@@ -241,7 +241,11 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
         # The append itself is best-effort — `append_lessons` guards the OSError an unwritable shared
         # store raises and discloses it as `lessons_store_unavailable` — so this call cannot fail the
         # run, matching the "the store misses one batch" stance two comments up.
-        self._e._append_lessons(lessons, hygiene=False, state=state)
+        # AFTER THE GATE IS DURABLE, not merely after it was appended: under the cadence offload the
+        # append above is BUFFERED, and writing the shared store from here reversed the order this
+        # comment block promises (review 2026-09-22, ENG3-05) — see `Engine._after_durable`.
+        self._e._after_durable(
+            lambda: self._e._append_lessons(lessons, hygiene=False, state=state))
         return fold(self._e.store.read_all())
 
     def maybe_promote_skills(self, state: RunState) -> RunState:

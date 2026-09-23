@@ -320,3 +320,71 @@ def test_a_card_merge_receipt_names_the_hypothesis_merge_at_its_REAL_seq(tmp_pat
     assert len(merge) == 1
     assert [r["source_event_seq"] for r in receipts] == [merge[0].seq], (
         "one card_merged per merge, naming the hypothesis_merged row at the seq it was published at")
+
+
+# --------------------------------------------- 7. a side effect follows its gate (ENG3-05, 2026-09-22)
+
+def test_a_side_effect_registered_in_the_block_runs_after_its_gate_is_published(tmp_path):
+    """`_after_durable` is how a cadence says "write this only once the event gating it is durable".
+    Inside the offload the gate is BUFFERED, so an effect run straight from the worker would land
+    first; registered, it runs on the main task after the publish — and sees its gate on the REAL log."""
+    eng, _state = _engine(tmp_path, "after", _SlowReportWriter())
+    seen: list[list[str]] = []
+
+    def _cadence():
+        eng.store.append("report_generated", {"at_node": 1})
+        eng._after_durable(lambda: seen.append([e.type for e in eng._event_store.read_all()]))
+        assert seen == [], "a registered effect must not run inside the worker"
+
+    anyio.run(eng._offload_cadence, _cadence)
+    assert len(seen) == 1 and "report_generated" in seen[0], seen
+
+
+def test_no_side_effect_lands_when_its_gate_could_not_be_published(tmp_path, monkeypatch):
+    """The event-first stance's other half: a gate that never became durable owns nothing, so the
+    effect behind it is skipped (the store "misses one batch"), never written without its gate."""
+    eng, _state = _engine(tmp_path, "gate-lost", _SlowReportWriter())
+    ran: list[bool] = []
+
+    def _cadence():
+        eng.store.append("report_generated", {"at_node": 1})
+        eng._after_durable(lambda: ran.append(True))
+
+    def _publish_fails(rows):
+        raise OSError("the log could not be appended")
+
+    monkeypatch.setattr(eng, "_publish_cadence_events", _publish_fails)
+    anyio.run(eng._offload_cadence, _cadence)
+    assert ran == []
+
+
+def test_outside_the_offload_the_effect_runs_at_once(tmp_path):
+    eng, _state = _engine(tmp_path, "direct", _SlowReportWriter())
+    ran: list[bool] = []
+    eng._after_durable(lambda: ran.append(True))
+    assert ran == [True]
+
+
+def test_the_lesson_distillation_writes_the_shared_store_after_its_gate(tmp_path):
+    """THE DEFECT, driven through the real cadence method. `maybe_distill_lessons` appends its
+    `lessons_distilled` gate and writes the SHARED lessons store; under the offload the gate was
+    buffered while the store write was immediate, so a death between the two left lessons with no
+    gate and the resume paid for — and appended — the same batch again. MUTATION: call
+    `_append_lessons` directly again -> the store write sees no gate on the real log."""
+    from looplab.events.types import EV_LESSONS_DISTILLED
+
+    eng, state = _engine(tmp_path, "lessons", _SlowReportWriter())
+    eng.lessons_every = 1
+    eng._comparative_lessons_on = True
+    eng._reflection_priors = True
+    eng.memory_dir = str(tmp_path / "memory")
+    lesson = {"statement": "a wider warmup helped", "outcome": "positive", "evidence": []}
+    eng._comparative_lessons = lambda _state, _fp, exclude=(): ([lesson], [])
+    eng._task_fingerprint = lambda _state, _best: []
+    writes: list[list[str]] = []
+    eng._append_lessons = lambda lessons, **_kw: writes.append(
+        [e.type for e in eng._event_store.read_all()])
+
+    anyio.run(eng._offload_cadence, functools.partial(eng.lessons.maybe_distill_lessons, state))
+    assert len(writes) == 1, writes
+    assert EV_LESSONS_DISTILLED in writes[0], "the shared store was written before its gate landed"

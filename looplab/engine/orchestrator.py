@@ -349,7 +349,7 @@ class _BufferedCadenceStore:
     goes the same way and for the same reason: it is a claim about bytes that are not written yet.
     """
 
-    __slots__ = ("_store", "rows")
+    __slots__ = ("_store", "rows", "after_publish")
 
     def __init__(self, store):
         self._store = store
@@ -357,6 +357,10 @@ class _BufferedCadenceStore:
         # fold, the pair beside it is what the publish re-appends with. Kept together so a publish
         # cannot drift from what the worker was shown.
         self.rows: list = []
+        # SIDE EFFECTS THAT MUST FOLLOW THEIR GATE (review 2026-09-22, ENG3-05): callables a
+        # cadence registered through `Engine._after_durable`, run by `_offload_cadence` on the main
+        # task only once every buffered row above is published. See that method for why.
+        self.after_publish: list = []
 
     def __getattr__(self, name):
         # Everything that is not an append or a read is the real store's — `path`, the locks, the
@@ -6538,6 +6542,35 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             except Exception:  # noqa: BLE001 - never mask the raise already in flight
                 _LOG.warning("buffered cadence rows could not be published on the way out",
                              exc_info=True)
+            else:
+                # Only once EVERY gate the block buffered is durable: an effect registered after
+                # its gate must never land when the gate did not (see `_after_durable`).
+                for effect in captured.after_publish:
+                    try:
+                        effect()
+                    except Exception:  # noqa: BLE001 - a best-effort store write after a durable gate; never mask the raise in flight
+                        _LOG.warning("a deferred cadence side effect failed after its gate was "
+                                     "published", exc_info=True)
+
+    def _after_durable(self, effect) -> None:
+        """Run `effect` once the events this code path appended BEFORE it are durable.
+
+        Outside a cadence offload that is now: the store is the real log and the appends already
+        landed. INSIDE one (`_offload_cadence`), every folded row is buffered until the main task
+        publishes it — so a side effect written straight from the worker lands BEFORE the event that
+        gates it. That silently reversed `lessons.py::LessonMemory.maybe_distill_lessons`' stated
+        event-first ordering (review 2026-09-22, ENG3-05): the `lessons_distilled` gate sat in the
+        buffer while the lessons were already in the SHARED store, so a process that died between
+        the two left lessons with no gate, and the resume paid for the same distillation again and
+        appended the same lessons a second time. Registered here, the write runs on the main task
+        right after the publish — and not at all when the publish failed, which is the "the store
+        misses one batch" outcome the event-first design chose on purpose.
+        """
+        sink = _CADENCE_STORE_SINK.get()
+        if sink is None:
+            effect()
+        else:
+            sink.after_publish.append(effect)
 
     def _publish_cadence_events(self, rows) -> int:
         """Append a buffered cadence prefix from the MAIN TASK. Returns how many landed.
