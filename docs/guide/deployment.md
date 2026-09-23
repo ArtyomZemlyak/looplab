@@ -115,6 +115,10 @@ Read a minted token back with `cat ~/.looplab/ui-token` (or `$LOOPLAB_UI_TOKEN_F
 UI with it. `looplab tui` reads the same file, so it keeps working without an exported variable. The
 file is reused across restarts — an already-unlocked tab does not have to be re-unlocked — and a
 token file that is a symlink or readable by anyone else is **refused at startup** rather than used.
+"Readable by anyone else" is read off the mode bits, so it is a POSIX check: Windows reports `0666`
+for every file whatever its ACL, so there only the link refusal applies and the file is exactly as
+private as the directory it sits in — the default `~\.looplab\` is inside your user profile, whose
+ACL is private to your account; keep a `LOOPLAB_UI_TOKEN_FILE` somewhere equally private.
 
 Two deliberate non-choices: "bind loopback-only when unset" cannot be the boundary, because on the hub
 the server *already* binds loopback and `jupyter-server-proxy` connects to it there — the bind host

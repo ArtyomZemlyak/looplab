@@ -455,7 +455,9 @@ creation identity still match a live process. Worker execution claims use the sa
 principle: elapsed heartbeat time alone cannot replace a possibly suspended live owner. New worker
 claims publish a complete owner record with an exclusive hard-link rather than exposing an empty
 authoritative file between create and write. Windows reads the native process creation FILETIME even
-without optional `psutil`. For a pre-upgrade, malformed, inaccessible-owner, or filesystem-fallback
+without optional `psutil`, and asks whether a pid is alive through a process handle, never with
+`os.kill(pid, 0)` — there signal 0 is `CTRL_C_EVENT`, which interrupts every process on the
+server's own console. For a pre-upgrade, malformed, inaccessible-owner, or filesystem-fallback
 execution/activity claim, `POST /api/runs/{run_id}/resolve-activity-claims` is the explicit recovery
 seam after process inspection and a safety delay; it requires the exact phrase
 `I verified no LoopLab command or run activity is active` and cannot clear a claim whose exact owner
