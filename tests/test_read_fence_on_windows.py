@@ -16,7 +16,9 @@ over its own hardened file. Two defects, both on branches no POSIX run executes:
 
 The generated template is executed here with the host's `os` swapped for one whose path module IS
 `ntpath` and whose name is "nt" — the exact inputs its `_NT` branches read — and the replace/unlink
-rules of Windows reproduced by `tests/_windows_emulation.py`-style doubles.
+rules of Windows reproduced by `tests/_windows_emulation.py`-style doubles. The emulated cwd reaches
+ntpath's `abspath` directly (`_windows_path`), because on a real Windows host that function is
+GetFullPathNameW and never reads `os.getcwd`.
 """
 from __future__ import annotations
 
@@ -33,10 +35,31 @@ from looplab.runtime import read_fence
 from _posix_gates import DIRECTORY_OPS_IGNORE_READONLY
 
 
+def _windows_path(cwd: str) -> types.ModuleType:
+    """`ntpath`, with `abspath` answering from `cwd` -- on EITHER host.
+
+    On a POSIX host ntpath's `abspath` is its fallback, `join(os.getcwd(), p)`, so patching
+    `os.getcwd` was enough here; on a REAL Windows host it is `nt._getfullpathname`
+    (GetFullPathNameW), which reads the process's own current directory and never calls
+    `os.getcwd`, so the Windows leg judged every relative name from the runner's checkout (run
+    35817293259, review 2026-09-22 wave 5, WIN-3). The emulated cwd therefore has to reach `abspath`
+    itself. Only `abspath` is re-pointed: `realpath` and the rest are ntpath's own, and the fence
+    hands `realpath` absolute paths only."""
+    path = types.ModuleType("ntpath")
+    path.__dict__.update(ntpath.__dict__)
+
+    def abspath(p):
+        p = os.fspath(p)
+        return ntpath.normpath(p if ntpath.isabs(p) else ntpath.join(cwd, p))
+
+    path.abspath = abspath
+    return path
+
+
 def _windows_os(cwd: str) -> types.ModuleType:
     fake = types.ModuleType("os")
     fake.__dict__.update(os.__dict__)
-    fake.path = ntpath
+    fake.path = _windows_path(cwd)
     fake.sep, fake.altsep, fake.name = "\\", "/", "nt"
     fake.getcwd = lambda: cwd
     return fake
@@ -62,7 +85,8 @@ def _fence_as_windows(monkeypatch, roots, *, cwd="C:\\work"):
     scope["__import__"] = _import
     ns = {"__name__": read_fence._PROBE_NAME, "__builtins__": scope}
     exec(compile(src, "sitecustomize.py", "exec"), ns)
-    # ntpath's own `abspath` reads the REAL cwd for a relative name; answer it like Windows too.
+    # Whatever still asks the REAL `os.getcwd` -- ntpath's POSIX fallbacks -- answers the same cwd.
+    # Not what reaches the fence's `abspath` on a Windows host: `_windows_path` is.
     monkeypatch.setattr(os, "getcwd", lambda: cwd)
     return ns
 
@@ -91,6 +115,31 @@ def test_a_relative_name_is_judged_from_the_cwd_it_will_act_in(monkeypatch):
     assert ns["_fenced_target"]("model.safetensors", None) == \
         "C:\\src\\repo\\experiments\\model.safetensors"
     assert ns["_fenced_target"]("..\\..\\other\\x", None) is None
+
+
+def _getfullpathname_over(process_cwd: str):
+    """`ntpath.abspath` as a REAL Windows host has it: `nt._getfullpathname(normpath(p))`, i.e.
+    GetFullPathNameW, which resolves a relative name against the PROCESS's current directory and
+    never calls `os.getcwd`. ntpath falls back to `join(os.getcwd(), p)` (`_abspath_fallback`) only
+    where `nt` cannot be imported -- a POSIX host."""
+    def abspath(path):
+        path = os.fspath(path)
+        return ntpath.normpath(path if ntpath.isabs(path) else ntpath.join(process_cwd, path))
+    return abspath
+
+
+def test_the_emulated_cwd_is_the_one_abspath_answers_from_on_either_host(monkeypatch):
+    """The double proves itself. It used to emulate the cwd by patching `os.getcwd`, which only
+    ntpath's POSIX fallback reads; on the Windows CI leg `abspath` is GetFullPathNameW over the
+    runner's REAL cwd, so the case above judged 'model.safetensors' from the checkout and answered
+    None (run 35817293259, review 2026-09-22 wave 5, WIN-3). That was a false model of Windows in
+    the TEST, not a hole in the fence: the fence's `_abspath` reads the same process cwd the guarded
+    call resolves a relative name against. Driven by giving this host's ntpath that native shape."""
+    monkeypatch.setattr(ntpath, "abspath", _getfullpathname_over(os.getcwd()))
+    ns = _fence_as_windows(monkeypatch, (ROOT,), cwd="C:\\src\\repo\\experiments")
+    assert ns["_abspath"]("model.safetensors") == "C:\\src\\repo\\experiments\\model.safetensors"
+    assert ns["_fenced_target"]("model.safetensors", None) == \
+        "C:\\src\\repo\\experiments\\model.safetensors"
 
 
 def _refused(hook, event, args) -> bool:
