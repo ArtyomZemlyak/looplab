@@ -96,6 +96,48 @@ def test_a_proposal_that_formed_no_idea_is_named_proposal_refused():
         True, False, "proposal_refused")
 
 
+def _real_producer_result(tmp_path, prepare_node_idea):
+    """What the REAL worker half (`_prepare_raw_card_stage`) hands the serve, on a real engine.
+
+    The two tests above build `SpecRawStageResult` by hand, and the shape they build for the
+    refusal — `success=True, idea=None` — is one the producer never returned: it set
+    `success=idea is not None`, so a refused proposal arrived as `success=False` and took the
+    producer-fault branch. Driving the producer itself is what makes the pairing checkable.
+    """
+    from looplab.events.replay import fold
+    from factories import make_engine
+
+    eng = make_engine(tmp_path / "run")
+    eng._prepare_node_idea = prepare_node_idea
+    roles = eng.task.build_roles()
+    return eng, eng._prepare_raw_card_stage(
+        {"kind": "draft"}, [], fold(eng.store.read_all()), 0, roles)
+
+
+def test_a_REFUSED_proposal_from_the_real_producer_is_named_proposal_refused(tmp_path):
+    """E2E sweep 2026-09-23 (flow B): two `novelty_rejected {kind: card_duplicate}` rows, and the
+    console said "the speculative lane abandoned a prepared proposal: producer_failed" twice — the
+    paid propose had NOT raised; the planner refused a duplicate. `proposal_refused` was unreachable
+    from the only producer that feeds the serve. Mutation: restore `success=idea is not None` in
+    `_prepare_raw_card_stage` and this reads `producer_failed` again."""
+    eng, result = _real_producer_result(tmp_path, lambda *a, **k: None)
+    assert result.idea is None
+    eng._spec_raw_stage_result = result
+    assert eng._serve_raw_card_stage() == (True, False, "proposal_refused")
+
+
+def test_a_RAISING_proposal_from_the_real_producer_is_still_producer_failed(tmp_path):
+    """The other half of the pairing, so the fix cannot have merged the two words: a propose that
+    RAISES is the fault branch, and its `SpecRawStageResult.failure` result keeps `success=False`."""
+    def _raise(*_a, **_k):
+        raise RuntimeError("provider went away")
+
+    eng, result = _real_producer_result(tmp_path, _raise)
+    assert result.success is False and "provider went away" in result.error
+    eng._spec_raw_stage_result = result
+    assert eng._serve_raw_card_stage() == (True, False, "producer_failed")
+
+
 def test_a_stager_refusal_carries_the_fence_slug_of_THIS_call():
     def _refuse(eng):
         eng._card_stage_refusal = "score_moved"

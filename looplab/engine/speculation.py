@@ -2216,7 +2216,14 @@ class SpeculationMixin:
                 proposal_node_ceiling=proposal_node_ceiling,
                 at_node=proposal_node_ceiling,
                 source=source,
-                success=idea is not None,
+                # `success` is "the paid propose RETURNED" — `SpecRawStageResult.failure` is the only
+                # other constructor and it is the RAISED case. A refused proposal (novelty gate, card
+                # planner) returns `idea=None` with success, and `_serve_raw_card_stage` names it
+                # `proposal_refused` off that pair. This used to be `success=idea is not None`, which
+                # sent every refusal down the fault branch: the E2E sweep of 2026-09-23 logged two
+                # `novelty_rejected {card_duplicate}` rows and warned "abandoned a prepared proposal:
+                # producer_failed" for both, while the provider had answered every call.
+                success=True,
                 idea=idea,
                 steering_context=steering,
                 cross_run_receipt=receipt,
