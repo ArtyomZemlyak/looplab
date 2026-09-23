@@ -12,8 +12,14 @@ delegators); the moved methods call them as `self.…`, resolved on the Engine i
 deps (ResearchMemo, verify_memo, hybrid_merge.consolidate) stay method-local imports, so a test
 monkeypatching `looplab.trust.memo_verify.verify_memo` etc. still intercepts them.
 
-Layering: no runtime import of the orchestrator (TYPE_CHECKING only) and never serve — only core,
-events and stdlib (the trust/search deps are lazy, method-local imports)."""
+Layering: no runtime import of the orchestrator and never `serve`, at any level. The heavy
+trust/search dependencies — `verify_memo` (and its sibling readers in `trust/memo_verify.py`) and
+`search/hybrid_merge.py::consolidate` — are imported inside the methods that call them and must stay
+there: they are patch seams resolved at call time, so a test that monkeypatches the SOURCE module
+intercepts the live call. Those clauses are pinned by `tests/test_engine_mixin_layering.py`, not
+described: this paragraph used to list the packages ("only core, events and stdlib") and was false for
+as long as the module imported `agents` at module level (review 2026-09-22, EM-17). What the module
+does import is its import block's to say."""
 from __future__ import annotations
 
 import contextlib

@@ -19,8 +19,11 @@ matrix, and record the breadth snapshot the brief reads.
 hypothesis-merge / lessons clusters use too, not strategist-specific. The moved methods call it as
 `self._op_span(...)` — resolved on the Engine instance, unchanged.
 
-Layering: no runtime import of the orchestrator (TYPE_CHECKING only) and never serve — only core,
-events, search, agents and stdlib (SurrogateResearcher / cli PRESETS stay lazy, method-local)."""
+Layering: no runtime import of the orchestrator and never `serve` or `cli`, at any level — pinned by
+`tests/test_engine_mixin_layering.py`, not described. This paragraph used to list the packages
+("only core, events, search, agents and stdlib", with "cli PRESETS" lazy) while the module imported
+`trust` and four engine siblings at module level and no `cli` at all (review 2026-09-22, EM-17). What
+the module does import is its import block's to say."""
 from __future__ import annotations
 
 import json
