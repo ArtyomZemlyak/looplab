@@ -108,6 +108,35 @@ def _missing_stage_input_paths(stages) -> list[str]:
 # hosts; `*`/`?` stop it too, because a glob is not a path this rule can reason about.
 _SRC_PATH_TAIL = re.compile(r"[^\s\"'`,;:()\[\]{}<>|*?\\]*")
 
+# A Windows editable root, in the "/"-normalized form `_source_root_paths` reads: a drive letter or a
+# UNC `//host/share`, then at least one directory — a bare `C:/` would match every absolute path on
+# the drive, which is the same reason a root of "/" is skipped.
+_WINDOWS_ROOT = re.compile(r"^(?:[A-Za-z]:|//[^/]+/[^/]+)/[^/]")
+
+
+def _root_spelled_in(content: str, root) -> bool:
+    """Does `content` spell a path UNDER `root` — `<root>/<something>` — in any spelling code uses?
+
+    A POSIX root is found exactly as it always was: the root followed by "/". A Windows root is
+    spelled in code with EITHER separator and often both (an f-string `{root}/sub` renders
+    `C:\\x\\repo/sub`), doubled inside a string literal (`C:\\\\x\\\\repo`), and in any case, because
+    a Windows path is case-insensitive. The POSIX test (`r.startswith("/")`) was the only one, so on
+    Windows the SOURCE note could never fire — measured on the Windows CI leg (review 2026-09-22
+    round 2, run 35804658308) as a write naming the editable root absolutely that came back with no
+    note at all.
+    """
+    r = str(root or "").replace("\\", "/").rstrip("/")
+    if _WINDOWS_ROOT.match(r):
+        parts = [re.escape(part) for part in r.split("/") if part]
+        lead = r"[\\/]{2}" if r.startswith("//") else ""
+        pattern = lead + r"[\\/]+".join(parts) + r"[\\/]"
+        return re.search(pattern, content, re.IGNORECASE) is not None
+    # A root of "" or "/" would match every absolute path; a relative root cannot appear as an
+    # absolute path in generated code at all.
+    if len(r) < 2 or not r.startswith("/"):
+        return False
+    return content.find(r + "/") >= 0
+
 
 def _path_components(p) -> tuple:
     """A path as its ordered, normalized components — the granularity the collision test compares at.
@@ -177,7 +206,11 @@ def source_root_targets(content: str, name, root) -> list[tuple]:
     """
     r = str(root or "").replace("\\", "/").rstrip("/")
     # A root of "" or "/" would match every absolute path; a relative root cannot appear as an
-    # absolute path in generated code at all. Same guard as `_source_root_paths`.
+    # absolute path in generated code at all. POSIX-spelled roots ONLY, deliberately unlike the
+    # advisory note (`_root_spelled_in`): this rule REFUSES a write, and a Windows spelling's tail is
+    # "\"-separated where `_SRC_PATH_TAIL` stops at the first "\" — a tail cut to its first component
+    # would turn every file under a shared top directory into a false collision. Extending it to
+    # Windows needs its own tail rule first (review 2026-09-22 round 2, reported, not changed).
     if len(r) < 2 or not r.startswith("/"):
         return []
     pre = () if name in ("", ".", None) else _path_components(name)
@@ -570,13 +603,10 @@ class RepoWriteTools:
         """
         out: list[str] = []
         for _name, root in self._roots:
-            r = str(root or "").replace("\\", "/").rstrip("/")
-            # A root of "" or "/" would match every absolute path; a relative root cannot appear as
-            # an absolute path in generated code at all.
-            if len(r) < 2 or not r.startswith("/"):
-                continue
-            idx = content.find(r + "/")
-            if idx >= 0 and r not in out:
+            # Reported in the root's OWN spelling, which for a POSIX root is byte-for-byte what this
+            # returned before; the match itself is `_root_spelled_in`'s (every spelling code uses).
+            r = str(root or "").rstrip("/\\")
+            if _root_spelled_in(content, root) and r not in out:
                 out.append(r)
         return out
 

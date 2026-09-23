@@ -280,6 +280,49 @@ def test_the_note_follows_the_edit_path_and_only_reports_what_the_hunk_introduce
     assert not quiet.startswith("(refused") and "SOURCE" not in quiet
 
 
+_WINDOWS_ROOT = "C:\\Users\\op\\vectorizer"
+
+
+@pytest.mark.parametrize("spelled", [
+    "C:\\Users\\op\\vectorizer/vectorsearch/experiments/x/final",      # an f-string of a WindowsPath
+    "C:\\Users\\op\\vectorizer\\vectorsearch\\experiments\\x\\final",  # native
+    "C:/Users/op/vectorizer/vectorsearch/experiments/x/final",         # `as_posix()` / a YAML author
+    "C:\\\\Users\\\\op\\\\vectorizer\\\\vectorsearch",                  # escaped in a string literal
+    "c:\\users\\OP\\Vectorizer\\vectorsearch",                         # a Windows path has no case
+], ids=["mixed", "native", "forward", "escaped", "case"])
+def test_a_windows_spelled_source_root_gets_the_same_note(spelled):
+    """The note tested "absolute" as "starts with /", so for a Windows editable root it could never
+    fire: the Windows CI leg (run 35804658308, review 2026-09-22 round 2) got a bare `wrote …` from
+    both the write and the edit path above. Every spelling Windows code uses must be recognised, and
+    the note names the root as the task spelled it."""
+    w = RepoWriteTools(["**/*"], [], editables=[{"name": "", "path": _WINDOWS_ROOT}])
+    wrote = w.execute("write_file", {"path": "configs/config.yaml",
+                                     "content": f"checkpoint_path: {spelled}\n"})
+    assert wrote.startswith("wrote ") and "SOURCE" in wrote and _WINDOWS_ROOT in wrote, wrote
+    edited = w.execute("edit_file", {"path": "configs/config.yaml",
+                                     "search": "checkpoint_path", "replace": f"ckpt: {spelled}\n#"})
+    assert not edited.startswith("(refused") and "SOURCE" in edited, edited
+
+
+@pytest.mark.parametrize("content", [
+    "checkpoint_path: C:\\Users\\op\\vectorizer2\\x\n",      # a SIBLING that merely shares a prefix
+    "checkpoint_path: C:\\Users\\op\\vectorizer\n",          # the root itself, nothing under it
+    "checkpoint_path: vectorsearch/experiments/x/final\n",  # workdir-relative, as the manifest says
+    "checkpoint_path: D:\\data\\vectorizer\\x\n",            # another drive entirely
+])
+def test_a_windows_root_does_not_fire_on_what_is_not_under_it(content):
+    w = RepoWriteTools(["**/*"], [], editables=[{"name": "", "path": _WINDOWS_ROOT}])
+    wrote = w.execute("write_file", {"path": "configs/config.yaml", "content": content})
+    assert wrote.startswith("wrote ") and "SOURCE" not in wrote, wrote
+
+
+def test_a_drive_root_is_as_broad_as_slash_and_never_matches():
+    """`C:\\` would match every absolute path on the drive, which is why "/" is skipped too."""
+    w = RepoWriteTools(["**/*"], [], editables=[{"name": "", "path": "C:\\"}])
+    wrote = w.execute("write_file", {"path": "a.yaml", "content": "p: C:\\Users\\op\\x\n"})
+    assert "SOURCE" not in wrote, wrote
+
+
 # ------------------------------------------------------------------- the argv rule's truth table
 
 @pytest.mark.parametrize("argv,expected", [
