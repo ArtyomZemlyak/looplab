@@ -139,7 +139,11 @@ def test_the_strict_writer_documents_its_INDETERMINATE_failure_mode():
 def test_the_zero_production_callers_claim_is_gone_because_it_is_false():
     source = (CORE / "atomicio.py").read_text(encoding="utf-8")
     assert "ZERO PRODUCTION CALLERS" not in source
-    assert "STILL OPEN:" in source, "the Windows gaps the note also recorded must not be lost"
+    # The Windows gaps the old note also recorded are the open item `atomicio-windows-parent-
+    # publication`, declared in atomicio.py and kept honest by `tests/test_open_item_index.py` — and
+    # closing an open item is DELETING its note. A `"STILL OPEN:" in source` pin here (prose only)
+    # would have made that deletion red in an unrelated test, so it is gone (review 2026-09-22,
+    # TST-05).
 
     root = CORE.parent
     callers = {

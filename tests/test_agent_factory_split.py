@@ -250,4 +250,5 @@ def test_the_dead_ambient_target_store_is_gone():
     statements = [line.strip() for line in body.splitlines()
                   if not line.strip().startswith("#")]
     assert "shared = resolve_llm_target(settings)" not in statements
-    assert "dead store" in body, "keep the note, so it is not re-added as if it were needed"
+    # (A second assert kept the note's words — "dead store" — which exist only in that comment, so it
+    # pinned prose; the statement's return is what is refused, above. Review 2026-09-22, TST-05.)

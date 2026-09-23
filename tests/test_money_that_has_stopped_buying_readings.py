@@ -63,7 +63,10 @@ def test_pulse_does_not_judge_a_running_probe_by_it():
     src = (BENCH / "pulse.py").read_text(encoding="utf-8")
     assert "TAIL_WORST_IN_THE_CORPUS" not in src, "порог по терминальным значениям вернулся"
     assert "still paying and no longer learning" not in src, "вердикт по живой пробе вернулся"
-    assert "collapses" in src, "причина, по которой его нет, должна остаться на месте"
+    # (`"collapses" in src` stood here: the word lives only in a pulse.py comment, so it pinned prose,
+    # and the property this test is named for is the two refusals above. The reason itself stays
+    # pinned where it was first missed — `test_the_reason_is_where_it_was_missed_the_first_time`.
+    # Review 2026-09-22, TST-05.)
 
 
 def test_the_reason_is_where_it_was_missed_the_first_time():
