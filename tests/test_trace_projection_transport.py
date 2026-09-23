@@ -39,6 +39,23 @@ def _deep_run(root):
     return run_dir
 
 
+def _decode_deep(response) -> dict:
+    """The response body, decoded by the PURE-PYTHON scanner.
+
+    The C scanner (`json.loads`, `httpx`'s `.json()`) recurses in C and is capped by CPython's C
+    recursion limit, which `sys.setrecursionlimit` does not move — and which is 3000 on Windows in
+    3.12 against 10000 elsewhere. A 4096-deep chain nests ~8192 containers, so the client's decode
+    raised RecursionError on the Windows CI leg (run 35804658308, review 2026-09-22 round 2) after
+    the server had answered 200 with the whole tree. The Python scanner's recursion is Python frames,
+    bounded by the limit this test raises on every platform."""
+    import json
+    import json.scanner
+
+    decoder = json.JSONDecoder()
+    decoder.scan_once = json.scanner.py_make_scanner(decoder)
+    return decoder.decode(response.content.decode("utf-8"))
+
+
 def _chain_length(forest) -> int:
     assert len(forest) == 1
     length, current = 0, forest[0]
@@ -60,21 +77,23 @@ def test_trace_tree_http_responses_preserve_the_maximum_deep_topology(tmp_path):
     client = TestClient(make_app(tmp_path))
     # Parsing a deliberately deep, valid JSON document is a client-test concern; increase only the
     # test process's decoder guard and restore it immediately. The production encoder is iterative.
+    # Eight frames of headroom per span: the pure-Python scanner (`_decode_deep`) spends about four
+    # per level of this chain (an object and its `children` array, two frames each).
     old_recursion_limit = sys.getrecursionlimit()
-    sys.setrecursionlimit(max(old_recursion_limit, TRACE_NODE_SPAN_CAP_MAX * 4))
+    sys.setrecursionlimit(max(old_recursion_limit, TRACE_NODE_SPAN_CAP_MAX * 8))
     try:
         node_response = client.get(
             f"/api/runs/demo/nodes/0/trace?limit={TRACE_NODE_SPAN_CAP_MAX}")
         assert node_response.status_code == 200
         assert node_response.headers["content-type"] == "application/json"
-        assert _chain_length(node_response.json()["nodes"]) == TRACE_NODE_SPAN_CAP_MAX
+        assert _chain_length(_decode_deep(node_response)["nodes"]) == TRACE_NODE_SPAN_CAP_MAX
 
         run_response = client.get("/api/runs/demo/trace")
         assert run_response.status_code == 200
-        assert _chain_length(run_response.json()["nodes"]["0"]) == TRACE_VIEW_SPAN_CAP
+        assert _chain_length(_decode_deep(run_response)["nodes"]["0"]) == TRACE_VIEW_SPAN_CAP
 
         operation_response = client.get("/api/runs/demo/trace/by_trace/deep-trace")
         assert operation_response.status_code == 200
-        assert _chain_length(operation_response.json()["spans"]) == TRACE_DETAIL_SPAN_CAP
+        assert _chain_length(_decode_deep(operation_response)["spans"]) == TRACE_DETAIL_SPAN_CAP
     finally:
         sys.setrecursionlimit(old_recursion_limit)

@@ -7,7 +7,9 @@ continues it, and a log is reachable only by a NAME the caller declared.
 """
 from __future__ import annotations
 
+import contextlib
 import os
+import types
 from pathlib import Path
 
 import pytest
@@ -59,6 +61,37 @@ _V2_NODE3 = next(
      for candidate in [base / "rubertlite-dr-unified-v2" / "nodes" / "node_3" / "train.log"]
      if candidate.exists()),
     Path("/nonexistent/train.log"))
+
+
+@contextlib.contextmanager
+def _a_deadline_already_spent():
+    """A search deadline that has passed by its FIRST check, on any host's clock.
+
+    `_SEARCH_DEADLINE_S = 1e-9` meant that only where the monotonic clock moves between two reads a
+    microsecond apart. Windows' `time.monotonic()` ticks every ~15.6 ms, so `now >= start + 1e-9`
+    never held inside one tick and the whole sweep ran (CI run 35804658308, review 2026-09-22 round
+    2: "reached the END of the log" where "search deadline" was pinned). A clock that advances one
+    second per read -- scoped to `log_tools`' own `time`, nothing else in the process -- says what
+    the tiny deadline meant on every host."""
+    import itertools
+    import time as _time
+
+    import looplab.tools.log_tools as lt
+
+    ticks = itertools.count(1_000_000)
+
+    class _TickingClock(types.ModuleType):
+        def __getattr__(self, name):
+            return getattr(_time, name)
+
+    clock = _TickingClock("time")
+    clock.monotonic = lambda: float(next(ticks))
+    real_time, real_deadline = lt.time, lt._SEARCH_DEADLINE_S
+    lt.time, lt._SEARCH_DEADLINE_S = clock, 1e-9
+    try:
+        yield
+    finally:
+        lt.time, lt._SEARCH_DEADLINE_S = real_time, real_deadline
 
 
 def _tools(tmp_path, body: str, name: str = "train.log", **kw):
@@ -619,14 +652,9 @@ def test_the_deadline_stop_never_skips_the_bytes_it_did_not_sweep(tmp_path):
     assert "1 match(es)" in tools.execute(                 # the control: it finds it normally
         "read_log", {"mode": "search", "pattern": "BOOM"})
 
-    import looplab.tools.log_tools as lt
-    monkey = lt._SEARCH_DEADLINE_S
-    try:
-        # A deadline already in the past — the check fires before the first record is matched.
-        lt._SEARCH_DEADLINE_S = 1e-9
+    # A deadline already in the past — the check fires before the first record is matched.
+    with _a_deadline_already_spent():
         out = tools.execute("read_log", {"mode": "search", "pattern": "BOOM"})
-    finally:
-        lt._SEARCH_DEADLINE_S = monkey
     assert "search deadline" in out
     assert _resume_byte(out) == 0                          # nothing was claimed as examined
     # ...and the honest resume byte still reaches the match, which a skipped-batch byte would not.
@@ -1151,27 +1179,18 @@ def test_a_deadline_inside_the_first_batch_says_its_byte_does_not_progress(tmp_p
     on a first-batch stop it names the byte the caller already spent. Withholding it would break the
     never-skip rule; presenting it bare reads as a remedy and loops a caller whose pattern is simply
     too slow. So it is given AND labelled."""
-    import looplab.tools.log_tools as lt
-
     body = "".join(("BOOM\n" if i == 500 else f"quiet {i:05d}\n") for i in range(1_000))
     tools = _tools(tmp_path, body)
-    monkey = lt._SEARCH_DEADLINE_S
-    try:
-        lt._SEARCH_DEADLINE_S = 1e-9
+    with _a_deadline_already_spent():
         out = _search(tools, "BOOM")
-    finally:
-        lt._SEARCH_DEADLINE_S = monkey
 
     assert "search deadline" in out and _resume_byte(out) == 0    # still honest, still no skipping
     assert "ALREADY STARTED" in out and "PATTERN is what has to change" in out, out
 
     # A stop that DID move keeps the plain remedy — the label is about non-progress, not about
     # deadlines in general.
-    try:
-        lt._SEARCH_DEADLINE_S = 1e-9
+    with _a_deadline_already_spent():
         moved = _search(tools, "BOOM", from_byte=0)
-    finally:
-        lt._SEARCH_DEADLINE_S = monkey
     assert "search deadline" in moved
 
 

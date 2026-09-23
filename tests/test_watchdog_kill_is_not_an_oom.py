@@ -29,6 +29,7 @@ they are mixed into the candidate's own output and are forgeable, the same reaso
 """
 from __future__ import annotations
 
+import os
 import sys
 import time
 
@@ -41,6 +42,13 @@ from looplab.runtime.command_eval import run_command_eval
 from looplab.runtime.sandbox import RunResult
 
 _M = {"kind": "stdout_json", "key": "metric"}
+
+# The exit code a TREE-KILL leaves. POSIX: SIGKILL, -9 (137 through a shell) -- the OOM heuristic's
+# exact premise. Windows has no signals: `sandbox._kill_tree` is `taskkill /F /T`, i.e.
+# TerminateProcess(..., 1), so a killed stage exits 1 there (CI run 35804658308, review 2026-09-22
+# round 2: `1 in (-9, 137)`). The property is the same on both -- the classifier must not read the
+# code the engine itself caused -- only the code differs.
+_TREE_KILLED = (-9, 137) if os.name == "posix" else (1,)
 
 # A stage that diverges and would then run for two minutes. Same shape as v6 node 5: real records on
 # stdout, non-finite from the start, no traceback anywhere, and the process alive when it is killed.
@@ -70,7 +78,7 @@ def test_a_diverged_training_is_classified_diverged_and_not_oom():
                            stages=_stage(_DIVERGING))
     assert time.time() - t0 < 40, "the watchdog did not kill the stage early"
 
-    assert res.exit_code in (-9, 137), "not a tree-kill; this test no longer covers the OOM premise"
+    assert res.exit_code in _TREE_KILLED, "not a tree-kill; this test no longer covers the OOM premise"
     assert "Traceback" not in (res.stderr or ""), "a traceback would take the OOM branch out of play"
     assert not res.timed_out, "a divergence kill is not a deadline timeout"
 
@@ -89,7 +97,7 @@ def test_a_stalled_stage_with_no_metric_is_classified_stalled_and_not_oom():
                            stages=[{"name": "train", "command": [sys.executable, "-c", prog],
                                     "timeout": 60}], stall_timeout=2)
 
-    assert res.exit_code in (-9, 137) and "Traceback" not in (res.stderr or "")
+    assert res.exit_code in _TREE_KILLED and "Traceback" not in (res.stderr or "")
     assert not res.timed_out
     assert res.stalled is True and res.diverged is False
     assert _failure_reason(res) == "stalled"
