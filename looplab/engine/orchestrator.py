@@ -2184,7 +2184,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 continue
 
             # docs/29 F1 — the run's WIDTH re-pins HERE, from what the research proposed, for the same
-            # reason the AUTO depth re-resolves below: a stable decision prefix, nothing in flight,
+            # reason the AUTO depth re-resolves below: a stable decision prefix, no PRODUCER in flight
+            # (an evaluation may be — review 2026-09-22, ES1-03; `_settle_proposal_width` says why),
             # and a durable event the caller must re-fold after. AFTER `_apply_control_overrides` so
             # an operator's live `budget_extend` is already in force and the axis it owns is visibly
             # theirs; BEFORE the speculation block so the depth settle and every gate under it read

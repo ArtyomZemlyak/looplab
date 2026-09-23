@@ -440,6 +440,89 @@ def test_the_launch_pin_and_not_the_last_repin_is_the_ceiling(tmp_path, monkeypa
     assert engine._eval_parallel == 2
 
 
+# --------------------------------------------------------------------------- #
+# An evaluation in flight does not freeze the width (review 2026-09-22, ES1-03)
+# --------------------------------------------------------------------------- #
+
+def test_a_narrowed_run_widens_back_while_an_evaluation_is_still_in_flight(tmp_path, monkeypatch):
+    """The re-pin must be reachable in the state a WORKING Card run is always in: something training.
+
+    The settle used to refuse whenever `_eval_inflight` was non-empty. Since F1f the Card session
+    refills a freed slot on the very turn that observes the terminal, and hands the outer loop its
+    turn only while the children keep burning, so on exactly the runs where production works the
+    outer loop never sees an empty set. One `{"gpus": 2}` proposal then narrowed a two-GPU run to
+    width 1 FOR GOOD: every later board of one-GPU Cards met an eval in flight and was refused, and
+    the second device idled for the rest of the run behind a width nothing could lift.
+
+    Driven with the in-flight set the session itself maintains (`_card_phase_admit_evals` adds, the
+    child's `finally` discards), holding the wide node's lifecycle while the one-GPU board arrives.
+    """
+    monkeypatch.setattr(_orch, "_detect_gpu_ids", lambda: [0, 1])
+    _gpu_capable(monkeypatch)
+    engine = _engine(tmp_path / "run")
+    anyio.run(engine.run)                     # run_started carries the launch pin (2)
+    _propose(engine, 2, 2)
+    assert engine._settle_proposal_width(fold(engine.store.read_all())) is True
+    assert engine._eval_parallel == 1
+
+    # The wide node is TRAINING, and the board now holds only one-GPU work.
+    engine._eval_inflight.add((0, 0))
+    assert engine._evals_inflight() is True
+    _propose(engine, 1, 1)
+    state = fold(engine.store.read_all())
+    for card in state.cards.values():
+        if (card.footprint or {}).get("gpus") == 2:
+            card.selection_ready = False
+    assert engine._settle_proposal_width(state) is True, (
+        "an evaluation in flight froze the width: the run can never widen back, because a Card "
+        "session that works always has one")
+    assert engine._eval_parallel == 2 and engine._llm_parallel == 2
+    assert _width_rows(engine)[-1]["eval_parallel"] == 2
+
+
+def test_the_legacy_dispatcher_never_lets_the_width_settle_under_a_live_batch(tmp_path, monkeypatch):
+    """Why the dropped in-flight clause needs no replacement on the NON-session dispatcher.
+
+    `_dispatch_evals` is a BARRIER: its task group joins the whole batch before it returns, and the
+    run loop that awaits it is the only caller of `_settle_proposal_width`, so no legacy batch can be
+    live when the width moves. And `_eval_inflight` is written only by the Card session's admission,
+    so on this path the clause read an empty set every time — it never refused anything here. Both
+    halves are observed on a real run rather than argued: a `card_driven_selection` run with the
+    prefetch off, on a two-GPU box at AUTO width, i.e. the configuration the re-pin is live on.
+    """
+    monkeypatch.setattr(_orch, "_detect_gpu_ids", lambda: [0, 1])
+    _gpu_capable(monkeypatch)
+    engine = _engine(tmp_path / "run")
+    assert engine._speculation_enabled() is False, "this run's dispatcher must be `_dispatch_evals`"
+    live = {"batches": 0}
+    evaluated_batches: list[int] = []
+    observed: list[tuple[int, bool]] = []
+    real_dispatch, real_settle = Engine._dispatch_evals, Engine._settle_proposal_width
+
+    async def _dispatch(self, evals, state, max_es):
+        live["batches"] += 1
+        evaluated_batches.append(len(evals))
+        try:
+            return await real_dispatch(self, evals, state, max_es)
+        finally:
+            live["batches"] -= 1
+
+    def _settle(self, state):
+        observed.append((live["batches"], self._evals_inflight()))
+        return real_settle(self, state)
+
+    monkeypatch.setattr(Engine, "_dispatch_evals", _dispatch)
+    monkeypatch.setattr(Engine, "_settle_proposal_width", _settle)
+    anyio.run(engine.run)
+
+    assert any(evaluated_batches), "the run never dispatched an evaluation batch"
+    assert observed, "the run loop never reached the width settle"
+    assert all(batches == 0 for batches, _ in observed), (
+        "the width settle ran while a `_dispatch_evals` batch was live")
+    assert not any(inflight for _, inflight in observed), (
+        "`_eval_inflight` was non-empty on the legacy dispatcher's path")
+
+
 def test_a_legacy_log_that_never_repinned_keeps_the_pre_feature_behaviour(tmp_path, monkeypatch):
     monkeypatch.setattr(_orch, "_detect_gpu_ids", lambda: [0, 1])
     _gpu_capable(monkeypatch)

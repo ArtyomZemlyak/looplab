@@ -117,14 +117,28 @@ class WidthSettlingMixin:
         * **an axis a `budget_extend` owns is the operator's.** They said it last and it is re-applied
           every turn, so a row here would be durable noise that changes nothing — the same reasoning,
           and the same key list, as `_repin_settled_widths`'s own stand-aside clause.
-        * **QUIESCENT ONLY.** Nothing in flight, no build, no head request — the same precondition
-          `_settle_speculation_depth` takes, and for a sharper reason: `_dispatch_evals` sizes a
-          per-batch `anyio.Semaphore` from the width and a Semaphore cannot be resized, so a width
-          that moves under a live batch leaves the batch's own concurrency at the old value while the
-          aged-head escape hatch compares against the new one. That comparison is now made against the
-          batch's captured total, so this is defence in depth rather than the only thing holding it —
-          but the honest statement is that a width change belongs BETWEEN batches, and between batches
-          is free: the loop reaches this point once per turn.
+        * **NO PRODUCER IN FLIGHT.** No build, no head request, no isolated build holding a result
+          slot — the producer half of the precondition `_settle_speculation_depth` takes.
+        * **…BUT AN EVALUATION IN FLIGHT IS NOT A REFUSAL** (review 2026-09-22, ES1-03), and that
+          is the one place this settle parts from the depth ratchet. The depth has to wait for its
+          evals because settling it to 0 SWITCHES DISPATCHERS; the width switches nothing. This
+          clause used to refuse on `_evals_inflight()` too, and since F1f that made the re-pin a
+          ONE-WAY narrowing on exactly the runs where production works: the Card session refills a
+          freed slot on the very turn that observes the terminal and hands the outer loop its turn
+          only while the children keep burning, so that turn never saw an empty set. One
+          `{"gpus": 2}` proposal narrowed a two-GPU run to width 1 and every later one-GPU board met
+          an eval in flight — `tests/test_proposal_derived_width.py` drives it. Where the Card
+          session is the dispatcher nothing needs the clause: its fill
+          (`speculation.py::_card_phase_admit_evals`) reads the LIVE width on every admission, and
+          what a running eval holds is its own device reservation, which no width change touches — a
+          widened run whose devices are still busy simply admits nothing until they are released.
+          The LEGACY dispatcher never needed it either: `_dispatch_evals` sizes a per-batch
+          `anyio.Semaphore` from the width, and a Semaphore cannot be resized, but it is a BARRIER —
+          its task group joins the whole batch before it returns to the run loop, the one caller of
+          this method — so no legacy batch is live here, and `_eval_inflight` is written only by the
+          Card session, so on that path the clause read an empty set every time. Its drained-pool
+          test also compares against the batch's own captured total, so a width that moved under a
+          batch could not wedge it anyway.
 
         `speculation_depth` is deliberately NOT re-derived from the new width, even though AUTO depth
         resolves off the eval width at startup. It is a `run_started` pin, it is `CalibrationRuntime`
@@ -143,9 +157,9 @@ class WidthSettlingMixin:
             return False
         if not self._card_inventory_enabled():
             return False
+        # The producer half only — see the bullets above for why an evaluation in flight is not here.
         if (self._head_request(state) is not None
                 or state.buildings
-                or self._evals_inflight()
                 or getattr(self, "_spec_build_inflight", None)
                 or getattr(self, "_spec_builds", None)):
             return False
