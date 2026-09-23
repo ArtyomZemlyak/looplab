@@ -913,6 +913,29 @@ how many of the run's experiments exist, how many more at most will run (the adm
 plan, where the endgame reserve begins — or that this proposal is inside it. It records no Card
 steering entry and moves no metric, champion or selection.
 
+### What the proposal is told about the search so far
+
+The Researcher's view of the run is `agents/state_brief.py::_state_brief`: the goal, the best node
+and the one being refined, then the working set `events/digest.py::experiments_digest` — the
+strongest experiments, the tuning table of the best swept node, the weakest and most recent failures
+("avoid repeating"), the theme map and the component attribution. The working set has a budget
+(`digest_char_cap`; 0 = 60 characters a node, clamped to 1,200–6,000). Since 2026-09-23
+(`Settings.propose_brief_fit`, ON; `false` restores the historical prompt byte for byte) the two
+propose paths read it FITTED: the budget is spent in whole rows, admitted round-robin across the
+sections so the avoid-repeating set survives beside the strongest, and a closing line names how many
+rows of each section were left out — and, when the proposer is offered the run tools, the call that
+returns them (`list_experiments`). Before it the text was cut mid-row with a bare `…`, and on a
+repo-shaped run the cut took every failure row. The same switch states each number once in one
+format, titles a list that holds every scored node "Scored so far, best first", shows a failure no
+triage judge explained by its own last error line instead of a traceback's head, and gives a board
+row every node of its belief. Triage, the repair critic, the macro chooser and deep research read
+the same builders and keep their historical briefs.
+
+Every lane proposes under the same switches: the brief's per-run settings (`memo_verdict_cue`,
+`digest_char_cap`, this one) are stamped on the proposing Researcher per proposal
+(`engine/proposal_cues.py::ProposalCuesMixin._stamp_brief_switches`), so a pooled or speculative
+lane's Researcher — minted after the engine was built — reads what the primary one reads.
+
 ### The durable research record
 
 Until 2026-09-06 a Deep-Research pass left three things behind that nothing could re-check: its
