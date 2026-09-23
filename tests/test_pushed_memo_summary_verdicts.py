@@ -255,6 +255,74 @@ def test_the_setting_reaches_a_real_researcher_and_a_real_engine(tmp_path):
         assert getattr(engine.researcher, "_memo_verdict_cue") is value   # the two propose paths
 
 
+class _RecordingEmitClient:
+    """Records EVERY request (a pooled pair proposes more than once) and emits a valid Idea."""
+
+    def __init__(self):
+        self.requests: list[list[dict]] = []
+
+    def complete_tool(self, messages, json_schema=None, **_kw):
+        self.requests.append([dict(m) for m in messages])
+        return {"operator": "draft", "params": {}, "rationale": "r", "concept_mode": "full",
+                "concepts": ["a/b"]}
+
+
+def _pooled_proposal_prompt(tmp_path, *, cue: bool, digest_char_cap: int = 0):
+    """The user turn a POOLED researcher sent, through the engine's own proposal half.
+
+    Q-3 (2026-09-23, the Researcher's context audit): `Engine.__init__` stamps `_memo_verdict_cue`
+    and `_digest_cap` on the researcher it is CONSTRUCTED with, and nothing else ever did. Every
+    fan-out / speculative lane proposes on a pair `_build_role_pairs` mints from `role_factory()`
+    AFTER `__init__`, so its prompts rendered the historical unqualified line whatever the run's
+    setting said. Measured through `cli._engine` on the toy task with `eval_parallel=2,
+    llm_parallel=4, speculation_depth=2`: 8 of 11 proposals carried the memo takeaway WITHOUT the
+    verifier clause under the shipped `memo_verdict_cue=True`, and the 3 that carried it were the
+    primary's. Driven here through the real pool minter and the real `_prepare_node_idea`.
+    """
+    from looplab.agents.toy_roles import ToyObjectiveDeveloper
+    from looplab.events.replay import fold
+    from tests.factories import make_engine
+
+    pooled_clients: list[_RecordingEmitClient] = []
+
+    def role_factory():
+        client = _RecordingEmitClient()
+        pooled_clients.append(client)
+        return LLMResearcher(client), ToyObjectiveDeveloper()
+
+    engine = make_engine(tmp_path / f"pool-{cue}-{digest_char_cap}",
+                         researcher=LLMResearcher(_RecordingEmitClient()),
+                         role_factory=role_factory, memo_verdict_cue=cue,
+                         digest_char_cap=digest_char_cap)
+    engine.store.append("research_completed", {
+        "at_node": 0, "attempt_id": "a1", "served_manual": False, "trigger": "run_start",
+        "memo": json.loads(_V8_MEMO.read_text(encoding="utf-8"))})
+    state = fold(engine.store.read_all())
+    pooled = engine._build_role_pairs(2)[1][0]
+    assert pooled is not engine.researcher and pooled_clients, "no pooled pair was minted"
+    engine._prepare_node_idea({"kind": "draft"}, state, researcher=pooled,
+                              prospective_node_id=0, source="planner")
+    user = [m["content"] for m in pooled_clients[0].requests[0] if m["role"] == "user"]
+    return user[0], pooled
+
+
+def test_a_pooled_researcher_proposes_under_the_runs_own_cue_not_the_historical_default(tmp_path):
+    """The flag is the RUN's, so every lane that proposes for the run reads it — not only the one
+    object `Engine.__init__` happened to be handed. ON reaches the pooled prompt; OFF keeps it off."""
+    on, _ = _pooled_proposal_prompt(tmp_path, cue=True)
+    assert "VERIFIER" in _takeaway_line(on) and "8 UNSUPPORTED" in _takeaway_line(on)
+    off, _ = _pooled_proposal_prompt(tmp_path, cue=False)
+    assert _takeaway_line(off).startswith(_HISTORICAL_PREFIX)
+    assert "VERIFIER" not in off
+
+
+def test_a_pinned_digest_budget_reaches_the_pooled_lane_too(tmp_path):
+    """`_digest_cap` travelled on the same `__init__`-only setattr, so a pinned `digest_char_cap`
+    sized the primary's working set and left every pooled proposal on the AUTO budget."""
+    _, pooled = _pooled_proposal_prompt(tmp_path, cue=True, digest_char_cap=777)
+    assert getattr(pooled, "_digest_cap", None) == 777
+
+
 def test_every_state_brief_call_site_decides_the_cue_rather_than_inheriting_the_default():
     """TIER 3, and only for the residue the two tiers above cannot reach.
 

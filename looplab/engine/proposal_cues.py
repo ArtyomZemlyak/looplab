@@ -502,6 +502,7 @@ class ProposalCuesMixin:
             steering.append({"kind": "sweep"})
         self._stamp_gpu_budget_hint(researcher=_r)
         self._stamp_time_budget_hint(researcher=_r)
+        self._stamp_brief_switches(researcher=_r)
         self._stamp_novelty_hint(state, self._novelty_stance, researcher=_r)
         strategy_cue = {"kind": "strategy"}
         if self._novelty_stance in {"explore", "balanced", "exploit"}:
@@ -802,6 +803,46 @@ class ProposalCuesMixin:
             setattr(_r, "_gpu_footprint_cue", bool(getattr(self, "_gpu_footprint_cue", True)))
         except Exception:  # noqa: BLE001
             pass
+
+    def _stamp_brief_switches(self, researcher=None) -> None:
+        """Stamp the run's settled BRIEF switches onto the Researcher that is about to propose.
+
+        `_memo_verdict_cue` and `_digest_cap` (both `RESEARCHER_HINT_ATTRS`) decide how
+        `roles._state_brief` renders the memo takeaway and how much of the working set it keeps, and
+        until Q-3 (the Researcher's context audit, 2026-09-23) they were stamped ONLY by
+        `Engine.__init__`, onto the researcher the engine was constructed with. The
+        `_gpu_footprint_cue` paragraph in `_stamp_gpu_budget_hint` above records why that is not
+        enough and moved its own switch here for it: `_build_role_pairs` mints the fan-out pairs from
+        `role_factory()` AFTER `__init__`, and every speculative / parallel lane proposes on one of
+        those. MEASURED through `cli._engine` on the toy task (`eval_parallel=2, llm_parallel=4,
+        speculation_depth=2`): 8 of 11 proposals rendered the memo takeaway WITHOUT the verifier
+        clause under the shipped `memo_verdict_cue=True` — every one of them a pooled pair's — while
+        the primary's three carried it. The run's setting was a property of one object.
+
+        Stamped per proposal, UNCONDITIONALLY, from the engine's own settled values: the knob for
+        the cue (so a pre-field snapshot's settled `False` reaches every lane too) and the launch
+        record for the digest budget, which nothing rewrites mid-run. A pure data-flow fix: a
+        primary role already held exactly these values, so its prompt does not move by a byte.
+        """
+        _r = researcher if researcher is not None else self.researcher
+        # Two literal `setattr`s rather than a loop over a dict: `tests/test_hint_forwarding.py`
+        # reads the hint names this module stamps off exactly this call shape. The catch is the
+        # three ways an attribute write is REFUSED (a read-only property or `__slots__`, a
+        # `__setattr__` that rejects the value, a validating model) — a role that refuses keeps what
+        # it had, and a prompt switch is never worth a failed build.
+        try:
+            # The real Engine settles the cue to `EngineOptions().memo_verdict_cue` (True) when
+            # nothing says otherwise, and that is the default a double of this mixin reads here too
+            # (`tests/test_engine_knob_defaults.py`: a `getattr` default is the settled value).
+            setattr(_r, "_memo_verdict_cue", bool(getattr(self, "_memo_verdict_cue", True)))
+        except (AttributeError, TypeError, ValueError):
+            pass
+        cap = getattr(getattr(self, "options", None), "digest_char_cap", None)
+        if isinstance(cap, int) and not isinstance(cap, bool):
+            try:
+                setattr(_r, "_digest_cap", cap)
+            except (AttributeError, TypeError, ValueError):
+                pass
 
     def _time_budget_hint_text(self) -> str:
         """The per-eval WALL-CLOCK ceiling the Researcher sizes the SCHEDULE against, as prose.
