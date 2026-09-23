@@ -98,3 +98,53 @@ with `run` broken out because it is the actionable one.
 Filled in by the box run, one dated line (`RESULT <date>: runs=… memos=… quoted=… cited=… run=…
 none=…`), and doc 52's `memo-number-fidelity-corpus-rate-unmeasured` marker is deleted in the same
 change.
+
+### 4.1 The box run, 2026-09-18
+
+Run on the box that holds `runs/` — the eleven dense-retrieval run directories, not the bench
+corpus §4 estimated from. The pass is the one §4 prescribes and nothing more: fold each run, call
+`number_fidelity_report` on every `research_completed` memo, pool the rows.
+
+**RESULT 2026-09-18: runs=9 memos=237 quoted=5267 cited=1191 run=250 none=3826**
+
+| run | memos | claims | quoted | excl | cited | run | none |
+|---|---|---|---|---|---|---|---|
+| e5small-dr-unified-v11 | 10 | 102 | 233 | 8 | 34 | 3 | 196 |
+| e5small-dr-unified-v12 | 57 | 730 | 2045 | 14 | 536 | 55 | 1454 |
+| e5small-dr-unified-v13 | 7 | 90 | 189 | 3 | 3 | 1 | 185 |
+| e5small-dr-unified-v2 | 11 | 79 | 132 | 0 | 21 | 1 | 110 |
+| e5small-dr-unified-v3 | — | — | — | — | — | — | — |
+| e5small-dr-unified-v4 | 75 | 720 | 930 | 1 | 415 | 123 | 392 |
+| rubertlite-dense-retrieval | 27 | 301 | 683 | 1 | 12 | 8 | 663 |
+| rubertlite-dr-unified-v6 | 28 | 240 | 603 | 0 | 88 | 44 | 471 |
+| rubertlite-dr-unified-v7 | — | — | — | — | — | — | — |
+| rubertlite-dr-unified-v8 | 15 | 129 | 312 | 2 | 72 | 14 | 226 |
+| rubertlite-dr-unified-v9 | 7 | 46 | 140 | 0 | 10 | 1 | 129 |
+| **TOTAL** | **237** | **2437** | **5267** | **29** | **1191** | **250** | **3826** |
+
+`cited/quoted` = **0.226**, run-channel **0.047**, none-channel **0.726**.
+
+**Two runs report no row and that is a refusal, not a zero.** `e5small-dr-unified-v3` and
+`rubertlite-dr-unified-v7` produced no metric at all, so their fold yields an empty metric map and
+every decimal in their memos is unmatched BY CONSTRUCTION. They are held out of the totals
+(`runs=9`, not 11) under the same denominator rule `core/claimpin.py` states: a pass that cannot
+tell "nothing matched" from "nothing was checked" is the vacuous green the rule exists to abolish.
+The first attempt at this pass is the worked example — it handed `EventStore` the run DIRECTORY
+instead of its `events.jsonl`, read 0 events for all eleven runs, and printed
+`cited=0 run=0 none=5365`, a headline that was pure artifact. Both channels empty at once is the
+signature: v12 has nineteen evaluated nodes and `0.782726` is in its memo text, so the `run`
+channel could not have been empty if the join had run at all.
+
+**Do not read `none` as "invented numbers", and this is the main caveat on the table.** The
+none-channel is dominated by decimals that are not metrics and are not supposed to be: learning
+rates (`1e-3`), temperatures (`0.05`), R-Drop alphas (`0.5`), thresholds (`0.1`), batch sizes and
+epoch counts, and the manual benchmark table's own `+0.03-0.04` deltas. A memo that writes
+"temp 0.05" quotes a decimal that no node metric should match. Separating hyperparameters from
+unsupported result claims needs a second rule this instrument deliberately does not have — it
+MATCHES, it does not classify (see `research_record.py::number_fidelity`'s own note on why that
+distinction is the whole design).
+
+**The actionable channel is `run` = 250 of 5267 (4.7%)**, exactly as §4 predicted when it asked for
+that column to be broken out: a real metric of this run attributed to an experiment the claim does
+not cite. It is not uniform — `e5small-dr-unified-v4` carries 123 of the 250 (13.2% of its own
+quoted decimals) against v2's 1 and v13's 1 — so the next read is that run, not the corpus.

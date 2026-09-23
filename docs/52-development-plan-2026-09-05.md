@@ -598,12 +598,18 @@ so (the run held zero nodes and every result number came from a sibling), and **
 hyperparameter values**, which is why the recorded share is an instrument reading and not a grade
 (`docs/audit/memo-number-fidelity.md`). Deleted per the index rule.*
 
-OPEN[memo-number-fidelity-corpus-rate-unmeasured] the instrument above shipped 2026-09-08 and the
-NUMBER the row asked for first has not: this checkout holds one real memo, and the corpus is the
-~119 completed memos across the thirty run dirs on the bench box. The pass is offline and free
-(fold each run, `number_fidelity_report` per `research_completed`, pool the rows) — what it needs
-is the box that holds `runs/`. Columns and the dated result line are in
-`docs/audit/memo-number-fidelity.md` §4. proof:`absent:RESULT 20@docs/audit/memo-number-fidelity.md`
+*Closed 2026-09-18: the marker `memo-number-fidelity-corpus-rate-unmeasured` stood here, asking for
+the corpus rate and naming what it needed — "the box that holds `runs/`". The pass ran on that box
+over the eleven dense-retrieval run dirs and the dated line is in `docs/audit/memo-number-fidelity.md`
+§4.1: **runs=9 memos=237 quoted=5267 cited=1191 run=250 none=3826**, i.e. `cited/quoted` = 0.226 and
+the actionable run-channel 4.7%. Two runs produced no metric at all and are HELD OUT rather than
+counted as zeros (`runs=9`, not 11) — the denominator rule, and the first attempt at the pass is the
+worked example of why: handed `EventStore` a run DIRECTORY instead of its `events.jsonl` it read 0
+events and printed `cited=0 run=0 none=5365`, pure artifact. The table's own caveat is that `none`
+is dominated by hyperparameters (learning rates, temperatures, alphas) that no metric should match,
+so it is not a hallucination rate; what the instrument does is MATCH, not classify. The next read is
+`e5small-dr-unified-v4`, which carries 123 of the 250 run-channel numbers — 13.2% of its own quoted
+decimals — against v2's 1 and v13's 1.*
 
 *Closed 2026-09-07 (row 32 shipped): the marker `novelty-gates-never-consult-literature` stood here.
 `engine/novelty.py::literature_overlap` is the deterministic, model-free overlap between a proposal
