@@ -44,7 +44,7 @@ import {
 import { stripPollMs, watchStrip } from './assistantWatchModel.js'
 import './assistant-polish.css'
 import {
-  get, fmtAgo, fmtDate, ASSISTANT_MODES as MODES, tokText, assistantCreate, assistantMessageStream,
+  deadlineGet, get, fmtAgo, fmtDate, ASSISTANT_MODES as MODES, tokText, assistantCreate, assistantMessageStream,
   assistantCommands, assistantRevert, assistantSessions, assistantGet, assistantDelete,
   assistantWatches, assistantWatchStop,
   assistantPermissions, assistantResolve, assistantCancel, assistantProgress,
@@ -839,8 +839,16 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
 
   useEffect(() => { assistantCommands().then(r => setCommands(r.commands || [])).catch(() => {}) }, [])
   const feedOpen = view === 'side' || view === 'full'
-  usePoll((alive) => get('/api/runs').then(r => alive() && setRuns(r || [])).catch(() => {}),
-    6000, [feedOpen], { enabled: feedOpen })
+  // The run list the feed names runs by (review 2026-09-22, UI-07). Each read is BOUNDED and handed
+  // back to `usePoll` so closing the feed aborts it: a bare `get` had no deadline, and one response
+  // that never came parked the poll behind `running` for the life of the page, freezing every run
+  // name in the transcript with nothing saying so. Paused while the tab is hidden, like the run
+  // list's own poll. A failed read keeps the last list — these are labels, not a decision.
+  usePoll((alive) => {
+    const request = deadlineGet('/api/runs')
+    request.promise.then(r => { if (alive()) setRuns(r || []) }).catch(() => {})
+    return request
+  }, 6000, [feedOpen], { enabled: feedOpen, pauseHidden: true })
   const runsById = React.useMemo(() => Object.fromEntries(runs.map(r => [r.run_id, r])), [runs])
   const refreshSessions = React.useCallback(async () => {
     const requestSeq = ++sessionsRequestSeqRef.current

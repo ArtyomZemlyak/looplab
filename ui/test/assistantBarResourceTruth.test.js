@@ -340,3 +340,15 @@ test('Assistant response announcements describe a new completion, never hydrated
   assert.match(source, /const ready = announceReplyReady\(reply,[\s\S]*?if \(ready\) setHasNew\(viewRef\.current === 'bar'\)/,
     'only a successful completion that finishes while collapsed is visually unread')
 })
+
+// Review 2026-09-22, UI-07: the feed's run-list poll had no deadline, so one hung response parked
+// `usePoll` behind `running` for the life of the page. Comment lines are stripped first: the
+// property is the CODE handing a bounded, abortable request back to the poll, not prose about it.
+test('the feed polls the run list with a bounded, abortable read, and not while hidden', async () => {
+  const source = await assistantSource()
+  const code = section(source, 'const feedOpen =', 'const runsById =')
+    .split('\n').filter(line => !line.trim().startsWith('//')).join('\n')
+  assert.match(code, /const request = deadlineGet\('\/api\/runs'\)/)
+  assert.match(code, /return request\s*\}, 6000, \[feedOpen\], \{ enabled: feedOpen, pauseHidden: true \}\)/)
+  assert.doesNotMatch(code, /get\('\/api\/runs'\)\.then/, 'an unbounded read of the run list is back')
+})
