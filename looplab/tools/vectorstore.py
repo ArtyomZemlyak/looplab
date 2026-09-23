@@ -96,6 +96,12 @@ class LLMEmbedder:
     Giving it the attribute is the whole wiring: no call site changes, because the walk was already
     looking for it.
 
+    BILLED IS NOT GOVERNED, and until review 2026-09-22 (CORE-01 part 2) it was only billed. The
+    accountant minted below is the fallback for a BARE construction and has no limit; the run's
+    embedder comes from `make_embedder`, which hands it the run's shared accountant
+    (`core/llm.py::run_cost_accountant`) so an embed spends against `llm_budget_usd` like any chat
+    call, and `_call` takes the broker permit so the reserve half and the call meter see it too.
+
     WHAT IS BILLED IS THE PROVIDER CALL, not a usable answer. `add` runs on any response that came
     back and parsed as JSON, before the body is validated — a batch whose rows disagree on dimension
     is discarded HERE and was still charged THERE, and `CostAccountant.add` already states this rule
@@ -137,7 +143,29 @@ class LLMEmbedder:
 
     def _call(self, texts: list[str]) -> Optional[list[Vector]]:
         """One batched POST /embeddings. Returns per-text vectors, or None on ANY failure (network,
-        HTTP, bad body) so the caller degrades gracefully instead of crashing the run."""
+        HTTP, bad body) so the caller degrades gracefully instead of crashing the run.
+
+        ADMITTED LIKE ANY PROVIDER CALL (review 2026-09-22, CORE-01 part 2). The request used to go
+        out with no `llm_request_permit`, so it was invisible to the one seam every other provider
+        request passes: the run's RESERVE half (`core/llm_budget.py::RunBudget`, reserved at the
+        broker's `borrow()`), the lane caps, and the per-window `ProviderCallMeter`. It now takes the
+        permit around exactly the POST — the chat client's `_post` rule, "admit immediately around
+        the real provider attempt" — and a reservation the run cannot afford raises `BudgetExceeded`
+        from here before anything is sent. That is the ceiling, not an endpoint failure, so it is
+        NOT in the degrade tuple below and never reaches the breaker.
+
+        The caller's cancel token is checked first, before the permit, as `_post` checks it per
+        attempt: a cancelled context sends nothing (`LLMCancelled`, "nothing was spent on it").
+        Raised rather than returned as None on purpose — None is a MISS, and a cancel on the first
+        embed would then write the endpoint off for the rest of the run (`_live = False`).
+
+        Both imports are function-local for the reason `_bill` gives: this module has no import-time
+        edge into `core`.
+        """
+        from looplab.core.llm_broker import llm_request_permit
+        from looplab.core.llm_transient import raise_if_cancelled
+
+        raise_if_cancelled(f"{self.base_url}/embeddings")
         try:
             req = urllib.request.Request(
                 f"{self.base_url}/embeddings",
@@ -146,8 +174,9 @@ class LLMEmbedder:
                 headers={"Content-Type": "application/json",
                          "Authorization": f"Bearer {self.api_key}"},
             )
-            with self._opener.open(req, timeout=self.timeout) as resp:
-                body = json.loads(resp.read().decode("utf-8", "replace"))
+            with llm_request_permit():
+                with self._opener.open(req, timeout=self.timeout) as resp:
+                    body = json.loads(resp.read().decode("utf-8", "replace"))
         except (urllib.error.URLError, TimeoutError, OSError, ValueError,
                 json.JSONDecodeError, http.client.HTTPException):
             # HTTPException covers IncompleteRead/BadStatusLine — a server dying mid-response
@@ -268,7 +297,7 @@ def make_embedder(settings) -> Callable[[str], Vector]:
     try:
         from looplab.core.llm import (
             bound_api_key_for, client_kwargs_for, normalize_llm_base_url,
-            resolve_llm_target, role_profile,
+            resolve_llm_target, role_profile, run_cost_accountant,
         )
         target = resolve_llm_target(settings, role="embed")
         embed_profile = role_profile(settings, "embed")
@@ -295,9 +324,17 @@ def make_embedder(settings) -> Callable[[str], Vector]:
             api_key_base_url=kwargs.get("api_key_base_url"))
     except Exception:  # noqa: BLE001 — missing/mismatched credentials fail closed to lexical search
         return hash_embed
+    # THE RUN'S accountant, not a private one (review 2026-09-22, CORE-01 part 2). Left to its own
+    # default, `LLMEmbedder` minted an UNLIMITED accountant: every embed was billed to a ledger the
+    # run's ceiling does not own, so `llm_budget_usd` never saw one and the `BudgetExceeded` re-raise
+    # in `_bill` could not fire on the shipped path. `run_cost_accountant` is the ONE accountant
+    # every client built from these settings shares (`make_llm_client` passes the same call), so an
+    # embed now spends against the same ceiling as the chat calls and lands in the same durable
+    # `llm_usage` ledger through the sink `engine/costs.py` binds on it.
     return LLMEmbedder(
         model, base_url=base, api_key=key,
-        trust_env=bool(getattr(settings, "llm_trust_env", False)))
+        trust_env=bool(getattr(settings, "llm_trust_env", False)),
+        accountant=run_cost_accountant(settings))
 
 
 def cosine(a: Vector, b: Vector) -> float:

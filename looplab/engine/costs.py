@@ -45,8 +45,14 @@ _COUNTER_KEYS = ("calls", "priced_calls", "prompt_tokens", "completion_tokens", 
 _LEGACY_DELTA_KEYS = frozenset({"cost", *_COUNTER_KEYS}) - {"priced_calls"}
 _OUTBOX_DIRNAME = ".llm-usage-outbox"
 _OUTBOX_VERSION = 1
+# `_embedder` (review 2026-09-22, CORE-01 part 2): `Engine(embedder=...)` is the novelty gate's and
+# the lesson priors' embedder, held on the engine itself where no role reaches it. `make_embedder`
+# gives it the run's shared accountant, which a chat client usually makes reachable anyway — but on
+# a run whose roles hold no LLM client (a toy backend with an embedding model configured), or with an
+# embedder a library caller built with its own accountant, nothing else leads the walk to it and its
+# embeds reached no durable `llm_usage` row. A root costs nothing when it is `hash_embed`.
 _ROOT_ATTRS = ("researcher", "developer", "strategist", "deep_researcher",
-               "report_writer", "onboarder", "_role_pool")
+               "report_writer", "onboarder", "_role_pool", "_embedder")
 _CHILD_ATTRS = (
     # `repair_developer`: the repair stage gets its OWN Developer when the operator points it at a
     # different model than implement — a second CostAccountant the walk would otherwise never reach,

@@ -593,6 +593,10 @@ class NoveltyGateMixin:
                 continue
             try:
                 s = _cosine(v, self._idea_vec(nt))
+            except BudgetExceeded:
+                # The embedder spends against the run's ceiling and is admitted by its broker
+                # (review 2026-09-22, CORE-01 part 2): a stop raised inside it is not a hiccup.
+                raise
             except Exception:  # noqa: BLE001 — an embedder hiccup must never block proposing
                 continue
             if s > best_s:
@@ -860,6 +864,8 @@ class NoveltyGateMixin:
                         _vec = self._embedder(raw)
                     if _cosine(_vec, self._idea_vec(ot_raw)) >= self._novelty_semantic_threshold:
                         return True
+                except BudgetExceeded:
+                    raise    # the run's ceiling, raised inside a governed embed (CORE-01 part 2)
                 except Exception:  # noqa: BLE001 — an embedder hiccup must never block proposing
                     pass
         return False

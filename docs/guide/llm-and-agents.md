@@ -213,6 +213,15 @@ fan-out overshoot. `core/llm_budget.py::run_usd_ceiling` is now the ONE derivati
 read: the tightest cap you actually declared binds both, and every refusal names the knob you
 typed. `llm_budget_usd` remains the documented spelling.
 
+**Embeddings are provider calls too (2026-09-23).** With `embed_model` set, the embedder's
+`/embeddings` requests were billed to a private, unlimited accountant and sent without the broker's
+permit, so neither half of the ceiling saw them and a cancelled caller still sent them.
+`tools/vectorstore.py::make_embedder` now meters it on the run's shared accountant, and each POST
+takes the same permit a chat request takes (after the same cancel check): an embed is reserved,
+counted by the call meter, refused when the run cannot afford it, and lands in the durable
+`llm_usage` ledger — including the engine's own embedder, which no role reaches (review
+2026-09-22, CORE-01).
+
 ## Reasoning / thinking
 
 `llm_reasoning` controls the chain-of-thought sent in the request (defaults to `high` — the agent

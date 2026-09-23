@@ -250,3 +250,42 @@ def test_settings_phase2_defaults():
     assert s.debug_depth == 2
     assert s.operator_bandit is False
     assert PROFILES["thorough"]["operator_bandit"] is True
+
+
+# Review 2026-09-22, CORE-01 part 2: the embedder meters on the run's accountant and is admitted by
+# its broker now, so an embed can raise the run's spend ceiling. The two blind "an embedder hiccup
+# must never block proposing" handlers around it must let that through (CLAUDE.md: every blind
+# handler around a paid call in the run path re-raises `BudgetExceeded` first).
+
+def _ceiling_after(n_ok):
+    calls = {"n": 0}
+
+    def embed(_text):
+        calls["n"] += 1
+        if calls["n"] > n_ok:
+            raise BudgetExceeded("run ceiling reached inside an embed")
+        return [1.0, 0.0, float(calls["n"])]
+
+    return embed
+
+
+def test_a_spend_ceiling_inside_the_semantic_gate_scan_propagates(tmp_path):
+    """The query embed succeeds; the per-node `_idea_vec` embed inside the scan's blind handler
+    hits the ceiling. MUTATION: drop the re-raise -> the scan `continue`s past the stop."""
+    eng = _mk_engine(tmp_path, novelty_semantic=True, embedder=_ceiling_after(1))
+    st = _state([_node(0, metric=0.4, rationale="a prior sufficiently long proposal text")])
+    idea = Idea(operator="improve", params={"x": 2.0},
+                rationale="a candidate sufficiently long proposal text")
+    with pytest.raises(BudgetExceeded, match="inside an embed"):
+        eng._semantic_duplicate(st, idea)
+
+
+def test_a_spend_ceiling_inside_the_batch_semantic_dedup_propagates(tmp_path):
+    """MUTATION: drop the re-raise in `_intra_batch_dup` -> it answers "not a duplicate" and the
+    proposal batch goes on past the run's stop."""
+    eng = _mk_engine(tmp_path, novelty_semantic=True, embedder=_ceiling_after(0))
+    eng._novelty_mode = "algo"
+    chosen = Idea(operator="draft", rationale="gradient boosting with deep trees and early stopping")
+    idea = Idea(operator="draft", rationale="a linear model with strong ridge regularization on")
+    with pytest.raises(BudgetExceeded, match="inside an embed"):
+        eng._intra_batch_dup(idea, [chosen])

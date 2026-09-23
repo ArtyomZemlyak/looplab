@@ -257,3 +257,121 @@ def test_the_embedder_stops_at_the_run_ceiling_instead_of_billing_past_it():
 
     embedder.accountant = _Broken()
     LLMEmbedder._bill(embedder, {"usage": {"total_tokens": 1}})   # must not raise
+
+
+# --------------------------------------------------------------------------------------------
+# Review 2026-09-22, CORE-01 part 2: BILLED IS NOT GOVERNED. Every embed reached a ledger, but the
+# ledger was the embedder's OWN: `make_embedder` handed `LLMEmbedder` no accountant, so it minted a
+# private one with no limit — `llm_budget_usd` never saw an embed, and `_bill`'s re-raise of the
+# ceiling (above) could not fire on the shipped path. And `_call` posted with no
+# `llm_request_permit`, so the run's reserve half (`RunBudget`, metered at the broker's `borrow()`)
+# and the call meter never saw the request at all, and a cancelled caller still sent it.
+# --------------------------------------------------------------------------------------------
+
+def _run_settings(**kw):
+    from looplab.core.config import Settings
+
+    return Settings(embed_model="embed-model", embed_base_url="http://127.0.0.1:9/v1",
+                    llm_base_url="http://127.0.0.1:9/v1", **kw)
+
+
+def test_the_run_embedder_meters_on_the_RUN_accountant_and_stops_at_its_ceiling():
+    """MUTATION: drop `accountant=run_cost_accountant(settings)` from `make_embedder` -> the
+    embedder carries a private, unlimited accountant, the identity asserts fail, and the two $0.25
+    embeds below spend $0.50 against a $0.50 ceiling without a word."""
+    from looplab.core.llm import BudgetExceeded, make_llm_client, run_cost_accountant
+
+    settings = _run_settings(llm_budget_usd=0.5)
+    embedder = make_embedder(settings)
+    assert isinstance(embedder, LLMEmbedder)
+    assert embedder.accountant is run_cost_accountant(settings), (
+        "the embedder meters on an accountant the run's ceiling does not own")
+    assert embedder.accountant is make_llm_client(settings).accountant, (
+        "the run's chat clients and its embedder must share ONE ledger")
+
+    priced = {"prompt_tokens": 4, "total_tokens": 4, "cost": 0.25}
+    embedder._opener = _Opener(_ok([[1.0, 0.0]], usage=priced), _ok([[0.0, 1.0]], usage=priced))
+    embedder.embed("first")
+    with pytest.raises(BudgetExceeded):
+        embedder.embed("second")
+    assert run_cost_accountant(settings).spent == pytest.approx(0.5)
+
+
+class _PermitProbe(_Opener):
+    """Records how many broker permits were out WHILE the request was on the wire."""
+
+    def __init__(self, broker, *payloads):
+        super().__init__(*payloads)
+        self.broker = broker
+        self.borrowed: list[int] = []
+
+    def open(self, req, timeout=None):
+        self.borrowed.append(self.broker.snapshot()["borrowed"])
+        return super().open(req, timeout=timeout)
+
+
+def test_an_embed_request_is_admitted_by_the_run_broker_and_counted_by_its_meter():
+    """The permit is where the run's reserve half and its per-window call meter live
+    (`core/llm_broker.py::llm_request_permit`). MUTATION: remove the permit from `_call` -> the
+    request goes out holding nothing (`borrowed == [0]`) and the meter reads zero calls."""
+    from looplab.core.llm_broker import (LLMConcurrencyBroker, ProviderCallMeter,
+                                         llm_broker_scope, provider_call_meter)
+
+    broker = LLMConcurrencyBroker(total=1)
+    embedder = _embedder()
+    embedder._opener = _PermitProbe(broker, _ok([[1.0, 0.0, 0.0, 0.0]]))
+    meter = ProviderCallMeter()
+    with llm_broker_scope(broker), provider_call_meter(meter):
+        assert embedder.embed("hello") == [1.0, 0.0, 0.0, 0.0]
+    assert embedder._opener.borrowed == [1], "the embed request was sent outside the broker"
+    assert meter.calls == 1, "the run's call meter never saw the embed request"
+    assert broker.snapshot()["borrowed"] == 0, "the permit leaked"
+
+
+def test_a_run_budget_that_cannot_afford_the_embed_refuses_it_BEFORE_it_is_sent():
+    """The reserve half refuses at admission, so the refused request never leaves. It is the
+    ceiling, not an endpoint failure: it propagates, and the breaker does not count it."""
+    from looplab.core.llm import BudgetExceeded
+    from looplab.core.llm_broker import LLMConcurrencyBroker, llm_broker_scope
+    from looplab.core.llm_budget import RunBudget
+
+    budget = RunBudget(cost_limit=0.5)
+    budget.commit({"cost": 0.5, "calls": 1, "priced_calls": 1, "total_tokens": 10})
+    embedder = _embedder(_ok([[1.0, 0.0, 0.0, 0.0]]))
+    with llm_broker_scope(LLMConcurrencyBroker(budget=budget)):
+        with pytest.raises(BudgetExceeded):
+            embedder.embed("hello")
+    assert embedder._opener.requests == 0, "a refused reservation still sent the request"
+    assert embedder._live is None and embedder._misses == 0, "the refusal tripped the breaker"
+
+
+def test_a_cancelled_caller_sends_no_embed_request_and_the_breaker_does_not_count_it():
+    """Same cancellation point as the chat client's `_post`: checked before the permit, per
+    request. A cancel is the CALLER's decision, not the endpoint failing — counting it as a miss
+    would, on a first embed, degrade the embedder to `hash_embed` for the rest of the run."""
+    from looplab.core.llm import LLMCancelled, cancel_check_scope
+
+    embedder = _embedder(_ok([[1.0, 0.0, 0.0, 0.0]]))
+    with cancel_check_scope(lambda: True):
+        with pytest.raises(LLMCancelled):
+            embedder.embed("hello")
+    assert embedder._opener.requests == 0
+    assert embedder._live is None and embedder._misses == 0
+    assert embedder.embed("hello") == [1.0, 0.0, 0.0, 0.0], "the endpoint was written off"
+
+
+def test_the_ENGINE_level_embedder_is_reconciled_even_when_no_role_holds_a_client():
+    """`Engine(embedder=...)` stores it as `_embedder`, which no role reaches. On a run whose
+    roles hold no LLM client (a toy backend with an embedding model configured) the walk found
+    nothing, so its embeds reached no durable `llm_usage` row. MUTATION: drop `_embedder` from
+    `engine/costs.py::_ROOT_ATTRS` -> the list below is empty."""
+    from looplab.engine.costs import find_cost_accountants
+
+    embedder = _embedder(_ok([[1.0, 0.0, 0.0, 0.0]]))
+
+    class _Engine:
+        pass
+
+    engine = _Engine()
+    engine._embedder = embedder
+    assert find_cost_accountants(engine) == [embedder.accountant]
