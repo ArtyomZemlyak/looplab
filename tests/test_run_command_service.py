@@ -1665,9 +1665,15 @@ def test_reload_finalize_reattaches_existing_record_without_event_or_spawn_dupli
     assert attached.status_code == 200 and attached.json()["id"] == first["id"]
     assert len(driver.calls) == 1 and _types(rd).count("run_abort") == 1
 
-    driver.alive = False
+    # The ENGINE's order, not the reverse: `run_finished` is written while the driver still holds
+    # engine.lock, and the lock goes when it exits. Flipped (CI run 1973, one failure in ~4,400),
+    # the two opened a window in which the service saw a dead driver and NO finish — an engine that
+    # died mid-finalize — and correctly launched a replacement, whose `on_spawn` made this fake alive
+    # for good: "finished AND stopped" could then never hold, and the record sat `executing`.
     EventStore(rd / "events.jsonl").append("run_finished", {"reason": "aborted"})
+    driver.alive = False
     assert _terminal(client, first)["status"] == "succeeded"
+    assert len(driver.calls) == 1, "a replacement driver was launched for a run that finished"
 
 
 def test_attach_finalize_completion_between_decision_and_continuation_is_causal(tmp_path):
