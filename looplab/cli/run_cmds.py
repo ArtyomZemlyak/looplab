@@ -1000,11 +1000,15 @@ def run(
                 "at a reachable model, or use --no-genesis to build the task from the explicit "
                 "--kind/--goal/--direction/--data flags.")
         # Pass the file's task: block (if any) as a draft so --goal refines it instead of discarding it.
+        # `evidence_envelope`: the scout's file reads and the cross-run rows arrive fenced when the
+        # run's envelope is on (review 2026-09-22, TAT-02) — through the ONE Settings reader.
+        from looplab.core.evidence import envelope_enabled
         result = _genesis.author_task(goal, client=client, kinds=_TASK_KINDS, kind=kind, data=data,
                                       direction=direction, draft=(file_task or None),
                                       parser=settings.llm_parser,
                                       memory_dir=getattr(settings, "memory_dir", None),          # PART V §22
-                                      cross_run_read_tools=getattr(settings, "cross_run_read_tools", False))
+                                      cross_run_read_tools=getattr(settings, "cross_run_read_tools", False),
+                                      evidence_envelope=envelope_enabled(settings))
         if result.error:    # transport/endpoint failure -> NOT a vague goal; say so plainly
             raise typer.BadParameter(
                 f"Genesis couldn't reach the model to author the task ({result.error}). Check "

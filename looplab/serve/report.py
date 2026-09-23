@@ -160,13 +160,21 @@ def _report_tools(state: RunState):
 
 
 def generate_report(state: RunState, client, *, parser: str = "tool_call", trigger: str = "",
-                    raise_on_failure: bool = False) -> dict:
+                    raise_on_failure: bool = False, evidence_envelope: bool = False) -> dict:
     """Synthesize one conclusion-first report dict from the run state.
 
     Engine-owned cadence/finalization calls keep the best-effort default and receive deterministic
     fallback content. A manual paid refresh passes ``raise_on_failure=True`` so provider failure can
     be recorded as a distinct durable terminal without replacing the last known-good report.
+
+    ``evidence_envelope`` fences what the report's run tools return — the candidates' own code, logs
+    and output — between `UNTRUSTED_RUN_EVIDENCE` and its closing marker (`core/evidence.py`; review
+    2026-09-22, TAT-02). OFF here, as at every constructor, because it changes a prompt: both
+    callers pass the RUN's `Settings.evidence_envelope` through `envelope_enabled` — the engine's
+    writer via `make_report_writer`, the manual refresh via the run's own snapshot — so a run
+    launched before the field keeps its historical report request byte for byte.
     """
+    from looplab.core.evidence import fence_kwargs
     from looplab.core.parse import parse_structured
     from looplab.agents.agent import agentic_struct
     try:
@@ -181,7 +189,8 @@ def generate_report(state: RunState, client, *, parser: str = "tool_call", trigg
         # yield nothing (or no client), preserving the offline minimal-report contract below.
         out = agentic_struct(client, _report_tools(state), messages, _ReportOut,
                              parser=parser, loop_opts={"max_turns": 15},
-                             fallback=lambda m: parse_structured(client, m, _ReportOut, parser))
+                             fallback=lambda m: parse_structured(client, m, _ReportOut, parser),
+                             **fence_kwargs(evidence_envelope))
         content = out.model_dump(mode="json")
     except Exception as e:  # noqa: BLE001 — report is best-effort; never crash the run
         if raise_on_failure:
@@ -252,12 +261,16 @@ class ReportWriter:
     """Thin wrapper holding the LLM client + parser so the engine/server can call `.generate(state)`
     symmetrically with the DeepResearcher."""
 
-    def __init__(self, client, parser: str = "tool_call"):
+    def __init__(self, client, parser: str = "tool_call", evidence_envelope: bool = False):
         self.client = client
         self.parser = parser
+        # The untrusted-evidence fence on the report's run tools (`generate_report`); OFF at the
+        # constructor like every prompt flag, filled by `make_report_writer` from the run's Settings.
+        self.evidence_envelope = bool(evidence_envelope)
 
     def generate(self, state: RunState, trigger: str = "") -> dict:
-        return generate_report(state, self.client, parser=self.parser, trigger=trigger)
+        return generate_report(state, self.client, parser=self.parser, trigger=trigger,
+                               evidence_envelope=self.evidence_envelope)
 
 
 def make_report_writer(settings, *, client=None) -> Optional[ReportWriter]:
@@ -265,4 +278,6 @@ def make_report_writer(settings, *, client=None) -> Optional[ReportWriter]:
     never runs the cadence and the UI shows the deterministic report only)."""
     if client is None:
         return None
-    return ReportWriter(client, parser=getattr(settings, "llm_parser", "tool_call"))
+    from looplab.core.evidence import envelope_enabled
+    return ReportWriter(client, parser=getattr(settings, "llm_parser", "tool_call"),
+                        evidence_envelope=envelope_enabled(settings))

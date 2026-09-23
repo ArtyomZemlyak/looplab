@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException, Request
 from looplab.serve.principal import portfolio_access, request_principal
 
 from looplab.core.config import Settings
+from looplab.core.evidence import envelope_enabled, fence_kwargs
 from looplab.serve.assistant import safe_provider_failure
 from looplab.serve.http import json_object
 from looplab.serve.protocol import JOB_DONE, JOB_RUNNING, JOB_UNKNOWN
@@ -368,6 +369,10 @@ def build_router(srv) -> APIRouter:
                 # old hardcoded 1000-turn / 600s ceiling. The endpoint runs this in a background job,
                 # so a long scout never blocks the HTTP request / trips a proxy timeout; set a positive
                 # cap in settings only if you want to bound a pathological model that never emits.
+                # FENCED when the envelope is on (review 2026-09-22, TAT-02): the scout reads files
+                # on the operator's machine — a cloned repository's README is a third party's words —
+                # and the cross-run tools read stored memory. No run exists yet, so the switch is the
+                # server's own Settings (`gset`), read through the one reader.
                 return emit_loop(                              # B1 stuck (+ C1/C2 if configured)
                     client, tools, [{"role": "system", "content": tool_sys},
                                     *evidence_messages,
@@ -375,7 +380,7 @@ def build_router(srv) -> APIRouter:
                     _GenesisSpec, gset,
                     description=("Emit the final run plan (run_id, task, settings, "
                                  "setup_steps, reply, rationale)."),
-                    fallback=_fb, on_step=on_step)
+                    fallback=_fb, on_step=on_step, **fence_kwargs(envelope_enabled(gset)))
             except Exception:  # noqa: BLE001 - the model/endpoint can't drive tools AT ALL -> single-shot
                 return None
 

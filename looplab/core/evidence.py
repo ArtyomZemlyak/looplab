@@ -71,6 +71,21 @@ def envelope_enabled(settings) -> bool:
     return bool(getattr(settings, "evidence_envelope", False))
 
 
+def fence_kwargs(enabled) -> dict:
+    """The fence keyword a tool-loop call spreads: `{"tool_result_label": EVIDENCE_LABEL}` while
+    the envelope is on, and `{}` while it is off — ABSENT, not an empty label, so a consumer with the
+    envelope off makes its historical call byte for byte (a test double written against a wrapper's
+    old signature is a caller too, and an always-passed `""` would break it).
+
+    Review 2026-09-22, TAT-02: the one spelling for every consumer OUTSIDE the engine once it holds
+    its switch as a bool — a role's `evidence_envelope` constructor argument, or
+    `envelope_enabled(settings)` read at a site that holds the run's (or the server's) Settings.
+    The engine's own sites ask `engine/shared.py::judge_evidence_kwargs`, which is this rule over
+    `Engine._evidence_envelope`.
+    """
+    return {"tool_result_label": EVIDENCE_LABEL} if enabled else {}
+
+
 def untrusted_evidence_guard(lead: str, *, powers: str) -> str:
     """The ONE way a role is told, at system authority, how to read untrusted evidence.
 

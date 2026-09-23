@@ -29,6 +29,7 @@ from pydantic import BaseModel
 
 from looplab.agents.agent import agentic_struct
 from looplab.core.errors import BudgetExceeded
+from looplab.core.evidence import fence_kwargs
 from looplab.core.parse import parse_structured
 from looplab.core.task_kinds import GENERATIVE_KINDS, default_backend
 
@@ -185,13 +186,20 @@ def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str
                 repo: Optional[str] = None, direction: Optional[str] = None,
                 kind: Optional[str] = None, draft: Optional[dict] = None,
                 parser: str = "tool_call", memory_dir=None,
-                cross_run_read_tools: bool = False) -> GenesisResult:
+                cross_run_read_tools: bool = False,
+                evidence_envelope: bool = False) -> GenesisResult:
     """Ask the model to author an inline task from a plain goal. With `kind=None` it also CHOOSES the
     kind; with `kind` set it is CONSTRAINED to that kind and only fills the rest (the user pinned the
     type, Genesis does the rest within it). `draft` is an existing task dict (e.g. from a config file)
     to refine in place rather than discard. Returns a GenesisResult; on a vague goal the task may be
     empty with a clarifying `reply`, and on a model/endpoint failure `error` is set (so the caller can
-    tell 'reach the model' apart from 'your goal was too vague')."""
+    tell 'reach the model' apart from 'your goal was too vague').
+
+    `evidence_envelope` fences what the scout and the cross-run tools return — files on the
+    operator's machine (a cloned repository's README is a third party's words) and stored memory —
+    between `UNTRUSTED_RUN_EVIDENCE` and its closing marker (`core/evidence.py`; review 2026-09-22,
+    TAT-02). OFF at the signature like every prompt flag; the CLI passes
+    `envelope_enabled(settings)`."""
     hints = []
     if data:
         hints.append(f"The user named a data/input path: {data} (use it; add others they mention).")
@@ -253,7 +261,8 @@ def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str
     try:
         plan = agentic_struct(client, tools, messages, _TaskPlan, parser=parser,
                               loop_opts={"max_turns": 15},
-                              fallback=lambda m: parse_structured(client, m, _TaskPlan, parser))
+                              fallback=lambda m: parse_structured(client, m, _TaskPlan, parser),
+                              **fence_kwargs(evidence_envelope))
     except BudgetExceeded:
         # Not "couldn't reach the model": the spend ceiling reached the operator as advice to check
         # the endpoint URL (review 2026-09-22, TAT-01). It is a refusal with its own message.

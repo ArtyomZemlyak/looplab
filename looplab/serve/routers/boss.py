@@ -20,6 +20,7 @@ except ModuleNotFoundError as e:  # allow importing pure action models/mappers w
     APIRouter = HTTPException = Request = Response = JSONResponse = None  # type: ignore[assignment,misc]
 
 from looplab.core.atomicio import best_effort_fsync
+from looplab.core.evidence import envelope_enabled, fence_kwargs
 from looplab.events.eventstore import EventStore, iter_jsonl
 from looplab.events.types import (
     EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_COMMENT_CREATED, EV_DEEP_RESEARCH,
@@ -219,9 +220,12 @@ def _run_report_refresh_worker(srv, settings, run_dir, generation: str,
         from looplab.serve.report import generate_report
         with _metered_run_client(srv, settings, run_dir, generation) as client:
             state = srv.state(run_dir)
+            # `settings` is the RUN's own snapshot (`llm_settings(rd)`), so the fence follows the
+            # run: a pre-field snapshot resolves OFF and keeps its historical request (TAT-02).
             content = generate_report(
                 state, client, parser=settings.llm_parser,
-                trigger="manual", raise_on_failure=True)
+                trigger="manual", raise_on_failure=True,
+                evidence_envelope=envelope_enabled(settings))
             try:
                 event = EventStore(run_dir / "events.jsonl").append(
                     EV_REPORT_GENERATED, {
@@ -766,13 +770,18 @@ def build_router(srv) -> APIRouter:
             # in settings only if you also want to hard-stop the loop itself.
             # Returns None (not an empty _Plan) when the loop produced no emit, so the caller falls
             # through to the forced-emit single-call route instead of short-circuiting to advisory.
+            # FENCED when the run's envelope is on (review 2026-09-22, TAT-02): `read_experiment`
+            # returns the candidates' own code and trials, and the system prompt above already names
+            # `UNTRUSTED_RUN_EVIDENCE` for the digest — the tool results arrived bare beside it. The
+            # switch is the RUN's snapshot (`s`), so a pre-field run keeps its historical request.
             return emit_loop(                                 # B1 stuck (+ C1 self-plan / C2 if set)
                 client, tools, [{"role": "system", "content": tool_sys},
                                 *evidence,
                                 {"role": "user", "content": user}],
                 _Plan, s,
                 description=("Emit the plan: a reply plus the ordered actions to "
-                             "apply now (empty actions = advice only)."))
+                             "apply now (empty actions = advice only)."),
+                **fence_kwargs(envelope_enabled(s)))
 
         # All the LLM/agent work below is blocking + network-bound AND can outlast a UI proxy's
         # gateway timeout (the boss tool-loop's in-flight turn runs to its own client timeout — see
