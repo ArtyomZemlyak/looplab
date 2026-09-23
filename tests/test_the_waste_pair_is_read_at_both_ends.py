@@ -72,7 +72,28 @@ def test_a_probe_that_never_reached_a_node_is_not_in_the_median(tmp_path):
     assert "2 probe(s)" in detail, detail
 
 
-def test_the_bands_are_pinned_not_derived():
-    src = (BENCH / "sweep_claims.py").read_text(encoding="utf-8")
-    assert "BEFORE_FIRST_NODE_BANDS" in src
-    assert "cannot be failed by them" in src
+def test_the_bands_are_pinned_not_derived(tmp_path, monkeypatch):
+    """§330: a band computed from the probes it judges cannot be failed by them — so PINNED means a
+    LITERAL table, and a verdict that follows the table.
+
+    Review 2026-09-22, TST-05: this was `"BEFORE_FIRST_NODE_BANDS" in src and "cannot be failed by
+    them" in src`, and the second literal is the comment that states the reason — a table computed
+    from the corpus, with that comment above it, kept the test green."""
+    import ast
+
+    tree = ast.parse((BENCH / "sweep_claims.py").read_text(encoding="utf-8"))
+    table = [n.value for n in tree.body if isinstance(n, ast.Assign) and any(
+        isinstance(t, ast.Name) and t.id == "BEFORE_FIRST_NODE_BANDS" for t in n.targets)]
+    assert len(table) == 1, "the bands must be bound exactly once, at module level"
+    bands = ast.literal_eval(table[0])                  # raises on anything computed
+    assert bands == sweep_claims.BEFORE_FIRST_NODE_BANDS, "rebound after the literal"
+    assert bands and all(isinstance(lo, (int, float)) and isinstance(hi, (int, float)) and lo < hi
+                         for lo, hi in bands.values())
+
+    # ...and the verdict is the TABLE's: the same three probes pass under the pinned band and fail
+    # once the table says otherwise, which a band re-derived from those probes never could.
+    rows = [_row("edge_expansion", 30.0), _row("edge_expansion", 34.0), _row("edge_expansion", 38.0)]
+    assert sweep_claims.check_waste_before_the_first_node(_bench(tmp_path / "a", rows))[0]
+    monkeypatch.setitem(sweep_claims.BEFORE_FIRST_NODE_BANDS, "edge_expansion", (0.0, 10.0))
+    ok, detail = sweep_claims.check_waste_before_the_first_node(_bench(tmp_path / "b", rows))
+    assert not ok and "edge_expansion median 34 % outside 0-10" in detail, detail
