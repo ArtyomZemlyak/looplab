@@ -865,7 +865,16 @@ def _record_repair_ledger(st: RunState, d: dict, ctx: "_FoldCtx") -> None:
     if type(node_id) is not int:
         return
     key = (node_id, attempt, generation)
-    if key in ctx.repair_ledger_keys:
+    # A KEY THE FOLD CANNOT HASH IS A ROW THIS LEDGER CANNOT RECORD, and it must not raise: no
+    # handler runs under per-event containment, so the TypeError a list/dict `attempt` or
+    # `generation` raised at the set lookup below escaped `fold` — one hand-edited or corrupt
+    # `node_repaired` row made every fold, `looplab replay` and resume of its run fail. Found by the
+    # EVT-12 split's hostile-payload fuzz (review 2026-09-22), identically on the pre-split code.
+    # The ledger records well-formed repairs; the node's own code handling below is untouched.
+    try:
+        if key in ctx.repair_ledger_keys:
+            return
+    except TypeError:
         return
     ctx.repair_ledger_keys.add(key)
     # BOTH bounds, and each records what it dropped. A silent cap made the CLI print 200 as a total

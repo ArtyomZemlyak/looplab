@@ -151,3 +151,24 @@ def test_the_cap_check_does_not_rescan_the_whole_ledger_per_row():
     attempted = (_REPAIR_LEDGER_MAX + 50) + 4_000
     assert st.repair_ledger_omitted["rows"] + len(st.repair_ledger) == attempted, (
         "every row is either kept or counted exactly once — that IS the honesty claim")
+
+
+@pytest.mark.parametrize("bad", [{"attempt": [1]}, {"generation": {"g": 1}}, {"attempt": {"a": [2]}}])
+def test_a_row_the_fold_cannot_key_is_skipped_not_raised(bad):
+    """A `node_repaired` row whose `attempt`/`generation` is a list or dict used to raise TypeError
+    out of `fold` (the idempotence set cannot hash it), and nothing contains a handler: one such row
+    made every fold, replay and resume of its run fail. DRIVEN through the real `fold`, with the
+    well-formed rows around it still recorded and still de-duplicated.
+    MUTATION: drop the `except TypeError` -> this test raises."""
+    from looplab.core.models import Event
+    from looplab.events.replay import fold
+
+    rows = [("run_started", {"run_id": "r", "task_id": "t", "direction": "min"}),
+            ("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}}, "code": ""}),
+            ("node_repaired", {"node_id": 0, "attempt": 1, "generation": 0, "code": "a"}),
+            ("node_repaired", {"node_id": 0, "code": "b", **{"attempt": 2, "generation": 0, **bad}}),
+            ("node_repaired", {"node_id": 0, "attempt": 1, "generation": 0, "code": "a"})]
+    st = fold([Event(seq=i, ts=float(i + 1), type=t, data=d) for i, (t, d) in enumerate(rows)])
+    assert [(r["attempt"], r["generation"]) for r in st.repair_ledger] == [(1, 0)]
+    assert st.repair_ledger_omitted == {}
