@@ -1,0 +1,106 @@
+{
+ "kind": "repo",
+ "id": "e5small-dr-unified-v14",
+ "goal": "Maximize test recall@100 on the ESCI v2 dense-retrieval benchmark by fine-tuning the SentenceTransformer backbone at /home/jovyan/data/embedder/d0rj/e5-small-en-ru.\n\nThe repo is /home/jovyan/data/vectorizer-unified — read it before changing anything. You realise an idea by EDITING THE REPO; nothing here is applied automatically.\n\nCLAIM[v14-backbone-path-resolves] the backbone named above is the model on disk at that path decided:`present:XLMRobertaModel@/home/jovyan/data/embedder/d0rj/e5-small-en-ru/config.json`\n\nDATA: use dataset_version '2'. The local data root is already exported into every stage's environment — do not set it in code.\n\nTHE DIRECTION THIS RUN IS FOR: HARD-NEGATIVE MINING. Loss-space tuning on this eval is spent, and that is a measurement rather than an opinion: in the previous run every one-knob delta measured around the leader came back at 0.0013 or less, or negative, i.e. inside an unmeasured noise floor. Mining is the one lever that has never been tried on THIS eval. It is not a new capability you have to build — the repo already has both halves, and each is a claim you can check:\n\nCLAIM[v14-mined-negative-loss-exists] a loss that consumes explicit mined negatives is already in the repo decided:`present:type: Literal[\"qwen3\"]@/home/jovyan/data/vectorizer-unified/vectorsearch/config.py`\nCLAIM[v14-miner-exists] so is the miner decided:`present:def mining_fingerprint@/home/jovyan/data/vectorizer-unified/vectorsearch/data/mine_negatives.py`\nCLAIM[v14-mining-type-vocabulary] and the miner offers three strategies decided:`present:mining_type: Literal[\"vector\", \"class_aware\", \"vector_class_aware\"]@/home/jovyan/data/vectorizer-unified/vectorsearch/config.py`\n\nMEASURED LIMITS OF THIS MACHINE. These are the things you cannot derive from your own tools, each with where it was measured:\n\n1. faiss GPU IS BROKEN ON THIS CARD and the repo already handles it. The installed wheel ships no kernels for the H200 (sm_90) and its first GPU add/search calls abort() with CUDA error 209 — there is no exception to catch, so do NOT wrap it in try/except. Both call sites in this repo probe in a CHILD process and fall back to the exact CPU index, which gives the same neighbours ~33x slower: about 51 minutes for the mining pass. Every node that mines pays it. Size your schedule for that before you choose how many mining passes an experiment makes.\n\n2. DO NOT COPY A BATCH SIZE FROM ANY TABLE — measure the memory ceiling yourself. Of the nine nodes of the earlier run e5small-dr-unified-v2, four died of torch.OutOfMemoryError on a single H200, at batch 8192 and below, with the process holding ~139 of 139.8 GiB. A memory ceiling is a fact about (this model, this sequence length, this negative count, this card); change any one and a number copied from prose is wrong. Put a short calibration step at the head of your own declared pipeline, inside the device you already reserved, and read the ceiling off it.\n\n3. THIS RUN HAS FOUR H200s AND RUNS ONE EXPERIMENT AT A TIME. Declare footprint {\"gpus\": 4} on every card and write training code that uses all four devices; the run is serial by the operator's choice (eval_parallel=1), so an experiment that takes fewer than four leaves cards idle for its whole duration and buys nothing — nothing else is waiting for them. A declared count is HONOURED exactly as written, so this is the one number you should not shrink \"to be safe\".\n\n   What four cards CHANGE about the experiment, stated because it is not only a speed question: at the same PER-DEVICE batch you get four times the effective batch and four times the in-batch negative pool, which is a DIFFERENT experiment from the same global batch spread over four. Whether that helps is a property of the LOSS, and the corpus does not settle it for you — `NLLCosLoss` in this repo documents itself as per-device with no gather, while its CrossBatch/SigLIP/Qwen3 siblings do gather. Say in the card which of the two you are running and why, because a reader cannot tell them apart from the metric alone.\n\n   And it is the memory ceiling that four cards move most: of the nine nodes of the earlier run e5small-dr-unified-v2, four died of torch.OutOfMemoryError on ONE H200 with the process holding ~139 of 139.8 GiB. Four devices do not raise the PER-DEVICE ceiling — measure it (limit 2 above) and then decide how to spend the extra devices.\n\nRANKING HINTS FROM THE OPERATOR'S MANUAL TABLE. Use these for the ORDER to try things in, never for a value:\n* class-aware hard negatives HURT on ESCI — the labels are noisy and carry many false negatives, so a class-aware miner promotes false negatives into the denominator. Try mining_type \"vector\" before either class_aware variant, and if you try a class-aware one, say in the card what you expect it to fix.\n* what worked as a mining model was either a strong embedder or a plain cosine threshold; false-negative filtering on top of the mined set is the half that made the gain hold.\n\nSCALE CAVEAT, the one thing you cannot derive from your own tools: the operator's manual benchmark table was measured against a ~37k-item catalogue and this eval indexes ~641k, so its absolute numbers are NOT on this scale and a lower number here is not a gap to close. Use that table for the RANKING of backbones and recipes; take every target value and every comparison from runs on THIS eval, which `list_sibling_runs` and `diff_nodes` will give you.",
+ "direction": "max",
+ "seed": 0,
+ "editable_path": "/home/jovyan/data/vectorizer-unified",
+ "edit_surface": [
+  "**/*"
+ ],
+ "protect": [],
+ "seed_mode": "",
+ "editables": [],
+ "references": [],
+ "data": {},
+ "eval": {
+  "command": [
+   "python",
+   "-m",
+   "vectorsearch.test"
+  ],
+  "stages": [],
+  "cwd": ".",
+  "metric": {
+   "pattern": "RECALL@100: ([0-9.]+)",
+   "kind": "stdout_regex",
+   "subject_glob": [
+    "vectorsearch/experiments/*/final/model.safetensors"
+   ],
+   "applied_config_glob": "vectorsearch/experiments/*/final/config.yaml"
+  },
+  "params_style": "none",
+  "timeout": 36000.0,
+  "setup": [],
+  "setup_timeout": 600.0,
+  "run_setup": [],
+  "run_setup_timeout": 1800.0,
+  "profiles": {},
+  "cross_check": null,
+  "drift_tolerance": 1e-06,
+  "metrics": {
+   "Recall_at_10": {
+    "kind": "stdout_regex",
+    "pattern": "Recall_at_10: ([0-9.]+)",
+    "direction": "max"
+   },
+   "Recall_at_100": {
+    "kind": "stdout_regex",
+    "pattern": "Recall_at_100: ([0-9.]+)",
+    "direction": "max"
+   },
+   "nDCG_at_10": {
+    "kind": "stdout_regex",
+    "pattern": "nDCG_at_10: ([0-9.]+)",
+    "direction": "max"
+   },
+   "nDCG_at_100": {
+    "kind": "stdout_regex",
+    "pattern": "nDCG_at_100: ([0-9.]+)",
+    "direction": "max"
+   },
+   "MAP_at_10": {
+    "kind": "stdout_regex",
+    "pattern": "MAP_at_10: ([0-9.]+)",
+    "direction": "max"
+   },
+   "MAP_at_100": {
+    "kind": "stdout_regex",
+    "pattern": "MAP_at_100: ([0-9.]+)",
+    "direction": "max"
+   },
+   "MRR_at_10": {
+    "kind": "stdout_regex",
+    "pattern": "MRR_at_10: ([0-9.]+)",
+    "direction": "max"
+   },
+   "MRR_at_100": {
+    "kind": "stdout_regex",
+    "pattern": "MRR_at_100: ([0-9.]+)",
+    "direction": "max"
+   },
+   "Precision_at_10": {
+    "kind": "stdout_regex",
+    "pattern": "Precision_at_10: ([0-9.]+)",
+    "direction": "max"
+   },
+   "Precision_at_100": {
+    "kind": "stdout_regex",
+    "pattern": "Precision_at_100: ([0-9.]+)",
+    "direction": "max"
+   }
+  },
+  "constraints": [],
+  "inputs": [
+   "/home/jovyan/data/dr-local/v2/test.parquet",
+   "/home/jovyan/data/dr-local/v2/smkt_all.index.parquet"
+  ],
+  "env": {
+   "VS_LOCAL_DATA_ROOT": "/home/jovyan/data/dr-local"
+  }
+ },
+ "params": {},
+ "onboard": false,
+ "onboard_command": [],
+ "onboard_timeout": 600.0
+}
