@@ -249,7 +249,8 @@ bought the same think, the same build, or the same install a second time. With t
   the node's terminal event is appended, so a kill in that gap left the node
   byte-indistinguishable from one whose evaluator never ran. `eval_invocation_claimed` goes down
   immediately before the invocation and `eval_invocation_settled` immediately after, carrying the
-  outcome (`ok` / `failed` / `superseded` / `aborted` / `gpu_unpinnable`) and the seconds it charged.
+  outcome (`ok` / `failed` / `superseded` / `aborted` / `gpu_unpinnable`, or `setup_refused` when the
+  run's `run_setup` refused before the evaluator could run) and the seconds it charged.
   The id is DERIVED from (run, node, generation, attempt) rather than minted, which is what lets the
   resumed process name the invocation it is repeating — hand it to an evaluator as an idempotency
   key if that evaluator has one — and a claim whose last row is still a claim is an invocation

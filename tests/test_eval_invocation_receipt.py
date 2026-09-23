@@ -176,3 +176,41 @@ def test_a_death_inside_the_evaluator_leaves_a_claim_the_next_process_reads(tmp_
     terminals = [e for e in resumed.store.read_all()
                  if e.type in ("node_evaluated", "node_failed")]
     assert len(terminals) == 1
+
+
+def test_a_refused_run_setup_settles_its_claim_so_no_resume_calls_it_interrupted(tmp_path):
+    """Review 2026-09-22, the ENG2-08 tail. A refused `run_setup` raises inside `_run_eval` AFTER the
+    claim and BEFORE any evaluator command, and it leaves as a deliberate stop — so it used to skip
+    the settle. The resumed process then read the claim as an invocation a dead process had left
+    open and stamped its repeat `after_interrupted_attempt`: an at-least-once repeat of an evaluator
+    that never ran. MUTATION: drop the settle -> the resumed claim carries the stamp again."""
+    from looplab.core.errors import RunSetupRefusal
+
+    run_dir = tmp_path / "refused-setup"
+    refused = _engine(run_dir)
+
+    def _refuse(*_a, **_kw):
+        raise RunSetupRefusal("run_setup failed: pip install -r requirements.txt exited 1")
+
+    refused._run_eval = _refuse
+    with pytest.raises(BaseException) as raised:
+        _drive(refused)
+    leaves = [raised.value] + list(getattr(raised.value, "exceptions", []) or [])
+    assert any(isinstance(leaf, RunSetupRefusal) for leaf in leaves), (
+        "the refusal still reaches its owner as a deliberate stop")
+
+    settles = _rows(refused, EV_EVAL_INVOCATION_SETTLED)
+    assert [row["outcome"] for row in settles] == ["setup_refused"]
+    assert unsettled_eval_invocations(refused.store.read_all(), 0, 0) == frozenset()
+    assert not [e for e in refused.store.read_all() if e.type in ("node_evaluated", "node_failed")], (
+        "a run-level refusal is not this node's terminal")
+
+    resumed = make_engine(run_dir, max_nodes=2)
+    resumed.concurrent_research = False
+    resumed._run_eval = lambda *_a, **_kw: RunResult(
+        exit_code=0, stdout="", stderr="", metric=1.0, timed_out=False)
+    _drive(resumed)
+    claims = _rows(resumed, EV_EVAL_INVOCATION_CLAIMED)
+    assert len(claims) == 2 and "after_interrupted_attempt" not in claims[1], (
+        "the evaluator never ran, so its repeat is a first invocation")
+    assert "setup_refused" in EVAL_INVOCATION_OUTCOMES

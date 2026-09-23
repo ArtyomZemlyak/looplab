@@ -533,9 +533,13 @@ def _durable_monitor_verdicts(events, node_id: int, generation: int) -> list[dic
 # state rather than failing. `ok`/`failed` are the evaluator's own two answers; `superseded` and
 # `aborted` are the intervention verdicts the attempt settles under, kept apart from `failed` because
 # they say the invocation was CUT, not that the candidate was bad; `gpu_unpinnable` is the one
-# fail-closed launch refusal that terminalizes from inside the attempt.
+# fail-closed launch refusal that terminalizes from inside the attempt. `setup_refused` is the one
+# settle whose evaluator NEVER RAN: the run's `run_setup` refused inside `_run_eval`, before any
+# evaluator command (review 2026-09-22, the ENG2-08 tail). Left unsettled, that claim read on resume
+# as an invocation a dead process had left open, and the next attempt of the same key was stamped
+# `after_interrupted_attempt` — an at-least-once repeat of an evaluator that had never been invoked.
 EVAL_INVOCATION_OUTCOMES: frozenset[str] = frozenset(
-    {"ok", "failed", "superseded", "aborted", "gpu_unpinnable"})
+    {"ok", "failed", "superseded", "aborted", "gpu_unpinnable", "setup_refused"})
 
 
 def eval_invocation_id(run_reference, node_id, generation, attempt) -> str:
@@ -3064,6 +3068,16 @@ class EvaluateMixin:
                 a.res = await anyio.to_thread.run_sync(
                     self._run_eval, a.node, str(a.workdir), a.eval_env, None, cancel, a.next_start
                 )
+            except RunSetupRefusal:
+                # The run's environment never came up: `_run_eval` runs `_ensure_run_setup` BEFORE
+                # any evaluator command, so this claim's evaluator was never invoked — settle it as
+                # such, then let the refusal go on to its owner unchanged (a deliberate stop, see
+                # `_EVAL_DELIBERATE_STOPS`). Shielded like the terminal below: the task group is
+                # about to cancel this scope, and an unsettled claim reads as a crash on resume.
+                with anyio.CancelScope(shield=True):
+                    await self._settle_eval_invocation(
+                        a, "setup_refused", round(time.time() - a._t0, 3))
+                raise
             except GpuPinUnenforceable as exc:
                 # Fail-closed device pin the Docker daemon/runtime cannot enforce. Terminalize
                 # THIS node instead of letting the raise cancel every in-flight sibling eval in
