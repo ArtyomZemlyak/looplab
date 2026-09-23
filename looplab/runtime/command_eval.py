@@ -509,8 +509,15 @@ def _read_stdout_json(stdout, workdir, spec, wrap, since, env=None) -> Optional[
     return json_line_metric(stdout, spec.get("key", "metric"))
 
 
+def regex_pattern(spec) -> object:
+    """The regex a `*_regex` reader applies: `pattern`, else `key` — the tolerant fallback kept for
+    composable authoring. The ONE resolution both readers and `metric_spec_pattern_error` read, so
+    the submit-time check cannot accept a spec the reader would resolve differently."""
+    return spec.get("pattern") or spec.get("key")
+
+
 def _read_stdout_regex(stdout, workdir, spec, wrap, since, env=None) -> Optional[float]:
-    pat = spec.get("pattern") or spec.get("key")   # key = tolerant fallback (composable authoring)
+    pat = regex_pattern(spec)
     return _regex_metric(stdout, pat, spec.get("group", 1)) if pat else None
 
 
@@ -528,7 +535,7 @@ def _read_file(stdout, workdir, spec, wrap, since, env=None) -> Optional[float]:
     if text is None:
         return None
     if spec.get("kind") == "file_regex":
-        pat = spec.get("pattern") or spec.get("key")
+        pat = regex_pattern(spec)
         return _regex_metric(text, pat, spec.get("group", 1)) if pat else None
     try:
         return _to_float(_dig(json.loads(text), spec.get("key", "metric")))
@@ -668,6 +675,54 @@ METRIC_READERS = {
 # file (never the file name), so a `{"kind":"file_json","key":"metric"}` spec validates on its kind,
 # the run starts, and EVERY node fails `no_metric` with nothing naming the cause.
 READERS_REQUIRING_PATH = frozenset({"file_json", "file_regex"})
+
+
+# The readers whose spec is DEAD without a regex to apply — the `READERS_REQUIRING_PATH` failure for
+# the other half of a regex reader's spec (review 2026-09-22, RTA-06). `_read_stdout_regex` and the
+# regex branch of `_read_file` return None the instant `regex_pattern` resolves to nothing, and
+# `_regex_metric` returns None for a pattern that does not compile or has no group `group` — every one
+# of them, deliberately, a node failure rather than a crash. So `{"kind": "stdout_regex"}` validated
+# on its kind, the run started, and EVERY node failed `no_metric` with nothing naming the cause, the
+# shape `metric_spec_path_error` exists to refuse at submit. 83 of 83 corpus metrics are
+# `stdout_regex` (`runtime/metric_subject.py`), so this is the reader the omission would hit.
+READERS_REQUIRING_PATTERN = frozenset({"stdout_regex", "file_regex"})
+
+_PATTERN_EXAMPLES = {
+    "stdout_regex": '{"kind": "stdout_regex", "pattern": "RECALL@100: ([0-9.]+)"}',
+    "file_regex": '{"kind": "file_regex", "path": "train.log", "pattern": "val_loss=([0-9.]+)"}',
+}
+_PATTERNLESS_COST = "Without a usable `pattern` this reader can never return a value."
+
+
+def metric_spec_pattern_error(spec, *, consequence: Optional[str] = None) -> Optional[str]:
+    """Why a regex reader in `spec` can never read a metric — or None when it can (or when `spec` is
+    not a regex reader). The submit-time statement of exactly what `_regex_metric` turns into None:
+    no pattern (or a non-string one), a pattern that does not compile, a `group` that `int()` cannot
+    read, a group the pattern does not have. `consequence` is the caller's per-slot cost, as for
+    `metric_spec_path_error`."""
+    if not isinstance(spec, dict):
+        return None
+    kind = spec_kind(spec)
+    if kind not in READERS_REQUIRING_PATTERN:
+        return None
+    tail = consequence or _PATTERNLESS_COST
+    pattern = regex_pattern(spec)
+    if not isinstance(pattern, str) or not pattern:
+        return (f"metric reader {kind!r} needs a `pattern`: a regex whose capture group (`group`, "
+                f"default 1) is the number, e.g. {_PATTERN_EXAMPLES[kind]}. " + tail)
+    try:
+        compiled = re.compile(pattern)
+    except re.error as exc:
+        return f"metric reader {kind!r} `pattern`={pattern[:80]!r} does not compile ({exc}). " + tail
+    group = spec.get("group", 1)
+    try:
+        index = int(group)                     # exactly `_regex_metric`'s coercion
+    except (TypeError, ValueError):
+        return (f"metric reader {kind!r} `group`={group!r} is not a capture-group number. " + tail)
+    if not 0 <= index <= compiled.groups:
+        return (f"metric reader {kind!r} reads capture group {index}, but `pattern`="
+                f"{pattern[:80]!r} has {compiled.groups}. " + tail)
+    return None
 
 
 def spec_kind(spec) -> str:

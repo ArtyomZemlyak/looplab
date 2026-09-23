@@ -327,6 +327,9 @@ def test_the_submit_validator_reads_the_reader_table_not_a_local_copy():
         # way: from the rule's own authority, not from a literal here.
         if command_eval.host_score_labels_error(spec):
             spec["labels"] = os.path.join(os.sep, "held-out", "labels.json")
+        # …and a regex reader's `pattern` the THIRD (review 2026-09-22, RTA-06), from its own table.
+        if kind in command_eval.READERS_REQUIRING_PATTERN:
+            spec["pattern"] = "metric=([0-9.]+)"
         EvalSpec.model_validate({"command": ["python", "main.py"], "metric": spec})
     with pytest.raises(Exception) as exc:
         EvalSpec.model_validate({"command": ["python", "main.py"],

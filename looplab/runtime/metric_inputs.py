@@ -130,20 +130,3 @@ def input_declaration(spec) -> list:
     if not isinstance(declared, (list, tuple)):
         return []
     return [entry for entry in declared if isinstance(entry, str) and entry.strip()][:MAX_INPUTS]
-
-
-def unreadable_input_note(record: Optional[dict]) -> str:
-    """One sentence naming the fix when a declared input did not bind. `""` when it did.
-
-    Reuses `metric_subject`'s per-reason message table rather than minting a second one — the slugs
-    are the same closed vocabulary and the fixes are the same fixes — but says INPUT, because
-    "the declared subject is not there" sends an operator to look at the wrong side of the eval.
-    """
-    if not isinstance(record, dict) or record.get("inputs_bound"):
-        return ""
-    row = next((entry for entry in (record.get("inputs") or []) if not entry.get("bound")), {})
-    reason = str(record.get("unbound_reason") or "unreadable")
-    path = row.get("path") or ""
-    return (f"the declared evaluation INPUT {path!r} could not be identified ({reason}), so this "
-            "number carries no evidence of what it was measured against and is not comparable with "
-            "any other run's.")

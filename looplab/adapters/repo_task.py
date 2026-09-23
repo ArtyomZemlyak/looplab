@@ -291,6 +291,13 @@ _PATHLESS_COST = {
 }
 
 
+# The same four costs for a regex reader with no usable `pattern` (review 2026-09-22, RTA-06): the
+# reader returns None exactly as a pathless one does, so the slot decides the symptom the same way.
+# Derived, not re-spelled — one statement of each symptom, re-led.
+_PATTERNLESS_COST = {slot: "Without a usable `pattern`" + text[len("Without `path`"):]
+                     for slot, text in _PATHLESS_COST.items()}
+
+
 # The reader slots that are operator-owned GATES, and therefore may never run agent-authored
 # `adapter` code. Deliberately NOT every slot in `EvalSpec.readers()`: the PRIMARY `metric` may be an
 # adapter and that is the whole `eval_trust_mode="ratify_freeze"` design — the operator freezes the
@@ -324,7 +331,8 @@ def eval_reader_path_errors(task_or_spec) -> list[str]:
     Shared by the submit-time refusal below and `cli/run_cmds.py::resume`, which reports the SAME
     text as a warning for a run that was started before the refusal existed (see `_readers_usable`).
     """
-    from looplab.runtime.command_eval import host_score_labels_error, metric_spec_path_error
+    from looplab.runtime.command_eval import (host_score_labels_error, metric_spec_path_error,
+                                              metric_spec_pattern_error)
     spec = task_or_spec.eval if isinstance(task_or_spec, RepoTask) else task_or_spec
     if not isinstance(spec, EvalSpec):
         return []
@@ -333,6 +341,9 @@ def eval_reader_path_errors(task_or_spec) -> list[str]:
         err = metric_spec_path_error(reader, consequence=_PATHLESS_COST[slot])
         if err:
             out.append(f"{label}: {err}")
+        pattern_err = metric_spec_pattern_error(reader, consequence=_PATTERNLESS_COST[slot])
+        if pattern_err:
+            out.append(f"{label}: {pattern_err}")
         labels_err = host_score_labels_error(reader)
         if labels_err:
             out.append(f"{label}: {labels_err}")
