@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import atexit
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -32,6 +33,7 @@ from typing import Any, Callable, Optional
 # functions still read them out of this module's globals, so such a patch still lands.
 from looplab.core.atomicio import file_identity
 from looplab.engine import run_lifecycle
+from looplab.events.types import EV_RESTART, EV_RESUME_REQUESTED
 from looplab.serve.jupyter import REAP_ON_EXIT_ENV
 from looplab.engine.run_lifecycle import (  # noqa: F401 - re-exported for the historical import path
     RESUME_RECONCILE_GRACE_S as _RESUME_RECONCILE_GRACE_S,
@@ -664,6 +666,47 @@ def _spawn_engine_after_exit(cli_args: list[str], *, run_dir: Path,
 _PENDING_RECHECK_S = 0.25
 
 
+# THE STARTUP SCAN'S BYTE PRE-FILTER (review 2026-09-22, SRV1-13). `resume_pending()` is
+# `last_resume_request_seq > last_resume_served_seq`, both zero by default, and exactly TWO folded
+# types raise the request seq: `resume_requested` (`_on_resume_requested`) and `restart`
+# (`_on_restart`). A log whose bytes carry neither quoted type name therefore cannot fold to a
+# pending resume, and the startup scan need not parse and fold it to find that out. Derived from
+# the event-type constants, so a renamed type cannot leave the filter matching a dead name.
+_RESUME_INTENT_MARKERS: tuple[bytes, ...] = tuple(
+    f'"{event_type}"'.encode("ascii") for event_type in (EV_RESUME_REQUESTED, EV_RESTART))
+# A JSON string may spell an ASCII letter or `_` as a `\u00XX` escape. No writer in this tree does,
+# but a type name spelled that way still folds, so a log carrying such an escape is never filtered.
+_ESCAPED_NAME_CHAR = re.compile(rb"\\u00(?:5[fF]|6[1-9a-fA-F]|7[0-9aA])")
+_RESUME_SCAN_CHUNK_BYTES = 1 << 20
+
+
+def _log_may_hold_resume_intent(path: Path) -> bool:
+    """False only when `path`'s bytes PROVE its fold cannot have `resume_pending()`.
+
+    A streaming scan in `_RESUME_SCAN_CHUNK_BYTES` reads — memory bounded whatever the log's size,
+    a substring search per chunk, with an overlap so a marker straddling two reads is still seen.
+    Everything uncertain answers True ("maybe"), and the full fold decides exactly as it always did:
+    a marker anywhere, an escaped name character, and a log this scan cannot read. It may cost a
+    fold it did not need; it may never skip one it did.
+    """
+    overlap = max(len(marker) for marker in _RESUME_INTENT_MARKERS) - 1
+    carry = b""
+    try:
+        with open(path, "rb") as stream:
+            while True:
+                chunk = stream.read(_RESUME_SCAN_CHUNK_BYTES)
+                if not chunk:
+                    return False
+                window = carry + chunk
+                if any(marker in window for marker in _RESUME_INTENT_MARKERS):
+                    return True
+                if b"\\u00" in window and _ESCAPED_NAME_CHAR.search(window) is not None:
+                    return True
+                carry = window[-overlap:]
+    except OSError:
+        return True
+
+
 def install_resume_reconcile_hooks(
         lifecycle, root: Path, *,
         before_spawn: Optional[Callable[[Path], Optional[dict]]] = None,
@@ -676,15 +719,18 @@ def install_resume_reconcile_hooks(
     timers: list[threading.Timer] = []
     shutdown = threading.Event()
 
-    # ADJUDICATED, kept SYNCHRONOUS. This folds the complete event log of every run under the root,
-    # so a workspace of many large runs does hold up server readiness — the cost is real. But
-    # "startup has recovered by the time startup returns" is the guarantee, not an implementation
-    # detail: `test_server_startup_recovers_restart_after_command_worker_loss` asserts the re-spawn
-    # has happened once the app has started, and moving the scan to a daemon thread makes recovery
-    # race the first request and the shutdown hook (a server stopped early would silently skip it).
-    # The cheap-check alternative is not available either: only `resume_pending()` is needed, but it
-    # is derived from the FOLD, and a tail probe cannot make that comparison (see the tail waiter's
-    # note). Losing an unserved resume is worse than a slow start, so the slow start stays.
+    # ADJUDICATED, kept SYNCHRONOUS. This folds the complete event log of every run that CAN hold a
+    # resume, so a workspace of many large resumable runs does hold up server readiness — the cost
+    # is real. But "startup has recovered by the time startup returns" is the guarantee, not an
+    # implementation detail: `test_server_startup_recovers_restart_after_command_worker_loss` asserts
+    # the re-spawn has happened once the app has started, and moving the scan to a daemon thread
+    # makes recovery race the first request and the shutdown hook (a server stopped early would
+    # silently skip it). A TAIL probe cannot replace the fold: `resume_pending()` compares the last
+    # request with the last serve (see the tail waiter's note). What a byte scan CAN prove is the
+    # absence of every event that raises the request seq (`_log_may_hold_resume_intent`, review
+    # 2026-09-22, SRV1-13): it used to parse and fold EVERY run's log before uvicorn bound, and a
+    # log that provably cannot be pending is now skipped without either. Losing an unserved resume
+    # is worse than a slow start, so a log the filter cannot rule out is still folded.
     def _scan_startup() -> None:
         from looplab.events.eventstore import EventStore
         from looplab.events.replay import fold
@@ -696,6 +742,8 @@ def install_resume_reconcile_hooks(
         for rd in run_dirs:
             if not (rd / "events.jsonl").is_file():
                 continue
+            if not _log_may_hold_resume_intent(rd / "events.jsonl"):
+                continue          # no event in it can raise the request seq: provably not pending
             try:
                 store = EventStore(rd / "events.jsonl")
                 if store.divergence is not None:
