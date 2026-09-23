@@ -36,3 +36,15 @@ export const normalizeComposerMode = value => (
 export const newComposerDraft = (mode = 'plan') => ({
   input: '', files: [], pendingFileReads: 0, runScope: null, mode: normalizeComposerMode(mode),
 })
+
+// WHICH RUN A DRAFT IS WRITTEN AGAINST, after an edit (review 2026-09-22, UI-06: the rule the
+// composer spelled twice, once for text and once for attachments). A draft that no longer uses the
+// run has none; one that STARTS using it, or never recorded one, takes `fallback()` — the open run,
+// or the scope an attachment was read under; one already bound keeps it, so switching runs mid-draft
+// cannot silently re-target it. `fallback` is a thunk and is called only when its value is taken.
+export const nextRunScope = (current, { usedRun, usesRun, fallback }) => {
+  if (!usesRun) return null
+  if (!usedRun || current == null) return fallback()
+  return current
+}
+

@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 
 import {
   NEW_CHAT_COMPOSER_KEY, NEW_RUN_DRAFT_RE, SECRET_RE, TEXT_EXT, composerRunKey, composerUsesRun,
-  newComposerDraft, normalizeComposerMode, refNodes, uiRunContext,
+  newComposerDraft, nextRunScope, normalizeComposerMode, refNodes, uiRunContext,
 } from '../src/assistantComposerModel.js'
 
 test('#N names an experiment only as a whole token', () => {
@@ -66,3 +66,23 @@ test('attachments: text-like files only, and secret-looking names refused', () =
     assert.equal(SECRET_RE.test(name), false, name)
   }
 })
+
+test('a draft keeps the run it was written against, and only takes a new one when it starts', () => {
+  let asked = 0
+  const fallback = () => { asked += 1; return 'open-run' }
+  assert.equal(nextRunScope('r1', { usedRun: true, usesRun: false, fallback }), null,
+    'a draft that stops using the run has none')
+  assert.equal(nextRunScope(null, { usedRun: false, usesRun: true, fallback }), 'open-run',
+    'a draft that starts using the run takes the open one')
+  assert.equal(nextRunScope('r1', { usedRun: false, usesRun: true, fallback }), 'open-run',
+    'starting again re-targets it, even over a stale scope')
+  assert.equal(nextRunScope(null, { usedRun: true, usesRun: true, fallback }), 'open-run',
+    'a using draft that never recorded one takes it now')
+  const before = asked
+  assert.equal(nextRunScope('r1', { usedRun: true, usesRun: true, fallback }), 'r1',
+    'a bound draft keeps its run when the open run changes')
+  assert.equal(asked, before, 'the fallback is not consulted when its value is not taken')
+  assert.equal(nextRunScope('r1', { usedRun: true, usesRun: false, fallback }), null)
+  assert.equal(asked, before)
+})
+

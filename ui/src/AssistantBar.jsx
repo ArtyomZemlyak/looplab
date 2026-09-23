@@ -66,14 +66,15 @@ import {
   DIRECT, UNKNOWN_DIRECT_SPEC, directCopy, directSpec, parseDirect, preRoute,
 } from './assistantDirectModel.js'
 import {
-  FILE_CHAR_CAP, MAX_FILE_BYTES, NEW_CHAT_COMPOSER_KEY, SECRET_RE, TEXT_EXT, composerRunKey,
-  composerUsesRun, newComposerDraft, normalizeComposerMode, refNodes, uiRunContext,
+  FILE_CHAR_CAP, MAX_FILE_BYTES, NEW_CHAT_COMPOSER_KEY, SECRET_RE, TEXT_EXT,
+  composerRunKey, composerUsesRun, normalizeComposerMode, refNodes, uiRunContext,
 } from './assistantComposerModel.js'
 import {
   assistantLiveShareAckRequired, assistantLiveShareIds, assistantLiveShareRecoveryFailure,
   shareRecoveryScope, validAssistantShareFallback, validAssistantShareMeta,
 } from './assistantShareMetaModel.js'
 import { assistantForkTurnInProgress } from './assistantForkModel.js'
+import { useAssistantComposer } from './useAssistantComposer.js'
 import { useAssistantFork } from './useAssistantFork.js'
 import { startTurnFallbackPolls } from './assistantTurnPolls.js'
 import { followClientRoute } from './accessibility.jsx'
@@ -234,8 +235,18 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       : staleDiagnostic
         ? 'Stale diagnostic link · open the current generation'
         : `History seq ${runAccess.seq} · return live`
-  const [input, setInputState] = useState('')
-  const [draftRunScope, setDraftRunScope] = useState(null)
+  // The composer and its per-chat drafts live in `useAssistantComposer.js` (review 2026-09-22, UI-06).
+  // Called where its first state was declared, because the view state below already reads `input`
+  // and `mode`; its two outside dependencies are handed over LAZILY for the same reason — both are
+  // declared further down and read only from handlers and effects.
+  const {
+    input, setInputState, draftRunScope, setDraftRunScope, mode, files, pendingFileReads,
+    composerDraftsRef, composerKeyRef, composerDraftRef, setInput, updateComposerFiles,
+    updatePendingFileReads, setFiles, setComposerMode, activateComposer, bindComposerToSession,
+  } = useAssistantComposer({
+    currentRunId: () => currentRunIdRef.current,
+    onActivate: () => { setSuggestionsDismissed(false); setSuggestionIndex(0) },
+  })
   const [sid, setSid] = useState(null)
   const [msgs, setMsgs] = useState([])
   // Editable Genesis task/settings can be sensitive.  Retain them only in this mounted Assistant's
@@ -268,7 +279,6 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     viewRef.current = next
     setView(next)
   }, [])
-  const [mode, setMode] = useState('plan')
   const [toast, flash, clearToast] = useToast()   // shared timer discipline (doc 25 UI-13)
   const [commands, setCommands] = useState([])
   const [suggestionIndex, setSuggestionIndex] = useState(0)
@@ -357,8 +367,6 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const [shareCopyFallbacks, setShareCopyFallbacks] = useState({})
   const [shareBusySid, setShareBusySid] = useState(null)
   const [shareAckNotice, setShareAckNotice] = useState(null)
-  const [files, setFilesState] = useState([])     // attached text files [{name,size,content,truncated}]
-  const [pendingFileReads, setPendingFileReads] = useState(0)
   const [sideW, setSideW] = useState(() => clampAssistantWidth(storageGet('ll.asstW', 440)))
   const autoRevealedPendingIdsRef = useRef(new Set())
 
@@ -515,92 +523,6 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     }, 2500)
     return true
   }, [clearReplyAnnouncement])
-  // A composer belongs to the chat it was written in. Keep text and attachments in memory per session
-  // so selecting another transcript cannot silently send the previous chat's draft. The unsaved
-  // new-chat composer has its own slot; "+ New" deliberately resets that slot.
-  const composerDraftsRef = useRef(new Map([
-    [NEW_CHAT_COMPOSER_KEY, newComposerDraft()],
-  ]))
-  const composerKeyRef = useRef(NEW_CHAT_COMPOSER_KEY)
-  const composerDraftRef = useRef(composerDraftsRef.current.get(NEW_CHAT_COMPOSER_KEY))
-  const setInput = React.useCallback(update => {
-    const draft = composerDraftRef.current
-    const usedRun = composerUsesRun(draft.input, draft.files, draft.pendingFileReads)
-    const next = typeof update === 'function' ? update(draft.input) : update
-    draft.input = next
-    const usesRun = composerUsesRun(next, draft.files, draft.pendingFileReads)
-    if (!usesRun) draft.runScope = null
-    else if (!usedRun || draft.runScope == null) draft.runScope = composerRunKey(currentRunIdRef.current)
-    setInputState(next)
-    setDraftRunScope(draft.runScope)
-  }, [])
-  const updateComposerFiles = React.useCallback((draft, update, runScope = undefined) => {
-    const usedRun = composerUsesRun(draft.input, draft.files, draft.pendingFileReads)
-    const next = typeof update === 'function' ? update(draft.files) : update
-    draft.files = next
-    const usesRun = composerUsesRun(draft.input, next, draft.pendingFileReads)
-    if (!usesRun) draft.runScope = null
-    else if (!usedRun || draft.runScope == null) {
-      draft.runScope = runScope === undefined
-        ? composerRunKey(currentRunIdRef.current) : runScope
-    }
-    if (composerDraftRef.current === draft) {
-      setFilesState(next)
-      setDraftRunScope(draft.runScope)
-    }
-  }, [])
-  const updatePendingFileReads = React.useCallback((draft, update) => {
-    const current = Math.max(0, Number(draft.pendingFileReads) || 0)
-    const nextValue = typeof update === 'function' ? update(current) : update
-    const next = Math.max(0, Number(nextValue) || 0)
-    draft.pendingFileReads = next
-    if (!composerUsesRun(draft.input, draft.files, next)) draft.runScope = null
-    if (composerDraftRef.current === draft) {
-      setPendingFileReads(next)
-      setDraftRunScope(draft.runScope)
-    }
-    return next
-  }, [])
-  const setFiles = React.useCallback(update => {
-    updateComposerFiles(composerDraftRef.current, update)
-  }, [updateComposerFiles])
-  const setComposerMode = React.useCallback(value => {
-    const next = normalizeComposerMode(value)
-    composerDraftRef.current.mode = next
-    setMode(next)
-  }, [])
-  const activateComposer = React.useCallback((key, { clear = false, seedMode = 'plan' } = {}) => {
-    const draft = clear
-      ? newComposerDraft()
-      : composerDraftsRef.current.get(key) || newComposerDraft(seedMode)
-    draft.mode = normalizeComposerMode(draft.mode ?? seedMode)
-    draft.pendingFileReads = Math.max(0, Number(draft.pendingFileReads) || 0)
-    composerDraftsRef.current.set(key, draft)
-    composerKeyRef.current = key
-    composerDraftRef.current = draft
-    if (draft.runScope == null && composerUsesRun(
-      draft.input, draft.files, draft.pendingFileReads,
-    )) {
-      draft.runScope = composerRunKey(currentRunIdRef.current)
-    }
-    setInputState(draft.input)
-    setFilesState(draft.files)
-    setPendingFileReads(draft.pendingFileReads)
-    setDraftRunScope(draft.runScope)
-    setMode(draft.mode)
-    setSuggestionsDismissed(false)
-    setSuggestionIndex(0)
-    return draft
-  }, [])
-  const bindComposerToSession = React.useCallback(id => {
-    const previousKey = composerKeyRef.current
-    const draft = composerDraftRef.current
-    composerDraftsRef.current.set(id, draft)
-    if (previousKey === NEW_CHAT_COMPOSER_KEY) {
-      composerDraftsRef.current.set(NEW_CHAT_COMPOSER_KEY, newComposerDraft())
-    }
-    composerKeyRef.current = id
-  }, [])
   const setShareUnknown = React.useCallback((sessionId, unknown) => {
     setShareUnknownSids(current => {
       const next = new Set(current)
