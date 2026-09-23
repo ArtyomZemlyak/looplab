@@ -49,6 +49,7 @@ from looplab.core.cards import (
     idea_field_carried as _idea_field_carried,
     idea_proposal_digest as _idea_proposal_digest,
     idea_proposal_ref as _idea_proposal_ref,
+    is_pure_belief,
     legacy_card_action_digest_v1 as _legacy_card_action_digest_v1,
     legacy_card_ownership_receipt_v1 as _legacy_card_ownership_receipt_v1,
     normalize_researcher_footprint,
@@ -2814,6 +2815,30 @@ class RunState(BaseModel):
             seen.add(key)
             out.append(c)
         return out
+
+    def open_pure_beliefs(self, *, untested_distinct: bool = False) -> list["Card"]:
+        """THE OPEN BELIEF BOARD: the open research cards that own no action (`is_pure_belief`).
+
+        ONE accessor for the two readers in `engine/research_cadence.py` that must mean the same
+        board (review 2026-09-22, EM-14). They spelled it apart: the hypothesis-merge cadence as
+        `open_research_cards()` filtered by "not ready for selection, and `is_pure_belief`" — per
+        CARD, with a readiness conjunct the Card model makes dead (it refuses a ready card that owns
+        no action, so no pure belief is ever ready) — and the deep-research admission bound as
+        `open_research_beliefs(only=is_pure_belief)` — per BELIEF. Both claimed to be "the same
+        board" and neither said which view it was.
+
+        It is one population with two views, and the view is now the caller's STATED choice:
+
+        * default — every such CARD, in board order. The merge cadence's view: it consolidates
+          cards, and the cards it must see include the ones the other view drops — a second card of
+          one belief, and a belief that has gathered evidence — because merging them is its job.
+        * `untested_distinct=True` — one representative per distinct UNTESTED belief, exactly
+          `open_research_beliefs(only=is_pure_belief)` (filtered before the collapse, see there). The
+          admission bound's view: it counts distinct open questions against a five-row cap.
+        """
+        if untested_distinct:
+            return self.open_research_beliefs(only=is_pure_belief)
+        return [c for c in self.open_research_cards() if is_pure_belief(c)]
 
     def repair_candidates(self) -> list[dict]:
         """The repair ledger grouped by FILE PATH, most-repeated first — the operator's list of

@@ -27,6 +27,9 @@ from looplab.agents.hints import DEEP_RESEARCH_HINT_PREFIX
 from looplab.agents.roles import BOARD_PROMPT_CARDS
 from looplab.core.advisory_payloads import MAX_SUPERSEDED_NODE_REFS
 from looplab.core.cards import hypothesis_id
+# The open-belief-board predicate lived HERE until review 2026-09-22 (EM-14) moved it beside `Card`,
+# where `RunState.open_pure_beliefs` can apply it; re-exported so the name still resolves here.
+from looplab.core.cards import is_pure_belief  # noqa: F401
 from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.jsonutil import canonical_json_digest
@@ -329,7 +332,9 @@ def open_belief_populations(board) -> "tuple[list[str], list[str]]":
     Choosing one here would silently give the other the wrong one.
     """
     taken_up = {c.parent_card_id for c in board.cards.values() if c.parent_card_id}
-    beliefs = board.open_research_beliefs(only=is_pure_belief)
+    # The open belief board's per-distinct-untested-belief view (`RunState.open_pure_beliefs`, the one
+    # accessor the merge cadence reads the per-card view of — review 2026-09-22, EM-14).
+    beliefs = board.open_pure_beliefs(untested_distinct=True)
     return ([c.seed_statement for c in beliefs],
             [c.seed_statement for c in beliefs if c.id not in taken_up])
 
@@ -506,20 +511,6 @@ def question_parent_rows(questions, per_question, known_ids=None) -> dict[str, s
             seen.add(nxt)
             walk = by_id.get(nxt, "")
     return {k: v for k, v in edges.items() if k not in doomed}
-
-
-def is_pure_belief(card) -> bool:
-    """A board row that owns no ACTION — the Card equivalent of the old open hypothesis.
-
-    Identity, not readiness (peer review): `selection_ready` is transient (a native card is not-ready
-    while stale/incomplete/in-flight/terminal), so a `not selection_ready` filter admits a native
-    work item whenever it is blocked. A native card OWNS an action
-    (`selection_provenance.action_source` != "none", i.e. action_owner_count > 0 — the model enforces
-    the equivalence); a pure belief owns none. Shared by the consolidation cadence and the
-    append-site bound so both mean the same board.
-    """
-    provenance = getattr(card, "selection_provenance", None)
-    return getattr(provenance, "action_source", "none") == "none"
 
 
 def research_memo_sig(memo) -> str:
@@ -1859,18 +1850,20 @@ class ResearchCadenceMixin:
         # excluded below because this cadence merges near-duplicate
         # research BELIEFS; collapsing a receipt-backed WORK ITEM's action identity is not its job.
         # Exclude native work-item cards by IDENTITY, not readiness — the rule, and what a readiness
-        # filter cost, are now stated once at module level (`is_pure_belief`), because the append-site
-        # bound `_admissible_beliefs` has to mean the SAME board this cadence merges. Merges emit
-        # `hypothesis_merged` with card ids, which `_derive_cards` applies unchanged.
+        # filter cost, are stated once (`core/cards.py::is_pure_belief`), and the board itself is ONE
+        # accessor, `RunState.open_pure_beliefs`, because the append-site bound
+        # `_admissible_beliefs` has to mean the SAME board this cadence merges (review 2026-09-22,
+        # EM-14). This reads its per-CARD view; the bound reads the per-distinct-untested-belief one.
+        # The `not c.selection_ready and` that sat beside the test here is gone: the Card model
+        # refuses a ready card that owns no `card_added` action, so the conjunct was always true.
+        # Merges emit `hypothesis_merged` with card ids, which `_derive_cards` applies unchanged.
         # The canonical this picks is a belief, but it need not STAY one: the Researcher may later
         # mint a native work item for that exact statement, and `_card_identity_map` bridges the
         # belief hash onto the native id — one claim, one row, which is what we want. The consequence
         # (every paraphrase becomes an alias of a work item nobody has touched) is handled where it
         # is decidable, at fold time: `core/cards.py::surviving_work_item_aliases` blocks only aliases
         # that could own work. Nothing here needs to predict a card that does not exist yet.
-        _pure_belief = is_pure_belief
-        open_hyps = [c for c in state.open_research_cards()
-                     if not c.selection_ready and _pure_belief(c)]
+        open_hyps = state.open_pure_beliefs()
         n = len(open_hyps)
         # KNOWN GAP, bounded and stated (the same class as the cadence note in `strategy.py`):
         # `_last_hyp_merge_n` is IN-MEMORY only, never folded. On a fresh process after resume the
@@ -1929,8 +1922,7 @@ class ResearchCadenceMixin:
         # merging 8 cards down to 4 left the baseline at 8, so the board had to re-grow to 10 before
         # the next pass instead of 6, and duplicates re-accumulated for far longer than the
         # documented cadence — the more effective the merge, the longer the blackout it caused.
-        self._last_hyp_merge_n = len([c for c in merged_state.open_research_cards()
-                                      if not c.selection_ready and _pure_belief(c)])
+        self._last_hyp_merge_n = len(merged_state.open_pure_beliefs())
         return merged_state
 
     def _maybe_refresh_report(self, state: RunState) -> RunState:

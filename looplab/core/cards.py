@@ -821,6 +821,27 @@ class CardSelectionProvenance(BaseModel):
         return self
 
 
+def is_pure_belief(card) -> bool:
+    """A board row that owns no ACTION — the Card equivalent of the old open hypothesis.
+
+    Identity, not readiness (peer review): `selection_ready` is transient (a native card is not-ready
+    while stale/incomplete/in-flight/terminal), so a `not selection_ready` filter admits a native
+    work item whenever it is blocked. A native card OWNS an action
+    (`selection_provenance.action_source` != "none", i.e. action_owner_count > 0 — the model enforces
+    the equivalence); a pure belief owns none. It is also why `not selection_ready` may never be
+    written BESIDE this test: `Card._selection_readiness_is_fail_closed` refuses a ready card whose
+    action source is not `card_added`, so no pure belief is ever ready and the conjunct can only be
+    dead text — the hypothesis-merge cadence carried it until review 2026-09-22 (EM-14).
+
+    Moved here from `engine/research_cadence.py` (which re-exports it) so that
+    `RunState.open_pure_beliefs` — the ONE accessor of the open belief board the consolidation
+    cadence and the append-site bound both read — can apply it without `core` importing `engine`.
+    Not `card_kind_of` below, and not one call with it: see that function for how they differ.
+    """
+    provenance = getattr(card, "selection_provenance", None)
+    return getattr(provenance, "action_source", "none") == "none"
+
+
 def card_kind_of(card) -> str:
     """`direction` or `experiment` — WHICH OF THE TWO THINGS a board row is.
 
@@ -829,8 +850,9 @@ def card_kind_of(card) -> str:
     ``action_owner_count > 0``). Readiness is transient — a native work item is not-ready while it is
     stale, incomplete, in flight or terminal — so a ``not selection_ready`` test would re-label a
     perfectly ordinary experiment as a direction every time it was blocked, which is precisely the
-    confusion this function exists to end. ``engine/research_cadence.py::is_pure_belief`` applies the
-    SAME test at the append site. THEY ARE NOT ONE CALL and this docstring claimed they were:
+    confusion this function exists to end. ``is_pure_belief`` above (home until 2026-09-22:
+    ``engine/research_cadence.py``) applies the SAME test to the open belief board.
+    THEY ARE NOT ONE CALL and this docstring claimed they were:
     that function is untouched, and the two already answer differently when
     `selection_provenance` is None — it reads `action_source` off a missing object and gets
     `"none"` (a direction), while this returns `experiment`, the conservative side. Unifying
@@ -1443,8 +1465,8 @@ class Card(BaseModel):
     # `direction` — owns no executable action, so it is a research question children answer;
     # `experiment` — owns one action, the minimal-change hypothesis the engine can actually run.
     # Identity, never readiness: a native work item that is merely stale/in-flight/terminal is still
-    # an `experiment`. `engine/research_cadence.py::is_pure_belief` applies the SAME TEST — action
-    # ownership via `selection_provenance.action_source` — at the append site, but THEY ARE NOT ONE
+    # an `experiment`. `core/cards.py::is_pure_belief` applies the SAME TEST — action ownership via
+    # `selection_provenance.action_source` — to the open belief board, but THEY ARE NOT ONE
     # CALL and this comment asserted they were until 2026-08-30. `card_kind_of`'s own docstring had
     # already retracted that equivalence and named the two apart: with `selection_provenance` MISSING
     # the append-site gate reads `action_source` off a None and gets `"none"`, i.e. a direction, while

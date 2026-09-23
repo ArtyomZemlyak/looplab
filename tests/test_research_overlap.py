@@ -11,6 +11,7 @@ import pytest
 
 from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import llm_request_permit
+from looplab.core.models import RunState
 from looplab.engine.orchestrator import Engine
 from looplab.engine.research_cadence import ResearchCadenceMixin, research_memo_sig
 
@@ -478,6 +479,11 @@ class _BoardState:
 
     def open_research_cards(self):
         return list(self._cards)
+
+    # The REAL board accessor, borrowed rather than restated: its per-card view reads only
+    # `open_research_cards` above, so this double runs production's board rule (review 2026-09-22,
+    # EM-14 — the cadence reads `open_pure_beliefs()` now, not its own filter).
+    open_pure_beliefs = RunState.open_pure_beliefs
 
 
 class _NullStore:

@@ -291,3 +291,63 @@ def test_ONE_FOLD_PER_MEMO_and_both_decisions_read_the_SAME_board(monkeypatch):
                 if etype == "hypothesis_added" and d.get("parent_belief_id")]
     assert parented and parented[0]["parent_belief_id"] == "card-1", (
         "the parent edge is resolved against that same board, not a second one")
+
+
+# --------------------------------------------------------------------------- ONE board, two views
+# Review 2026-09-22, EM-14. The hypothesis-merge cadence read the open belief board as
+# `open_research_cards()` filtered by `not selection_ready and is_pure_belief` (per CARD) and the
+# admission bound as `open_research_beliefs(only=is_pure_belief)` (per BELIEF), each claiming to
+# mean "the same board". `RunState.open_pure_beliefs` is now the one accessor both read, with the
+# view each wants stated at the call.
+
+def _board_with_every_kind() -> RunState:
+    work = Card(id="w1", statement="Raise the LR", seed_statement="Raise the LR",
+                selection_provenance=CardSelectionProvenance(action_source="card_added",
+                                                             action_owner_count=1))
+    return _board([_direction("d1", "Raise the LR"),
+                   _direction("d2", "raise   the lr"),              # the same BELIEF as d1
+                   _direction("d3", "add dropout", evidence=[4]),   # a belief with evidence
+                   work])                                           # owns an action: not a belief
+
+
+def test_the_open_belief_board_is_one_population_with_two_stated_views():
+    """Per card for the merge (it must see d2 and d3: merging them is its job), one untested
+    representative per belief for the admission bound — and the bound's view is EXACTLY what it
+    computed before, so nothing about admission moved."""
+    st = _board_with_every_kind()
+    assert [c.id for c in st.open_pure_beliefs()] == ["d1", "d2", "d3"]
+    assert [c.id for c in st.open_pure_beliefs(untested_distinct=True)] == ["d1"]
+    assert st.open_pure_beliefs(untested_distinct=True) == st.open_research_beliefs(
+        only=is_pure_belief)
+    assert rc.open_belief_populations(st) == (["Raise the LR"], ["Raise the LR"])
+
+
+def test_the_dropped_selection_ready_conjunct_could_never_have_been_false():
+    """The merge cadence filtered `not c.selection_ready and is_pure_belief(c)`. The Card model
+    refuses a ready card that owns no `card_added` action, so no pure belief is ever ready and the
+    conjunct was dead text — which is why dropping it moves no card in or out of the merge."""
+    import pytest
+
+    with pytest.raises(ValueError, match="selection_ready requires"):
+        Card(id="x", statement="s", seed_statement="s", selection_ready=True,
+             selection_provenance=CardSelectionProvenance())
+    st = _board_with_every_kind()
+    assert all(not c.selection_ready for c in st.open_pure_beliefs())
+
+
+def test_the_merge_cadence_consolidates_exactly_the_per_card_view(monkeypatch):
+    """Driven through `_maybe_merge_hypotheses` with the real accessor: the texts the paid merge is
+    handed are the per-card view, in board order — the population it always used."""
+    import looplab.search.hybrid_merge as hybrid_merge
+
+    st = _board_with_every_kind()
+    st.cards["d4"] = _direction("d4", "use label smoothing")     # >= 4 so the pass is due
+    seen: list[list[str]] = []
+    monkeypatch.setattr(hybrid_merge, "consolidate",
+                        lambda texts, client, **kw: seen.append(list(texts)) or [])
+    engine = types.SimpleNamespace(_track_hypotheses=True, _reflect_client=lambda: object(),
+                                   _embedder=None, lessons=None)
+    engine._op_span = lambda *_a, **_k: __import__("contextlib").nullcontext()
+    rc.ResearchCadenceMixin._maybe_merge_hypotheses(engine, st)
+    assert seen == [["Raise the LR", "raise   the lr", "add dropout", "use label smoothing"]]
+    assert engine._last_hyp_merge_n == 4
