@@ -940,7 +940,7 @@ PHASE_SIGNALS = frozenset({PHASE_NEXT, PHASE_RETRY, PHASE_SETTLED, PHASE_RETURN}
 
 
 # THE SERIAL DISPATCHER'S ADMISSION FOLD, HANDED TO ADMIT (review 2026-09-22, EVT-04). The serial
-# branch of `orchestrator.py::_dispatch_evals` folds the log to admit an evaluation — at the loop
+# branch of `eval_dispatch.py::_dispatch_evals` folds the log to admit an evaluation — at the loop
 # top, then through its tail gate `_fold_if_tail_moved` across the resource wait — and ADMIT, the
 # first thing `_evaluate` does, folded the same log again a few statements later. Measured on the
 # reviewer's run (the documented offline smoke, `-s max_nodes=60`): all 60 of ADMIT's folds were an

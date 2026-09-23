@@ -19,6 +19,7 @@ import inspect
 import pytest
 
 from looplab.engine.orchestrator import Engine
+from looplab.engine.eval_dispatch import EvalDispatchMixin
 from looplab.engine.forced_requests import ForcedRequestsMixin
 from looplab.engine.reentry import ReentryMixin
 from looplab.engine.research_cadence import ResearchCadenceMixin
@@ -54,6 +55,14 @@ FORCED_REQUEST_MEMBERS = ("_serve_forced_requests", "_defer_for_node_budget",
                           "_pending_forced_ablation", "_append_inject_failure",
                           "_close_node_creating_forced_request_before_terminal_gate")
 FORCED_REQUEST_MODULE_NAMES = ("_BUDGET_WAIT_MIN_S", "_BUDGET_WAIT_MAX_S")
+
+# The non-Card evaluation dispatch (serial + continuous parallel), its loop-local tail gate and its
+# zero-cost abort close, moved beside the eval entrypoint it calls — ENG1-04 step 4d — with the
+# admission rules only it (and, function-locally, the Card lanes in `speculation.py`) reads.
+EVAL_DISPATCH_MEMBERS = ("_dispatch_evals", "_fold_if_tail_moved", "_skip_if_aborted")
+EVAL_DISPATCH_MODULE_NAMES = ("_HEAD_BYPASS_LIMIT", "budget_stop_recheck", "_run_terminal_gate",
+                              "_eval_admission_current", "_eval_time_admission_refused",
+                              "_reserve_eval_time", "_release_eval_time")
 
 
 def _homes(cls) -> dict[str, list[str]]:
@@ -169,6 +178,34 @@ def test_the_budget_poll_geometry_has_no_second_spelling_on_the_orchestrator(nam
     assert hasattr(forced_requests, name), f"{name} left `forced_requests.py` — re-point this guard"
     assert not hasattr(orchestrator, name), f"orchestrator.{name} exists again and would reach nothing"
     assert vars(ForcedRequestsMixin)["_defer_for_node_budget"].__globals__ is vars(forced_requests)
+
+
+@pytest.mark.parametrize("name", EVAL_DISPATCH_MEMBERS)
+def test_the_eval_dispatch_resolves_to_its_mixin(name):
+    assert EvalDispatchMixin in Engine.__mro__
+    assert name not in vars(Engine), f"a copy of {name} in the Engine body shadows the mixin's"
+    assert inspect.getattr_static(Engine, name) is vars(EvalDispatchMixin)[name]
+
+
+@pytest.mark.parametrize("name", EVAL_DISPATCH_MODULE_NAMES)
+def test_a_rule_the_dispatch_reads_has_no_second_spelling_on_the_orchestrator(name):
+    """`_dispatch_evals` reads these from `eval_dispatch`'s globals, and `tests/test_engine_refolds.py`
+    patches `_reserve_eval_time` THERE to move the log between the dispatcher's fold and ADMIT. A copy
+    on `orchestrator` would make the old spelling's patch succeed and reach nothing."""
+    from looplab.engine import eval_dispatch, orchestrator
+
+    assert hasattr(eval_dispatch, name), f"{name} left `eval_dispatch.py` — re-point this guard"
+    assert not hasattr(orchestrator, name), f"orchestrator.{name} exists again and would reach nothing"
+    assert vars(EvalDispatchMixin)["_dispatch_evals"].__globals__ is vars(eval_dispatch)
+
+
+def test_the_deferred_stop_is_one_class_under_both_spellings():
+    """`_DeferredBudgetStop` moved with `_dispatch_evals`, and the two parallel-build fan-outs that stay
+    in `orchestrator.py` import it back. A class is used by identity, never patched, so the second
+    spelling is safe exactly while it IS the same object."""
+    from looplab.engine import eval_dispatch, orchestrator
+
+    assert orchestrator._DeferredBudgetStop is eval_dispatch._DeferredBudgetStop
 
 
 def test_the_census_sees_a_copy_left_behind():

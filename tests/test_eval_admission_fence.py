@@ -15,7 +15,7 @@ import inspect
 import pytest
 
 from looplab.core.models import NodeStatus
-from looplab.engine.orchestrator import _eval_admission_current, _run_terminal_gate
+from looplab.engine.eval_dispatch import _eval_admission_current, _run_terminal_gate
 
 
 class _Node:
@@ -67,18 +67,20 @@ def test_the_terminal_gate_tolerates_a_state_missing_the_fields():
 
 
 def test_no_dispatch_branch_re_derives_the_fence():
-    """The regression that matters is a fourth copy, not a wrong answer here."""
-    from looplab.engine import orchestrator
+    """The regression that matters is a fourth copy, not a wrong answer here. Both modules: the
+    dispatch branches moved to `eval_dispatch.py` beside the fence in ENG1-04 step 4d, and the run
+    loop that decides WHEN to dispatch stays in `orchestrator.py`."""
+    from looplab.engine import eval_dispatch, orchestrator
 
-    tree = ast.parse(inspect.getsource(orchestrator))
     offenders = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.FunctionDef):
-            continue
-        if node.name in {"_eval_admission_current", "_run_terminal_gate"}:
-            continue
-        body = ast.unparse(node)
-        if "aborted_nodes" in body and "total_eval_seconds" in body and "tombstoned" in body:
-            offenders.append(node.name)
+    for module in (orchestrator, eval_dispatch):
+        for node in ast.walk(ast.parse(inspect.getsource(module))):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            if node.name in {"_eval_admission_current", "_run_terminal_gate"}:
+                continue
+            body = ast.unparse(node)
+            if "aborted_nodes" in body and "total_eval_seconds" in body and "tombstoned" in body:
+                offenders.append(f"{module.__name__}.{node.name}")
     assert not offenders, (
         f"{offenders} re-derive the admission fence inline; call `_eval_admission_current`")

@@ -381,7 +381,7 @@ def test_the_resource_wait_still_admits_the_eval_when_no_ceiling_fires(monkeypat
 
 
 def test_the_recheck_is_the_sink_and_nothing_else():
-    from looplab.engine.orchestrator import budget_stop_recheck
+    from looplab.engine.eval_dispatch import budget_stop_recheck
 
     assert not budget_stop_recheck([])
     assert budget_stop_recheck([BudgetExceeded(CEILING)])

@@ -2731,7 +2731,7 @@ class SpeculationMixin:
             # before the inflight entry and the wake-up below: the next admission fill asks whether
             # one more lane fits, and it must ask with this lane's worst case already handed back —
             # its REAL cost is in the log by now and `total_eval_seconds` charges it.
-            from looplab.engine.orchestrator import _release_eval_time
+            from looplab.engine.eval_dispatch import _release_eval_time
             _release_eval_time(self, node_id, generation)
             if reservation is not None:
                 self._clear_eval_resource_reservation(node_id, generation)
@@ -3015,14 +3015,14 @@ class SpeculationMixin:
                         selection_changed = True
                     break
             # THE EVAL-SECOND ALLOWANCE, asked here exactly as `_dispatch_evals` asks it (review
-            # 2026-09-22, ENG2-05): the SAME `orchestrator.py::_eval_time_admission_refused` over the
+            # 2026-09-22, ENG2-05): the SAME `eval_dispatch.py::_eval_time_admission_refused` over the
             # same in-flight reservation ledger. This path used to ask nothing, so with one second of
             # `max_eval_seconds` left every free speculative lane read "there is time" and started —
             # the "ceiling times N" `resources.py::eval_time_admission_blocked` was written to refuse,
             # on the path speculation runs. The first lane with nothing in flight is still admitted
             # whatever its worst case (that rule's deadlock guard). Deferred import: the helpers live
             # beside the dispatcher that owns them, and this mixin is imported by the orchestrator.
-            from looplab.engine.orchestrator import _eval_time_admission_refused
+            from looplab.engine.eval_dispatch import _eval_time_admission_refused
             if _eval_time_admission_refused(self, current, chosen, session.max_eval_seconds):
                 self._release_gpus(reservation.get("gpu_ids"))
                 break
@@ -3053,7 +3053,7 @@ class SpeculationMixin:
             # fill of this loop is asked against it (ENG2-05). Taken after the durable boundary, so
             # a store error there cannot leak it; released in `_card_eval_one`'s `finally` beside
             # the devices, or on the failed-spawn path below, where nothing ran to release it.
-            from looplab.engine.orchestrator import _release_eval_time, _reserve_eval_time
+            from looplab.engine.eval_dispatch import _release_eval_time, _reserve_eval_time
             _reserve_eval_time(self, chosen.id, chosen.attempt, chosen)
             try:
                 # The RUN-scoped group (`session.eval_task_group`), not the session-owned one.

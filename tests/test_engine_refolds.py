@@ -82,10 +82,10 @@ def test_the_serial_dispatch_folds_a_quiet_prefix_once_per_evaluation(tmp_path, 
 def test_admit_refolds_when_the_log_moved_after_the_hand_off(tmp_path, monkeypatch):
     """The hand-off is TAIL-GATED: anything appended between the dispatcher's fold and ADMIT moves
     the tail, and ADMIT then folds for itself — it never decides on a fold of an older log."""
-    from looplab.engine import orchestrator
+    from looplab.engine import eval_dispatch
     from looplab.events.types import EV_TRAIN_MONITOR_ALERT
 
-    real_reserve = orchestrator._reserve_eval_time
+    real_reserve = eval_dispatch._reserve_eval_time
 
     def reserve_then_append(engine, node_id, generation, node):
         # A diagnostic row, appended where nothing else writes: after the last dispatcher fold,
@@ -93,7 +93,7 @@ def test_admit_refolds_when_the_log_moved_after_the_hand_off(tmp_path, monkeypat
         engine.store.append(EV_TRAIN_MONITOR_ALERT, {"node_id": node_id, "note": "moved the tail"})
         return real_reserve(engine, node_id, generation, node)
 
-    monkeypatch.setattr(orchestrator, "_reserve_eval_time", reserve_then_append)
+    monkeypatch.setattr(eval_dispatch, "_reserve_eval_time", reserve_then_append)
     folds, state = _folds_by_caller(tmp_path, monkeypatch, n_seeds=2, max_nodes=4)
     evaluated = [n for n in state.nodes.values() if n.metric is not None]
     assert len(evaluated) == 4

@@ -3,7 +3,7 @@ ENG1-11).
 
 `paused or finished or stop_requested` was written out at thirteen sites — admission and reservation
 fences, the confirm phase's lifecycle checks, the Card session's terminal intent, the containment
-pause, the CLI's resume handoff — beside `orchestrator.py::_run_terminal_gate`, which asks the same
+pause, the CLI's resume handoff — beside `eval_dispatch.py::_run_terminal_gate`, which asks the same
 question of a possibly hand-built state. Thirteen copies of a gate are thirteen chances for one of
 them to drift (a `stop_requested` read by truthiness at one site and by `is not None` at another is a
 run that stops in one place and keeps building in the next). The copies now read the property; this
@@ -22,7 +22,7 @@ import itertools
 import pytest
 
 from looplab.core.models import RunState
-from looplab.engine.orchestrator import _run_terminal_gate
+from looplab.engine.eval_dispatch import _run_terminal_gate
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
 from tests._source_scan import PKG, iter_trees
@@ -89,7 +89,7 @@ def test_no_module_spells_the_disjunction_out_again():
     """By AST (a comment cannot satisfy it): the property's own body and the stub-tolerant gate are
     the only two spellings in the package."""
     allowed = {("core/models.py", "RunState.halted"),
-               ("engine/orchestrator.py", "_run_terminal_gate")}
+               ("engine/eval_dispatch.py", "_run_terminal_gate")}
     found = set()
     for path, tree in iter_trees(PKG):
         rel = path.relative_to(PKG).as_posix()

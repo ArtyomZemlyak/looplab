@@ -2742,7 +2742,7 @@ class RunState(BaseModel):
 
         ONE spelling of the three-way disjunction every admission, reservation and pause gate asks
         (review 2026-09-22, ENG1-11: `paused or finished or stop_requested` was written out at more
-        than a dozen sites beside `orchestrator.py::_run_terminal_gate`, which asks the same thing of
+        than a dozen sites beside `eval_dispatch.py::_run_terminal_gate`, which asks the same thing of
         a possibly hand-built state). TRUTHINESS, exactly as those sites read it: `stop_requested`
         is the requesting control's reason string, and an empty one does not stop the run. A plain
         property, not a field, so no dump, snapshot or wire payload changes.
