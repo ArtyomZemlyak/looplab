@@ -47,7 +47,9 @@ def _stand(tmp: Path) -> Path:
 
 
 def _run(root: Path) -> subprocess.CompletedProcess:
-    env = dict(os.environ, ROOT=str(root))
+    # Scoped to this test's own tree (`check_money.sh`'s PROXY_SCOPE): the suite runs as concurrent
+    # shards, and another test's deliberately stale proxy is not this test's subject.
+    env = dict(os.environ, ROOT=str(root), PROXY_SCOPE=str(root.parent))
     env.pop("PROXY_SRC_OVERRIDE", None)
     return subprocess.run(["bash", str(CHECK_MONEY), "3"], capture_output=True, text=True,
                           timeout=180, env=env)
@@ -107,3 +109,22 @@ def test_the_refusal_names_the_file_it_judged(tmp_path):
     finally:
         proc.kill(); proc.wait(timeout=30)
     assert str(src) in got.stdout, got.stdout
+
+
+def test_a_proxy_outside_the_scope_is_not_judged(tmp_path):
+    """`PROXY_SCOPE` narrows the scan to one tree — what lets the suite run as concurrent shards on
+    one box without one test's deliberately stale proxy landing in another test's report (observed
+    2026-09-23). Two stale proxies, one inside the scope and one outside: only the inside one is
+    reported. MUTATION: drop the scope check in `check_money.sh` -> the outside pid is reported too."""
+    root = _stand(tmp_path / "in")
+    inside, inside_src = _proxy_from(tmp_path / "in" / "repo" / "benchmarks" / "meter")
+    outside, outside_src = _proxy_from(tmp_path / "out" / "benchmarks" / "meter")
+    try:
+        os.utime(inside_src, None)                   # both edited AFTER they started: both stale
+        os.utime(outside_src, None)
+        got = _run(root)
+    finally:
+        for proc in (inside, outside):
+            proc.kill(); proc.wait(timeout=30)
+    assert f"pid={inside.pid}" in got.stdout, got.stdout + got.stderr
+    assert f"pid={outside.pid}" not in got.stdout, got.stdout

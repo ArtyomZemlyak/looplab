@@ -53,7 +53,8 @@ def _stand(tmp: Path, *, truncated: bool) -> Path:
 
 def _run(root: Path) -> subprocess.CompletedProcess:
     # PROXY_SRC_OVERRIDE points the SECOND block at nothing, so this test is about the first one.
-    env = dict(os.environ, ROOT=str(root), PROXY_SRC_OVERRIDE=str(root / "no-such-proxy.py"))
+    env = dict(os.environ, ROOT=str(root), PROXY_SRC_OVERRIDE=str(root / "no-such-proxy.py"),
+               PROXY_SCOPE=str(root))   # no other shard's proxy in this test's report
     return subprocess.run(["bash", str(CHECK_MONEY), "3"], capture_output=True, text=True,
                           timeout=120, env=env)
 

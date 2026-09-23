@@ -148,6 +148,13 @@ root = sys.argv[1]
 fallback = os.environ.get("PROXY_SRC_OVERRIDE") or os.path.join(root, "looplab", "benchmarks", "meter", "proxy.py")
 if not os.path.exists(fallback):
     fallback = os.path.join(root, "benchmarks", "meter", "proxy.py")
+# PROXY_SCOPE: judge only the proxies whose OWN proxy.py lies under this directory. Unset -- the
+# bench box -- every proxy on the machine is judged, as before. The test suite sets it, because it
+# runs as four concurrent shards on one box and one test deliberately starts a STALE proxy: without
+# a scope, a concurrent shard's "all proxies newer than their code" read saw that proxy and failed
+# (observed 2026-09-23, tests/test_a_proxy_is_judged_against_its_own_source.py).
+scope = os.environ.get("PROXY_SCOPE")
+scope = os.path.realpath(scope) if scope else None
 if True:
     boot = time.time() - float(open("/proc/uptime").read().split()[0])
     hz = os.sysconf("SC_CLK_TCK")
@@ -179,6 +186,8 @@ if True:
         # ЕГО СОБСТВЕННЫЙ ИСХОДНИК. `PROXY_SRC_OVERRIDE` (и корень) остаются запасным вариантом для
         # процесса, чей файл удалён или назван относительным путём из каталога, которого уже нет.
         own = next((a for a in parts if os.path.basename(a) == "proxy.py"), None)
+        if scope and not (own and os.path.realpath(own).startswith(scope + os.sep)):
+            continue
         src = own if own and os.path.exists(own) else fallback
         if not os.path.exists(src):
             continue
