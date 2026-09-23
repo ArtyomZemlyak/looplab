@@ -4,15 +4,6 @@
 # is red, and a new unresolved citation with no row is red (`tests/test_claim_pins.py`). Keyed
 # `<file>::<doc> §<key>` with no line number, so a row survives edits above it.
 
-# The target was DELETED: doc 53's numbered 2a/2b/2c subsections were dropped when a later merge
-# (`agent/novelty`) rewrote its §2; their text survives only in history (`cafa30be`'s tree).
-
 # Not recoverable from the tree: doc 17 has no 20.6, and the CoverageFrame semantics this cites
 # (unknown vs zero) live in its 21.20.3 and 21.20.7, so neither the typo nor its target is certain.
 looplab/engine/claims_retrieval.py::§20.6
-
-# The correction is KNOWN and left to the change that owned the file on 2026-09-23:
-#   context_budget.py -> `docs/BACKLOG.md §0.17` (the bounded-answer rule, as knowledge_tools names it)
-#   memory.py         -> `doc 51 §3, item (b)` ("A promoted skill is promoted forever")
-#   replay.py         -> `doc 14 §2.2` (the breedable-nodes rule every sibling site now names)
-looplab/events/replay.py::§2.2

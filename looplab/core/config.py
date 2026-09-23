@@ -2139,13 +2139,14 @@ class Settings(BaseSettings):
     # in `Engine._resolve_speculation_depth`. What used to block it was a defect in the Card
     # DEBUG anchor that only a default could make everyone's problem:
     #
-    #   `events/replay.py::_card_debuggable_leaf_ids` disqualified a failed node the moment it had ANY
-    #   child. A receipt-bound `debug` Card's own work item IS such a child, so the instant its node
-    #   existed the Card's anchor died and it folded to `action_receipt_incomplete`. Nothing noticed
-    #   while speculation was off, because the ordinary lane never re-checks a Card after its node
-    #   exists. The L5 freshness gate does — that is its whole job — so EVERY speculative debug
-    #   prefetch was superseded on sight, and the lane then authored a fresh unselectable Card per
-    #   loop turn until the runaway guard tripped with "node creation not converging".
+    #   `events/card_ledger.py::_card_debuggable_leaf_ids` disqualified a failed node the moment it
+    #   had ANY child. A receipt-bound `debug` Card's own work item IS such a child, so the instant
+    #   its node existed the Card's anchor died and it folded to `action_receipt_incomplete`.
+    #   Nothing noticed while speculation was off, because the ordinary lane never re-checks a Card
+    #   after its node exists. The L5 freshness gate does — that is its whole job — so EVERY
+    #   speculative debug prefetch was superseded on sight, and the lane then authored a fresh
+    #   unselectable Card per loop turn until the runaway guard tripped with "node creation not
+    #   converging".
     #
     # Measured on a real 2-GPU run (`runs/rubert-dr-0805`, launched at AUTO): 2 nodes of a 12-node
     # budget, then stuck. Reproduced offline at depth 1 on a task whose first node crashes: 2 nodes
