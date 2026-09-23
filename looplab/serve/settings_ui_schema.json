@@ -506,7 +506,7 @@
           "label": "Proxy scoring",
           "type": "bool",
           "default": false,
-          "help": "A6: early-signal score candidates to skip doomed full evals."
+          "help": "Inert on its own: the proxy scorer is built only when proxy_kill_fraction > 0. Kept for snapshot compatibility."
         },
         {
           "key": "proxy_kill_fraction",

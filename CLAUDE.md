@@ -321,7 +321,9 @@ refused — is in `docs/64-agent-guide-narratives-2026-09-06.md` ("Engine invari
   not put ANSWERS in a goal** — the objective, the constraints and the MEASURED limits with their
   source, never a configuration copied from a benchmark table.
 - Settings are flat on purpose (`LOOPLAB_<FIELD>` env vars map 1:1); never nest or rename fields —
-  snapshots and env compat depend on the names. A new field costs: its row in
+  snapshots and env compat depend on the names. Removing a field costs a `core/config.py::RETIRED_SETTINGS` row in the same
+  change, or every snapshot carrying it stops resuming: resume, finalize and Replay refuse a snapshot
+  key this build does not know (`unknown_snapshot_keys`). A new field costs: its row in
   `docs/guide/configuration.md`, the settings catalogue (`serve/settings_ui_schema.json` +
   `SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT` + the keyset revision, or a written-down entry in
   `SETTINGS_UI_SCHEMA_UNCURATED_FIELDS`), the `tests/test_settings_ui_schema.py` and

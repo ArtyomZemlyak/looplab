@@ -13,10 +13,14 @@ be set four ways, in increasing priority:
    **any** setting by its exact field name.
 
 The resolved, **secret-masked launch settings** are written to `config.snapshot.json` in every run
-dir. The file carries its own format version in `config_snapshot_schema`; a snapshot written by a
-**newer** LoopLab is refused rather than loaded, because `Settings` ignores fields it does not
-recognize and resuming would otherwise continue the same event history under different paid,
-concurrency or selection semantics with no diagnostic. Upgrade LoopLab to resume such a run. A
+dir. The file carries its own format version in `config_snapshot_schema` (now `3`). One policy,
+stated at `core/config.py::CONFIG_SNAPSHOT_SCHEMA`, governs a snapshot this build does not fully
+understand. A **newer format** is refused on every path. A **key** this build does not know — neither
+a current `Settings` field nor one it retired (`RETIRED_SETTINGS`) — is refused, with one line at exit
+2, on the paths that spend the run's money: `resume`, `finalize` and the server's Replay. `Settings`
+ignores fields it does not recognize, so continuing would silently run under different paid,
+concurrency or selection semantics, a spend cap among them. Read-only paths still load such a
+snapshot. Upgrade LoopLab to resume such a run. A
 snapshot with no version key predates the marker and still loads under its historical contract: a
 pre-versioned snapshot is a full settings dump, so a **missing** key means the field did not exist
 when the run was launched, and resume restores the pre-field behaviour (feature off, cadence `0`)
@@ -74,8 +78,9 @@ An unknown key in any LAUNCH layer is refused by name — the config file's `set
 command-line flags and `--set` all go through one rule — so a renamed or mistyped knob stops the run
 instead of silently taking the default. `--set` has always done this; the file layer did not, and a
 `settings:` block carrying `max_node: 30` used to build a `Settings` with `max_nodes = 8` and print
-nothing. RESUME is deliberately the other way: `config.snapshot.json` keeps `extra="ignore"` so an
-older binary can still load a snapshot a newer one wrote.
+nothing. A run's recorded `config.snapshot.json` follows its own rule (above, and
+`core/config.py::CONFIG_SNAPSHOT_SCHEMA`): an unknown key is refused on resume, finalize and Replay,
+and read leniently by read-only commands.
 
 ---
 
@@ -815,7 +820,7 @@ never touches.
 | `foresight_min_confidence` | `LOOPLAB_FORESIGHT_MIN_CONFIDENCE` | `0.0` | Minimum predicted confidence at which a predict-before-execute pick is ACTED on. Below it the ranker abstains (K-idea panel → first proposal; best-of-N → D10 tie-break) instead of committing a low-confidence choice. `0.0` = off (act on every pick); raise toward ~0.5 to make the world model defer when unsure. Bounded to 0.0-1.0 — an out-of-range value is rejected at construction rather than becoming a gate no score can clear. Pairs with the foresight track record the predictor is primed with |
 | `foresight_verify` | `LOOPLAB_FORESIGHT_VERIFY` | `true` | PART IV Phase 2c. Replace the world model's SELF-REPORTED confidence (measured Pearson≈0 with realized outcome) with a CALIBRATED §12-verifier score: after the K-idea ranker picks the predicted-best candidate, the grounded + repeated + criteria-decomposed verifier (`foresight_criteria` — likely to improve the objective, and sound/feasible) scores it, and that becomes the confidence the `foresight_min_confidence` gate and telemetry (`confidence_source`) use. Degrades to the self-reported confidence without a client or on any verifier error. A few extra LLM calls per acted-on proposal |
 | `foresight_verify_samples` | `LOOPLAB_FORESIGHT_VERIFY_SAMPLES` | `3` | Verifier sample count for `foresight_verify` (the §12 repeated-sampling expectation on a no-logprob backend). `3` tames single-shot variance; `1` = cheaper/noisier. Valid range: `1..8`; a value outside it is **clamped** into the range rather than rejected (`core/config.py` — deliberate, so a resumed run whose snapshot carries an out-of-range value still loads), and direct library calls are bounded independently. |
-| `proxy_scoring` | `LOOPLAB_PROXY_SCORING` | `false` | Rank a candidate's potential from early signals |
+| `proxy_scoring` | `LOOPLAB_PROXY_SCORING` | `false` | Inert on its own since 2026-09-23: the proxy scorer is built only when `proxy_kill_fraction` > 0, which gates its only consumer, the pre-eval kill. Kept so snapshots and env keep parsing |
 | `proxy_kill_fraction` | `LOOPLAB_PROXY_KILL_FRACTION` | `0.0` | Skip a full eval for the doomed bottom fraction (0 = off); never a candidate whose nearest evaluated neighbour is beyond the explored region's own radius (the abstain band, `proxy_scored.abstained`) |
 | `novelty_mode` | `LOOPLAB_NOVELTY_MODE` | `llm` | How a proposal is dedup-checked: `off` (Researcher's own judgment) / `algo` (param-distance + optional embedding) / `llm` (an LLM reads the real experiments and decides, then re-proposes). **This is the off switch — `novelty_gate=false` is not.** `llm` is NOT "one extra call per proposal", which this row claimed until 2026-08-20: it is a 12-turn agentic loop and, on a rejection, a whole second Researcher proposal. Measured over 20 AlgoTune runs (`runs-armb`): 99 invocations, 823 paid calls, **$1.77 of a $15.73 campaign and 6.6 of its 60.8 run-hours**, for 10 rejections — an admitted proposal a median 4 calls / 10.6 s, a rejected one 37 calls / **21.6 minutes**, against a median card build of $0.077 and a median evaluation of 34 s. Worth it only where a duplicate experiment costs more than that (a GPU training run does; a 34-second solver benchmark does not). The phase is traced since 2026-08-20, so `looplab timings` and the trace view now show what it costs on YOUR task |
 | `novelty_gate` | `LOOPLAB_NOVELTY_GATE` | `false` | Reject near-duplicate proposals (param-space distance). Legacy: `true` forces `novelty_mode=algo`; `false` forces NOTHING and is **not** an off switch for the novelty gate |
