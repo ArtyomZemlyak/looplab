@@ -28,6 +28,7 @@ import check_money  # noqa: E402
 import outlier_check  # noqa: E402
 import probe_summary  # noqa: E402
 import pulse  # noqa: E402
+from _source_scan import iter_trees  # noqa: E402
 from _windows_emulation import windows_glob  # noqa: E402
 
 
@@ -128,11 +129,12 @@ def test_every_directory_split_in_the_bench_tools_is_made_on_the_posix_form():
     above are what prove the rule works. A name counts as POSIX form only where the SAME function
     assigned it from one."""
     offenders, sites = set(), set()
-    for path in sorted(BENCH.rglob("*.py")):
+    # The ONE walk (`tests/_source_scan.py::iter_trees`, sorted, BOM-safe) — a private `rglob` here
+    # is what `test_source_scan_helper::test_no_guard_test_re_derives_the_walk` refuses.
+    for path, tree in iter_trees(BENCH):
         rel = path.relative_to(REPO).as_posix()
         if rel in _NOT_A_GLOB_ANSWER:
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
         for scope in [n for n in ast.walk(tree)
                       if isinstance(n, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef))]:
             bound = {t.id for n in ast.walk(scope) if isinstance(n, ast.Assign)
