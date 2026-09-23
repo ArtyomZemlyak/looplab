@@ -346,6 +346,7 @@ _LAYOUT = {
     "replay_concepts": "events",
     "replay_journals": "events",
     "replay_cards": "events",
+    "replay_selection": "events",
     "stop_account": "events",
     "repo_developer": "adapters",
     "repo_task": "adapters",
