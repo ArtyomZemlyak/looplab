@@ -106,7 +106,7 @@ def test_neither_module_is_a_god_module_again():
     extraction happened (`normalize_task` -> `adapters/task_schema.py`) and the cap FOLLOWED the
     file down. A cap is only a decision if it can move either way for a stated reason.
     """
-    for rel, cap in (("adapters/tasks.py", 233), ("agents/factory.py", 386),
+    for rel, cap in (("adapters/tasks.py", 233), ("agents/factory.py", 387),
                      ("agents/developer_backends.py", 188),
                      ("adapters/task_schema.py", 231)):
     #
@@ -169,6 +169,13 @@ def test_neither_module_is_a_god_module_again():
     # `core.evidence` import. A Settings field threaded into the role it configures is the
     # composition root doing its job, not a second domain; the raises pay for exactly the lines spent
     # (384 -> 385 and 185 -> 187 measured) and keep the same one line of headroom.
+    #
+    # 386 -> 387, 2026-09-23, review 2026-09-22 TST-07 (a `§` citation must name the doc it points
+    # into): `make_roles`' per-role comment cited a bare section number that resolves in no doc;
+    # it now names doc 14's section 4, item 1, and the ten-line comment around it re-wrapped to
+    # eleven (385 -> 386 measured, which met the cap exactly and turned CI run 1999 red). No code
+    # moved and no domain arrived — a longer citation is not what the extraction rule above is
+    # for — so the raise pays for that one line and keeps the same one line of headroom.
         lines = len((_PKG / rel).read_text(encoding="utf-8").splitlines())
         assert lines < cap, f"{rel} is back to {lines} lines"
 
