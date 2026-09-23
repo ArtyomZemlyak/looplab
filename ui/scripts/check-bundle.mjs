@@ -69,7 +69,12 @@ export const DEFAULT_BUDGETS = Object.freeze({
       roots: [entry, named('RunList'), ownerChrome],
       // Owner chrome now includes the bounded Assistant tool-activity disclosure.
       // 2026-09-22: measured 213,682 B JS (still under) / 39,902 B CSS gzip (was 38 KiB).
-      limits: { js: { gzip: 210 * KIB }, css: { gzip: 40 * KIB } },
+      // 2026-09-23: measured 215,282 B JS (was 210 KiB, +242 B over). What the bytes bought: UI-06
+      // moved the composer's per-chat drafts out of AssistantBar into `useAssistantComposer.js`, and
+      // a hook's interface is its 17 returned names, which minification keeps in the return AND the
+      // destructure: +704 B raw / +286 B gzip in the OwnerChrome chunk, measured slice by slice (the
+      // two model slices beside it measured +11 / -15 B).
+      limits: { js: { gzip: 211 * KIB }, css: { gzip: 40 * KIB } },
     },
     {
       name: 'Run compare increment',
@@ -117,7 +122,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
         ownerChrome,
       ],
       // 2026-09-22: measured 255,694 B JS (was 233 KiB, +16.7 KiB) / 42,442 B CSS (was 40 KiB).
-      limits: { js: { gzip: 251 * KIB }, css: { gzip: 42 * KIB } },
+      // 2026-09-23: measured 257,268 B JS (was 251 KiB, +244 B over): the same OwnerChrome growth
+      // as the owner List route above (UI-06's composer hook).
+      limits: { js: { gzip: 252 * KIB }, css: { gzip: 42 * KIB } },
     },
     {
       name: 'panel-hub increment',
