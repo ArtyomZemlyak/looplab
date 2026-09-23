@@ -241,7 +241,9 @@ refused — is in `docs/64-agent-guide-narratives-2026-09-06.md` ("Engine invari
   exc)` inside the handler so the containment is on the span and in `looplab timings`.
 - **Tool providers**: the `bind_state` hook is OPTIONAL (`tools/_base.py`), but a provider that
   implements it must accept the second `parent` argument (`bind_state(self, state, parent=None)`).
-- **Tests isolate the environment** (`tests/conftest.py`): dotenv loading is disabled,
+- **Tests isolate the environment** (`tests/conftest.py`): dotenv loading is disabled, the
+  shell's LLM/Kaggle credentials are removed for the whole session unless
+  `LOOPLAB_LIVE_SCENARIOS` is set (`tests/_credential_floor.py`),
   `LOOPLAB_MEMORY_DIR`/`LOOPLAB_KNOWLEDGE_DIR` point at tmp dirs, and the host GPU-pool lease is
   redirected to a per-test file. Engine tests construct `Engine(...)` directly (~246 call sites) —
   keep its keyword API stable; new tests use `tests/factories.py::make_engine`. Use pytest's

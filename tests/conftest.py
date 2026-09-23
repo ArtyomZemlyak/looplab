@@ -184,6 +184,31 @@ def _isolate_looplab_home_for_the_whole_session(_session_isolation_patch, tmp_pa
                                          lambda _p=_session_lease: _p, raising=False)
 
 
+# --------------------------------------------------------------------------------------------
+# THE DEVELOPER'S CREDENTIALS ARE NOT THE SUITE'S (review 2026-09-22, TST-03).
+#
+# Dotenv loading is disabled above, but the PROCESS environment still reaches every `Settings()` a
+# test builds and every child a test spawns — and on a developer's box that environment carries the
+# very credential a real run would use. MEASURED 2026-09-23: the 73 test files that touch LLM
+# configuration, run with a dummy `LOOPLAB_LLM_API_KEY` + `LOOPLAB_LLM_API_KEY_BASE_URL` exported
+# in the shell, gave 93 failures that CI (which exports no key) never sees — the pair is resolved
+# from the process first, so every test that means "no credential configured" met a key bound to
+# another host instead (`test_server.py`, `test_start_idempotency.py`, the wrap-up boundaries, …).
+# The direction that is not a red test is worse: a test that builds a client against a reachable
+# endpoint would send a real key with it.
+#
+# SESSION scope, for the reason `_isolate_looplab_home_for_the_whole_session` gives: a higher-scoped
+# fixture runs before any per-test one. The rule — which names, and that `LOOPLAB_LIVE_SCENARIOS`
+# keeps them — is `tests/_credential_floor.py::scrubbed_credential_names`; a test that needs one of
+# these names sets it itself through `monkeypatch`, which restores the floor after it.
+@pytest.fixture(autouse=True, scope="session")
+def _scrub_developer_credentials_for_the_whole_session(_session_isolation_patch):
+    from _credential_floor import scrubbed_credential_names
+
+    for name in scrubbed_credential_names(os.environ):
+        _session_isolation_patch.delenv(name, raising=False)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_looplab_home(_isolation_patch, tmp_path):
     """Cross-run memory and the knowledge base are ON BY DEFAULT — they point at the developer's real
