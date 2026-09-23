@@ -823,12 +823,18 @@ def _canonical_preserves_subject(source: str, canonical: str) -> bool:
 def classify_skill_candidate(statement, *, client=None, task_goal: str = "", task_kind: str = "",
                              evidence: Optional[list[dict]] = None, best_delta=None,
                              parser: str = "tool_call", tools=None,
-                             loop_opts=None) -> SkillCandidateAssessment:
+                             loop_opts=None, tool_result_label: str = "") -> SkillCandidateAssessment:
     """Hybrid classifier for one evidence-backed auto-skill candidate.
 
     With no client, the deterministic prefilter is the explicit offline behavior. With a configured
     client, any invocation/parse/rubric/canonicalization failure rejects this procedural artifact; the
     caller has already retained the underlying claim as a lesson, so there is no knowledge loss.
+
+    `tool_result_label` is the untrusted-evidence FENCE on what `tools` return (`core/evidence.py`,
+    review 2026-09-22 TAT-02): the caller hands over the run's read-only tools, whose results are
+    the candidates' own code and logs, so the fence is the caller's to ask for — the engine passes
+    `engine/shared.py::judge_evidence_kwargs`. Forwarded only when non-empty, so the default is the
+    historical call byte for byte.
     """
     local = assess_skill_statement(statement)
     if not local.promotable:
@@ -897,7 +903,8 @@ def classify_skill_candidate(statement, *, client=None, task_goal: str = "", tas
         from looplab.agents.agent import agentic_struct
 
         rubric = agentic_struct(
-            client, tools, messages, _SkillRubric, parser=parser, loop_opts=loop_opts)
+            client, tools, messages, _SkillRubric, parser=parser, loop_opts=loop_opts,
+            **({"tool_result_label": tool_result_label} if tool_result_label else {}))
     except BudgetExceeded:
         raise
     except Exception:  # noqa: BLE001 — a skill is best-effort; the lesson remains durable

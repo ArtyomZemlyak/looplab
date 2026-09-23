@@ -144,6 +144,14 @@ def judge_evidence_kwargs(engine) -> dict:
     label, and each of those four asks HERE — four clusters, one reading of one flag, so no site can
     come to read it with a different default.
 
+    NOT ONLY JUDGES, since the second half of TAT-02: every engine-side loop whose tools read the
+    candidates' text asks here too — the passes that AUTHOR cross-run memory from a run
+    (`lessons_distill.py`'s reflection, skill-card distillation, causal meta-note and skill rubric
+    classifier; `lessons_reconcile.py`'s comparative lessons) and the research cadence's memo
+    verifier. Their conclusions land in the SHARED store a later run reads as a prior, so a forged
+    marker in one run's candidate code was one bare tool result away from another run's prompt. The
+    name stayed, so no landed call site moves.
+
     A module function over `engine` rather than a mixin method, and a `getattr` with the flag's own
     constructor default: the watchdog judges are driven in the suite through stubs that inherit
     their own mixin and never run `Engine.__init__` (`tests/test_asha_monitor.py::_AshaStub`), and a

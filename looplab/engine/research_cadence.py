@@ -1100,10 +1100,14 @@ class ResearchCadenceMixin:
                 contain("research memo state fold", exc)
         if self._research_verify and state is not None:
             try:
+                from looplab.engine.shared import judge_evidence_kwargs
                 from looplab.trust.memo_verify import verify_memo
+                # The verifier's tools read the candidates' own code and logs: fenced when the
+                # run's evidence envelope is on (review 2026-09-22, TAT-02), absent when off.
                 ver = verify_memo(memo_d, state,
                                   client=getattr(self.deep_researcher, "client", None),
-                                  parser=getattr(self.deep_researcher, "parser", "tool_call"))
+                                  parser=getattr(self.deep_researcher, "parser", "tool_call"),
+                                  **judge_evidence_kwargs(self))
                 if ver is not None:
                     memo_d["verification"] = ver
             except BudgetExceeded:

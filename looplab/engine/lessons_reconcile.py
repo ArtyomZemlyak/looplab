@@ -215,9 +215,14 @@ class LessonReconcileMixin:
                   "[GOOD]/[BAD] controls reuse guidance, not whether the sentence is true. No preamble.")
         try:
             from looplab.agents.agent import agentic_text
+            from looplab.engine.shared import judge_evidence_kwargs
+            # The pair's code and logs are the candidates' own, and the credited lesson goes to the
+            # SHARED store mid-run — fenced when the run's evidence envelope is on (review
+            # 2026-09-22, TAT-02); absent, and so the historical call, when it is off.
             out = agentic_text(client, self._reflect_tools(state), [{"role": "user", "content": prompt}],
                                loop_opts=self._reflect_loop_opts(),
-                               answer_desc="one credited lesson per pair: `P<n> [GOOD]/[BAD] <lesson>`") or ""
+                               answer_desc="one credited lesson per pair: `P<n> [GOOD]/[BAD] <lesson>`",
+                               **judge_evidence_kwargs(self._e)) or ""
         except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
             raise
         except Exception:  # noqa: BLE001 — reflection is best-effort; a real run writes NO templated lesson

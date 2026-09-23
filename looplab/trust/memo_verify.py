@@ -501,7 +501,7 @@ def _verify_tools(state: RunState):
 
 
 def verify_memo(memo: dict, state: RunState, client=None,
-                parser: str = "tool_call") -> Optional[dict]:
+                parser: str = "tool_call", tool_result_label: str = "") -> Optional[dict]:
     """Verify a memo's claims. Deterministic layer always runs; the LLM rubric pass upgrades
     `cited` claims to supported/unsupported/unclear when a client is wired. Returns
     {"verdicts": [{statement, verdict, note, evidence}], "method": "deterministic"|"llm",
@@ -514,7 +514,12 @@ def verify_memo(memo: dict, state: RunState, client=None,
     0 summaries). The reader is now `core/advisory_payloads.py::memo_verification_view`, beside the
     sanitizer that re-emits this dict, and `tests/test_research_memo_verdicts.py` re-derives BOTH key
     sets from this source and that one — so adding a key here without a reader, or reading a key
-    nothing writes, is a red test rather than a silently empty answer."""
+    nothing writes, is a red test rather than a silently empty answer.
+
+    `tool_result_label` fences what the judge's read-only run tools return — the very code and logs
+    whose claims it grades (`core/evidence.py`; review 2026-09-22, TAT-02). The engine's research
+    cadence passes the run's switch through `engine/shared.py::judge_evidence_kwargs`; empty (the
+    default) is the historical call byte for byte."""
     raw_claims = (memo or {}).get("claims") if isinstance(memo, dict) else ()
     claims = list(raw_claims[:_MAX_CLAIMS]) if isinstance(raw_claims, (list, tuple)) else []
     if not claims:
@@ -546,7 +551,9 @@ def verify_memo(memo: dict, state: RunState, client=None,
             # bit, then emit (these judge, they don't investigate for 300 turns) — mirrors reflect_lessons.
             from looplab.trust.judge import structured_judge
             out = structured_judge(client, msgs, _VerdictOut, parser=parser,
-                                   tools=_verify_tools(state))
+                                   tools=_verify_tools(state),
+                                   **({"tool_result_label": tool_result_label}
+                                      if tool_result_label else {}))
             for k, (i, _c) in enumerate(todo):
                 if k < len(out.verdicts) and out.verdicts[k] in ("supported", "unsupported",
                                                                  "unclear"):

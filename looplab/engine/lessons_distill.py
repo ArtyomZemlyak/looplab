@@ -498,6 +498,7 @@ class LessonDistillMixin:
                                            classify_skill_candidate,
                                            promotable_skill_statement, unreliable_metric_ids,
                                            write_auto_skill)
+        from looplab.engine.shared import judge_evidence_kwargs
         sk_dir = Path(self._e.memory_dir) / "skills"
         skills: list[str] = []
         skill_candidates: list[dict] = []
@@ -577,11 +578,14 @@ class LessonDistillMixin:
                     str(key) for key in (getattr(n.idea, "params", {}) or {})),
                 "measured": n.metric is not None,
             } for n in ev[:8]]
+            # The rubric's tools read the candidates' own code and logs, fenced when the run's
+            # evidence envelope is on (review 2026-09-22, TAT-02) — a card it accepts is a skill
+            # every later run is told to reuse.
             assessment = classify_skill_candidate(
                 h.statement, client=classifier_client, task_goal=state.goal,
                 task_kind=getattr(getattr(self._e, "task", None), "kind", ""), evidence=evidence,
                 best_delta=h.best_delta, parser=classifier_parser, tools=classifier_tools,
-                loop_opts=classifier_loop_opts)
+                loop_opts=classifier_loop_opts, **judge_evidence_kwargs(self._e))
             receipt = {
                 "source_sha256": source_digest, "accepted": assessment.promotable,
                 "reason": assessment.reason, "classifier": assessment.classifier_version,
@@ -749,9 +753,14 @@ class LessonDistillMixin:
                   "line, no preamble.")
         try:
             from looplab.agents.agent import agentic_text
+            from looplab.engine.shared import judge_evidence_kwargs
+            # What its tools return is the candidates' own code and logs, and what it writes is a
+            # cross-run lesson — fenced when the run's evidence envelope is on (review 2026-09-22,
+            # TAT-02); absent, and so the historical call, when it is off.
             out = agentic_text(client, self._reflect_tools(final), [{"role": "user", "content": prompt}],
                                loop_opts=self._reflect_loop_opts(),
-                               answer_desc="generalizable lessons, one theme per line, each tagged [GOOD]/[BAD]") or ""
+                               answer_desc="generalizable lessons, one theme per line, each tagged [GOOD]/[BAD]",
+                               **judge_evidence_kwargs(self._e)) or ""
         except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
             raise
         except Exception:   # noqa: BLE001 - best-effort; a real run writes NO templated fallback
@@ -821,9 +830,13 @@ class LessonDistillMixin:
                   "Keep it concise — a card someone reuses, never a code dump.")
         try:
             from looplab.agents.agent import agentic_text
+            from looplab.engine.shared import judge_evidence_kwargs
+            # Fenced when the envelope is on, like the reflection above: the card is a SKILL a later
+            # run reuses, and its tools read the winning candidate's own code (TAT-02).
             out = (agentic_text(client, self._reflect_tools(final), [{"role": "user", "content": prompt}],
                                 loop_opts=self._reflect_loop_opts(),
-                                answer_desc="a short reusable skill card: technique + minimal snippet + when to use")
+                                answer_desc="a short reusable skill card: technique + minimal snippet + when to use",
+                                **judge_evidence_kwargs(self._e))
                    or "").strip()
             return (f"{out[:1800]}\n\n_Verified on `{final.task_id}` (Δ={h.best_delta:+.4g})._"
                     if out else base)
@@ -865,9 +878,12 @@ class LessonDistillMixin:
                   "task can learn from. Be specific and concise; no preamble, don't just restate params.")
         try:
             from looplab.agents.agent import agentic_text
+            from looplab.engine.shared import judge_evidence_kwargs
+            # Fenced when the envelope is on (TAT-02): the note is stored as this run's meta-note.
             out = (agentic_text(client, self._reflect_tools(final), [{"role": "user", "content": prompt}],
                                 loop_opts=self._reflect_loop_opts(),
-                                answer_desc="a 2-3 sentence reusable causal note on WHY the winner won")
+                                answer_desc="a 2-3 sentence reusable causal note on WHY the winner won",
+                                **judge_evidence_kwargs(self._e))
                    or "").strip()
             return out[:700] or None
         except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
