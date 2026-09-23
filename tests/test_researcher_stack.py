@@ -254,6 +254,54 @@ def test_the_surrogate_layer_adds_no_paid_call_and_changes_no_prompt(tmp_path, m
     assert len(bare.client.calls) == 2
 
 
+# --------------------------------------------------------------------------- the AUTO width probe
+_HIDDEN_CLIENT_CONFIGS = {
+    # The finding's case: an LLM Researcher behind the surrogate, a templated toy Developer.
+    "surrogate": {"surrogate_proposer": True},
+    # The k-NN panel forwards `client` from its base — which is the surrogate, which holds none.
+    "surrogate+knn-panel": {"surrogate_proposer": True, "researcher_panel": 3},
+}
+
+
+@pytest.mark.parametrize("config", list(_HIDDEN_CLIENT_CONFIGS))
+def test_the_surrogate_does_not_hide_the_llm_researcher_from_the_auto_widths(
+        tmp_path, monkeypatch, config):
+    """`orchestrator.py::_build_calls_an_llm` decides whether AUTO widths fan out, and it read the
+    roles' `client` — which `SurrogateResearcher` hides on purpose (review 2026-09-22, W5-5
+    follow-up). MEASURED through this constructor before the fix, toy task, non-unified,
+    `max_parallel=4`: without the surrogate `_build_calls_an_llm()` True, `llm_parallel` 4,
+    `speculation_depth` 4; with `surrogate_proposer` (and with `researcher_panel=3` on top) it
+    answered False and AUTO settled `llm_parallel` 1, `speculation_depth` 0 — a proposal lane with a
+    provider call per node run as if it had no latency to overlap.
+
+    MUTATION: drop the `base`/`fallback`/`inner` descent from `_build_calls_an_llm` -> both configs
+    are back at (1, 0)."""
+    _offline_llm(monkeypatch)
+    task = _task("toy", tmp_path)
+    bare = _build(tmp_path, f"{config}-bare", task, unified_agent=False, max_parallel=4)
+    wrapped = _build(tmp_path, f"{config}-wrapped", task, unified_agent=False, max_parallel=4,
+                     **_HIDDEN_CLIENT_CONFIGS[config])
+    assert _has_surrogate(wrapped.researcher) and not _has_surrogate(bare.researcher)
+    # The precondition, stated: neither handle surfaces a client — the surrogate hides it and the
+    # toy Developer is a template — so only the wrapper descent can find the LLM.
+    assert getattr(wrapped.researcher, "client", None) is None
+    assert getattr(wrapped.developer, "client", None) is None
+    for engine in (bare, wrapped):
+        assert engine._build_calls_an_llm() is True
+        assert (engine._llm_parallel, engine.speculation_depth) == (4, 4)
+
+
+def test_a_surrogate_over_a_templated_researcher_still_settles_serial(tmp_path, monkeypatch):
+    """The descent must not widen an OFFLINE run: `--backend toy` with the surrogate wraps a
+    `ToyResearcher` — no client anywhere in the chain — so AUTO keeps the serial, byte-reproducible
+    offline spine (`tests/test_settled_width_pins.py`)."""
+    engine = _build(tmp_path, "toy-backend", _task("toy", tmp_path), backend="toy",
+                    surrogate_proposer=True, max_parallel=4)
+    assert _has_surrogate(engine.researcher)
+    assert engine._build_calls_an_llm() is False
+    assert (engine._llm_parallel, engine.speculation_depth) == (1, 0)
+
+
 # --------------------------------------------------------------------------- the layer's own rule
 class _Plain:
     def __init__(self, bounds=None):

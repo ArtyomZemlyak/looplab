@@ -5279,28 +5279,46 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         recorded no `speculation_depth` at all (AUTO had settled to 0) even though the run's own
         `llm_usage` rows show the Researcher on the wire before the first node existed. So descend
         into the facade's own per-stage backends as well.
+
+        …AND THE WRAPPER CHAIN, for the same failure one layer out (review 2026-09-22, W5-5
+        follow-up). `SurrogateResearcher` hides its fallback's `client` on purpose, so a NON-unified
+        run whose LLM Researcher sits behind the surrogate (`surrogate_proposer`, `policy=bohb`) and
+        whose Developer is a template read as "no LLM" — driven through `cli/__init__.py::_engine` on
+        the toy task at `max_parallel=4`: `llm_parallel` 4 -> 1 and `speculation_depth` 4 -> 0 at
+        launch, and `Panel(Surrogate(...))` the same. Every link is now tested the same way, reached
+        through the registered handles alone — the facade's stages (`FACADE_STAGE_ATTRS`) and each
+        wrapper's wrapped role (`WRAPPED_ROLE_ATTRS`, the names
+        `search/researcher_stack.py::researcher_chain` walks) — never an `isinstance` on a search
+        class, so a new wrapper is seen by holding its role under a registered name. True here is a
+        LAUNCH answer and is right for the surrogate: below its warm-up (every early node, and
+        forever on a task whose params carry no numbers) it delegates each proposal to that LLM
+        Researcher.
         """
         seen: list = []
-        for role in (getattr(self, "researcher", None), getattr(self, "developer", None)):
-            if role is None or any(role is other for other in seen):
+        # Breadth-first over the roles and every link reachable from them. `seen` is compared by
+        # IDENTITY (a unified facade is both roles, `UnifiedAgent.inner` may be its own developer, a
+        # `__getattr__` proxy answers for its base) and CAPPED, so a proxy that mints a fresh object
+        # per attribute read can only cost the walk its cap, never loop it.
+        pending: list = [getattr(self, "researcher", None), getattr(self, "developer", None)]
+        while pending and len(seen) < 32:
+            link = pending.pop(0)
+            if link is None or any(link is other for other in seen):
                 continue
-            seen.append(role)
+            seen.append(link)
             try:
-                if getattr(role, "client", None) is not None:
+                if getattr(link, "client", None) is not None:
                     return True
-                if getattr(role, "is_code_generating", False):
+                if getattr(link, "is_code_generating", False):
                     return True
                 # A composing facade (UnifiedAgent) exposes its stages PUBLICLY, for the same reason
                 # the cost roll-up walks them: `researcher`/`developer` are the per-stage backends and
-                # `stage_clients` holds the clients no backend owns (strategy, pilot). Guard against
-                # self-reference so a role that names itself cannot loop.
-                for stage in (getattr(role, "researcher", None), getattr(role, "developer", None)):
-                    if stage is None or stage is role:
-                        continue
-                    if (getattr(stage, "client", None) is not None
-                            or getattr(stage, "is_code_generating", False)):
-                        return True
-                if any(client is not None for client in (getattr(role, "stage_clients", None) or ())):
+                # `stage_clients` holds the clients no backend owns (strategy, pilot). A wrapper holds
+                # the role it wraps under `base`/`fallback`/`inner`. Both kinds are queued as links and
+                # tested exactly like a role; the identity check above is the self-reference guard.
+                pending.extend((getattr(link, "researcher", None), getattr(link, "developer", None),
+                                getattr(link, "base", None), getattr(link, "fallback", None),
+                                getattr(link, "inner", None)))
+                if any(client is not None for client in (getattr(link, "stage_clients", None) or ())):
                     return True
             except Exception:  # noqa: BLE001 — a proxy/property that raises is not evidence of an LLM
                 continue

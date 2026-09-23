@@ -325,6 +325,21 @@ LLM_PRESENCE_ATTRS: tuple[str, ...] = (
 # in mind before making one of these private.
 FACADE_STAGE_ATTRS: tuple[str, ...] = ("researcher", "developer", "stage_clients")
 
+# The PUBLIC handle a role WRAPPER keeps the role it wraps under — the second descent of the same
+# predicate: `base` (the foresight and k-NN panels), `fallback` (`SurrogateResearcher`), `inner` (the
+# Developer wrappers and the unified facade) — the three names
+# `search/researcher_stack.py::researcher_chain` walks, for the same reason. Load-bearing because
+# a wrapper need not surface its wrapped role's client, and `SurrogateResearcher` hides it ON
+# PURPOSE (the foresight wiring gates on `getattr(researcher, "client", None)`;
+# `agents/role_wrappers.py::WrapsResearcher` says why), so without this descent a NON-unified run
+# whose LLM Researcher sits behind the surrogate (`surrogate_proposer` / `policy=bohb`) and whose
+# Developer is a template read as "no LLM": driven through `cli/__init__.py::_engine` on the toy
+# task at `max_parallel=4`, AUTO settled `llm_parallel` 4 -> 1 and `speculation_depth` 4 -> 0
+# (review 2026-09-22, W5-5 follow-up). Registered for the same reason as the two tuples above:
+# `tests/test_build_llm_probe_contract.py` holds the probe and the shipped wrappers to these names
+# in both directions.
+WRAPPED_ROLE_ATTRS: tuple[str, ...] = ("base", "fallback", "inner")
+
 # TWO KNOWN IMPRECISIONS, both accepted, both outside any shipped wiring — recorded so the next
 # reader does not "fix" one into a real defect. The predicate is a WIDTH heuristic, so it is tuned to
 # be wrong in the cheap direction, and the two directions are not symmetric:

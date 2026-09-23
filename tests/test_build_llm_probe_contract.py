@@ -31,12 +31,13 @@ from pathlib import Path
 
 import pytest
 
-from looplab.agents.roles import FACADE_STAGE_ATTRS, LLM_PRESENCE_ATTRS
+from looplab.agents.roles import FACADE_STAGE_ATTRS, LLM_PRESENCE_ATTRS, WRAPPED_ROLE_ATTRS
 from looplab.agents.unified_agent import UnifiedAgent
 from looplab.engine.orchestrator import Engine
 
 _PKG = Path(__file__).resolve().parents[1] / "looplab"
-_REGISTERED = frozenset(LLM_PRESENCE_ATTRS) | frozenset(FACADE_STAGE_ATTRS)
+_REGISTERED = (frozenset(LLM_PRESENCE_ATTRS) | frozenset(FACADE_STAGE_ATTRS)
+               | frozenset(WRAPPED_ROLE_ATTRS))
 
 
 def _probed_attribute_names() -> set[str]:
@@ -133,3 +134,108 @@ def test_the_facade_descent_is_what_answers_for_a_templated_developer():
     engine = Engine.__new__(Engine)                  # the predicate reads only these two attributes
     engine.researcher = engine.developer = facade
     assert engine._build_calls_an_llm() is True
+
+
+# --------------------------------------------------------------------------- the wrapper descent
+
+def _surrogate(role):
+    from looplab.search.surrogate import SurrogateResearcher
+    return SurrogateResearcher({}, fallback=role)
+
+
+def _knn_panel(role):
+    from looplab.search.panel import PanelResearcher
+    return PanelResearcher(role, k=3)
+
+
+def _foresight_panel(role):
+    from looplab.search.foresight import ForesightPanelResearcher
+    return ForesightPanelResearcher(role, k=2)
+
+
+def _validating(role):
+    from looplab.agents.role_wrappers import ValidatingDeveloper
+    return ValidatingDeveloper(role)
+
+
+# Every shipped wrapper, by the registered handle it keeps its wrapped role under.
+_WRAPPER_PRODUCERS = {
+    "fallback": (_surrogate,),
+    "base": (_knn_panel, _foresight_panel),
+    "inner": (_validating,),
+}
+
+
+@pytest.mark.parametrize("attr", WRAPPED_ROLE_ATTRS)
+def test_every_wrapped_role_handle_is_still_where_a_shipped_wrapper_keeps_its_role(attr):
+    """The producer side of the WRAPPER descent (review 2026-09-22, W5-5 follow-up): renaming
+    `SurrogateResearcher.fallback` or a panel's `base` would silently hide a wrapped LLM Researcher
+    from the AUTO width probe again. A registered name with no known producer is registry rot."""
+    builders = _WRAPPER_PRODUCERS.get(attr)
+    assert builders, f"`{attr}` is registered in WRAPPED_ROLE_ATTRS but no shipped wrapper holds it"
+    for build in builders:
+        role = object()
+        assert getattr(build(role), attr) is role, (build.__name__, attr)
+
+
+class _LLMRole:
+    """A plain LLM-backed role: the marker the probe reads."""
+
+    def __init__(self):
+        self.client = object()
+
+
+class _Template:
+    """A templated role: no client, not code-generating."""
+
+
+def _engine_over(researcher, developer) -> Engine:
+    engine = Engine.__new__(Engine)                  # the predicate reads only these two attributes
+    engine.researcher, engine.developer = researcher, developer
+    return engine
+
+
+@pytest.mark.parametrize("wrap", [_surrogate, lambda role: _knn_panel(_surrogate(role)),
+                                  lambda role: _surrogate(_surrogate(role))],
+                         ids=["surrogate", "knn-panel(surrogate)", "surrogate(surrogate)"])
+def test_the_wrapper_descent_is_what_answers_for_a_hidden_llm_researcher(wrap):
+    """Behavioural anchor for the wrapper registry, like the facade anchor above: the surrogate
+    hides its fallback's `client` ON PURPOSE (`search/surrogate.py::_fallback_telemetry`), so only
+    the descent through `fallback` finds the LLM Researcher behind it — at any depth.
+
+    MUTATION: drop the `base`/`fallback`/`inner` reads from `_build_calls_an_llm` and every case
+    answers False, the "no LLM" the AUTO widths then settle serial on."""
+    researcher = wrap(_LLMRole())
+    assert getattr(researcher, "client", None) is None, "precondition: the wrapper hides the client"
+    assert _engine_over(researcher, _Template())._build_calls_an_llm() is True
+
+
+def test_the_wrapper_descent_does_not_invent_an_llm():
+    """…and it finds nothing that is not there: a surrogate over a TEMPLATED Researcher (the
+    `--backend toy` shape) still reads "no LLM", so the offline spine stays serial."""
+    assert _engine_over(_surrogate(_Template()), _Template())._build_calls_an_llm() is False
+    assert _engine_over(_knn_panel(_surrogate(_Template())),
+                        _validating(_Template()))._build_calls_an_llm() is False
+
+
+def test_a_self_referential_or_self_minting_chain_ends():
+    """The walk is identity-guarded and capped: a link that names itself, and a proxy that mints a
+    FRESH object on every attribute read, both end in "no LLM" instead of looping.
+
+    MUTATION: drop the cap and the minting proxy is walked until it runs dry (it stops minting at
+    5,000 so the mutant fails instead of eating the box)."""
+    loop = _Template()
+    loop.base = loop
+    assert _engine_over(loop, None)._build_calls_an_llm() is False
+
+    minted: list[int] = []
+
+    class _Minting:
+        def __getattr__(self, name):
+            if name in {"client", "is_code_generating", "stage_clients"} or len(minted) >= 5000:
+                raise AttributeError(name)
+            minted.append(1)
+            return _Minting()
+
+    assert _engine_over(_Minting(), None)._build_calls_an_llm() is False
+    assert len(minted) < 500, f"the walk followed {len(minted)} minted links — it is not capped"
