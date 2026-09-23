@@ -20,7 +20,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from looplab.adapters import tasks as task_adapters
-from looplab.core.atomicio import file_identity
+from looplab.core.atomicio import file_identity, same_file_entry
 from looplab.core.pathsafe import RUN_CHILD_NAME_DEFECTS, validate_run_child
 from looplab.core.appconfig import load_document, parse_document_text, split_document
 from looplab.core.comparison import canonical_comparison_contract
@@ -363,11 +363,17 @@ def read_confined_task_file(root: Path, expanded: str) -> ConfinedTaskFile:
       `read_text` block the preflight worker forever; opening non-blocking and refusing a
       non-regular file closes both the hang and the device/`/proc`-style pseudo-file read. It keeps
       the existing `task_file_not_found` code, which `Path.is_file()` already gave these.
-    * **an identity CAS across the read.** The `fstat` taken before the read is compared against an
-      `lstat` of the same path after it, through `core/atomicio.file_identity` — the canonical
-      "same file AND unchanged" tuple, used WHOLE and not as a subset because that is exactly the
-      question here: the bytes handed to the parser must be the bytes of the file that passed
-      containment. A replacement (new inode), a same-size rewrite, or a growth mid-read all refuse.
+    * **an identity CAS across the read.** The `fstat` taken before the read is compared against a
+      second `fstat` of the same descriptor after it, through `core/atomicio.file_identity` — the
+      canonical "same file AND unchanged" tuple, used WHOLE because that is exactly the question
+      here: the bytes handed to the parser must be the bytes of the file that passed containment. An
+      `lstat` of the path after the read binds the NAME to that descriptor with `same_file_entry`.
+      A replacement (new inode), a same-size rewrite, or a growth mid-read all refuse. The two
+      interfaces are compared like with like, the ladder `serve/routers/misc.py::
+      _read_author_file_safely` states: on Windows `lstat` reports the CREATION time as `st_ctime`
+      and `fstat` the change time, so the whole tuple across the two refused every file there —
+      every launch through a `task_file` answered 422 on the Windows CI leg (review 2026-09-22
+      round 2, run 35804658308).
 
     What stays open, said plainly: a DIRECTORY component of the resolved path could still be swapped
     between the resolve and the open, which no `O_NOFOLLOW` can see — closing that needs an
@@ -396,13 +402,17 @@ def read_confined_task_file(root: Path, expanded: str) -> ConfinedTaskFile:
                     f"task_file exceeds the {_MAX_TASK_FILE_BYTES}-byte limit", "task_file")
         try:
             data = _read_bounded(fd)
+            after_read = os.fstat(fd)
             after = os.lstat(path)
         except OSError as exc:
             _reject(422, "task_source_changed", f"task_file cannot be read: {exc}", "task_file")
         if len(data) > _MAX_TASK_FILE_BYTES:
             _reject(400, "task_file_too_large",
                     f"task_file exceeds the {_MAX_TASK_FILE_BYTES}-byte limit", "task_file")
-        if file_identity(after) != file_identity(before):
+        # Like with like (see the docstring): the full tuple over the descriptor's own two
+        # observations, the replacement tier across the descriptor and the name.
+        if (file_identity(after_read) != file_identity(before)
+                or same_file_entry(after) != same_file_entry(before)):
             _reject(422, "task_source_changed",
                     "task_file changed while it was being read", "task_file")
     finally:

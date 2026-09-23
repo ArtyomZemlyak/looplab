@@ -78,6 +78,12 @@ DIR_FSYNC = pytest.mark.posix_only(
 RENAMEAT2 = pytest.mark.posix_only(
     "Linux renameat2(RENAME_NOREPLACE) through libc (Windows: MoveFileExW without REPLACE_EXISTING)")
 
+# An open that REFUSES a final symlink (`os.O_NOFOLLOW`, ELOOP). Windows has no such flag: its open
+# follows the link, and what refuses the swap there is the caller's identity check instead — which
+# is driven on every platform beside each gated test by taking the flag away.
+NOFOLLOW_OPEN = pytest.mark.posix_only(
+    "os.O_NOFOLLOW (an open that refuses a final symlink; Windows' open follows it)")
+
 # The dev probe's KERNEL read rung: Landlock `open(O_PATH)`s each grant inside the interpreter the
 # audit hook is already live in. Windows has no kernel rung -- and its hook normalizes a directory
 # grant's trailing separator away, harmlessly, since an `open` of a directory reads nothing.

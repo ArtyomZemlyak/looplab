@@ -17,6 +17,9 @@ These doubles reproduce exactly the rule each branch exists for, no more:
   the runner), not UTF-8: `subprocess.run(text=True)` through `locale.getencoding()`, and
   `Path.read_text()`/`write_text()` through `io.text_encoding`. `non_utf8_child_env` is its
   stand-in for a child process, where the builtin `open()` is reached too.
+* `windows_path_stat_ctime` — CPython (3.12+) fills a PATH stat's `st_ctime` with the creation
+  time and an `fstat`'s with FILE_BASIC_INFO.ChangeTime, so for one unchanged file the two calls
+  disagree about it (review 2026-09-22 round 2, GitHub Actions run 35804658308).
 
 A test switches `os.name` to "nt" only around the call under test (pathlib picks its flavour from
 it at construction time) and restores it before asserting.
@@ -183,3 +186,53 @@ def non_utf8_child_env() -> dict:
     if not got or got.replace("-", "").lower() in {"utf8", "cp65001"}:
         pytest.skip(f"a child under LC_ALL=C still decodes as {got or '?'}: no non-UTF-8 codec here")
     return env
+
+
+# Every named `os.stat_result` field past the ten positional ones that a platform may carry: the
+# double below rebuilds a result and must hand back EXACTLY what the filesystem said in every other
+# field, or a test built on it proves the wrong thing.
+_STAT_EXTRA_FIELDS = (
+    "st_atime", "st_mtime", "st_ctime", "st_atime_ns", "st_mtime_ns", "st_ctime_ns",
+    "st_blksize", "st_blocks", "st_rdev", "st_flags", "st_gen", "st_birthtime", "st_birthtime_ns",
+    "st_file_attributes", "st_reparse_tag", "st_fstype")
+
+
+def windows_path_stat_ctime(monkeypatch) -> list:
+    """Make a PATH stat disagree with an `fstat` about `st_ctime`, the way CPython (3.12+) does on
+    Windows.
+
+    `os.stat`/`os.lstat` go through `win32_xstat`, which copies the file's CREATION time into
+    `st_ctime` ("ctime is only deprecated from 3.12, so we copy birthtime across"), while `os.fstat`
+    goes through `_Py_fstat_noraise` and reports FILE_BASIC_INFO.ChangeTime. For any file written after
+    it was created the two differ, so a `file_identity` taken through one never equals one taken
+    through the other -- measured on the Windows CI leg (run 35804658308) as every launch through a
+    `task_file` answering 422 `task_source_changed`. Every other field is filled from the same handle
+    information by both calls (the leg's own logs show path and descriptor identities agreeing on
+    `(st_dev, st_ino)`), so this double moves ctime alone: every PATH stat's ctime is shifted one
+    second back, `os.fstat` (and `os.stat` of an int descriptor, which IS an fstat) stays real.
+    Returns the paths it answered for, so a test can prove it fired."""
+    real_stat, real_lstat = os.stat, os.lstat
+    answered: list = []
+
+    def _creation_stamped(info):
+        extra = {name: getattr(info, name) for name in _STAT_EXTRA_FIELDS if hasattr(info, name)}
+        extra["st_ctime_ns"] = info.st_ctime_ns - 1_000_000_000
+        extra["st_ctime"] = extra["st_ctime_ns"] / 1e9
+        head = list(tuple(info)[:10])
+        head[9] = int(extra["st_ctime"])
+        return os.stat_result(head, extra)
+
+    def _stat(path, *args, **kwargs):
+        info = real_stat(path, *args, **kwargs)
+        if isinstance(path, int):
+            return info
+        answered.append(path)
+        return _creation_stamped(info)
+
+    def _lstat(path, *args, **kwargs):
+        answered.append(path)
+        return _creation_stamped(real_lstat(path, *args, **kwargs))
+
+    monkeypatch.setattr(os, "stat", _stat)
+    monkeypatch.setattr(os, "lstat", _lstat)
+    return answered

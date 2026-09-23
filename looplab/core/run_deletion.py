@@ -15,7 +15,7 @@ import stat
 from pathlib import Path
 from typing import Any, Optional
 
-from looplab.core.atomicio import file_identity, strict_fsync_parent
+from looplab.core.atomicio import file_identity, same_file_entry, strict_fsync_parent
 from looplab.core.fence import (
     FENCE_GENERATION_RE, FENCE_MAX_BYTES, FENCE_OPERATION_RE,
     load_bounded_json_marker, publish_bounded_json_marker)
@@ -75,8 +75,13 @@ def run_deletion_snapshot_token(
         raise RunDeletionStorageError(
             f"empty run deletion identity is unavailable: {exc}") from exc
     identity = file_identity(before)
+    # Like with like (the `serve/routers/misc.py::_read_author_file_safely` ladder): the full tuple
+    # across the two `lstat`s, the replacement tier across the `lstat` and the `fstat`. On Windows a
+    # path stat reports the CREATION time as `st_ctime` and `fstat` the change time, so the full
+    # tuple across the two interfaces refused every empty log there (review 2026-09-22 round 2).
     if (data or not stat.S_ISREG(opened.st_mode) or opened.st_size != 0
-            or identity != file_identity(opened) or identity != file_identity(after)):
+            or same_file_entry(opened) != same_file_entry(before)
+            or identity != file_identity(after)):
         raise RunDeletionStorageError(
             "the empty event log changed while its deletion identity was inspected")
     material = json.dumps({

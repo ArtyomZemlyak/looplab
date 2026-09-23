@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
+
+from _posix_gates import NOFOLLOW_OPEN, POSIX_ONLY_OS_CALLS
 
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
@@ -484,11 +487,24 @@ def test_task_file_replaced_mid_read_is_refused_and_never_parsed(tmp_path, monke
     assert _SECRET_LINE not in response.text
 
 
-def test_task_file_that_becomes_a_symlink_after_containment_is_refused(tmp_path, monkeypatch):
+@pytest.mark.parametrize("nofollow", [
+    pytest.param(True, id="O_NOFOLLOW", marks=NOFOLLOW_OPEN),
+    pytest.param(False, id="no-O_NOFOLLOW"),
+])
+def test_task_file_that_becomes_a_symlink_after_containment_is_refused(tmp_path, monkeypatch,
+                                                                         nofollow):
     """The swap that reaches OUT of every declared root. Resolve-then-contain answered about the
     file that was there at check time; `O_NOFOLLOW` on the resolved path answers about the one that
     is there at OPEN time, and it can refuse no legitimate launch — a resolved path holds no
-    symlinks by construction."""
+    symlinks by construction.
+
+    Where there is no `O_NOFOLLOW` (Windows) the open FOLLOWS the link and the descriptor lands on
+    the target; the identity CAS refuses it instead — the name's entry is the link, the descriptor's
+    is the target — so the answer is 422 `task_source_changed`, and the target is still never
+    parsed. Measured on the Windows CI leg (run 35804658308) as that 422 where this pinned the 400;
+    driven here by taking the flag away."""
+    if not nofollow:
+        monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
     root = tmp_path / "runroot"
     root.mkdir()
     secret = tmp_path / "shadow"
@@ -512,11 +528,13 @@ def test_task_file_that_becomes_a_symlink_after_containment_is_refused(tmp_path,
         "run_id": "relinked", "task_file": str(source),
     })
 
-    assert response.status_code == 400, response.text
-    assert response.json()["detail"]["code"] == "task_file_not_found"
+    status, code = (400, "task_file_not_found") if nofollow else (422, "task_source_changed")
+    assert response.status_code == status, response.text
+    assert response.json()["detail"]["code"] == code
     assert _SECRET_LINE not in response.text
 
 
+@POSIX_ONLY_OS_CALLS
 def test_task_file_fifo_in_a_declared_root_does_not_hang_the_worker(tmp_path):
     """A FIFO passes `Path.is_file()`-shaped intent checks in spirit but blocks `read_text` forever.
     The open is non-blocking and a non-regular file is refused, so this returns instead of wedging
