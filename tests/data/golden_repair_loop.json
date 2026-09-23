@@ -1,0 +1,1913 @@
+{
+  "repaired_then_scored": [
+    [
+      "eval_invocation_claimed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0"
+      }
+    ],
+    [
+      "eval_invocation_settled",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "outcome": "failed",
+        "eval_seconds": "<volatile>"
+      }
+    ],
+    [
+      "node_repaired",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 1,
+        "code": "import json; print(json.dumps({'metric': 0.1}))\n",
+        "files": {},
+        "deleted": [],
+        "error_in": "ValueError: boom\n",
+        "triage_action": "repair",
+        "error_evidence": "ValueError: boom\n",
+        "rationale": "fix the raise",
+        "changed": [
+          "<whole-file solution>"
+        ],
+        "stages_passed": 0,
+        "verified": "unstated",
+        "unmet": [],
+        "edit_calls": 0,
+        "attribution": {
+          "prose_authored": "before_repair",
+          "wrote": [
+            {
+              "path": "<whole-file solution>",
+              "kept": 0.0
+            }
+          ],
+          "deleted": [],
+          "unattributed": [],
+          "named": [],
+          "unnamed": []
+        },
+        "reason": "crash",
+        "reason_source": "triage",
+        "engine_reason": "crash",
+        "reason_evidence": {
+          "source": "none",
+          "locator": "",
+          "quote": ""
+        },
+        "eval_seconds": "<volatile>",
+        "unparseable_repairs": 0
+      }
+    ],
+    [
+      "eval_invocation_claimed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 1,
+        "invocation_id": "legacy:r:n0:g0:a1"
+      }
+    ],
+    [
+      "eval_invocation_settled",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 1,
+        "invocation_id": "legacy:r:n0:g0:a1",
+        "outcome": "ok",
+        "eval_seconds": "<volatile>"
+      }
+    ],
+    [
+      "node_evaluated",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "metric": 0.1,
+        "stdout_tail": "{\"metric\": 0.1}\n",
+        "eval_seconds": "<volatile>",
+        "extra_metrics": {},
+        "violations": [],
+        "trials": []
+      }
+    ],
+    [
+      "trust_scan",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "detectors": [
+          "reward_hack",
+          "workdir_audit",
+          "code_leakage",
+          "critic"
+        ],
+        "findings": 2,
+        "evidence_version": 1,
+        "code_digest": "671cc0e711875570"
+      }
+    ],
+    [
+      "reward_hack_suspected",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "signals": [
+          {
+            "signal": "critic:hardcoded_metric",
+            "detail": "the metric appears to be a hard-coded constant, not computed"
+          },
+          {
+            "signal": "critic:params_ignored",
+            "detail": "none of the proposed params ['x', 'y'] are referenced in the code"
+          }
+        ],
+        "evidence_version": 1,
+        "code_digest": "671cc0e711875570"
+      }
+    ]
+  ],
+  "triage_abandon": [
+    [
+      "eval_invocation_claimed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0"
+      }
+    ],
+    [
+      "eval_invocation_settled",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "outcome": "failed",
+        "eval_seconds": "<volatile>"
+      }
+    ],
+    [
+      "node_failed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "error": "ValueError: boom\n",
+        "reason": "crash",
+        "eval_seconds": "<volatile>",
+        "reason_source": "triage",
+        "engine_reason": "crash",
+        "error_evidence": "ValueError: boom\n",
+        "reason_evidence": {
+          "source": "none",
+          "locator": "",
+          "quote": ""
+        },
+        "triage_action": "abandon",
+        "triage_rationale": "nothing left"
+      }
+    ]
+  ],
+  "triage_reject_idea": [
+    [
+      "eval_invocation_claimed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0"
+      }
+    ],
+    [
+      "eval_invocation_settled",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "outcome": "failed",
+        "eval_seconds": "<volatile>"
+      }
+    ],
+    [
+      "node_failed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "error": "ValueError: boom\n",
+        "reason": "idea_rejected",
+        "eval_seconds": "<volatile>",
+        "reason_source": "engine",
+        "engine_reason": "crash",
+        "error_evidence": "ValueError: boom\n",
+        "reason_evidence": {
+          "source": "none",
+          "locator": "",
+          "quote": ""
+        },
+        "triage_action": "reject_idea",
+        "triage_rationale": "wrong model"
+      }
+    ]
+  ],
+  "triage_unreachable": [
+    [
+      "eval_invocation_claimed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0"
+      }
+    ],
+    [
+      "eval_invocation_settled",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "outcome": "failed",
+        "eval_seconds": "<volatile>"
+      }
+    ],
+    [
+      "pause",
+      {
+        "reason": "auto-paused: the crash-triage model could not be reached while deciding whether to keep repairing node 0 — RuntimeError: Error code: 402 - out of credits. Every other node reaches the same endpoint; fix it (credits, key, base URL, or the endpoint itself) and resume."
+      }
+    ],
+    [
+      "node_failed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "error": "crash-triage failed: RuntimeError: Error code: 402 - out of credits\n[the model that decides whether to keep repairing this node could not be reached, so the node was stopped rather than repaired blind. Its last eval error was: ValueError: boom\n]",
+        "reason": "developer_crash",
+        "eval_seconds": "<volatile>",
+        "reason_source": "undiagnosed",
+        "engine_reason": "crash",
+        "error_evidence": "ValueError: boom\n",
+        "reason_evidence": {
+          "source": "none",
+          "locator": "",
+          "quote": ""
+        },
+        "triage_action": "abandon",
+        "triage_rationale": "the repair-stop judge could not be reached — treating it as a provider failure, not as permission to keep repairing"
+      }
+    ]
+  ],
+  "triage_unreadable": [
+    [
+      "eval_invocation_claimed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0"
+      }
+    ],
+    [
+      "eval_invocation_settled",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "outcome": "failed",
+        "eval_seconds": "<volatile>"
+      }
+    ],
+    [
+      "node_failed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "error": "ValueError: boom\n",
+        "reason": "unclassified",
+        "eval_seconds": "<volatile>",
+        "reason_source": "undiagnosed",
+        "engine_reason": "crash",
+        "error_evidence": "ValueError: boom\n",
+        "reason_evidence": {
+          "source": "none",
+          "locator": "",
+          "quote": ""
+        },
+        "triage_action": "abandon",
+        "triage_rationale": "the repair-stop judge answered something the engine could not read as a verdict, so this node stopped rather than repairing blind — the triage model returned no usable verdict ({'action': 'keep-going', 'failure_kind': 'crash'})"
+      }
+    ]
+  ],
+  "developer_stuck": [
+    [
+      "eval_invocation_claimed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0"
+      }
+    ],
+    [
+      "eval_invocation_settled",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "outcome": "failed",
+        "eval_seconds": "<volatile>"
+      }
+    ],
+    [
+      "node_failed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "error": "ValueError: boom\n",
+        "reason": "crash",
+        "eval_seconds": "<volatile>",
+        "reason_source": "triage",
+        "engine_reason": "crash",
+        "error_evidence": "ValueError: boom\n",
+        "reason_evidence": {
+          "source": "none",
+          "locator": "",
+          "quote": ""
+        },
+        "triage_action": "abandon",
+        "triage_rationale": "the Developer declared it does not know how to fix this — no idea left"
+      }
+    ]
+  ],
+  "developer_provider_sentinel": [
+    [
+      "eval_invocation_claimed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0"
+      }
+    ],
+    [
+      "eval_invocation_settled",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "outcome": "failed",
+        "eval_seconds": "<volatile>"
+      }
+    ],
+    [
+      "pause",
+      {
+        "reason": "auto-paused: the Developer's LLM provider failed while repairing node 0, so the repair returned an error instead of code — (developer error: 402 out of credits). Every other node reaches the same endpoint; fix it (credits, key, base URL, or the endpoint itself) and resume."
+      }
+    ],
+    [
+      "node_failed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "error": "(developer error: 402 out of credits)\n[the Developer's own session failed, so this node was never repaired. Its last eval error was: ValueError: boom\n]",
+        "reason": "developer_crash",
+        "eval_seconds": "<volatile>",
+        "reason_source": "engine",
+        "engine_reason": "crash",
+        "error_evidence": "ValueError: boom\n",
+        "reason_evidence": {
+          "source": "none",
+          "locator": "",
+          "quote": ""
+        },
+        "triage_action": "abandon",
+        "triage_rationale": "the repair CALL failed at the provider — no repaired code was produced"
+      }
+    ]
+  ],
+  "developer_raises": [
+    [
+      "eval_invocation_claimed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0"
+      }
+    ],
+    [
+      "eval_invocation_settled",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "outcome": "failed",
+        "eval_seconds": "<volatile>"
+      }
+    ],
+    [
+      "pause",
+      {
+        "reason": "auto-paused: the Developer's LLM provider failed while repairing node 0, so the repair returned an error instead of code — (developer error: socket closed). Every other node reaches the same endpoint; fix it (credits, key, base URL, or the endpoint itself) and resume."
+      }
+    ],
+    [
+      "node_failed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "error": "(developer error: socket closed)\n[the Developer's own session failed, so this node was never repaired. Its last eval error was: ValueError: boom\n]",
+        "reason": "developer_crash",
+        "eval_seconds": "<volatile>",
+        "reason_source": "engine",
+        "engine_reason": "crash",
+        "error_evidence": "ValueError: boom\n",
+        "reason_evidence": {
+          "source": "none",
+          "locator": "",
+          "quote": ""
+        },
+        "triage_action": "abandon",
+        "triage_rationale": "the repair CALL failed at the provider — no repaired code was produced"
+      }
+    ]
+  ],
+  "inert_chain": [
+    [
+      "eval_invocation_claimed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0"
+      }
+    ],
+    [
+      "eval_invocation_settled",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "outcome": "failed",
+        "eval_seconds": "<volatile>"
+      }
+    ],
+    [
+      "node_repaired",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 1,
+        "code": "import sys\nsys.stderr.write('ValueError: boom\\n')\nsys.exit(1)\n",
+        "files": {},
+        "deleted": [],
+        "error_in": "ValueError: boom\n",
+        "triage_action": "repair",
+        "error_evidence": "ValueError: boom\n",
+        "rationale": "fix the raise",
+        "changed": [],
+        "stages_passed": 0,
+        "verified": "inert",
+        "unmet": [],
+        "edit_calls": 0,
+        "attribution": {
+          "prose_authored": "before_repair",
+          "wrote": [],
+          "deleted": [],
+          "unattributed": [],
+          "named": [],
+          "unnamed": []
+        },
+        "reason": "crash",
+        "reason_source": "triage",
+        "engine_reason": "crash",
+        "reason_evidence": {
+          "source": "none",
+          "locator": "",
+          "quote": ""
+        },
+        "eval_seconds": "<volatile>",
+        "unparseable_repairs": 0
+      }
+    ],
+    [
+      "eval_invocation_claimed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 1,
+        "invocation_id": "legacy:r:n0:g0:a1"
+      }
+    ],
+    [
+      "eval_invocation_settled",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 1,
+        "invocation_id": "legacy:r:n0:g0:a1",
+        "outcome": "failed",
+        "eval_seconds": "<volatile>"
+      }
+    ],
+    [
+      "node_repaired",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 2,
+        "code": "import sys\nsys.stderr.write('ValueError: boom\\n')\nsys.exit(1)\n",
+        "files": {},
+        "deleted": [],
+        "error_in": "ValueError: boom\n",
+        "triage_action": "repair",
+        "error_evidence": "ValueError: boom\n",
+        "rationale": "fix the raise",
+        "changed": [],
+        "stages_passed": 0,
+        "verified": "inert",
+        "unmet": [],
+        "edit_calls": 0,
+        "attribution": {
+          "prose_authored": "before_repair",
+          "wrote": [],
+          "deleted": [],
+          "unattributed": [],
+          "named": [],
+          "unnamed": []
+        },
+        "reason": "crash",
+        "reason_source": "triage",
+        "engine_reason": "crash",
+        "reason_evidence": {
+          "source": "none",
+          "locator": "",
+          "quote": ""
+        },
+        "eval_seconds": "<volatile>",
+        "unparseable_repairs": 0
+      }
+    ],
+    [
+      "node_failed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "error": "ValueError: boom\n",
+        "reason": "crash",
+        "eval_seconds": "<volatile>",
+        "reason_source": "triage",
+        "engine_reason": "crash",
+        "error_evidence": "ValueError: boom\n",
+        "reason_evidence": {
+          "source": "none",
+          "locator": "",
+          "quote": ""
+        },
+        "triage_action": "abandon",
+        "triage_rationale": "the last 2 repair attempts changed nothing at all — the engine compared the repaired files against the ones already on disk and they are byte-identical, so re-evaluating would re-run inputs this node has already run; abandoning in-node repair — the node ends here, and the loop's next proposal is fre"
+      }
+    ]
+  ],
+  "critic_stop": [
+    [
+      "eval_invocation_claimed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0"
+      }
+    ],
+    [
+      "eval_invocation_settled",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "outcome": "failed",
+        "eval_seconds": "<volatile>"
+      }
+    ],
+    [
+      "node_repaired",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 1,
+        "code": "import sys\nsys.stderr.write('ValueError: boom\\n')\nsys.exit(1)\n# attempt 1\n",
+        "files": {},
+        "deleted": [],
+        "error_in": "ValueError: boom\n",
+        "triage_action": "repair",
+        "error_evidence": "ValueError: boom\n",
+        "rationale": "fix the raise",
+        "changed": [
+          "<whole-file solution>"
+        ],
+        "stages_passed": 0,
+        "verified": "unstated",
+        "unmet": [],
+        "edit_calls": 0,
+        "attribution": {
+          "prose_authored": "before_repair",
+          "wrote": [
+            {
+              "path": "<whole-file solution>",
+              "kept": 0.857
+            }
+          ],
+          "deleted": [],
+          "unattributed": [],
+          "named": [],
+          "unnamed": []
+        },
+        "reason": "crash",
+        "reason_source": "triage",
+        "engine_reason": "crash",
+        "reason_evidence": {
+          "source": "none",
+          "locator": "",
+          "quote": ""
+        },
+        "eval_seconds": "<volatile>",
+        "unparseable_repairs": 0
+      }
+    ],
+    [
+      "eval_invocation_claimed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 1,
+        "invocation_id": "legacy:r:n0:g0:a1"
+      }
+    ],
+    [
+      "eval_invocation_settled",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 1,
+        "invocation_id": "legacy:r:n0:g0:a1",
+        "outcome": "failed",
+        "eval_seconds": "<volatile>"
+      }
+    ],
+    [
+      "node_repaired",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 2,
+        "code": "import sys\nsys.stderr.write('ValueError: boom\\n')\nsys.exit(1)\n# attempt 2\n",
+        "files": {},
+        "deleted": [],
+        "error_in": "ValueError: boom\n",
+        "triage_action": "repair",
+        "error_evidence": "ValueError: boom\n",
+        "rationale": "fix the raise",
+        "changed": [
+          "<whole-file solution>"
+        ],
+        "stages_passed": 0,
+        "verified": "unstated",
+        "unmet": [],
+        "edit_calls": 0,
+        "attribution": {
+          "prose_authored": "before_repair",
+          "wrote": [
+            {
+              "path": "<whole-file solution>",
+              "kept": 0.75
+            }
+          ],
+          "deleted": [],
+          "unattributed": [],
+          "named": [],
+          "unnamed": []
+        },
+        "reason": "crash",
+        "reason_source": "triage",
+        "engine_reason": "crash",
+        "reason_evidence": {
+          "source": "none",
+          "locator": "",
+          "quote": ""
+        },
+        "eval_seconds": "<volatile>",
+        "unparseable_repairs": 0
+      }
+    ],
+    [
+      "eval_invocation_claimed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 2,
+        "invocation_id": "legacy:r:n0:g0:a2"
+      }
+    ],
+    [
+      "eval_invocation_settled",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 2,
+        "invocation_id": "legacy:r:n0:g0:a2",
+        "outcome": "failed",
+        "eval_seconds": "<volatile>"
+      }
+    ],
+    [
+      "repair_critic_verdict",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 3,
+        "durable_repairs": 2,
+        "after": 2,
+        "verdict": "stop",
+        "source": "model",
+        "rationale": "same cause",
+        "judged": [
+          {
+            "attempt": 1,
+            "cause": "crash",
+            "changed": 1,
+            "verified": "unstated"
+          },
+          {
+            "attempt": 2,
+            "cause": "crash",
+            "changed": 1,
+            "verified": "unstated"
+          }
+        ]
+      }
+    ],
+    [
+      "node_failed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "error": "ValueError: boom\n",
+        "reason": "crash",
+        "eval_seconds": "<volatile>",
+        "reason_source": "triage",
+        "engine_reason": "crash",
+        "error_evidence": "ValueError: boom\n",
+        "reason_evidence": {
+          "source": "none",
+          "locator": "",
+          "quote": ""
+        },
+        "triage_action": "abandon",
+        "triage_rationale": "the repair critic stopped this chain — same cause"
+      }
+    ]
+  ],
+  "count_floor": [
+    [
+      "eval_invocation_claimed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0"
+      }
+    ],
+    [
+      "eval_invocation_settled",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "outcome": "failed",
+        "eval_seconds": "<volatile>"
+      }
+    ],
+    [
+      "node_repaired",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 1,
+        "code": "import sys\nsys.stderr.write('ValueError: boom\\n')\nsys.exit(1)\n# attempt 1\n",
+        "files": {},
+        "deleted": [],
+        "error_in": "ValueError: boom\n",
+        "triage_action": "repair",
+        "error_evidence": "ValueError: boom\n",
+        "rationale": "fix the raise",
+        "changed": [
+          "<whole-file solution>"
+        ],
+        "stages_passed": 0,
+        "verified": "unstated",
+        "unmet": [],
+        "edit_calls": 0,
+        "attribution": {
+          "prose_authored": "before_repair",
+          "wrote": [
+            {
+              "path": "<whole-file solution>",
+              "kept": 0.857
+            }
+          ],
+          "deleted": [],
+          "unattributed": [],
+          "named": [],
+          "unnamed": []
+        },
+        "reason": "crash",
+        "reason_source": "triage",
+        "engine_reason": "crash",
+        "reason_evidence": {
+          "source": "none",
+          "locator": "",
+          "quote": ""
+        },
+        "eval_seconds": "<volatile>",
+        "unparseable_repairs": 0
+      }
+    ],
+    [
+      "eval_invocation_claimed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 1,
+        "invocation_id": "legacy:r:n0:g0:a1"
+      }
+    ],
+    [
+      "eval_invocation_settled",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 1,
+        "invocation_id": "legacy:r:n0:g0:a1",
+        "outcome": "failed",
+        "eval_seconds": "<volatile>"
+      }
+    ],
+    [
+      "node_repaired",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 2,
+        "code": "import sys\nsys.stderr.write('ValueError: boom\\n')\nsys.exit(1)\n# attempt 2\n",
+        "files": {},
+        "deleted": [],
+        "error_in": "ValueError: boom\n",
+        "triage_action": "repair",
+        "error_evidence": "ValueError: boom\n",
+        "rationale": "fix the raise",
+        "changed": [
+          "<whole-file solution>"
+        ],
+        "stages_passed": 0,
+        "verified": "unstated",
+        "unmet": [],
+        "edit_calls": 0,
+        "attribution": {
+          "prose_authored": "before_repair",
+          "wrote": [
+            {
+              "path": "<whole-file solution>",
+              "kept": 0.75
+            }
+          ],
+          "deleted": [],
+          "unattributed": [],
+          "named": [],
+          "unnamed": []
+        },
+        "reason": "crash",
+        "reason_source": "triage",
+        "engine_reason": "crash",
+        "reason_evidence": {
+          "source": "none",
+          "locator": "",
+          "quote": ""
+        },
+        "eval_seconds": "<volatile>",
+        "unparseable_repairs": 0
+      }
+    ],
+    [
+      "eval_invocation_claimed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 2,
+        "invocation_id": "legacy:r:n0:g0:a2"
+      }
+    ],
+    [
+      "eval_invocation_settled",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 2,
+        "invocation_id": "legacy:r:n0:g0:a2",
+        "outcome": "failed",
+        "eval_seconds": "<volatile>"
+      }
+    ],
+    [
+      "node_failed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "error": "ValueError: boom\n",
+        "reason": "crash",
+        "eval_seconds": "<volatile>",
+        "reason_source": "engine",
+        "engine_reason": "crash",
+        "error_evidence": "ValueError: boom\n",
+        "triage_action": "abandon",
+        "triage_rationale": "inline repair has spent its hard limit of 2 attempt(s) on this node (inline_repair_attempts)"
+      }
+    ]
+  ],
+  "inline_repair_off": [
+    [
+      "eval_invocation_claimed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0"
+      }
+    ],
+    [
+      "eval_invocation_settled",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "outcome": "failed",
+        "eval_seconds": "<volatile>"
+      }
+    ],
+    [
+      "node_failed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "error": "ValueError: boom\n",
+        "reason": "crash",
+        "eval_seconds": "<volatile>",
+        "reason_source": "engine",
+        "engine_reason": "crash",
+        "error_evidence": "ValueError: boom\n"
+      }
+    ]
+  ],
+  "reason_not_repairable": [
+    [
+      "eval_invocation_claimed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0"
+      }
+    ],
+    [
+      "eval_invocation_settled",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "outcome": "failed",
+        "eval_seconds": "<volatile>"
+      }
+    ],
+    [
+      "node_failed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "error": "ValueError: boom\n",
+        "reason": "crash",
+        "eval_seconds": "<volatile>",
+        "reason_source": "engine",
+        "engine_reason": "crash",
+        "error_evidence": "ValueError: boom\n"
+      }
+    ]
+  ],
+  "developer_cannot_repair": [
+    [
+      "eval_invocation_claimed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0"
+      }
+    ],
+    [
+      "eval_invocation_settled",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "outcome": "failed",
+        "eval_seconds": "<volatile>"
+      }
+    ],
+    [
+      "node_failed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "error": "ValueError: boom\n",
+        "reason": "crash",
+        "eval_seconds": "<volatile>",
+        "reason_source": "engine",
+        "engine_reason": "crash",
+        "error_evidence": "ValueError: boom\n"
+      }
+    ]
+  ],
+  "salvaged": [
+    [
+      "eval_invocation_claimed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0"
+      }
+    ],
+    [
+      "eval_invocation_settled",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "outcome": "failed",
+        "eval_seconds": "<volatile>"
+      }
+    ],
+    [
+      "stage_finished",
+      {
+        "node_id": 0,
+        "name": "train",
+        "status": "expect_failed",
+        "exit_code": 0,
+        "seconds": "<volatile>",
+        "stage_key_reason": "opaque_entry",
+        "concern": "stage 'train' exited 0 but did NOT produce its declared artifact 'exp/run-a/final/model.safetensors'. The stage manifest DECLARES this stage produces it, so either the stage's code never wrote it (fix the code) or the declaration names the wrong path (fix looplab_stages.json). Do not delete the declaration to make this pass.",
+        "expect_since": "<volatile>",
+        "expect_declared": [
+          "exp/run-a/final/model.safetensors"
+        ],
+        "generation": 0
+      }
+    ],
+    [
+      "node_evaluated",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "metric": 0.74325,
+        "stdout_tail": "RECALL@100: 0.743250\n",
+        "eval_seconds": "<volatile>",
+        "extra_metrics": {},
+        "violations": [
+          {
+            "name": "metric_salvaged",
+            "value": 0.74325,
+            "max": null,
+            "min": null,
+            "salvage": {
+              "salvaged": true,
+              "condition": "artifact_contract",
+              "source": "declared_reader",
+              "reader": "stdout_regex",
+              "producer": "agent_stage",
+              "stage": "train"
+            }
+          }
+        ],
+        "trials": [],
+        "stderr_tail": "stage 'train' failed its declared artifact contract: stage 'train' exited 0 but did NOT produce its declared artifact 'exp/run-a/final/model.safetensors'. The stage manifest DECLARES this stage produces it, so either the stage's code never wrote it (fix the code) or the declaration names the wrong path (fix looplab_stages.json). Do not delete the declaration to make this pass.",
+        "metric_provenance": {
+          "salvaged": true,
+          "condition": "artifact_contract",
+          "source": "declared_reader",
+          "reader": "stdout_regex",
+          "producer": "agent_stage",
+          "stage": "train",
+          "cause_repaired": false,
+          "salvaged_error": "stage 'train' failed its declared artifact contract: stage 'train' exited 0 but did NOT produce its declared artifact 'exp/run-a/final/model.safetensors'. The stage manifest DECLARES this stage produces it, so either the stage's code never wrote it (fix the code) or the declaration names the wrong path (fix looplab_stages.json). Do not delete the declaration to make this pass.",
+          "subject_bound": false,
+          "unbound_reason": "not_declared",
+          "subjects": []
+        }
+      }
+    ],
+    [
+      "trust_scan",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "detectors": [
+          "reward_hack",
+          "workdir_audit",
+          "code_leakage",
+          "critic"
+        ],
+        "findings": 2,
+        "evidence_version": 1,
+        "code_digest": "b5a40c67ec99fe59"
+      }
+    ],
+    [
+      "reward_hack_suspected",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "signals": [
+          {
+            "signal": "critic:no_metric_output",
+            "detail": "code never references 'metric' — it may not emit the required score"
+          },
+          {
+            "signal": "critic:params_ignored",
+            "detail": "none of the proposed params ['x', 'y'] are referenced in the code"
+          }
+        ],
+        "evidence_version": 1,
+        "code_digest": "b5a40c67ec99fe59"
+      }
+    ]
+  ],
+  "salvaged_cause_fixed": [
+    [
+      "eval_invocation_claimed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0"
+      }
+    ],
+    [
+      "eval_invocation_settled",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "outcome": "failed",
+        "eval_seconds": "<volatile>"
+      }
+    ],
+    [
+      "stage_finished",
+      {
+        "node_id": 0,
+        "name": "train",
+        "status": "expect_failed",
+        "exit_code": 0,
+        "seconds": "<volatile>",
+        "stage_key_reason": "opaque_entry",
+        "concern": "stage 'train' exited 0 but did NOT produce its declared artifact 'exp/run-a/final/model.safetensors'. The stage manifest DECLARES this stage produces it, so either the stage's code never wrote it (fix the code) or the declaration names the wrong path (fix looplab_stages.json). Do not delete the declaration to make this pass.",
+        "expect_since": "<volatile>",
+        "expect_declared": [
+          "exp/run-a/final/model.safetensors"
+        ],
+        "generation": 0
+      }
+    ],
+    [
+      "node_repaired",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "files": {
+          "looplab_stages.json": "{\"stages\":[{\"name\":\"train\",\"command\":[\"python\",\"-c\",\"print('RECALL@100: 0.743250')\"],\"timeout\":120.0,\"expect\":{\"files\":[\"exp/run-a_model/final/model.safetensors\"]}}]}"
+        },
+        "deleted": [],
+        "error_in": "stage 'train' failed its declared artifact contract: stage 'train' exited 0 but did NOT produce its declared artifact 'exp/run-a/final/model.safetensors'. The stage manifest DECLARES this stage produces it, so either the stage's code never wrote it (fix the code) or the declaration names the wrong path (fix looplab_stages.json). Do not delete the declaration to make this pass.",
+        "triage_action": "salvage_cause_fix",
+        "rationale": "metric salvaged (declared_reader); fixing the declaration that failed, without re-evaluating",
+        "changed": [
+          "looplab_stages.json"
+        ],
+        "stages_passed": null,
+        "salvaged_metric": 0.74325
+      }
+    ],
+    [
+      "node_evaluated",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "metric": 0.74325,
+        "stdout_tail": "RECALL@100: 0.743250\n",
+        "eval_seconds": "<volatile>",
+        "extra_metrics": {},
+        "violations": [
+          {
+            "name": "metric_salvaged",
+            "value": 0.74325,
+            "max": null,
+            "min": null,
+            "salvage": {
+              "salvaged": true,
+              "condition": "artifact_contract",
+              "source": "declared_reader",
+              "reader": "stdout_regex",
+              "producer": "agent_stage",
+              "stage": "train"
+            }
+          }
+        ],
+        "trials": [],
+        "stderr_tail": "stage 'train' failed its declared artifact contract: stage 'train' exited 0 but did NOT produce its declared artifact 'exp/run-a/final/model.safetensors'. The stage manifest DECLARES this stage produces it, so either the stage's code never wrote it (fix the code) or the declaration names the wrong path (fix looplab_stages.json). Do not delete the declaration to make this pass.",
+        "metric_provenance": {
+          "salvaged": true,
+          "condition": "artifact_contract",
+          "source": "declared_reader",
+          "reader": "stdout_regex",
+          "producer": "agent_stage",
+          "stage": "train",
+          "cause_repaired": true,
+          "salvaged_error": "stage 'train' failed its declared artifact contract: stage 'train' exited 0 but did NOT produce its declared artifact 'exp/run-a/final/model.safetensors'. The stage manifest DECLARES this stage produces it, so either the stage's code never wrote it (fix the code) or the declaration names the wrong path (fix looplab_stages.json). Do not delete the declaration to make this pass.",
+          "subject_bound": false,
+          "unbound_reason": "not_declared",
+          "subjects": []
+        }
+      }
+    ],
+    [
+      "trust_scan",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "detectors": [
+          "reward_hack",
+          "workdir_audit",
+          "code_leakage",
+          "critic"
+        ],
+        "findings": 2,
+        "evidence_version": 1,
+        "code_digest": "5cd371dc70a62f71"
+      }
+    ],
+    [
+      "reward_hack_suspected",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "signals": [
+          {
+            "signal": "critic:no_metric_output",
+            "detail": "code never references 'metric' — it may not emit the required score"
+          },
+          {
+            "signal": "critic:params_ignored",
+            "detail": "none of the proposed params ['x', 'y'] are referenced in the code"
+          }
+        ],
+        "evidence_version": 1,
+        "code_digest": "5cd371dc70a62f71"
+      }
+    ]
+  ],
+  "cause_fixed_artifact_written": [
+    [
+      "eval_invocation_claimed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0"
+      }
+    ],
+    [
+      "eval_invocation_settled",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "outcome": "failed",
+        "eval_seconds": "<volatile>"
+      }
+    ],
+    [
+      "stage_finished",
+      {
+        "node_id": 0,
+        "name": "train",
+        "status": "expect_failed",
+        "exit_code": 0,
+        "seconds": "<volatile>",
+        "stage_key_reason": "opaque_entry",
+        "concern": "stage 'train' exited 0 but did NOT produce its declared artifact 'exp/run-a/final/model.safetensors'. The stage manifest DECLARES this stage produces it, so either the stage's code never wrote it (fix the code) or the declaration names the wrong path (fix looplab_stages.json). Do not delete the declaration to make this pass. A file of that name WAS written by this stage at 'exp/run-a_model/final/model.safetensors' — so the code ran and produced output; the declared path is what disagrees with it.",
+        "expect_since": "<volatile>",
+        "expect_declared": [
+          "exp/run-a/final/model.safetensors"
+        ],
+        "generation": 0
+      }
+    ],
+    [
+      "node_repaired",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "files": {
+          "looplab_stages.json": "{\"stages\":[{\"name\":\"train\",\"command\":[\"python\",\"-c\",\"import os; os.makedirs(os.path.dirname('exp/run-a_model/final/model.safetensors'), exist_ok=True); open('exp/run-a_model/final/model.safetensors', 'wb').write(b'w'); print('RECALL@100: 0.743250')\"],\"timeout\":120.0,\"expect\":{\"files\":[\"exp/run-a_model/final/model.safetensors\"]}}]}"
+        },
+        "deleted": [],
+        "error_in": "[failed stage: train]\ntage 'train' exited 0 but did NOT produce its declared artifact 'exp/run-a/final/model.safetensors'. The stage manifest DECLARES this stage produces it, so either the stage's code never wrote it (fix the code) or the declaration names the wrong path (fix looplab_stages.json). Do not delete the declaration to make this pass. A file of that name WAS written by this stage at 'exp/run-a_model/final/model.safetensors' — so the code ran and produced output; the declared path is what disagrees with it.",
+        "triage_action": "salvage_cause_fix",
+        "rationale": "metric salvaged (declared_reader); fixing the declaration that failed, without re-evaluating",
+        "changed": [
+          "looplab_stages.json"
+        ],
+        "stages_passed": null,
+        "salvaged_metric": 0.74325
+      }
+    ],
+    [
+      "node_evaluated",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "metric": 0.74325,
+        "stdout_tail": "RECALL@100: 0.743250\n",
+        "eval_seconds": "<volatile>",
+        "extra_metrics": {},
+        "violations": [
+          {
+            "name": "metric_salvaged",
+            "value": 0.74325,
+            "max": null,
+            "min": null,
+            "salvage": {
+              "salvaged": true,
+              "condition": "artifact_contract",
+              "source": "declared_reader",
+              "reader": "stdout_regex",
+              "producer": "agent_stage",
+              "stage": "train"
+            }
+          }
+        ],
+        "trials": [],
+        "stderr_tail": "stage 'train' failed its declared artifact contract: stage 'train' exited 0 but did NOT produce its declared artifact 'exp/run-a/final/model.safetensors'. The stage manifest DECLARES this stage produces it, so either the stage's code never wrote it (fix the code) or the declaration names the wrong path (fix looplab_stages.json). Do not delete the declaration to make this pass. A file of that name WAS written by this stage at 'exp/run-a_model/final/model.safetensors' — so the code ran and produced output; the declared path is what disagrees with it.",
+        "metric_provenance": {
+          "salvaged": true,
+          "condition": "artifact_contract",
+          "source": "declared_reader",
+          "reader": "stdout_regex",
+          "producer": "agent_stage",
+          "stage": "train",
+          "cause_repaired": true,
+          "salvaged_error": "[failed stage: train]\ntage 'train' exited 0 but did NOT produce its declared artifact 'exp/run-a/final/model.safetensors'. The stage manifest DECLARES this stage produces it, so either the stage's code never wrote it (fix the code) or the declaration names the wrong path (fix looplab_stages.json). Do not delete the declaration to make this pass. A file of that name WAS written by this stage at 'exp/run-a_model/final/model.safetensors' — so the code ran and produced output; the declared path is what disagrees with it.",
+          "subject_bound": false,
+          "unbound_reason": "not_declared",
+          "subjects": []
+        }
+      }
+    ],
+    [
+      "trust_scan",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "detectors": [
+          "reward_hack",
+          "workdir_audit",
+          "code_leakage",
+          "critic"
+        ],
+        "findings": 2,
+        "evidence_version": 1,
+        "code_digest": "fc587ac719f86395"
+      }
+    ],
+    [
+      "reward_hack_suspected",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "signals": [
+          {
+            "signal": "critic:no_metric_output",
+            "detail": "code never references 'metric' — it may not emit the required score"
+          },
+          {
+            "signal": "critic:params_ignored",
+            "detail": "none of the proposed params ['x', 'y'] are referenced in the code"
+          }
+        ],
+        "evidence_version": 1,
+        "code_digest": "fc587ac719f86395"
+      }
+    ]
+  ],
+  "declaration_repaired": [
+    [
+      "eval_invocation_claimed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0"
+      }
+    ],
+    [
+      "eval_invocation_settled",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "outcome": "failed",
+        "eval_seconds": "<volatile>"
+      }
+    ],
+    [
+      "stage_finished",
+      {
+        "node_id": 0,
+        "name": "train",
+        "status": "expect_failed",
+        "exit_code": 0,
+        "seconds": "<volatile>",
+        "stage_key_reason": "opaque_entry",
+        "concern": "stage 'train' exited 0 but did NOT produce its declared artifact 'exp/run-a/final/model.safetensors'. The stage manifest DECLARES this stage produces it, so either the stage's code never wrote it (fix the code) or the declaration names the wrong path (fix looplab_stages.json). Do not delete the declaration to make this pass. A file of that name WAS written by this stage at 'exp/run-a_model/final/model.safetensors' — so the code ran and produced output; the declared path is what disagrees with it.",
+        "expect_since": "<volatile>",
+        "expect_declared": [
+          "exp/run-a/final/model.safetensors"
+        ],
+        "generation": 0
+      }
+    ],
+    [
+      "node_repaired",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "files": {
+          "looplab_stages.json": "{\"stages\":[{\"name\":\"train\",\"command\":[\"python\",\"-c\",\"import os; os.makedirs(os.path.dirname('exp/run-a_model/final/model.safetensors'), exist_ok=True); open('exp/run-a_model/final/model.safetensors', 'wb').write(b'w'); print('RECALL@100: 0.743250')\"],\"timeout\":120.0,\"expect\":{\"files\":[\"exp/run-a_model/final/model.safetensors\"]}}]}"
+        },
+        "deleted": [],
+        "error_in": "[failed stage: train]\ntage 'train' exited 0 but did NOT produce its declared artifact 'exp/run-a/final/model.safetensors'. The stage manifest DECLARES this stage produces it, so either the stage's code never wrote it (fix the code) or the declaration names the wrong path (fix looplab_stages.json). Do not delete the declaration to make this pass. A file of that name WAS written by this stage at 'exp/run-a_model/final/model.safetensors' — so the code ran and produced output; the declared path is what disagrees with it.",
+        "triage_action": "salvage_cause_fix",
+        "rationale": "metric salvaged (declared_reader); fixing the declaration that failed, without re-evaluating",
+        "changed": [
+          "looplab_stages.json"
+        ],
+        "stages_passed": null,
+        "salvaged_metric": 0.74325
+      }
+    ],
+    [
+      "node_evaluated",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "metric": 0.74325,
+        "stdout_tail": "RECALL@100: 0.743250\n",
+        "eval_seconds": "<volatile>",
+        "extra_metrics": {},
+        "violations": [],
+        "trials": [],
+        "stderr_tail": "stage 'train' failed its declared artifact contract: stage 'train' exited 0 but did NOT produce its declared artifact 'exp/run-a/final/model.safetensors'. The stage manifest DECLARES this stage produces it, so either the stage's code never wrote it (fix the code) or the declaration names the wrong path (fix looplab_stages.json). Do not delete the declaration to make this pass. A file of that name WAS written by this stage at 'exp/run-a_model/final/model.safetensors' — so the code ran and produced output; the declared path is what disagrees with it.",
+        "metric_provenance": {
+          "salvaged": false,
+          "declaration_repaired": true,
+          "stage": "train",
+          "reader": "stdout_regex",
+          "producer": "operator_stage",
+          "expect_files": [
+            "exp/run-a_model/final/model.safetensors"
+          ],
+          "declaration_error": "[failed stage: train]\ntage 'train' exited 0 but did NOT produce its declared artifact 'exp/run-a/final/model.safetensors",
+          "subject_bound": false,
+          "unbound_reason": "not_declared",
+          "subjects": []
+        }
+      }
+    ],
+    [
+      "trust_scan",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "detectors": [
+          "reward_hack",
+          "workdir_audit",
+          "code_leakage",
+          "critic"
+        ],
+        "findings": 2,
+        "evidence_version": 1,
+        "code_digest": "fc587ac719f86395"
+      }
+    ],
+    [
+      "reward_hack_suspected",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "signals": [
+          {
+            "signal": "critic:no_metric_output",
+            "detail": "code never references 'metric' — it may not emit the required score"
+          },
+          {
+            "signal": "critic:params_ignored",
+            "detail": "none of the proposed params ['x', 'y'] are referenced in the code"
+          }
+        ],
+        "evidence_version": 1,
+        "code_digest": "fc587ac719f86395"
+      }
+    ]
+  ],
+  "full_provenance": [
+    [
+      "eval_invocation_claimed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0"
+      }
+    ],
+    [
+      "eval_invocation_settled",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "outcome": "ok",
+        "eval_seconds": "<volatile>"
+      }
+    ],
+    [
+      "node_evaluated",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "metric": 0.99,
+        "stdout_tail": "{\"metric\": 0.99}\n",
+        "eval_seconds": "<volatile>",
+        "extra_metrics": {
+          "loss": 0.2,
+          "auc": 0.9
+        },
+        "violations": [],
+        "trials": [],
+        "self_metric": 0.97,
+        "stderr_tail": "note: scored on the held split\n",
+        "extra_metrics_provenance": {
+          "loss": "declared",
+          "auc": "auto"
+        },
+        "extra_metrics_direction": {
+          "loss": "min"
+        },
+        "metric_provenance": {
+          "subject_bound": true,
+          "subjects": [
+            {
+              "path": "out/model.bin"
+            }
+          ],
+          "host_scorer": {
+            "argv": [
+              "python",
+              "score.py"
+            ],
+            "program": "score.py"
+          },
+          "eval_inputs": {
+            "files": [
+              {
+                "path": "data/test.csv",
+                "sha256": "abababababababababababababababababababababababababababababababab"
+              }
+            ]
+          },
+          "applied_params": {
+            "committed": {
+              "x": 1.0
+            },
+            "resolved": {},
+            "conflicts": []
+          }
+        }
+      }
+    ],
+    [
+      "trust_scan",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "detectors": [
+          "reward_hack",
+          "workdir_audit",
+          "code_leakage",
+          "critic"
+        ],
+        "findings": 2,
+        "evidence_version": 1,
+        "code_digest": "671cc0e711875570"
+      }
+    ],
+    [
+      "reward_hack_suspected",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "signals": [
+          {
+            "signal": "critic:hardcoded_metric",
+            "detail": "the metric appears to be a hard-coded constant, not computed"
+          },
+          {
+            "signal": "critic:params_ignored",
+            "detail": "none of the proposed params ['x', 'y'] are referenced in the code"
+          }
+        ],
+        "evidence_version": 1,
+        "code_digest": "671cc0e711875570"
+      }
+    ]
+  ],
+  "unbound_subject_required": [
+    [
+      "eval_invocation_claimed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0"
+      }
+    ],
+    [
+      "eval_invocation_settled",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "outcome": "ok",
+        "eval_seconds": "<volatile>"
+      }
+    ],
+    [
+      "node_evaluated",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "metric": 0.99,
+        "stdout_tail": "{\"metric\": 0.99}\n",
+        "eval_seconds": "<volatile>",
+        "extra_metrics": {},
+        "violations": [
+          {
+            "name": "metric_salvaged",
+            "value": 0.99,
+            "max": null,
+            "min": null,
+            "salvage": {
+              "salvaged": false,
+              "condition": "metric_subject_unbound",
+              "unbound_reason": "not_declared",
+              "detail": "this metric names no SUBJECT: `eval.metric.subject` is empty, so the number has no recorded referent and nothing can check what it is about. Declare the workdir-relative artifact the metric is a claim about, e.g. \"subject\": [\"outputs/final/model.safetensors\"] — or, when the pipeline names its own ou"
+            }
+          }
+        ],
+        "trials": [],
+        "metric_provenance": {
+          "subject_bound": false,
+          "unbound_reason": "not_declared",
+          "subjects": []
+        }
+      }
+    ],
+    [
+      "trust_scan",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "detectors": [
+          "reward_hack",
+          "workdir_audit",
+          "code_leakage",
+          "critic"
+        ],
+        "findings": 2,
+        "evidence_version": 1,
+        "code_digest": "671cc0e711875570"
+      }
+    ],
+    [
+      "reward_hack_suspected",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "signals": [
+          {
+            "signal": "critic:hardcoded_metric",
+            "detail": "the metric appears to be a hard-coded constant, not computed"
+          },
+          {
+            "signal": "critic:params_ignored",
+            "detail": "none of the proposed params ['x', 'y'] are referenced in the code"
+          }
+        ],
+        "evidence_version": 1,
+        "code_digest": "671cc0e711875570"
+      }
+    ]
+  ],
+  "drift_refused": [
+    [
+      "eval_invocation_claimed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0"
+      }
+    ],
+    [
+      "eval_invocation_settled",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 0,
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "outcome": "failed",
+        "eval_seconds": "<volatile>"
+      }
+    ],
+    [
+      "node_repaired",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 1,
+        "code": "import json; print(json.dumps({'metric': 0.1}))\n",
+        "files": {},
+        "deleted": [],
+        "error_in": "metric drift: {'primary': 0.99, 'cross': 0.5, 'tolerance': 0.01}",
+        "triage_action": "repair",
+        "rationale": "fix the raise",
+        "changed": [],
+        "stages_passed": 0,
+        "verified": "inert",
+        "unmet": [],
+        "edit_calls": 0,
+        "attribution": {
+          "prose_authored": "before_repair",
+          "wrote": [],
+          "deleted": [],
+          "unattributed": [],
+          "named": [],
+          "unnamed": []
+        },
+        "reason": "drift",
+        "reason_source": "engine",
+        "engine_reason": "drift",
+        "reason_evidence": {
+          "source": "none",
+          "locator": "",
+          "quote": ""
+        },
+        "eval_seconds": "<volatile>",
+        "unparseable_repairs": 0
+      }
+    ],
+    [
+      "eval_invocation_claimed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 1,
+        "invocation_id": "legacy:r:n0:g0:a1"
+      }
+    ],
+    [
+      "eval_invocation_settled",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 1,
+        "invocation_id": "legacy:r:n0:g0:a1",
+        "outcome": "failed",
+        "eval_seconds": "<volatile>"
+      }
+    ],
+    [
+      "node_repaired",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "attempt": 2,
+        "code": "import json; print(json.dumps({'metric': 0.1}))\n",
+        "files": {},
+        "deleted": [],
+        "error_in": "metric drift: {'primary': 0.99, 'cross': 0.5, 'tolerance': 0.01}",
+        "triage_action": "repair",
+        "rationale": "fix the raise",
+        "changed": [],
+        "stages_passed": 0,
+        "verified": "inert",
+        "unmet": [],
+        "edit_calls": 0,
+        "attribution": {
+          "prose_authored": "before_repair",
+          "wrote": [],
+          "deleted": [],
+          "unattributed": [],
+          "named": [],
+          "unnamed": []
+        },
+        "reason": "drift",
+        "reason_source": "engine",
+        "engine_reason": "drift",
+        "reason_evidence": {
+          "source": "none",
+          "locator": "",
+          "quote": ""
+        },
+        "eval_seconds": "<volatile>",
+        "unparseable_repairs": 0
+      }
+    ],
+    [
+      "spec_drift",
+      {
+        "node_id": 0,
+        "primary": 0.99,
+        "cross": 0.5,
+        "tolerance": 0.01,
+        "generation": 0
+      }
+    ],
+    [
+      "node_failed",
+      {
+        "node_id": 0,
+        "generation": 0,
+        "error": "metric drift: {'primary': 0.99, 'cross': 0.5, 'tolerance': 0.01}",
+        "reason": "drift",
+        "eval_seconds": "<volatile>",
+        "reason_source": "engine",
+        "engine_reason": "drift",
+        "reason_evidence": {
+          "source": "none",
+          "locator": "",
+          "quote": ""
+        },
+        "triage_action": "abandon",
+        "triage_rationale": "the last 2 repair attempts changed nothing at all — the engine compared the repaired files against the ones already on disk and they are byte-identical, so re-evaluating would re-run inputs this node has already run; abandoning in-node repair — the node ends here, and the loop's next proposal is fre"
+      }
+    ]
+  ]
+}

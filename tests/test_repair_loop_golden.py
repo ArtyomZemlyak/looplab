@@ -1,0 +1,380 @@
+"""THE REPAIR LOOP'S DURABLE RECORD, pinned over scripted failures (review 2026-09-22, ENG2-06).
+
+`_evaluate`'s attempt loop decides, per failed attempt, whether it may buy a repair, what the triage
+verdict does to the attempt, whether the repair that came back was a repair at all, and — once the
+loop settles — what the terminal row says about its own number. Moving those decisions out of the
+phase methods into pure functions is only safe if the loop still writes the SAME log, and this file
+is how that is shown: every scenario below drives the REAL `Engine._evaluate` over one seeded node,
+with only the solution source, the triage judge, the critic, the Developer and (for the provenance
+cases) the evaluator's result scripted, and compares the rows the attempt loop wrote against
+`tests/data/golden_repair_loop.json` — generated on the tree BEFORE any such move.
+
+WHAT IS COMPARED. Every row of a type `engine/evaluate.py` appends (`_LOOP_EVENT_TYPES`, held to the
+AST scan by the last test), in log order, with every key in its written ORDER — so a payload that
+gains, loses or reorders a column is a difference, and so is a row that moves. Wall-clock values are
+masked but their keys are kept (`_VOLATILE`), and the run directory is spelled `<RUN>`, so the
+comparison is exact on everything a machine does not decide.
+
+WHAT THE SCENARIOS COVER, by the decision each one reaches (named as the review named them):
+  * may this attempt buy a repair (`repair_gate`): the feature off, a reason outside
+    `inline_repair_reasons`, a Developer with no `repair`, the operator's count floor;
+  * the triage verdict (`triage_verdict_outcome`): repair, abandon, reject_idea, a judge that cannot
+    be reached (the provider breaker: `developer_crash` plus one run-level pause), and one that
+    answers out of the vocabulary;
+  * the repair's answer (`classify_repair_answer`): an edit that scores, the Developer declaring
+    itself stuck, its provider sentinel, a raise normalized into that sentinel, and a chain of
+    byte-identical edits stopped by the inert bound; plus the critic's stop;
+  * the scored terminal (`evaluated_terminal`): a plain score, a metric SALVAGED with and without its
+    cause fixed (and with the artifact written where the fix points), a declaration the cause fix
+    CORRECTED (the F1e measured case, through the one seam no shipped shape reaches), and scripted
+    evaluator results carrying every provenance channel — subject (bound, unbound under `require`),
+    host scorer, evaluation inputs, applied coordinates, extra metrics with channel and direction,
+    the candidate's own number, and a drift report.
+
+REGENERATE ONLY FOR AN INTENDED CHANGE TO WHAT THE LOOP WRITES, and read the diff first — this file
+exists to notice the unintended one:
+
+    python -c "from tests.test_repair_loop_golden import regenerate; regenerate()"
+"""
+from __future__ import annotations
+
+import os
+import tempfile
+from pathlib import Path
+
+import anyio
+import orjson
+import pytest
+
+from looplab.adapters.toytask import ToyTask
+from looplab.core.models import DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX, Idea
+from looplab.engine.orchestrator import Engine
+from looplab.events.eventstore import EventStore
+from looplab.runtime.sandbox import RunResult, SubprocessSandbox
+from looplab.search.policy import GreedyTree
+
+ROOT = Path(__file__).resolve().parents[1]
+TASK = ROOT / "examples" / "toy_task.json"
+GOLDEN = Path(__file__).resolve().parent / "data" / "golden_repair_loop.json"
+
+# The rows `engine/evaluate.py` appends — the attempt loop's own record. Everything else in the log
+# (the setup phase's `deps_declared`, the stage runner's `phase_progress` beacons) belongs to other
+# modules and would make this pin fail on changes that have nothing to do with the loop.
+_LOOP_EVENT_TYPES = frozenset({
+    "deps_installed", "effective_train_batch", "eval_invocation_claimed", "eval_invocation_settled",
+    "full_retrain_charged", "node_build_delta", "node_eval_started", "node_evaluated", "node_failed",
+    "node_repaired", "pause", "proxy_scored", "repair_critic_verdict", "reward_hack_suspected",
+    "spec_drift", "stage_finished", "stage_rollback", "trust_scan"})
+
+# Values a machine decides — wall clock and the timestamps derived from it. MASKED, never dropped:
+# the key's presence and its position in the payload are part of what is pinned.
+_VOLATILE = frozenset({"eval_seconds", "seconds", "expect_since", "read_at"})
+
+_GOOD = "import json; print(json.dumps({'metric': 0.1}))\n"
+
+
+def _emits(tail: str) -> str:
+    """A solution whose failure IS `tail`: it writes those bytes to stderr and exits 1. No Python
+    traceback, so nothing in the pinned record depends on the interpreter's own error formatting."""
+    return f"import sys\nsys.stderr.write({tail!r})\nsys.exit(1)\n"
+
+
+_CRASH = _emits("ValueError: boom\n")
+
+
+class _Judge:
+    """A scripted crash-triage judge (and optional critic). Echoes the tagged failure kind back,
+    which is what the shipped prompt asks a real judge to do, so the diagnosed path is the one
+    exercised unless a scenario says otherwise."""
+
+    def __init__(self, verdict=None, *, raises=None, critic=None):
+        self.verdict = verdict if verdict is not None else {"action": "repair",
+                                                            "rationale": "fix the raise"}
+        self.raises = raises
+        self.critic = critic
+
+    def propose(self, state, parent):
+        return Idea(operator="x", params={"x": 1.0, "y": 1.0})
+
+    def triage_crash(self, node, error, attempt, *, state=None, brief="", history="",
+                     stages_passed=None, attempts_left=None):
+        if self.raises is not None:
+            raise self.raises
+        if not isinstance(self.verdict, dict):
+            return self.verdict
+        out = dict(self.verdict)
+        if "failure_kind" not in out:
+            tag = str(error or "").partition("[failure kind: ")[2].partition("]")[0].strip()
+            if tag:
+                out["failure_kind"] = tag
+        return out
+
+    def repair_critic(self, node, *, state=None, brief="", trajectory="", attempt=None):
+        return dict(self.critic) if self.critic else None
+
+
+class _Dev:
+    """A scripted Developer: `first` is the build, `answers` the repairs in order; past the end it
+    keeps returning `tail` (a callable of the call count, or a fixed string)."""
+
+    def __init__(self, first, answers=(), tail=None):
+        self.first = first
+        self.answers = list(answers)
+        self.tail = tail
+        self.calls = 0
+
+    def implement(self, idea):
+        return self.first
+
+    def repair(self, idea, code, error):
+        self.calls += 1
+        if self.answers:
+            answer = self.answers.pop(0)
+        elif callable(self.tail):
+            answer = self.tail(self.calls)
+        else:
+            answer = self.tail if self.tail is not None else _GOOD
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+
+class _NoRepairDev:
+    """A Developer that can build and cannot repair — the gate's `callable(developer.repair)` rung."""
+
+    def implement(self, idea):
+        return _CRASH
+
+
+class _ManifestDev:
+    """A Developer whose repair fixes the stage DECLARATION, as the repo one does: the reply is ""
+    and the work rides in `last_files`."""
+
+    def __init__(self, fixed_manifest):
+        self.fixed_manifest = fixed_manifest
+        self.last_files: dict = {}
+        self.last_deleted: list = []
+
+    def implement(self, idea):
+        return "print('unused')\n"
+
+    def repair(self, idea, code, error):
+        self.last_files = {"looplab_stages.json": self.fixed_manifest}
+        return ""
+
+
+def _engine(run_dir, *, dev, judge, **kw):
+    kw.setdefault("auto_install_deps", False)
+    return Engine(run_dir, task=ToyTask.load(TASK), researcher=judge, developer=dev,
+                  sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1), **kw)
+
+
+def _seed_and_evaluate(eng, *, code, files=None, direction="min") -> None:
+    eng.store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g",
+                                     "direction": direction})
+    node = {"node_id": 0, "parent_ids": [], "operator": "draft",
+            "idea": {"operator": "draft", "params": {"x": 1.0, "y": 1.0}, "rationale": "seed"},
+            "code": code}
+    if files is not None:
+        node["files"] = files
+    eng.store.append("node_created", node)
+
+    async def _bounded() -> bool:
+        with anyio.move_on_after(300) as scope:
+            await eng._evaluate(0, anyio.CapacityLimiter(1), None)
+        return scope.cancelled_caught
+
+    assert not anyio.run(_bounded), "the attempt loop did not terminate"
+
+
+def _toy(run_dir, dev, judge=None, **kw):
+    eng = _engine(run_dir, dev=dev, judge=judge or _Judge(), **kw)
+    _seed_and_evaluate(eng, code=dev.implement(None))
+    return eng
+
+
+# The v5 shape (`tests/test_metric_salvage.py` owns the account): a `train` stage that prints the
+# metric the operator's reader matches and then fails its declared artifact contract.
+_METRIC = {"kind": "stdout_regex", "pattern": "RECALL@100: ([0-9.]+)"}
+_DECLARED = "exp/run-a/final/model.safetensors"
+_ACTUAL = "exp/run-a_model/final/model.safetensors"
+
+
+def _manifest(declared: str, *, writes: str = "") -> str:
+    body = (f"import os; os.makedirs(os.path.dirname({writes!r}), exist_ok=True); "
+            f"open({writes!r}, 'wb').write(b'w'); " if writes else "")
+    return orjson.dumps({"stages": [{
+        "name": "train", "command": ["python", "-c", body + "print('RECALL@100: 0.743250')"],
+        "timeout": 120.0, "expect": {"files": [declared]}}]}).decode()
+
+
+def _staged(run_dir, *, manifest, dev=None, **kw):
+    dev = dev if dev is not None else _ManifestDev(None)
+    eng = _engine(run_dir, dev=dev, judge=_Judge({"action": "abandon", "rationale": "no"}), **kw)
+    eng._eval_spec = {"command": ["python", "-c", "print('score stage never runs')"], "cwd": ".",
+                      "metric": dict(_METRIC), "timeout": 120.0}
+    _seed_and_evaluate(eng, code="print('unused')\n", files={"looplab_stages.json": manifest},
+                       direction="max")
+    return eng
+
+
+def _declaration_repaired(run_dir):
+    """The F1e MEASURED branch. No shipped pipeline shape reaches it end to end (the appended
+    `score` stage never runs after a contract failure — `tests/test_metric_salvage.py` says why), so
+    the re-check seam answers what `_recheck_repaired_contract` answers for the one shape its rules
+    admit, and everything around it — the salvage, the cause fix, the terminal — is the real path."""
+    eng = _engine(run_dir, dev=_ManifestDev(_manifest(_ACTUAL, writes=_ACTUAL)),
+                  judge=_Judge({"action": "abandon", "rationale": "no"}))
+    eng._eval_spec = {"command": ["python", "-c", "print('score stage never runs')"], "cwd": ".",
+                      "metric": dict(_METRIC), "timeout": 120.0}
+    eng._recheck_repaired_contract = lambda res, node, workdir, salvaged, fix, err: {
+        "salvaged": False, "declaration_repaired": True, "stage": "train",
+        "reader": "stdout_regex", "producer": "operator_stage", "expect_files": [_ACTUAL],
+        "declaration_error": err[:120]}
+    _seed_and_evaluate(eng, code="print('unused')\n",
+                       files={"looplab_stages.json": _manifest(_DECLARED, writes=_ACTUAL)},
+                       direction="max")
+    return eng
+
+
+def _faked(run_dir, result: RunResult, **kw):
+    """The terminal's provenance channels, from a scripted evaluator result — the only way to set
+    every one of them at once without a GPU training and a host scorer."""
+    eng = _engine(run_dir, dev=_Dev(_GOOD), judge=_Judge(), **kw)
+
+    def fake_run_eval(node, workdir, env=None, profile=None, cancel=None, start_stage=None):
+        return result
+
+    eng._run_eval = fake_run_eval
+    _seed_and_evaluate(eng, code=_GOOD, direction="max")
+    return eng
+
+
+def _result(**kw) -> RunResult:
+    return RunResult(**{"exit_code": 0, "stdout": '{"metric": 0.99}\n', "stderr": "",
+                        "metric": 0.99, "timed_out": False, **kw})
+
+
+def _full_provenance() -> RunResult:
+    res = _result(
+        stderr="note: scored on the held split\n",
+        extra_metrics={"loss": 0.2, "auc": 0.9}, violations=[],
+        extra_metrics_provenance={"loss": "declared", "auc": "auto"},
+        extra_metrics_direction={"loss": "min"})
+    res.metric_subject = {"subject_bound": True, "subjects": [{"path": "out/model.bin"}]}
+    res.host_scorer = {"argv": ["python", "score.py"], "program": "score.py"}
+    res.eval_inputs = {"files": [{"path": "data/test.csv", "sha256": "ab" * 32}]}
+    res.applied_params = {"committed": {"x": 1.0}, "resolved": {}, "conflicts": []}
+    res.self_metric = 0.97
+    return res
+
+
+def _unbound_require() -> RunResult:
+    res = _result()
+    res.metric_subject = {"subject_bound": False, "unbound_reason": "not_declared", "subjects": []}
+    return res
+
+
+def _drifted() -> RunResult:
+    return _result(metric=None, exit_code=0,
+                   drift={"primary": 0.99, "cross": 0.5, "tolerance": 0.01})
+
+
+# name -> (driver, kwargs). Each builds its own engine under the directory it is handed.
+SCENARIOS = {
+    # --- the answer ladder and the triage verdicts
+    "repaired_then_scored": lambda d: _toy(d, _Dev(_CRASH, [_GOOD])),
+    "triage_abandon": lambda d: _toy(d, _Dev(_CRASH), _Judge({"action": "abandon",
+                                                              "rationale": "nothing left"})),
+    "triage_reject_idea": lambda d: _toy(d, _Dev(_CRASH), _Judge({"action": "reject_idea",
+                                                                  "rationale": "wrong model"})),
+    "triage_unreachable": lambda d: _toy(d, _Dev(_CRASH), _Judge(
+        raises=RuntimeError("Error code: 402 - out of credits"))),
+    "triage_unreadable": lambda d: _toy(d, _Dev(_CRASH), _Judge({"action": "keep-going"})),
+    "developer_stuck": lambda d: _toy(d, _Dev(_CRASH, [f"{DEVELOPER_STUCK_PREFIX} no idea left)"])),
+    "developer_provider_sentinel": lambda d: _toy(d, _Dev(
+        _CRASH, [f"{DEVELOPER_ERROR_PREFIX} 402 out of credits)"])),
+    "developer_raises": lambda d: _toy(d, _Dev(_CRASH, [RuntimeError("socket closed")])),
+    "inert_chain": lambda d: _toy(d, _Dev(_CRASH, tail=_CRASH)),
+    "critic_stop": lambda d: _toy(d, _Dev(_CRASH, tail=lambda n: _CRASH + f"# attempt {n}\n"),
+                                  _Judge(critic={"action": "stop", "rationale": "same cause"}),
+                                  repair_critic_after=2),
+    # --- may this attempt buy a repair
+    "count_floor": lambda d: _toy(d, _Dev(_CRASH, tail=lambda n: _CRASH + f"# attempt {n}\n"),
+                                  inline_repair_attempts=2),
+    "inline_repair_off": lambda d: _toy(d, _Dev(_CRASH), inline_repair=False),
+    "reason_not_repairable": lambda d: _toy(d, _Dev(_CRASH), inline_repair_reasons=("no_metric",)),
+    "developer_cannot_repair": lambda d: _toy(d, _NoRepairDev()),
+    # --- the scored terminal
+    "salvaged": lambda d: _staged(d, manifest=_manifest(_DECLARED), metric_salvage_repair=False),
+    "salvaged_cause_fixed": lambda d: _staged(d, manifest=_manifest(_DECLARED),
+                                              dev=_ManifestDev(_manifest(_ACTUAL))),
+    # v6 node 3's shape: the stage DID write its artifact, at the path the fix corrects to — still
+    # salvaged, because the operator's appended `score` stage never ran.
+    "cause_fixed_artifact_written": lambda d: _staged(
+        d, manifest=_manifest(_DECLARED, writes=_ACTUAL),
+        dev=_ManifestDev(_manifest(_ACTUAL, writes=_ACTUAL))),
+    "declaration_repaired": _declaration_repaired,
+    "full_provenance": lambda d: _faked(d, _full_provenance(), metric_subject="audit"),
+    "unbound_subject_required": lambda d: _faked(d, _unbound_require(), metric_subject="require"),
+    "drift_refused": lambda d: _faked(d, _drifted()),
+}
+
+
+def _normalize(value, run_dir: str):
+    if isinstance(value, dict):
+        return {k: ("<volatile>" if k in _VOLATILE else _normalize(v, run_dir))
+                for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_normalize(v, run_dir) for v in value]
+    if isinstance(value, str):
+        return value.replace(run_dir, "<RUN>").replace("\r\n", "\n")
+    return value
+
+
+def loop_record(name: str, root: Path) -> list:
+    """Scenario `name`'s attempt-loop rows, normalized, as `[type, payload]` pairs in log order."""
+    run_dir = root / name
+    eng = SCENARIOS[name](run_dir)
+    rows = EventStore(run_dir / "events.jsonl").read_all()
+    del eng
+    return [[e.type, _normalize(e.data or {}, str(run_dir))] for e in rows
+            if e.type in _LOOP_EVENT_TYPES]
+
+
+def regenerate() -> None:
+    """Rewrite the golden from THIS tree. Key order is kept (no sort), because it is pinned."""
+    root = Path(tempfile.mkdtemp(prefix="golden-repair-"))
+    out = {name: loop_record(name, root) for name in SCENARIOS}
+    GOLDEN.write_bytes(orjson.dumps(out, option=orjson.OPT_INDENT_2) + b"\n")
+
+
+@pytest.fixture(scope="module")
+def golden():
+    return orjson.loads(GOLDEN.read_bytes())
+
+
+@pytest.mark.parametrize("name", sorted(SCENARIOS))
+def test_the_attempt_loop_writes_the_golden_record(tmp_path, golden, name):
+    got = loop_record(name, tmp_path)
+    want = golden[name]
+    # Row by row as canonical bytes WITHOUT sorting keys: two payloads that hold the same pairs in a
+    # different order are a different record, and `==` on dicts would call them equal.
+    assert [orjson.dumps(r).decode() for r in got] == [orjson.dumps(r).decode() for r in want]
+
+
+def test_every_scenario_is_pinned_and_every_pin_has_a_scenario(golden):
+    assert set(golden) == set(SCENARIOS)
+    assert all(golden[name] for name in golden), "a scenario whose loop wrote nothing pins nothing"
+
+
+def test_the_pinned_types_are_the_ones_the_attempt_loop_writes():
+    """`_LOOP_EVENT_TYPES` is re-derived from the writers the AST scan finds in `evaluate.py`, so a
+    new row the loop starts appending is either pinned here or this goes red — it cannot slip past
+    the comparison by being a type nobody listed."""
+    from tests._source_scan import event_payload_writers
+
+    written = {etype for etype, row in event_payload_writers().items()
+               if any(site.replace(os.sep, "/").startswith("looplab/engine/evaluate.py")
+                      for site in row["sites"])}
+    assert written == set(_LOOP_EVENT_TYPES)
