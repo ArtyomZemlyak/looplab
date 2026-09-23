@@ -1058,3 +1058,20 @@ def test_a_tool_that_raises_an_unexpected_error_returns_it_instead_of_ending_the
         for name in [s["function"]["name"] for s in provider.specs()]:
             result = provider.execute(name, {"run_id": "other", "node_id": 1, "params": {"x": 1}})
             assert isinstance(result, str), (cls.__name__, name, result)
+
+
+def test_read_code_says_when_it_cut_the_file():
+    """Review 2026-09-22, TAT-12. `read_code` returned `n.code[:max_chars]` — the first 3,500
+    characters of a longer solution.py presented as the whole file, so a model building on it never
+    learned the rest existed. The cut is now said, with the count, through `tools/_base.py::clip`;
+    a file inside the window comes back byte-identical. MUTATION: restore the bare slice -> red."""
+    st = _st()
+    st.nodes[0].code = "x = 1\n" * 1000                        # 6,000 characters
+    rt = RunTools(max_chars=3500)
+    rt.bind_state(st)
+    long = rt.execute("read_code", {"node_id": 0})
+    assert "2500 more characters of this solution.py not shown" in long, long[-200:]
+    assert "read_code shows the first 3500" in long
+
+    short = rt.execute("read_code", {"node_id": 1})
+    assert short == "# solution.py of experiment #1\nprint(1)", short

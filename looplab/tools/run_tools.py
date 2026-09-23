@@ -547,7 +547,15 @@ class RunTools:
         if not n.code and not n.files:
             return f"(experiment #{nid} has no code recorded)"
         files = (f"\nother files: {list(n.files)}" if n.files else "")
-        return f"# solution.py of experiment #{nid}\n{n.code[:self.max_chars]}{files}"
+        # The cut is SAID (review 2026-09-22, TAT-12; `tools/_base.py::clip`, the one marker every
+        # bounded reader uses): `n.code[:max_chars]` returned the first 3,500 characters of a longer
+        # file as if they were the whole of it, so a model building on the code never learned the
+        # rest existed. `read_code` has no offset to continue with, so the marker says only what
+        # was left out.
+        code = clip(n.code, self.max_chars, note=(
+            "\n… [{n} more characters of this solution.py not shown — read_code shows the first "
+            f"{self.max_chars}]"))
+        return f"# solution.py of experiment #{nid}\n{code}{files}"
 
     def _logs(self, st: RunState, nid: int) -> str:
         """The node's execution logs: the captured stdout tail (what it printed while training/eval)
