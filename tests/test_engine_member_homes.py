@@ -14,9 +14,12 @@ anything else defined twice is red.
 """
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 from looplab.engine.orchestrator import Engine
+from looplab.engine.reentry import ReentryMixin
 from looplab.engine.width_settling import WidthSettlingMixin
 
 # name -> why a class earlier in `Engine.__mro__` deliberately re-defines a later class's member.
@@ -25,6 +28,11 @@ INTENDED_OVERRIDES: dict[str, str] = {}
 # The live width settle, moved out of `orchestrator.py` in ENG1-04 step 1.
 WIDTH_SETTLING_MEMBERS = ("_proposal_footprints", "_settle_proposal_width",
                           "_apply_control_overrides", "_reconfigure_llm_broker")
+
+# The run-start pins and the re-entry checks that read them back, moved in ENG1-04 step 2.
+REENTRY_MEMBERS = ("_run_start_pinned_values", "_run_start_settled_widths", "_repin_declared_env",
+                   "_repin_settled_widths", "_recorded_settled_width",
+                   "_require_pinned_speculation_receipt", "_reentry_repin")
 
 
 def _homes(cls) -> dict[str, list[str]]:
@@ -53,6 +61,40 @@ def test_the_live_width_settle_resolves_to_its_mixin(name):
     assert WidthSettlingMixin in Engine.__mro__
     assert name not in vars(Engine), f"a copy of {name} in the Engine body shadows the mixin's"
     assert getattr(Engine, name) is vars(WidthSettlingMixin)[name]
+
+
+@pytest.mark.parametrize("name", REENTRY_MEMBERS)
+def test_the_re_entry_pins_resolve_to_their_mixin(name):
+    assert ReentryMixin in Engine.__mro__
+    assert name not in vars(Engine), f"a copy of {name} in the Engine body shadows the mixin's"
+    # `getattr_static`, not `getattr`: `_recorded_settled_width` is a staticmethod, which a class-level
+    # `getattr` unwraps to its bare function — never the object the mixin's own dict holds.
+    assert inspect.getattr_static(Engine, name) is vars(ReentryMixin)[name]
+
+
+def test_a_refusal_the_mixin_raises_is_caught_under_the_spelling_the_cli_imports():
+    """The three re-entry refusals moved into `reentry.py` WITH the checks that raise them, and
+    `orchestrator.py` imports them back — the spelling `cli/run_cmds.py::_drive_engine_to_terminal`
+    catches by (`except RunStartPinError: raise`) and the tests import. A second class object under
+    that spelling (a stale copy of the class left behind, or re-declared there) makes that `except`
+    miss every refusal: the refused re-entry falls into the generic fatal-error branch, which writes
+    `run_finished` and finalization receipts into the very log the engine refused to trust.
+
+    DRIVEN through the real width check rather than asserted by name only: the refusal the MIXIN
+    raises must be caught by the ORCHESTRATOR's class, and be exactly its subclass. Then pinned by
+    identity for all three names, which is the whole property."""
+    from looplab.core.models import RunState
+    from looplab.engine import orchestrator, reentry
+
+    eng = Engine.__new__(Engine)          # the width check reads these four attributes and no other
+    eng._eval_parallel, eng._eval_parallel_startup_auto = 2, False      # an explicitly spelled 2...
+    eng._llm_parallel, eng._llm_parallel_startup_auto = 1, False
+    with pytest.raises(orchestrator.RunStartPinError) as caught:
+        eng._repin_settled_widths(RunState(eval_parallel=1))           # ...against a log pinned at 1
+    assert type(caught.value) is orchestrator.SettledWidthPinError
+    for name in ("RunStartPinError", "SpeculationAuthorizationError", "SettledWidthPinError"):
+        assert getattr(orchestrator, name) is getattr(reentry, name), (
+            f"orchestrator.{name} is not the class `reentry.py` raises — a stale copy shadows it")
 
 
 def test_the_census_sees_a_copy_left_behind():

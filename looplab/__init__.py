@@ -426,6 +426,8 @@ _LAYOUT = {
     "widths": "engine",        # the live concurrency-width settling rule (doc 25 ES-09/EC-11)
     # The Engine members that APPLY that rule to a running run (review 2026-09-22, ENG1-04 step 1).
     "width_settling": "engine",
+    # The run-start pins and the re-entry checks that read them back (ENG1-04 step 2).
+    "reentry": "engine",
     "tui": "serve",
     "tui_api": "serve",
     "tui_format": "serve",

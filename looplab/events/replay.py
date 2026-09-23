@@ -506,7 +506,7 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # R1-c: recorded at start so replay applies the same selection rule (config isn't available to the
     # pure fold). Absent in old logs -> False -> byte-identical legacy selection.
     # The fold stays pinned to the RECORDED value (never a live re-read); the engine re-pins its own
-    # `_select_verifier` gate from this recorded value on resume (orchestrator `_reentry_repin`), so the
+    # `_select_verifier` gate from this recorded value on resume (`reentry.py::_reentry_repin`), so the
     # fold's tie-break rule and the live verify production can't diverge across a config edit (invariant #6).
     st.select_verifier_tiebreak = bool(d.get("select_verifier", False))
     st.verifier_ci_tie = bool(d.get("verifier_ci_tie", False))   # R1-d: absent on old logs -> exact-tie

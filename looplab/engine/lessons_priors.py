@@ -160,7 +160,7 @@ class LessonPriorsMixin:
         # transient FS fault). This helper deliberately does NOT swallow it: `maybe_refresh_lessons`
         # needs the exception so it can disclose the skip AND decline to advance its stamp. Both
         # callers guard it — the mid-run refresh has always, and the RUN-START loader
-        # (`orchestrator._reentry_repin`) now does too, which is what stopped an unreadable memory_dir
+        # (`reentry.py::_reentry_repin`) now does too, which is what stopped an unreadable memory_dir
         # from failing the run during deterministic setup on every start and resume.
         note_rows, note_health = read_memory_jsonl_window(npath)
         scope_filtered = 0

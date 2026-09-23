@@ -75,7 +75,7 @@ LAZY_ENGINE_ATTRIBUTES: dict[str, tuple[str, ...]] = {
     '_pending_batch_novelty_gated': ('card_reservation.py::_stage_card_creates', 'novelty.py::_propose_batch', 'orchestrator.py::_handle_create_actions', 'orchestrator.py::_steady_state_build_lane'),
     '_pending_batch_telemetry': ('card_reservation.py::_stage_card_creates', 'novelty.py::_propose_batch'),
     '_pending_create_pause': ('orchestrator.py::_drain_create_pause', 'orchestrator.py::_handle_create_actions', 'orchestrator.py::_refuse_degraded_proposal', 'orchestrator.py::_request_create_pause', 'orchestrator.py::_run_with_llm_broker'),
-    '_pending_finalize_scope': ('orchestrator.py::_reentry_repin', 'orchestrator.py::_run_with_llm_broker'),
+    '_pending_finalize_scope': ('orchestrator.py::_run_with_llm_broker', 'reentry.py::_reentry_repin'),
     '_read_fence_cache': ('resources.py::_read_fence_dir',),
     '_run_loop_exit_owed': ('orchestrator.py::_record_run_loop_exit', 'orchestrator.py::_run_with_llm_broker'),
     '_spec_build_inflight': ('speculation.py::_ensure_speculation_state',),

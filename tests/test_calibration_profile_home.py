@@ -814,8 +814,14 @@ def test_the_derivation_refuses_a_required_settings_field(monkeypatch):
                                   "SPECULATION_CALIBRATION_PROFILE_DIGEST"])
 def test_the_orchestrator_no_longer_derives_the_profile_itself(name):
     """A re-derivation in the engine would be a second answer to a receipt question — and the two
-    could disagree without either being obviously wrong."""
-    from looplab.engine import orchestrator
+    could disagree without either being obviously wrong.
 
-    source = inspect.getsource(orchestrator)
-    assert f"{name} = " not in source, f"engine/orchestrator.py re-derives {name}"
+    `engine/reentry.py` is scanned too since review 2026-09-22 ENG1-04 step 2 moved the digest's two
+    engine READERS there (the run-start pin and the re-entry check that compares it): that is now the
+    likeliest place for a local copy to be written, and scanning only the orchestrator would have left
+    this guard green over it."""
+    from looplab.engine import orchestrator, reentry
+
+    for module in (orchestrator, reentry):
+        source = inspect.getsource(module)
+        assert f"{name} = " not in source, f"{module.__name__} re-derives {name}"

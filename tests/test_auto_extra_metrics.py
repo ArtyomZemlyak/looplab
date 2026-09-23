@@ -289,10 +289,13 @@ def test_the_flag_is_not_pinned_in_run_started(tmp_path):
     would revoke every issued speculation-calibration receipt, whose check compares that payload's
     exact key SET (`search/speculation_quality.py::_CALIBRATION_RUN_STARTED_FIELDS`) — and pinning
     it would buy nothing, because the fold never reads it (see the test above)."""
-    from looplab.engine import orchestrator as orch
+    # The run-start pin writer (`_run_start_pinned_values`) and the contract set it checks itself
+    # against live in `engine/reentry.py` since review 2026-09-22 ENG1-04 step 2 (it was
+    # `engine/orchestrator.py`, which no longer imports the set).
+    from looplab.engine import reentry
     from looplab.search.speculation_quality import _CALIBRATION_RUN_STARTED_FIELDS
     assert "auto_extra_metrics" not in _CALIBRATION_RUN_STARTED_FIELDS
-    assert "auto_extra_metrics" not in orch.RUN_START_PINNED_FIELDS
+    assert "auto_extra_metrics" not in reentry.RUN_START_PINNED_FIELDS
 
 
 # ------------------------------------------- the THIRD channel: the engine's own spliced diagnostic

@@ -19,11 +19,11 @@ follows them:
   (`strategy.py::_apply_strategy`) call.
 
 The bottom layer — the `run_started` pin and its re-entry reconciliation (`_run_start_settled_widths`,
-`_repin_settled_widths`, `_recorded_settled_width`) — stays with the other re-entry pins in
-`orchestrator.py` for now: it is the re-entry cluster (step 2), and splitting a re-entry boundary
-across two modules would be the wrong seam. The STARTUP resolvers (`_resolve_llm_parallel`,
-`_resolve_speculation_depth`) stay beside `Engine.__init__`, their only caller, and so does the role
-probe they share (`_build_calls_an_llm`), which `_settle_proposal_width` reaches through `self`.
+`_repin_settled_widths`, `_recorded_settled_width`) — lives with the other re-entry pins in
+`reentry.py::ReentryMixin` (step 2): splitting a re-entry boundary across two modules would be the
+wrong seam. The STARTUP resolvers (`_resolve_llm_parallel`, `_resolve_speculation_depth`) stay beside
+`Engine.__init__`, their only caller, and so does the role probe they share (`_build_calls_an_llm`),
+which `_settle_proposal_width` reaches through `self`.
 
 WHY A SIBLING OF `widths.py` AND NOT A CLASS INSIDE IT. `widths.py` is the settling RULES as pure
 functions — it imports `math` and `typing` and nothing else, and `tests/test_width_settling.py`

@@ -336,7 +336,9 @@ def test_the_two_re_entry_adoption_rules_are_one_rule(tmp_path, caplog):
     assert resumed.speculation_depth == 2 and resumed._speculation_depth_auto is False
     resumed._require_pinned_speculation_receipt(entry)      # marker-less: returns without a word
     assert resumed.speculation_depth == 2
-    with caplog.at_level(logging.WARNING, logger="looplab.engine.orchestrator"):
+    # `_reentry_repin` logs under its own module since review 2026-09-22 ENG1-04 step 2 moved it into
+    # `engine/reentry.py` (it was `looplab.engine.orchestrator`).
+    with caplog.at_level(logging.WARNING, logger="looplab.engine.reentry"):
         assert resumed._reentry_repin() is False
     assert resumed.speculation_depth == 0                   # the log still wins...
     assert resumed._speculation_enabled() is False
@@ -354,7 +356,7 @@ def test_the_two_re_entry_adoption_rules_are_one_rule(tmp_path, caplog):
     inert.store.append("run_started", {
         "run_id": inert_dir.name, "task_id": "toy", "goal": "g", "direction": "min",
         **inert._run_start_pinned_values(), **inert._run_start_settled_widths()})
-    with caplog.at_level(logging.WARNING, logger="looplab.engine.orchestrator"):
+    with caplog.at_level(logging.WARNING, logger="looplab.engine.reentry"):
         inert._reentry_repin()
     assert inert.speculation_depth == 0
     assert not [r for r in caplog.records if "on re-entry" in r.getMessage()]

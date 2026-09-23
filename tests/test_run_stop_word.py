@@ -39,6 +39,9 @@ READERS = {
     # the ceiling written by the same guard from the same exception. That is the eighth reader and
     # the one a tree-wide scan found rather than a review — see `GUARDED_ABORT_REASONS`.
     "events/replay.py",
+    # `_reentry_repin`'s "is this run already finalized?" (review 2026-09-22, ENG1-04 step 2 moved it
+    # out of `engine/orchestrator.py`, which still asks the question in `_run_with_llm_broker`).
+    "engine/reentry.py",
 }
 
 
