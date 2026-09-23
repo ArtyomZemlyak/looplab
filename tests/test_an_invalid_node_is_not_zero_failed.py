@@ -130,6 +130,8 @@ _DECISION_PATH = ("looplab/engine/triage.py", "looplab/engine/metric_salvage.py"
                   "looplab/engine/failure_diagnosis.py", "looplab/engine/repair_judgment.py",
                   "looplab/engine/crash_repair.py", "looplab/core/fitness.py",
                   "looplab/search/policy.py", "looplab/engine/evaluate.py",
+                  # the attempt loop's decisions since ENG2-06 moved them out of `evaluate.py`
+                  "looplab/engine/eval_attempt_rules.py",
                   "looplab/agents/strategist.py")
 
 

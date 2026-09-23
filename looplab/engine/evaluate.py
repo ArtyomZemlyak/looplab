@@ -32,6 +32,14 @@ control it cannot execute as a closed `PHASE_*` signal. The cut moved text and n
 phase body is the old region with its locals spelled `a.<name>`, proven AST-equivalent to that
 rewrite statement by statement, with every append, `_write_lock` block, fold and branch in place.
 
+Since review 2026-09-22 (ENG2-06) the phases' remaining DECISIONS are pure functions in
+`engine/eval_attempt_rules.py` — `repair_gate` (DECIDE_REPAIR's inline-repair gate),
+`triage_verdict_outcome` (what the judge's action does to the attempt), `evaluated_terminal` (the
+scored row's violations and provenance), and the answer ladder `_classify_repair_answer` with its
+two rungs, moved there verbatim and re-exported here. Every append, lock, fold, await and paid call
+stayed in its phase; `tests/test_repair_loop_golden.py` holds the loop to the log it wrote before
+the move.
+
 `fold` is imported from its canonical home here (the orchestrator's module-global `fold` seam —
 monkeypatched by two tests — does not reach `_evaluate`: those patches gate node CREATION).
 Invariant #2 lives in this file: exactly ONE terminal event per node, emitted at the end of the
@@ -57,8 +65,7 @@ from looplab.core.errors import (BudgetExceeded, RunSetupRefusal, budget_stop_le
                                  exception_leaves)
 from looplab.core.models import (DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX, NodeStatus,
                                  coerce_node_id,
-                                 developer_artifact_footprint, developer_stuck_reason,
-                                 is_developer_error, is_developer_stuck,
+                                 developer_artifact_footprint,
                                  EXTRA_METRIC_DECLARED, authenticated_extra_metrics_only,
                                  normalize_extra_metric_directions,
                                  normalize_extra_metric_channels, normalize_extra_metrics)
@@ -66,6 +73,14 @@ from looplab.core.node_evidence import begin_metrics_attempt
 from looplab.core.run_identity import run_ref
 from looplab.engine.asha_monitor import extract_resource_curve
 from looplab.engine.comparability import comparability_record
+# THE ATTEMPT LOOP'S PURE DECISIONS (review 2026-09-22, ENG2-06): the phases below read the engine,
+# ASK one of these, and act on the answer — see that module's docstring for the four and for what
+# deliberately stays here. The answer ladder moved there verbatim with its private spellings; the
+# `noqa` names are the ones `tests/test_evaluate_named_rules.py` imports from this module.
+from looplab.engine.eval_attempt_rules import (  # noqa: F401 — the ladder's rungs, re-exported
+    _REPAIR_ANSWER_EDIT, _REPAIR_ANSWER_PROVIDER_FAILURE, _REPAIR_ANSWER_STUCK,
+    RepairGateContext, _classify_repair_answer, _repair_change_set, _repair_provider_failure,
+    evaluated_terminal, repair_gate, triage_verdict_outcome)
 from looplab.engine.eval_stages import STAGE_MANIFEST_NAME
 from looplab.engine.metric_salvage import (DEFAULT_METRIC_SALVAGE, SALVAGE_CAUSE_TRIAGE_ACTION,
                                            cause_repair_context, salvage_gates,
@@ -73,8 +88,7 @@ from looplab.engine.metric_salvage import (DEFAULT_METRIC_SALVAGE, SALVAGE_CAUSE
                                            declaration_only_repair, declaration_repair_provenance,
                                            declared_pipeline_completed, recheck_floor,
                                            recheckable_expect, recheckable_salvage,
-                                           salvage as salvage_metric,
-                                           unbound_subject_violation_rows)
+                                           salvage as salvage_metric)
 from looplab.engine.options import _UNSET
 from looplab.engine.repair_judgment import (CRITIC_STOP, critic_due, critic_evidence,
                                             declared_pipeline_seconds, developer_stuck_contract,
@@ -103,9 +117,7 @@ def _watch_limiter() -> "anyio.CapacityLimiter":
     if _WATCH_LIMITER is None:
         _WATCH_LIMITER = anyio.CapacityLimiter(_WATCH_THREADS)
     return _WATCH_LIMITER
-from looplab.engine.triage import (_MAX_DEP_ROUNDS, DEFAULT_TRIAGE_ACTION,
-                                   UNANSWERABLE_TRIAGE_ACTION, UNREADABLE_TRIAGE_ACTION,
-                                   _failure_reason, repair_artifact_defect)
+from looplab.engine.triage import _MAX_DEP_ROUNDS, DEFAULT_TRIAGE_ACTION, _failure_reason
 # THE OWNERSHIP SPLIT, imported from its own module rather than through `triage`'s re-export: this
 # file is the one CALLER of the rule, so it should name the module that owns it. See that module's
 # docstring for which reasons are the engine's own and which are the diagnostician's, for the
@@ -128,7 +140,9 @@ from looplab.engine.failure_diagnosis import (REASON_SOURCE_ENGINE, coerce_diagn
 # would be a second implementation of "the diagnostician could not answer", and the two would drift.
 # `REASON_SOURCE_ENGINE` is imported because the loop really does have to stamp it in the places the
 # rule never sees: the loop-local default, and the two engine-authored reasons (`idea_rejected`,
-# `developer_crash`) that are not classifications of the eval at all. The PER-ATTEMPT re-stamp is
+# `developer_crash`) that are not classifications of the eval at all — `idea_rejected`'s stamp now
+# rides the verdict `eval_attempt_rules.triage_verdict_outcome` returns (ENG2-06), and that module
+# imports the constant itself. The PER-ATTEMPT re-stamp is
 # not one of them any more — it goes through `reason_source_for`, because one engine-final answer
 # (`rules_violation`) is a fact the eval STATED rather than one the engine measured, and that
 # derivation belongs beside the split it comes from and not inline here.
@@ -140,14 +154,6 @@ from looplab.engine.failure_diagnosis import (REASON_SOURCE_ENGINE, coerce_diagn
 from looplab.engine.repair_verify import (INERT_REPAIR_LIMIT, PARAM_OVERRIDE_CAP, REPAIR_VERDICTS,
                                           changed_region, declared_param_overrides, inert_streak,
                                           repair_attribution, verify_repair)
-
-# How many repair calls may answer with something that is not Python before the loop calls it a
-# provider failure rather than a truncation. NOT operator-settable and deliberately small: this is
-# not a budget, it is the point at which "the model got cut off" stops being the likelier
-# explanation than "the endpoint is answering with prose". Two truncations in a row on one node
-# already warrant looking at the provider, and the run-level pause is resumable, so the cost of
-# being early here is one operator click while the cost of being late is the whole node budget.
-_UNPARSEABLE_REPAIR_LIMIT = 3
 
 # Bounds on the repair history handed to the stop judge. Measured live (deepseek-v4-flash, the
 # recorded six-migration chain): the history costs ~66 extra prompt tokens per row and ZERO extra
@@ -841,174 +847,6 @@ def _workdir_manifest_digest(node) -> str:
         {"attempt": node.attempt, "code": node.code,
          "files": node.files or {}, "deleted": sorted(node.deleted or [])},
         option=orjson.OPT_SORT_KEYS)).hexdigest()
-
-
-def _repair_provider_failure(node_code: str, new_code, repaired_files, repaired_deleted,
-                             unparseable_repairs: int) -> tuple[Optional[str], int]:
-    """Did the repair CALL fail at the provider, and how many not-Python answers has it given?
-
-    A pure rule with a name (doc 25 ES-03) because the property it decides has already cost a real
-    run: as ~50 lines in the middle of `_evaluate`'s attempt loop, the only way to observe any of
-    its four branches was to drive a whole sandboxed eval against a dead endpoint. It returns the
-    provider-failure message (or None) and the UPDATED unparseable counter — the counter round-trips
-    through the return value rather than being mutated in place, so a caller that forgets to carry
-    it back is a name the caller has to bind, not a silently-frozen count.
-    """
-    # DOES THE ARTIFACT LOOK LIKE THE THING IT REPLACES? Only asked when the whole-file
-    # `code` really is what this repair shipped: a repo/multi-file repair returns "" and
-    # carries its work in `files`/`deleted`, and a node whose own code is empty never had
-    # a whole-file artifact to begin with. `engine/triage.py::repair_artifact_defect`
-    # documents the two answers and why they are treated differently.
-    _artifact_defect = ""
-    if not repaired_files and not repaired_deleted and (node_code or "").strip():
-        _artifact_defect = repair_artifact_defect(new_code)
-    # A REPAIR THAT DID NOT PRODUCE A REPAIR. The Developer returns the in-band
-    # "(developer error: …)" sentinel when its OWN session failed — an unreachable
-    # endpoint, a 401, a 402 "out of credits" — so `new_code` is a provider/transport
-    # error message, not code. Nothing downstream could tell the difference: the sentinel
-    # was committed as the node's code by `node_repaired`, re-materialized into the
-    # workdir, and re-evaluated; the eval then failed with a fresh error, so the loop
-    # simply asked again. A dead OpenRouter account produced 2343 such "repairs" on ONE
-    # node at ~11/min for 3.5 h, each one a full re-eval.
-    #
-    # A provider failure is not a code defect, so it must not drive the code-repair loop.
-    # No `node_repaired`, no attempt spent, no files written — the loop breaks here and
-    # the node terminalizes ONCE below with reason="developer_crash" naming the provider
-    # failure, and the run-level circuit breaker fires. (Deliberately NOT committing the
-    # sentinel as node.code also keeps the recovery sweep's `_developer_sentinel` scan,
-    # which keys on exactly that, from later re-terminalizing this node.)
-    #
-    # `is_developer_error` recognises exactly ONE shape of this, LoopLab's own sentinel,
-    # produced by `adapters/repo_developer.py` alone. Two more shapes reach here:
-    #   * a repair that RAISED — normalized into the sentinel at the call above, so it
-    #     arrives here already wearing the shape this branch understands;
-    #   * a repair that answered with PROSE. When the prose PARSES — a comment-only or
-    #     docstring-only answer — the eval exits 0 with no metric, and the node used to
-    #     terminalize as `no_metric`, telling the operator "the command printed no metric"
-    #     about a provider that is dead, with no pause. `"no_code"` is the engine's own
-    #     proof of the same fact the sentinel asserts: an artifact whose module body can
-    #     never execute cannot be a repair, whoever wrote it.
-    #
-    # The remaining answer, `"unparseable"`, keeps today's behaviour of committing the
-    # artifact and letting the next eval's SyntaxError inform the next repair — which is
-    # how a TRUNCATED generation recovers, and stopping a node on one truncation would be
-    # a regression. It is counted DIRECTLY (not inferred from the error text, which can
-    # carry a varying provider request id and so looks new every time) and becomes the
-    # provider verdict once a repair call has answered with something that is not Python
-    # `_UNPARSEABLE_REPAIR_LIMIT` times on one node.
-    if _artifact_defect == "unparseable":
-        unparseable_repairs += 1
-    _dev_err = None
-    if is_developer_error(new_code):
-        _dev_err = str(new_code)[:400]
-    elif _artifact_defect == "no_code":
-        _dev_err = ("the repair returned no executable code, only text: "
-                    + " ".join(str(new_code).split())[:200])
-    elif unparseable_repairs >= _UNPARSEABLE_REPAIR_LIMIT:
-        _dev_err = (f"the repair has now returned something that is not valid Python "
-                    f"{unparseable_repairs}x — the last one began: "
-                    + " ".join(str(new_code).split())[:160])
-    return _dev_err, unparseable_repairs
-
-
-def _repair_change_set(prev_files, prev_deleted, repaired_files,
-                       repaired_deleted) -> tuple[set, list]:
-    """THIS repair's real change set: files whose content moved, plus its own deletions.
-
-    Named (doc 25 ES-03) because both halves are DELTAS against the pre-repair node and the reason
-    is not visible from the expression — a cumulative read of either silently disables checkpoint
-    reuse for the rest of the node's life, which is a cost regression no test of the repair loop's
-    outcome would notice.
-    """
-    # The repair's REAL change set = files whose content actually differs from the pre-repair
-    # node (last_files is cumulative — see prev_files above), plus THIS repair's deletions.
-    changed = {f for f, c in repaired_files.items() if prev_files.get(f) != c}
-    # Deletions likewise get the delta, not the cumulative set: a deletion that predates
-    # the completed train stage cannot invalidate its checkpoint — the stage already ran
-    # (and passed) without that file on disk. Blocking on the cumulative `repaired_deleted`
-    # (seeded from node.deleted at repair_from) would permanently disable stage reuse for
-    # any node whose implement ever deleted a file; only THIS repair's deletions can
-    # invalidate the checkpoint, so only they enter the reuse decision.
-    new_deleted = [d for d in repaired_deleted if d not in prev_deleted]
-    changed |= set(new_deleted)
-    return changed, new_deleted
-
-
-# What ONE repair call answered. Three kinds, and the ladder that tells them apart is ORDERED.
-# Process-local (never written to a row), so deliberately NOT a registered vocabulary.
-_REPAIR_ANSWER_STUCK = "stuck"                      # the Developer's own "(developer stuck: …)"
-_REPAIR_ANSWER_PROVIDER_FAILURE = "provider_failure"  # `_repair_provider_failure` fired
-_REPAIR_ANSWER_EDIT = "edit"                        # an artifact — which may still move nothing
-
-
-@dataclass(frozen=True)
-class _RepairAnswer:
-    """`_classify_repair_answer`'s verdict on one repair call — see it for why there is ONE ladder.
-
-    The collections keep the exact types the attempt loop always computed (a `set`, two `list`s):
-    the in-process judge row and the one `_durable_repair_ledger` rebuilds from the log must render
-    identically, and a tuple where a list was would not compare equal to `[]`."""
-    kind: str
-    # The Developer's stuck reason, or the provider-failure message; "" for an edit.
-    detail: str = ""
-    # The per-NODE not-Python counter, carried back (a stuck answer leaves it untouched).
-    unparseable_repairs: int = 0
-    # THIS repair's change set: files whose bytes moved + its own deletions (`_repair_change_set`).
-    changed: set = field(default_factory=set)
-    # THIS repair's own deletions — the delta, never the cumulative set the Developer hands back.
-    new_deleted: list = field(default_factory=list)
-    # Does the whole-file code the node will CARRY differ from the code it carried?
-    code_changed: bool = False
-    # The durable `changed` column: the change set, capped, else the whole-file marker when the
-    # code moved, else [] — which is the spelling every reader already takes for "changed nothing".
-    changed_column: list = field(default_factory=list)
-
-    @property
-    def moved(self) -> bool:
-        """Did the repair change ANYTHING the node carries? False is the byte-anchored no-op."""
-        return bool(self.changed) or self.code_changed
-
-
-def _classify_repair_answer(node_code, new_code, prev_files, prev_deleted, repaired_files,
-                            repaired_deleted, unparseable_repairs: int, *,
-                            empty_code_keeps_artifact: bool = False) -> _RepairAnswer:
-    """WAS THIS A REPAIR AT ALL — the ONE ladder both repair call sites read.
-
-    Hoisted (review 2026-09-22, ENG2-07) because the salvage-cause fix had re-implemented the
-    attempt loop's ladder and drifted from it three ways, each of which let a fix nobody made read
-    as `cause_repaired`: it had NO stuck rung, so a "(developer stuck: …)" declaration was
-    committed as the node's code; its no-change exit read the CUMULATIVE deletions, so a node whose
-    implement once deleted a file could never be a no-op; and its `changed` column fell back on
-    "the reply is non-empty" instead of "the code moved". One function is what keeps the two from
-    drifting again. The rungs, in order — and the order is the rule:
-
-      1. STUCK first: the declaration is not Python, so `_repair_provider_failure` would count it
-         `unparseable` and, three in, pause the RUN over a provider that is answering perfectly
-         (`core/models.py::DEVELOPER_STUCK_PREFIX` says why the two sentinels differ).
-      2. PROVIDER FAILURE: `_repair_provider_failure`'s four answers, counter round-tripped.
-      3. an EDIT, measured as DELTAS against the pre-repair node (`_repair_change_set`) plus
-         whether the whole-file code moved. `moved` False is a repair that changed nothing.
-
-    `empty_code_keeps_artifact` states the ONE way the two callers commit differently. The attempt
-    loop writes `code` unconditionally, so an empty reply over a non-empty artifact IS a change to
-    the code; the cause fix omits the key when the reply is empty (the fold's "leave it alone"
-    spelling), so the node keeps its artifact and the code has not moved.
-    """
-    if is_developer_stuck(new_code):
-        return _RepairAnswer(_REPAIR_ANSWER_STUCK, developer_stuck_reason(new_code),
-                             unparseable_repairs)
-    dev_err, unparseable_repairs = _repair_provider_failure(
-        node_code, new_code, repaired_files, repaired_deleted, unparseable_repairs)
-    if dev_err is not None:
-        return _RepairAnswer(_REPAIR_ANSWER_PROVIDER_FAILURE, dev_err, unparseable_repairs)
-    changed, new_deleted = _repair_change_set(prev_files, prev_deleted, repaired_files,
-                                              repaired_deleted)
-    carried = (node_code if empty_code_keeps_artifact and not (new_code or "").strip()
-               else new_code)
-    code_changed = (carried or "") != (node_code or "")
-    column = sorted(changed)[:12] or (["<whole-file solution>"] if code_changed else [])
-    return _RepairAnswer(_REPAIR_ANSWER_EDIT, "", unparseable_repairs, changed, new_deleted,
-                         code_changed, column)
 
 
 def _repair_forces_full_retrain(res, next_start, *, rolled_back: bool = False) -> bool:
@@ -2972,7 +2810,8 @@ class EvaluateMixin:
         a.repair_log: list[dict] = list(_durable_rows)
         # A repair that returned something that is not Python at all. Counted directly rather than
         # inferred from the SyntaxError it produces: the error text can vary per attempt (a
-        # provider request id), the FACT cannot. See `_UNPARSEABLE_REPAIR_LIMIT`. Durable for the
+        # provider request id), the FACT cannot. See
+        # `eval_attempt_rules._UNPARSEABLE_REPAIR_LIMIT`. Durable for the
         # same reason as the budget: it bounds a per-NODE condition (a provider answering with
         # prose), so a process-local count let a resume grant three more truncations.
         # `unparseable_repairs` is seeded from the ledger above.
@@ -3540,15 +3379,16 @@ class EvaluateMixin:
                 retrain_cap=int(self._inline_repair_retrain_cap or 0))
         # Inline-repair gate: feature on, repairable reason, no floor reached, a Developer that
         # can repair, and something to repair (whole-file code, multi-file edits, or a repo).
-        if (not self._inline_repair
-                or a.reason not in self._inline_repair_reasons
-                or floor_stop is not None
-                or not callable(getattr(self.developer, "repair", None))
-                or not (a.node.code or a.node.files or self._repo_spec)):
-            if floor_stop is not None and self._inline_repair:
-                # Which bound stopped it, said out loud. An operator whose snapshot says 0
-                # never chose 50 and must not read a terminal that implies they did.
-                a.triage_outcome = ("abandon", floor_stop)
+        # The truth table — and which bound it names when a floor is what said no — is
+        # `eval_attempt_rules.repair_gate` (ENG2-06); this frame only reads the engine for it.
+        gate = repair_gate(RepairGateContext(
+            inline_repair=bool(self._inline_repair), reason=a.reason,
+            repair_reasons=self._inline_repair_reasons, floor_stop=floor_stop,
+            developer_repairs=callable(getattr(self.developer, "repair", None)),
+            has_artifact=bool(a.node.code or a.node.files or self._repo_spec)))
+        if not gate.buys_repair:
+            if gate.outcome is not None:
+                a.triage_outcome = gate.outcome
             return PHASE_SETTLED
         # THE STOP DECISION. One call per attempt — the same call the loop already made — now
         # carrying this node's repair history, so the model is answering "given everything
@@ -3733,22 +3573,12 @@ class EvaluateMixin:
         # second explanation with its own confidence is evidence for a human and for the next
         # diagnosis, not a second instruction for this one.
         a._hypotheses = coerce_hypotheses(a.triage, self._redact)
-        if action == "abandon":
-            a.triage_outcome = ("abandon", a.triage.get("rationale", ""))
-            return PHASE_SETTLED
-        if action == "reject_idea":   # the idea itself is wrong -> mark the lineage; steer to a new idea
-            a.reason = "idea_rejected"
-            # Not a classification of the eval — it is the ENGINE's word for "this lineage
-            # is wrong", set from the action and not from `failure_kind`. So the attribution
-            # goes back to the engine even though a model's verdict is what triggered it:
-            # `reason_source` answers "who classified the failure", and nobody did here.
-            a._reason_source = REASON_SOURCE_ENGINE
-            a.triage_outcome = ("reject_idea", a.triage.get("rationale", ""))
-            return PHASE_SETTLED
-        # A JUDGE THAT PRODUCED NO USABLE VERDICT, in the two shapes that are not the same
-        # condition (`engine/triage.py`'s verdict contract owns the distinction). Both have
-        # already been re-asked by `_triage_crash`; reaching here means the non-answer
-        # persisted, so neither may read as "keep going".
+        # WHAT THE VERDICT DOES TO THE ATTEMPT. `abandon` and `reject_idea` (the idea itself is
+        # wrong -> mark the lineage; steer to a new idea) end it on the judge's word; a judge that
+        # produced no usable verdict ends it too, in the two shapes that are not the same condition
+        # (`engine/triage.py`'s verdict contract owns the distinction) — `unanswerable` through the
+        # provider breaker, `unreadable` as a per-node stop. The table, with each row's account, is
+        # `eval_attempt_rules.triage_verdict_outcome` (ENG2-06); this frame applies what it returns.
         #
         # THIS BLOCK IS ABOVE THE TRIAGE-DRIVEN INSTALL ON PURPOSE. It used to sit below it,
         # and the install `continue`s on success — so a judge that answered `unanswerable`
@@ -3758,39 +3588,18 @@ class EvaluateMixin:
         # because the agent's RATIONALE proves it read the traceback and named a library the
         # traceback could not — a premise a non-answer denies outright. A verdict nobody could
         # read is not evidence about anything, least of all about what to pip install.
-        if action in (UNANSWERABLE_TRIAGE_ACTION, UNREADABLE_TRIAGE_ACTION):
-            _judge_err = str(a.triage.get("rationale", ""))[:400] or "no verdict returned"
-            if action == UNANSWERABLE_TRIAGE_ACTION:
-                # THE TRANSPORT FAILED. Not a verdict about this node: the triage model was
-                # wired and the call did not complete — the same dead-provider condition the
-                # circuit breaker exists for, and exactly how the 2345-repair incident began.
-                # Routed to that breaker (terminal + RUN-level pause) rather than to a quiet
-                # per-node abandon the operator would have to infer a provider outage from.
-                a.triage_outcome = ("abandon", "the repair-stop judge could not be reached — "
-                                             "treating it as a provider failure, not as "
-                                             "permission to keep repairing")
-                a.reason = "developer_crash"
-                a.err = (f"crash-triage failed: {_judge_err}\n[the model that decides whether "
-                       f"to keep repairing this node could not be reached, so the node was "
-                       f"stopped rather than repaired blind. Its last eval error was: "
-                       f"{a.err[-200:]}]")
-                await self._auto_pause_provider_failure(
-                    f"the crash-triage model could not be reached while deciding whether to "
-                    f"keep repairing node {a.node_id} — {_judge_err}")
-            else:
-                # THE MODEL ANSWERED SOMETHING UNREADABLE. The endpoint is demonstrably alive
-                # — it produced bytes — so this is a per-NODE stop and NOTHING MORE. Pausing
-                # the run here was a measured defect: one out-of-enum verdict on a SyntaxError
-                # in the agent's own generated code raised a run-level pause carrying
-                # `node_id=None` (not clearable by a node reset) that told the operator to
-                # check credits, key and base URL — using the MODEL's own rationale as the
-                # evidence — and under `eval_parallel > 1` took every healthy in-flight
-                # sibling down with it. It terminalizes like an `abandon`, keeping the eval's
-                # own `reason`, so a node reset re-opens it and the run continues.
-                a.triage_outcome = ("abandon", f"the repair-stop judge answered something the "
-                                             f"engine could not read as a verdict, so this "
-                                             f"node stopped rather than repairing blind — "
-                                             f"{_judge_err}")
+        _verdict = triage_verdict_outcome(action, a.triage.get("rationale", ""), err=a.err,
+                                          node_id=a.node_id)
+        if _verdict.settles:
+            if _verdict.reason is not None:
+                a.reason = _verdict.reason
+            if _verdict.reason_source is not None:
+                a._reason_source = _verdict.reason_source
+            if _verdict.err is not None:
+                a.err = _verdict.err
+            a.triage_outcome = _verdict.outcome
+            if _verdict.pause is not None:
+                await self._auto_pause_provider_failure(_verdict.pause)
             return PHASE_SETTLED
         # A library the traceback never NAMED. `_prepare_env` above installs only what the
         # crash reports as missing; when a library degrades an absent dependency into a
@@ -4545,163 +4354,30 @@ class EvaluateMixin:
                     _eval_payload["extra_metrics_direction"] = _extra_dirs
                 if _curve:                     # computed above, outside the write-lock (see the #7 note)
                     _eval_payload["resource_curve"] = _curve
-                if a.salvaged is not None:
-                    # A SALVAGED METRIC IS NEVER SILENTLY EQUAL TO A MEASURED ONE. Two records,
-                    # because they answer two different questions and only one of them is read by
-                    # anything today:
-                    #   * `metric_provenance` is the ACCOUNT — which rung recovered the value,
-                    #     out of which declared reader, which stage had failed, and whether the
-                    #     cause was then corrected. Additive, so old logs and old readers are
-                    #     unaffected (invariant #5).
-                    #   * the `metric_salvaged` VIOLATION row is the ENFORCEMENT. The fold's rule
-                    #     is `feasible = not violations`, so under the default `audit` mode this
-                    #     node keeps its metric and its evaluated status — it counts, it is in the
-                    #     budget, the UI and the digest and the lineage all see it — while
-                    #     `RunState.feasible_nodes()` excludes it, which is what champion
-                    #     selection and breeding read. A provenance field alone would satisfy
-                    #     "the selection path CAN tell" and not "does": nothing on that path
-                    #     reads an unknown event key. `metric_salvage="select"` is the operator's
-                    #     opt-in to a salvaged metric competing on equal terms.
-                    _prov = a.salvaged.as_event()
-                    _prov["cause_repaired"] = bool(a.salvage_cause_repaired)
-                    # The failure the salvage overrode, kept verbatim on the SUCCESS terminal.
-                    # A node that reads as evaluated must still be able to tell whoever looks
-                    # what went wrong, or the salvage has merely moved the silence.
-                    #
-                    # INSIDE the provenance record, not beside it as its own event key. It was a
-                    # top-level `salvaged_error` and the fold ignores unknown keys — so the one
-                    # place it was meant to be read (a replayed `RunState`, which is what the UI,
-                    # the report and every read-model see) never had it, and `looplab replay`
-                    # silently dropped the only account of what the node's failure had been.
-                    # `metric_provenance` IS folded, so putting it here is what makes the promise
-                    # true rather than adding a second field for the fold to learn.
-                    _prov["salvaged_error"] = str(a.err)[:600]
-                    _eval_payload["metric_provenance"] = _prov
-                    _eval_payload["violations"] = (
-                        list(_eval_payload["violations"])
-                        + a.salvaged.violation_rows(getattr(self, "metric_salvage",
-                                                          DEFAULT_METRIC_SALVAGE)))
-                elif a.declaration_repaired is not None:
-                    # A MEASURED metric with provenance — the F1e case. The declared contract
-                    # failed, the Developer's fix corrected the declaration, and the artifact
-                    # check then PASSED against it, so the pipeline is known to have produced
-                    # what it declared and nothing about the number was ever in doubt. NO
-                    # violation row and nothing on the selection path: this node competes for
-                    # champion and can be bred from, which is the entire point.
-                    #
-                    # The record is still written (decision (d) in `metric_salvage.py`'s
-                    # `declaration_repair_provenance`): "the manifest was wrong and we fixed it"
-                    # is worth knowing even when the number is sound — it is the only durable
-                    # trace that the node's recorded code is not byte-for-byte what produced its
-                    # recorded metric, and the only way an operator sees that every MERGE node
-                    # in a run needed the same correction.
-                    _eval_payload["metric_provenance"] = a.declaration_repaired
-                # THE SUBJECT — what this number is a claim ABOUT. Folded onto the SAME
-                # `metric_provenance` dict rather than beside it, for the reason `salvaged_error`
-                # records one branch up: the fold ignores unknown top-level keys, so a second
-                # event key would be invisible in every replayed `RunState` — which is what the
-                # UI, the report and every read-model see.
-                #
-                # It MERGES with whatever the salvage/declaration-repair branches already put
-                # there. Those answer "which rung produced this number"; this answers "about
-                # what", and a salvaged number still has a subject. Merging also means a reader
-                # keeps one key to look at, which is the property `metric_provenance` was folded
-                # for in the first place.
-                #
-                # `.get`, not truthiness: `res.metric_subject` is None on the `off` rung and on
-                # every path that never reached a metric read, and an old log has no key at all —
-                # invariant #5's additive-with-reader-side-defaults rule, which is not optional
-                # here because EVERY existing run's log has no provenance.
-                _subject_prov = getattr(a.res, "metric_subject", None)
-                if isinstance(_subject_prov, dict):
-                    _eval_payload["metric_provenance"] = {
-                        **(_eval_payload.get("metric_provenance") or {}), **_subject_prov}
-                # THE ENFORCEMENT, under `require`: an UNBOUND metric gets the EXISTING
-                # `metric_salvaged` violation row, so the fold's `feasible = not violations`
-                # keeps it out of `feasible_nodes()` — counted, in the budget, in the UI and
-                # the lineage, and never champion and never bred from. A provenance field
-                # alone would satisfy "the selection path CAN tell" and not "does": nothing
-                # on that path reads an unknown event key. No second exclusion vocabulary is
-                # minted — see `unbound_subject_violation_rows` for why the row is the same
-                # name and what a new slug would silently cost.
-                #
-                # ON EVERY SCORED NODE, and not inside the host-scorer branch below, where it
-                # sat until review 2026-09-22 (ENG2-03): there it fired only for a node whose
-                # number a HOST scorer produced, so a node scored by its own command with an
-                # unbound subject — every task that declares no host scorer — kept its metric
-                # AND its place in `feasible_nodes()` under the very rung that exists to refuse
-                # it. The subject record is set on every eval-spec path that reads a metric
-                # (`eval_dispatch.py` records the absent declaration itself), and a path with no
-                # record — a toy/dataset eval, the `off` rung — reaches here with None, which
-                # `unbound_subject_violation_rows` answers with no row.
-                _eval_payload["violations"] = (
-                    list(_eval_payload["violations"])
-                    + unbound_subject_violation_rows(
-                        _subject_prov, a.res.metric,
-                        str(getattr(self, "metric_subject", "audit") or "audit")))
-                # THE HOST SCORER'S RECEIPT (doc 52 row 10a) — WHAT PRODUCED the number, beside
-                # what it is ABOUT: `{argv, program, program_sha256, program_size}`, digested at
-                # the score stage's start, merged onto the same provenance dict for the reason
-                # the subject is. Two nodes whose receipts differ were not scored by the same
-                # program, and that is the fact a "consistent scoring" claim rests on.
-                _host_prov = getattr(a.res, "host_scorer", None)
-                if isinstance(_host_prov, dict):
-                    _eval_payload["metric_provenance"] = {
-                        **(_eval_payload.get("metric_provenance") or {}),
-                        "host_scorer": _host_prov}
-                # THE COMPARABILITY KEY — what this number may be RANKED AGAINST. Merged onto the
-                # same `metric_provenance` dict as the subject, for the reason recorded one branch
-                # up: the fold ignores unknown TOP-LEVEL keys, so a second event key would be
-                # invisible in every replayed `RunState`, which is what the UI, the report, the
-                # cross-run panel and `looplab inspect` all read.
-                #
-                # TWO RECORDS, not one, because they answer different questions and only one of
-                # them is an identity: `eval_inputs` is the EVIDENCE (which files, which digests,
-                # and the named reason when one did not bind — what an operator debugging a
-                # `unknown` key has to look at), `comparability` is the KEY (a digest plus the
-                # authority it was decided at — what a ranking surface compares). A surface that
-                # had to re-derive the key from the evidence would be a second copy of
-                # `comparability_record`, and the first thing to drift.
-                #
-                # UNCONDITIONAL, and never a violation. This records what a number may be compared
-                # with; it does not decide whether the number is sound, so it mints no row, gates
-                # nothing and cannot cost a node its terminal. `None` — the answer for every task
-                # that declares neither inputs nor a comparison contract — writes NO key at all
-                # rather than an empty one, because two empty keys would compare EQUAL and
-                # "two runs that recorded nothing are the same evaluation" is the exact statement
-                # this mechanism exists to refuse.
+                # THE ROW'S VIOLATIONS AND ITS PROVENANCE — the salvage account and its enforcement
+                # row, a corrected declaration (F1e), the subject and its `require` row, the host
+                # scorer's receipt, the evaluation inputs and comparability key, the applied
+                # coordinates — are ONE decision with an ORDER (the row is serialized as built), and
+                # it is `eval_attempt_rules.evaluated_terminal` (ENG2-06), which carries each
+                # record's account. This frame reads the attempt and the engine for it, and computes
+                # the one input that reads the run itself: the comparability key.
                 _inputs_prov = getattr(a.res, "eval_inputs", None)
                 # `_substrate` was read above, BEFORE this lock was taken (ENG2-11) — see there.
                 _cmp = comparability_record(task=self._task_snapshot_for_comparability(),
                                             inputs_prov=_inputs_prov, substrate=_substrate)
-                if isinstance(_inputs_prov, dict) or _cmp is not None:
-                    _merged = dict(_eval_payload.get("metric_provenance") or {})
-                    if isinstance(_inputs_prov, dict):
-                        _merged["eval_inputs"] = _inputs_prov
-                    if _cmp is not None:
-                        _merged["comparability"] = _cmp
-                    _eval_payload["metric_provenance"] = _merged
-                # THE APPLIED COORDINATES — what the configuration that ran said this node's
-                # declared `Idea.params` were worth (`runtime/applied_params.py`, bound at the
-                # metric read in `eval_dispatch`).
-                #
-                # MERGED ONTO `metric_provenance` and NOT given a top-level event key, for the
-                # reason the subject record already relies on: the fold ignores unknown TOP-LEVEL
-                # keys, so a second key would be invisible in every replayed `RunState` — which
-                # is what the UI, the report, the exports and `looplab inspect` all read.
-                #
-                # UNCONDITIONAL AND NEVER A VIOLATION. `Idea.params` is a PROPOSAL under
-                # `params_style: "none"`; a node that adjusted for a real constraint (an OOM, a
-                # time budget) did the right thing and must still be allowed to win. This says
-                # what it ran at; it mints no row, excludes nothing, and cannot cost a node its
-                # terminal. Absent when the node declares no comparable coordinate or no carrier
-                # could be read — never an empty record, which would be the claim "the
-                # configuration was checked and said nothing".
-                _applied_prov = getattr(a.res, "applied_params", None)
-                if isinstance(_applied_prov, dict):
-                    _eval_payload["metric_provenance"] = dict(
-                        _eval_payload.get("metric_provenance") or {},
-                        applied_params=_applied_prov)
+                _terminal = evaluated_terminal(
+                    violations=_eval_payload["violations"], metric=a.res.metric,
+                    salvaged=a.salvaged, salvage_cause_repaired=a.salvage_cause_repaired,
+                    failure_text=a.err, declaration_repaired=a.declaration_repaired,
+                    metric_salvage=getattr(self, "metric_salvage", DEFAULT_METRIC_SALVAGE),
+                    subject=getattr(a.res, "metric_subject", None),
+                    metric_subject=str(getattr(self, "metric_subject", "audit") or "audit"),
+                    host_scorer=getattr(a.res, "host_scorer", None),
+                    eval_inputs=_inputs_prov, comparability=_cmp,
+                    applied_params=getattr(a.res, "applied_params", None))
+                _eval_payload["violations"] = _terminal.violations
+                if _terminal.metric_provenance is not None:
+                    _eval_payload["metric_provenance"] = _terminal.metric_provenance
                 self.store.append(EV_NODE_EVALUATED, _eval_payload)
                 # WHAT THE TRAINING PROCESS SAID IT RAN AT (`runtime/effective_batch.py`), bound at
                 # the metric read beside the applied coordinates and recorded as its own diagnostic

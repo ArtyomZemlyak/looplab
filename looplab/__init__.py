@@ -442,6 +442,8 @@ _LAYOUT = {
     "asha_monitor": "engine",    # per-eval ASHA live-curve rank watchdog (advisory rank + a kill switch)
     "triage": "engine",
     "repair_judgment": "engine",
+    # The eval attempt loop's pure decisions: repair gate, triage verdict, answer ladder, terminal.
+    "eval_attempt_rules": "engine",
     "widths": "engine",        # the live concurrency-width settling rule (doc 25 ES-09/EC-11)
     # The Engine members that APPLY that rule to a running run (review 2026-09-22, ENG1-04 step 1).
     "width_settling": "engine",
