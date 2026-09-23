@@ -1,12 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { fileURLToPath } from 'node:url'
 
 import React, { act } from 'react'
-import { createServer } from 'vite'
 import { JSDOM } from 'jsdom'
 
-const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
+import { sharedVite } from './_mount.js'
+
 const lenses = [
   { name: 'is_a', label: 'Family / is-a', rels: ['is_a'], kind: 'path' },
   { name: 'uses', label: 'Usage / uses', rels: ['uses'], kind: 'edge' },
@@ -152,10 +151,7 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     for (const [key, value] of Object.entries(installed)) {
       Object.defineProperty(globalThis, key, { configurable: true, writable: true, value })
     }
-    vite = await createServer({
-      root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-      server: { middlewareMode: true },
-    })
+    vite = await sharedVite()
     const [{ createRoot }, conceptModule] = await Promise.all([
       import('react-dom/client'), vite.ssrLoadModule('/src/ConceptView.jsx'),
     ])
@@ -963,9 +959,7 @@ test('ConceptView does not crash on a concept id that is a JS prototype key (exp
     for (const [key, value] of Object.entries(installed)) {
       Object.defineProperty(globalThis, key, { configurable: true, writable: true, value })
     }
-    vite = await createServer({
-      root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent', server: { middlewareMode: true },
-    })
+    vite = await sharedVite()
     const [{ createRoot }, conceptModule] = await Promise.all([
       import('react-dom/client'), vite.ssrLoadModule('/src/ConceptView.jsx'),
     ])

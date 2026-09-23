@@ -1,11 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
-import { fileURLToPath } from 'node:url'
 import React, { act } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { JSDOM } from 'jsdom'
-import { createServer } from 'vite'
+
+import { sharedVite } from './_mount.js'
 import {
   LEDGER_RENDER_LIMITS,
   boundedLedgerText,
@@ -22,7 +22,6 @@ import {
 } from '../src/api.js'
 
 const source = name => readFile(new URL(`../src/${name}`, import.meta.url), 'utf8')
-const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const PORTFOLIO_ID = `portfolio-sha256:${'a'.repeat(64)}`
 const REPLACEMENT_PORTFOLIO_ID = `portfolio-sha256:${'b'.repeat(64)}`
 const completeReadSegment = Object.freeze({
@@ -227,10 +226,7 @@ test('the ledger never reconstructs a positive from a partial D8 prefix and rend
   assert.equal(splitSnapshot.contradictions[0].epistemic, 'mixed')
   assert.equal(splitSnapshot.claimSource.status, 'unknown')
 
-  const vite = await createServer({
-    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-    server: { middlewareMode: true },
-  })
+  const vite = await sharedVite()
   try {
     const { EvidenceSourceNotice } = await vite.ssrLoadModule('/src/ClaimsCuration.jsx')
     const markup = renderToStaticMarkup(React.createElement(EvidenceSourceNotice, {
@@ -304,10 +300,7 @@ test('the ledger uses combined claim-source authority when lesson rows are quara
   assert.deepEqual(view.claims[0].support, ['run-35:node-1'],
     'retained references remain visible as a lower bound')
 
-  const vite = await createServer({
-    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-    server: { middlewareMode: true },
-  })
+  const vite = await sharedVite()
   try {
     const { EvidenceSourceNotice } = await vite.ssrLoadModule('/src/ClaimsCuration.jsx')
     const markup = renderToStaticMarkup(React.createElement(EvidenceSourceNotice, {
@@ -451,10 +444,7 @@ test('the ledger preserves decision freshness and warns only on stale or unknown
   const view = buildClaimsCurationView({}, { claims: rows }, {})
   assert.deepEqual(view.claims.map(row => row.decisionFresh), [false, null, true, null])
 
-  const vite = await createServer({
-    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-    server: { middlewareMode: true },
-  })
+  const vite = await sharedVite()
   try {
     const { ClaimCard } = await vite.ssrLoadModule('/src/ClaimsCuration.jsx')
     const markup = view.claims.map(row => renderToStaticMarkup(
@@ -788,10 +778,7 @@ test('a partial UI never presents an unavailable source as an empty current fact
 })
 
 test('the ledger empty state distinguishes evidence runs and each independent source', async () => {
-  const vite = await createServer({
-    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-    server: { middlewareMode: true },
-  })
+  const vite = await sharedVite()
   const current = { state: 'current', loadedAt: '2026-07-16T10:00:00Z', revision: '1' }
   const failed = { state: 'failed', loadedAt: '', revision: '' }
   const stale = { state: 'retained-stale', loadedAt: '2026-07-16T09:00:00Z', revision: '1' }
@@ -933,10 +920,7 @@ test('the mounted ledger settles sources progressively and fences timed-out or s
     for (const [key, value] of Object.entries(installed)) {
       Object.defineProperty(globalThis, key, { configurable: true, writable: true, value })
     }
-    vite = await createServer({
-      root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-      server: { middlewareMode: true },
-    })
+    vite = await sharedVite()
     const [{ createRoot }, { default: ClaimsCuration }] = await Promise.all([
       import('react-dom/client'), vite.ssrLoadModule('/src/ClaimsCuration.jsx'),
     ])

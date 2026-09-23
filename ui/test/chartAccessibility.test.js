@@ -1,15 +1,14 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
-import { fileURLToPath } from 'node:url'
 
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { createServer } from 'vite'
 import { JSDOM } from 'jsdom'
 
+import { sharedVite } from './_mount.js'
+
 const source = name => readFile(new URL(`../src/${name}`, import.meta.url), 'utf8')
-const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
 
 const exportedFunction = (sourceText, name, nextName) => {
   const start = sourceText.indexOf(`export function ${name}`)
@@ -78,13 +77,7 @@ test('list and map use native links for the primary open-run action', async () =
 })
 
 test('every analytical chart renders its non-empty data path', async t => {
-  const vite = await createServer({
-    root: UI_ROOT,
-    configFile: false,
-    appType: 'custom',
-    logLevel: 'silent',
-    server: { middlewareMode: true },
-  })
+  const vite = await sharedVite()
   try {
     const charts = await vite.ssrLoadModule('/src/charts.jsx')
     const fixtures = [
@@ -132,10 +125,7 @@ test('every analytical chart renders its non-empty data path', async t => {
 })
 
 test('dense trajectory and waterfall visuals stay legible while exact data remains available', async () => {
-  const vite = await createServer({
-    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-    server: { middlewareMode: true },
-  })
+  const vite = await sharedVite()
   try {
     const { Trajectory, ImprovementWaterfall } = await vite.ssrLoadModule('/src/charts.jsx')
     const nodes = Array.from({ length: 100 }, (_, index) => ({
@@ -206,10 +196,7 @@ test('dense charts pick the nearest node and keep every row in the keyboard data
     for (const [key, value] of Object.entries(installed)) {
       Object.defineProperty(globalThis, key, { configurable: true, writable: true, value })
     }
-    vite = await createServer({
-      root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-      server: { middlewareMode: true },
-    })
+    vite = await sharedVite()
     const [{ createRoot }, { act }, { Trajectory, ImprovementWaterfall }] = await Promise.all([
       import('react-dom/client'), import('react'), vite.ssrLoadModule('/src/charts.jsx'),
     ])

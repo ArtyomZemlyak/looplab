@@ -9,13 +9,11 @@
 // which surfaces as a bare SIGKILL with no message.
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { fileURLToPath } from 'node:url'
 
 import { JSDOM } from 'jsdom'
 import React from 'react'
-import { createServer } from 'vite'
 
-const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
+import { sharedVite } from './_mount.js'
 
 // A node whose conversation is bounded by the STAGE cap, not the span read — the shape measured on
 // runs/rubert-dr-0804 node 1, where every withheld band was already derivable from the spans in hand.
@@ -144,10 +142,7 @@ test('scrolling the conversation sentinel into view fetches a bigger window and 
       return { ok: true, status: 200, json: async () => body }
     }
 
-    const vite = await createServer({
-      root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-      server: { middlewareMode: true },
-    })
+    const vite = await sharedVite()
     try {
       const { Trace } = await vite.ssrLoadModule('/src/Inspector.jsx')
       const { createRoot } = await import('react-dom/client')
@@ -236,10 +231,7 @@ test('the steps control pages past the episode-map ceiling to the earliest row',
     return { ok: true, status: 200, json: async () => body }
   }
 
-  const vite = await createServer({
-    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-    server: { middlewareMode: true },
-  })
+  const vite = await sharedVite()
   try {
     const { Trace } = await vite.ssrLoadModule('/src/Inspector.jsx')
     const { createRoot } = await import('react-dom/client')
@@ -305,10 +297,7 @@ test('a failed initial episode map can be retried without closing the Trace tab'
     return response({})
   }
 
-  const vite = await createServer({
-    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-    server: { middlewareMode: true },
-  })
+  const vite = await sharedVite()
   try {
     const { Trace } = await vite.ssrLoadModule('/src/Inspector.jsx')
     const { createRoot } = await import('react-dom/client')
@@ -364,10 +353,7 @@ test('at the ceiling the operator gets the COUNT, not another sentinel', async (
     return { ok: true, status: 200, json: async () => body }
   }
 
-  const vite = await createServer({
-    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-    server: { middlewareMode: true },
-  })
+  const vite = await sharedVite()
   try {
     const { Trace } = await vite.ssrLoadModule('/src/Inspector.jsx')
     const { createRoot } = await import('react-dom/client')
@@ -438,10 +424,7 @@ test('lazy span detail validates both run generation and span identity before co
     return { ok: true, status: 200, json: async () => body }
   }
 
-  const vite = await createServer({
-    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-    server: { middlewareMode: true },
-  })
+  const vite = await sharedVite()
   try {
     const { NodeTrace } = await vite.ssrLoadModule('/src/Inspector.jsx')
     const { createRoot } = await import('react-dom/client')
@@ -512,10 +495,7 @@ test('the earlier steps stay reachable without a mouse, and a failed widen keeps
       return { ok: true, status: 200, json: async () => body }
     }
 
-    const vite = await createServer({
-      root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-      server: { middlewareMode: true },
-    })
+    const vite = await sharedVite()
     try {
       const { Trace } = await vite.ssrLoadModule('/src/Inspector.jsx')
       const { createRoot } = await import('react-dom/client')
@@ -603,10 +583,7 @@ test('conversation fallback is lifecycle-scoped and an unavailable wider envelop
       return response(conversationPage(512, 200))
     }
 
-    const vite = await createServer({
-      root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-      server: { middlewareMode: true },
-    })
+    const vite = await sharedVite()
     try {
       const { Conversation } = await vite.ssrLoadModule('/src/Inspector.jsx')
       // The conversation reads whatever SUBJECT it is given — a node here, one operation's own
@@ -690,10 +667,7 @@ test('a failed live refresh marks a complete last-good conversation stale until 
     return { ok: true, status: 200, json: async () => conversationPage(512, 1) }
   }
 
-  const vite = await createServer({
-    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-    server: { middlewareMode: true },
-  })
+  const vite = await sharedVite()
   try {
     const { Trace } = await vite.ssrLoadModule('/src/Inspector.jsx')
     const { createRoot } = await import('react-dom/client')
@@ -792,10 +766,7 @@ test('live conversation reuses only an exact ETag and aborts an unsettled condit
     })
   }
 
-  const vite = await createServer({
-    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-    server: { middlewareMode: true },
-  })
+  const vite = await sharedVite()
   try {
     const { Trace } = await vite.ssrLoadModule('/src/Inspector.jsx')
     const { createRoot } = await import('react-dom/client')
@@ -870,10 +841,7 @@ test('a conversation response for another attempt is rejected before it reaches 
       return { ok: true, status: 200, json: async () => body }
     }
 
-    const vite = await createServer({
-      root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-      server: { middlewareMode: true },
-    })
+    const vite = await sharedVite()
     try {
       const { Trace } = await vite.ssrLoadModule('/src/Inspector.jsx')
       const { createRoot } = await import('react-dom/client')
@@ -916,10 +884,7 @@ test('a conversation response for another run generation is rejected before comm
     return { ok: true, status: 200, json: async () => body }
   }
 
-  const vite = await createServer({
-    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-    server: { middlewareMode: true },
-  })
+  const vite = await sharedVite()
   try {
     const { Trace } = await vite.ssrLoadModule('/src/Inspector.jsx')
     const { createRoot } = await import('react-dom/client')
@@ -978,10 +943,7 @@ test('the span-tree view pages through /trace, and only once the operator asks',
     return { ok: true, status: 200, json: async () => body }
   }
 
-  const vite = await createServer({
-    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-    server: { middlewareMode: true },
-  })
+  const vite = await sharedVite()
   try {
     const { Trace } = await vite.ssrLoadModule('/src/Inspector.jsx')
     const { createRoot } = await import('react-dom/client')
@@ -1087,10 +1049,7 @@ test('a historical span-tree failure is unavailable, auto-retries, and never bor
       return response({})
     }
 
-    const vite = await createServer({
-      root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-      server: { middlewareMode: true },
-    })
+    const vite = await sharedVite()
     try {
       const { TraceSurface } = await vite.ssrLoadModule('/src/Inspector.jsx')
       const { nodeTraceSubject } = await vite.ssrLoadModule('/src/traceSurfaceModel.js')

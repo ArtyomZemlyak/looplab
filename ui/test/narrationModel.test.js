@@ -2,7 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
-import { createServer } from 'vite'
+
+import { sharedVite } from './_mount.js'
 
 // The event-feed narration MODEL (src/narration.js) used to be ~300 lines of data inside the Dock
 // component, split across two parallel registries keyed by the same event types (NARR + NARR_VALID)
@@ -10,14 +11,10 @@ import { createServer } from 'vite'
 // own comments record past drift. These tests hold the merged shape to its promises: one entry per
 // type, both halves reachable, and the kind tables covering exactly the narrated types. doc 25 UI-08.
 
-const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const source = name => readFile(new URL(`../src/${name}`, import.meta.url), 'utf8')
 
 const withNarration = async (body) => {
-  const vite = await createServer({
-    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-    server: { middlewareMode: true },
-  })
+  const vite = await sharedVite()
   try { await body(vite, await vite.ssrLoadModule('/src/narration.js')) } finally { await vite.close() }
 }
 
@@ -129,10 +126,7 @@ test('the curated allow-list is the narration table itself', async () => {
 })
 
 test('Dock consumes the narration model instead of owning it', async () => {
-  const vite = await createServer({
-    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-    server: { middlewareMode: true },
-  })
+  const vite = await sharedVite()
   try {
     await vite.ssrLoadModule('/src/Dock.jsx')
     // The real resolved import edge, read from vite's module graph — a commented-out import creates
@@ -168,10 +162,7 @@ test('Dock consumes the narration model instead of owning it', async () => {
 // mention of the training at all. A source pin cannot tell "both lanes are named" from "one is", so
 // this drives the sentence.
 const withDock = async (body) => {
-  const vite = await createServer({
-    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-    server: { middlewareMode: true },
-  })
+  const vite = await sharedVite()
   try { await body(await vite.ssrLoadModule('/src/Dock.jsx')) } finally { await vite.close() }
 }
 

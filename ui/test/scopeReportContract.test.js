@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
 import React, { act } from 'react'
 import { JSDOM } from 'jsdom'
-import { createServer } from 'vite'
+
+import { sharedVite } from './_mount.js'
 
 import {
   scopeObservationRows, scopeReportAuthority, scopeReportGenerationError, scopeReportKey,
@@ -14,7 +14,6 @@ import {
 } from '../src/scopeReportModel.js'
 
 const source = readFileSync(new URL('../src/ScopeReport.jsx', import.meta.url), 'utf8')
-const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
 
 // jsdom does not implement `window.confirm`: it logs "Not implemented" and returns `undefined`.
 // ScopeReport's paid-generation guard reads `!window.confirm(...)`, so every click these tests make
@@ -217,10 +216,7 @@ test('ScopeReport renders only current authority and ignores an old generation a
     for (const [key, value] of Object.entries(installed)) {
       Object.defineProperty(globalThis, key, { configurable: true, writable: true, value })
     }
-    vite = await createServer({
-      root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-      server: { middlewareMode: true },
-    })
+    vite = await sharedVite()
     const [{ createRoot }, { default: ScopeReport }] = await Promise.all([
       import('react-dom/client'), vite.ssrLoadModule('/src/ScopeReport.jsx'),
     ])
@@ -340,10 +336,7 @@ test('ScopeReport reload resumes one stored paid action through job then durable
       Object.defineProperty(globalThis, key, { configurable: true, writable: true, value })
     }
     const loadComponent = async () => {
-      vite = await createServer({
-        root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-        server: { middlewareMode: true },
-      })
+      vite = await sharedVite()
       return (await vite.ssrLoadModule('/src/ScopeReport.jsx')).default
     }
     const { createRoot } = await import('react-dom/client')
@@ -460,10 +453,7 @@ test('ScopeReport adopts a server-fenced action from another tab before recovery
     for (const [key, value] of Object.entries(installed)) {
       Object.defineProperty(globalThis, key, { configurable: true, writable: true, value })
     }
-    vite = await createServer({
-      root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-      server: { middlewareMode: true },
-    })
+    vite = await sharedVite()
     const [{ createRoot }, { default: ScopeReport }] = await Promise.all([
       import('react-dom/client'), vite.ssrLoadModule('/src/ScopeReport.jsx'),
     ])
@@ -563,10 +553,7 @@ test('ScopeReport re-probes repaired storage and clears a settled uppercase UUID
     for (const [key, value] of Object.entries(installed)) {
       Object.defineProperty(globalThis, key, { configurable: true, writable: true, value })
     }
-    vite = await createServer({
-      root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-      server: { middlewareMode: true },
-    })
+    vite = await sharedVite()
     const [{ createRoot }, { default: ScopeReport }] = await Promise.all([
       import('react-dom/client'), vite.ssrLoadModule('/src/ScopeReport.jsx'),
     ])

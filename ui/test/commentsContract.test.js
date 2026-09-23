@@ -1,14 +1,13 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
-import { fileURLToPath } from 'node:url'
 
 import axe from 'axe-core'
 import { JSDOM } from 'jsdom'
 import React from 'react'
-import { createServer } from 'vite'
 
-const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
+import { sharedVite } from './_mount.js'
+
 const GEN = 'a'.repeat(64)
 const COMMENT_ID = `cmt_${'1'.repeat(32)}`
 const TOKEN = 'rv_0123456789ab_abcdefghijklmnopqrstuvwxyzABCDEFG'
@@ -64,17 +63,9 @@ async function mountHarness({ url, fetchStub, load }) {
   for (const [key, value] of Object.entries(installed)) {
     Object.defineProperty(globalThis, key, { configurable: true, writable: true, value })
   }
-  const vite = await createServer({
-    root: UI_ROOT,
-    configFile: false,
-    appType: 'custom',
-    logLevel: 'silent',
-    // Four other mounted-contract files may create Vite servers in parallel under `node --test`.
-    // Dependency discovery shares a default cache and can race another server's optimizer, leaving
-    // an open scanner after one suite closes. SSR loads dependencies through Node directly here.
-    optimizeDeps: { noDiscovery: true, include: [] },
-    server: { middlewareMode: true },
-  })
+  // One server for this file's ten mounts, each on a fresh module runner (`_mount.js::sharedVite`,
+  // whose configuration now carries this file's `optimizeDeps` finding for every harness server).
+  const vite = await sharedVite()
   let root
   try {
     const [{ createRoot }, component] = await Promise.all([

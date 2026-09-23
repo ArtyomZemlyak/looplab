@@ -1,18 +1,16 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
-import { fileURLToPath } from 'node:url'
 
 import { JSDOM } from 'jsdom'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { createServer } from 'vite'
 
 import { analyze, buildModelCard, failureBreakdown, hyperImportance, toMarkdown,
   verdict } from '../src/report.js'
 import { normalizeReportNodeDetail, normalizeRunReport, reportNarrativeCoverage } from '../src/reportModel.js'
 
-const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
+import { sharedVite } from './_mount.js'
 
 const node = (id, metric, operator, parentIds = [], theme = '') => ({
   id, metric, operator, parent_ids: parentIds, feasible: true, status: 'evaluated',
@@ -107,13 +105,7 @@ test('failure breakdown treats prototype names as ordinary model-authored reason
 })
 
 test('Report uses semantic section headings and exposes an unambiguous operator/theme identity', async () => {
-  const vite = await createServer({
-    root: UI_ROOT,
-    configFile: false,
-    appType: 'custom',
-    logLevel: 'silent',
-    server: { middlewareMode: true },
-  })
+  const vite = await sharedVite()
   try {
     const { default: ReportView } = await vite.ssrLoadModule('/src/Report.jsx')
     const markup = renderToStaticMarkup(React.createElement(ReportView, {
@@ -230,10 +222,7 @@ test('deterministic verdict stays authoritative across UI, Markdown, and model-c
   assert.match(mismatchedMarkdown, /^- \*\*Best:\*\* node #1 /m)
   assert.doesNotMatch(mismatchedMarkdown, /^- \*\*Best:\*\* node #99 /m)
 
-  const vite = await createServer({
-    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-    server: { middlewareMode: true },
-  })
+  const vite = await sharedVite()
   try {
     const { default: ReportView } = await vite.ssrLoadModule('/src/Report.jsx')
     const markup = renderToStaticMarkup(React.createElement(ReportView, {

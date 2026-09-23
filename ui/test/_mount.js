@@ -35,12 +35,13 @@
 // timer references captured when this module loads, so they still turn the event loop inside a test
 // that has mocked `setTimeout`.
 import assert from 'node:assert/strict'
+import { after } from 'node:test'
 import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
 
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { createServer } from 'vite'
+import { createServer, createServerModuleRunner } from 'vite'
 import { JSDOM } from 'jsdom'
 
 const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
@@ -226,14 +227,62 @@ export function holdFrames() {
   }
 }
 
+// The one Vite configuration every harness here loads modules with (a fresh object per server).
+// `optimizeDeps` is off for the reason `commentsContract.test.js` found and first stated: "Four
+// other mounted-contract files may create Vite servers in parallel under `node --test`. Dependency
+// discovery shares a default cache and can race another server's optimizer, leaving an open
+// scanner after one suite closes. SSR loads dependencies through Node directly here." Every module
+// these harnesses hand out is an SSR load, so the client optimizer is never needed — and its shared
+// `node_modules/.vite` cache is written by every Vite test file running beside this one.
+const viteOptions = () => ({
+  root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
+  optimizeDeps: { noDiscovery: true, include: [] },
+  server: { middlewareMode: true },
+})
+
+// ONE Vite server per test FILE (review 2026-09-22, UI-05). A server is cheap to start (~40 ms
+// measured) and expensive to FILL: every module it hands out is transformed on first load, and a
+// new server transforms the whole graph again — Inspector.jsx's took 0.8-1.4 s on this box, paid
+// once per test by a file that started a server per test (13 times in
+// `inspectorTracePager.test.js`, which is how that file came to be cancelled at the 30 s per-file
+// timeout under load). `sharedVite()` keeps one server for the PROCESS and hands each caller a
+// FRESH module runner over it: module instances are per call, exactly as a new server's were, so
+// a test still sees no module state another test left, while the transforms are paid once (a warm
+// runner re-evaluates Inspector.jsx's graph in ~0.11 s). A process is a FILE here — node --test
+// runs each file in its own — and that is the ceiling: one server across files would need the
+// whole suite in one process, sharing every global each file installs. The caller's `close()`
+// releases its runner; the server closes after the file's last test (the root `after` hook
+// below), because an open one holds a listening socket and file watchers that would keep the
+// process alive past its tests.
+let sharedServer = null
+export async function sharedVite() {
+  sharedServer ??= createServer(viteOptions())
+  const server = await sharedServer
+  // `ssrLoadModule`'s own runner, minus its per-server cache: the same `hmr: false`, no source-map
+  // interceptor, native evaluation of externals (so React stays one instance per process).
+  const runner = createServerModuleRunner(server.environments.ssr,
+    { hmr: false, sourcemapInterceptor: false })
+  return {
+    ssrLoadModule: path => runner.import(path),
+    close: () => runner.close(),
+    // The server's module graph, for a test that reads a real resolved import edge. It records
+    // TRANSFORMS, which every runner over this server shares, so it reads as a new server's did.
+    get environments() { return server.environments },
+    get moduleGraph() { return server.moduleGraph },
+  }
+}
+after(async () => {
+  if (!sharedServer) return
+  const server = await sharedServer
+  sharedServer = null
+  await server.close()
+})
+
 export async function mountHarness({ routes = {}, visible = false } = {}) {
   installDom({ visible })
   const fetch = fetchStub(routes)
   globalThis.fetch = fetch
-  const vite = await createServer({
-    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-    server: { middlewareMode: true },
-  })
+  const vite = await createServer(viteOptions())
   return {
     vite,
     fetch,

@@ -1,13 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
-import { fileURLToPath } from 'node:url'
 
 import React, { act, useState } from 'react'
-import { createServer } from 'vite'
 import { JSDOM } from 'jsdom'
 
-const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
+import { sharedVite } from './_mount.js'
 
 const source = () => readFile(new URL('../src/RunList.jsx', import.meta.url), 'utf8')
 const between = (text, start, end) => text.slice(text.indexOf(start), text.indexOf(end))
@@ -88,8 +86,7 @@ test('the shared RunList mutation guard is single-flight, bounded, and honest ab
 })
 
 test('reflected fence-conflict text is coerced, bounded, and never empty', async () => {
-  const vite = await createServer({ root: UI_ROOT, configFile: false, appType: 'custom',
-    logLevel: 'silent', server: { middlewareMode: true } })
+  const vite = await sharedVite()
   try {
     const { __testFenceConflictMessage: message } = await vite.ssrLoadModule('/src/RunList.jsx')
     assert.ok(typeof message === 'function', 'RunList no longer exports the reflection helper')
@@ -195,10 +192,7 @@ test('project rename blocks competing controls and re-arms after an authoritativ
     for (const [key, value] of Object.entries(installed)) {
       Object.defineProperty(globalThis, key, { configurable: true, writable: true, value })
     }
-    vite = await createServer({
-      root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-      server: { middlewareMode: true },
-    })
+    vite = await sharedVite()
     const [{ createRoot }, { TreeNode }] = await Promise.all([
       import('react-dom/client'), vite.ssrLoadModule('/src/RunList.jsx'),
     ])

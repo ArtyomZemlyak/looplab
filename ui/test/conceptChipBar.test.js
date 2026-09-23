@@ -11,14 +11,12 @@
 // textContent, a mapped array — whenever the expected value is "no such element".
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { fileURLToPath } from 'node:url'
 
 import { JSDOM } from 'jsdom'
 import React, { act } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { createServer } from 'vite'
 
-const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
+import { sharedVite } from './_mount.js'
 
 const STATE = {
   nodes: Object.fromEntries(Array.from({ length: 5 }, (_, id) => [id, { id }])),
@@ -32,10 +30,7 @@ const STATE = {
 }
 
 test('ConceptChipBar renders nothing when the run carries no concepts', async () => {
-  const vite = await createServer({
-    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-    server: { middlewareMode: true },
-  })
+  const vite = await sharedVite()
   try {
     const { default: ConceptChipBar } = await vite.ssrLoadModule('/src/ConceptChipBar.jsx')
     const markup = renderToStaticMarkup(React.createElement(ConceptChipBar, {
@@ -52,10 +47,7 @@ test('ConceptChipBar renders nothing when the run carries no concepts', async ()
 // unavailable; not empty." over 21 exact memberships across 6 clean experiments because a single delta
 // node's parent was never tagged. Only a run-SCOPED failure may refuse the whole control.
 test('ConceptChipBar withholds the degraded row and keeps the rest of the run filterable', async () => {
-  const vite = await createServer({
-    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-    server: { middlewareMode: true },
-  })
+  const vite = await sharedVite()
   try {
     const { default: ConceptChipBar } = await vite.ssrLoadModule('/src/ConceptChipBar.jsx')
     const render = state => new JSDOM(renderToStaticMarkup(React.createElement(ConceptChipBar, {
@@ -97,10 +89,7 @@ test('ConceptChipBar withholds the degraded row and keeps the rest of the run fi
 })
 
 test('ConceptChipBar renders top-level concept chips with subtree counts', async () => {
-  const vite = await createServer({
-    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-    server: { middlewareMode: true },
-  })
+  const vite = await sharedVite()
   try {
     const { default: ConceptChipBar } = await vite.ssrLoadModule('/src/ConceptChipBar.jsx')
     const markup = renderToStaticMarkup(React.createElement(ConceptChipBar, {
@@ -120,10 +109,7 @@ test('ConceptChipBar renders top-level concept chips with subtree counts', async
 })
 
 test('ConceptChipBar excludes tombstoned and run-level aborted memberships', async () => {
-  const vite = await createServer({
-    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-    server: { middlewareMode: true },
-  })
+  const vite = await sharedVite()
   try {
     const { default: ConceptChipBar } = await vite.ssrLoadModule('/src/ConceptChipBar.jsx')
     const markup = renderToStaticMarkup(React.createElement(ConceptChipBar, {
@@ -159,10 +145,7 @@ test('selecting a chip pushes the matching node set to onHighlight; clear resets
     for (const [key, value] of Object.entries(installed)) {
       Object.defineProperty(globalThis, key, { configurable: true, writable: true, value })
     }
-    vite = await createServer({
-      root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-      server: { middlewareMode: true },
-    })
+    vite = await sharedVite()
     const [{ createRoot }, { default: ConceptChipBar }] = await Promise.all([
       import('react-dom/client'), vite.ssrLoadModule('/src/ConceptChipBar.jsx'),
     ])
@@ -309,10 +292,7 @@ test('search previews a graph highlight and commits a concept on result click', 
     for (const [key, value] of Object.entries(installed)) {
       Object.defineProperty(globalThis, key, { configurable: true, writable: true, value })
     }
-    vite = await createServer({
-      root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-      server: { middlewareMode: true },
-    })
+    vite = await sharedVite()
     const [{ createRoot }, { default: ConceptChipBar }] = await Promise.all([
       import('react-dom/client'), vite.ssrLoadModule('/src/ConceptChipBar.jsx'),
     ])
@@ -422,10 +402,7 @@ test('a non-matching query shows an empty state and dims nothing', async () => {
     for (const [key, value] of Object.entries(installed)) {
       Object.defineProperty(globalThis, key, { configurable: true, writable: true, value })
     }
-    vite = await createServer({
-      root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-      server: { middlewareMode: true },
-    })
+    vite = await sharedVite()
     const [{ createRoot }, { default: ConceptChipBar }] = await Promise.all([
       import('react-dom/client'), vite.ssrLoadModule('/src/ConceptChipBar.jsx'),
     ])
@@ -468,10 +445,7 @@ test('concepts vanishing while selected clears the highlight instead of strandin
     for (const [key, value] of Object.entries(installed)) {
       Object.defineProperty(globalThis, key, { configurable: true, writable: true, value })
     }
-    vite = await createServer({
-      root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-      server: { middlewareMode: true },
-    })
+    vite = await sharedVite()
     const [{ createRoot }, { default: ConceptChipBar }] = await Promise.all([
       import('react-dom/client'), vite.ssrLoadModule('/src/ConceptChipBar.jsx'),
     ])
