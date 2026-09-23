@@ -27,8 +27,10 @@ on:
 jobs:
   pytest-windows:
     runs-on: windows-latest
-    # 30, not 20: run 1964's group 4 was cancelled at the old 20-minute ceiling mid-suite.
-    timeout-minutes: 30
+    # 45, not 20 or 30: run 1964's group 4 was cancelled at the old 20-minute ceiling mid-suite, and
+    # the triage measured this runner at 2.1-6.5 tests/s per shard (Linux: ~5-6) with single
+    # `arm_power_tool` chunks of 177, 148 and 122 s — about 4,300 tests a shard needs more than 30.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
