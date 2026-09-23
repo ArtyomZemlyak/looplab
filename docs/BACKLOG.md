@@ -7245,3 +7245,83 @@ the reading, not another throwaway script.
 OPEN[belief-identity-text-keyed] belief identity is a digest of the seed TEXT and the semantic key is unbuilt; the instrument `looplab belief-key-split <runs-root>` (`events/belief_key_split.py`) exists and was run 2026-09-18 (10 of 128 concept-equal groups split, 7 of those would pool CONFLICTING verdicts — paragraph below). The concept-set key is DECLINED; a better key is not ruled out, because 3 of the 10 splits are genuine re-wordings. proof:present:hypothesis_statement_digest(seed)@looplab/events/card_ledger.py
 
 *The measurement behind `belief-identity-text-keyed`, 2026-09-18:* on the dense-retrieval corpus (`runs/`, 11 run dirs): **128 concept-equal groups over 303 cards; 10 groups SPLIT by the seed-TEXT key, covering 20 cards; 7 of the 10 would pool CONFLICTING verdicts.** So a concepts-keyed identity would be wrong on 7 of the 10 groups it would merge, and the reading the entry asked for is in the output: v11 splits "run DCL+R-Drop at the sibling champion's footprint" (`open`) from "implement DCL and R-Drop in NLLCosLoss" (`supported`) under 13 identical concept tags — a configuration question and an implementation question, which a merge would settle with the second one's verdict; while v12 splits "per-device batch 512->2048" from "512->4096" at one effective batch, which IS one question in two wordings. Both live in the same split shape, so no key separates them — only a reading does. The number exists and it says the key does not change. **DECIDED 2026-09-18:** the CONCEPT-SET key specifically is refused (the DECLINED marker above); this is deliberately NARROWER than "the text key is fine" — 3 of the 10 splits are genuine re-wordings, so text-keying does cost something and a better key is not ruled out. What is ruled out is the one that was proposed.
+
+### §0.24 Our agentic loop is the most expensive thing we own, and a coding agent already implements it (2026-09-17)
+
+**The operator's ask, in their words:** a skill — or whatever shape fits — that Claude Code, Codex
+or a comparable coding agent can use, "in that mode all our agentic loops are replaced from our own
+implementation with this Claude Code or similar", the main agent being Claude Code itself (start
+there; Codex and the rest may or may not be the same shape), and the solution must be "maximally
+flexible, simple and universal". The named reference is `https://github.com/alphaXiv/OpenResearch`.
+
+**THAT REFERENCE HAS NOT BEEN READ AND NOTHING BELOW RESTS ON IT.** No network read was made in
+the session that wrote this entry, so every claim here is about THIS tree. Reading it is step one
+and it may change the shape; do not quote it as evidence until someone has.
+
+**Why this is worth a real design pass rather than another backend preset.** The money is in the
+loop, not in the ideas. Measured over 19 runs in `looplab-bench/plots/node-count-analysis.md`
+($29.83, 6,666 generations, 10,830 tool calls, 64 nodes): **95.3 %** of the spend is tool-loop
+CONTINUATIONS rather than first moves ($18.90 against $0.92), the re-sent Developer system prompt is
+26.1 Mtok = **$3.66 of $19.83 (18 %)**, and **16.3 %** of all tool calls are exact repeats inside
+one session (1,765 of 10,830; turns made entirely of repeats are $2.641 = 8.9 % of the money).
+Context management, prompt caching and repeat suppression are exactly what a shipped coding-agent
+harness does for a living, and `looplab/agents/tool_loop.py` + `roles.py` is where we do it
+ourselves. What LoopLab uniquely owns is the other half — the append-only ledger, replay, the
+trust gates, the Card board, the metric provenance record — and none of that is agentic-loop code.
+
+**What already exists, so nobody rebuilds it.** `looplab/agents/cli_agent.py` (ADR-7) runs any
+terminal coding agent head-less as a Developer backend, with four presets (`opencode`, `aider`,
+`goose`, `continue`) and a patch-gated multi-file mode carrying `surface` / `protect` /
+`editable_prefixes`. So the *Developer* lane is already delegable and repo-shaped. Two things it is
+not: it has no Claude Code (or Codex) preset, and it is the ONLY role that can be delegated at all.
+
+OPEN[no-claude-code-agent-preset] the shipped CLI-agent presets are `opencode`/`aider`/`goose`/`continue` and `core/config.py::DEVELOPER_BACKENDS` names the same four, so the agent the operator asked to start with cannot be selected at all proof:absent:claude-code@looplab/agents/cli_agent.py
+
+OPEN[only-the-developer-role-is-delegable] there is one backend switch and it is the Developer's; the Researcher, Strategist, crash/timeout diagnostician, train-monitor judge, ASHA judge, repair critic, memo verifier, concept classifier and the paid stewards all run through `core/llm.py::OpenAICompatibleClient` with no seam an external agent could take, so "all our agentic loops" is today one of nine or ten proof:absent:role_backends@looplab/core/config.py
+
+**FOUR CONSTRAINTS THIS REPO'S OWN INVARIANTS PUT ON THE ANSWER.** Each is checkable in the tree
+and each has already cost something when it was got wrong, so they are the design brief, not
+objections:
+
+1. **An external agent may never append a domain event.** Engine invariant #1 — the engine is the
+   sole writer of folded events, with three narrowly registered exceptions. A delegated role
+   RETURNS a value; the main task writes. `engine/novelty.py::_capture_proposal_events` is the
+   shape to copy: the offloaded lane BUFFERS intents and the main task publishes them.
+2. **The read fence cannot see a shell, and that is the sharpest problem.**
+   `runtime/read_fence.py` is a CPython `sys.addaudithook`, so it covers `open` inside an
+   interpreter and nothing else. An external coding agent's whole value is that it runs `bash`,
+   `cat`, `rg` and a language server — none of which raises a Python audit event.
+   `tools/dev_probe.py` already refuses to be a shell in exactly these words ("a tool that could
+   run `cat`/`cp`/`bash` would be an execution surface the fence cannot see"), and the incident it
+   protects against is real: `runs/rubertlite-dr-unified-v6` node 4 trained a good model and then
+   scored a HUMAN's checkpoint an absolute path named, with the artifact contract PASSED. So a
+   delegated role needs the KERNEL rung, which is `runtime/landlock.py` — the same gap one surface
+   over, already indexed under the slug `landlock-is-opt-in-by-default`; this entry deliberately
+   mints no second slug for it. (Spelled WITHOUT the `OPEN[…]` token on purpose: the token is a
+   DECLARATION, so writing it here declared the slug twice and `test_each_slug_is_declared_exactly_once`
+   went red. A cross-reference names the slug in backticks.)
+3. **The cost ledger goes blind.** `engine/costs.py` writes `llm_usage`/`llm_cost` from OUR client.
+   An external agent bills its own account and reports usage in its own format, so either it hands
+   back a usage record the ledger can absorb or every budget, `$/node` figure and the whole
+   `looplab tokens` roll-up silently stops describing the run. The `.llm-usage-outbox` is the seam.
+4. **Prompt strings are contracts and an external agent will not take ours.** A delegated role gets
+   a task BRIEF, not `_REPO_DEV_SYSTEM_BODY`. That is mostly good — 18 % of the money is re-sending
+   that body, and it contains a `declare_stages` block measured as never once invoked — but it
+   means the prompt-level guarantees (the scorer boundary, the footprint contract, the "you cannot
+   execute anything yourself" clause) have to be re-expressed as things the ENGINE checks rather
+   than things the prompt says. Which is the direction docs/36 already prescribes.
+
+**How it would be measured, and the blocker on that.** The comparison bench exists:
+`looplab-bench` runs 20 AlgoTune tasks at a $1 budget, side A the AlgoTune baseline agent and side B
+LoopLab. The last campaign (`campaign-final-20260910`) has **no B-side measurement at all** — all
+20 refused with `rc=2`, one cause, `LOOPLAB_LLM_API_KEY_BASE_URL` set without `LOOPLAB_LLM_API_KEY`
+— so there is currently no LoopLab number for a replacement to beat. Fix the credential pair and
+re-run the campaign BEFORE building the harness, or the first delegated run has nothing to be
+compared against.
+
+**The smallest honest first slice**, in the order the constraints above allow: a Claude Code preset
+in `PRESETS` with the patch gate on (constraint 1 holds by construction — a Developer backend
+already only returns files), a usage read-back into the outbox (3), the landlock rung switched on
+for the delegated lane (2), and only then a second role — the Researcher, because it is the one
+whose 8.82-provider-calls-per-failure neighbour is already measured. A role-agnostic
+`role_backends` map is the END of that road, not the start of it.
