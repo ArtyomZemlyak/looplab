@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { assistantDirectIntent } from '../src/assistantCommand.js'
+import { NEW_RUN_DRAFT_RE } from '../src/assistantComposerModel.js'
 
 // Every slash command a screen PRINTS must be one a human can type. `panels.jsx` told the operator to
 // "Trigger one with /deep-research in the chat" and to "add one from the chat (/experiment)"; neither
@@ -14,8 +15,10 @@ import { assistantDirectIntent } from '../src/assistantCommand.js'
 // ends printed at the one moment the reader has nothing else to go on (an empty panel).
 //
 // Drive both tables rather than pinning literals: `assistantDirectIntent` IS the run-control
-// vocabulary (it throws on anything else), and the draft regex is read out of AssistantBar's own
-// source and executed, so renaming either goes red here in the same change. Coding-assistant skills
+// vocabulary (it throws on anything else), and the draft regex is the composer model's own object,
+// imported and executed (it used to be parsed out of AssistantBar's source text until the composer
+// rules left the component, review 2026-09-22 UI-06), so renaming either goes red here in the same
+// change. Coding-assistant skills
 // (`/init`, `/review`, … from `GET /api/assistant/commands`) are a DIFFERENT plane and deliberately
 // not accepted: they do not steer a run, and a screen that offers one as a run action is the same
 // defect over again.
@@ -29,10 +32,9 @@ const walk = dir => readdirSync(dir).flatMap(name => {
 })
 
 function newRunDraftPattern() {
-  const source = readFileSync(join(SRC, 'AssistantBar.jsx'), 'utf8')
-  const match = /const NEW_RUN_DRAFT_RE = \/(.+?)\/([a-z]*)\n/.exec(source)
-  assert.ok(match, 'AssistantBar no longer declares NEW_RUN_DRAFT_RE; this scan cannot classify /new')
-  return new RegExp(match[1], match[2])
+  assert.ok(NEW_RUN_DRAFT_RE instanceof RegExp,
+    'the composer model no longer exports NEW_RUN_DRAFT_RE; this scan cannot classify /new')
+  return NEW_RUN_DRAFT_RE
 }
 
 function namedSlashCommands() {

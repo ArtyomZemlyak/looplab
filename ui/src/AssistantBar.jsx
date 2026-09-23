@@ -62,6 +62,18 @@ import {
   storageGet, storageSet, storageRemove, runApiPath,
 } from './util.js'
 import { boundedRequest, deadlineRequest } from './requestDeadline.js'
+import {
+  DIRECT, UNKNOWN_DIRECT_SPEC, directCopy, directSpec, parseDirect, preRoute,
+} from './assistantDirectModel.js'
+import {
+  FILE_CHAR_CAP, MAX_FILE_BYTES, NEW_CHAT_COMPOSER_KEY, SECRET_RE, TEXT_EXT, composerRunKey,
+  composerUsesRun, newComposerDraft, normalizeComposerMode, refNodes, uiRunContext,
+} from './assistantComposerModel.js'
+import {
+  assistantLiveShareAckRequired, assistantLiveShareIds, assistantLiveShareRecoveryFailure,
+  shareRecoveryScope, validAssistantShareFallback, validAssistantShareMeta,
+} from './assistantShareMetaModel.js'
+import { assistantForkTurnInProgress } from './assistantForkModel.js'
 import { useAssistantFork } from './useAssistantFork.js'
 import { startTurnFallbackPolls } from './assistantTurnPolls.js'
 import { followClientRoute } from './accessibility.jsx'
@@ -113,45 +125,6 @@ const retainLaunchDisclosure = (store, key, open, limit = 50) => {
   return next
 }
 
-// Run-control commands safe to fire directly (no model). `arg:true` needs a node id (e.g. /approve #12).
-const FREEZE = { success: '⏸ run stopped (not finalized)',
-  noop: '⏸ run already stopped', executing: 'Stop requested — waiting for freeze' }
-const FINALIZE = { success: '⏹ run finalized',
-  noop: '⏹ run already finalized', executing: 'Finalize requested — waiting for wrap-up' }
-const DIRECT = {
-  stop: FREEZE, pause: FREEZE, finalize: FINALIZE, abort: FINALIZE,
-  resume:   { success: '▶ run resumed',
-    noop: '▶ run already running', executing: 'Resume requested — waiting for engine' },
-  ratify:   { success: '✓ eval spec ratified',
-    noop: '✓ eval spec already ratified', executing: 'Ratification requested — awaiting confirmation' },
-  approve:  { arg: true, success: (id) => `✓ approved #${id}`,
-    noop: (id) => `✓ #${id} already approved`, executing: (id) => `Approval #${id} requested — awaiting confirmation` },
-}
-const directSpec = name => typeof name === 'string' && Object.hasOwn(DIRECT, name)
-  ? DIRECT[name] : null
-const UNKNOWN_DIRECT_SPEC = {
-  success: 'Run command completed', noop: 'Run command was already satisfied',
-  executing: 'Run command is pending',
-}
-const directCopy = (value, arg) => typeof value === 'function' ? value(arg) : value
-// Unambiguous = a lone /name optionally + a single #id token, and NOTHING else. Trailing prose → LLM.
-function parseDirect(t) {
-  const m = /^\/([a-z_]+)(?:\s+#?(\d+))?\s*$/i.exec(t)
-  if (!m) return null
-  const name = m[1].toLowerCase()
-  const spec = directSpec(name)
-  if (!spec) return null
-  const arg = m[2] ? Number(m[2]) : null
-  if (spec.arg && arg == null) return null
-  // A node token changes the meaning of a run-wide lifecycle command. Treat that input as
-  // invalid instead of silently discarding the node and stopping the whole run (or asking an LLM
-  // to reinterpret a control-shaped typo). Preserve the draft so the user can correct it in place.
-  if (!spec.arg && arg != null) return {
-    invalid: true,
-    message: `/${name} controls the whole run and does not accept #${arg}. Remove the node id to continue.`,
-  }
-  return { name, spec, arg }
-}
 
 const firstLine = (s) => (s || '').replace(/[#*`>_-]/g, '').split('\n').map(l => l.trim()).find(Boolean) || ''
 const previewText = (value) => firstLine(assistantPreview(value)).slice(0, 120)
@@ -171,38 +144,6 @@ const normalizedFailureText = (value) => {
 
 const safeErrorNotice = (value) => assistantErrorInfo(`Assistant error: ${String(value || '')}`)?.title || 'Assistant request failed'
 
-// U5 · cheap pre-router: catch a few natural-language control phrases WITHOUT paying for an LLM
-// round-trip. Fires ONLY when the phrase names the run ("stop the run", "finalize run") — a bare
-// "stop" or "continue" is everyday chat directed at the assistant. `stop` is now a reversible FREEZE
-// (safe); the terminal wrap-up is `finalize` (maps everyday "abort/halt/wrap up" onto it).
-const _NL_CONTROL = { stop: 'stop', freeze: 'stop', pause: 'stop',
-  finalize: 'finalize', abort: 'finalize', halt: 'finalize', wrapup: 'finalize',
-  resume: 'resume', continue: 'resume', unpause: 'resume' }
-function preRoute(t) {
-  const cleaned = t.toLowerCase().replace(/^(please\s+|can you\s+)/, '').replace(/[.!]+$/, '').trim()
-  if (!/\brun\b/.test(cleaned)) return null
-  const norm = cleaned.replace(/\b(the\s+|this\s+|current\s+)?run\b/g, '').trim()
-  const name = Object.hasOwn(_NL_CONTROL, norm) ? _NL_CONTROL[norm] : null
-  const spec = directSpec(name)
-  return name && spec ? { name, spec, arg: null } : null
-}
-// `#N` must start a token (not follow a word/# char) and end at a boundary — so `#3498db` (hex color),
-// URL fragments (`page#12`), and `x#5` don't fabricate an experiment reference.
-const refNodes = (t) => [...new Set([...(t || '').matchAll(/(?<![\w#])#(?:node-)?(\d+)\b/gi)].map(m => Number(m[1])))]
-const NEW_RUN_DRAFT_RE = /^\/(?:new|genesis|run)\b/i
-const composerUsesRun = (input, files = [], pendingFileReads = 0) => {
-  const text = String(input || '').trim()
-  return files.length > 0 || pendingFileReads > 0
-    || (!NEW_RUN_DRAFT_RE.test(text) && text.length > 0)
-}
-const composerRunKey = runId => runId == null ? '' : String(runId)
-const uiRunContext = (runId, refs) => {
-  if (!runId) return ''
-  const safe = String(runId).replace(/[\]"\r\n]/g, ' ').slice(0, 200)
-  const nodes = refs.length
-    ? ` The user refers to ${refs.map(id => '#' + id).join(', ')}; read them with run tools.` : ''
-  return `\n\n[UI context: run "${safe}" is open.${nodes} Use run tools if relevant.]`
-}
 
 // Popular one-tap prompts surfaced in the full view (and side view when empty). Keep short + generic.
 const HINTS = [
@@ -212,72 +153,6 @@ const HINTS = [
   { label: "What's next?", text: 'Propose the highest-value next experiment and why.' },
 ]
 
-// Attach only text-ish files we can read as plain text (no special parsing). Cap each file so a huge
-// paste doesn't blow the context; the backend receives the content inline in the instruction.
-const TEXT_EXT = /\.(txt|md|markdown|csv|tsv|json|jsonl|ya?ml|toml|ini|cfg|conf|log|py|js|jsx|ts|tsx|sh|c|cpp|h|hpp|java|go|rs|rb|sql|html|css|xml|env)$/i
-const FILE_CHAR_CAP = 20000
-const MAX_FILE_BYTES = 2 * 1024 * 1024   // never readAsText a giant log/csv into the tab (OOM)
-const SECRET_RE = /(^|\/)\.env(\.|$)|\.pem$|\.key$|(^|\/)(id_rsa|id_ed25519)$|secret|credential/i
-const NEW_CHAT_COMPOSER_KEY = '__new__'
-const normalizeComposerMode = value => (
-  MODES.some(candidate => candidate.id === value) ? value : 'plan'
-)
-const newComposerDraft = (mode = 'plan') => ({
-  input: '', files: [], pendingFileReads: 0, runScope: null, mode: normalizeComposerMode(mode),
-})
-const ASSISTANT_SHARE_ID_RE = /^[0-9a-f]{32}$/
-const ASSISTANT_SHARE_URL_RE = /^#\/assistant\/shared\/([0-9a-f]{32})\.([A-Za-z0-9_-]{43})$/
-const ASSISTANT_SHARE_IDS_MAX = 4096
-const validAssistantShareId = value => typeof value === 'string' && ASSISTANT_SHARE_ID_RE.test(value)
-const boundedAssistantShareIds = value => {
-  if (!Array.isArray(value) || value.length > ASSISTANT_SHARE_IDS_MAX) return null
-  const ids = []
-  const seen = new Set()
-  for (const id of value) {
-    if (!validAssistantShareId(id) || seen.has(id)) return null
-    seen.add(id); ids.push(id)
-  }
-  return ids
-}
-const assistantShareIds = meta => boundedAssistantShareIds(meta?.share_ids)
-const assistantLiveShareIds = meta => boundedAssistantShareIds(meta?.live_share_ids)
-const validAssistantShareMeta = meta => {
-  const ids = assistantShareIds(meta)
-  const liveIds = assistantLiveShareIds(meta)
-  const shareSet = ids == null ? null : new Set(ids)
-  if (ids == null || liveIds == null
-      || liveIds.some(id => !shareSet.has(id))
-      || typeof meta.shared !== 'boolean' || meta.shared !== (ids.length > 0)
-      || !Number.isInteger(meta.share_count) || meta.share_count !== ids.length
-      || typeof meta.share_live !== 'boolean' || meta.share_live !== (liveIds.length > 0)) return false
-  return ids.length
-    ? Number.isFinite(meta.share_expires_at) && meta.share_expires_at > 0
-    : meta.share_expires_at == null
-}
-const assistantLiveShareAckRequired = error => error?.status === 409
-  && error?.code === 'assistant_live_share_ack_required'
-const assistantForkTurnInProgress = error => error?.status === 409
-  && error?.code === 'assistant_turn_fork_in_progress'
-const assistantLiveShareRecoveryFailure = {
-  message: 'Saved Assistant turn paused because the live public-link set changed. Verify its status, then retry this exact turn.',
-  notice: 'Saved Assistant turn paused · live public-link status changed',
-  blocked: false,
-}
-// A saved create identity belongs to ONE deployment served from ONE path: two LoopLabs open in the
-// same tab must not read each other's envelopes, and a chat id is only unique within a deployment.
-// (`assistantShareReceipt` used to live here; the receipt is now checked against what this browser
-// DERIVES rather than against the shape of the answer — `assistantShareRecovery.js`.)
-const shareRecoveryScope = () => `${location.origin}${location.pathname}`
-const validAssistantShareFallback = value => {
-  if (!value || !validAssistantShareId(value.shareId) || !Number.isFinite(value.expiresAt)
-      || value.expiresAt <= 0 || typeof value.url !== 'string') return false
-  try {
-    const parsed = new URL(value.url)
-    const match = ASSISTANT_SHARE_URL_RE.exec(parsed.hash)
-    return parsed.origin === location.origin && parsed.pathname === location.pathname
-      && !parsed.search && match?.[1] === value.shareId
-  } catch { return false }
-}
 const ASSISTANT_OVERLAY_MAX_PX = 1439
 const assistantMaxWidth = compact => Math.max(320, window.innerWidth - (compact ? 120 : 880))
 const clampAssistantWidth = (value, compact = window.innerWidth <= ASSISTANT_OVERLAY_MAX_PX) => {

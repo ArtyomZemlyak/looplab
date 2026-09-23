@@ -165,3 +165,9 @@ export function forkSettlement(kind, { presented = false } = {}) {
     ? 'Fork is still finishing · use check fork to recover this exact request'
     : 'Fork status is uncertain · use check fork before starting another' }
 }
+
+// The server's refusal of a turn while this chat is being forked: a 409 with its own code, which the
+// send path reads as "wait for the fork", never as a failed turn (moved out of `AssistantBar.jsx`,
+// review 2026-09-22 UI-06).
+export const assistantForkTurnInProgress = error => error?.status === 409
+  && error?.code === 'assistant_turn_fork_in_progress'
