@@ -127,6 +127,9 @@ def test_jupyter_serverproxy_spec_is_valid(monkeypatch):
     command that runs `looplab ui --no-build` with a pinned run-root, prefix-stripping (absolute_url
     False), and a Launcher tile."""
     monkeypatch.delenv("LOOPLAB_UI_TOKEN", raising=False)
+    # "Local": no hub environment — the only case a server with no token stays anonymous (SRV1-08).
+    for name in ("JUPYTERHUB_SERVICE_PREFIX", "JUPYTERHUB_API_TOKEN", "LOOPLAB_UI_ANONYMOUS"):
+        monkeypatch.delenv(name, raising=False)
     from looplab.serve.jupyter import setup_looplab
     spec = setup_looplab()
     assert spec["command"][:2] == ["looplab", "ui"]
@@ -144,6 +147,36 @@ def test_jupyter_protected_shell_opens_outside_frame(monkeypatch):
     from looplab.serve.jupyter import setup_looplab
 
     assert setup_looplab()["new_browser_tab"] is True
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("token", [None, "owner-secret"])
+@pytest.mark.parametrize("hub", [None, "/user/alice/"])
+@pytest.mark.parametrize("anonymous", [None, "1"])
+def test_the_launcher_frames_exactly_the_servers_that_stay_anonymous(monkeypatch, tmp_path, token,
+                                                                     hub, anonymous):
+    """Review 2026-09-22, SRV1-08. The launcher decides framing at spec time, in the jupyter-server
+    process; the child `looplab ui` decides its owner token at start. On a hub with no token the child
+    MINTS one and refuses framing, while the launcher (reading only the parent's token) framed it —
+    a blank Launcher tile. Both deciders are driven over every combination and must agree.
+    MUTATION: `_launched_shell_is_protected` back to `bool(os.environ.get("LOOPLAB_UI_TOKEN"))` -> the
+    (no token, hub, not anonymous) rows go red."""
+    from looplab.serve.jupyter import setup_looplab
+    from looplab.serve.owner_token import resolve_owner_token
+
+    for name, value in (("LOOPLAB_UI_TOKEN", token), ("JUPYTERHUB_SERVICE_PREFIX", hub),
+                        ("LOOPLAB_UI_ANONYMOUS", anonymous)):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    monkeypatch.delenv("JUPYTERHUB_API_TOKEN", raising=False)
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN_FILE", str(tmp_path / "ui-token"))
+    framed_out = setup_looplab()["new_browser_tab"]
+    enforced, _source = resolve_owner_token(None)          # loopback: jsp launches on 127.0.0.1
+    assert framed_out is (enforced is not None), (token, hub, anonymous, _source)
 
 
 def test_compose_protected_ui_wires_host_allowlist_and_public_healthcheck():

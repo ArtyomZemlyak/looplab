@@ -207,9 +207,11 @@ project information.
 ## Run as a JupyterHub app (jupyter-server-proxy)
 
 LoopLab can launch as a **first-class app inside a JupyterHub single-user server** — a tile in the
-Launcher that opens the live UI with no terminal and no hand-typed URL. Anonymous local mode can open
-in-frame. When `LOOPLAB_UI_TOKEN` protects the owner shell, the tile opens a new browser tab because
-the shell intentionally denies framing; the launcher never weakens that clickjacking boundary.
+Launcher that opens the live UI with no terminal and no hand-typed URL. On a hub the owner shell is
+always protected — by your `LOOPLAB_UI_TOKEN`, or by a token the server mints (unless you set
+`LOOPLAB_UI_ANONYMOUS=1`) — and a protected shell intentionally denies framing, so the tile opens a new
+browser tab; the launcher never weakens that clickjacking boundary. Only an anonymous shell (no hub
+environment, or the explicit opt-out) opens in-frame.
 Install the extra:
 
 ```bash

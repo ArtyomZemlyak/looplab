@@ -48,12 +48,33 @@ def _run_root() -> str:
     return os.environ.get("LOOPLAB_RUN_ROOT") or str(Path.home() / "looplab-runs")
 
 
+def _launched_shell_is_protected() -> bool:
+    """Will the `looplab ui` this spec launches enforce an owner token — and therefore refuse framing?
+
+    The CHILD decides, in `serve/owner_token.py::resolve_owner_token`: a supplied `LOOPLAB_UI_TOKEN`,
+    or — on the shared JupyterHub origin, which is where this launcher serves from — a token it MINTS
+    unless the operator set `LOOPLAB_UI_ANONYMOUS`. This used to read only the PARENT's
+    `LOOPLAB_UI_TOKEN` (review 2026-09-22, SRV1-08): the default hub deployment sets none, the child
+    minted one and sent `X-Frame-Options: DENY`, and the Launcher framed it anyway — a blank tile on
+    exactly the box LoopLab is deployed on. Spelled here with the same three environment reads rather
+    than by importing `owner_token`, which pulls the serving layer into jupyter-server's startup;
+    `tests/test_jh_compat.py` drives both deciders over every combination and pins that they agree.
+    """
+    if os.environ.get("LOOPLAB_UI_TOKEN"):
+        return True
+    shared_hub = bool(os.environ.get("JUPYTERHUB_SERVICE_PREFIX")
+                      or os.environ.get("JUPYTERHUB_API_TOKEN"))
+    anonymous = str(os.environ.get("LOOPLAB_UI_ANONYMOUS", "")).strip().lower() in {
+        "1", "true", "yes", "on"}
+    return shared_hub and not anonymous
+
+
 def setup_looplab():
     """Return the jupyter-server-proxy launch spec for LoopLab. jsp fills ``{port}`` with a free port
     and proxies it; we keep ``absolute_url=False`` so jsp strips the prefix and the backend still sees
     plain ``/api/...`` (the SPA joins the served prefix itself)."""
     run_root = _run_root()
-    protected_shell = bool(os.environ.get("LOOPLAB_UI_TOKEN"))
+    protected_shell = _launched_shell_is_protected()
     launcher = {"title": "LoopLab", "enabled": True}
     # Optional Launcher icon — only set when the asset actually exists (jsp tolerates its absence).
     icon = Path(__file__).resolve().parents[2] / "ui" / "public" / "looplab.svg"
