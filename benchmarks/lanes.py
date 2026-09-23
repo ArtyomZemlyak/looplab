@@ -65,8 +65,15 @@ def tree_cpus(pid: int, root: str = DEFAULT_ROOT, proc: str = "/proc", affinity=
     The union, not a list: a lane is a set, and the question is whether the tree as a whole stays
     inside one. `proc` and `affinity` are injectable for `probes`' reason -- a scan of the real
     `/proc` cannot be tested, and it is the only way the escaping-worker case can go red.
+
+    A BOX WITH NO CPU-AFFINITY API HAS NO LANES, so there is no tree cpu set to read: the answer is
+    the empty set, which `pulse` already reads as "use the probe's own cpus". Windows has no
+    `os.sched_getaffinity`, and the default spelling raised AttributeError there before any of this
+    ran (review 2026-09-22 round 2, the Windows CI leg: every `pulse` test that reached `main`).
     """
-    affinity = affinity or os.sched_getaffinity
+    affinity = affinity or getattr(os, "sched_getaffinity", None)
+    if affinity is None:
+        return set()
     kids: dict = {}
     for entry in os.listdir(proc):
         if not entry.isdigit():
@@ -145,8 +152,17 @@ def probes(root: str = DEFAULT_ROOT, proc: str = "/proc", affinity=None) -> list
 
     `affinity` is injectable so the scan is testable against a fake `/proc`; by default it is
     `os.sched_getaffinity`, which is the only reading of a lane that is not a guess.
+
+    A BOX WITH NO CPU-AFFINITY API HAS NO LANES, and a bench probe is by definition a process pinned
+    to one (`run_probe.sh` launches it under `taskset`), so no bench probe can be running there: the
+    answer is the empty list, the same one an idle bench box gives. Windows has no
+    `os.sched_getaffinity`, and the default spelling raised AttributeError there before the scan
+    began, taking `pulse`, `outlier_check`, `arm_power` and the sweep's own live-probe reading down
+    with it (review 2026-09-22 round 2, the Windows CI leg, run 35804658308).
     """
-    affinity = affinity or os.sched_getaffinity
+    affinity = affinity or getattr(os, "sched_getaffinity", None)
+    if affinity is None:
+        return []
     out = []
     for pid in sorted(os.listdir(proc), key=lambda p: int(p) if p.isdigit() else 0):
         if not pid.isdigit():

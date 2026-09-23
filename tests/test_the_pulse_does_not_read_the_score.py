@@ -210,3 +210,21 @@ def test_a_probe_with_no_ledger_row_still_reports(tmp_path, monkeypatch, capsys)
                            log_age=30)
     assert rc == 0 and "live" in out, out
     assert "CALLING BUT NOT PRODUCING" not in out, out
+
+
+def test_a_box_with_no_sysconf_and_no_affinity_api_still_reads_its_probes(tmp_path, monkeypatch,
+                                                                         capsys):
+    """Windows has neither `os.sysconf` nor `os.sched_getaffinity`, and `orphans()` evaluated the
+    first — and `lanes.tree_cpus` the second — before any of their own fallbacks could answer, so
+    every test in this file that reached `main` died with AttributeError on the Windows CI leg
+    (review 2026-09-22 round 2, run 35804658308: 14 rows). Driven by taking both away: the reading
+    the pulse exists for still comes out, and still without the score."""
+    import os
+
+    monkeypatch.delattr(os, "sysconf", raising=False)
+    monkeypatch.delattr(os, "sched_getaffinity", raising=False)
+    _probe(tmp_path, "live", scored=(LOUD,), zeros=(0.1,))
+    _, out = _run_main(tmp_path, monkeypatch, capsys)
+    assert "RULER REFUSAL" in out and "eval_seconds=0.1" in out, out
+    assert "123456" not in out, out
+    assert pulse.orphans(str(tmp_path)) == {"count": 0, "rss_mib": 0.0, "oldest_h": 0.0, "cpus": 0}

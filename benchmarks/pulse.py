@@ -482,7 +482,14 @@ def orphans(bench: str) -> dict:
 
     Only what belongs to the bench's own interpreter is counted. An orphan of the host's making is
     not this tool's business, and claiming it would make the number unactionable.
+
+    A box with no `os.sysconf` or no CPU-affinity API (Windows) has neither the clock tick nor the
+    lanes this counts in, and gets the same answer as a box with no `/proc`: `os.sysconf` used to be
+    evaluated before that answer could be given, and its AttributeError took every `pulse` run down
+    on the Windows CI leg (review 2026-09-22 round 2, run 35804658308).
     """
+    if not hasattr(os, "sysconf") or not hasattr(os, "sched_getaffinity"):
+        return {"count": 0, "rss_mib": 0.0, "oldest_h": 0.0, "cpus": 0}
     try:
         hz = os.sysconf("SC_CLK_TCK")
         boot = float(open("/proc/uptime", encoding="utf-8").read().split()[0])

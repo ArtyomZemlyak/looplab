@@ -75,3 +75,21 @@ def test_a_process_that_exits_under_the_walk_is_not_a_leak(tmp_path):
 def test_pulse_judges_the_tree_not_the_engine():
     src = (BENCH / "pulse.py").read_text(encoding="utf-8")
     assert "lanes.tree_cpus(row[\"pid\"])" in src, "pulse снова судит только верхний процесс"
+
+
+def test_a_box_with_no_affinity_api_has_no_probe_on_a_lane(monkeypatch, tmp_path):
+    """Windows has no `os.sched_getaffinity`, and the default `affinity or os.sched_getaffinity`
+    raised AttributeError before either scan began — which took `pulse`, `outlier_check`,
+    `arm_power` and the sweep's own live-probe reading down on the Windows CI leg (review 2026-09-22
+    round 2, run 35804658308: 17 rows). A lane IS an affinity set, so a box with no affinity API has
+    no probe on one: the scan says so the way an idle box does, and the tree has no cpus to add.
+    Driven by taking the API away, with a REAL process table beside it so only the API is missing."""
+    import os
+
+    import sweep_claims
+
+    monkeypatch.delattr(os, "sched_getaffinity", raising=False)
+    assert lanes.probes() == []
+    assert lanes.probes(str(tmp_path)) == []
+    assert lanes.tree_cpus(os.getpid()) == set()
+    assert sweep_claims.live_probes(str(tmp_path)) == set()
