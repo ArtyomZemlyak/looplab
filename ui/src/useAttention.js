@@ -7,9 +7,11 @@ import {
 } from './attentionModel.js'
 
 const SNAPSHOT_RE = /^[0-9a-f]{64}$/
-const ATTENTION_REQUEST_TIMEOUT_MS = 8000
+// The two delays a deadline test ticks a mocked clock to are exported so it names them instead of
+// re-spelling their values (`test/useAttentionDeadline.test.js`, review 2026-09-22, UI-05).
+export const ATTENTION_REQUEST_TIMEOUT_MS = 8000
 const RUN_POLL_MS = 8000
-const PERMISSION_POLL_MS = 4000
+export const PERMISSION_POLL_MS = 4000
 const MAX_BACKOFF_MS = 60_000
 
 const sourceStaleItem = item => item?.stale && item?.notifyEligible === false
