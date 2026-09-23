@@ -267,10 +267,14 @@ refused — is in `docs/64-agent-guide-narratives-2026-09-06.md` ("Engine invari
   through `tests/_windows_emulation.py`. On Windows `os.kill(pid, 0)` is Ctrl+C to the whole
   console (`signal.CTRL_C_EVENT == 0`) — never a liveness probe
   (`serve/run_commands.py::_windows_process_alive`). A byte locked with `msvcrt.locking` refuses
-  every other handle's READ of it, so a lock byte never sits on bytes anyone reads
-  (`core/tracing.py::_WINDOWS_EXPORT_DATA_LOCK_BYTE`); a path `stat` reports creation time as
+  every other handle's READ whose REQUESTED range covers it — a buffered `read(n)` requests a whole
+  8192-byte buffer — so a lock byte never sits within what anyone asks to read
+  (`core/tracing.py::_WINDOWS_EXPORT_DATA_LOCK_BYTE`; a reader near one reads unbuffered,
+  `engine/resources.py::describe_gpu_host_lease_holder`); a path `stat` reports creation time as
   `st_ctime` where `fstat` reports change time, so a path-versus-descriptor check compares
-  `core/atomicio.py::same_file_entry`, never the full `file_identity`.
+  `core/atomicio.py::same_file_entry`, never the full `file_identity`; and no timestamp moves
+  inside one clock tick, so a same-size-rewrite check reads the bytes back
+  (`serve/launch.py::_still_reads_back`).
 - **A guard test must not be satisfiable by a COMMENT.** Roughly 200 assertions read production
   source, half of them POSITIVE pins (`assert "<literal>" in source`), and every positive pin is
   one comment away from vacuous — `pass  # self._record_eval_start_boundary(chosen)` satisfies an
