@@ -42,6 +42,7 @@ import {
   finalReplyText, restoredComposerInput, sendAbandonReason, sendTurnBlock, terminalTurnOutcome,
 } from './assistantTurnModel.js'
 import { stripPollMs, watchStrip } from './assistantWatchModel.js'
+import { latestHandlers } from './assistantTranscriptModel.js'
 import './assistant-polish.css'
 import {
   deadlineGet, get, fmtAgo, fmtDate, ASSISTANT_MODES as MODES, tokText, assistantCreate, assistantMessageStream,
@@ -307,6 +308,17 @@ const readFileText = (file) => new Promise((resolve) => {
   r.onerror = () => resolve(null)
   r.readAsText(file)
 })
+// Review 2026-09-22, UI-06. A handler handed to the memoized transcript `Turn` must keep its IDENTITY
+// across renders, or every stream chunk re-renders every message anyway. This is that handler's
+// stable face: one function for the component's life that calls the closure of the LATEST render —
+// what a Turn re-rendered on every chunk used to hold. The ref is assigned during render, as this
+// component's other latest-value refs are (`viewRef`, `openSessionRef`); the face is only ever called
+// from an event, never during a render.
+const useLatestHandler = handler => {
+  const latest = useRef(handler)
+  latest.current = handler
+  return React.useCallback((...args) => latest.current(...args), [])
+}
 
 export default function AssistantBar({ runId, hidden = false, onReady }) {
   const compactAssistant = useMediaQuery(`(max-width: ${ASSISTANT_OVERLAY_MAX_PX}px)`)
@@ -1048,8 +1060,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     pendingRouteHandoffRef.current = href
     collapseForNavigationRef.current?.()
   }
-  const openRunFromAssistant = (event, href) => followClientRoute(event,
-    () => handoffAssistantRoute(href))
+  const openRunFromAssistant = useLatestHandler((event, href) => followClientRoute(event,
+    () => handoffAssistantRoute(href)))
   const toggleSide = () => (view === 'side' ? collapseToBar() : openSide())
   useDialogFocus(fullDialogRef, collapseToBar, view === 'full' && !hidden,
     { priority: DIALOG_PRIORITY.ASSISTANT_FULL })
@@ -1845,6 +1857,34 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         })
     }
   }
+  // ── the transcript's Turn props ──
+  // Review 2026-09-22, UI-06. Every stream chunk replaces the LAST message and re-renders this
+  // component; `Turn` is memoized (`AssistantChat.jsx`) and skips a settled message only when every
+  // prop it is handed keeps its identity across that render. The messages already do (`patchLast`
+  // replaces one element of a copied array). These are the rest, each by what it IS:
+  //   * handlers that close over this render — Undo here, run links and Settings where they are
+  //     defined, Retry per message in `renderThread` — are handed as stable faces that call the
+  //     latest render's closure (`useLatestHandler`, `assistantTranscriptModel.js::latestHandlers`);
+  //   * `revertState` is READ while a Turn renders, so it must NOT be a face: it changes identity
+  //     whenever what it answers from changes (the chat, the reverting and reverted sets), and the
+  //     Undo labels re-render with it;
+  //   * the launch-card callbacks only call state setters, so they are created once.
+  // Hooks, so above the `hidden` return below.
+  const revertChange = useLatestHandler(onRevert)
+  const revertState = React.useCallback(change => {
+    const key = assistantRevertKey(sid, change)
+    return key ? { busy: revertingChanges.has(key), done: revertedChanges.has(key) } : {}
+  }, [sid, revertingChanges, revertedChanges])
+  const retainTurnLaunchDraft = React.useCallback((key, draft) => setLaunchDrafts(
+    current => retainLaunchDraft(current, key, draft)), [])
+  const retainTurnLaunchDisclosure = React.useCallback((key, open) => setLaunchDisclosures(
+    current => retainLaunchDisclosure(current, key, open)), [])
+  const settleTurnLaunchStarted = React.useCallback(key => {
+    setLaunchDrafts(current => removeLaunchDraft(current, key))
+    setLaunchDisclosures(current => retainLaunchDisclosure(current, key, false))
+  }, [])
+  const retryHandlersRef = useRef(null)
+  if (!retryHandlersRef.current) retryHandlersRef.current = latestHandlers()
 
   const directLabels = entry => entry.spec.arg && entry.arg == null ? {
     success: 'Run command completed', noop: 'Run command was already satisfied',
@@ -2838,9 +2878,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       acknowledgedShareMeta })
   }
 
-  const openAssistantSettings = () => {
+  const openAssistantSettings = useLatestHandler(() => {
     handoffAssistantRoute('#/settings', { collapse: true })
-  }
+  })
 
   const currentComposerRunKey = composerRunKey(runId)
   const draftRunMismatch = draftRunScope != null
@@ -3462,10 +3502,6 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // latest explicit Genesis command through the owning proposal message; unrelated session history,
   // attachment payloads, system/tool records, and unfinished turns fail closed.
   const launchChatThrough = index => proposalLaunchChat(msgs, index)
-  const revertState = change => {
-    const key = assistantRevertKey(sid, change)
-    return key ? { busy: revertingChanges.has(key), done: revertedChanges.has(key) } : {}
-  }
   const attentionPermissionHandoffActive = attentionPermissionFocus.phase !== 'idle'
   const attentionPermissionTargetVisible = attentionPermissionFocus.phase === 'ready'
     && pending.some(request => request?.id === attentionPermissionFocus.id)
@@ -3529,7 +3565,13 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     </div>)}
   </div>)
 
-  const renderThread = () => <>
+  const renderThread = () => {
+    // Each message's Retry closes over THIS render (its transcript, the share and fork gates), so the
+    // Turn is handed its stable face instead; publishing the whole table here replaces the previous
+    // render's closures, and a message with no Retry this render gets none (UI-06, above).
+    const retryHandlers = retryHandlersRef.current
+    retryHandlers.publish(msgs.map((_, index) => retryHandlerFor(index)))
+    return <>
     {renderWatchStrip()}
     {msgs.length === 0 && <div className="asst-empty">
       <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
@@ -3551,8 +3593,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         {(m.context.refs || []).map(r => <span key={'r' + r} className="asst-ctx-i">#{r}</span>)}
         {(m.context.files || []).map(f => <span key={'f' + f} className="asst-ctx-i"><OpIcon name="clip" size={10} /> {f}</span>)}
       </div>}
-      <Turn m={m} runsById={runsById} readOnly={historical} onRevert={historical ? null : onRevert}
-        onRetry={retryHandlerFor(i)}
+      <Turn m={m} runsById={runsById} readOnly={historical} onRevert={historical ? null : revertChange}
+        onRetry={retryHandlers.face(i)}
         retryLabel={shareUnknown || shareVerifying
           ? shareVerifying ? 'Checking status…' : 'Verify status' : 'Retry'}
         retryBusy={shareVerifying || retryChecking}
@@ -3562,13 +3604,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         launchSessionId={sid} launchMessageId={m.turn_id || m.id} launchMessageIndex={i}
         launchDrafts={launchDrafts}
         launchDisclosures={launchDisclosures}
-        onLaunchDraft={(key, draft) => setLaunchDrafts(current => retainLaunchDraft(current, key, draft))}
-        onLaunchDisclosure={(key, open) => setLaunchDisclosures(
-          current => retainLaunchDisclosure(current, key, open))}
-        onLaunchStarted={key => {
-          setLaunchDrafts(current => removeLaunchDraft(current, key))
-          setLaunchDisclosures(current => retainLaunchDisclosure(current, key, false))
-        }} />
+        onLaunchDraft={retainTurnLaunchDraft}
+        onLaunchDisclosure={retainTurnLaunchDisclosure}
+        onLaunchStarted={settleTurnLaunchStarted} />
     </React.Fragment>)}
     {!historical && pending.length > 0 && <div className="asst-perm-region" role="region"
       aria-label={`${pending.length} pending Assistant approval${pending.length === 1 ? '' : 's'}`}
@@ -3588,6 +3626,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     {/* The streaming placeholder is itself in `msgs`; its Turn renders the activity timeline +
         the "thinking" indicator — no separate block here (which would double the label). */}
   </>
+  }
 
   const fileChips = files.length > 0 && <div className="asst-files">
     {files.map(f => <span key={f.name} className="chip xs file" title={`${(f.size / 1024).toFixed(1)} KB${f.truncated ? ' · truncated' : ''}`}>

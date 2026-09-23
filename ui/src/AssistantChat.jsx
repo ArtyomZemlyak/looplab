@@ -7,6 +7,7 @@ import LaunchCard from './LaunchCard.jsx'
 import { launchDraftKey } from './launchDraftStore.js'
 import { OpIcon } from './icons.jsx'
 import { toolActivityProjection } from './assistantToolActivity.js'
+import { turnPropsEqual } from './assistantTranscriptModel.js'
 import './assistant-tool-activity.css'
 
 const RUN_MENTION_MAX = 32
@@ -116,7 +117,7 @@ function AssistantErrorCard({ error, onRetry, retryLabel = 'Retry', retryBusy = 
     </div>
   </div>
 }
-export function Turn({
+function Turn({
   m, runsById, onRevert, onRetry, retryLabel, retryBusy, onOpenSettings, onRunOpen, launchChat,
   readOnly = false,
   audience = 'owner',
@@ -192,6 +193,15 @@ export function Turn({
     </div>
   </div>
 }
+// Review 2026-09-22, UI-06. A reply streams into the transcript's LAST message, so every chunk
+// re-renders the list that owns it; a plain Turn then re-ran for every message already on screen —
+// rebuilding its Markdown's inline pass and element tree — once per token of somebody else's reply.
+// Memoized, a settled message renders again only when a prop it reads changes. What it is compared
+// on is `assistantTranscriptModel.js::turnPropsEqual` (identity, except a launch chat, which the bar
+// rebuilds per render and the card reads by content); keeping those props identity-stable across a
+// chunk is the bar's half (`AssistantBar.jsx`, "the transcript's Turn props").
+const MemoTurn = React.memo(Turn, turnPropsEqual)
+export { MemoTurn as Turn }
 
 // The assistant's live TODO list for a multi-step task.
 function Todos({ items }) {
