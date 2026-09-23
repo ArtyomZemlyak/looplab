@@ -66,7 +66,8 @@ class UnifiedAgent(WrapsDeveloper):
                  triage_time_budget_s: float = 0.0,
                  loop_opts: Optional[dict] = None, repair_developer=None,
                  evidence_envelope: bool = False,
-                 diagnosis_hypotheses: bool = False):
+                 diagnosis_hypotheses: bool = False,
+                 triage_kinds_from_registry: bool = False):
         # Internal per-stage backends. Named `researcher`/`developer`/`strategist` (not _-prefixed)
         # so the engine's cost roll-up walk (_emit_llm_cost) descends into them and finds every
         # per-stage CostAccountant.
@@ -78,6 +79,10 @@ class UnifiedAgent(WrapsDeveloper):
         # doc 52 row 32: ask the triage judge for the alternatives it considered. Off = the
         # historical tool schema and prompt, byte for byte.
         self._diagnosis_hypotheses = bool(diagnosis_hypotheses)
+        # Review 2026-09-22, TAT-07: the triage prompt's two failure-kind lists (and its user turn's
+        # "if the kind tagged above is …") rendered FROM the registries — see `_triage_kind_lists`.
+        # Off = the historical prompt, byte for byte; `agents/factory.py` threads the Settings flag.
+        self._triage_kinds_from_registry = bool(triage_kinds_from_registry)
         self._active_developer = developer
         # THE PROPOSE RECEIPT'S OWN SLOT, initialized so its ABSENCE means something.
         # `roles.researcher_budget_exhausted` falls back to the plain `last_budget_exhausted` for a
@@ -500,6 +505,10 @@ class UnifiedAgent(WrapsDeveloper):
     # tool schema, byte for byte — rather than raise inside the schema assembly.
     _diagnosis_hypotheses = False
 
+    # And again for the kind lists (review 2026-09-22, TAT-07): a facade built through
+    # `object.__new__` renders the historical triage prompt, not the registry one.
+    _triage_kinds_from_registry = False
+
     def _evidence(self, text: str) -> str:
         """The candidate's text as it rides in a judge's user turn: fenced when the envelope is on,
         the historical bytes when it is off."""
@@ -509,7 +518,12 @@ class UnifiedAgent(WrapsDeveloper):
         """The `tool_result_label` a judge's loop is handed: the marker, or "" (no fence)."""
         return EVIDENCE_LABEL if self._evidence_envelope else ""
 
-    _TRIAGE_SYSTEM = (
+    # THE TRIAGE SYSTEM PROMPT, IN THREE PIECES, because the middle one has two alternatives spliced
+    # at the SAME position (the `role_prompts.py::footprint_guidance` pattern; review 2026-09-22,
+    # TAT-07). `_TRIAGE_SYSTEM` below is still the whole historical prompt, byte for byte —
+    # `tests/test_triage_kind_vocabulary.py` pins its digest as measured before the split — and the
+    # middle piece is the one `Settings.triage_kinds_from_registry` replaces (`_triage_kind_lists`).
+    _TRIAGE_SYSTEM_HEAD = (
         "You are debugging an autonomous ML research loop. One experiment node just FAILED at "
         "runtime (the error is tagged with its kind: crash, timeout, oom, diverged, stalled, or "
         "needs_failed). "
@@ -561,8 +575,19 @@ class UnifiedAgent(WrapsDeveloper):
         "\"accelerate\"); the engine installs it and re-runs. Leave it empty for anything you would "
         "fix by editing code.\n"
         "YOU ARE ALSO THE DIAGNOSTICIAN: you say WHAT THE FAILURE WAS (`failure_kind`), and the "
-        "tagged kind above is NOT an answer — it is what the engine could see from the outside. It "
-        "is one of four, and each is tagged for a reason it cannot see past:\n"
+        "tagged kind above is NOT an answer — it is what the engine could see from the outside. ")
+    # THE TWO KIND LISTS AS SHIPPED ON 2026-08-20 and grown by hand since, kept FROZEN because a run
+    # launched on them resumes on them (`LEGACY_CONFIG_SNAPSHOT_DEFAULTS`) and a prompt is a
+    # contract. Measured against the registries they describe (review 2026-09-22, TAT-07; doc 50
+    # AG-06) they are wrong three ways: the engine-tag list says "one of four" and names `oom`,
+    # which `engine/failure_diagnosis.py::DIAGNOSABLE_ENGINE_REASONS` deliberately does not hold
+    # (both of its producers were deleted text rules, so the engine has no way to say it); the
+    # answer list says "from these five" over six bullets; and the "Choose from those only." after
+    # it forbids the seventh member of `DIAGNOSED_FAILURE_REASONS` — `check_false_positive`, the
+    # very answer the `failure_kind` field's own description recommends. Do not edit this: the
+    # registry rendering below is what every new run gets.
+    _TRIAGE_KINDS_HISTORICAL = (
+        "It is one of four, and each is tagged for a reason it cannot see past:\n"
         "  - 'crash': the process exited non-zero. That is ALL it means. Nothing observed why.\n"
         "  - 'no_metric': it exited zero and no reader found the number. Also just that.\n"
         "  - 'oom': the engine already suspects memory, but it is still an inference.\n"
@@ -590,7 +615,8 @@ class UnifiedAgent(WrapsDeveloper):
         "  - 'diverged': ONLY when the tagged kind is 'check_failed' and what the check refused is "
         "a NON-FINITE or exploded loss (inf, nan, |loss| in the 1e+8 range) — the objective blew "
         "up numerically, which is neither 'not learning' nor a bug. On any other tagged kind the "
-        "divergence watchdog was watching and did not fire, and 'diverged' is refused.\n"
+        "divergence watchdog was watching and did not fire, and 'diverged' is refused.\n")
+    _TRIAGE_SYSTEM_TAIL = (
         "Choose from those only. When the tagged kind is 'check_failed' and you answer "
         "'not_learning', cite a 'log' source — the loss series is what that claim is ABOUT, and "
         "the check's refusal is the sentence you are contradicting, not evidence for it; an "
@@ -615,6 +641,102 @@ class UnifiedAgent(WrapsDeveloper):
         "are rooted at the node's own workdir), then call `triage_crash` exactly once with your "
         "`action`, your `failure_kind`, your evidence and a one-sentence `rationale`."
     )
+    _TRIAGE_SYSTEM = _TRIAGE_SYSTEM_HEAD + _TRIAGE_KINDS_HISTORICAL + _TRIAGE_SYSTEM_TAIL
+
+    # THE SAME TWO LISTS, RENDERED FROM THE REGISTRIES (`Settings.triage_kinds_from_registry`, ON
+    # for a new run). The REGISTRY decides which kinds are named — `DIAGNOSABLE_ENGINE_REASONS` for
+    # the tags the engine hands on, `DIAGNOSED_FAILURE_REASONS` (the emit schema's own enum) for the
+    # answers — and the two tables below decide only the ORDER they are named in and the words each
+    # one gets. The order is the historical one because it carries meaning: 'crash' reads "it failed
+    # for some other reason" AFTER 'oom' and 'not_learning', not before them. Every kind the
+    # historical lists named keeps its words byte for byte; the one new bullet,
+    # `check_false_positive`, is worded by the `failure_kind` field's own shipped description. And
+    # NO COUNT: "one of four" and "these five" were each true of an older registry, so neither intro
+    # states a size any more.
+    _TRIAGE_TAG_INTRO = "It is one of these, and each is tagged for a reason it cannot see past:\n"
+    _TRIAGE_ANSWER_INTRO = "Answer with the kind that is TRUE, from these:\n"
+    _TRIAGE_TAG_MEANS = {
+        "crash": "the process exited non-zero. That is ALL it means. Nothing observed why.",
+        "no_metric": "it exited zero and no reader found the number. Also just that.",
+        "check_failed": (
+            "a stage's declared condition was judged not to hold — BY ANOTHER MODEL reading the "
+            "stage's output. That verdict names the symptom it saw; it is evidence for you, not a "
+            "diagnosis. A frozen loss, a run that could not fit its budget, and a config that "
+            "silently ran one epoch instead of fifty all arrive tagged exactly this way."),
+    }
+    _TRIAGE_ANSWER_MEANS = {
+        "oom": (
+            "it ran out of memory, device or host, however it died. This is the expensive one to "
+            "miss, because it costs the memory-reduction directive and sends the repair hunting a "
+            "bug that is not there. Watch for an allocator whose spelling is unusual (a host "
+            "`MemoryError`, `DefaultCPUAllocator: can't allocate memory`, an OOM re-raised inside "
+            "another library's exception) and — far more common here — a launcher "
+            "(torchrun/accelerate) that SWALLOWS the child exception and shows only a 'Root Cause "
+            "... exitcode: 1' block, in which case the tail below names nothing at all."),
+        "not_learning": (
+            "the training ran but the objective never descended — a loss pinned at its "
+            "initialization value, a config that trained a fraction of what it declared, a "
+            "reduction or normalization that cannot learn as written. Say this when the log shows "
+            "it, even when the tagged kind says 'check_failed' or 'no_metric'."),
+        "crash": ("it failed for some other reason — a bug, a bad argument, a missing file, an "
+                  "assertion the script itself raised."),
+        "no_metric": "it completed and simply never produced the number.",
+        "check_failed": "the declared condition really did not hold and that IS the whole story.",
+        "check_false_positive": (
+            "the stage's declared check refused a run that actually MET its condition — the "
+            "numbers are in the log and the assertion is what is wrong."),
+        "diverged": (
+            "ONLY when the tagged kind is 'check_failed' and what the check refused is a "
+            "NON-FINITE or exploded loss (inf, nan, |loss| in the 1e+8 range) — the objective blew "
+            "up numerically, which is neither 'not learning' nor a bug. On any other tagged kind "
+            "the divergence watchdog was watching and did not fire, and 'diverged' is refused."),
+    }
+    # The user turn's "if the kind tagged above is …" as it has always read: the pre-2026-08-20
+    # trio, naming the `oom` the engine never tags and omitting the `check_failed` it does. OFF
+    # only.
+    _TRIAGE_ASKED_HISTORICAL = "crash/oom/no_metric"
+
+    @staticmethod
+    def _kind_bullets(kinds, means: dict) -> str:
+        """One `  - '<kind>': <words>` line per member of `kinds`: the registry decides WHO is
+        named, `means` only the order and the words.
+
+        A kind `means` does not describe is still named — bare, after the described ones — because
+        an admissible answer the prompt leaves out is the defect this exists to end, so a missing
+        description must cost words and never the kind (`tests/test_triage_kind_vocabulary.py` keeps
+        both tables complete, so a bare bullet does not ship). A kind `means` describes that the
+        registry does not hold is not named at all."""
+        kinds = tuple(kinds)
+        ordered = [k for k in means if k in kinds] + [k for k in kinds if k not in means]
+        return "".join(f"  - '{k}': {means[k]}\n" if k in means else f"  - '{k}'\n"
+                       for k in ordered)
+
+    @classmethod
+    def _triage_kind_lists(cls, tagged, answerable) -> str:
+        """Both kind lists, from the registries `triage_crash` hands in — `tagged` is
+        `DIAGNOSABLE_ENGINE_REASONS`, `answerable` is `DIAGNOSED_FAILURE_REASONS`. Arguments rather
+        than an import because `agents` reaches `engine` only inside a call (the deferred import
+        `triage_crash` already makes for the schema's enums), and so a test can hand it a registry
+        that grew or shrank."""
+        return (cls._TRIAGE_TAG_INTRO + cls._kind_bullets(tagged, cls._TRIAGE_TAG_MEANS)
+                + cls._TRIAGE_ANSWER_INTRO
+                + cls._kind_bullets(answerable, cls._TRIAGE_ANSWER_MEANS))
+
+    def _triage_system_default(self, tagged, answerable) -> str:
+        """The `triage_system` DEFAULT `render()` is handed: the historical prompt, or the same
+        prompt with its two kind lists rendered from the registries. Only the default — an
+        operator's `triage_system.md` override still replaces it whole, in either mode."""
+        if not self._triage_kinds_from_registry:
+            return self._TRIAGE_SYSTEM
+        return (self._TRIAGE_SYSTEM_HEAD + self._triage_kind_lists(tagged, answerable)
+                + self._TRIAGE_SYSTEM_TAIL)
+
+    def _triage_asked_kinds(self, tagged) -> str:
+        """The user turn's "if the kind tagged above is …": the tags the engine hands on for a
+        diagnosis (`tagged`, the registry), or the historical trio."""
+        if not self._triage_kinds_from_registry:
+            return self._TRIAGE_ASKED_HISTORICAL
+        return "/".join(tagged)
 
     # The sentence that tells the triage judge the stderr tail is not all it may have. Spliced ONLY
     # when log tools are actually wired (`engine/train_monitor.py::repair_log_tools`), at the SAME
@@ -808,6 +930,7 @@ class UnifiedAgent(WrapsDeveloper):
         # (stdlib-only at module scope), so this cannot cycle; keeping it call-local mirrors the
         # `agents` -> `search` rule and adds no import-time edge upward.
         from looplab.engine.triage import (AGENT_TRIAGE_ACTIONS, DEFAULT_TRIAGE_ACTION,
+                                           DIAGNOSABLE_ENGINE_REASONS,
                                            DIAGNOSED_FAILURE_REASONS, DIAGNOSIS_SUMMARY_CAP,
                                            EVIDENCE_LOCATOR_CAP,
                                            EVIDENCE_QUOTE_CAP, EVIDENCE_SOURCES,
@@ -837,8 +960,13 @@ class UnifiedAgent(WrapsDeveloper):
         # conclusion is the whole point, and for why the inference it enables is stronger than the
         # deleted rule that used to make it.
         facts = (str(engine_facts) + "\n") if str(engine_facts or "").strip() else ""
+        # THE KIND LISTS — the historical ones, or both rendered from the two registries imported
+        # above (review 2026-09-22, TAT-07; `_triage_kind_lists`). It decides the DEFAULT only, so a
+        # `triage_system.md` override still replaces the whole system prompt in either mode.
+        system_default = self._triage_system_default(DIAGNOSABLE_ENGINE_REASONS,
+                                                     DIAGNOSED_FAILURE_REASONS)
         messages = [
-            {"role": "system", "content": render(self.prompts, "triage_system", self._TRIAGE_SYSTEM)
+            {"role": "system", "content": render(self.prompts, "triage_system", system_default)
                                # The evidence guard LAST, or "" — see `_TRIAGE_EVIDENCE_GUARD`.
                                + (self._TRIAGE_EVIDENCE_GUARD if self._evidence_envelope else "")},
             {"role": "user", "content": (
@@ -851,7 +979,10 @@ class UnifiedAgent(WrapsDeveloper):
                 + (f"{self._evidence(history)}\n" if history else "") +
                 f"--- CODE (tail) ---\n{self._evidence(code_tail)}\n"
                 "Choose an action (repair, reject_idea, abandon) AND, if the kind tagged above is "
-                "crash/oom/no_metric, the failure_kind you believe it really was.").strip()},
+                # The diagnosable tags, from the registry — or the historical trio, which named the
+                # `oom` the engine never tags and left out its `check_failed` (TAT-07).
+                + self._triage_asked_kinds(DIAGNOSABLE_ENGINE_REASONS)
+                + ", the failure_kind you believe it really was.").strip()},
         ]
         emit_spec = {"type": "function", "function": {
             "name": "triage_crash",

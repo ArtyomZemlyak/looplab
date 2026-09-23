@@ -171,7 +171,18 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               the digest binds the COMPLETE non-variant envelope -- and a PROMPT knob earns it
 #               twice over, since a prompt is a contract (doc 52) and the ON path changes what the
 #               proposing role reads before it proposes.
-_EXPECTED_DIGEST = "sha256:6f2580d19cd259deb9253841fd6f2a8e0f45070fddfbd422a255182a8813f587"
+#   2026-09-23  + triage_kinds_from_registry (review 2026-09-22, TAT-07: the crash-triage prompt's
+#               two failure-kind lists rendered from `engine/failure_diagnosis.py`'s registries).
+#               The 'field set changed too' branch, verified the prescribed way rather than from the
+#               count: an AST scan of `Settings`' annotated assignments against the pre-change tree
+#               reports exactly `['triage_kinds_from_registry']` added and `[]` removed.
+#               `_EXPECTED_FIELD_COUNT` goes 245 -> 246 and both pins are re-set. INERT for a
+#               calibration replicate: the profile's toy backend builds no triage judge at all
+#               (`unified_agent` is False and `make_roles` returns the task's own roles), so no
+#               replicate renders either prompt. Re-pinned anyway on the rule every inert knob above
+#               was re-pinned under — the digest binds the COMPLETE non-variant envelope — and a
+#               PROMPT knob earns it, since a prompt is a contract.
+_EXPECTED_DIGEST = "sha256:76656ad61abbaa0ac2dbab20158765fe2db77709832490756f91f9b6ea2a617c"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -650,7 +661,7 @@ _EXPECTED_DIGEST = "sha256:6f2580d19cd259deb9253841fd6f2a8e0f45070fddfbd422a2551
 #               decides whether a run's params, metrics and champion CODE leave the box for an
 #               external server, and an envelope that cannot state that is not the envelope a later
 #               receipt would be compared against.
-_EXPECTED_FIELD_COUNT = 245
+_EXPECTED_FIELD_COUNT = 246
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

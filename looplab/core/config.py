@@ -1674,6 +1674,25 @@ class Settings(BaseSettings):
     # `failure_kind`. No extra provider call — the same triage call answers one more field — but it
     # changes that call's prompt, so it ships off.
     diagnosis_hypotheses: bool = False
+    # THE DIAGNOSTICIAN'S KIND LISTS, FROM THE REGISTRIES (review 2026-09-22, TAT-07; doc 50 AG-06).
+    # The crash-triage system prompt spelled both of its failure-kind lists by hand and both had
+    # drifted from `engine/failure_diagnosis.py`: the kinds the engine hands on for a diagnosis read
+    # "one of four" and included `oom`, which the engine has had no way to say since 2026-08-20 (it
+    # is deliberately absent from `DIAGNOSABLE_ENGINE_REASONS`); the kinds it may answer
+    # read "from these five:" over SIX bullets and then "Choose from those only." against a schema
+    # enum of seven (`DIAGNOSED_FAILURE_REASONS`, with the `check_false_positive` the field's own
+    # description recommends); and the user turn asked for a diagnosis on crash/oom/no_metric,
+    # omitting `check_failed` — the one tag the `not_learning` and `diverged` bullets are about.
+    # ON: both lists and that condition are rendered FROM those registries with no count word
+    # (`agents/unified_agent.py::UnifiedAgent._triage_kind_lists`); every kind the old lists named
+    # keeps its words byte for byte. It changes a PROMPT and buys no call, so `false` reproduces the
+    # historical prompt BYTE FOR BYTE, every constructor defaults it OFF, and a pre-field snapshot
+    # resumes OFF (its `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row, on `evidence_envelope`'s ground).
+    # Read through ONE reader, `engine/failure_diagnosis.py::kinds_from_registry_enabled`. An
+    # operator's `triage_system.md` override still replaces the system prompt whole. It moves no
+    # metric, champion, selectability decision or violation: the answer is still read against the
+    # same enum by the same `diagnosed_failure_reason` (docs/36).
+    triage_kinds_from_registry: bool = True
     # PART IV Phase 2b — D7 capability-expansion forced-jump DIRECTIVE (§21.8/§21.13, issue #7). When on
     # and the concept-graph cadence detects action-space LOCK-IN (the search has stayed inside one D5
     # branch for a long consecutive streak) on an `explore` stance, the Researcher's novelty hint
@@ -3359,6 +3378,14 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # (c) is `False`, pointable at every commit before this one, and the field's own comment states
     # that `false` restores every prompt byte for byte.
     "evidence_envelope": False,
+    # THE TRIAGE PROMPT'S KIND LISTS, added 2026-09-23 defaulting ON (review 2026-09-22, TAT-07).
+    # (a) holds. (b) is the row above's DIFFERENT-PROMPT ground: ON, the crash-triage system prompt
+    # lists the kinds from `engine/failure_diagnosis.py`'s registries and its user turn asks about
+    # the diagnosable tags, so a resumed run would change what its diagnostician is told mid-log.
+    # (c) is `False`, pointable at every commit before this one; the field's own comment and
+    # `tests/test_triage_kind_vocabulary.py` hold that `false` is the historical prompt, byte for
+    # byte.
+    "triage_kinds_from_registry": False,
     # THE PROBE'S KERNEL READ CONFINEMENT, added 2026-08-21 defaulting to True. (a) holds — a
     # pre-2026-08-21 snapshot names no such field. (b) is not paid work, but it is the strongest
     # column there is on a RESUME: the rung fails CLOSED. On a box whose kernel offers no Landlock,

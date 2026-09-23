@@ -100,7 +100,11 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 213
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 214
+    # 213 -> 214 on 2026-09-23: `triage_kinds_from_registry` (review 2026-09-22, TAT-07) -- the
+    # crash-triage prompt's kind lists rendered from the registries. A ROW because it changes a
+    # PROMPT and OFF is the historical bytes an operator must be able to get back. Verified by
+    # INTERSECTION: 213 keys common to the previous keyset plus exactly that one, none removed.
     # 212 -> 213 on 2026-09-17: `regime_prior`, the read side of docs/60 §60.9 B2 -- it shows the
     # PROPOSING role what the regime ledger measured. A ROW rather than an uncurated omission
     # because it is a PROMPT change an operator turns on for an arm and must be able to turn back
@@ -374,7 +378,10 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # turns on for an arm and must be able to turn back off.
     # 247 -> 248 on 2026-09-17: `regime_prior` (docs/60 §60.9 B2; a curated row, so BOTH counts
     # move together) -- the propose prior's measured-regime block.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 248
+    # 248 -> 249 on 2026-09-23: `triage_kinds_from_registry` (review 2026-09-22, TAT-07; a curated
+    # row, so BOTH counts move together). An AST scan of `Settings`' annotated assignments against
+    # the pre-change tree reports exactly `['triage_kinds_from_registry']` added and `[]` removed.
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 249
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

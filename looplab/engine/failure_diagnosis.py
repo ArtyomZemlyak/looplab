@@ -966,6 +966,17 @@ def hypotheses_enabled(settings) -> bool:
     return bool(getattr(settings, "diagnosis_hypotheses", False))
 
 
+def kinds_from_registry_enabled(settings) -> bool:
+    """`Settings.triage_kinds_from_registry` as the constructor argument the triage judge takes.
+
+    ONE reader, for `hypotheses_enabled`'s reason one function up, and it lives beside the
+    registries the flag renders from (`DIAGNOSABLE_ENGINE_REASONS`, `DIAGNOSED_FAILURE_REASONS`).
+    Absent means OFF, which is the historical prompt byte for byte — so a duck-typed stub reads what
+    every constructor default and a pre-field snapshot (through its legacy row) read.
+    """
+    return bool(getattr(settings, "triage_kinds_from_registry", False))
+
+
 def evidence_citation_resolves(evidence, workdir) -> bool | None:
     """Does the cited file actually exist inside the node's workdir? `None` when there is nothing
     checkable to resolve (no citation, or a citation into the error text it was handed anyway).

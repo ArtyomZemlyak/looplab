@@ -106,7 +106,7 @@ def test_neither_module_is_a_god_module_again():
     extraction happened (`normalize_task` -> `adapters/task_schema.py`) and the cap FOLLOWED the
     file down. A cap is only a decision if it can move either way for a stated reason.
     """
-    for rel, cap in (("adapters/tasks.py", 233), ("agents/factory.py", 387),
+    for rel, cap in (("adapters/tasks.py", 233), ("agents/factory.py", 390),
                      ("agents/developer_backends.py", 188),
                      ("adapters/task_schema.py", 231)):
     #
@@ -176,6 +176,13 @@ def test_neither_module_is_a_god_module_again():
     # eleven (385 -> 386 measured, which met the cap exactly and turned CI run 1999 red). No code
     # moved and no domain arrived — a longer citation is not what the extraction rule above is
     # for — so the raise pays for that one line and keeps the same one line of headroom.
+    #
+    # 387 -> 390, 2026-09-23, review 2026-09-22 TAT-07 (the triage prompt's kind lists rendered from
+    # the registries): the TAT-02 entry's shape — ONE keyword at the composition site,
+    # `triage_kinds_from_registry=kinds_from_registry_enabled(settings)`, its one-line why, and the
+    # function-local import of that reader (`agents` reaches `engine` only inside a call). A
+    # Settings field threaded into the role it configures, not a second domain: 386 -> 389
+    # measured, and the raise pays for exactly those three lines and keeps one line of headroom.
         lines = len((_PKG / rel).read_text(encoding="utf-8").splitlines())
         assert lines < cap, f"{rel} is back to {lines} lines"
 

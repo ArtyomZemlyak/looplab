@@ -189,7 +189,10 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   212 -> 213 (2026-09-17): `regime_prior`, the read side of docs/60 §60.9 B2 — the propose
   //   prior's measured-regime block. A row because it is a prompt change an operator turns on for
   //   an arm; the Python half moved in the same change, as this tripwire's history demands.
-  assert.equal(Object.keys(schema.fieldByKey).length, 213)
+  //   213 -> 214 (2026-09-23): `triage_kinds_from_registry` (review 2026-09-22, TAT-07) — the
+  //   crash-triage prompt's kind lists from the registries. A row because it changes a prompt and
+  //   OFF is the historical bytes; the Python half moved in the same change.
+  assert.equal(Object.keys(schema.fieldByKey).length, 214)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')
