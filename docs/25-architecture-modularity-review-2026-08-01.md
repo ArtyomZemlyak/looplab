@@ -885,6 +885,13 @@ given" across 57 tests, and only that loudly because that helper is called every
 neighbour would have failed on one path. `test_the_staticmethods_around_the_new_helpers_are_still_staticmethods`
 now checks the decorators directly.
 
+*The "longer term" half landed in review 2026-09-22 (ENG1-12): `_propose_batch` RETURNS
+`engine/novelty.py::BatchProposal(ideas, telemetry, dropped, gated)`, the three attributes and every
+reset are gone, and the gate capability reaches its one consumer explicitly (`already_gated=`). The
+two orderings above no longer need a reset to hold; `tests/test_batch_proposal_is_a_value.py` drives
+both call sites, including an exception mid-batch — which on the chunk path, the one with no
+`finally`, had left a live novelty-gate bypass on the engine.*
+
 #### ES-09 · LOW · duplication · effort: small — **RESOLVED (2026-08-08)**
 
 **_apply_control_overrides contains two copy-pasted parallelism-override loops**

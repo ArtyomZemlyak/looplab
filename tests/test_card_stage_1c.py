@@ -68,8 +68,9 @@ def test_intra_batch_duplicate_is_journaled_after_accepted_reservations(tmp_path
     engine._effective_researcher_eval_timeout = lambda idea: idea.eval_timeout
 
     state = fold(engine.store.read_all())
-    accepted = engine._propose_batch(state, 2)
-    dropped = list(engine._pending_batch_dropped)
+    # The drops ride the RETURNED `BatchProposal` (review 2026-09-22, ENG1-12).
+    proposal = engine._propose_batch(state, 2)
+    accepted, dropped = proposal.ideas, list(proposal.dropped)
     assert len(accepted) == 1 and len(dropped) == 1
 
     reservation = engine._reserve_node_build(

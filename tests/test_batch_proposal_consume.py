@@ -1,21 +1,25 @@
-"""One owner for `_propose_batch`'s three-attribute result protocol (doc 25 ES-08).
+"""One owner for reading `_propose_batch`'s result (doc 25 ES-08; review 2026-09-22, ENG1-12).
 
-`_propose_batch` (novelty.py) does not return its results. It signals them through three instance
-attributes — `_pending_batch_telemetry`, `_pending_batch_dropped`, `_pending_batch_novelty_gated` —
-and two call sites read that protocol by hand: `run`'s concurrent-build chunk and
-`_stage_card_creates`.
+`_propose_batch` (novelty.py) did not return its results until review 2026-09-22 (ENG1-12). It
+signalled them through three instance attributes — `_pending_batch_telemetry`,
+`_pending_batch_dropped`, `_pending_batch_novelty_gated` — and two call sites read that protocol by
+hand: `run`'s concurrent-build chunk and `_stage_card_creates`. It now RETURNS a
+`novelty.py::BatchProposal`, and `_consume_batch_proposal` is still the one reader.
 
-Two rules in that hand-written reading are load-bearing and silent when wrong:
+Two rules in that reading are load-bearing and silent when wrong:
 
 * **telemetry must be PADDED to align 1:1 with the ideas.** A short list shifts every later idea's
   telemetry onto the wrong node, so a build emits another proposal's
   hypothesis_ranked/foresight_selected receipts.
-* **`dropped` must be SNAPSHOTTED before anyone resets the attribute**, because each caller resets at
-  the point its own durability ordering requires — `run` after the reservations are durable,
-  `_stage_card_creates` in a `finally`.
+* **what the caller records must be its OWN copy.** With the attributes this was "SNAPSHOTTED before
+  anyone resets the attribute", because each caller reset at the point its own durability ordering
+  required — `run` after the reservations were durable, `_stage_card_creates` in a `finally`. There
+  is nothing left to reset; the copy still keeps a producer that reuses its buffers from emptying
+  what a caller is about to record.
 
 Neither shows up as an exception; both show up as a run whose audit trail describes work it did not
-do. So the protocol has one owner now, and these pin it.
+do. So the protocol has one owner, and these pin it. The orderings the resets protected are DRIVEN
+through both call sites in `tests/test_batch_proposal_is_a_value.py`.
 """
 from __future__ import annotations
 
@@ -25,6 +29,7 @@ import inspect
 import pytest
 
 from looplab.core.models import Idea
+from looplab.engine.novelty import BatchProposal
 from looplab.engine.orchestrator import Engine
 from tests._source_scan import called_names, function_tree
 
@@ -52,14 +57,19 @@ class _Host:
         self._dropped = dropped
         self.proposed: list[tuple[object, int]] = []
         self.recorded: list[dict] = []
+        self.returned: list[BatchProposal] = []
 
     def _propose_batch(self, state, width):
         self.proposed.append((state, width))
-        if self._telemetry is not None:
-            self._pending_batch_telemetry = list(self._telemetry)
-        if self._dropped is not None:
-            self._pending_batch_dropped = list(self._dropped)
-        return list(self._ideas)
+        ideas = list(self._ideas)
+        proposal = BatchProposal(
+            ideas,
+            list(self._telemetry) if self._telemetry is not None else (),
+            list(self._dropped) if self._dropped is not None else (),
+            tuple(ideas),
+        )
+        self.returned.append(proposal)
+        return proposal
 
     def _record_node_less_card(self, idea, *, reason, steering_context):
         self.recorded.append({"idea": idea, "reason": reason, "steering": steering_context})
@@ -102,30 +112,33 @@ def test_longer_telemetry_is_left_alone_rather_than_truncated():
     assert len(telemetry) == 2
 
 
-@pytest.mark.parametrize("attribute", ["_pending_batch_telemetry", "_pending_batch_dropped"])
-def test_the_results_are_SNAPSHOTTED_not_aliased(attribute):
-    """Each caller resets the attributes at the point its own durability ordering requires, and
-    `run`'s reset happens BEFORE the drop loop it feeds.
+@pytest.mark.parametrize("field", ["telemetry", "dropped"])
+def test_the_results_are_SNAPSHOTTED_not_aliased(field):
+    """What a caller records must be its OWN list.
 
-    The reset as written rebinds (`self._pending_batch_* = []`), which an alias would survive — so
-    this is specifically about IN-PLACE mutation: a `.clear()` here, or a producer that reuses its
-    buffer between batches, would empty the very list the caller is about to record from, and every
-    rejected proposal would silently lose its node-less Card. Returning a copy makes that
-    unreachable rather than merely unlikely, which is why the identity is asserted directly.
+    With the attribute protocol this was about the resets (`run`'s happened BEFORE the drop loop it
+    fed). The attributes are gone, but the hazard it pinned is IN-PLACE mutation, and that survives
+    them: a producer that reuses its buffer between batches would empty the very list the caller is
+    about to record from, and every rejected proposal would silently lose its node-less Card.
+    Returning a copy makes that unreachable rather than merely unlikely, which is why the identity is
+    asserted directly — now against the producer's own `BatchProposal` field.
     """
     host = _Host([_idea()], telemetry=[{"a": 1}], dropped=[{"idea": _idea(), "reason": "r"}])
     _ideas, telemetry, dropped = host._consume_batch_proposal(None, 1)
-    returned = {"_pending_batch_telemetry": telemetry, "_pending_batch_dropped": dropped}[attribute]
-    assert returned is not getattr(host, attribute), f"{attribute} was aliased, not snapshotted"
-    getattr(host, attribute).clear()
+    returned = {"telemetry": telemetry, "dropped": dropped}[field]
+    produced = getattr(host.returned[-1], field)
+    assert returned is not produced, f"{field} was aliased, not snapshotted"
+    produced.clear()
     assert returned, "an in-place clear of the producer's buffer emptied the caller's snapshot"
 
 
-def test_a_missing_attribute_is_an_empty_result_not_an_AttributeError():
-    """`_propose_batch` may fail before it sets anything; the consumer must still produce a usable
-    (empty) batch rather than crash the loop."""
+def test_an_empty_proposal_is_an_empty_result():
+    """`_propose_batch` may produce nothing but its ideas; the consumer must still produce a usable
+    (empty, aligned) batch rather than crash the loop — a `BatchProposal` carries no telemetry and
+    no drops by default."""
     host = _Host([])
     assert host._consume_batch_proposal(None, 0) == ([], [], [])
+    assert BatchProposal([]).telemetry == () and BatchProposal([]).dropped == ()
 
 
 # ------------------------------------------------------------------ the drop loop
@@ -214,12 +227,12 @@ def test_both_call_sites_go_through_the_awaited_offload(method):
         "`_consume_batch_proposal(` here is the event-loop freeze restored")
     assert not any(name.endswith("_consume_batch_proposal") for name in called), (
         f"{method} calls the funnel DIRECTLY again, on the event-loop thread")
-    # Assigning the attributes back to [] is each caller's own reset, which deliberately stays; what
-    # must not come back is READING them.
-    assert 'getattr(self, "_pending_batch_telemetry"' not in source, (
-        f"{method} reads the telemetry attribute directly again")
-    assert 'getattr(self, "_pending_batch_dropped"' not in source, (
-        f"{method} reads the dropped attribute directly again")
+    # The attributes are gone (review 2026-09-22, ENG1-12) — `_propose_batch` RETURNS its result —
+    # so what must not come back is ANY use of them here: a read, and now the reset too, which was
+    # each caller's own and was the part whose three orderings disagreed. A negative pin stays a
+    # substring on purpose: what must not return is the TEXT.
+    assert "_pending_batch" not in source, (
+        f"{method} names a batch-result attribute again — the result is `BatchProposal`'s")
 
 
 def test_the_awaited_wrapper_delegates_to_the_SHARED_consume():
@@ -237,8 +250,7 @@ def test_the_awaited_wrapper_delegates_to_the_SHARED_consume():
         "the offload must still go through the ONE funnel — reading the attribute protocol inside "
         "the wrapper is the same defect one frame down")
     source = inspect.getsource(Engine._await_batch_proposal)
-    assert 'getattr(self, "_pending_batch_telemetry"' not in source
-    assert 'getattr(self, "_pending_batch_dropped"' not in source
+    assert "_pending_batch" not in source
 
 
 def test_the_wrapper_really_OFFLOADS_and_publishes_from_the_main_task():

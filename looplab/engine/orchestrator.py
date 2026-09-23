@@ -2727,8 +2727,6 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 ideas, telemetry, dropped = await self._await_batch_proposal(state, 1)
                 if not ideas:
                     self._record_dropped_batch_cards(dropped)
-                    self._pending_batch_dropped = []
-                    self._pending_batch_novelty_gated = []
                     limiter.release()
                     continue
                 idea, telemetry_row = ideas[0], (telemetry[0] if telemetry else None)
@@ -2740,8 +2738,6 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                     # node for it is new work the held stop forbids — its build's first paid call
                     # would only raise the same stop — so it takes the same exit.
                     self._record_dropped_batch_cards(dropped)
-                    self._pending_batch_dropped = []
-                    self._pending_batch_novelty_gated = []
                     limiter.release()
                     break
                 if "_scores" in action:
@@ -2755,16 +2751,15 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                     scored_against_attempt=anchor_attempt, source="researcher",
                     steering_context=((telemetry_row or {}).get("_steering_context", [])
                                       if isinstance(telemetry_row, dict) else []))
-                # THE REJECTS GET THEIR NODE-LESS CARDS HERE, on the SUCCESS path too, and the
-                # two capabilities are spent in the same breath — exactly as the chunked path does
-                # after its reservations are durable. Without this a lane that proposed one idea
-                # and rejected three recorded only the one: the three drops never reached the Card
-                # board at all (the two failure paths above record them, so the loss showed only
-                # when the proposal SUCCEEDED), and `_pending_batch_novelty_gated` kept an
-                # already-reserved Idea as a live one-shot gate bypass into the next iteration.
+                # THE REJECTS GET THEIR NODE-LESS CARDS HERE, on the SUCCESS path too — exactly as
+                # the chunked path does after its reservations are durable. Without this a lane
+                # that proposed one idea and rejected three recorded only the one: the three drops
+                # never reached the Card board at all (the two failure paths above record them, so
+                # the loss showed only when the proposal SUCCEEDED). The two batch capabilities
+                # this also used to spend are gone with the attributes that carried them (review
+                # 2026-09-22, ENG1-12): an already-reserved Idea can no longer ride into the next
+                # iteration as a live gate bypass, because nothing of this proposal outlives it.
                 self._record_dropped_batch_cards(dropped)
-                self._pending_batch_dropped = []
-                self._pending_batch_novelty_gated = []
                 if reservation is None:
                     limiter.release()
                     continue
@@ -3079,8 +3074,6 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                     state, len(_chunk))
                 if not _ideas:
                     self._record_dropped_batch_cards(_dropped_batch)
-                    self._pending_batch_dropped = []
-                    self._pending_batch_novelty_gated = []
                     continue
                 # Third and last lane that reserves a node from a proposal without crossing
                 # `_prepare_node_idea`'s `_link` funnel. A dead provider hands the shared batch
@@ -3089,8 +3082,6 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 # before any `start_soon`.
                 if any(self._refuse_degraded_proposal(_idea, main_task=True) for _idea in _ideas):
                     self._record_dropped_batch_cards(_dropped_batch)
-                    self._pending_batch_dropped = []
-                    self._pending_batch_novelty_gated = []
                     break
                 _chunk = _chunk[:len(_ideas)]
                 for _a in _chunk:               # surface the audit events only for what we build
@@ -3136,10 +3127,6 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 # Accepted preplanned ids are durable first. Node-less rejects then receive fresh
                 # closed Card ids without shifting any reservation the workers are about to use.
                 self._record_dropped_batch_cards(_dropped_batch)
-                self._pending_batch_dropped = []
-                # The accepted Ideas are now durably reserved, so the unreserved compatibility
-                # capability is no longer reachable or needed.
-                self._pending_batch_novelty_gated = []
                 # Cost guardrail (Phase 4): surface the concurrent build fan-out width in the
                 # trace (spans.jsonl / OTel). `built` is structurally bounded by `fan` (=len of
                 # the role pool) which is bounded by `parallel_build`, so a batch can never exceed
@@ -5119,15 +5106,19 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
     # looplab/engine/crash_repair.py (CrashRepairMixin — inherited, zero call-site churn).
 
     def _consume_batch_proposal(self, state, width: int):
-        """Run one batched proposal and READ its three-attribute result. Returns
-        ``(ideas, telemetry, dropped)``.
+        """Run one batched proposal and READ its result. Returns ``(ideas, telemetry, dropped)``.
 
-        `_propose_batch` (novelty.py) signals its results through three instance attributes rather
-        than a return value: `_pending_batch_telemetry`, `_pending_batch_dropped` and
-        `_pending_batch_novelty_gated`. Two call sites — `_handle_create_actions`' concurrent-build
+        `_propose_batch` (novelty.py) signalled its results through three instance attributes rather
+        than a return value — `_pending_batch_telemetry`, `_pending_batch_dropped` and
+        `_pending_batch_novelty_gated` — until review 2026-09-22 (ENG1-12) made them the RETURNED
+        `novelty.py::BatchProposal`. Two call sites — `_handle_create_actions`' concurrent-build
         chunk and `card_reservation.py::_stage_card_creates` — used to read that protocol by hand,
         including the padding rule and the snapshot-before-reset ordering (doc 25 ES-08), which is
-        what this funnel replaced.
+        what this funnel replaced. With no shared attribute there is nothing left to reset: each
+        call's lists are its own, so no batch can read another's telemetry, drops or gate capability
+        whatever order its caller records, reserves or raises in. The gate capability
+        (`BatchProposal.gated`) is not returned from here at all — both callers reserve or stage
+        every Idea, and neither crosses `_prepare_node_idea`, its only consumer.
 
         NEITHER CALLS THIS DIRECTLY ANY MORE (2026-08-30): both `await _await_batch_proposal`, which
         runs this on a worker thread under `_capture_proposal_events` and publishes the buffered
@@ -5139,11 +5130,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         OWN hypothesis_ranked/foresight_selected. A short list silently shifts every later idea's
         telemetry onto the wrong node.
 
-        Both `dropped` and `telemetry` are SNAPSHOTTED (copied) here, so a caller may reset the
-        attributes at whatever point its own durability ordering requires without losing what it is
-        about to record. Resetting stays at the call sites precisely because that ordering differs:
-        `_handle_create_actions` clears after the reservations are durable, `_stage_card_creates`
-        clears in a `finally`.
+        Both `dropped` and `telemetry` are SNAPSHOTTED (copied) here. That once let each caller reset
+        the attributes at whatever point its own durability ordering required without losing what it
+        was about to record (`_handle_create_actions` cleared after the reservations were durable,
+        `_stage_card_creates` in a `finally`); with the attributes gone the copy still keeps what a
+        caller records independent of a producer that reuses its buffers.
         """
         # The BATCH proposal's progress beacon, and the one that matters most: on the shipped default
         # width this — not `_prepare_node_idea` from `_create_node_scoped` — is the path a run
@@ -5165,11 +5156,12 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # SERIAL propose one method over is inside `_create_node`'s `create_node` span, so the
         # asymmetry hid — the lane that pays most was the one with no span.
         with self._paid_progress(PROGRESS_STAGE_BUILD, "propose", count=int(width)):
-            ideas = self._propose_batch(state, width)
-        telemetry = list(getattr(self, "_pending_batch_telemetry", None) or [])
+            proposal = self._propose_batch(state, width)
+        ideas = list(proposal.ideas)
+        telemetry = list(proposal.telemetry or ())
         if len(telemetry) < len(ideas):
             telemetry.extend([None] * (len(ideas) - len(telemetry)))
-        dropped = list(getattr(self, "_pending_batch_dropped", None) or [])
+        dropped = list(proposal.dropped or ())
         return ideas, telemetry, dropped
 
     async def _await_batch_proposal(self, state, width: int):
@@ -5462,12 +5454,17 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
 
     def _prepare_node_idea(self, action: dict, state: RunState, *, researcher,
                            prospective_node_id: int, source: str,
-                           proposal_events=None, preproposed=None) -> Optional[Idea]:
+                           proposal_events=None, preproposed=None,
+                           already_gated: bool = False) -> Optional[Idea]:
         """Finish the concrete Idea before Card/node reservation, without implementing code.
 
         A native ownership receipt binds the final operator/params/space/profile/footprint, so the
         old reserve-before-propose ordering cannot produce an honest Card.  This helper is the moved
         proposal half of ``_create_node``; every Developer call remains after durable reservation.
+
+        ``already_gated`` is the caller's statement that ``preproposed`` is an object the batch pass
+        itself put through the vs-history novelty gate — `BatchProposal.crossed_gate(idea)`, an
+        IDENTITY test (review 2026-09-22, ENG1-12). It was an engine list this method consumed.
         """
         kind = action["kind"]
         events = list(proposal_events) if proposal_events is not None else self.store.read_all()
@@ -5589,17 +5586,12 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             return plan.idea if plan.disposition in {"mint", "reuse", "attach"} else None
 
         if preproposed is not None:
-            already_gated = False
-            pending_batch = getattr(self, "_pending_batch_novelty_gated", None)
-            if isinstance(pending_batch, list):
-                for index, batch_idea in enumerate(pending_batch):
-                    if preproposed is batch_idea:
-                        # Consume the capability exactly once.  Equality is intentionally insufficient:
-                        # a direct plugin/caller proposal that happens to match a batch result has not
-                        # itself crossed the proposal-bound gate.
-                        del pending_batch[index]
-                        already_gated = True
-                        break
+            # The capability arrives as `already_gated`, stated by the caller that holds the
+            # `BatchProposal` (review 2026-09-22, ENG1-12) — it was an engine list this branch
+            # consumed by identity, and which every batch lane had to remember to reset. Equality is
+            # intentionally insufficient: a direct plugin/caller proposal that happens to match a
+            # batch result has not itself crossed the proposal-bound gate
+            # (`BatchProposal.crossed_gate` is the identity test).
             candidate = (self._canonicalize_draft_idea(preproposed)
                          if kind == "draft" else preproposed)
             linked = _link(candidate)
@@ -5682,8 +5674,13 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
     @in_llm_lane("build")
     def _create_node(self, action: dict, roles=None, reserved=None, preproposed=None,
                      pretelemetry=None, precoded=None,
-                     precoded_max_eval_seconds: Optional[float] = None) -> None:
-        """Run proposal, reservation and implementation in one node-scoped handoff context."""
+                     precoded_max_eval_seconds: Optional[float] = None, *,
+                     already_gated: bool = False) -> None:
+        """Run proposal, reservation and implementation in one node-scoped handoff context.
+
+        ``already_gated`` travels with an UNRESERVED ``preproposed`` Idea to `_prepare_node_idea`:
+        `BatchProposal.crossed_gate(idea)` from the batch that proposed it (review 2026-09-22,
+        ENG1-12). A reserved build never consults it — its reservation carries the Idea."""
         from looplab.agents.agent import handoff_scope
 
         folded = None
@@ -5718,7 +5715,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             with model_override(self._model_for_arm(action)):
                 return self._create_node_scoped(
                     action, roles, reserved, preproposed=preproposed,
-                    pretelemetry=pretelemetry, folded=folded)
+                    pretelemetry=pretelemetry, folded=folded, already_gated=already_gated)
 
     def _model_for_arm(self, action: dict) -> Optional[str]:
         """The model id an action's `_model` arm names, or None for the default arm / no arm /
@@ -5730,7 +5727,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         return entry[0] if entry else None
 
     def _create_node_scoped(self, action: dict, roles=None, reserved=None, preproposed=None,
-                            pretelemetry=None, folded=None) -> None:
+                            pretelemetry=None, folded=None, already_gated: bool = False) -> None:
         # Variant-1 parallel build: `roles` is a per-build (researcher, developer) pair from the pool
         # (isolated per-build state so concurrent drafts don't clobber each other's hints/last_files);
         # `reserved` is a pre-reserved (state, id, kind, parents, parent_generations) tuple (the parallel
@@ -5766,7 +5763,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 idea = self._prepare_node_idea(
                     action, proposal_state, researcher=researcher,
                     prospective_node_id=prospective_node_id,
-                    source=source, proposal_events=proposal_events, preproposed=preproposed)
+                    source=source, proposal_events=proposal_events, preproposed=preproposed,
+                    already_gated=already_gated)
             if idea is None:
                 self._discard_node_build_telemetry(researcher=researcher, developer=developer)
                 return
@@ -5817,7 +5815,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 action, state, researcher=researcher,
                 prospective_node_id=node_id,
                 source="engine" if action.get("kind") == "merge" else "researcher",
-                proposal_events=self.store.read_all(), preproposed=preproposed)
+                proposal_events=self.store.read_all(), preproposed=preproposed,
+                already_gated=already_gated)
             if idea is None:
                 self._discard_node_build_telemetry(researcher=researcher, developer=developer)
                 return

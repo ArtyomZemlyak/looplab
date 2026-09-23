@@ -1145,7 +1145,7 @@ def test_propose_batch_uses_action_identity_even_for_short_rationales(tmp_path):
     b = Idea(operator="draft", params={"x": 2}, rationale="try x")
     c = Idea(operator="draft", params={"x": 3}, rationale="last")
     eng.researcher = _SeqResearcher([a, dup, b, c])
-    ideas = eng._propose_batch(RunState(), 3)
+    ideas = eng._propose_batch(RunState(), 3).ideas
     assert [idea.params for idea in ideas] == [{"x": 1.0}, {"x": 2.0}, {"x": 3.0}]
     assert eng.researcher.calls == 4                         # rolled a 4th time to replace the dropped dup
 
@@ -1173,8 +1173,10 @@ def test_propose_batch_captures_per_idea_foreagent_telemetry(tmp_path):
                         rationale=f"distinct research direction number {i} explored")
 
     eng.researcher = _RankingResearcher()
-    ideas = eng._propose_batch(RunState(), 3)
-    telem = eng._pending_batch_telemetry
+    # The telemetry is the RETURNED `BatchProposal`'s since review 2026-09-22 (ENG1-12), not an
+    # engine attribute a later batch could read.
+    proposal = eng._propose_batch(RunState(), 3)
+    ideas, telem = proposal.ideas, proposal.telemetry
     assert len(ideas) == 3 and len(telem) == 3
     assert [t["last_hyp_priority"]["reason"] for t in telem] == ["roll 1", "roll 2", "roll 3"]
     assert [t["last_foresight"]["choice"] for t in telem] == ["idea1", "idea2", "idea3"]
@@ -1207,7 +1209,7 @@ def test_propose_batch_uses_a_native_backend_when_present(tmp_path):
             prospective_node_id=prospective_node_id)
 
     eng._apply_novelty_gate = _record_gate
-    ideas = eng._propose_batch(RunState(), 3)
+    ideas = eng._propose_batch(RunState(), 3).ideas
     assert len(ideas) == 3 and len({i.params["x"] for i in ideas}) == 3
     assert gated == [(0, True, True, 0), (1, True, True, 1), (2, True, True, 2)]
 
@@ -1228,7 +1230,7 @@ def test_native_batch_drops_same_action_but_accepts_distinct_params(tmp_path):
             raise AssertionError("native batch should not fall back")
 
     eng.researcher = _BatchResearcher()
-    ideas = eng._propose_batch(RunState(), 3)
+    ideas = eng._propose_batch(RunState(), 3).ideas
     assert [idea.params for idea in ideas] == [{"x": 1.0}, {"x": 2.0}]
 
 
@@ -1248,7 +1250,7 @@ def test_native_batch_dedups_model_operators_that_execute_as_draft(tmp_path):
             raise AssertionError("native batch should not fall back")
 
     eng.researcher = _BatchResearcher()
-    ideas = eng._propose_batch(RunState(), 2)
+    ideas = eng._propose_batch(RunState(), 2).ideas
     assert [(idea.operator, idea.params, idea.eval_timeout) for idea in ideas] == [
         ("draft", {"x": 1.0}, 60.0),
     ]
@@ -1270,7 +1272,7 @@ def test_native_batch_keeps_distinct_governed_eval_timeouts(tmp_path):
             raise AssertionError("native batch should not fall back")
 
     eng.researcher = _BatchResearcher()
-    ideas = eng._propose_batch(RunState(), 2)
+    ideas = eng._propose_batch(RunState(), 2).ideas
     assert [(idea.operator, idea.eval_timeout) for idea in ideas] == [
         ("draft", 60.0),
         ("draft", 3600.0),
@@ -1323,7 +1325,7 @@ def test_native_batch_novelty_receipts_use_unique_prospective_ids(tmp_path):
     st = RunState()
     st.nodes[0] = Node(id=0, operator="draft", idea=Idea(operator="draft", params={"x": 0.0}),
                        metric=1.0, status=NodeStatus.evaluated)
-    ideas = eng._propose_batch(st, 3)
+    ideas = eng._propose_batch(st, 3).ideas
     receipts = [event for event in eng.store.read_all() if event.type == EV_NOVELTY_REJECTED]
     assert len(ideas) == 3
     assert [event.data["node_id"] for event in receipts] == [1, 2, 3]
@@ -1392,8 +1394,11 @@ def test_serial_draft_improve_and_batch_bind_the_exact_persisted_idea(tmp_path):
     batch.researcher = _Researcher(
         Idea(operator="model-batch-label", params={"x": 0.125}), native=True)
     batch_bindings = _capture(batch)
-    ideas = batch._propose_batch(fold(batch.store.read_all()), 1)
-    batch._create_node({"kind": "draft"}, preproposed=ideas[0])
+    # The gate capability travels EXPLICITLY with the Idea it belongs to (review 2026-09-22,
+    # ENG1-12): the batch already gated it, so the compatibility build must not gate it twice.
+    proposal = batch._propose_batch(fold(batch.store.read_all()), 1)
+    batch._create_node({"kind": "draft"}, preproposed=proposal.ideas[0],
+                       already_gated=proposal.crossed_gate(proposal.ideas[0]))
     batch_node = fold(batch.store.read_all()).nodes[0]
     assert batch_node.idea.operator == "draft"
     assert batch_bindings == [{

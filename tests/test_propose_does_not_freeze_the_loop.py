@@ -21,6 +21,8 @@ import time
 import anyio
 import pytest
 
+from looplab.engine.novelty import BatchProposal
+
 
 @pytest.mark.anyio
 async def test_the_engine_keeps_turning_while_ITS_OWN_proposal_is_in_flight(tmp_path):
@@ -161,7 +163,7 @@ async def test_the_BATCH_lane_also_leaves_the_loop_thread(tmp_path):
         time.sleep(0.15)
         observed["after"] = ticks
         release.set()
-        return []
+        return BatchProposal([])       # the batch's result is its RETURN (review 2026-09-22, ENG1-12)
 
     engine._propose_batch = _blocking_batch
 
@@ -223,7 +225,7 @@ async def test_the_batch_lane_s_folded_rows_are_appended_by_the_MAIN_task(tmp_pa
     def _rejecting_batch(_state, _n):
         observed["thread"] = threading.get_ident()
         engine._append_proposal_event(EV_NOVELTY_REJECTED, {"reason": "duplicate"})
-        return []
+        return BatchProposal([])
 
     engine._propose_batch = _rejecting_batch
 

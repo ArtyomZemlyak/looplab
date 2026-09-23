@@ -152,7 +152,6 @@ def _drop_one_per_proposal(engine, dropped_ideas: list):
         rejected = Idea(hypothesis=f"rejected-{len(dropped_ideas)}",
                         rationale="a near-duplicate", operator="tweak", params={})
         dropped_ideas.append(rejected.hypothesis)
-        engine._pending_batch_dropped = [{"idea": rejected, "reason": "semantic_duplicate"}]
         return ideas, telemetry, [{"idea": rejected, "reason": "semantic_duplicate"}]
 
     engine._await_batch_proposal = _with_a_drop
@@ -181,24 +180,28 @@ def test_a_reject_beside_an_accepted_idea_still_gets_its_node_less_card(tmp_path
         f"{len(dropped_ideas)} reject(s) proposed, {recorded.count('semantic_duplicate')} recorded")
 
 
-def test_the_lane_spends_the_batch_capabilities_before_the_next_proposal(tmp_path):
-    """`_pending_batch_novelty_gated` is a ONE-SHOT gate bypass keyed on object identity, and the
-    lane reserves every Idea it accepts — so leaving the list populated carries an already-built
-    proposal into the next iteration as a live bypass. The chunked path clears both lists once its
-    reservations are durable; this asserts the lane does too, observed at each proposal."""
+def test_no_batch_result_survives_into_the_next_proposal(tmp_path):
+    """The gate capability is a bypass keyed on object identity, and the lane reserves every Idea it
+    accepts — so a capability that outlived its batch would carry an already-built proposal into the
+    next iteration as a live bypass. It used to be the engine list `_pending_batch_novelty_gated`,
+    which this lane (like the chunked path) had to remember to clear; since review 2026-09-22
+    (ENG1-12) it is `BatchProposal.gated` on the value `_propose_batch` RETURNS, so there is nothing
+    to clear. Observed at each proposal of the REAL lane: the engine holds no batch result at all."""
     engine, _timeline = _timed_engine(tmp_path / "spend", steady=True, slow_first=0.0)
     real = engine._await_batch_proposal
-    seen_at_entry: list[int] = []
+    seen_at_entry: list[set] = []
 
     async def _observe(state, width):
-        seen_at_entry.append(len(getattr(engine, "_pending_batch_novelty_gated", None) or []))
+        # Data only: this very wrapper sits on the instance as `_await_batch_proposal`.
+        seen_at_entry.append({name for name, value in vars(engine).items()
+                              if "batch" in name.lower() and not callable(value)})
         return await real(state, width)
 
     engine._await_batch_proposal = _observe
     anyio.run(engine.run)
     assert len(seen_at_entry) > 1, "only one proposal ran — the property is about the NEXT one"
-    assert seen_at_entry[1:] == [0] * len(seen_at_entry[1:]), (
-        f"a spent capability survived into a later proposal: {seen_at_entry}")
+    assert seen_at_entry == [set()] * len(seen_at_entry), (
+        f"a batch result survived on the engine into a later proposal: {seen_at_entry}")
 
 
 def test_no_lane_ever_holds_the_PRIMARY_role_pair(tmp_path):

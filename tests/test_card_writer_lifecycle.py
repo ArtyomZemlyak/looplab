@@ -505,7 +505,7 @@ def test_invalid_long_and_oversized_batch_ideas_do_not_strand_a_valid_sibling(tm
         [long_statement, oversized_identity, valid])
     _start(engine)
 
-    ideas = engine._propose_batch(fold(engine.store.read_all()), 3)
+    ideas = engine._propose_batch(fold(engine.store.read_all()), 3).ideas
 
     assert len(ideas) == 1
     assert ideas[0].hypothesis == valid.hypothesis

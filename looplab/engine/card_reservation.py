@@ -1857,9 +1857,8 @@ class CardReservationMixin:
             self._record_dropped_batch_cards(dropped_batch)
             return staged
         finally:
-            self._pending_batch_dropped = []
-            self._pending_batch_telemetry = []
-            self._pending_batch_novelty_gated = []
+            # (No batch result to reset here any more: `_propose_batch` RETURNS it since review
+            # 2026-09-22, ENG1-12, so an exception mid-batch leaves nothing a later batch can read.)
             # The single-action lane reaches the proposal circuit breaker through
             # `_prepare_node_idea`'s `_link`, which uses the WORKER discipline (it cannot know which
             # task it is on) and therefore only QUEUES the run-global pause. Both callers of this

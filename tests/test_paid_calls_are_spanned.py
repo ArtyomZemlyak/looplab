@@ -233,9 +233,13 @@ def test_the_batch_proposal_pays_inside_a_span(tmp_path, monkeypatch):
     state = fold(engine.store.read_all())
 
     def _paying_batch(_state, width):
+        from looplab.engine.novelty import BatchProposal
+
         for _ in range(int(width)):
             _pay(engine)
-        return [Idea(operator="draft", params={"x": float(i)}) for i in range(int(width))]
+        # A VALUE since review 2026-09-22 (ENG1-12): the batch's result is its return.
+        return BatchProposal([Idea(operator="draft", params={"x": float(i)})
+                              for i in range(int(width))])
 
     monkeypatch.setattr(type(engine), "_propose_batch",
                         lambda self, st, w: _paying_batch(st, w), raising=True)

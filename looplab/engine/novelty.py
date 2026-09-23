@@ -21,7 +21,7 @@ import unicodedata
 from contextlib import contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
-from typing import Optional
+from typing import NamedTuple, Optional, Sequence
 
 from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
@@ -322,6 +322,44 @@ def literature_overlap(text: str, literature, *, floor: float = LITERATURE_OVERL
                         "similarity": round(similarity, 4)})
     out.sort(key=lambda row: (-row["similarity"], row["title"]))
     return out[:limit]
+
+
+class BatchProposal(NamedTuple):
+    """What ONE batched proposal produced: `_propose_batch`'s RETURN VALUE (review 2026-09-22,
+    ENG1-12).
+
+    It used to hand three of these back through ENGINE ATTRIBUTES — `_pending_batch_telemetry`,
+    `_pending_batch_dropped`, `_pending_batch_novelty_gated` — written from the worker thread the
+    batch runs on, read by `orchestrator.py::_consume_batch_proposal`, and reset by seventeen
+    statements at eight sites in three files, in three different orders (doc 25 ES-08 is the
+    ordering those resets protected: a later batch must never read an earlier batch's telemetry,
+    drops or gate capability). A value has no reset to get wrong and no reader to reach it in the
+    wrong order.
+
+    ``ideas``      the accepted, Card-linked, novelty-gated Ideas — at most the requested width.
+    ``telemetry``  per-idea role snapshots, ALIGNED 1:1 with ``ideas`` by the producer; the one
+                   consumer still pads a short list, because a short one silently shifts every later
+                   idea's receipts onto the wrong node (`_consume_batch_proposal`).
+    ``dropped``    the proposals the batch refused before any Node owned them (their node-less
+                   Cards are recorded by the caller, after its accepted reservations are durable).
+    ``gated``      the EXACT objects that crossed the vs-history novelty gate, for the one consumer
+                   that needs the capability: `_create_node(..., preproposed=idea,
+                   already_gated=proposal.crossed_gate(idea))`. The reserved production lanes never
+                   consult it — their reservation carries the Idea — so it lives on the value that
+                   produced it rather than on the engine, where it used to outlive its batch.
+    """
+
+    ideas: list
+    telemetry: Sequence = ()
+    dropped: Sequence = ()
+    gated: tuple = ()
+
+    def crossed_gate(self, idea) -> bool:
+        """Did THIS object cross the batch's novelty gate? Identity, never equality: an unrelated
+        caller that supplies an EQUAL proposal has not itself crossed the proposal-bound gate, and
+        must still pass through it once."""
+        return any(idea is gated for gated in self.gated)
+
 
 class NoveltyGateMixin:
     """The engine's novelty/dedup gate cluster. See the module docstring for the mixin convention
@@ -877,7 +915,7 @@ class NoveltyGateMixin:
         return False
 
     @in_llm_lane("build")
-    def _propose_batch(self, state: RunState, n: int) -> list:
+    def _propose_batch(self, state: RunState, n: int) -> BatchProposal:
         """Variant-1 Phase 2 — the ONE shared-researcher pass that yields up to N DISTINCT seed
         hypotheses for a concurrent draft batch ("one researcher -> N ideas -> N developers"), so a
         `parallel_build>1` fan-out doesn't pay N independent research rolls that collide on the same
@@ -886,7 +924,9 @@ class NoveltyGateMixin:
         directions already taken THIS batch as a transient avoidance directive (reusing the
         `_novelty_feedback` channel the researcher already reads), applying the normal vs-history
         novelty gate, and DROPPING an intra-batch near-duplicate. Distinct-by-construction and
-        backend-agnostic; returns 1..N ideas (fewer only if the researcher can't diversify).
+        backend-agnostic; returns 1..N ideas (fewer only if the researcher can't diversify), as a
+        `BatchProposal` together with their telemetry, the drops and the gate capability — a VALUE
+        since review 2026-09-22 (ENG1-12), never three engine attributes a later batch could read.
 
         WHERE THIS RUNS, corrected 2026-08-31 — the sentence here said "in the MAIN task before the
         build fan-out, so it uses `self.researcher` (no pool race)", and the first half went false
@@ -903,7 +943,8 @@ class NoveltyGateMixin:
         the telemetry attributes in its `finally`.
 
         THOSE ATTRIBUTE SETS ARE DISJOINT TODAY and that is the whole of the safety: this lane owns
-        `_novelty_feedback` and the `_pending_batch_*` trio; the eval-task consumers own the repair
+        `_novelty_feedback` (and owned the `_pending_batch_*` trio until its result became the
+        returned `BatchProposal`, review 2026-09-22 ENG1-12); the eval-task consumers own the repair
         and triage paths and touch neither. It is not enforced anywhere, so a new attribute shared
         between the two is a real race and this paragraph is the only place that says so.
 
@@ -920,13 +961,14 @@ class NoveltyGateMixin:
         the primary pair re-opens it, and `tests/test_steady_state_build.py::
         test_no_lane_ever_holds_the_PRIMARY_role_pair` is what says so."""
         n = max(1, int(n))
-        self._pending_batch_dropped = []
         # Keep the exact returned objects as a one-shot capability for the rare unreserved
         # ``_create_node(..., preproposed=...)`` compatibility path.  The normal parallel path reserves
         # every Idea before fan-out and never consults this list.  Identity (rather than a digest/card id)
         # matters: an unrelated caller that later supplies an equal proposal must still pass through the
         # ordinary novelty gate once.
-        self._pending_batch_novelty_gated = []
+        # (The capability is `BatchProposal.gated` on the RETURNED value since review 2026-09-22,
+        # ENG1-12 — no longer an engine list reset here and consumed there — so it cannot outlive
+        # this batch: it is held by whoever holds the value, who passes it on as `already_gated=`.)
         native = getattr(self.researcher, "propose_batch", None)
         ideas: list = []
         dropped: list[dict] = []
@@ -1022,13 +1064,13 @@ class NoveltyGateMixin:
                     # isn't separable here. The structured cue snapshot is common to the one batch call;
                     # preserve it per reservation while leaving rank telemetry to the backend.
                     _steering = list(getattr(self.researcher, "_steering_context", []) or [])
-                    self._pending_batch_telemetry = [
-                        {"_steering_context": list(_steering)} for _ in ideas[:n]
-                    ]
-                    self._pending_batch_dropped = dropped
                     accepted = ideas[:n]
-                    self._pending_batch_novelty_gated = list(accepted)
-                    return accepted
+                    return BatchProposal(
+                        accepted,
+                        [{"_steering_context": list(_steering)} for _ in accepted],
+                        dropped,
+                        tuple(accepted),
+                    )
             except BudgetExceeded:
                 # The native batch AND its novelty gate are paid; falling back to sequential rolls
                 # on the ceiling bought the first roll's `propose` (which the sequential loop below
@@ -1114,10 +1156,7 @@ class NoveltyGateMixin:
                     setattr(self.researcher, _a, None)
                 except Exception:  # noqa: BLE001
                     pass
-        self._pending_batch_telemetry = telem
-        self._pending_batch_dropped = dropped
-        self._pending_batch_novelty_gated = list(ideas)
-        return ideas
+        return BatchProposal(ideas, telem, dropped, tuple(ideas))
 
     def _snapshot_role_telemetry(self, attr: str):
         """A shallow copy of a researcher predictive-telemetry attr (a dict set during propose), or None.

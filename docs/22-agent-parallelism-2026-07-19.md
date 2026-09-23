@@ -172,7 +172,7 @@ concerns, (c) the only genuinely hard piece — atomic id reservation under repl
 > |---|---|---|
 > | 0 — atomic id reservation | **shipped** | ids reserved serially under `_id_lock` before the fan-out |
 > | 1 — parallel build of a `creates` batch | **shipped** | the `parallel_build_batch` task group in `engine/orchestrator.py::run`; per-build `(researcher, developer)` pair from the role pool, as the Risks section below required |
-> | 2 — batch proposal with enforced diversity | **shipped** | batch novelty gate present (`_pending_batch_novelty_gated`) |
+> | 2 — batch proposal with enforced diversity | **shipped** | batch novelty gate present (`_pending_batch_novelty_gated`; since review 2026-09-22 ENG1-12 the returned `BatchProposal.gated`, passed on as `already_gated=`) |
 > | 3 — settings, governance, autonomy | **shipped** | canonical `llm_parallel`/`eval_parallel`; `parallel_build`/`max_parallel` are aliases |
 > | 4 — verification | **partial** | the serial golden replay exists (`tests/test_golden_replay.py`); the **"new golden for a 2-wide parallel-build run"** this phase specifies was never added — no golden pins id monotonicity / one-terminal-per-node / deterministic replay under a 2-wide fan-out. The cost guardrail DID ship (the `parallel_build_batch` tracer span). |
 >
