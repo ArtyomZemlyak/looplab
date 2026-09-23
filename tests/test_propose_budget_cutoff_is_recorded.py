@@ -18,9 +18,12 @@ import ast
 import inspect
 import pathlib
 
+import pytest
+
 from looplab.agents import agent as agent_mod
 from looplab.agents.loop_options import EXPLICIT_ONLY_LOOP_ARGS
-from looplab.agents.roles import RESEARCHER_OUTPUT_ATTRS
+from looplab.agents.roles import RESEARCHER_OUTPUT_ATTRS, researcher_budget_exhausted
+from looplab.core.models import Idea, Node, NodeStatus, RunState
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -158,3 +161,120 @@ def test_the_attribute_is_REGISTERED_so_a_rename_cannot_be_silent():
     assert "last_propose_budget_exhausted" in RESEARCHER_OUTPUT_ATTRS, (
         "the role-scoped spelling is registered too: it is what keeps the propose receipt and the "
         "repair receipt apart on the ONE object the shipped default makes of both roles")
+
+
+# ------------------------------------------------------------------ through the surrogate wrapper
+
+_TOY_BOUNDS = {"x": (-10.0, 10.0), "y": (-10.0, 10.0)}
+
+
+class _CutEveryCall:
+    """A Researcher whose every propose is cut short by its turn budget — what `_note_cutoff`
+    records on `ToolUsingResearcher` — and which can be made to raise mid-propose."""
+
+    def __init__(self):
+        self.calls = 0
+        self.raises = False
+        self.last_budget_exhausted = ""
+
+    def propose(self, _state, _parent):
+        self.calls += 1
+        self.last_budget_exhausted = "turns"
+        if self.raises:
+            raise RuntimeError("the provider went away mid-propose")
+        return Idea(operator="draft", params={"x": 0.5, "y": 0.5},
+                    rationale="an LLM proposal", hypothesis="an LLM hypothesis")
+
+
+def _warm_state(n: int = 5) -> RunState:
+    """Enough evaluated history over the toy bounds for the surrogate to pass its warm-up (4)."""
+    state = RunState(goal="g", direction="min")
+    for i in range(n):
+        state.nodes[i] = Node(id=i, operator="draft", status=NodeStatus.evaluated, feasible=True,
+                              metric=float((i - 2) ** 2),
+                              idea=Idea(operator="draft", params={"x": float(i), "y": -float(i)}))
+    return state
+
+
+def test_the_surrogate_reports_a_DELEGATED_cutoff_and_never_a_STALE_one():
+    """Review 2026-09-22, W5-5 follow-up. Under `surrogate_proposer` / `policy=bohb` the engine's
+    researcher handle IS `SurrogateResearcher`, which carried no receipt: a cut-short proposal its
+    fallback made was never reported. Both halves, driven:
+
+    * DELEGATED (below warm-up): the fallback's cutoff is THIS proposal's — reported;
+    * NUMERIC (past warm-up): no call reached the fallback, whose receipt now describes an EARLIER
+      proposal — so "" — and a delegate that RAISES leaves no receipt of an earlier call either.
+
+    MUTATIONS, each red here: no pass-through (the delegated half reads ""); a read-through property
+    to the fallback (the numeric half reads the stale "turns"); no reset on entry (the numeric and
+    the raising halves keep the previous call's "turns")."""
+    from looplab.search.surrogate import SurrogateResearcher
+
+    cut = _CutEveryCall()
+    surrogate = SurrogateResearcher(_TOY_BOUNDS, fallback=cut)
+    surrogate.propose(RunState(goal="g", direction="min"), None)
+    assert cut.calls == 1
+    assert researcher_budget_exhausted(surrogate) == "turns"
+
+    idea = surrogate.propose(_warm_state(), None)
+    assert "surrogate-guided" in idea.rationale and cut.calls == 1, "a numeric point makes no call"
+    assert cut.last_budget_exhausted == "turns", "precondition: the fallback's receipt is STALE now"
+    assert researcher_budget_exhausted(surrogate) == ""
+
+    surrogate.propose(RunState(goal="g", direction="min"), None)
+    assert researcher_budget_exhausted(surrogate) == "turns"
+    cut.raises = True
+    with pytest.raises(RuntimeError):
+        surrogate.propose(RunState(goal="g", direction="min"), None)
+    assert researcher_budget_exhausted(surrogate) == ""
+
+
+def test_the_proposal_funnel_warns_through_the_surrogate_only_for_a_delegated_cutoff(
+        tmp_path, monkeypatch, caplog):
+    """The READER the receipt exists for, driven: `_prepare_node_idea._link` on a run whose
+    researcher handle is the surrogate. A delegated cut-short proposal must be reported TRUNCATED;
+    a numeric point past warm-up — which never called the cut-short fallback — must not be.
+
+    MUTATION: drop the surrogate's pass-through and the first half is silent again."""
+    from looplab.adapters.toytask import ToyTask
+    from looplab.events.replay import fold
+    from looplab.search.surrogate import SurrogateResearcher
+    from tests.factories import TOY_TASK, make_engine
+
+    cut = _CutEveryCall()
+    task = ToyTask.load(TOY_TASK)
+    engine = make_engine(tmp_path / "surrogate-funnel", task=task,
+                         researcher=SurrogateResearcher(task.bounds, fallback=cut))
+    engine.store.append("run_started", {
+        "run_id": engine.run_dir.name, "task_id": "toy", "goal": "g", "direction": "min"})
+    monkeypatch.setattr(engine, "_apply_novelty_gate", lambda _state, idea, **_kw: idea)
+    proposed: list = []
+    surrogate_propose = engine.researcher.propose
+
+    def _spy(state, parent):
+        proposed.append(surrogate_propose(state, parent))
+        return proposed[-1]
+
+    monkeypatch.setattr(engine.researcher, "propose", _spy)
+
+    def _truncation_warnings(node_id: int) -> list[str]:
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="looplab.engine.orchestrator"):
+            engine._prepare_node_idea(
+                {"kind": "draft"}, fold(engine.store.read_all()), researcher=engine.researcher,
+                prospective_node_id=node_id, source="researcher")
+        return [r.getMessage() for r in caplog.records if "cut short by its" in r.getMessage()]
+
+    assert _truncation_warnings(0), "a delegated cut-short proposal went unreported"
+    assert cut.calls == 1
+    for i in range(5):
+        engine.store.append("node_created", {
+            "node_id": i, "parent_ids": [], "operator": "draft", "code": "print(1)",
+            "idea": {"operator": "draft", "params": {"x": float(i), "y": -float(i)}}})
+        engine.store.append("node_evaluated", {
+            "node_id": i, "generation": 0, "metric": float((i - 2) ** 2), "eval_seconds": 0.1})
+    assert _truncation_warnings(5) == [], (
+        "a numeric point that made no call was reported TRUNCATED off the fallback's stale receipt")
+    assert len(proposed) == 2 and "surrogate-guided" in proposed[1].rationale, (
+        "the second proposal must be the surrogate's own numeric point, or the half above is vacuous")
+    assert cut.calls == 1, "past warm-up the surrogate proposed without calling the fallback"

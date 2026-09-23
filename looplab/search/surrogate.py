@@ -13,7 +13,7 @@ from __future__ import annotations
 import random
 from typing import Optional
 
-from looplab.agents.roles import WrapsResearcher, forward_hints
+from looplab.agents.roles import WrapsResearcher, forward_hints, researcher_budget_exhausted
 from looplab.core.models import Idea, Node, RunState
 # Module scope, like every other search module that needs the digest primitives
 # (`search/coverage.py`, `search/panel.py`). These three used to be function-local, annotated
@@ -59,6 +59,11 @@ class SurrogateResearcher(WrapsResearcher):
         self.explore = max(0.0, explore)
         self.warmup = max(2, warmup)
         self.k = max(1, k)
+        # WHICH BOUND ENDED THE LAST PROPOSE — `agents/roles.py::RESEARCHER_OUTPUT_ATTRS`, read
+        # through `researcher_budget_exhausted` by the proposal funnel (`_prepare_node_idea._link`)
+        # and the batch lane. A PER-CALL receipt, never a read-through like the telemetry
+        # properties below: see `propose`.
+        self.last_budget_exhausted = ""
 
     @property
     def _delegate(self):
@@ -130,6 +135,16 @@ class SurrogateResearcher(WrapsResearcher):
         return pred, nearest
 
     def propose(self, state: RunState, parent: Optional[Node]) -> Idea:
+        # THE PROPOSE RECEIPT IS THIS CALL'S, OR NONE (review 2026-09-22, W5-5 follow-up). The engine
+        # reads "which bound cut this proposal short" off the OUTERMOST handle — this wrapper, under
+        # `surrogate_proposer` / `policy=bohb` — and it had no such attribute, so a cut-short
+        # proposal the fallback made through it was never reported. A read-through would be wrong
+        # the other way: past warm-up this wrapper proposes WITHOUT calling the fallback, whose
+        # receipt then describes an EARLIER proposal, and forwarding it would mark a numeric point
+        # that made no call as TRUNCATED. So: "" on entry — which is also what a delegate that raises
+        # leaves — and the fallback's own receipt (both spellings, `researcher_budget_exhausted`)
+        # only after a DELEGATED call returns.
+        self.last_budget_exhausted = ""
         # P2 delivery contract: the engine setattrs ephemeral hints on the OUTERMOST active
         # researcher — which may be THIS wrapper — so mirror them onto the fallback before any
         # delegation (roles.forward_hints owns the registry + `track_hypotheses` rule).
@@ -139,7 +154,9 @@ class SurrogateResearcher(WrapsResearcher):
         hist = self._history(state, bounds)
         if not bounds or len(hist) < self.warmup:
             if self.fallback is not None:                 # bootstrap / non-numeric -> delegate
-                return self.fallback.propose(state, parent)
+                idea = self.fallback.propose(state, parent)
+                self.last_budget_exhausted = researcher_budget_exhausted(self.fallback)
+                return idea
             params = {k: round(self.rng.uniform(lo, hi), 4) for k, (lo, hi) in bounds.items()}
             return Idea(operator="draft", params=params, rationale="surrogate bootstrap (random)")
         # Sample candidates over the bounds; score each by the acquisition (predicted metric adjusted
