@@ -395,3 +395,30 @@ def test_project_mutating_routes_never_take_the_blocking_lock_on_the_event_loop(
     # …and the offload did not break the writes it wraps.
     assert projects.load()["projects"][0]["name"] == "renamed"
     assert projects.load()["supertasks"][0]["name"] == "resweep"
+
+
+def test_projects_are_listed_and_deleted_over_http_without_orphaning_children(tmp_path):
+    """`GET /api/projects` and `DELETE /api/projects/{pid}` were the two project routes no test ever
+    requested — found by the route inventory (review 2026-09-22, SRV2-12 / doc 50 SR-09;
+    `tests/test_route_coverage.py`)."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from looplab.serve.server import make_app
+
+    client = TestClient(make_app(tmp_path))
+    parent = client.post("/api/projects", json={"name": "vision"}).json()["id"]
+    child = client.post("/api/projects",
+                        json={"name": "detection", "parent_id": parent}).json()["id"]
+    listed = client.get("/api/projects")
+    assert listed.status_code == 200
+    by_id = {p["id"]: p for p in listed.json()["projects"]}
+    assert set(by_id) == {parent, child} and by_id[child]["parent_id"] == parent
+
+    assert client.delete(f"/api/projects/{parent}").json() == {"ok": True}
+    after = {p["id"]: p for p in client.get("/api/projects").json()["projects"]}
+    assert set(after) == {child}
+    assert after[child]["parent_id"] is None, "a deleted project's children move up, not away"
+
+    unknown = client.delete("/api/projects/no-such-project")
+    assert unknown.status_code == 400 and "no such project" in unknown.text
+    assert set(p["id"] for p in client.get("/api/projects").json()["projects"]) == {child}

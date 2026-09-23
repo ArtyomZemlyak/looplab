@@ -147,3 +147,45 @@ def test_a_run_that_is_already_gone_parks_nothing_to_leak(tmp_path, monkeypatch)
         "expected_seq": 0, "delete_memory": True})
     assert response.status_code >= 400
     assert _sidecars(srv, tmp_path) == []
+
+
+# ------------------------------------------------------------------ the two routes no test spoke
+# Review 2026-09-22, SRV2-12 / doc 50 SR-09: `GET .../deletions/{operation_id}` had no HTTP test,
+# and the route inventory (`tests/test_route_coverage.py`) found the bodyless `DELETE` tombstone
+# beside it.
+
+def test_a_deletion_is_observable_by_its_operation_id_and_only_under_its_run(tmp_path):
+    """The read a client whose deletion POST lost its response makes to learn how it ended —
+    without repeating an irreversible request."""
+    run_dir = _run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    deleted = client.post(f"/api/runs/{RUN}/deletions",
+                          json=_identity(run_dir, delete_memory=False))
+    assert deleted.status_code == 200 and not run_dir.exists()
+
+    observed = client.get(f"/api/runs/{RUN}/deletions/{OPERATION}")
+    assert observed.status_code == 200, observed.text
+    for key in ("status", "operation_id", "run_id"):
+        assert observed.json()[key] == deleted.json()[key], key
+    assert observed.json()["status"] == "succeeded"
+
+    unknown = "22222222-2222-4222-8222-222222222222"
+    missing = client.get(f"/api/runs/{RUN}/deletions/{unknown}")
+    assert missing.status_code == 404
+    assert missing.json()["detail"]["code"] == "delete_operation_not_found"
+    assert missing.json()["detail"]["operation_id"] == unknown
+    malformed = client.get(f"/api/runs/{RUN}/deletions/not-a-uuid")
+    assert malformed.status_code == 404
+    assert malformed.json()["detail"]["code"] == "delete_operation_not_found"
+    # A receipt answers only under the run it deleted.
+    assert client.get(f"/api/runs/another-run/deletions/{OPERATION}").status_code == 404
+
+
+def test_the_bodyless_delete_is_a_tombstone_that_deletes_nothing(tmp_path):
+    """Deprecated (SRV2-09) and kept only to refuse: a bodyless request could otherwise destroy a
+    replacement generation the caller never inspected."""
+    run_dir = _run(tmp_path)
+    refused = TestClient(make_app(tmp_path)).delete(f"/api/runs/{RUN}")
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["code"] == "deletion_identity_required"
+    assert (run_dir / "events.jsonl").is_file(), "a refusal must delete nothing"

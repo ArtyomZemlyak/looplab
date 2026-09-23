@@ -660,6 +660,38 @@ def test_concept_merge_and_split_routes(tmp_path):
             and s.json()["governance_revision"] == 3)
 
 
+def test_concept_split_clear_undoes_the_active_split_and_refuses_when_there_is_none(tmp_path):
+    """The one governance route no test requested, found by the route inventory (review
+    2026-09-22, SRV2-12 / doc 50 SR-09; `tests/test_route_coverage.py`)."""
+    _seed_memory()
+    client = TestClient(make_app(tmp_path))
+    nothing = client.post("/api/cross-run/concept-split-clear", json={
+        "from_concept": "coarse", "expected_revision": 0, "expected_governance_revision": 0,
+        "action_id": "clear-before-any-split"})
+    assert nothing.status_code == 422 and "no active split" in nothing.text
+
+    split = client.post("/api/cross-run/concept-split", json={
+        "from_concept": "coarse", "rules": [{"to": "fine", "when_any": ["match"]}],
+        "expected_revision": 0, "expected_governance_revision": 0,
+        "action_id": "split-to-clear"})
+    assert split.status_code == 200 and split.json()["governance_revision"] == 1
+    stale = client.post("/api/cross-run/concept-split-clear", json={
+        "from_concept": "coarse", "expected_revision": 0, "expected_governance_revision": 1,
+        "action_id": "clear-stale"})
+    assert stale.status_code == 409, stale.text
+    clear = client.post("/api/cross-run/concept-split-clear", json={
+        "from_concept": "coarse", "expected_revision": 1, "expected_governance_revision": 1,
+        "action_id": "clear-current"})
+    assert clear.status_code == 200, clear.text
+    assert clear.json()["revision"] == 2 and clear.json()["governance_revision"] == 2
+    assert clear.json()["split"]["action"] == "clear"
+    # Append-only: the clear is a new row, and a second clear finds nothing active to undo.
+    again = client.post("/api/cross-run/concept-split-clear", json={
+        "from_concept": "coarse", "expected_revision": 2, "expected_governance_revision": 2,
+        "action_id": "clear-twice"})
+    assert again.status_code == 422 and "no active split" in again.text
+
+
 def test_concept_http_fences_nonexistent_entities_but_split_can_create_children(tmp_path):
     _seed_memory()
     client = TestClient(make_app(tmp_path))

@@ -284,3 +284,62 @@ def test_a_card_stamped_proposal_in_a_foreign_trace_is_found_by_lookup(tmp_path)
                              _normalized=True)
     assert [r["trace_id"] for r in out["research"]] == ["t-prop"]
     assert out["research"][0]["link"] == "card_id"
+
+
+# ------------------------------------------------------------------ the HTTP route
+
+def test_the_card_trace_route_serves_the_join_under_the_run_generation_fence(tmp_path):
+    """`GET /api/runs/{run_id}/cards/{card_id}/trace` had no HTTP test at all (review 2026-09-22,
+    SRV2-12 / doc 50 SR-09). Driven end to end: the fold says which nodes the card owns and which
+    trace built each one, the span index supplies the rows, and the before/after generation CAS
+    refuses a malformed or superseded generation instead of serving one run's trace on another's
+    screen."""
+    import json
+
+    import pytest
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from looplab.serve.server import make_app
+
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    rows = [
+        {"v": 1, "seq": 0, "ts": 1.0, "type": "run_started",
+         "data": {"run_id": "demo", "task_id": "t", "goal": "g", "direction": "max"}},
+        # The engine stamps the BUILD trace on `node_created`; the route reads it from the log.
+        {"v": 1, "seq": 1, "ts": 2.0, "type": "node_created", "trace_id": "t-node0",
+         "data": {"node_id": 0, "parent_ids": [], "operator": "draft",
+                  "idea": {"operator": "draft", "params": {}, "rationale": "r",
+                           "card_id": "card-1"}}},
+    ]
+    (rd / "events.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows),
+                                     encoding="utf-8")
+    (rd / "spans.jsonl").write_text("".join(json.dumps(s) + "\n" for s in _corpus()),
+                                    encoding="utf-8")
+    client = TestClient(make_app(tmp_path))
+
+    served = client.get("/api/runs/demo/cards/card-1/trace")
+    assert served.status_code == 200, served.text
+    body = served.json()
+    assert body["run_id"] == "demo" and body["card_id"] == "card-1"
+    assert {r["trace_id"]: r["link"] for r in body["research"]}["t-prop"] == "card_id"
+    assert all(r["trace_id"] != "t-other" for r in body["research"]), "another card's research"
+    assert [(n["node_id"], n["trace_id"]) for n in body["nodes"]] == [("0", "t-node0")]
+    generation = body["run_generation"]
+    assert generation, "the read is bound to the generation it was served from"
+
+    pinned = client.get("/api/runs/demo/cards/card-1/trace",
+                        params={"expected_generation": generation})
+    assert pinned.status_code == 200 and pinned.json()["nodes"] == body["nodes"]
+    malformed = client.get("/api/runs/demo/cards/card-1/trace",
+                           params={"expected_generation": "not-a-generation"})
+    assert malformed.status_code == 400
+    assert malformed.json()["detail"]["code"] == "invalid_run_generation"
+    stale = client.get("/api/runs/demo/cards/card-1/trace",
+                       params={"expected_generation": "0" * len(generation)})
+    assert stale.status_code == 409, stale.text
+
+    # A card the fold does not know is an empty story, never a guessed one.
+    unknown = client.get("/api/runs/demo/cards/card-unknown/trace").json()
+    assert unknown["research"] == [] and unknown["nodes"] == []

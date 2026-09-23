@@ -1085,3 +1085,71 @@ def test_cancel_skips_the_paid_session_titling_call(tmp_path, monkeypatch):
     release.set()
     assert not titled.wait(timeout=1.5), (
         "a cancelled first turn still issued the paid titling call")
+
+
+# --------------------------------------------------------------------------- two unrequested routes
+# Review 2026-09-22, SRV2-12 / doc 50 SR-09: no test requested `GET .../fork/{action_id}`, and the
+# route inventory (`tests/test_route_coverage.py`) found `GET /api/assistant/progress` asked only
+# for its 401 — a refusal the token gate answers before the handler runs.
+
+def test_a_fork_is_observable_by_its_action_id_without_forking_again(tmp_path):
+    """How a client whose fork POST lost its response learns whether the child was published."""
+    client = TestClient(make_app(tmp_path))
+    sid = client.post("/api/assistant/sessions", json={"title": "t"}).json()["id"]
+    action = str(uuid.uuid4())
+
+    missing = client.get(f"/api/assistant/sessions/{sid}/fork/{action}")
+    assert missing.status_code == 404
+    assert missing.json()["detail"]["code"] == "assistant_fork_not_found"
+
+    child = client.post(f"/api/assistant/sessions/{sid}/fork", json={"action_id": action}).json()
+    assert child["parent"] == sid and child["fork_action_id"] == action
+    observed = client.get(f"/api/assistant/sessions/{sid}/fork/{action}")
+    assert observed.status_code == 200, observed.text
+    assert observed.json()["id"] == child["id"] and observed.json()["fork_action_id"] == action
+    sessions = client.get("/api/assistant/sessions").json()["sessions"]
+    assert sum(s.get("parent") == sid for s in sessions) == 1, "an observation must not fork"
+
+    malformed = client.get(f"/api/assistant/sessions/{sid}/fork/not-an-action")
+    assert malformed.status_code == 400
+    assert malformed.json()["detail"]["code"] == "assistant_fork_action_invalid"
+    other_snapshot = client.get(f"/api/assistant/sessions/{sid}/fork/{action}",
+                                params={"expected_messages": 7})
+    assert other_snapshot.status_code == 409
+    assert other_snapshot.json()["detail"]["code"] == "assistant_fork_action_conflict"
+
+
+def test_turn_progress_is_live_while_a_turn_runs_and_empty_after(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0.01")
+    monkeypatch.setattr("looplab.serve.server.make_llm_client",
+                        lambda _s, **_kw: _FakeChatClient([]))
+    entered, release = threading.Event(), threading.Event()
+
+    def fake_run_turn(_client, _root, _history, instruction, mode, **_kwargs):
+        entered.set()
+        assert release.wait(timeout=5)
+        return {"ok": True, "reply": "done", "steps": [], "applied": [],
+                "proposals": [], "todos": [], "refs": [], "mode": mode}
+
+    monkeypatch.setattr("looplab.serve.routers.assistant._assistant_run_turn", fake_run_turn)
+    client = TestClient(make_app(tmp_path))
+    sid = client.post("/api/assistant/sessions", json={"mode": "plan"}).json()["id"]
+    idle = {"steps": [], "todos": [], "text": "", "active": False}
+    assert client.get("/api/assistant/progress", params={"session": sid}).json() == idle
+
+    started = client.post(f"/api/assistant/sessions/{sid}/message",
+                          json={"instruction": "hello", "mode": "plan"}).json()
+    assert started.get("status") == "running" and entered.wait(timeout=5)
+    live = client.get("/api/assistant/progress", params={"session": sid})
+    assert live.status_code == 200 and live.json()["active"] is True
+    release.set()
+    deadline = time.monotonic() + 10
+    while client.get("/api/assistant/progress", params={"session": sid}).json()["active"]:
+        assert time.monotonic() < deadline, "the finished turn never released its progress slot"
+        time.sleep(0.02)
+    assert client.get("/api/assistant/progress", params={"session": sid}).json() == idle
+
+    assert client.get("/api/assistant/progress").status_code == 422   # the session is required
