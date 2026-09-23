@@ -983,6 +983,26 @@ four wrappers those judges call the model through (`agentic_text`, `agentic_stru
 guard sentence — and `false` (or a pre-field snapshot) keeps their historical bytes.
 `tests/test_judge_evidence_fence.py` drives each judge both ways.
 
+The rest of that review took the same switch to **every other loop whose tools return text the
+model did not write**: the passes that author cross-run memory (run-end reflection, the skill-card
+distiller and its rubric classifier, the causal meta-note, comparative lessons) and the research
+cadence's memo verifier; the run report (the engine's writer and the manual refresh), the Boss's
+action router and both Genesis planners (web and CLI); the concept diagnostics' agentic tagger, the
+`asset-brief` prior-art sweep and the foresight ranker; and the three roles that make most of a
+run's tool calls — the agentic Researcher, Deep Research and the repo Developer (all five of its
+phases). Each reads the switch from the run's own Settings, so a pre-field snapshot keeps its
+historical bytes (Genesis, which runs before any run exists, follows the server's Settings), and each
+gains the fence only — no prompt wording moves.
+
+**Every tool loop is registered.** `core/evidence.py::EVIDENCE_CONSUMERS` lists each call site that
+hands a loop a toolset — keyed `<module>::<qualname> -> <callee>` — as `FENCED` (naming the test that
+drives a real tool result through it, envelope on and off) or `EXEMPT` (with its reason; today only
+the judgebench trajectory harness, whose fence is the benchmark case's own variable).
+`tests/test_evidence_consumers.py` derives the same set by AST — every call of `drive_tool_loop` and,
+transitively, of every function that passes its own `tools` parameter into one — and fails on a new
+site with no row or on a row whose site is gone, so the next loop over a candidate's code cannot
+arrive unfenced unnoticed. `tests/test_evidence_consumer_fences.py` drives the consumers it added.
+
 ## Knowledge, skills & prompts
 
 Give the agentic Researcher extra context and tools:

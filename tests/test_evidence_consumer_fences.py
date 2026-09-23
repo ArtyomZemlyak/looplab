@@ -8,12 +8,17 @@ label at all, so the inter-stage checker, both watchdog judges, the novelty adju
 pilot read the candidate's text bare). This file covers the consumers that were still unfenced
 after it: every other loop whose tools return a candidate's code, logs and output, a repository's
 files, or cross-run memory — the passes that AUTHOR cross-run memory from a run (reflection,
-comparative lessons, skill distillation and its classifier), the memo verifier, …
+comparative lessons, skill distillation and its classifier), the memo verifier, the run report, the
+Boss's router, both Genesis planners, the concept diagnostics, the prior-art sweep, the foresight
+ranker, and the three roles that make most of a run's tool calls: the Researcher, Deep Research and
+the repo Developer.
 
 Every test DRIVES the real `drive_tool_loop` with a scripted model that calls one real tool whose
 result carries an injection-shaped line (a forged closing marker and a "SYSTEM:" instruction), and
 reads what the loop actually sent back. OFF is the historical bytes — the keyword is ABSENT, not an
 empty label; ON, the result is exactly `fence_untrusted(<what the tool returned>, EVIDENCE_LABEL)`.
+The registry of every consumer (`core/evidence.py::EVIDENCE_CONSUMERS`) names these tests as its
+proofs, and `tests/test_evidence_consumers.py` is the two-way guard over it.
 """
 from __future__ import annotations
 
@@ -208,6 +213,47 @@ def test_the_research_cadence_hands_the_verifier_the_runs_fence(monkeypatch, env
     eng._record_deep_research(memo, trigger="cadence", manual=False)
     assert {k: v for k, v in seen.items() if k == "tool_result_label"} == expected
     assert "client" in seen, "the verifier was not reached — the harness proves nothing"
+
+
+@pytest.mark.parametrize("envelope", [True, False, None], ids=["on", "off", "stub-without-init"])
+def test_the_research_cadence_verifier_reads_candidate_code_fenced(tmp_path, envelope):
+    """End to end — the registry's proof for the memo verifier: the engine's switch, through the one
+    production caller (`_record_deep_research`), the REAL `verify_memo` and its real run tools, to
+    the tool result the judge is sent."""
+    from types import SimpleNamespace
+
+    from looplab.core.models import ResearchMemo
+    from looplab.engine.orchestrator import Engine
+    from looplab.events.eventstore import EventStore
+    from looplab.events.replay import fold
+
+    source = EventStore(tmp_path / "events.jsonl")
+    source.append("run_started", {"run_id": "r", "task_id": "toy", "goal": "g", "direction": "min"})
+    source.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                   "idea": {"operator": "draft", "params": {}, "rationale": "r"},
+                                   "code": PAYLOAD})
+    source.append("node_evaluated", {"node_id": 0, "metric": 1.0})
+    events = source.read_all()
+
+    class _Store:                       # the engine's writes are not what this test is about
+        def append(self, *_a, **_k):
+            return None
+
+        def read_all(self):
+            return events
+
+    model = _Reader("emit", {"verdicts": ["supported"], "notes": ["read it"]})
+    eng = Engine.__new__(Engine)
+    eng.store = _Store()
+    eng._research_verify = True
+    eng._track_hypotheses = False
+    eng.deep_researcher = SimpleNamespace(client=model, parser="tool_call")
+    if envelope is not None:
+        eng._evidence_envelope = envelope
+    memo = ResearchMemo(summary="memo", at_node=1,
+                        claims=[{"statement": "node 0 reached 1.0", "node_ids": [0]}])
+    eng._record_deep_research(memo, trigger="cadence", manual=False)
+    assert model.tool_messages == [_expected(fold(events), envelope)]
 
 
 # ------------------------------------------------------------------ 2. the report writer, the Boss, Genesis

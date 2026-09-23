@@ -1393,6 +1393,17 @@ class Settings(BaseSettings):
     # only — no guard sentence is added to those judges' system prompts. A run launched with this ON
     # before that change resumes with those tool results fenced; a pre-field run stays OFF (the
     # legacy row below), so its judges keep their historical bytes.
+    #
+    # AND EVERY OTHER TOOL LOOP OVER TEXT THE MODEL DID NOT WRITE, since the rest of TAT-02: the
+    # passes that author cross-run memory (reflection, skill distillation and its rubric, the causal
+    # meta-note, comparative lessons), the memo verifier, the run report (engine writer and manual
+    # refresh), the Boss's router, both Genesis planners, the concept diagnostics' tagger, the
+    # prior-art sweep, the foresight ranker, and the agentic Researcher, Deep Research and the repo
+    # Developer (every phase) — the fence only, each OFF at its constructor, each reading this field
+    # through `core/evidence.py::envelope_enabled` (or, in the engine, `judge_evidence_kwargs`).
+    # `core/evidence.py::EVIDENCE_CONSUMERS` lists every call site that hands a loop a toolset, and a
+    # two-way guard keeps it complete. Same resume rule: a run launched with this ON resumes fenced,
+    # a pre-field run stays OFF.
     evidence_envelope: bool = True
     # C4 independent critic: an execution-free critic of each solution (stub / hardcoded-metric /
     # params-ignored; on host-graded tasks the metric checks become a submission-output check)
@@ -3338,7 +3349,9 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # system prompts gain a guard sentence and their user turns gain a fence around the candidate's
     # own text, and the Strategist's tool results arrive fenced — so the two values produce two
     # different prompts for three roles (and, since review 2026-09-22 TAT-02, different tool-result
-    # bytes for the stage checker, both watchdog judges, the novelty adjudicator and the pilot).
+    # bytes for the stage checker, both watchdog judges, the novelty adjudicator and the pilot — and
+    # for every other FENCED row of `core/evidence.py::EVIDENCE_CONSUMERS` but the two that fence
+    # unconditionally, the assistant and the cross-run scope report).
     # (c) is `False`, pointable at every commit before this one, and the field's own comment states
     # that `false` restores every prompt byte for byte.
     "evidence_envelope": False,

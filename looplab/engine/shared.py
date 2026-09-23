@@ -150,7 +150,8 @@ def judge_evidence_kwargs(engine) -> dict:
     classifier; `lessons_reconcile.py`'s comparative lessons) and the research cadence's memo
     verifier. Their conclusions land in the SHARED store a later run reads as a prior, so a forged
     marker in one run's candidate code was one bare tool result away from another run's prompt. The
-    name stayed, so no landed call site moves.
+    name stayed, so no landed call site moves; every site that asks here is a FENCED row of
+    `core/evidence.py::EVIDENCE_CONSUMERS`.
 
     A module function over `engine` rather than a mixin method, and a `getattr` with the flag's own
     constructor default: the watchdog judges are driven in the suite through stubs that inherit

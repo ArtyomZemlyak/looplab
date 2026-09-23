@@ -40,6 +40,13 @@ resumed pre-field run keeps the prompts it was launched with). The engine's own 
 field by `from_settings`) and ask `engine/shared.py::judge_evidence_kwargs` for their fence — the four
 judge wrappers (`agentic_text`, `agentic_struct`, `emit_loop`, `trust/judge.py::structured_judge`)
 carry a `tool_result_label` since review 2026-09-22 (TAT-02), which until then no caller could pass.
+The rest of TAT-02 took the same switch to every other loop that hands a model a toolset over text
+it did not write — the passes that author cross-run memory, the memo verifier, the report writer,
+the Boss's router, both Genesis planners, the concept diagnostics, the prior-art sweep, the
+foresight ranker, and the Researcher, Deep Research and the repo Developer themselves — spelled
+`fence_kwargs` outside the engine; and `EVIDENCE_CONSUMERS` (the end of this module) lists every
+such call site, fenced or exempt with its reason, under a two-way guard
+(`tests/test_evidence_consumers.py`), so the next loop cannot arrive unfenced unnoticed.
 The Boss and the assistant predate the flag and are unconditional; nothing about them moved —
 `serve/llm_context.py` re-exports the builder and the label under the names its tests import, and
 `agents/tool_loop.py` re-exports the fence, so both spellings name the SAME objects.
@@ -54,6 +61,7 @@ import functools
 import re
 import sys
 import unicodedata
+from typing import NamedTuple
 
 # The marker every fenced block opens and closes with. `serve/llm_context.py::BOSS_EVIDENCE_LABEL`
 # is this constant under its historical name.
@@ -63,19 +71,20 @@ EVIDENCE_LABEL = "UNTRUSTED_RUN_EVIDENCE"
 def envelope_enabled(settings) -> bool:
     """`Settings.evidence_envelope` as the constructor argument every consumer takes.
 
-    ONE reader, because the flag reaches five constructors from three modules
-    (`agents/factory.py`, `agents/strategist.py::make_strategist`, `agents/deep_research.py`) and a
-    `getattr` default re-typed at each is how one of them ends up reading a different default.
-    Absent (a duck-typed settings stub) means OFF, which is the byte-identical historical prompt.
+    ONE reader, because the flag reaches constructors and call sites all over the tree — the role
+    builders in `agents/`, the report writer, the Boss's and Genesis's routes, the CLI; every loop
+    it governs is a row of `EVIDENCE_CONSUMERS` — and a `getattr` default re-typed at each is how
+    one of them ends up reading a different default. Absent (a duck-typed settings stub) means OFF,
+    which is the byte-identical historical prompt.
     """
     return bool(getattr(settings, "evidence_envelope", False))
 
 
 def fence_kwargs(enabled) -> dict:
     """The fence keyword a tool-loop call spreads: `{"tool_result_label": EVIDENCE_LABEL}` while
-    the envelope is on, and `{}` while it is off — ABSENT, not an empty label, so a consumer with the
-    envelope off makes its historical call byte for byte (a test double written against a wrapper's
-    old signature is a caller too, and an always-passed `""` would break it).
+    the envelope is on, and `{}` while it is off — ABSENT, not an empty label, so a consumer with
+    the envelope off makes its historical call byte for byte (a test double written against a
+    wrapper's old signature is a caller too, and an always-passed `""` would break it).
 
     Review 2026-09-22, TAT-02: the one spelling for every consumer OUTSIDE the engine once it holds
     its switch as a bool — a role's `evidence_envelope` constructor argument, or
@@ -160,9 +169,10 @@ def fence_untrusted(text: str, label: str) -> str:
     product, and a prompt is a contract (CLAUDE.md), so a loop's tool results stay byte-identical
     until someone decides that role wants this too. Since review 2026-09-22 (TAT-02) the Researcher,
     Deep Research and the repo Developer have decided so — under `Settings.evidence_envelope`, each
-    OFF at its constructor. It is an EXPLICIT-only loop argument for the same reason `nudge_prompt`
-    is — the wording is the contract, and it belongs at the site that owns it rather than in a
-    bundle a settings file could reword.
+    OFF at its constructor — and the decision for every loop that hands a model a toolset is written
+    down in `EVIDENCE_CONSUMERS` below. It is an EXPLICIT-only loop argument for the same reason
+    `nudge_prompt` is — the wording is the contract, and it belongs at the site that owns it rather
+    than in a bundle a settings file could reword.
     """
     if not label:
         return text
@@ -248,3 +258,189 @@ def _sub_through_format_chars(pattern: "re.Pattern", text: str, mark) -> str:
         cursor = end
     out.append(text[cursor:])
     return "".join(out)
+
+
+# ------------------------------------------------------------------ who asks for the fence
+#
+# EVERY CALL SITE THAT HANDS A TOOL LOOP A TOOLSET, and whether what that toolset returns arrives
+# fenced (review 2026-09-22, TAT-02 — its ROOT, RC-8 "the boundary is opt-in in every constructor").
+# The fence is applied by ONE function (`agents/tool_loop.py::drive_tool_loop`) and only for a
+# caller that passes `tool_result_label`, which is deliberate — a prompt is a contract, so nothing
+# grows a fence nobody decided on — and it is also why the fence kept not arriving: nothing listed
+# the call sites, so a new loop over a candidate's code was one more bare consumer no test could
+# see. The review found the judges reading the candidate's own logs bare, then most rows below.
+#
+# A key is `<module>::<qualname> -> <callee>`: the site that DECIDES WHICH TOOLSET a loop receives
+# (that is what decides whose words come back) and the entry point it hands it to. The set is not
+# typed in by hand: `tests/test_evidence_consumers.py` derives it by AST — every call of
+# `drive_tool_loop` and, transitively, of every function that passes its OWN `tools` parameter into
+# one (the wrappers, `run_phase`, `verify`, `classify_skill_candidate`, `tag_nodes_llm`,
+# `build_concept_map`, `rank_agentic`, the watchdog judges' `_asha_verdict`/`_training_verdict`,
+# the repo Developer's `_run_fresh`), minus the calls that pass no toolset at all — and refuses both
+# drifts: a new site with no row, and a row whose site is gone.
+#
+# FENCED rows name the test that proves it — for every row added with this registry, one that
+# DRIVES a real tool result through the site with the envelope on and off; the three that predate it
+# (the Strategist, the assistant, the scope report) keep their existing seam and AST pins — and say
+# where the site's switch comes from — one of three readers of the ONE setting:
+# `engine/shared.py::judge_evidence_kwargs` (the engine's own sites), a role's `evidence_envelope`
+# constructor argument filled by its builder from `envelope_enabled`, or `envelope_enabled` over the
+# run's (or, before a run exists, the server's) Settings at the call. The assistant and the
+# cross-run scope report predate the flag and fence unconditionally. EXEMPT rows say why no
+# untrusted text reaches a decision through them; "not fenced yet" is not a reason.
+FENCED = "fenced"
+EXEMPT = "exempt"
+
+
+class EvidenceConsumer(NamedTuple):
+    """One registered call site (`EVIDENCE_CONSUMERS`)."""
+
+    status: str        # FENCED | EXEMPT
+    why: str           # what the toolset returns, and where the site's switch comes from
+    proof: str = ""    # FENCED: `tests/<file>.py::<test>` driving a real tool result on and off
+
+
+_ENGINE = (" Switch: engine/shared.py::judge_evidence_kwargs (the run's"
+           " EngineOptions.evidence_envelope).")
+_ROLE = (" Switch: the role's `evidence_envelope` constructor argument (OFF by default), filled"
+         " by its builder from envelope_enabled(settings).")
+_RUN = " Switch: envelope_enabled(<the run's Settings>) at the call."
+_ALWAYS = (" Fenced unconditionally with serve/llm_context.py::BOSS_EVIDENCE_LABEL (predates the"
+           " flag).")
+_RUN_TOOLS = "readonly_run_tools: the candidates' own code, logs and output."
+_T = "tests/test_evidence_consumer_fences.py::"
+_J = "tests/test_judge_evidence_fence.py::"
+_E = "tests/test_evidence_envelope.py::"
+_DEV = ("repo scouts over the task repository and this node's staged files, env inspection, dev"
+        " commands and the probe (repo text and the output of candidate code).")
+_DEV_PROOF = _T + "test_every_repo_developer_phase_asks_the_loop_for_the_fence"
+_MEMORY_PROOF = _T + "test_the_passes_that_author_cross_run_memory_read_candidate_code_fenced"
+_CONCEPT_PROOF = _T + "test_the_concept_diagnostics_fence_the_node_code_their_tagger_reads"
+
+EVIDENCE_CONSUMERS: dict[str, EvidenceConsumer] = {
+    # --- the three roles that drive most of a run's tool calls (review 2026-09-22, TAT-02)
+    "adapters/repo_developer.py::LLMRepoDeveloper._declare_stages_phase -> run_phase":
+        EvidenceConsumer(FENCED, "The stages phase: " + _DEV + _ROLE,
+                         _DEV_PROOF),
+    "adapters/repo_developer.py::LLMRepoDeveloper._propose_plan -> run_phase":
+        EvidenceConsumer(FENCED, "The plan phase: " + _DEV + _ROLE,
+                         _DEV_PROOF),
+    "adapters/repo_developer.py::LLMRepoDeveloper._run_step -> run_phase":
+        EvidenceConsumer(FENCED, "One plan step, with the write tools: " + _DEV + _ROLE,
+                         _DEV_PROOF),
+    "adapters/repo_developer.py::LLMRepoDeveloper._run -> _run_fresh":
+        EvidenceConsumer(FENCED, "The single-session implement (via `_run_fresh`): " + _DEV
+                         + _ROLE, _DEV_PROOF),
+    "adapters/repo_developer.py::LLMRepoDeveloper._run -> run_phase":
+        EvidenceConsumer(FENCED, "The repair session: " + _DEV + _ROLE,
+                         _DEV_PROOF),
+    "agents/agent.py::ToolUsingResearcher.propose -> run_phase":
+        EvidenceConsumer(FENCED, "Run introspection, the repo reader, knowledge, memory, skills and"
+                         " the literature/web tools." + _ROLE,
+                         _T + "test_the_researcher_reads_the_run_fenced_when_the_envelope_is_on"),
+    "agents/deep_research.py::DeepResearcher.research -> drive_tool_loop":
+        EvidenceConsumer(FENCED, "The Researcher's providers plus web fetch/search (which also"
+                         " stamp their own results; the fence is idempotent over them)." + _ROLE,
+                         _T + "test_the_deep_researcher_reads_the_run_fenced_when_the_envelope_"
+                         "is_on"),
+    # --- the judges and the pilot (review 2026-09-22, TAT-02, first half; doc 52 row 13)
+    "agents/strategist.py::ToolUsingStrategist.decide -> drive_tool_loop":
+        EvidenceConsumer(FENCED, "The Strategist's run, data, sibling-run, knowledge and memory"
+                         " tools." + _ROLE,
+                         _E + "test_the_tool_strategist_on_fences_its_results_with_the_marker_"
+                         "the_guard_names"),
+    "agents/unified_agent.py::UnifiedAgent._pilot_emit -> drive_tool_loop":
+        EvidenceConsumer(FENCED, "The pilot tools (run introspection + task data) for the pilot,"
+                         " the crash-triage judge and the repair critic; each caller passes"
+                         " `_evidence_label()`." + _ROLE,
+                         _J + "test_the_pilot_fences_its_tool_results_like_its_sibling_judges"),
+    "engine/asha_monitor.py::AshaMonitorMixin._monitor_asha._judge -> _asha_verdict":
+        EvidenceConsumer(FENCED, "The ASHA watchdog judge's log tools: the candidate's own stage"
+                         " log." + _ENGINE,
+                         _J + "test_the_asha_judge_fences_what_its_tools_return"),
+    "engine/eval_stages.py::EvalStagesMixin._stage_check_fn._check -> agentic_text":
+        EvidenceConsumer(FENCED, "The inter-stage checker's log tools (its FAIL ends a node)."
+                         + _ENGINE,
+                         _J + "test_the_stage_checker_reads_the_candidates_log_fenced_when_the_"
+                         "envelope_is_on"),
+    "engine/novelty.py::NoveltyGateMixin._llm_novelty_gate -> agentic_struct":
+        EvidenceConsumer(FENCED, "The novelty adjudicator's " + _RUN_TOOLS + _ENGINE,
+                         _J + "test_the_novelty_adjudicator_reads_prior_code_fenced_when_the_"
+                         "envelope_is_on"),
+    "engine/train_monitor.py::TrainingMonitorMixin._monitor_training._judge -> _training_verdict":
+        EvidenceConsumer(FENCED, "The training monitor judge's log tools (kill authority)."
+                         + _ENGINE,
+                         _J + "test_the_training_monitor_judge_fences_what_its_tools_return"),
+    # --- the passes that author cross-run memory, and the memo verifier
+    "engine/lessons_distill.py::LessonDistillMixin.reflect_lessons -> agentic_text":
+        EvidenceConsumer(FENCED, "Run-end reflection, " + _RUN_TOOLS + _ENGINE,
+                         _MEMORY_PROOF),
+    "engine/lessons_distill.py::LessonDistillMixin.distill_skill_body -> agentic_text":
+        EvidenceConsumer(FENCED, "The skill-card distiller, " + _RUN_TOOLS + _ENGINE,
+                         _MEMORY_PROOF),
+    "engine/lessons_distill.py::LessonDistillMixin.causal_meta_note -> agentic_text":
+        EvidenceConsumer(FENCED, "The causal meta-note, " + _RUN_TOOLS + _ENGINE,
+                         _MEMORY_PROOF),
+    "engine/lessons_distill.py::LessonDistillMixin.promote_settled_skills"
+    " -> classify_skill_candidate":
+        EvidenceConsumer(FENCED, "The skill rubric classifier, " + _RUN_TOOLS + _ENGINE,
+                         _MEMORY_PROOF),
+    "engine/lessons_reconcile.py::LessonReconcileMixin.comparative_lessons -> agentic_text":
+        EvidenceConsumer(FENCED, "The comparative-lessons pass, " + _RUN_TOOLS + _ENGINE,
+                         _MEMORY_PROOF),
+    "trust/memo_verify.py::verify_memo -> structured_judge":
+        EvidenceConsumer(FENCED, "The memo verifier, " + _RUN_TOOLS + " Its label is its caller's:"
+                         " the research cadence passes engine/shared.py::judge_evidence_kwargs.",
+                         _T + "test_the_research_cadence_verifier_reads_candidate_code_fenced"),
+    # --- the report, the Boss, both Genesis planners
+    "serve/report.py::generate_report -> agentic_struct":
+        EvidenceConsumer(FENCED, "The run report's " + _RUN_TOOLS + " Switch: the writer's"
+                         " `evidence_envelope`, from envelope_enabled(the run's Settings) in"
+                         " `make_report_writer` and in the manual refresh.",
+                         _T + "test_the_engines_report_writer_takes_its_switch_from_the_one_"
+                         "settings_reader"),
+    "serve/routers/boss.py::build_router.command._route_with_tools -> emit_loop":
+        EvidenceConsumer(FENCED, "The Boss's router: RunTools, sibling runs and task data before it"
+                         " proposes actions." + _RUN,
+                         _T + "test_the_boss_command_route_fences_what_its_run_tools_read"),
+    "serve/routers/genesis.py::build_router.genesis._plan_agentic -> emit_loop":
+        EvidenceConsumer(FENCED, "The web Genesis planner: files on the operator's machine and"
+                         " cross-run memory. Switch: envelope_enabled(the server's Settings) — no"
+                         " run exists yet.",
+                         _T + "test_the_genesis_planner_fences_the_files_it_scouts"),
+    "engine/genesis.py::author_task -> agentic_struct":
+        EvidenceConsumer(FENCED, "The CLI Genesis author: the path the operator named and cross-run"
+                         " memory. Switch: its `evidence_envelope`, from envelope_enabled(settings)"
+                         " in cli/run_cmds.py::run.",
+                         _T + "test_the_cli_genesis_author_fences_the_files_it_scouts"),
+    "serve/assistant.py::run_turn -> drive_tool_loop":
+        EvidenceConsumer(FENCED, "The assistant: run logs, traces, files, the web." + _ALWAYS,
+                         "tests/test_tool_results_are_fenced.py::test_the_assistant_passes_it"),
+    "serve/scope_report.py::generate_scope_report -> drive_tool_loop":
+        EvidenceConsumer(FENCED, "The cross-run scope report: run goals, labels, drilled nodes."
+                         + _ALWAYS, "tests/test_tool_results_are_fenced.py::"
+                         "test_the_CROSS_RUN_REPORT_loop_asks_for_the_fence"),
+    # --- the CLI diagnostics and the rankers
+    "cli/concept_cmds.py::_concept_map_for -> build_concept_map":
+        EvidenceConsumer(FENCED, "The agentic concept tagger behind lock-in/board-dedup/…, "
+                         + _RUN_TOOLS + _RUN,
+                         _CONCEPT_PROOF),
+    "cli/concept_cmds.py::concept_coverage -> build_concept_map":
+        EvidenceConsumer(FENCED, "`looplab concept-coverage`'s tagger, " + _RUN_TOOLS + _RUN,
+                         _CONCEPT_PROOF),
+    "tools/asset_brief.py::agentic_asset_brief -> agentic_text":
+        EvidenceConsumer(FENCED, "The prior-art sweep: RepoScoutTools over a task repository. Its"
+                         " label is its caller's: the CLI's `asset-brief --llm` and the concept"
+                         " commands' `--repo` grounding pass envelope_enabled(settings).",
+                         _T + "test_the_prior_art_sweep_fences_the_repository_files_it_reads"),
+    "search/foresight.py::ForesightPanelResearcher._rank -> rank_agentic":
+        EvidenceConsumer(FENCED, "The foresight ranker's RunTools + DataTools." + _ROLE,
+                         _T + "test_the_foresight_ranker_fences_the_run_it_reads_before_it_ranks"),
+    # --- not a product consumer
+    "judgebench/trajectory.py::run_case -> drive_tool_loop":
+        EvidenceConsumer(EXEMPT, "A BENCHMARK harness, not a product consumer: it replays one"
+                         " recorded trajectory case through the real loop, and the fence is that"
+                         " case's own independent variable (`loop.tool_result_label`), which"
+                         " `_fence_defects` grades — fencing it here would erase the measurement it"
+                         " exists to take. Nothing it reads reaches a run's decision."),
+}
