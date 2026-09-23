@@ -2189,6 +2189,7 @@ Where each concept lives in the code:
 | Durable whole-run Replay/deletion receipts + the destructive-quiescence ladder | `serve/durable_op.py`, `serve/reset_transaction.py`, `serve/deletion_transaction.py` |
 | Durable receipt for the agent-facing node purge (its phase lattice + the crash fence) | `tools/node_purge_receipt.py`, `tools/run_control_tools.py` |
 | Serve-side paid work: metering lease + claim→terminal receipt ledger | `serve/paid_work.py`, `serve/paid_ledger.py` |
+| Files-as-truth authoring (bounded listing + operation receipts) · the paid LLM-health probe and its app-local replay registry · the Memory panel's read model — the services `serve/routers/misc.py` calls | `serve/authoring_store.py`, `serve/llm_probe.py`, `serve/memory_projection.py` |
 | Variance gate + multi-seed confirmation | `trust/gate.py`, `trust/confirm.py` |
 | CV harness, K-fold, purged walk-forward | `trust/cv.py` |
 | Leakage detectors + data profiler + the advisory distribution-shift record | `trust/leakage.py`, `core/profile.py`, `trust/drift.py` |

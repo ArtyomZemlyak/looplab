@@ -264,7 +264,7 @@ def test_BOTH_shipped_receipts_report_the_same_two_facts():
     routers read this out-cell verbatim into `params_truncated` / `defaults_truncated`, so an
     operator reading either endpoint was told the opposite of the truth in both directions."""
     from looplab.serve.routers.genesis import _bounded_evidence_value
-    from looplab.serve.routers.misc import _bounded_json_value
+    from looplab.serve.memory_projection import _bounded_json_value
 
     for project in (_bounded_evidence_value, _bounded_json_value):
         masked, cut = project({"note": "sk-" + "A" * 30, "epochs": 3})
@@ -286,14 +286,17 @@ def test_NORMALIZATION_alone_is_not_truncation():
 
 
 def test_the_two_serve_projectors_delegate_rather_than_walking_themselves():
-    """The SR-06 collapse. A private recursive walk in either router is the second implementation
+    """The SR-06 collapse. A private recursive walk in either projector is the second implementation
     coming back, and the drift it produces is invisible: both outputs still look redacted, they just
-    disagree about what happens to a credential-named key."""
+    disagree about what happens to a credential-named key. (The memory one left `routers/misc.py`
+    for `serve/memory_projection.py` in review 2026-09-22, SRV2-13.)"""
     import inspect
 
-    from looplab.serve.routers import genesis, misc
+    from looplab.serve import memory_projection
+    from looplab.serve.routers import genesis
 
-    for module, name in ((genesis, "_bounded_evidence_value"), (misc, "_bounded_json_value")):
+    for module, name in ((genesis, "_bounded_evidence_value"),
+                         (memory_projection, "_bounded_json_value")):
         source = inspect.getsource(getattr(module, name))
         assert "bounded_redacted_tree(" in source, f"{name} no longer shares the walker"
         assert "is_secret_key_name(" not in source, f"{name} re-implements the secret-key masking"
@@ -305,7 +308,7 @@ def test_both_serve_projectors_agree_on_a_credential_named_key():
     misc MASKED it (and did not). Same payload, two endpoints, two answers — and the dropping one
     told the operator nothing about why a field had vanished."""
     from looplab.serve.routers.genesis import _bounded_evidence_value
-    from looplab.serve.routers.misc import _bounded_json_value
+    from looplab.serve.memory_projection import _bounded_json_value
 
     payload = {"api_key": "tok-abcd", "lr": 0.01}
     assert _bounded_evidence_value(payload) == _bounded_json_value(payload)
@@ -317,7 +320,7 @@ def test_a_hostile_mapping_no_longer_reaches_the_endpoint_as_a_500():
     response down. The shared walker degrades to a marker — a redaction boundary that can raise is a
     boundary that can drop a whole payload."""
     from looplab.serve.routers.genesis import _bounded_evidence_value
-    from looplab.serve.routers.misc import _bounded_json_value
+    from looplab.serve.memory_projection import _bounded_json_value
 
     for project in (_bounded_evidence_value, _bounded_json_value):
         out, cut = project(_HostileMapping({"a": 1}))

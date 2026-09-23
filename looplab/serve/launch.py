@@ -393,7 +393,7 @@ def read_confined_task_file(root: Path, expanded: str) -> ConfinedTaskFile:
       here: the bytes handed to the parser must be the bytes of the file that passed containment. An
       `lstat` of the path after the read binds the NAME to that descriptor with `same_file_entry`.
       A replacement (new inode), a same-size rewrite, or a growth mid-read all refuse. The two
-      interfaces are compared like with like, the ladder `serve/routers/misc.py::
+      interfaces are compared like with like, the ladder `serve/authoring_store.py::
       _read_author_file_safely` states: on Windows `lstat` reports the CREATION time as `st_ctime`
       and `fstat` the change time, so the whole tuple across the two refused every file there —
       every launch through a `task_file` answered 422 on the Windows CI leg (review 2026-09-22

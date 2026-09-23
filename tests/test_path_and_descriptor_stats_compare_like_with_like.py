@@ -11,7 +11,7 @@ The cause is CPython's, and it is documented in its source: `os.stat`/`os.lstat`
 3.12, so we copy birthtime across"), while `os.fstat` reports FILE_BASIC_INFO.ChangeTime. So
 `file_identity(os.lstat(p)) != file_identity(os.fstat(fd))` for one unchanged file, and
 `serve/launch.py::read_confined_task_file` compared exactly that pair. The house already has the
-ladder that answers it — `serve/routers/misc.py::_read_author_file_safely`: the weak
+ladder that answers it — `serve/authoring_store.py::_read_author_file_safely`: the weak
 `same_file_entry` binds the descriptor to the name ACROSS the two interfaces, and the full
 `file_identity` only ever compares like with like (two `fstat`s of one descriptor, two `lstat`s of
 one name). `core/run_deletion.py::run_deletion_snapshot_token` paired an `lstat` with an `fstat` the

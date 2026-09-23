@@ -85,6 +85,10 @@ _LAYOUT = {
     "paid_work": "serve",
     "paid_ledger": "serve",  # ...its claim→terminal receipt half, shared by the paid routes (doc 25 SR-01)
     "api_reference": "serve",  # the HTTP API reference generated from app.openapi() (doc 52 row 25)
+    # the three services `routers/misc.py` used to host (review 2026-09-22, SRV2-13 / doc 50 SR-04)
+    "authoring_store": "serve",    # files-as-truth authoring: bounded listing + operation receipts
+    "llm_probe": "serve",          # the paid LLM-health probe and its app-local replay registry
+    "memory_projection": "serve",  # the Memory panel's bounded, allow-listed read model
     "settings_ui_schema": "serve",
     "asset_brief": "tools",   # PART IV D1 bounded local asset/prior-art brief
     "audit": "engine",   # engine audit/trust-emitter mixin

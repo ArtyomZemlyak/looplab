@@ -75,10 +75,11 @@ def run_deletion_snapshot_token(
         raise RunDeletionStorageError(
             f"empty run deletion identity is unavailable: {exc}") from exc
     identity = file_identity(before)
-    # Like with like (the `serve/routers/misc.py::_read_author_file_safely` ladder): the full tuple
-    # across the two `lstat`s, the replacement tier across the `lstat` and the `fstat`. On Windows a
-    # path stat reports the CREATION time as `st_ctime` and `fstat` the change time, so the full
-    # tuple across the two interfaces refused every empty log there (review 2026-09-22 round 2).
+    # Like with like (the `serve/authoring_store.py::_read_author_file_safely` ladder): the full
+    # tuple across the two `lstat`s, the replacement tier across the `lstat` and the `fstat`. On
+    # Windows a path stat reports the CREATION time as `st_ctime` and `fstat` the change time, so
+    # the full tuple across the two interfaces refused every empty log there (review 2026-09-22
+    # round 2).
     if (data or not stat.S_ISREG(opened.st_mode) or opened.st_size != 0
             or same_file_entry(opened) != same_file_entry(before)
             or identity != file_identity(after)):

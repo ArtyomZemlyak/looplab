@@ -250,16 +250,16 @@ def test_every_env_var_the_authoring_panel_prints_actually_configures_that_kind(
 
     Driven end to end rather than pinned as a string pair: it goes through the real `Settings`
     loader (so it also fails if the flat `LOOPLAB_<FIELD>` convention is ever broken) and then
-    through `serve/routers/misc.py::_current_author_directory`, which is the function the
+    through `serve/authoring_store.py::_current_author_directory`, which is the function the
     `GET /api/{kind}` listing resolves its root with.
     """
     from looplab.core.config import Settings
-    from looplab.serve.routers.misc import _current_author_directory
+    from looplab.serve.authoring_store import _current_author_directory
 
     kinds = _authoring_kind_env()
     assert set(kinds) == {"prompts", "skills", "knowledge", "memory_skills"}, kinds
     # `memory_skills` is the one DERIVED root: the operator configures `memory_dir` and the store is
-    # its `skills/` child (`serve/routers/misc.py::memory_skills_dir`), so the hint names the var
+    # its `skills/` child (`serve/authoring_store.py::memory_skills_dir`), so the hint names the var
     # that moves it rather than a variable of its own — which is the same failure this test exists
     # for, one indirection further along.
     expected_suffix = {"memory_skills": "skills"}

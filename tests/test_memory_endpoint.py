@@ -12,7 +12,7 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from looplab.serve.server import make_app  # noqa: E402
-import looplab.serve.routers.misc as misc_router  # noqa: E402
+import looplab.serve.memory_projection as memory_projection  # noqa: E402  (the bounds live here)
 from looplab.tools.memory_tools import MemoryTools  # noqa: E402
 
 
@@ -61,8 +61,8 @@ def test_saved_memory_dir_drives_memory_and_atlas_reads(tmp_path, monkeypatch):
 def test_memory_endpoint_is_allowlisted_row_safe_and_bounded(tmp_path, monkeypatch):
     memory_dir = tmp_path / "portfolio-memory"
     memory_dir.mkdir()
-    monkeypatch.setattr(misc_router, "_MEMORY_TIER_LIMIT", 3)
-    monkeypatch.setattr(misc_router, "_MEMORY_SOURCE_ROWS", 20)
+    monkeypatch.setattr(memory_projection, "_MEMORY_TIER_LIMIT", 3)
+    monkeypatch.setattr(memory_projection, "_MEMORY_SOURCE_ROWS", 20)
 
     cases = [
         [],
@@ -98,8 +98,8 @@ def test_memory_endpoint_is_allowlisted_row_safe_and_bounded(tmp_path, monkeypat
 def test_memory_endpoint_bounds_source_bytes_and_oversized_rows(tmp_path, monkeypatch):
     memory_dir = tmp_path / "portfolio-memory"
     memory_dir.mkdir()
-    monkeypatch.setattr(misc_router, "_MEMORY_SOURCE_BYTES", 500)
-    monkeypatch.setattr(misc_router, "_MEMORY_ROW_BYTES", 180)
+    monkeypatch.setattr(memory_projection, "_MEMORY_SOURCE_BYTES", 500)
+    monkeypatch.setattr(memory_projection, "_MEMORY_ROW_BYTES", 180)
     (memory_dir / "lessons.jsonl").write_text(
         "".join(json.dumps({"statement": "old-" + "x" * 80 + str(index)}) + "\n"
                   for index in range(20))
@@ -173,7 +173,7 @@ def test_lesson_evidence_and_generations_reach_the_wire(tmp_path):
 def test_lesson_evidence_refs_reject_malformed_ids_and_are_bounded(tmp_path, monkeypatch):
     memory_dir = tmp_path / "mem"
     memory_dir.mkdir()
-    monkeypatch.setattr(misc_router, "_MEMORY_EVIDENCE_MAX", 3)
+    monkeypatch.setattr(memory_projection, "_MEMORY_EVIDENCE_MAX", 3)
     (memory_dir / "lessons.jsonl").write_text(
         json.dumps({
             "statement": "hostile evidence", "run_id": "r",
@@ -198,7 +198,7 @@ def test_memory_run_filter_is_applied_inside_the_source_window(tmp_path, monkeyp
     """
     memory_dir = tmp_path / "mem"
     memory_dir.mkdir()
-    monkeypatch.setattr(misc_router, "_MEMORY_TIER_LIMIT", 3)
+    monkeypatch.setattr(memory_projection, "_MEMORY_TIER_LIMIT", 3)
     rows = [{"statement": "mine", "run_id": "wanted", "task_id": "t"}]
     rows += [{"statement": f"theirs-{index}", "run_id": "other", "task_id": "t"} for index in range(10)]
     (memory_dir / "lessons.jsonl").write_text(

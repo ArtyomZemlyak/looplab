@@ -7,8 +7,8 @@ runs learned — `lessons.jsonl`, `cases.jsonl`, `meta_notes.jsonl` — carried 
 `loss/contrastive`" or to sort the Memory panel by the concept tree.
 
 This module is the join. It is deliberately PURE (no I/O, no LLM) and lives beside its sibling
-`concept_capsules.py` because cross-run memory is the engine's, not serve's — `serve/routers/misc.py`
-calls in, never the reverse.
+`concept_capsules.py` because cross-run memory is the engine's, not serve's — the Memory panel's
+read model `serve/memory_projection.py` calls in, never the reverse.
 
 Two things it fixes, and one it refuses to paper over:
 
@@ -52,8 +52,9 @@ from looplab.core.concepts import MAX_MATERIALIZED_CONCEPTS, normalize_concept_i
 
 # The attribution vocabulary is a REGISTRY, not a set of bare strings at the call sites: it reaches the
 # HTTP wire and the UI renders a different affordance per value, so a typo would silently degrade a
-# record-level claim into an unlabelled one. `tests/test_concept_shelf.py` scans this module and
-# `serve/routers/misc.py` for members, the same two-way guard the duck-typed seams in CLAUDE.md use.
+# record-level claim into an unlabelled one. `tests/test_concept_shelf.py` scans this module and the
+# UI's `conceptShelf.js` / `panels.jsx` for members, the same two-way guard the duck-typed seams in
+# CLAUDE.md use.
 ATTRIBUTION_RECORD = "record"
 ATTRIBUTION_RUN = "run"
 ATTRIBUTION_SOURCES = (ATTRIBUTION_RECORD, ATTRIBUTION_RUN)

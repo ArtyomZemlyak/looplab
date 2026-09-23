@@ -4130,7 +4130,7 @@ def test_author_routes_are_bounded_and_name_restricted(tmp_path, monkeypatch):
     assert client.put("/api/knowledge/ok.md", content=b"# fine").status_code == 200
 
     # per-file byte bound, with an explicit truncation receipt rather than a silent whole-file read
-    from looplab.serve.routers.misc import _AUTHOR_MAX_BYTES
+    from looplab.serve.authoring_store import _AUTHOR_MAX_BYTES
     (kdir / "big.md").write_text("x" * (_AUTHOR_MAX_BYTES + 5000), encoding="utf-8")
     listed = client.get("/api/knowledge").json()
     entry = next(f for f in listed["files"] if f["name"] == "big.md")
@@ -4200,17 +4200,17 @@ def test_skills_authoring_lists_nested_packages_read_only_and_rejects_nested_wri
     # The recursive inventory is bounded independently of content reads. Known overflow is a lower
     # bound; a separate incompleteness flag covers the case where a scan/depth cap makes the unknown
     # suffix uncountable. Either signal prevents the UI treating absence as a proven deletion.
-    import looplab.serve.routers.misc as misc
-    original_max_files = misc._AUTHOR_MAX_FILES
-    monkeypatch.setattr(misc, "_AUTHOR_MAX_FILES", 2)
+    import looplab.serve.authoring_store as authoring_store  # the listing bounds live here
+    original_max_files = authoring_store._AUTHOR_MAX_FILES
+    monkeypatch.setattr(authoring_store, "_AUTHOR_MAX_FILES", 2)
     bounded = client.get("/api/skills").json()
     assert len(bounded["files"]) == 2
     assert bounded["truncated_files"] >= 1
     assert bounded["inventory_incomplete"] is True
     assert bounded["files"][0]["name"] == "root.md"  # flat writable inventory keeps priority
 
-    monkeypatch.setattr(misc, "_AUTHOR_MAX_FILES", original_max_files)
-    monkeypatch.setattr(misc, "_AUTHOR_SKILL_MAX_DEPTH", 0)
+    monkeypatch.setattr(authoring_store, "_AUTHOR_MAX_FILES", original_max_files)
+    monkeypatch.setattr(authoring_store, "_AUTHOR_SKILL_MAX_DEPTH", 0)
     depth_capped = client.get("/api/skills").json()
     assert [row["name"] for row in depth_capped["files"]] == ["root.md"]
     assert depth_capped["truncated_files"] == 0
@@ -4415,7 +4415,7 @@ def test_author_name_allowlist_rejects_a_trailing_newline(tmp_path):
     # Unicode basenames. Follow it, because what must not drift is the REJECTION set below — the
     # regex was only ever the mechanism. Importing the retired constant made this test an
     # ImportError, which retires the guard instead of checking it.
-    from looplab.serve.routers.misc import _valid_author_name
+    from looplab.serve.authoring_store import _valid_author_name
 
     assert _valid_author_name("note.md")
     assert _valid_author_name("a_b-c.1.md")
@@ -4484,7 +4484,7 @@ def test_clear_trace_refuses_a_run_with_an_unserved_resume(tmp_path):
 def test_authoring_writes_are_bounded_and_utf8_and_a_vanished_file_is_skipped(tmp_path, monkeypatch):
     """Three ways this pair could fail on ordinary input. The dirs are hot-reloaded into agent
     context, and `knowledge_dir` is AGENT-writable, so all three are reachable in a live run."""
-    from looplab.serve.routers.misc import _AUTHOR_MAX_BYTES
+    from looplab.serve.authoring_store import _AUTHOR_MAX_BYTES
 
     kdir = tmp_path / "knowledge"
     kdir.mkdir()
@@ -4508,17 +4508,17 @@ def test_authoring_writes_are_bounded_and_utf8_and_a_vanished_file_is_skipped(tm
     # (3) A file that vanishes between the glob and the open (the agent deleting its own note) must
     # skip that entry, not 500 the whole listing.
     (kdir / "ghost.md").write_text("gone soon", encoding="utf-8")
-    import looplab.serve.routers.misc as misc
-    real_safe_read = misc._read_author_file_safely
+    import looplab.serve.authoring_store as authoring_store  # the listing's reader lives here
+    real_safe_read = authoring_store._read_author_file_safely
 
     def vanishing_read(root, path):
         if path.name == "ghost.md":
             return None
         return real_safe_read(root, path)
 
-    monkeypatch.setattr(misc, "_read_author_file_safely", vanishing_read)
+    monkeypatch.setattr(authoring_store, "_read_author_file_safely", vanishing_read)
     listing = client.get("/api/knowledge")
-    monkeypatch.setattr(misc, "_read_author_file_safely", real_safe_read)
+    monkeypatch.setattr(authoring_store, "_read_author_file_safely", real_safe_read)
     assert listing.status_code == 200
     assert [f["name"] for f in listing.json()["files"]] == ["good.md"]
 

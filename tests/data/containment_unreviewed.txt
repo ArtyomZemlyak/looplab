@@ -59,16 +59,6 @@ looplab/serve/deletion_transaction.py::save_deletion_identity#0
 looplab/serve/memory_cascade.py::memory_dir_is_known#0
 looplab/serve/routers/assistant.py::build_router.assistant_message_stream._worker#0
 looplab/serve/routers/cross_run.py::build_router._steward_client#0
-looplab/serve/routers/misc.py::build_router._run_llm_health#1
-looplab/serve/routers/misc.py::build_router._run_llm_health#2
-looplab/serve/routers/misc.py::build_router._run_llm_health#3
-looplab/serve/routers/misc.py::build_router._run_llm_health#4
-looplab/serve/routers/misc.py::build_router._run_llm_health#5
-looplab/serve/routers/misc.py::build_router._run_llm_health#6
-looplab/serve/routers/misc.py::build_router._run_llm_health#7
-looplab/serve/routers/misc.py::build_router._run_llm_health#8
-looplab/serve/routers/misc.py::build_router._run_llm_health#9
-looplab/serve/routers/misc.py::build_router._run_llm_health._preflight_failure#0
 looplab/serve/routers/runs.py::build_router._node_trace#0
 looplab/serve/routers/runs.py::build_router.node_conversation#1
 looplab/serve/routers/runs.py::build_router.span_io#0
