@@ -255,7 +255,7 @@ def test_live_prompt_refreshes_then_reads(monkeypatch):
 
     read_sock, write_sock = socket.socketpair()
     stdin = read_sock.makefile("r", encoding="utf-8")
-    devnull = open(os.devnull, "w")
+    devnull = open(os.devnull, "w", encoding="utf-8")
     app.console = Console(file=devnull)                     # swallow drawing output
     monkeypatch.setattr(sys, "stdin", stdin)
     monkeypatch.setattr(app, "_interactive", lambda: True)
@@ -1558,7 +1558,7 @@ def test_live_prompt_falls_back_when_select_unusable(monkeypatch):
     os.write(w_fd, b"typed\n")
     os.close(w_fd)
     stdin = os.fdopen(r_fd, "r")
-    devnull = open(os.devnull, "w")
+    devnull = open(os.devnull, "w", encoding="utf-8")
     app.console = Console(file=devnull)
     monkeypatch.setattr(sys, "stdin", stdin)
     monkeypatch.setattr(app, "_interactive", lambda: True)
@@ -1655,7 +1655,7 @@ def _tui_over(client: "TestClient") -> "tui.Tui":
     _bind(api, client)
     app = tui.Tui.__new__(tui.Tui)                          # bypass __init__ (no server process)
     app.api = api
-    app.console = Console(file=open(os.devnull, "w"))
+    app.console = Console(file=open(os.devnull, "w", encoding="utf-8"))   # "▶": not cp1252
     return app
 
 

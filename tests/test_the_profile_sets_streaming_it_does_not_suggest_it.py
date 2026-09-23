@@ -76,7 +76,7 @@ def test_the_value_the_profile_wants_is_not_left_to_a_default_expansion():
     """A `:-` default is the wrong construct for something with these stakes; forbid its return."""
     import re
 
-    body = PROFILE.read_text()
+    body = PROFILE.read_text(encoding="utf-8")
     # `${VAR:-}` is fine -- that is "is it set", the guard this file needs under `set -u`. What is
     # forbidden is a NON-EMPTY default, `${VAR:-1}`, because that is the construct that hands the
     # decision to whatever was already in the environment while looking like it decides.

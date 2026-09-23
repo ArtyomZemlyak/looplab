@@ -72,7 +72,7 @@ def test_no_site_compares_the_stop_word_as_a_literal():
                 # `stop_reason`, or `.get("reason")`. A `level == "error"` on a log line is not it.
                 text = ast.unparse(node.left)
                 if "lower()" in text or "stop_reason" in text or 'get("reason")' in text:
-                    rel = str(path.relative_to(PKG))
+                    rel = path.relative_to(PKG).as_posix()      # "/" like the literal below
                     if rel == "core/models.py":
                         continue          # the helper's own body
                     offenders.append(f"{rel}:{node.lineno}: {ast.unparse(node)}")
@@ -92,7 +92,7 @@ def test_the_readers_are_exactly_the_listed_modules():
     fail the day someone legitimately needs the narrow question again."""
     calling = set()
     for path, tree in iter_trees(PKG):
-        rel = str(path.relative_to(PKG))
+        rel = path.relative_to(PKG).as_posix()     # "/" like READERS and the literal below
         if rel == "core/models.py":
             continue                      # the narrow helper's own body
         for node in ast.walk(tree):

@@ -834,7 +834,8 @@ def test_browser_and_server_share_one_node_span_window(tmp_path):
     A UI ceiling below the server's leaves spans the operator can never reach; above it, the pager
     keeps offering clicks that return the identical response. Both read as "load more is broken".
     """
-    source = (Path(__file__).resolve().parents[1] / "ui" / "src" / "traceProjection.js").read_text()
+    source = (Path(__file__).resolve().parents[1] / "ui" / "src" / "traceProjection.js").read_text(
+        encoding="utf-8")
     mirrored = dict(
         re.findall(r"^export const (NODE_TRACE_SPAN_WINDOW(?:_MAX)?) = (\d+)$", source, re.M))
     assert mirrored == {

@@ -38,19 +38,19 @@ def test_the_bundle_packages_the_record_and_describes_every_file(tmp_path):
     assert {p["@id"] for p in root["hasPart"]} == set(files)
     assert meta["@context"].startswith("https://w3id.org/ro/crate/1.1")
     assert verify_bundle(out) == []
-    assert json.loads((out / RO_CRATE_METADATA).read_text()) == meta
+    assert json.loads((out / RO_CRATE_METADATA).read_text(encoding="utf-8")) == meta
 
 
 def test_the_summary_row_carries_what_a_reviewer_reads_first(tmp_path):
     rd = _run(tmp_path)
     export_bundle(rd, tmp_path / "b")
-    summary = json.loads((tmp_path / "b" / "summary.json").read_text())
+    summary = json.loads((tmp_path / "b" / "summary.json").read_text(encoding="utf-8"))
     assert summary["champion"] is not None and summary["best_metric"] is not None
     assert summary["best_metric_caveats"] == [] and summary["mislead_gap"]["gap"] == 0.0
     assert summary["seeds"] == {"confirm_seed_base": 5, "LOOPLAB_EVAL_SEED": "11"}
-    claims = json.loads((tmp_path / "b" / "claims.json").read_text())
+    claims = json.loads((tmp_path / "b" / "claims.json").read_text(encoding="utf-8"))
     assert "memos" in claims and "plan" in claims
-    champion = (tmp_path / "b" / "champion" / "solution.py").read_text()
+    champion = (tmp_path / "b" / "champion" / "solution.py").read_text(encoding="utf-8")
     assert champion.strip(), "the champion's code, off the folded record"
 
 

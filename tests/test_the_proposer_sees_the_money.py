@@ -118,7 +118,7 @@ def _cue_splice_sites():
             for inner in ast.walk(node):
                 if (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
                         and inner.func.id == "collect_hint_cues"):
-                    out.add((str(path.relative_to(PKG.parent)), node.name))
+                    out.add((path.relative_to(PKG.parent).as_posix(), node.name))   # "/"-spelled
     return out
 
 
