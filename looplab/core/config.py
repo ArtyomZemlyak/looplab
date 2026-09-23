@@ -35,9 +35,13 @@ _LL_HOME = Path.home() / ".looplab"
 # operator would otherwise never see fail, and the map is a public artifact (config.snapshot.json,
 # HTTP, LOOPLAB_*), so it must never accrete free-form keys.
 _PROFILE_FIELDS = frozenset({"model", "base_url", "temperature", "api_key_env"})
-# A variable name that `runtime/sandbox.py::SECRET_ENV` will recognize as holding a secret and strip
-# from generated code's environment. Duplicated here, not imported: layering forbids `core` from
-# importing `runtime`. `tests/test_secret_env_pattern.py` holds the two in agreement.
+# A variable name that `core/envsafe.py::SECRET_ENV` (re-exported by `runtime/sandbox.py`) will
+# recognize as holding a secret and strip from generated code's environment. Not that pattern
+# itself: this one answers a different, STRICTER question — is this a name an operator may declare
+# as a profile's key variable (UPPER_SNAKE, at most 64 characters, one of six secret words) — and
+# must stay inside the sandbox's looser screen. `tests/test_secret_env_pattern.py` holds the two in
+# that order. (It once said "duplicated, layering forbids `core` importing `runtime`"; the screen
+# moved into `core` and the sentence did not — review 2026-09-02, CO-07.)
 _SECRET_ENV_NAME = re.compile(
     r"\A(?=[A-Z][A-Z0-9_]{0,63}\Z)(?=.*(KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL)).*\Z")
 
@@ -305,7 +309,7 @@ PROFILES: dict[str, dict] = {
         "budget_aware": True,
         "failure_reflection": True,
         "watchdog_reflection": True,   # feed recent live-watchdog (train-monitor/ASHA) flags to proposals
-        "reflection_priors": True,     # no-op unless memory_dir is set (cross-run priors)
+        "reflection_priors": True,     # cross-run priors; memory_dir is set by default, so live
     },
 }
 
@@ -434,7 +438,8 @@ def _parser_names() -> tuple[str, ...]:
 class Settings(BaseSettings):
     """The engine settings schema (every knob a run accepts).
 
-    Timeout family — six distinct knobs, each owned by a different subsystem:
+    Timeout family — the six most often confused, each owned by a different subsystem (the family
+    is larger: every `*timeout*` / `*_budget_s` field has its own row in docs/guide/configuration.md):
       - `timeout`:             per-eval wall-clock budget for ONE experiment's evaluation (engine/eval).
       - `max_eval_timeout`:    hard ceiling for a governed per-node Researcher timeout override.
       - `llm_timeout`:         LLM request idle timeout — inter-token stall limit in stream mode
@@ -1208,7 +1213,8 @@ class Settings(BaseSettings):
     # the winner into `<memory_dir>/meta_notes.jsonl` AND structured lessons (incl. NEGATIVE results:
     # tested/abandoned hypotheses + failure themes) into `lessons.jsonl` with a task fingerprint; at run
     # start, inject exact-task notes + fingerprint-matched lessons from SIMILAR tasks into the proposal
-    # prompt. ON by default — but a NO-OP until `memory_dir` is set (that's where cross-run memory lives).
+    # prompt. ON by default, and LIVE out of the box: it needs `memory_dir` (where cross-run memory
+    # lives), which defaults to ~/.looplab/memory — clear memory_dir to disable cross-run memory.
     reflection_priors: bool = True
     # M6 comparative lessons (MARS "comparative reflective memory", doc 13 §7 item 2): distill
     # credit-assigned lessons from PAIRS of solutions — which SPECIFIC change made a child beat

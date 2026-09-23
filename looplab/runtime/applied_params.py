@@ -154,7 +154,8 @@ def declared_numeric_params(params) -> dict:
     THE SAME THREE BOUNDS `engine/repair_verify.py::declared_param_overrides` applies, deliberately
     re-stated rather than imported: `runtime` may not import `engine`, and the alternative — the
     engine passing a pre-filtered map — would put the rule at the call site where no test can reach
-    it. `tests/test_applied_params.py` pins the two against each other.
+    it. `tests/test_param_carriers.py::test_the_two_declaration_filters_admit_exactly_the_same_keys`
+    pins the two against each other.
 
       * at least two dotted parts (a bare `lr` is a word, not a path);
       * numeric and finite (a computed or non-finite coordinate is not comparable);

@@ -66,6 +66,32 @@ def test_no_source_citation_is_dead():
         "drop the citation):\n  " + "\n  ".join(defects))
 
 
+def test_a_bare_test_file_citation_must_name_a_file_that_exists(tmp_path):
+    """The "pinned by `tests/test_x.py`" citation carries no `::symbol`, so the rule above never read
+    it — and three of the 371 in `looplab/` named files that did not exist (doc 50 CO-07). Driven on
+    a synthetic tree: the dead one is reported, a live one, the `::` form and a `(dot)py` history
+    mention are not, and the `::` form is still reported ONCE, by its own rule, when it is dead."""
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_real.py").write_text("def test_it():\n    pass\n", encoding="utf-8")
+    pkg = tmp_path / "looplab"
+    pkg.mkdir()
+    (pkg / "mod.py").write_text(
+        "# pinned by `tests/test_real.py` and by `tests/test_real.py::test_it`\n"
+        "# a file that never existed: `tests/test_gone(dot)py`, spelled as history\n"
+        "X = 1\n", encoding="utf-8")
+    assert citation_defects(tmp_path) == []
+
+    (pkg / "dead.py").write_text(
+        "# `tests/test_gone.py` holds this true\n"
+        "# `tests/test_gone.py::test_it` too\n", encoding="utf-8")
+    defects = citation_defects(tmp_path)
+    bare = [d for d in defects if "no such test file" in d]
+    symbol = [d for d in defects if "no file at" in d]
+    assert len(bare) == 1 and "looplab/dead.py: `tests/test_gone.py`" in bare[0], defects
+    assert len(symbol) == 1 and "tests/test_gone.py::test_it" in symbol[0], defects
+    assert len(defects) == 2, "the `::` form must not be reported twice"
+
+
 def test_every_claim_pin_is_well_formed():
     """A `CLAIM[…]` with no `decided:` clause is the unpinned sentence this convention replaces."""
     bad: list[str] = []

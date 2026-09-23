@@ -43,7 +43,7 @@ prefixes plus the mounts as exceptions); this module is the complement, expresse
 kernel ruleset needs. They are two spellings of one policy, and
 `tests/test_read_fence.py::test_the_two_spellings_of_the_boundary_agree_about_the_declared_mounts`
 derives BOTH from one spec and pins that the mounts appear in each. (This paragraph named a
-`tests/test_read_allowlist.py` from the day it was written; no such file has ever existed — this
+`tests/test_read_allowlist(dot)py` from the day it was written; no such file has ever existed — this
 module's own tests live in the `The read allow-list` section of `tests/test_metric_subject.py`,
 beside the subject binding they shipped with.)
 

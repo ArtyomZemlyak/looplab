@@ -1532,7 +1532,10 @@ class Node(BaseModel):
     # this lifecycle. Excluded from every public model dump: the durable source remains the event log.
     terminal_event_seq: Optional[int] = Field(default=None, exclude=True)
     error: str = ""
-    # Failure taxonomy (set by node_failed): setup | timeout | oom | crash | no_metric | drift.
+    # Failure taxonomy (set by node_failed): an experiment's own failure is a member of the closed
+    # `FAILURE_REASONS` above; a node the engine ended carries its own word (`BENIGN_TERMINAL_REASONS`,
+    # triage's `idea_rejected`). Not re-listed here: a six-name copy stood on this line while the
+    # vocabulary grew past a dozen (review 2026-09-02, CO-07).
     # Audit/observability only — lets a UI/operator see WHY runs fail across a search.
     error_reason: str = ""
     # Crash-triage verdict (set by node_failed when the LLM triage ran): the agent's one-line

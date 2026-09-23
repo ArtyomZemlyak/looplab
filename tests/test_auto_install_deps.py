@@ -95,7 +95,8 @@ def test_the_traceback_does_not_always_name_the_missing_library():
       * a library that re-raises its own missing-dependency error in prose rather than the
         canonical wording.
 
-    `deps.triage_install_candidates` (see `tests/test_repair_budget_apportionment.py`) is the path
+    `deps.triage_install_candidates` (see
+    `tests/test_repair_stop_decision.py::test_install_candidates_are_jointly_evidenced`) is the path
     that reaches these, using the crash-triage agent's diagnosis as the source of the NAME while
     keeping the traceback as the source of the EVIDENCE."""
     guarded = ("  File \"/opt/conda/lib/python3.11/site-packages/transformers/modeling_utils.py\", "

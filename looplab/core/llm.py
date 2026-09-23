@@ -63,8 +63,11 @@ from looplab.core.parse import split_think  # noqa: F401  (also a re-export)
 # `looplab.core.llm._X` replaces only THIS module's alias; a sibling that calls `_X` through its own
 # module globals keeps calling the original, so the patch is a silent no-op — the exact failure mode
 # the project's registry-guard convention exists to prevent. Patch the OWNING module instead
-# (`looplab.core.llm_streaming._X`). `tests/test_llm_reexport_seam.py` enumerates which names are
-# affected and fails if a new one appears without this note being true of it.
+# (`looplab.core.llm_streaming._X`). Pinned by two tests, neither of which enumerates every name:
+# `tests/test_core_contracts.py::test_the_affected_names_are_real_and_named_where_it_matters`
+# (the streaming pair really is unreachable through this alias) and
+# `tests/test_core_contracts.py::test_no_test_relies_on_the_broken_direction` (no test patches a
+# private name through this barrel).
 from looplab.core.llm_transient import (  # noqa: F401
     BACKOFF_CAP_S, LLM_FAILURE_CAUSES, RETRY_AFTER_CAP_S, _REASONING_REJECT_KEYS, _backoff,
     _err_body, _inband_stream_error, _is_constrained_decoding_reject, _is_reasoning_reject,

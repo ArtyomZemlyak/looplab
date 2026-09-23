@@ -396,7 +396,7 @@
           "label": "Cross-run memory (priors + lessons)",
           "type": "bool",
           "default": true,
-          "help": "E4/M2/M3 (on by default): at run end distill the winner + structured LESSONS (incl. negative results — tested/abandoned hypotheses & failure themes) with a task fingerprint; at run start inject exact-task notes + fingerprint-matched lessons from SIMILAR past runs. No-op until a Memory dir is set (below)."
+          "help": "E4/M2/M3 (on by default): at run end distill the winner + structured LESSONS (incl. negative results — tested/abandoned hypotheses & failure themes) with a task fingerprint; at run start inject exact-task notes + fingerprint-matched lessons from SIMILAR past runs. Needs a Memory dir (below), which is set by default — so it is live out of the box; clear the Memory dir to turn cross-run memory off."
         }
       ]
     },

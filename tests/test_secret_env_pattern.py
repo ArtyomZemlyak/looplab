@@ -2,9 +2,10 @@
 
 `runtime/sandbox.py::SECRET_ENV` is the filter that strips the operator's keys out of the environment
 handed to generated candidate code. `core/config.py::_SECRET_ENV_NAME` is what a connection profile's
-`api_key_env` must match. They are duplicated rather than shared because layering forbids `core` from
-importing `runtime` — so a name accepted by the config validator but NOT recognized by the sandbox
-would be a credential the sandbox happily hands to untrusted code. This test is the joint.
+`api_key_env` must match. Both live in `core` now (`core/envsafe.py::SECRET_ENV`, re-exported by the
+sandbox), and they stay two patterns because they answer two questions: the config one is STRICTER
+(a name an operator may declare), and a name it accepts but the sandbox did NOT recognize would be a
+credential the sandbox happily hands to untrusted code. This test is the joint.
 """
 from __future__ import annotations
 

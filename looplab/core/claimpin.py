@@ -122,6 +122,18 @@ CITATION = re.compile(
 # The form this module refuses. Not "hard to check" — UNCHECKABLE: an edit anywhere above the cited
 # line silently re-points it, which is why 8 of 8 went dead before anyone looked.
 LINE_CITATION = re.compile(r"(?<![\w/.-])((?:[a-z_][a-z0-9_]*/)*[a-z_][a-z0-9_]*\.py):(\d+)\b")
+# A BARE test-file citation: `tests/<name>(dot)py` with no `::symbol` (review 2026-09-22; doc 50 CO-07).
+# `CITATION` above checks the `::` form only, so a comment that names the test holding it true — the
+# commonest way this codebase says "pinned by" (371 of them in `looplab/` on 2026-09-23) — could name
+# a file that never existed and nothing looked: `core/llm.py` cited a `test_llm_reexport_seam` from
+# 2026-08-03 on (a review ledger flagged it a month later, and it still stood three weeks after
+# that), and `runtime/applied_params.py` a `test_applied_params` whose check lives in
+# `test_param_carriers`. Only the `tests/` prefix is read — it is repo-root relative by construction,
+# so it resolves ONE way, where a bare `train.py` in a docstring is an example of a user's repo, not
+# a citation of this one. A path meant as history rather than as a citation is spelled `(dot)py`, as
+# `citation_defects`'s own docstring does.
+TEST_PATH_CITATION = re.compile(
+    r"(?<![\w/.-])(tests/(?:[a-z_][a-z0-9_]*/)*[a-z_][a-z0-9_]*\.py)(?!::)")
 
 _SKIP_DIRS = {".git", ".claude", "runs", "node_modules", "dist", "site", "__pycache__",
               ".pytest_cache", ".mypy_cache", ".venv", "venv", "build",
@@ -450,6 +462,9 @@ def citation_defects(root: Path, subtrees: tuple[str, ...] = ("looplab",)) -> li
     A symbol is "present" if every dotted component appears as a word in the target. That is
     deliberately loose: it catches the rot (deletions and renames) without a second, drifting model
     of Python scoping, and a loose check people keep is worth more than a strict one they disable.
+
+    A third defect has no symbol to check: a bare `tests/<name>(dot)py` (`TEST_PATH_CITATION`) that
+    names no file — the "pinned by" citation, whose whole promise is that the file exists.
     """
     out: list[str] = []
     cache: dict[Path, str] = {}
@@ -472,6 +487,11 @@ def citation_defects(root: Path, subtrees: tuple[str, ...] = ("looplab",)) -> li
                 out.append(f"{where}: `{m.group(1)}:{m.group(2)}` cites a LINE NUMBER — any edit "
                            "above it silently re-points the citation. Locate by SYMBOL "
                            f"(`{m.group(1)}::<name>`) instead.")
+            for m in TEST_PATH_CITATION.finditer(text):
+                if not (root / m.group(1)).is_file():
+                    out.append(f"{where}: `{m.group(1)}` — no such test file (renamed, merged into "
+                               "another, or never written); cite the test that holds the claim, "
+                               "as `tests/<file>.py::<test>` where one test does")
             for m in CITATION.finditer(joined):
                 rel, sym = m.group(1), m.group(2)
                 cands = _citation_candidates(rel, root, f)
