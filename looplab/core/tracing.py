@@ -689,7 +689,9 @@ class ObservationHandle:
 
     def output(self, text) -> "ObservationHandle":
         if self._h is not None and self._capture and text is not None:
-            self._h.set("output", _trace_text(text if isinstance(text, str) else _as_text(text)))
+            # Sanitized HERE, once — `_set_sanitized`, not `set`, which would sanitize it again.
+            self._h._set_sanitized(
+                "output", _trace_text(text if isinstance(text, str) else _as_text(text)))
         return self
 
     def _billed_from_below(self) -> bool:
@@ -725,7 +727,7 @@ class ObservationHandle:
 
     def thinking(self, t) -> "ObservationHandle":
         if self._h is not None and self._capture and t:
-            self._h.set("thinking", _trace_text(t))
+            self._h._set_sanitized("thinking", _trace_text(t))
         return self
 
     def tool_calls(self, calls) -> "ObservationHandle":
@@ -751,7 +753,7 @@ class ObservationHandle:
             if remaining <= 0:
                 break
         if safe:
-            self._h.set("tool_calls", safe)
+            self._h._set_sanitized("tool_calls", safe)   # every field sanitized above, under one budget
         return self
 
     def error(self, msg: str) -> "ObservationHandle":
@@ -899,10 +901,16 @@ def generation(*, op: str, model: str, messages: Optional[list] = None,
             # Require np > 0: a zero-length carry saves nothing and would leave a dangling `input_from`
             # with carry=0, so `input_from is not None` on disk always implies a real carried prefix.
             np = len(prev[2]) if prev is not None else 0
+            # `_set_sanitized`: `cur` IS the sanitizer's output (see `SpanHandle._safe` for what a
+            # second pass through `set` cost), the carry an int, the back-ref a span id we minted.
             if prev is not None and prev[1] == tid and np > 0 and len(cur) >= np and cur[:np] == prev[2]:
-                h.set_many(input=cur[np:], input_carry=np, input_from=prev[0])
+                h._set_sanitized("input", cur[np:])
+                h._set_sanitized("input_carry", np)
+                h._set_sanitized("input_from", prev[0])
             else:
-                h.set_many(input=cur, input_carry=0, input_from=None)
+                h._set_sanitized("input", cur)
+                h._set_sanitized("input_carry", 0)
+                h._set_sanitized("input_from", None)
             _prev_gen.set((sid, tid, cur))
         yield ObservationHandle(h)
 
@@ -2291,8 +2299,15 @@ class SpanHandle:
     # here rather than at the call site. Every purpose-built path already sanitizes before writing
     # (`generation`, `tool`, `output`, `thinking`), but these generic methods took arbitrary values
     # verbatim — and `traceview` only protects the UI projection, not the bytes on disk or the ones
-    # shipped to an external collector. Both helpers are idempotent over already-sanitized strings, so
-    # routing the specialized paths' output through them again costs nothing.
+    # shipped to an external collector.
+    #
+    # The purpose-built paths do NOT come back through here (review 2026-09-22, CORE-02): they write
+    # through `_set_sanitized`. This comment used to say a second pass over their output "costs
+    # nothing". Measured, it was half of every generation's redaction work — the whole replayed
+    # conversation sanitized once by `_trace_messages` and again here — and it was not even
+    # idempotent: the tree walk charges the dict KEYS to the same 64 000-character budget and spends
+    # it oldest-first, so a near-budget conversation lost its NEWEST message on disk, the one
+    # `_trace_messages` had spent newest-first to keep.
     @staticmethod
     def _safe(key: str, value):
         return "***" if is_secret_key_name(key) else sanitize_trace_value(value)
@@ -2314,7 +2329,21 @@ class SpanHandle:
 
     def set(self, key: str, value) -> "SpanHandle":
         raw_key, key = self._safe_key(key)
-        value = self._safe(raw_key, value)
+        return self._store(raw_key, key, self._safe(raw_key, value))
+
+    def _set_sanitized(self, key: str, value) -> "SpanHandle":
+        """TRUSTED write: `value` already crossed this module's durable sanitizer, `key` is a literal.
+
+        For the purpose-built observation paths only — `generation`'s input and its delta
+        bookkeeping, `ObservationHandle.output` / `.thinking` / `.tool_calls` — whose values are
+        produced by `_trace_text` / `_trace_messages` a line earlier, under their own caps. Anything
+        that arrives from outside this module goes through `set`, which sanitizes it. The OTLP mirror
+        and the structural-key rules are `set`'s own, unchanged: only the second redaction is gone.
+        """
+        return self._store(key, key, value)
+
+    def _store(self, raw_key: str, key: str, value) -> "SpanHandle":
+        """Write one already-sanitized attribute to the record and mirror it — `set`'s back half."""
         # Exact structural setters are privileged only with their schema shape. Invalid provider
         # metadata is retained as diagnostic data without corrupting node/attempt attribution.
         if raw_key in ("generation", "attempt") and not (
@@ -2345,7 +2374,7 @@ class SpanHandle:
         if self._otel is not None:
             try:
                 self._otel.set_attribute(key, value if isinstance(value, (str, int, float, bool)) else str(value))
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001 — a broken bridged provider must not fail the durable write
                 pass
             # BESIDE it, the same fact under the GenAI conventions (see `genai_semconv`). Late keys
             # matter as much as the opening ones: `usage` is stamped after the call returns, and it

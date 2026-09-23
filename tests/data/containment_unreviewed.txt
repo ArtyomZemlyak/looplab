@@ -11,7 +11,6 @@ looplab/core/llm_streaming.py::_stream_raw_socket#0
 looplab/core/llm_streaming.py::_stream_with_idle_guard._wd#0
 looplab/core/llm_streaming.py::_stream_with_idle_guard._wd#1
 looplab/core/tracing.py::SpanHandle.event#0
-looplab/core/tracing.py::SpanHandle.set#0
 looplab/core/tracing.py::Tracer.span#0
 looplab/core/tracing.py::Tracer.span#1
 looplab/core/tracing.py::Tracer.span#2
