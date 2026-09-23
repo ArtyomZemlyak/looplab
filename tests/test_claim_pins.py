@@ -237,7 +237,7 @@ def test_the_section_backlog_only_shrinks_and_names_live_defects():
     stale = [r for r in rows if r not in live]
     assert not stale, (f"these {SECTION_BACKLOG} rows name no unresolved citation any more — delete "
                        "them:\n  " + "\n  ".join(stale))
-    assert len(rows) <= 8, len(rows)
+    assert len(rows) <= 2, len(rows)
 
 
 def test_every_claim_pin_is_well_formed():

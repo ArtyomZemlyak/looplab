@@ -197,6 +197,139 @@ is not this one.
 
 ---
 
+_Restored 2026-09-23 (review 2026-09-22, TST-07): §2b and §2c were dropped when a merge rewrote §2 (`1d28858c`, `agent/novelty`), while six code comments still cite them. They are restored verbatim from `cafa30be`; "this one" in §2b's title is the former §2a — the re-proposal billed to the gate that asked for it._
+
+### 2b. The item this one uncovered
+
+**CLOSED 2026-08-26, and the location I recorded was WRONG.** The headline re-derives exactly --
+`llm_usage` $20.0081 over 6819 calls against $17.6867 over 5903 generation spans, a $2.3214 gap --
+but "almost all of it is `card_build` and `hyp_prioritize`" does not survive. Both open spans and
+are fully accounted (`card_build` $6.1620 / 1755 generations; `hyp_prioritize` is a real span name
+at `search/foresight.py:391`, $0.2908 / 297). **Zero** unspanned rows belong to either. That
+sentence came from a summary I passed on without checking the one claim in it I could have checked.
+
+Attributed to the operation actually open around each row, the gap is FOUR unrelated defects and
+sums to $2.3214 with nothing left over:
+
+| site | calls | $ | share | cause |
+|---|---|---|---|---|
+| concurrent deep research | 817 | **2.1921** | 94.4 % | `_research_attempt_step` is shared by the serial cadence and BOTH concurrent seams; only `_run_deep_research` opened the span |
+| `_tag_hypothesis_concepts` | 88 | 0.0211 | 0.9 % | pays after the `concept_coverage` span beside it closes |
+| ceiling-aborted calls | 36 | 0.1015 | 4.4 % | the span exists and carries no cost: `CostAccountant.add` pays, emits the row, then raises `BudgetExceeded` before the caller can stamp it |
+| finish report | 11 | 0.0067 | 0.3 % | the span WAS opened and never reached disk — a different defect, §2c |
+
+**What it changes about the loop.** Deep research filed $0.8352 (4.7 %) and actually cost about
+**$3.03 -- roughly 15 %, the arm's fourth-largest consumer, ahead of the novelty gate.** Every
+per-phase conclusion drawn before this was drawn over a channel missing its third-biggest line.
+
+The docstring that caused it -- *"the tracer is not safe to write from the concurrent worker"* --
+is false, and the counter-example sits in the same file family: `_maybe_merge_hypotheses` appends
+`hypothesis_merged` from the very same `anyio.to_thread.run_sync` hop.
+
+A third site was found BY INSPECTION rather than by measurement: `verifier_tiebreak.py` runs
+between two span-opening siblings and opened none. `select_verifier` is off by default, so it
+bought $0.0000 here and would first have surfaced in whichever campaign turned that knob on.
+
+**The guard is a CONSERVATION test, not a per-site checklist**: every `llm_usage` row joins a
+generation span, every such span carries a cost, and the two sums agree to 1e-9, with a
+non-vacuity latch so a scenario that bought nothing cannot pass. Not an assertion in the tracer,
+deliberately: the failure mode IS that nothing calls the tracer, and at the one place that sees
+every paid call, "no span is open" and "nothing is traced" are the same observation.
+
+### 2c. The one it uncovered
+
+**CLOSED 2026-08-27, and the item's own NAME was wrong.** The marker is deleted. Nothing vanished
+between close and flush: the span never reached the exporter's queue, because the exporter was
+already terminal when the span opened. Cause established, and it is one frame, not a race.
+
+**Re-measured first, over all thirty run dirs** (`runs-B` + `model-probes` + `fullctx-probe`, with
+the crash-atomic `__looplab_event_batch_v1__` packets expanded): **15** `report_generated` rows name
+a `span_id` that is in no artifact -- 11 under `runs-B`, exactly as recorded, plus `fxKcenters`,
+`gpt56luna`, `opus5` and the fullctx probe. All 15 are `trigger="finish"`, and all 15 belong to a
+run whose `run_finished` is the ceiling (`error` on the older arm, `budget_exhausted` after §7). No
+run that ended otherwise lost one.
+
+**The mechanism.** `Engine.run`'s `finally` retires the exporter -- one lifetime per run, terminal
+so that a straggler closing later is REJECTED rather than appended behind a trace reset/clear. A
+ceiling hit does not end there: it escapes `Engine.run`, and `cli/run_cmds.py::_run_engine_guarded`'s
+outer handler then writes the terminal AND buys the finish report, several frames above that
+`finally`. `AsyncJsonlSpanExporter.export` refuses the post-shutdown row and records the drop with
+`durable=False` -- deliberately, so a dead exporter can never be resurrected as a receipt writer --
+so the refusal leaves nothing on disk at all. Right for a background straggler; wrong for the run's
+own terminal report, which is synchronous, on the main thread, and still inside the engine lock.
+
+**Reproduced end to end before the fix**, real `Engine` + real exporter + a `_run_with_llm_broker`
+that raises `BudgetExceeded`: `report_generated` carried `span_id=71bcb6b78f90bc75`, `spans.jsonl`
+held zero rows, and the exporter's own counters read `dropped_shutdown: 1, loss_receipts: 0` -- the
+corpus signature exactly.
+
+**So the LIFETIME moved and the FENCE did not.** The owner that writes the terminal owns the trace:
+`_run_engine_guarded` calls `Engine.defer_trace_retirement()` and runs `retire_tracer()` in its own
+`finally`, inside the same lock scope `Engine.run` held. Nothing about the barrier, the
+abandon-on-timeout or the writer guard changed.
+`tests/test_finish_report_span_survives_the_ceiling.py` carries three cases and each dies under its
+own mutation: dropping the deferral reproduces the missing span; dropping the retirement lets a
+post-owner straggler onto disk; deferring by DEFAULT leaves every directly-driven `Engine.run`
+(server, TUI, ~40 tests) with a live writer behind the lifecycle lock. Two existing tests were
+scaffolding on the old shape and are updated to the real property -- the source pin now asserts
+BOTH that `run`'s `finally` reaches the retirement AND that the retirement is still a bounded
+`shutdown`, which a single relocated assertion would not have.
+
+The original finding:
+
+Eleven finish-report spans were opened, their ids reached the events, and the records are absent
+from `spans.jsonl`, `.spans-append.jsonl` AND `trace.json`, with no exporter-loss receipt anywhere
+in the corpus. The corpus splits cleanly 20 of 20: **all 11 runs that lost the span ended on
+`BudgetExceeded`; all 9 that ended otherwise kept it.** Cause not established. It matters more than
+its $0.0067 -- a barrier that returns while leaving an accepted span off disk is a hole in the
+record, not an accounting rounding error.
+
+The finding that uncovered it:
+
+**$2.3214 across 916 calls — 11.6 % of arm B's money — appears in `llm_usage` events and in NO
+generation span.** Spans account for $17.6867 of the $20.0081 the event log records. Almost all of
+it is `card_build` and `hyp_prioritize`. Every per-phase question asked of the span channel is
+therefore answered over 88 % of the money, and the missing 12 % is concentrated in the single
+largest consumer. This is the same class of error as 2a — a cost channel that is silently partial —
+and it is the one to fix before any further conclusion is drawn about where the loop's money goes.
+
+**What survives of the original complaint.** Nothing here says the spend is well allocated:
+19 node evaluations for $8.029 on the 8-task corpus is $0.42 per measurement against the reference
+arm's $0.0175. But the money to re-target is `card_build` (34.8 %) and `plan` (19.0 %), not the
+gate.
+
+The original finding, kept as the evidence that was refuted:
+
+**Measured across the eight task-arms**, attributing every `llm_usage` to the enclosing
+`phase_progress`:
+
+| phase | spend | share |
+|---|---|---|
+| `novelty` | **$5.324** | **66.3 %** |
+| `propose` | $2.275 | 28.3 % |
+| everything else (incl. every evaluation) | $0.430 | 5.4 % |
+
+24 novelty phases, **16 538 s = 4.6 h** of wall clock. They produced **6 `novelty_rejected`
+verdicts, and all 6 carry a `repropose` action** — every rejection was overridden and the idea was
+built anyway. The gate consumed two thirds of the money and changed nothing that was built.
+
+**19 node evaluations for $8.029 — $0.42 per measurement.** The counterpart arm bought 54–57
+full-dataset evaluations for $1.00 ($0.0175 each) and won two tasks purely on micro-optimisations
+that only a cheap measurement can find.
+
+**Fix.**
+
+1. **Cap the gate by budget share, not by satisfaction.** A hard ceiling (5 %? 10 %?) after which
+   novelty returns "unknown, proceed" is strictly better than the current behaviour, which is to
+   spend two thirds and then proceed anyway.
+2. **Make a rejection binding or remove it.** A verdict that is always overridden is a tax. Either
+   `novelty_rejected` blocks the build (and the proposer must produce something else), or the phase
+   is demoted to an advisory note produced *inside* `propose` at no extra call.
+3. **Re-target the money at evaluation.** The loop's own scoreboard shows the exchange rate: at
+   $0.0175/eval the current novelty budget buys ~300 additional measurements.
+
+---
+
 ## 3. The plan is stored; the artefact is what ran
 
 **CLOSED 2026-08-27, and the status line above it was STALE, not the code.** The marker is deleted.

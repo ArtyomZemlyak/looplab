@@ -6,12 +6,6 @@
 
 # The target was DELETED: doc 53's numbered 2a/2b/2c subsections were dropped when a later merge
 # (`agent/novelty`) rewrote its §2; their text survives only in history (`cafa30be`'s tree).
-looplab/cli/run_cmds.py::doc 53 §2c
-looplab/engine/orchestrator.py::doc 53 §2c
-looplab/engine/shared.py::doc 53 §2b
-looplab/engine/verifier_tiebreak.py::doc 53 §2b
-tests/test_async_trace_exporter.py::doc 53 §2c
-tests/test_finish_report_span_survives_the_ceiling.py::doc 53 §2c
 
 # Not recoverable from the tree: doc 17 has no 20.6, and the CoverageFrame semantics this cites
 # (unknown vs zero) live in its 21.20.3 and 21.20.7, so neither the typo nor its target is certain.
