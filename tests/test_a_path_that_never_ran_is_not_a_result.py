@@ -216,7 +216,7 @@ def test_a_declared_marker_is_written_into_the_node_s_files(monkeypatch):
 
 def test_the_last_plan_step_declares_it_too(monkeypatch):
     files = _build(monkeypatch, {"summary": "s", "activation_markers": ["prefix cache: ON"]},
-                   plan_steps=["write it", "wire it"])
+                   plan_steps=[{"title": "write it", "detail": "d"}, {"title": "wire it", "detail": "d"}])
     assert json.loads(files[activation.ACTIVATION_MANIFEST_NAME]) == {"markers": ["prefix cache: ON"]}
 
 
@@ -282,3 +282,43 @@ def test_the_real_build_bounces_a_marker_only_its_test_prints(monkeypatch):
     LLMRepoDeveloper(object(), task, plan_decompose=False).implement(
         Idea(operator="draft", params={}, rationale="x"))
     assert refusals and "'PER_DEPTH_SCORER_TEST_OK'" in refusals[0]
+
+
+def test_a_marker_declared_on_an_earlier_step_is_still_checked_at_the_last(monkeypatch):
+    """Measured 2026-09-23 (inf12 node 0): markers declared on steps 3 and 4 of a 5-step build, one
+    of them in no file at all, and step 5 -- the only validated emit -- declared none. The check has
+    to ask the node's EFFECTIVE declaration, not only the last emit's arguments."""
+    import sys
+    import looplab.agents.agent as agent_mod
+    from looplab.adapters.repo_task import EvalSpec, LLMRepoDeveloper, RepoTask
+
+    refusals: list = []
+    step = {"n": 0}
+
+    def fake_loop(client, tools, messages, emit_spec, *, finalize, fallback, **opts):
+        name = emit_spec["function"]["name"]
+        if name == "declare_stages":
+            return finalize({"stages": []})
+        if name == "propose_plan":
+            return finalize({"steps": [{"title": "write the path", "detail": "d"},
+                                       {"title": "finish", "detail": "d"}]})
+        step["n"] += 1
+        if step["n"] == 1:
+            tools.execute("write_file", {"path": "solution.py", "content": "print('PATH_ACTIVE')\n"})
+            return finalize({"summary": "wrote it",
+                             "activation_markers": ["PATH_ACTIVE", "PATH_INIT_ACTIVE"]})
+        args = {"summary": "done"}
+        validate = opts.get("validate")
+        if validate is not None and (refusal := validate(args)):
+            refusals.append(refusal)
+        return finalize(args)
+
+    monkeypatch.setattr(agent_mod, "drive_tool_loop", fake_loop)
+    fixture = Path(__file__).resolve().parent / "fixtures" / "repo_fixture"
+    task = RepoTask(id="r", goal="g", direction="max", editable_path=str(fixture),
+                    edit_surface=["*.py"], protect=[],
+                    eval=EvalSpec(command=[sys.executable, "ttrain.py"],
+                                  metric={"kind": "stdout_json", "key": "metric"}))
+    LLMRepoDeveloper(object(), task, plan_decompose=True, plan_min_steps=2).implement(
+        Idea(operator="draft", params={}, rationale="x"))
+    assert refusals and "'PATH_INIT_ACTIVE'" in refusals[0] and "'PATH_ACTIVE'" not in refusals[0]

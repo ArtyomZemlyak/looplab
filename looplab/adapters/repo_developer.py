@@ -2609,12 +2609,24 @@ class LLMRepoDeveloper:
                 return silent_broad_fallbacks(write.files, before=_started_from)
 
             def _marker_refusal(args) -> str:
-                # Checked against THIS emit's declaration, not the file it will become: the
-                # bounce is the one chance to correct a marker before an eval is spent on it.
-                if not isinstance(args, dict) or "activation_markers" not in args:
-                    return ""
+                # The node's EFFECTIVE declaration: this emit's markers if it carries any, else the
+                # file an EARLIER emit wrote. Only the last emit of a decomposed build is validated,
+                # and measured 2026-09-23 (MiniOneRec inf12 node 0) the markers were declared on
+                # steps 3 and 4 of 5 -- one of them, `SPLIT_PREFIX_PREFILL_INIT_ACTIVE`, in no file
+                # at all -- and step 5's `done` declared none, so asking only THIS emit let the
+                # node ship a marker its code could never print.
+                import json as _json
+                from looplab.engine.activation import ACTIVATION_MANIFEST_NAME
                 from looplab.engine.repair_verify import activation_markers_not_in_code
-                return activation_markers_not_in_code(args.get("activation_markers"), write.files)
+                if isinstance(args, dict) and "activation_markers" in args:
+                    declared = args.get("activation_markers")
+                else:
+                    try:
+                        declared = _json.loads(write.files.get(ACTIVATION_MANIFEST_NAME) or "{}").get(
+                            "markers")
+                    except (ValueError, AttributeError):
+                        declared = None
+                return activation_markers_not_in_code(declared, write.files)
 
             def _validate_build(_args):
                 """A manifest declaring a stage whose SCRIPT this session never wrote.

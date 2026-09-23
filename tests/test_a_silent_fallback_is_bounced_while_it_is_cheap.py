@@ -149,8 +149,11 @@ def test_the_real_build_path_bounces_it(monkeypatch):
 
 
 def test_the_last_plan_step_carries_it_too(monkeypatch):
+    # Dicts, not strings: `_propose_plan` keeps only {title, detail} steps, and a list of strings
+    # silently falls back to ONE session -- which would not test the last step at all.
     refusals = _fresh_repo_dev(monkeypatch, writes={"solution.py": _SILENT},
-                               plan_steps=["write the fast path", "wire it in"])
+                               plan_steps=[{"title": "write the fast path", "detail": "d"},
+                                           {"title": "wire it in", "detail": "d"}])
     assert refusals and "solution.py:4" in refusals[0]
 
 
