@@ -14,6 +14,7 @@ import { normalizeReportNodeDetail, normalizeRunReport, reportCoverageText,
   reportNarrativeCoverage } from './reportModel.js'
 import { nodeTheme } from './conceptId.js'
 import { nodeIsActive } from './nodeProjection.js'
+import { readOnlyLabel } from './runMode.js'
 import './report-trust-polish.css'
 
 const TRUST_CLASS = { unverified: 'neutral', caveats: 'warn', suspect: 'alarm' }
@@ -506,7 +507,7 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
           ? 'Read-only review · report refresh disabled'
           : readOnlyReason === 'start-over'
             ? 'Start over unresolved · report refresh disabled'
-            : `Snapshot seq ${historySeq} · report refresh disabled`}</span>}
+            : `${readOnlyLabel(readOnlyReason, historySeq)} · report refresh disabled`}</span>}
         <span className="spacer" style={{ flex: 1 }} />
         <button className="btn sm" onClick={() => window.print()}><OpIcon name="printer" size={12} /> Print / PDF</button>
         <button className="btn sm" onClick={() => dl(`${state.run_id}_report.md`, toMarkdown({ ...state, report: rep }, best, exportContext), 'text/markdown')}><OpIcon name="download" size={12} /> Markdown</button>

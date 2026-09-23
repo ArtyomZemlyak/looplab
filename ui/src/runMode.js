@@ -111,25 +111,75 @@ export function runIdFromApiPath(path) {
   try { return decodeURIComponent(m[1]) } catch { return m[1] }
 }
 
+// THE READ-ONLY MODES, one row each (review 2026-09-22, UI-04). RunView publishes seven access modes
+// (`runAccessMode`), and its three consumers each named a subset: this guard spelled four and worded
+// the rest as history, and RunView's `readOnlyReason` for the Inspector and the Report collapsed
+// everything but review and start-over into 'history' too. So a run that was merely LOADING, or whose
+// current generation was UNCONFIRMED, refused an action with "Historical snapshot seq null is
+// read-only — return to live to act" and labelled its panels "Snapshot seq null": wrong about the
+// cause, and wrong about the remedy — there was no snapshot to return from. `label` is the short cause
+// the panels print before their own consequence; `refusal` is the guard's whole sentence.
+const READ_ONLY_MODES = Object.freeze({
+  review: {
+    code: 'REVIEW_READ_ONLY', label: () => 'Read-only review',
+    refusal: () => 'This review link is read-only',
+  },
+  'stale-link': {
+    code: 'STALE_LINK_READ_ONLY', label: () => 'Earlier run generation',
+    refusal: () => 'This diagnostic link targets an earlier run generation — open the current generation before acting',
+  },
+  'start-over': {
+    code: 'START_OVER_RECOVERY_LOCK', label: () => 'Start over unresolved',
+    refusal: () => 'Start over is unresolved — retry or finish that exact request before changing the run',
+  },
+  history: {
+    code: 'HISTORICAL_READ_ONLY', label: seq => `Snapshot seq ${seq}`,
+    refusal: seq => `Historical snapshot seq ${seq} is read-only — return to live to act`,
+  },
+  loading: {
+    code: 'RUN_LOADING_READ_ONLY', label: () => 'Run still loading',
+    refusal: () => 'The run is still loading — act once its current state has arrived',
+  },
+  unavailable: {
+    code: 'RUN_UNAVAILABLE_READ_ONLY', label: () => 'Run state unconfirmed',
+    refusal: () => "The run's current state is not confirmed — reload the run before acting",
+  },
+})
+// A read-only access in a mode no row names fails CLOSED under its own code — never in history's words.
+const UNKNOWN_READ_ONLY = {
+  code: 'RUN_READ_ONLY', label: () => 'Read-only', refusal: () => 'This run is read-only here',
+}
+
+// Every code `assertRunMutationAllowed` can throw. Each is a refusal made in THIS tab before any
+// request left it, so a caller may read it as "nothing was sent" (`ConceptView` clears a paid lens
+// intent on exactly these — it used to keep its own list of three, which missed start-over).
+export const LOCAL_READ_ONLY_CODES = Object.freeze([
+  ...Object.values(READ_ONLY_MODES).map(row => row.code), UNKNOWN_READ_ONLY.code,
+])
+
+// The ONE derivation of RunView's access mode, in precedence order: the mode it publishes to
+// `setRunAccess` and the `readOnlyReason` its panels print are both this value.
+export function runAccessMode({ reviewMode = false, startOverBlocked = false, routeFenceBlocked = false,
+  historyActive = false, runStatus = 'ready', runAuthorityBlocked = false } = {}) {
+  return reviewMode ? 'review' : startOverBlocked ? 'start-over'
+    : routeFenceBlocked ? 'stale-link' : historyActive ? 'history'
+      : runStatus === 'loading' ? 'loading' : runAuthorityBlocked ? 'unavailable' : 'live'
+}
+
+// The short cause a read-only panel prints for `mode` ("Snapshot seq 12", "Run still loading").
+export function readOnlyLabel(mode, seq = null) {
+  return (READ_ONLY_MODES[mode] || UNKNOWN_READ_ONLY).label(seq)
+}
+
 export function assertRunMutationAllowed(path, { allowModes = [] } = {}) {
   const runId = runIdFromApiPath(path)
   if (!runId) return
   const access = getRunAccess(runId)
   if (!access.readOnly) return
   if (allowModes.includes(access.mode)) return
-  const review = access.mode === 'review'
-  const staleLink = access.mode === 'stale-link'
-  const startOver = access.mode === 'start-over'
-  const error = new Error(review
-    ? 'This review link is read-only'
-    : staleLink
-      ? 'This diagnostic link targets an earlier run generation — open the current generation before acting'
-      : startOver
-        ? 'Start over is unresolved — retry or finish that exact request before changing the run'
-      : `Historical snapshot seq ${access.seq} is read-only — return to live to act`)
-  error.code = review ? 'REVIEW_READ_ONLY'
-    : staleLink ? 'STALE_LINK_READ_ONLY'
-      : startOver ? 'START_OVER_RECOVERY_LOCK' : 'HISTORICAL_READ_ONLY'
+  const row = READ_ONLY_MODES[access.mode] || UNKNOWN_READ_ONLY
+  const error = new Error(row.refusal(access.seq))
+  error.code = row.code
   error.runId = runId
   error.seq = access.seq
   throw error

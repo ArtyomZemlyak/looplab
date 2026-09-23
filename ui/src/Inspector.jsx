@@ -18,6 +18,7 @@ import {
   extraMetricChannel, extraMetricCaveated, extraMetricSourceHelp,
   extraMetricSourceLabel, extraMetricIsBackfilled } from './extraMetrics.js'
 import { reviewInspectorTabs } from './runRouteState.js'
+import { readOnlyLabel } from './runMode.js'
 import { nodeAppliedParams, appliedParamsDivergences, appliedParamsChecked,
   appliedParamsNotice, appliedParamsConflicts,
   appliedParamsConflictNotice } from './runIndex.js'
@@ -392,7 +393,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
                 : 'Summary-only review. Source, live traces, and actions are not included.'
               : readOnlyReason === 'start-over'
                 ? 'Start over is unresolved. Actions and live traces stay locked until the exact request is recovered.'
-                : `Snapshot seq ${historySeq} · read-only. Live traces, metrics sidecars and actions are hidden.`}</div>
+                : `${readOnlyLabel(readOnlyReason, historySeq)} · read-only. Live traces, metrics sidecars and actions are hidden.`}</div>
           : <div className="insp-hint muted">Run actions (confirm · ablate · fork · promote) stay in chat. Use Comments for review, or attach <button className="ctx-chip ctx-chip-action" title="attach this node to assistant context" onClick={() => window.dispatchEvent(new CustomEvent('ll:attach-node', { detail: { id: n.id } }))}>＋ #{n.id}</button> as context.<ResetBtn runId={runId} id={n.id} generation={n.attempt} onToast={onToast} /></div>}
 
         {onOpenLineage && <div className="insp-hint">

@@ -6,7 +6,7 @@ import {
   pollDiscoveredConceptLens, requestConceptLens, resolveOrphanedConceptLens,
   updateConceptLensIntent,
 } from './conceptLensRecovery.js'
-import { getRunAccess } from './runMode.js'
+import { LOCAL_READ_ONLY_CODES, getRunAccess } from './runMode.js'
 import {
   relationshipProjectionCopy, visibleConceptRows, conceptLeaf, deltaTone, fmtCell,
   CONCEPT_COLUMNS, DEFAULT_COLUMNS,
@@ -940,8 +940,9 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
     } catch (error) {
       if (lensCreates.current.get(paidLensScope) === owner
           && currentPaidLensScope.current === paidLensScope) {
-        const localReadOnly = ['STALE_LINK_READ_ONLY', 'HISTORICAL_READ_ONLY',
-          'REVIEW_READ_ONLY'].includes(error?.code)
+        // Refused in this tab before anything was sent — every code the guard can throw
+        // (`runMode.js::LOCAL_READ_ONLY_CODES`; the hand list this replaced missed start-over).
+        const localReadOnly = LOCAL_READ_ONLY_CODES.includes(error?.code)
         const safelyRejected = ['invalid_run_generation', 'run_generation_unavailable',
           'run_generation_changed', 'concept_lens_prompt_too_large', 'concept_lens_body_too_large',
           'concept_lens_in_progress', 'concept_lens_ledger_conflict', 'job_capacity'].includes(error?.code)

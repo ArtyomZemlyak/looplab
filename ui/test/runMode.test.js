@@ -2,8 +2,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  assertRunMutationAllowed, clearRunAccess, liveHistory, reconcileHistoricalSelection,
-  historyMatches, rejectHistory, requestHistory, resolveHistory, runIdFromApiPath, setRunAccess,
+  LOCAL_READ_ONLY_CODES, assertRunMutationAllowed, clearRunAccess, liveHistory, readOnlyLabel,
+  reconcileHistoricalSelection, historyMatches, rejectHistory, requestHistory, resolveHistory,
+  runAccessMode, runIdFromApiPath, setRunAccess,
 } from '../src/runMode.js'
 
 const GEN_A = 'a'.repeat(64)
@@ -192,4 +193,59 @@ test('a live RunView publication wins over the durable envelope', () => {
     clearRunAccess('demo')       // ...and unmounting restores the durable fallback
     assert.throws(() => assertRunMutationAllowed('/api/runs/demo/label'))
   })
+})
+
+// --- one row per mode (review 2026-09-22, UI-04) ---------------------------------------------
+// RunView publishes seven access modes; the guard spelled four and worded the rest as history, so a
+// run that was only LOADING refused an action with "Historical snapshot seq null is read-only".
+
+const refusalFor = (mode, seq = null) => {
+  setRunAccess('demo', { readOnly: true, mode, seq })
+  try {
+    assertRunMutationAllowed('/api/runs/demo/control')
+    return null
+  } catch (error) {
+    return error
+  } finally {
+    clearRunAccess('demo')
+  }
+}
+
+test('a loading or unconfirmed run is refused for what it is, not as a historical snapshot', () => {
+  for (const [mode, code, said] of [
+    ['loading', 'RUN_LOADING_READ_ONLY', /still loading/],
+    ['unavailable', 'RUN_UNAVAILABLE_READ_ONLY', /not confirmed/],
+    ['someday-a-new-mode', 'RUN_READ_ONLY', /read-only/],
+  ]) {
+    const error = refusalFor(mode)
+    assert.ok(error, `${mode}: a read-only access must refuse`)
+    assert.equal(error.code, code)
+    assert.match(error.message, said)
+    assert.doesNotMatch(error.message, /historical|snapshot|seq null/i, `${mode}: ${error.message}`)
+  }
+  assert.match(refusalFor('history', 12).message, /Historical snapshot seq 12 is read-only/)
+})
+
+test('every code the guard throws is in the exported list of local refusals', () => {
+  const modes = ['review', 'stale-link', 'start-over', 'history', 'loading', 'unavailable', 'x-unknown']
+  const thrown = modes.map(mode => refusalFor(mode, 3)?.code)
+  assert.deepEqual([...new Set(thrown)].sort(), [...LOCAL_READ_ONLY_CODES].sort())
+})
+
+test('one derivation of the access mode, in precedence order', () => {
+  assert.equal(runAccessMode({}), 'live')
+  assert.equal(runAccessMode({ runStatus: 'loading', runAuthorityBlocked: true }), 'loading')
+  assert.equal(runAccessMode({ runAuthorityBlocked: true }), 'unavailable')
+  assert.equal(runAccessMode({ historyActive: true, runStatus: 'loading' }), 'history')
+  assert.equal(runAccessMode({ routeFenceBlocked: true, historyActive: true }), 'stale-link')
+  assert.equal(runAccessMode({ startOverBlocked: true, routeFenceBlocked: true }), 'start-over')
+  assert.equal(runAccessMode({ reviewMode: true, startOverBlocked: true }), 'review')
+})
+
+test('the panels print the same cause the guard refuses with', () => {
+  assert.equal(readOnlyLabel('history', 12), 'Snapshot seq 12')
+  assert.equal(readOnlyLabel('loading'), 'Run still loading')
+  assert.equal(readOnlyLabel('unavailable'), 'Run state unconfirmed')
+  assert.equal(readOnlyLabel('stale-link'), 'Earlier run generation')
+  assert.equal(readOnlyLabel('never-heard-of-it'), 'Read-only')
 })

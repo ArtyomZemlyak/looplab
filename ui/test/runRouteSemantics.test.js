@@ -27,7 +27,11 @@ test('RunView URL state is authoritative and stale generations lock every mutati
   assert.match(runView, /const viewSeq = routeState\.sequence/)
   assert.match(runView, /const selectedId = routeState\.nodeId/)
   assert.match(runView, /useLayoutEffect\(\(\) => \{[\s\S]*?setRunAccess\(runId,/)
-  assert.match(runView, /mode: reviewMode \? 'review' : startOverMutationBlocked \? 'start-over'\n\s*: routeFenceBlocked \? 'stale-link'/)
+  // The mode's precedence (review > start-over > stale-link > history > loading > unavailable) is
+  // `runMode.js::runAccessMode`, held to its own truth table in test/runMode.test.js; what RunView
+  // owes is to publish THAT value, and to print the same one (review 2026-09-22, UI-04).
+  assert.match(runView, /const mutationReadOnlyReason = runAccessMode\(\{[\s\S]*?routeFenceBlocked[\s\S]*?\}\)/)
+  assert.match(runView, /setRunAccess\(runId, \{ readOnly: mutationReadOnlyMode, seq: viewSeq, mode: mutationReadOnlyReason \}\)/)
   assert.match(runView, /enabled: !reviewMode && !routeFenceBlocked/)
   assert.match(runView, /timelineFilter: value \}\), \{ mode: 'replace' \}\)/)
   assert.match(runView, /kindFilters=\{routeState\.timelineKinds\}/)

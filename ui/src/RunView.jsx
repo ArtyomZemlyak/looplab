@@ -21,7 +21,7 @@ import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
 import { nextRovingIndex } from './accessibility.jsx'
 import {
   clearRunAccess, historyMatches, liveHistory, reconcileHistoricalSelection, rejectHistory,
-  requestHistory, resolveHistory, setRunAccess,
+  requestHistory, resolveHistory, runAccessMode, setRunAccess,
 } from './runMode.js'
 import {
   approvalCommandFor, dagEmptyPresentation, lifecyclePhaseLabel, runLifecycle, sourceIncomplete,
@@ -472,8 +472,11 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   // failures must never inherit the previous route's live access.
   const runAuthorityBlocked = runStatus !== 'ready' || !live || !generation
   const mutationReadOnlyMode = readOnlyMode || runAuthorityBlocked || startOverMutationBlocked
-  const mutationReadOnlyReason = reviewMode ? 'review'
-    : startOverMutationBlocked ? 'start-over' : 'history'
+  // The mode published to `setRunAccess` below AND the reason the panels print — one derivation
+  // (`runMode.js::runAccessMode`); this used to say 'history' for a run that was only loading.
+  const mutationReadOnlyReason = runAccessMode({
+    reviewMode, startOverBlocked: startOverMutationBlocked, routeFenceBlocked, historyActive,
+    runStatus, runAuthorityBlocked })
   // The ONE gesture a historical snapshot may run, and the whole statement of when it may
   // (`forkFromSeqModel.js`'s header says why it, and nothing else, is admissible here).
   // `mutationReadOnlyMode` above is UNCHANGED and every other node action still meets it head-on:
@@ -567,15 +570,11 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     // current truth confirms it. Publish in the same layout-effect phase as useRunState's observed
     // generation so the persistent Assistant/Dock cannot see generation B with generation A's old
     // live access during the commit-to-passive-effect window.
-    setRunAccess(runId, { readOnly: mutationReadOnlyMode, seq: viewSeq,
-      mode: reviewMode ? 'review' : startOverMutationBlocked ? 'start-over'
-        : routeFenceBlocked ? 'stale-link' : historyActive ? 'history'
-          : runStatus === 'loading' ? 'loading' : runAuthorityBlocked ? 'unavailable' : 'live' })
+    setRunAccess(runId, { readOnly: mutationReadOnlyMode, seq: viewSeq, mode: mutationReadOnlyReason })
     // An unresolved destructive operation outlives this route. Leave its published access lock in
     // place when navigating Back; getRunAccess also reconstructs it from session storage after reload.
     return () => { if (!startOverMutationBlocked) clearRunAccess(runId) }
-  }, [runId, reviewMode, mutationReadOnlyMode, viewSeq, historyActive, routeFenceBlocked,
-    runStatus, runAuthorityBlocked, startOverMutationBlocked])
+  }, [runId, mutationReadOnlyMode, viewSeq, mutationReadOnlyReason, startOverMutationBlocked])
   const [toast, showToast] = useToast()   // shared timer discipline (doc 25 UI-13)
   const [routeNotice, setRouteNotice] = useState('')
   const [attemptFenceNotice, setAttemptFenceNotice] = useState('')
