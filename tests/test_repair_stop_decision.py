@@ -37,6 +37,9 @@ from __future__ import annotations
 
 import ast
 import collections
+import os
+import threading
+import time
 from pathlib import Path
 
 import anyio
@@ -59,6 +62,7 @@ from looplab.runtime import deps
 from looplab.runtime.deps import InstallResult
 from looplab.runtime.sandbox import SubprocessSandbox
 from looplab.search.policy import GreedyTree
+from tests._windows_emulation import windows_realpath_race
 # The verbatim evidence from the two live incidents, owned by the file that documents them.
 from tests.test_repair_runaway_guard import (_DDP, _DDP_RATIONALE, _GOOD, _REAL_SYMBOLS, _SECOND_QUESTION,
                                              _SEQUENCE, _cyrillic_src, _emits, _lazy_import_src)
@@ -1005,10 +1009,9 @@ def test_repeated_non_python_answers_become_a_provider_verdict(tmp_path):
     assert len([e for e in evs if e.type == "pause"]) == 1
 
 
-def test_only_one_pause_across_concurrent_sibling_evals(tmp_path):
-    """Every sibling reaches the same dead endpoint at the same time. The run-level pause is
-    deduplicated by the already-halting re-check under `_write_lock`, so the operator gets ONE
-    diagnosis, not one per in-flight eval."""
+def _four_siblings_on_a_dead_endpoint(tmp_path) -> list:
+    """Four seed siblings evaluated CONCURRENTLY, every repair call hitting the same dead endpoint.
+    Returns the run's events."""
 
     class _RaisingDev(_ScriptedDev):
         def repair(self, idea, code, error):
@@ -1036,7 +1039,10 @@ def test_only_one_pause_across_concurrent_sibling_evals(tmp_path):
         return scope.cancelled_caught
 
     assert not anyio.run(_run_siblings), "the sibling evals did not terminate"
-    evs = list(EventStore(run_dir / "events.jsonl").read_all())
+    return list(EventStore(run_dir / "events.jsonl").read_all())
+
+
+def _assert_one_pause_for_the_dead_endpoint(evs) -> None:
     assert len([e for e in evs if e.type == "pause"]) == 1
     terminals = [e for e in evs if e.type in ("node_evaluated", "node_failed")]
     # Since 2026-09-22 (review ENG2-01) a sibling that reaches its repair decision AFTER the run was
@@ -1050,6 +1056,44 @@ def test_only_one_pause_across_concurrent_sibling_evals(tmp_path):
     assert all(e.data["reason"] == "developer_crash" for e in terminals)
     state = fold(evs)
     assert all(state.nodes[nid].status.value == "pending" for nid in range(4) if nid not in per_node)
+
+
+def test_only_one_pause_across_concurrent_sibling_evals(tmp_path):
+    """Every sibling reaches the same dead endpoint at the same time. The run-level pause is
+    deduplicated by the already-halting re-check under `_write_lock`, so the operator gets ONE
+    diagnosis, not one per in-flight eval."""
+    _assert_one_pause_for_the_dead_endpoint(_four_siblings_on_a_dead_endpoint(tmp_path))
+
+
+def test_a_sibling_resolving_its_workdir_as_another_creates_nodes_still_pauses_for_the_endpoint(
+        tmp_path, monkeypatch):
+    """The test above as Windows CI run 36 ran it (review 2026-09-22, WIN-4; run 35823390348), where
+    it failed on `reason == "developer_crash"`: node 3 was closed as `engine_error` —
+    `refusing to materialize outside the run directory: \\\\?\\C:\\...\\run\\nodes\\node_3` — and
+    the run paused for a PATH, not for the endpoint. The siblings build their workdirs in worker
+    threads at once and the first to write creates `run/nodes`; on Windows a resolve of a workdir
+    that does not exist yet keeps the `\\\\?\\` prefix when that creation lands between
+    `ntpath.realpath`'s two probes (`tests/_windows_emulation.py::windows_realpath_race`), and the
+    containment check compared it with an unprefixed run dir. That interleaving is FORCED here:
+    node 3's first probe sees no `nodes`, and it waits for a sibling to create it before its second.
+    Fixed in `WorkspaceSeeder.materialize` through `core/pathsafe.py::resolve_settled`."""
+    nodes = os.path.abspath(tmp_path / "run" / "nodes")
+    workdirs = [os.path.join(nodes, f"node_{nid}") for nid in range(4)]
+    node_3_probed = threading.Event()
+
+    def window(resolving: str) -> None:
+        if resolving == workdirs[3]:
+            node_3_probed.set()                   # its FIRST probe saw no `nodes` ...
+            deadline = time.monotonic() + 30
+            while not os.path.isdir(nodes) and time.monotonic() < deadline:
+                time.sleep(0.005)                 # ... and a sibling creates it before the second
+        elif resolving in workdirs:
+            node_3_probed.wait(30)                # no sibling writes before node 3 has probed
+
+    kept = windows_realpath_race(monkeypatch, window=window)
+    evs = _four_siblings_on_a_dead_endpoint(tmp_path)
+    assert workdirs[3] in kept, "the premise: node 3's resolve straddled the creation of `nodes`"
+    _assert_one_pause_for_the_dead_endpoint(evs)
 
 
 # ---------------------------------------------------------------------- replay safety

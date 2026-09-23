@@ -238,3 +238,44 @@ def contained_member(root, name) -> "Path | None":
     target = (base / text).resolve()
     return target if base in target.parents else None
 
+
+# The prefix `nt._getfinalpathname` puts on every final path it answers (`\\?\C:\...`).
+_VERBATIM_PREFIX = "\\\\?\\"
+
+
+def resolve_settled(path) -> Path:
+    """`Path(path).resolve()`, asked AGAIN while the answer carries a `\\\\?\\` prefix the caller
+    did not write — so a containment test does not depend on what another thread created meanwhile.
+
+    On Windows `resolve()` is `ntpath.realpath`: it asks the OS for the FINAL path, which always
+    comes back as `\\\\?\\C:\\...`, and strips that prefix only when a second probe of the
+    unprefixed name answers the same path or fails with the SAME winerror. A name that does not
+    exist yet fails both probes — ERROR_PATH_NOT_FOUND while a parent is missing,
+    ERROR_FILE_NOT_FOUND once only its last component is — so when ANOTHER thread creates that
+    missing parent between the two probes, the answer keeps its prefix, and `root in
+    resolved.parents` against a root resolved without one says "outside". Measured on the Windows
+    CI leg (review 2026-09-22 WIN-4, run 35823390348): four sibling evals creating `run/nodes` at
+    once had one refused by `WorkspaceSeeder.materialize` as "outside the run directory", closed as
+    `engine_error`, and the whole run PAUSED for a path that was inside it.
+
+    ASKED AGAIN, NOT STRIPPED. A prefix `ntpath.realpath` keeps on purpose names an EXISTING entry
+    that only the prefixed spelling reaches (a reserved device name, a trailing dot), so stripping
+    it would hand the caller a different file. Asking again separates the two by CPython's own
+    rule: the parent the race created exists now, both probes agree and the prefix goes, while a
+    deliberate one survives the second asking unchanged. Each re-ask can only lose to yet another
+    missing component being created meanwhile, so the name's depth bounds them. A name the caller
+    spelled WITH the prefix is answered as `resolve()` answers it, and on POSIX no answer carries
+    one, so there this is exactly one `resolve()`.
+    """
+    requested = Path(path)
+    answer = requested.resolve()
+    if str(requested).startswith(_VERBATIM_PREFIX):
+        return answer
+    for _ in range(len(requested.parts)):
+        if not str(answer).startswith(_VERBATIM_PREFIX):
+            break
+        again = requested.resolve()
+        if again == answer:
+            break
+        answer = again
+    return answer

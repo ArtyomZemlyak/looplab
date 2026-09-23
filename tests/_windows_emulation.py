@@ -27,6 +27,10 @@ These doubles reproduce exactly the rule each branch exists for, no more:
 * `change_time_within_one_tick` — a file's change time moves only when the clock that stamps it
   ticks, so a same-size rewrite with its mtime put back, done inside one tick, leaves EVERY stat
   field as it was (review 2026-09-22 wave 5, GitHub Actions run 35817293259).
+* `windows_realpath_race` — `ntpath.realpath` (what `Path.resolve()` asks) strips the `\\\\?\\`
+  prefix of the OS's final path only when a SECOND probe of the unprefixed name agrees with the
+  first, so a name that does not exist yet keeps the prefix when a concurrent thread creates a
+  missing ANCESTOR between the two probes (review 2026-09-22 WIN-4, GitHub Actions run 35823390348).
 
 A test switches `os.name` to "nt" only around the call under test (pathlib picks its flavour from
 it at construction time) and restores it before asserting.
@@ -424,3 +428,61 @@ def refuse_deleting_an_open_file(monkeypatch) -> list:
     monkeypatch.setattr(os, "unlink", _unlink)
     monkeypatch.setattr(os, "remove", _unlink)
     return refused
+
+
+# The prefix `nt._getfinalpathname` puts on every answer: `\\?\C:\...` (`\\?\UNC\...` for a share).
+VERBATIM_PREFIX = "\\\\?\\"
+
+
+def windows_realpath_race(monkeypatch, *, window=None) -> list:
+    """Make `os.path.realpath` -- what `Path.resolve()` asks -- keep the `\\\\?\\` prefix exactly
+    when `ntpath.realpath` does on Windows.
+
+    `ntpath.realpath` asks `_getfinalpathname`, whose answer ALWAYS carries the verbatim prefix; for
+    a name that does not exist it records the probe's winerror (ERROR_FILE_NOT_FOUND = 2 when only
+    the last component is missing, ERROR_PATH_NOT_FOUND = 3 when a parent is) and resolves the
+    longest existing ancestor instead. It then strips the prefix only after a SECOND probe of the
+    unprefixed name either answers the same path or fails with the SAME winerror:
+
+        except OSError as ex:
+            # If the path does not exist and originally did not exist, then
+            # strip the prefix anyway.
+            if ex.winerror == initial_winerror:
+                path = spath
+
+    So a name whose missing PARENT another thread creates between the two probes (3 becomes 2)
+    comes back as `\\\\?\\C:\\...`, while the same call a moment earlier or later answers
+    `C:\\...` -- which is how four sibling evals creating `run/nodes` at once had one of them
+    refused as "outside the run directory" (run 35823390348). This double applies that rule to the
+    real answer: `window(path)` runs between the two probes of a missing name, so a test can hold
+    that window open until the ancestor exists. An existing name, or one whose probe answers the
+    same twice, resolves exactly as it did. Returns the names that kept the prefix, so a test can
+    prove the rule fired."""
+    real_realpath = os.path.realpath
+    kept: list = []
+
+    def _winerror(name: str):
+        # `_getfinalpathname`'s answer for a name: None when it resolves, else the probe's winerror.
+        if os.path.lexists(name):
+            return None
+        return 2 if os.path.isdir(os.path.dirname(name)) else 3
+
+    def _realpath(path, *args, **kwargs):
+        final = real_realpath(path, *args, **kwargs)
+        name = os.fspath(path)
+        if isinstance(name, bytes) or name.startswith(VERBATIM_PREFIX):
+            return final
+        name = os.path.abspath(name)
+        first = _winerror(name)
+        if first is None:
+            return final
+        if window is not None:
+            window(name)
+        second = _winerror(name)
+        if second is None or second == first:
+            return final
+        kept.append(name)
+        return VERBATIM_PREFIX + final
+
+    monkeypatch.setattr(os.path, "realpath", _realpath)
+    return kept

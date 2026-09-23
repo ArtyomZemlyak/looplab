@@ -436,9 +436,15 @@ class WorkspaceSeeder:
         top of the seeded tree, and task assets win any name collision, last. Routed through the
         Engine's delegators so an instance-level monkeypatch of any step still intercepts it."""
         from looplab.core.atomicio import rmtree_readonly_aware
+        from looplab.core.pathsafe import resolve_settled
 
-        wd = Path(workdir).resolve()
-        run_dir = Path(self._e.run_dir).resolve()
+        # SETTLED, not a bare `resolve()` (review 2026-09-22, WIN-4): concurrent sibling evals reach
+        # this line together, and the first to write creates `run/nodes`. On Windows a resolve of a
+        # workdir that does not exist yet, straddling that creation, keeps its `\\?\` prefix, so
+        # this check refused a workdir INSIDE the run, closed the node as `engine_error` and paused
+        # the run (Windows CI run 35823390348). `resolve_settled` asks again until no race answers.
+        wd = resolve_settled(workdir)
+        run_dir = resolve_settled(self._e.run_dir)
         if wd == run_dir or run_dir not in wd.parents:
             raise ValueError(f"refusing to materialize outside the run directory: {wd}")
         # A fresh lifecycle must start from the canonical seed + current node manifest, not an overlay
