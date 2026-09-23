@@ -180,7 +180,9 @@ _SILENT_AFTER_ONE_BAR = ("import time\n"
 # clock is taken), the recorded outcome is the silence clock due on the deadline's own tick:
 # Windows run 58, STALLED at 3.094 s, "no output for 3s", no grace asked. That is the watchdog's
 # designed order for a child silent a whole window, not the property under test; a bar half a
-# second in keeps the silence clock that much short of the deadline on any tick.
+# second in keeps the silence clock that much short of the deadline on any tick. Both tests that
+# clamp the window to the budget take it: Windows run 65 recorded the same order for the direct
+# `run_argv` one at a 1 s budget (no `deadline_grace_s` in its signals).
 _SILENT_AFTER_A_LATE_BAR = ("import time\n"
                             "time.sleep(0.5)\n"
                             "print('100%|##########| 664/664 [00:17<00:00, 38.13it/s]', flush=True)\n"
@@ -192,7 +194,11 @@ def test_a_grace_granted_to_a_SILENT_child_is_actually_served(tmp_path):
     different things — total wall time and silence — and a grace moves only the first. The silence
     kill is DEFERRED for exactly the window bought, so the seconds `deadline_grace_s` reports are
     seconds the process really received; then it dies, because a grace is not a reprieve."""
-    (tmp_path / "quiet.py").write_text(_SILENT_AFTER_ONE_BAR, encoding="utf-8")
+    # The LATE bar (see `_SILENT_AFTER_A_LATE_BAR`): with the window clamped to the budget, a bar at
+    # the child's first instant can put the silence clock on the deadline's own tick, and the stall
+    # branch runs first. Half a second in, the silence clock comes due about half a second INTO
+    # the 2 s grace, well before its end — so the deferral is still what keeps the child alive.
+    (tmp_path / "quiet.py").write_text(_SILENT_AFTER_A_LATE_BAR, encoding="utf-8")
     sig: dict = {}
     t0 = time.monotonic()
     rc, out, err, timed_out = run_argv(
