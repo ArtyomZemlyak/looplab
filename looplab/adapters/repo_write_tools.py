@@ -367,6 +367,14 @@ class RepoWriteTools:
         a bare join would probe <root>/<name>/<file> and read a missing (or wrong) original."""
         if p in self.files:
             return self.files[p]
+        return self.original(p)
+
+    def original(self, p: str):
+        """The file as it stands in an editable root ON DISK, ignoring everything staged; None if absent.
+
+        PUBLIC for the same reason `exists` is: a rule in another package needs the BEFORE side of an
+        edit (`engine/repair_verify.py::silent_broad_fallbacks` asks which `except` a session ADDED,
+        and a handler the repo already had is not this session's to answer for)."""
         from pathlib import Path as _P
         for name, r in self._roots:
             rel = p[len(name) + 1:] if name and name != "." and p.startswith(name + "/") else p

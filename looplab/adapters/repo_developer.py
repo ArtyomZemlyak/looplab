@@ -2506,6 +2506,17 @@ class LLMRepoDeveloper:
             # this.
             _bounced: list = []
 
+            def _started_from(path):
+                # The BEFORE side of this session's edit: the parent's file on an improve/merge,
+                # else the original in the editable root on disk.
+                if isinstance(base, dict) and path in base:
+                    return base.get(path)
+                return write.original(path)
+
+            def _silent_fallback_refusal() -> str:
+                from looplab.engine.repair_verify import silent_broad_fallbacks
+                return silent_broad_fallbacks(write.files, before=_started_from)
+
             def _validate_build(_args):
                 """A manifest declaring a stage whose SCRIPT this session never wrote.
 
@@ -2529,6 +2540,9 @@ class LLMRepoDeveloper:
                 refusal = build_declared_script_never_written(
                     write.files.get("looplab_stages.json", ""), write.files,
                     exists=write.exists)
+                # Second rule, same single bounce: a catch-everything handler this session added
+                # that keeps no record of what it caught (`repair_verify.silent_broad_fallbacks`).
+                refusal = refusal or _silent_fallback_refusal()
                 if not refusal:
                     return None
                 _bounced.append(True)
@@ -2590,6 +2604,10 @@ class LLMRepoDeveloper:
                         (args or {}).get("summary", ""),
                         wrote=(write.files != _files_before
                                or write.deleted != _deleted_before))
+                    # A repair is where a silent fallback does most damage: the node is failing,
+                    # and wrapping the failing call in `except Exception: pass` makes the failure
+                    # vanish from the next attempt's evidence as well as from this one's.
+                    refusal = refusal or _silent_fallback_refusal()
                     if not refusal:
                         return None                     # claimed nothing concrete — a legitimate
                     _bounced.append(True)               # "no change needed" answer is left alone

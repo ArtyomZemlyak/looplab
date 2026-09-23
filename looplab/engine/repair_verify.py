@@ -1478,3 +1478,121 @@ def inert_streak(repair_log) -> int:
             break
         n += 1
     return n
+
+
+# ---------------------------------------------------------------------- the silent broad fallback
+#
+# Measured 2026-09-23 on a MiniOneRec inference run. A node added a prefix-cached prefill behind a
+# self-check, wrapped the check in `except BaseException:` and printed one line, "verification
+# raised". The check died on `cache.key_cache` -- an attribute transformers 5 removed -- the path
+# switched itself off, and the node scored 1.004 with every list byte-identical to its parent. Its
+# row was indistinguishable from an idea that does not help, the Developer has no shell to find out
+# otherwise, and the only way to recover the cause was to re-run the node by hand with the handler
+# patched. One `traceback.format_exc()` in that handler would have put the AttributeError in
+# `score.log`, which the next repair reads.
+#
+# So an implement or repair emit that ADDS a handler which catches everything and keeps no record of
+# what it caught is bounced once, while it is still cheap to fix. "Keeps a record" is read off the
+# AST, generously: a re-raise, anything from `traceback`, a logger's `.exception(...)`, an
+# `exc_info=` keyword, `sys.exc_info()`, or simply USING the bound exception (`print(e)` names the
+# cause, which is all that node needed). Only handlers the session added count -- one the file
+# already had, identically, is not this session's to answer for -- and a file that does not parse is
+# left to the checks that own syntax.
+
+_BROAD_EXCEPTION_NAMES = frozenset({"Exception", "BaseException"})
+_RECORDING_CALLS = frozenset({"print_exc", "format_exc", "print_exception", "format_exception",
+                              "exception", "exc_info", "print_tb", "format_tb"})
+_MAX_LISTED_HANDLERS = 5
+
+
+def _is_broad(handler) -> bool:
+    kind = handler.type
+    if kind is None:
+        return True
+    names = kind.elts if isinstance(kind, ast.Tuple) else [kind]
+    for n in names:
+        if isinstance(n, ast.Name) and n.id in _BROAD_EXCEPTION_NAMES:
+            return True
+        if isinstance(n, ast.Attribute) and n.attr in _BROAD_EXCEPTION_NAMES:
+            return True
+    return False
+
+
+def _keeps_a_record(handler) -> bool:
+    bound = handler.name
+    todo = list(handler.body)
+    while todo:
+        node = todo.pop()
+        # A nested def/lambda is not what runs when the handler does.
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue
+        if isinstance(node, ast.Raise):
+            return True
+        if bound and isinstance(node, ast.Name) and node.id == bound and isinstance(node.ctx, ast.Load):
+            return True
+        if isinstance(node, ast.Call):
+            fn = node.func
+            called = (fn.attr if isinstance(fn, ast.Attribute)
+                      else fn.id if isinstance(fn, ast.Name) else "")
+            if called in _RECORDING_CALLS:
+                return True
+            if any(kw.arg == "exc_info" for kw in node.keywords):
+                return True
+        todo.extend(ast.iter_child_nodes(node))
+    return False
+
+
+def _silent_broad_handlers(source: str) -> list:
+    """`[(line, header_text, body_text)]` for every broad handler in `source` that keeps no record."""
+    try:
+        tree = ast.parse(source or "")
+    except (SyntaxError, ValueError):
+        return []
+    lines = (source or "").splitlines()
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ExceptHandler) and _is_broad(node) and not _keeps_a_record(node):
+            header = lines[node.lineno - 1].strip() if 0 < node.lineno <= len(lines) else "except:"
+            body = ast.get_source_segment(source, node) or header
+            out.append((node.lineno, header, " ".join(body.split())))
+    return out
+
+
+def silent_broad_fallbacks(written: dict, *, before=None) -> str:
+    """The bounce text for an emit that ADDED a silent catch-everything handler, else "".
+
+    `written` is the write tool's ledger (`RepoWriteTools.files`); `before(path) -> str | None` is the
+    content the session started from -- the parent's file on an improve/merge, else the original on
+    disk. A handler present in `before` with the same text is not new. Pure and total, like the rule
+    above: runs inside an emit that has already cost minutes, so it never raises."""
+    found = []
+    for path in sorted((written or {})):
+        if not str(path).endswith(".py"):
+            continue
+        new = written.get(path)
+        if not isinstance(new, str):
+            continue
+        try:
+            old = before(path) if callable(before) else None
+        except Exception:  # noqa: BLE001 - an unreadable original is an absent one
+            old = None
+        seen: dict = {}
+        for _line, _hdr, body in _silent_broad_handlers(old or ""):
+            seen[body] = seen.get(body, 0) + 1
+        for line, header, body in _silent_broad_handlers(new):
+            if seen.get(body):
+                seen[body] -= 1
+                continue
+            found.append(f"  {path}:{line}  {header}")
+    if not found:
+        return ""
+    listed = found[:_MAX_LISTED_HANDLERS]
+    more = len(found) - len(listed)
+    return ("Your change adds an `except` that catches everything and keeps no record of what it "
+            "caught:\n" + "\n".join(listed) + (f"\n  ... and {more} more" if more > 0 else "")
+            + "\n\nIf the code behind it fails during evaluation, the fallback runs, the node measures "
+            "the unchanged path, and nothing anywhere says why -- you have no shell to find out, and "
+            "the next repair cannot read a cause that was never printed. Keep the fallback if you "
+            "want one, but make it say what broke: print `traceback.format_exc()` (or at least the "
+            "exception) before falling back, or re-raise. Fix it and call done again. If a handler "
+            "is deliberately silent, call done again unchanged; you will not be asked twice.")
