@@ -218,3 +218,23 @@ def validate_run_child(root, child, *, must_exist: bool = True,
 __all__ = ["REPARSE_POINT", "RUN_CHILD_DEFECTS", "RUN_CHILD_NAME_DEFECTS", "RunChild",
            "WINDOWS_RESERVED", "filesystem_identity", "is_reparse", "run_child_name_defect",
            "validate_run_child"]
+
+
+def contained_member(root, name) -> "Path | None":
+    """Where the relative member `name` lands under `root` — or None when it would land anywhere else.
+
+    RESOLVED containment, the rule `engine/workspace.py::WorkspaceSeeder.write_node_files` already
+    applies to a node's files, stated once for the writers that had their own weaker copy (review
+    2026-09-22, ENG3-15: the reviewer bundle checked `".." in parts or is_absolute()`). A lexical
+    check misses every escape the FILESYSTEM decides: a symlinked component, and on Windows a
+    drive-relative name (`C:x.py` is not absolute, joins by switching drive, and lands outside the
+    root). Resolving both sides and requiring the root to be a strict ancestor catches all of them the
+    same way on every host. `name`'s backslashes are separators (an agent may write either).
+    """
+    base = Path(root).resolve()
+    text = str(name).replace("\\", "/")
+    if not text or text.startswith("/"):
+        return None
+    target = (base / text).resolve()
+    return target if base in target.parents else None
+

@@ -31,9 +31,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
+
+from looplab.core.pathsafe import contained_member
 
 RO_CRATE_CONTEXT = "https://w3id.org/ro/crate/1.1/context"
 RO_CRATE_METADATA = "ro-crate-metadata.json"
@@ -121,15 +124,29 @@ def export_bundle(run_dir, out_dir) -> dict:
     if best is not None:
         champ = out_dir / "champion"
         champ.mkdir(exist_ok=True)
+        # The champion's files are AGENT-AUTHORED names, written out of the run's record into a
+        # directory a reviewer will open (review 2026-09-22, ENG3-15). Three things the lexical
+        # `".." / is_absolute()` check this replaced let through: a `champion/` that is a link to
+        # somewhere else (refused, never followed), a Windows drive-relative name (`C:x.py` lands
+        # outside), and a `solution.py` key — which overwrote the champion's CODE with a file of the
+        # same name while the crate listed both. `solution.py` is `best.code`, exactly as
+        # `engine/workspace.py::WorkspaceSeeder.write_node_files` treats it; every other name goes
+        # through `core/pathsafe.py::contained_member`, that writer's resolved-containment rule.
+        if champ.resolve() != out_dir.resolve() / "champion":
+            raise ValueError(f"{champ} resolves outside the bundle ({champ.resolve()}); refusing to "
+                             "write the champion's files through it")
         (champ / "solution.py").write_text(best.code or "", encoding="utf-8")
         members.append(("champion/solution.py", f"the champion's (node {best.id}) code, off the folded record"))
         for fn, src in sorted((best.files or {}).items()):
-            rel = Path("champion") / Path(str(fn).replace("\\", "/"))
-            if ".." in rel.parts or rel.is_absolute():
+            if os.path.normcase(str(fn).replace("\\", "/")) == os.path.normcase("solution.py"):
                 continue
-            (out_dir / rel).parent.mkdir(parents=True, exist_ok=True)
-            (out_dir / rel).write_text(str(src), encoding="utf-8")
-            members.append((rel.as_posix(), f"the champion's committed file {fn}"))
+            target = contained_member(champ, fn)
+            if target is None:
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(str(src), encoding="utf-8")
+            rel = target.relative_to(out_dir.resolve()).as_posix()
+            members.append((rel, f"the champion's committed file {fn}"))
         copy(f"nodes/node_{best.id}/mlebench_report.json", "the champion's official MLE-bench report")
     claims = {"plan": getattr(state, "research_plan", None),
               "memos": [{"index": i, "claims": memo.get("claims", []), "literature": memo.get("literature", [])}
