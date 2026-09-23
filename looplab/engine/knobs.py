@@ -156,6 +156,9 @@ class EngineKnobs:
     _budget_aware = Knob("budget_aware")
     # Q-3: the node-budget line in the proposal prompt (`proposal_cues._cue_node_budget`).
     _node_budget_cue = Knob("node_budget_cue", bool)
+    # Q-3: the fitted proposal brief. Read by three cues here and stamped per proposal onto the
+    # Researcher as `_brief_fit` (`proposal_cues._stamp_brief_switches`) for `roles._state_brief`.
+    _propose_brief_fit = Knob("propose_brief_fit", bool)
     _failure_reflection = Knob("failure_reflection")
     _watchdog_reflection = Knob("watchdog_reflection")
     _deep_repair = Knob("deep_repair")

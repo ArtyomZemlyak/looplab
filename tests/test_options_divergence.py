@@ -91,6 +91,10 @@ EXPECTED = {
     # PROMPT, and a prompt flag defaults off at every constructor, so a direct `Engine(...)` keeps
     # the historical proposal bytes.
     "node_budget_cue": (True, False),
+    # The FITTED proposal brief (Q-3, 2026-09-23): whole digest rows with a cut receipt, each fact
+    # once. ON in the product surface, OFF in the bare library on the row above's ground — a PROMPT
+    # flag, so a direct `Engine(...)` keeps the historical proposal bytes.
+    "propose_brief_fit": (True, False),
     "unified_agent": (True, False),
     # Layer 3 Card queue owns macro-action selection in the product surface (2026-08-04): the Card lane
     # is the intended selector, and it wins over `agent_drives_actions` when both are on. The bare

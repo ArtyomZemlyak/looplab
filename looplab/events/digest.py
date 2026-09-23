@@ -497,7 +497,23 @@ def trial_line(t) -> str:
 
 
 
-def _node_line(n, state=None) -> str:
+def error_last_line(error, limit: int = 100) -> str:
+    """The LAST non-empty line of a failure's error text, whitespace-collapsed and bounded — `""`
+    when there is none.
+
+    A Python failure's error is a traceback, and a traceback's HEAD is always the same 34 characters
+    ("Traceback (most recent call last):") followed by a file path: the line that says what went
+    wrong is the last one. Q-3 (the Researcher's context audit, 2026-09-23) measured the failure
+    cue cutting the head — `(n.error or "")[:60]` rendered `Traceback (most recent call
+    last):\\n  File "/runs/x/nodes/nod` for a node that failed with `ValueError: Input X contains
+    NaN` — so a failure the triage judge never explained reached the Researcher with no reason at
+    all. Render-only: this reads text the candidate's eval wrote and decides nothing.
+    """
+    lines = [line.strip() for line in str(error or "").splitlines() if line.strip()]
+    return " ".join(lines[-1].split())[:limit] if lines else ""
+
+
+def _node_line(n, state=None, *, fit: bool = False) -> str:
     if n.status is NodeStatus.failed:
         outcome = f"FAILED ({n.error_reason or 'error'})"
     else:
@@ -513,6 +529,13 @@ def _node_line(n, state=None) -> str:
     # next proposal then reacts to "the idea is unsound because X", not a bare taxonomy label.
     triage = getattr(n, "triage_rationale", "") if n.status is NodeStatus.failed else ""
     triage = f" — triage: {' '.join(triage.split())[:100]}" if triage else ""
+    # …and when NO judge explained it, the failure's OWN last line (`error_last_line`), under
+    # `Settings.propose_brief_fit` only (Q-3): an untriaged failure — an engine-final kill, a
+    # triage call that did not answer — otherwise reached this row as a bare `FAILED (crash)`,
+    # the kind with no reason, which is the one thing the "avoid repeating" set cannot act on.
+    if fit and n.status is NodeStatus.failed and not triage:
+        own = error_last_line(getattr(n, "error", ""))
+        triage = f" — error: {own}" if own else ""
     # THE COORDINATES THAT RAN, and HOW MANY OF THEM this node actually moved.
     #
     # `fmt_params(n.idea.params)` printed the PROPOSAL. Under `params_style: "none"` a repair moves
@@ -524,7 +547,7 @@ def _node_line(n, state=None) -> str:
     # made its 0.789365 unable to answer the question it was proposed to answer. Δ0 with a different
     # metric is its own signal — the difference was in CODE, not coordinates.
     from looplab.core.param_carriers import node_knob_comparison, node_params_brief
-    params = node_params_brief(n, cap=6)
+    params = node_params_brief(n, cap=6, compact=fit)
     delta = ""
     parents = list(getattr(n, "parent_ids", None) or [])
     if parents and state is not None:
@@ -796,11 +819,12 @@ def auto_char_cap(state: RunState) -> int:
     return min(6000, max(1200, 60 * len(state.nodes)))
 
 
-def sibling_digest(state: RunState, parent) -> str:
+def sibling_digest(state: RunState, parent, *, fit: bool = False) -> str:
     """M1/A0c operator-scoped memory (aira-dojo MEM_OPS `sibling`): what the OTHER children of
     the node being operated on (or the other root drafts, when drafting) already tried — the
     diversity-pressure context for draft/improve ("your siblings already tried A/B/C; do
-    something different"). Empty when there are no resolved siblings."""
+    something different"). Empty when there are no resolved siblings. `fit` renders each row the
+    way the working set above it does under `Settings.propose_brief_fit` (`_node_line`)."""
     pid = parent.id if parent is not None else None
     sibs = [n for n in state.nodes.values()
             if n.status is not NodeStatus.pending
@@ -813,7 +837,7 @@ def sibling_digest(state: RunState, parent) -> str:
     lines = ["\nSiblings of this expansion (already tried — push diversity, don't repeat):"]
     for n in sibs[:5]:
         why = " ".join((n.idea.rationale or "").split())[:90]
-        lines.append(_node_line(n, state) + (f" — {why}" if why else ""))
+        lines.append(_node_line(n, state, fit=fit) + (f" — {why}" if why else ""))
     return "\n".join(lines)
 
 
@@ -928,11 +952,17 @@ def ablation_attribution(state: RunState) -> dict:
 
 
 def experiments_digest(state: RunState, top_k: int = 5, worst_n: int = 3,
-                       char_cap: int = 0) -> str:
+                       char_cap: int = 0, *, fit: bool = False) -> str:
     """A compact, budgeted snapshot of the whole search appended to the Researcher's prompt — its
     always-on "working set". Lists the strongest experiments, the weakest + recent failures (so the
     model doesn't repeat dead ends), and the theme map. Depth lives behind the run-introspection
-    tools; this stays small (hard `char_cap`; <=0 = auto-scale with the run size, M5)."""
+    tools; this stays small (hard `char_cap`; <=0 = auto-scale with the run size, M5).
+
+    `fit` (`Settings.propose_brief_fit`, the proposal brief only — Q-3, 2026-09-23) changes three
+    things and nothing else: rows are rendered compactly (`_node_line(fit=True)`), a list that holds
+    EVERY scored node is titled for what it is rather than "Strongest", and the budget is spent in
+    WHOLE rows with a receipt — see `_fitted_digest` for the measurement. Off, the render and its
+    cut are the historical bytes."""
     nodes = state.nodes
     if not nodes:
         return ""
@@ -956,11 +986,21 @@ def experiments_digest(state: RunState, top_k: int = 5, worst_n: int = 3,
     # historical headline byte for byte — the new words appear only where they are the truth.
     invalid = f", {n_invalid} invalid (scored, but the eval refused to time it)" if n_invalid else ""
     lines = [f"\nSearch so far — {len(live)} experiment(s), {n_fail} failed{invalid}:"]
+    # The same rows as `lines`, grouped by section for `_fitted_digest`:
+    # `(key, title, rows, admission order of the rows)`.
+    sections: list[tuple[str, Optional[str], list[str], list[int]]] = []
 
     winners = top_nodes(state, top_k)
     if winners:
         lines.append("Strongest:")
-        lines += [_node_line(n, state) for n in winners]
+        lines += [_node_line(n, state, fit=fit) for n in winners]
+        # A list that holds EVERY scored node is not a list of the strongest: with three scored
+        # nodes the far corner that scored 100 (twenty times the baseline) was rendered under
+        # "Strongest:" and the "avoid repeating" section was empty, because `weak` below excludes
+        # every winner. Measured on the Q-3 toy render (S2/S4b). Titled for what it is, under `fit`.
+        scored = sum(1 for n in state.feasible_nodes() if node_metric(n) is not None)
+        title = ("Scored so far, best first:" if fit and 2 <= scored <= top_k else "Strongest:")
+        sections.append(("win", title, lines[-len(winners):], list(range(len(winners)))))
 
     # Tuning landscape of the best SWEPT experiment — a small representative sample (best→worst, even
     # spread) so the model reasons over the response surface, not just the winning point. Placed right
@@ -975,6 +1015,9 @@ def experiments_digest(state: RunState, top_k: int = 5, worst_n: int = 3,
         cap = f", showing {len(sel)} of {finite_n} best→worst" if len(sel) < finite_n else ""
         lines.append(f"Tuning of #{champ.id} ({len(champ.trials)} trials{cap}):")
         lines += [f"  {trial_line(t)}" for t in sel]
+        # A title with no finite trial under it is still printed (historically), so it is its own row.
+        sections.append(("tune", lines[-len(sel) - 1], lines[-len(sel):], list(range(len(sel))))
+                        if sel else ("tune", None, [lines[-1]], [0]))
 
     # Weakest feasible + the most recent failures — the "avoid repeating this" set.
     weak = [n for n in top_nodes(state, worst_n, worst=True) if n not in winners]
@@ -983,7 +1026,13 @@ def experiments_digest(state: RunState, top_k: int = 5, worst_n: int = 3,
     avoid = weak + [f for f in fails if f not in weak]
     if avoid:
         lines.append("Weakest / failures (avoid repeating):")
-        lines += [_node_line(n, state) for n in avoid]
+        lines += [_node_line(n, state, fit=fit) for n in avoid]
+        # Admitted under a tight budget newest FAILURE first (a failure row carries its why), then
+        # alternating with the weakest scored rows; rendered in the order above either way.
+        failed, weakest = list(range(len(weak), len(avoid))), list(range(len(weak)))
+        order = [index for pair in zip(failed, weakest) for index in pair]
+        order += [index for index in failed + weakest if index not in order]
+        sections.append(("avoid", lines[-len(avoid) - 1], lines[-len(avoid):], order))
 
     themes = theme_rollup(state)
     if themes:
@@ -991,6 +1040,7 @@ def experiments_digest(state: RunState, top_k: int = 5, worst_n: int = 3,
             f"{t} ×{d['count']}" + (f" (best {fmt_num(d['best_metric'])})" if d['best_metric'] is not None else "")
             for t, d in sorted(themes.items(), key=lambda kv: -kv[1]["count"]))
         lines.append(f"Themes: {chips}")
+        sections.append(("themes", None, [lines[-1]], [0]))
 
     # P3: run-level component attribution — which parts of the pipeline actually moved the
     # metric, aggregated over every ablation probe (steers refinement toward high-yield parts).
@@ -999,8 +1049,103 @@ def experiments_digest(state: RunState, top_k: int = 5, worst_n: int = 3,
         top = list(attr.items())[:5]
         lines.append("Component attribution (summed ablation impact): " +
                      "; ".join(f"{c} {fmt_num(d['impact'])} (×{d['n']})" for c, d in top))
+        sections.append(("attr", None, [lines[-1]], [0]))
 
+    if fit:
+        return _fitted_digest(lines[0], sections, char_cap)
     out = "\n".join(lines)
     if len(out) > char_cap:
+        out = out[:char_cap].rstrip() + " …"
+    return out
+
+
+# How `_fitted_digest`'s receipt names the rows it left out, per section. Keyed like the `sections`
+# it is handed; a one-row section is named whole.
+_FIT_SECTION_NOUNS = {"win": "strongest", "avoid": "weakest/failed", "tune": "tuning trials",
+                      "themes": "the theme map", "attr": "the component attribution"}
+
+
+def _fit_receipt(char_cap: int, sections: list, kept: dict) -> str:
+    """`_fitted_digest`'s one receipt line: how many rows of each section the budget left out and
+    the calls that return them — `""` when nothing was left out."""
+    left_out, trials = [], ""
+    for key, _title, rows, _order in sections:
+        missing = len(rows) - len(kept.get(key) or [])
+        if missing:
+            noun = _FIT_SECTION_NOUNS.get(key, key)
+            left_out.append(f"{missing} of {len(rows)} {noun}" if len(rows) > 1 else noun)
+            if key == "tune":
+                trials = "; read_experiment returns every trial"
+    if not left_out:
+        return ""
+    return (f"[not shown within this {char_cap}-char budget: {', '.join(left_out)} — "
+            f"list_experiments returns them (sort=recent includes the failed){trials}]")
+
+
+def _fitted_digest(header: str, sections: list, char_cap: int) -> str:
+    """The working set under its budget in WHOLE rows, the avoid-repeating rows kept beside the
+    strongest, and a receipt naming what the budget left out (`Settings.propose_brief_fit`).
+
+    THE CUT THIS REPLACES, measured (Q-3, the Researcher's context audit, 2026-09-23). The historical
+    digest joins every row and then cuts the STRING at `char_cap` — mid-row, with a bare ` …` that
+    says nothing about what went. The AUTO budget is 1,200 characters for any run under twenty nodes
+    (`auto_char_cap`), and on a repo-shaped run (eight dotted params per node, the params brief ~330
+    characters a row) it held three and a half "Strongest" rows: rendered from real events, a
+    12-node run lost 10 of 13 lines and a 20-node run lost 10 of 13, EVERY "Weakest / failures
+    (avoid repeating)" row among them — the one section the digest exists to carry into the next
+    proposal — and a 40-node run (budget 2,400) still lost every failure row.
+
+    THE RULE. A row is never cut mid-way except by its own per-row clip (a third of the budget, with
+    `…`), so one long row cannot eat the rest. When the whole render does not fit, rows are admitted
+    ROUND-ROBIN across the sections in their historical order — one row of the strongest, of the
+    tuning table, of the avoid-repeating set, the theme map, the component attribution, then the
+    next row of each — so no section is starved by the one above it, each paying its title with its
+    first row. Inside a section rows are admitted in its own order (best first; the avoid set its
+    newest failure first — `experiments_digest`), and a section stops at its first row that does not
+    fit, so what it shows is always a PREFIX of that order, never a ranking with a silent hole. The
+    admitted rows are rendered in the historical order, and one receipt line (`_fit_receipt`, whose
+    every-section-cut length is held back first) says how many rows of each section were left out
+    and which call returns them (the `core/context_budget.py::bounded_page` house rule: a bound says
+    what it cut).
+    """
+    def _render(kept: dict) -> list[str]:
+        out = [header]
+        for key, title, rows, _order in sections:
+            chosen = sorted(kept.get(key) or [])
+            if not chosen:
+                continue
+            if title:
+                out.append(title)
+            out += [rows[i] for i in chosen]
+        return out
+
+    full = "\n".join(_render({key: list(range(len(rows))) for key, _t, rows, _o in sections}))
+    if len(full) <= char_cap:
+        return full
+    row_cap = max(160, char_cap // 3)
+    sections = [(key, title, [row if len(row) <= row_cap else row[:row_cap - 1].rstrip() + "…"
+                              for row in rows], order)
+                for key, title, rows, order in sections]
+    budget = char_cap - len(header) - len(_fit_receipt(char_cap, sections, {})) - 1
+    kept: dict[str, list[int]] = {}
+    queues = [(key, title, rows, list(order)) for key, title, rows, order in sections if order]
+    while queues:
+        for entry in list(queues):
+            key, title, rows, queue = entry
+            index = queue.pop(0)
+            cost = len(rows[index]) + 1 + (len(title) + 1 if title and key not in kept else 0)
+            if cost > budget:
+                queues.remove(entry)                 # a section shows a PREFIX of its order
+                continue
+            kept.setdefault(key, []).append(index)
+            budget -= cost
+            if not queue:
+                queues.remove(entry)
+    lines = _render(kept)
+    receipt = _fit_receipt(char_cap, sections, kept)
+    if receipt:
+        lines.append(receipt)
+    out = "\n".join(lines)
+    if len(out) > char_cap:          # a pinned budget smaller than the header and receipt alone
         out = out[:char_cap].rstrip() + " …"
     return out

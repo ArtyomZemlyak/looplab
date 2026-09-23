@@ -372,7 +372,8 @@ class ToolUsingResearcher:
                                                      hyp_order=getattr(self, "_hyp_order", None),
                                                      board_cards=self._visible_board_cards,
                                                      memo_verdicts=bool(getattr(
-                                                         self, "_memo_verdict_cue", False)))
+                                                         self, "_memo_verdict_cue", False)),
+                                                     fit=bool(getattr(self, "_brief_fit", False)))
                 + answered_by_context(self.tools)
                 + _established_block(_researcher_workspace(getattr(self, "_established", None)))
                 + hint_block + cue +

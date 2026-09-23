@@ -198,7 +198,10 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   215 -> 216 (2026-09-23): `node_budget_cue` (Q-3) — each proposal is told the run's remaining
   //   node budget and its plan phase. A row because it changes a prompt and OFF is the historical
   //   bytes; the Python half moved in the same change.
-  assert.equal(Object.keys(schema.fieldByKey).length, 216)
+  //   216 -> 217 (2026-09-23): `propose_brief_fit` (Q-3) — the proposal's working set fitted to its
+  //   budget in whole rows with a receipt, each fact once. A row because it changes a prompt and
+  //   OFF is the historical bytes; the Python half moved in the same change.
+  assert.equal(Object.keys(schema.fieldByKey).length, 217)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

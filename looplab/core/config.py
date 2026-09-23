@@ -919,6 +919,30 @@ class Settings(BaseSettings):
     # reader, the engine knob `_node_budget_cue`. It records no Card steering entry (the Card's
     # steering vocabulary is closed) and moves no metric, champion, selection or violation.
     node_budget_cue: bool = True
+    # THE PROPOSAL BRIEF, FITTED (Q-3, the Researcher's context audit, 2026-09-23). Rendered through
+    # the real `cli._engine` + `Engine.run` over a scripted toy run, and on repo-shaped states built
+    # from real events, the proposal's working set failed the model four ways, each measured:
+    # (1) the digest's budget (1,200 chars under twenty nodes) cut the STRING mid-row with a bare ` …`,
+    # and on a repo-shaped run it held three and a half "Strongest" rows — 10 of 13 lines lost at 12
+    # nodes, EVERY "Weakest / failures (avoid repeating)" row among them, still every failure row at
+    # 40 nodes; (2) with five or fewer scored nodes every one was listed under "Strongest:" (a far
+    # corner scoring 100, twenty times the baseline); (3) facts twice or in two spellings — the
+    # header's raw `0.08000000000000004` beside the digest's `0.08`, "Refine from node N" repeating
+    # "Best so far" on every champion improve, the ~400-char concept JSON twice when the run has a
+    # concept base, the repo time budget twice (~1,000 duplicate chars); (4) an untriaged failure's
+    # WHY cut to the traceback's head ("Traceback (most recent call last):" + a path) or dropped, and
+    # a board row showing one of a belief's two failed attempts. ON: the digest spends its budget in
+    # WHOLE rows (strongest and avoid-repeating alternating) with a receipt naming what it left out
+    # (`events/digest.py::_fitted_digest`); a list of every scored node is titled for what it is; one
+    # number format and each fact once; a failure's own last error line; every node of a board
+    # belief. Reaches ONLY the two propose paths (triage, the repair critic, the macro chooser and
+    # deep research keep their briefs). It changes a PROMPT and buys no call, so `false` reproduces
+    # the historical prompt BYTE FOR BYTE, every constructor defaults it OFF, and a pre-field snapshot
+    # resumes OFF (its `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row). Read through ONE reader, the engine
+    # knob `_propose_brief_fit`, stamped per proposal onto the Researcher as `_brief_fit`
+    # (`engine/proposal_cues.py::ProposalCuesMixin._stamp_brief_switches`). It moves no metric,
+    # champion, selection or violation.
+    propose_brief_fit: bool = True
     # A4 (LATS-style): feed a summary of the most recent FAILED branches (operator + error reason)
     # back into the proposal prompt so the proposer reflects on and avoids repeating them. ON by
     # default: it is SELECTIVE by construction (injects only when recent failures exist — the
@@ -3454,6 +3478,12 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # the field's comment and `tests/test_node_budget_cue.py` hold that `false` is the historical
     # prompt, byte for byte.
     "node_budget_cue": False,
+    # THE FITTED PROPOSAL BRIEF, added 2026-09-23 defaulting ON (Q-3). (a) holds. (b) is the row
+    # above's DIFFERENT-PROMPT ground: ON, every proposal prompt's working set, header, board rows and
+    # three engine cues render differently. (c) is `False`, pointable at every commit before this
+    # one; the field's comment and `tests/test_propose_brief_fit.py` hold that `false` is the
+    # historical prompt, byte for byte.
+    "propose_brief_fit": False,
     # THE PROBE'S KERNEL READ CONFINEMENT, added 2026-08-21 defaulting to True. (a) holds — a
     # pre-2026-08-21 snapshot names no such field. (b) is not paid work, but it is the strongest
     # column there is on a RESUME: the rung fails CLOSED. On a box whose kernel offers no Landlock,

@@ -403,6 +403,8 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         # …and the proposal prompt's node-budget line (Q-3, 2026-09-23), ON in Settings and OFF in
         # the bare library for the same reason (a prompt flag).
         node_budget_cue=settings.node_budget_cue,
+        # …and the fitted proposal brief (Q-3, 2026-09-23), a prompt flag on the same ground.
+        propose_brief_fit=settings.propose_brief_fit,
         # …and the seven above, so the differential compares a NON-DEFAULT value on both sides.
         stage_check_tools=settings.stage_check_tools,
         llm_cost_limit=settings.llm_cost_limit,

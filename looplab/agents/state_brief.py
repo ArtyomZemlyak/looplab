@@ -76,6 +76,29 @@ def next_board_prompt_cards(
     return selected
 
 
+def _is_attempted_live(card) -> bool:
+    """Is this card LIVE work on a question that already has an experiment — the one predicate the
+    "ALREADY on the board" rows and their belief groups share (see the docstring below for each
+    clause: a seed to show, evidence or a node in flight, and not a closed work item)."""
+    if not (card.seed_statement or "").strip():
+        return False
+    if not (card.evidence or card.status in {"building", "running", "evaluated"}):
+        return False
+    return not (card.status in {"dropped", "gated"} or card.verdict == "abandoned"
+                or card.dropped_reason is not None)
+
+
+def _attempted_belief_groups(state: RunState) -> dict:
+    """`{belief: [live cards, oldest first]}` over `_is_attempted_live` — what one "ALREADY on the
+    board" row stands for when `Settings.propose_brief_fit` renders it (`board_prompt_lines`)."""
+    groups: dict = {}
+    for card in state.research_cards():
+        if _is_attempted_live(card):
+            belief = card.belief_id or hypothesis_statement_digest(card.seed_statement)
+            groups.setdefault(belief, []).append(card)
+    return groups
+
+
 def attempted_board_prompt_cards(state: RunState, shown=(), *,
                                  limit: int = BOARD_PROMPT_CARDS) -> list:
     """The board rows a proposer must CHECK AGAINST: research questions that already have work.
@@ -118,12 +141,7 @@ def attempted_board_prompt_cards(state: RunState, shown=(), *,
     rows = []
     seen_beliefs: set = set()
     for c in state.research_cards():
-        if c.id in already or not (c.seed_statement or "").strip():
-            continue
-        if not (c.evidence or c.status in {"building", "running", "evaluated"}):
-            continue
-        if (c.status in {"dropped", "gated"} or c.verdict == "abandoned"
-                or c.dropped_reason is not None):
+        if c.id in already or not _is_attempted_live(c):
             continue
         belief = c.belief_id or hypothesis_statement_digest(c.seed_statement)
         if belief in shown_beliefs or belief in seen_beliefs:
@@ -145,7 +163,7 @@ def attempted_board_prompt_cards(state: RunState, shown=(), *,
 
 def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
                        board_cards: Optional[list] = None, *,
-                       for_proposal: bool = True) -> list[str]:
+                       for_proposal: bool = True, fit: bool = False) -> list[str]:
     """The board a prompt must read before it names a direction — BOTH halves, ONE vocabulary.
 
     Extracted from `_state_brief` so the deep-research memo prompt renders the SAME rows in the SAME
@@ -243,10 +261,25 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
     # claimable queue: it deliberately does not carry the "return its CARD_ID" contract above,
     # because these work items are owned. A NODES list with no verdict yet is work IN FLIGHT.
     attempted = attempted_board_prompt_cards(state, open_hyps)
+    # EVERY NODE OF THE BELIEF, not only its first card's (`Settings.propose_brief_fit`, Q-3). A row
+    # is one BELIEF (see `attempted_board_prompt_cards`), but it printed the FIRST card's status and
+    # evidence, so a belief tested twice read as tested once: on the Q-3 toy render two nodes failed
+    # with the same error on "large x keeps improving" (card-3, card-4) and the row said
+    # `CARD_ID=card-3 STATUS=failed NODES=[3]` — the second attempt, the one that makes it a
+    # pattern, was not on the board at all. Under `fit` the row is the belief's NEWEST live card
+    # (its status is the question's current state: a retry still running reads as running) with the
+    # union of every live card's nodes.
+    grouped = _attempted_belief_groups(state) if fit else {}
     if attempted:
         lines.append("Research questions ALREADY on the board (each already has an experiment — "
                      "do NOT propose one of these again as if it were new):")
         for card in attempted:
+            group = grouped.get(card.belief_id or hypothesis_statement_digest(card.seed_statement))
+            if group:
+                card = group[-1]
+                nodes = sorted({node for member in group for node in member.evidence})
+            else:
+                nodes = sorted(card.evidence)
             # …AND WHETHER THE EXPERIMENT THAT RAN IS STILL THE ONE THIS CARD PROPOSED. The arbiter
             # existed and nothing consumed it, which made this block quietly dangerous: a card's
             # `params` is the receipt-bound PROPOSAL, and under `params_style: "none"` the Developer
@@ -261,7 +294,7 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
             lines.append(
                 f"- CARD_ID={card.id} BELIEF_ID={card.belief_id or ''} "
                 f"STATUS={card.status} VERDICT={card.verdict} "
-                f"NODES={sorted(card.evidence)} "
+                f"NODES={nodes} "
                 + (f"{drift} " if drift else "")
                 + f"SEED_STATEMENT_JSON={json.dumps(card.seed_statement, ensure_ascii=False)}")
         if for_proposal:
@@ -356,12 +389,19 @@ def bind_idea_to_board_card(idea: Idea, cards: list) -> Idea:
 
 def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
                  hyp_order: Optional[list[str]] = None, board_cards: Optional[list] = None,
-                 *, for_proposal: bool = True, memo_verdicts: bool = False) -> str:
+                 *, for_proposal: bool = True, memo_verdicts: bool = False,
+                 fit: bool = False) -> str:
     # Function-local for the same reason as the `experiments_digest` import below: `agents` may not
     # take a module-level edge on `events`. `unscored_metric_clause` is the ONE spelling of "the
     # eval refused to produce this number" (doc 53 §4a) — the headline count and this line are two
     # renders of one fact and must not drift into two vocabularies.
-    from looplab.events.digest import unscored_metric_clause
+    #
+    # `fit` is `Settings.propose_brief_fit` (Q-3, the Researcher's context audit, 2026-09-23),
+    # passed ONLY by the two propose paths: the header states each fact once and every number in
+    # the working set's one format, the digest spends its budget in whole rows with a receipt, and
+    # a board row carries every node of its belief. Off (every other caller, and the historical
+    # propose) the brief is the historical bytes.
+    from looplab.events.digest import fmt_num, node_metric, unscored_metric_clause
     best = state.best()
     lines = [f"Goal: {state.goal}", f"Optimize direction: {state.direction}."]
     # THE COORDINATES THAT RAN, not the ones that were asked for. `Idea.params` is a PROPOSAL, and
@@ -373,14 +413,33 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
     # that never existed. `node_params_brief` puts the applied value first and the proposal in
     # brackets beside the ones that moved.
     from looplab.core.param_carriers import node_params_brief
-    if best is not None:
-        lines.append(f"Best so far: node {best.id} metric={best.metric} "
-                     f"params={node_params_brief(best)}"
-                     + unscored_metric_clause(best))
-    if parent is not None:
-        lines.append(f"Refine from node {parent.id}: params={node_params_brief(parent)} "
-                     f"metric={parent.metric}"
-                     + unscored_metric_clause(parent))
+    if fit:
+        # ONE NUMBER, ONE FORMAT, STATED ONCE. The historical header printed `best.metric` raw —
+        # `metric=0.08000000000000004` two lines above a digest row saying `metric=0.08` for the
+        # same node — and the RAW value, where the digest ranks and prints the confirmed mean
+        # (`node_metric`), so a confirmed champion read as two different numbers. And on every
+        # improve of the champion (S2-S6 of the Q-3 render) "Refine from node N" repeated the
+        # line above it word for word.
+        if best is not None:
+            lines.append(f"Best so far: node {best.id} metric={fmt_num(node_metric(best))} "
+                         f"params={node_params_brief(best, compact=True)}"
+                         + unscored_metric_clause(best))
+        if parent is not None and best is not None and parent.id == best.id:
+            lines.append(f"Refine from node {parent.id} (the best so far).")
+        elif parent is not None:
+            lines.append(f"Refine from node {parent.id}: "
+                         f"params={node_params_brief(parent, compact=True)} "
+                         f"metric={fmt_num(node_metric(parent))}"
+                         + unscored_metric_clause(parent))
+    else:
+        if best is not None:
+            lines.append(f"Best so far: node {best.id} metric={best.metric} "
+                         f"params={node_params_brief(best)}"
+                         + unscored_metric_clause(best))
+        if parent is not None:
+            lines.append(f"Refine from node {parent.id}: params={node_params_brief(parent)} "
+                         f"metric={parent.metric}"
+                         + unscored_metric_clause(parent))
     # PART V (B): a delta author cannot subtract from an invisible reference. Surface the run base and
     # effective primary-parent membership, bounded so a malformed taxonomy cannot consume the role context.
     # Replay uses the union of all actual parents for a merge; the proposal role sees the primary parent
@@ -408,11 +467,11 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
     # failures, theme map) so the Researcher proposes with awareness of what's already been tried,
     # not just `best` + `parent`. Depth (full experiments, code, data) lives behind the run tools.
     from looplab.events.digest import experiments_digest, lineage_lessons, sibling_digest
-    lines.append(experiments_digest(state, char_cap=digest_cap))
+    lines.append(experiments_digest(state, char_cap=digest_cap, fit=fit))
     # M1/A0c operator-scoped memory: draft/improve additionally see their SIBLINGS (diversity
     # pressure — aira-dojo MEM_OPS `sibling`) and, when refining, the LESSONS distilled from the
     # lineage under the refined node (D6 insight backpropagation, Arbor's Backpropagate step).
-    lines.append(sibling_digest(state, parent))
+    lines.append(sibling_digest(state, parent, fit=fit))
     lines.append(lineage_lessons(state, parent))
     # Signal-delivery (§1): the latest deep-research memo's takeaway. Its `recommended_directions`
     # already ride as standing hints, but the summary/findings/claims were recorded-but-unread — this
@@ -458,5 +517,6 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
     # The board itself — both halves, in the one spelling every prompt that must not re-propose
     # an existing question shares (`board_prompt_lines`). The deep-research memo prompt renders
     # the SAME rows; it had this exact defect and did not get this exact fix.
-    lines.extend(board_prompt_lines(state, hyp_order, board_cards, for_proposal=for_proposal))
+    lines.extend(board_prompt_lines(state, hyp_order, board_cards, for_proposal=for_proposal,
+                                    fit=fit))
     return "\n".join(line for line in lines if line)

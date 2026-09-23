@@ -367,8 +367,8 @@ WRAPPED_ROLE_ATTRS: tuple[str, ...] = ("base", "fallback", "inner")
 # the agentic path and the plain path would ask the model different questions and no test would care.
 #
 # A strict subset by design. `_digest_cap` is a numeric cap consumed separately, `_hyp_order` orders
-# the open-hypothesis board inside `_state_brief`, `_memo_verdict_cue` is a BOOLEAN threaded into
-# `_state_brief` the same way (config, not prose — the `_digest_cap` shape exactly), and
+# the open-hypothesis board inside `_state_brief`, `_memo_verdict_cue` and `_brief_fit` are BOOLEANS
+# threaded into `_state_brief` the same way (config, not prose — the `_digest_cap` shape exactly), and
 # `_novelty_stance` / `_steering_context` /
 # `_cross_run_advisory_receipt` are read structurally rather than concatenated as prose.
 #
@@ -387,7 +387,11 @@ RESEARCHER_PROMPT_CUES: tuple[str, ...] = (
 RESEARCHER_HINT_ATTRS: tuple[str, ...] = (
     "_digest_cap", "_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint",
     "_novelty_stance", "_hyp_order", "_steering_context", "_cross_run_advisory_receipt",
-    "_gpu_budget_hint", "_time_budget_hint", "_memo_verdict_cue", "_gpu_footprint_cue")
+    "_gpu_budget_hint", "_time_budget_hint", "_memo_verdict_cue", "_gpu_footprint_cue",
+    # Q-3 (2026-09-23): `Settings.propose_brief_fit` as the BOOLEAN both propose paths hand
+    # `_state_brief` (the `_memo_verdict_cue` shape), stamped per proposal by
+    # `engine/proposal_cues.py::ProposalCuesMixin._stamp_brief_switches`.
+    "_brief_fit")
 """Ephemeral hint attributes communicated to the ACTIVE Researcher via `setattr` and consumed
 with `getattr(obj, name, default)`. Writers: the engine (`_digest_cap` in orchestrator.py
 `__init__`; `_complexity_hint`/`_sweep_hint` in engine/proposal_cues.py `_set_complexity_hint`;
@@ -671,7 +675,8 @@ class LLMResearcher:
                                                      hyp_order=getattr(self, "_hyp_order", None),
                                                      board_cards=visible_cards,
                                                      memo_verdicts=bool(getattr(
-                                                         self, "_memo_verdict_cue", False)))
+                                                         self, "_memo_verdict_cue", False)),
+                                                     fit=bool(getattr(self, "_brief_fit", False)))
                                         + "\n" + self.space_hint +
                                         hint_block + cues +
                                         "\nPropose the next Idea (operator, params, rationale, concept_mode, "

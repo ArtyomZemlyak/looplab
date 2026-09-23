@@ -100,7 +100,11 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 216
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 217
+    # 216 -> 217 on 2026-09-23: `propose_brief_fit` (Q-3, the Researcher's context audit) -- the
+    # proposal's working set fitted to its budget in whole rows with a receipt, each fact once. A ROW
+    # because it changes a PROMPT and OFF is the historical bytes an operator must be able to get
+    # back. Verified by INTERSECTION: 216 keys common to the previous keyset plus exactly that one.
     # 215 -> 216 on 2026-09-23: `node_budget_cue` (Q-3, the Researcher's context audit) -- each
     # proposal is told the run's remaining node budget and its plan phase. A ROW because it changes a
     # PROMPT and OFF is the historical bytes an operator must be able to get back. Verified by
@@ -396,7 +400,10 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # proposal prompt's node-budget line (a curated row, so BOTH counts move together). An AST
     # scan of `Settings`' annotated assignments against the pre-change tree reports exactly
     # `['node_budget_cue']` added and `[]` removed.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 251
+    # 251 -> 252 on 2026-09-23: `propose_brief_fit` (Q-3) -- the fitted proposal brief (a curated
+    # row, so BOTH counts move together); the AST scan against the pre-change tree reports exactly
+    # `['propose_brief_fit']` added.
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 252
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

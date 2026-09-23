@@ -445,7 +445,17 @@ def resolve_declaration_python(paths: dict, parts) -> dict:
     return out
 
 
-def node_params_brief(node, *, cap: int = 12) -> str:
+def _compact_value(value) -> str:
+    """One number format for a coordinate in a prompt: the working set's own `%.4g` spelling
+    (`core/fitness.py::format_metric` as `events/digest.py::fmt_num` calls it), so `0.3` never
+    reaches a model as `0.30000000000000004` beside a digest row that says `0.3`."""
+    from looplab.core.fitness import format_metric
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return str(value)
+    return format_metric(value, absent="?", precision=4, exponent=False, absent_nan=False)
+
+
+def node_params_brief(node, *, cap: int = 12, compact: bool = False) -> str:
     """What this node's coordinates WERE, with what was proposed in brackets where the two differ.
 
     THE ORDER IS THE POINT. `Idea.params` is a PROPOSAL — with `params_style: "none"` the engine
@@ -464,6 +474,14 @@ def node_params_brief(node, *, cap: int = 12) -> str:
     Falls back to the declaration, unmarked, when no applied record exists — a pre-2026-08-20 node,
     or one whose metric was never bound. Absent evidence is not evidence of agreement, so nothing is
     bracketed in that case: the reader sees exactly what it saw before.
+
+    `compact` (the proposal brief under `Settings.propose_brief_fit`, Q-3, 2026-09-23) renders the
+    DECLARED fallback the way the applied branch already renders — `name=value` pairs under the SAME
+    `cap`, which the fallback ignored — with every number in the working set's one `%.4g` format.
+    Measured on a repo-shaped state (eight dotted params per node), the fallback's Python-dict
+    `repr` made each digest row ~330 characters, with float noise such as `0.30000000000000004`, so
+    the digest's 1,200-char AUTO budget held three and a half rows and cut the rest. Off, both
+    branches render exactly as before.
     """
     idea = getattr(node, "idea", None)
     declared = dict(getattr(idea, "params", None) or {})
@@ -471,6 +489,12 @@ def node_params_brief(node, *, cap: int = 12) -> str:
     record = provenance.get("applied_params") if isinstance(provenance, dict) else None
     applied = record.get("applied") if isinstance(record, dict) else None
     if not isinstance(applied, dict) or not applied:
+        if compact and declared:
+            names = list(declared)
+            shown = ", ".join(f"{name}={_compact_value(declared[name])}"
+                              for name in names[:max(0, cap)])
+            omitted = max(0, len(names) - cap)
+            return shown + (f", +{omitted} more" if omitted else "")
         return repr(declared) if declared else "(none recorded)"
     diverged = record.get("diverged") if isinstance(record, dict) else None
     moved = {}
@@ -479,12 +503,13 @@ def node_params_brief(node, *, cap: int = 12) -> str:
             if isinstance(row, dict) and isinstance(row.get("param"), str):
                 moved[row["param"]] = row.get("declared")
     parts = []
+    shown = _compact_value if compact else (lambda v: v)
     for name in sorted(applied)[:max(0, cap)]:
         value = applied[name]
         if name in moved:
-            parts.append(f"{name}={value} (proposed {moved[name]})")
+            parts.append(f"{name}={shown(value)} (proposed {shown(moved[name])})")
         else:
-            parts.append(f"{name}={value}")
+            parts.append(f"{name}={shown(value)}")
     omitted = max(0, len(applied) - cap)
     tail = f", +{omitted} more" if omitted else ""
     # Name the divergence COUNT even when the diverged entries fall outside the cap: "these are the

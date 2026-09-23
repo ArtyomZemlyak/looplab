@@ -232,6 +232,10 @@ class EngineOptions:
     # row (`tests/test_options_divergence.py`) — because it changes a PROMPT, and a prompt flag
     # defaults off at every constructor (CLAUDE.md): a bare `Engine(...)` keeps the historical bytes.
     node_budget_cue: bool = False
+    # Q-3 (2026-09-23): the FITTED proposal brief (`Settings.propose_brief_fit`) — whole digest rows
+    # with a cut receipt, each fact once. A divergence-table row on `node_budget_cue`'s ground: a
+    # prompt flag, OFF here so a bare `Engine(...)` keeps the historical bytes.
+    propose_brief_fit: bool = False
     failure_reflection: bool = False     # A4: reflect on recent failed branches in the prompt
     watchdog_reflection: bool = False    # feed recent live-watchdog (train-monitor/ASHA) flags to proposals
     deep_repair: bool = False            # C3: structured failure-taxonomy repair context

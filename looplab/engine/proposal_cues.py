@@ -328,6 +328,18 @@ class ProposalCuesMixin:
 
         calib = "; ".join(f"node {n.id}: {n.eval_seconds / 60:.0f} min" + _outcome(n) for n in timed)
         limit = self._experiment_time_budget()
+        if limit is not None and getattr(self, "_propose_brief_fit", False):
+            # THE BUDGET ONCE, THE MEASUREMENT HERE (`Settings.propose_brief_fit`, Q-3). With a
+            # known budget `_time_budget_hint_text` states the same ceiling a few lines below —
+            # "KILLED with NO metric", the total_steps × per-step estimate, "data prep and scoring
+            # have their OWN ceilings", "a smaller experiment that COMPLETES beats a bigger one" —
+            # so on a repo task every proposal carried the budget twice, ~1,000 of its ~2,450
+            # characters a duplicate (measured by stamping a real Engine with an eval spec). What
+            # only this cue carries is the wall clock the run's own nodes MEASURED, so that is
+            # what it keeps; the steering receipt below is unchanged.
+            hint = (f"\nExperiment wall-clock measured so far (the TIME BUDGET below is the ceiling "
+                    f"each stage runs under): {calib}." if calib else "")
+            return hint, [{"kind": "experiment_time_budget", "seconds": limit}]
         # `(train+eval)` said the budget was a POOL the two spent between them, and it is not:
         # `_run_stages` gives EACH declared stage its own copy of the number and the protected
         # scoring stage runs under the operator's own timeout on top (`_time_budget_hint_text`
@@ -385,12 +397,20 @@ class ProposalCuesMixin:
         if not fails:
             return "", []
 
+        fit = getattr(self, "_propose_brief_fit", False)
+
         def _why(n) -> str:
             # Signal-delivery (§1): prefer the crash-triage VERDICT (the LLM's judgment of
             # why the idea/code failed) over the raw stderr tail — that judgment is the most
             # expensive reasoning in the failure path and was previously dropped by the fold.
             tr = " ".join((getattr(n, "triage_rationale", "") or "").split())[:90]
-            return tr or (n.error or "")[:60]
+            if tr or not fit:
+                return tr or (n.error or "")[:60]
+            # …and without one, the error's LAST line (`Settings.propose_brief_fit`, Q-3): the
+            # first 60 characters of a traceback are "Traceback (most recent call last):" and a
+            # file path, never the line that says what failed (`digest.error_last_line`).
+            from looplab.events.digest import error_last_line
+            return error_last_line(n.error, 90)
         summ = "; ".join(f"node {n.id} ({n.error_reason}): {_why(n)}" for n in fails)
         return (f"\nReflection — recent failures to avoid repeating: {summ}.",
                 [{"kind": "failure_reflection", "node_ids": [n.id for n in fails]}])
@@ -508,7 +528,12 @@ class ProposalCuesMixin:
                                                         concept_inheritance_context)
         concept_context = concept_inheritance_context(
             state, parent.id if parent is not None else None)
-        hint = ("\nUNTRUSTED_RECORDED_CONCEPT_DATA="
+        # ONCE PER PROMPT under `Settings.propose_brief_fit` (Q-3): `roles._state_brief` already
+        # splices this exact JSON — the same `concept_inheritance_context(state, parent)` over the
+        # same state — a screen above, so every proposal on a run with a concept base carried the
+        # ~400-character block twice (measured on the Q-3 toy render). The instruction below stays.
+        hint = ("" if getattr(self, "_propose_brief_fit", False) else
+                "\nUNTRUSTED_RECORDED_CONCEPT_DATA="
                 + bounded_untrusted_concept_json(concept_context))
         if concept_context["delta_safe"]:
             hint += (
@@ -916,6 +941,13 @@ class ProposalCuesMixin:
                 setattr(_r, "_digest_cap", cap)
             except (AttributeError, TypeError, ValueError):
                 pass
+        try:
+            # `Settings.propose_brief_fit` (Q-3): the brief's layout switch, stamped here and ONLY
+            # here, so the primary and every pooled lane read one value. A bare Engine settles it
+            # OFF, the default a double of this mixin reads too.
+            setattr(_r, "_brief_fit", bool(getattr(self, "_propose_brief_fit", False)))
+        except (AttributeError, TypeError, ValueError):
+            pass
 
     def _time_budget_hint_text(self) -> str:
         """The per-eval WALL-CLOCK ceiling the Researcher sizes the SCHEDULE against, as prose.
