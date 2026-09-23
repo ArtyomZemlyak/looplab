@@ -89,7 +89,17 @@ def test_thread_side_append_site_asserts_its_own_membership():
     # test went red over an event that is outside the property entirely. A fold-ignored append cannot
     # widen `SETUP_THREAD_APPENDABLE`, which is what this test exists to stop — so exclude the
     # diagnostic types by NAME, from the registry, rather than by loosening the count.
-    module_src = inspect.getsource(eval_dispatch)
+    #
+    # The members ENG1-04 step 4d moved into this module are the non-Card DISPATCH: they run on the
+    # event loop that owns the dispatch, never on the eval worker thread this property is about, and
+    # `_skip_if_aborted`'s zero-cost `node_failed` is the main task's own append. They are excluded
+    # BY NAME, so a folded append added to any other member of the module still counts.
+    main_task = {"_dispatch_evals", "_fold_if_tail_moved", "_skip_if_aborted"}
+    assert main_task <= set(vars(eval_dispatch.EvalDispatchMixin)), (
+        "a main-task member left the module — re-point this exclusion")
+    module_src = "\n".join(
+        inspect.getsource(member) for name, member in vars(eval_dispatch.EvalDispatchMixin).items()
+        if callable(member) and name not in main_task)
     appends = [line.strip() for line in module_src.splitlines() if "self.store.append(" in line]
     folded = [line for line in appends
               if not any(f"({name}" in line or f"({name}," in line
