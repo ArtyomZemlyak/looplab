@@ -21,7 +21,7 @@ from looplab.core import _pathsafe
 from looplab.tools._base import (RESULT_CAP, RowCountTooLarge, clip, fn_spec,
                                  jsonl_row_count)
 from looplab.tools.perm_modes import (
-    DEFAULT_MODE, authorize, default_approver)
+    DEFAULT_MODE, authorize, clip_approval_preview, default_approver)
 from looplab.tools.retrieval import glob_files, grep, read_file
 from looplab.tools.vectorstore import InMemoryVectorStore, Item, cosine, hash_embed
 from looplab.trust.cross_run import LessonScope
@@ -255,10 +255,19 @@ class KnowledgeWriteTools:
             if not isinstance(raw_tags, (list, tuple)):   # a junk model may pass a scalar
                 raw_tags = [raw_tags]
             tags = [str(t) for t in raw_tags if str(t).strip()]
+            # THE CARD SHOWS THE NOTE (review 2026-09-22, TAT-05). It showed `title[:4000]` — the
+            # one field that is not saved as the knowledge — so "Approve" wrote a body the approver
+            # never saw into the SHARED knowledge base every future run's Researcher reads
+            # (`kb_search`): an instruction injected into this turn only had to title its note
+            # innocently. The preview is what `body` below renders, bounded the one way every
+            # approval card is, so a cut is SAID; the scope still binds the whole note by digest.
             action = {
                 "tool": "remember", "tool_kind": "knowledge_write",
                 "label": f"remember {title[:80]}", "verb": "save a shared knowledge note",
-                "path": str(self.dir), "preview": title[:4000],
+                "path": str(self.dir),
+                "preview": clip_approval_preview(
+                    f"# {title}\n\n{note}\n"
+                    + ("\n_tags: " + ", ".join(tags) + "_\n" if tags else "")),
                 "scope": {
                     "knowledge_dir": str(self.dir),
                     "note_digest": hashlib.sha256(json.dumps(

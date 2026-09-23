@@ -485,7 +485,7 @@ class GatedMcpTools:
         return self.execute_result(name, args).content
 
     def execute_result(self, name: str, args: dict, *, cancel_check=None) -> ToolResult:
-        from looplab.tools.perm_modes import authorize
+        from looplab.tools.perm_modes import authorize, clip_approval_preview
         try:
             args_json = json.dumps(args or {}, sort_keys=True, separators=(",", ":"),
                                    ensure_ascii=False, allow_nan=False)
@@ -493,9 +493,12 @@ class GatedMcpTools:
             args_json = "<invalid arguments>"
         from looplab.core.redact import redact_secrets
         args_digest = hashlib.sha256(args_json.encode("utf-8")).hexdigest()
+        # The arguments the approver is shown, bounded the ONE way every approval card is: it was
+        # `[:2000]`, silent, so an argument past character 2,000 reached "Approve" unseen while the
+        # scope bound all of it by digest (review 2026-09-22, TAT-05).
         action = {"tool": name, "tool_kind": "mcp", "label": f"MCP tool {name}",
                   "verb": f"call MCP tool `{name}`",
-                  "preview": redact_secrets(args_json)[:2000], "cwd": "",
+                  "preview": clip_approval_preview(redact_secrets(args_json)), "cwd": "",
                   "scope": {"tool": name, "arguments_digest": args_digest}}
         refusal = authorize(
             self._mode, self._approver, action,

@@ -23,7 +23,7 @@ from typing import Optional
 
 from looplab.tools._base import RESULT_CAP, fn_spec
 from looplab.tools.perm_modes import (
-    DEFAULT_MODE, authorize, default_approver)
+    DEFAULT_MODE, authorize, clip_approval_preview, default_approver)
 from looplab.trust.cross_run import cross_run_text
 
 
@@ -132,7 +132,9 @@ class ConceptGovernanceTools:
         """Apply the shared permission policy to one mutation. Returns None to PROCEED, else a message."""
         action = {"tool": name, "tool_kind": "concept_edit", "label": label,
                   "verb": "edit the shared cross-run concept taxonomy", "path": str(self.dir),
-                  "preview": preview[:_MAX_APPROVAL_PREVIEW_CHARS], "scope": scope}
+                  # Bounded the one way every approval card is, so a cut is SAID (TAT-05).
+                  "preview": clip_approval_preview(preview, _MAX_APPROVAL_PREVIEW_CHARS),
+                  "scope": scope}
         return authorize(
             self.mode, self.approver, action,
             denied=(f"({name} is disabled in read-only plan mode. Switch to default/acceptEdits/auto to "
