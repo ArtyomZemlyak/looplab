@@ -173,3 +173,25 @@ def test_contradiction_scan_all_fail_is_not_reported_as_no_contradictions(tmp_pa
     assert res["contradictions"] == []       # ...but nothing could be judged
     assert res["n_judged"] == 0
     assert res["adjudicated"] is False       # so: INCONCLUSIVE, not "no contradictions found"
+
+
+def test_an_inert_path_failure_is_said_to_be_no_evidence_about_the_idea(tmp_path):
+    """`inert_path` (2026-09-23): the node's own declared new path never ran, so a lesson that stands
+    on it -- "this idea does not help" -- is the node_63 over-generalization with nothing under it."""
+    from looplab.trust.lesson_guard import _evidence_text
+    s = EventStore(tmp_path / "events.jsonl")
+    s.append("run_started", {"run_id": "t", "task_id": "dr", "goal": "g", "direction": "max"})
+    s.append("node_created", {"node_id": 1, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": "prefix cache"}})
+    s.append("node_failed", {"node_id": 1, "error": "[inert_path] ...", "reason": "inert_path"})
+    s.append("node_created", {"node_id": 2, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": "other"}})
+    s.append("node_failed", {"node_id": 2, "error": "boom", "reason": "crash"})
+    s.append("lessons_distilled", {"at_node": 3, "trigger": "run_end", "count": 1, "pairs": [],
+                                   "lessons": [{"statement": "x", "outcome": "", "evidence": [1, 2]}]})
+    st = fold(s.read_all())
+    txt = _evidence_text(_lesson_records(st)[0], st)
+    inert_line = next(line for line in txt.splitlines() if line.startswith("#1"))
+    crash_line = next(line for line in txt.splitlines() if line.startswith("#2"))
+    assert "NEVER RAN" in inert_line and "no evidence about the idea" in inert_line
+    assert "NEVER RAN" not in crash_line

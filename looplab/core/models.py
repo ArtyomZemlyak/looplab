@@ -1357,11 +1357,20 @@ DEVELOPER_ERROR_PREFIX = "(developer error:"
 # model saying "the check was wrong" must not thereby score the node (docs/36). What it buys is the
 # record and the DIRECTIVE: `crash_repair._repair_error_context` points the repair at the check
 # instead of asking a Developer to rewrite an experiment it has just been told is correct.
+# `inert_path` (2026-09-23) is the SIXTEENTH, and the first that describes a run which SUCCEEDED: it
+# exited 0 and printed its metric, but an activation marker the node itself DECLARED never appeared
+# (`engine/activation.py`). Measured on a MiniOneRec inference run: a node's new prefill path died on
+# an attribute its library had removed, a fallback switched it off, and the node scored 1.004 with
+# every list byte-identical to its parent -- recorded as an idea that does not help, when the idea
+# was never executed. It is a contract check like `expect_failed`, not a reading of the log's words:
+# the node named the line, the engine only checks it was printed. Repairable, because the fault is
+# the IMPLEMENTATION ("make the path you built run"), and in `metric_salvage.NEVER_SALVAGED_REASONS`,
+# because the number it printed measured the path the node meant to replace.
 FAILURE_REASONS: tuple[str, ...] = ("crash", "timeout", "oom", "setup", "no_metric", "drift",
                                     "unclassified",
                                     "expect_failed", "check_failed", "diverged", "stalled",
                                     "needs_failed", "not_learning", "check_false_positive",
-                                    "rules_violation")
+                                    "rules_violation", "inert_path")
 
 # The ONE reason that is not eligible for inline repair, and the criterion is
 # `tests/test_inline_repair_reason_coverage.py`'s own: a reason should end a node with no repair

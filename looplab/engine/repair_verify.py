@@ -1594,5 +1594,7 @@ def silent_broad_fallbacks(written: dict, *, before=None) -> str:
             "the unchanged path, and nothing anywhere says why -- you have no shell to find out, and "
             "the next repair cannot read a cause that was never printed. Keep the fallback if you "
             "want one, but make it say what broke: print `traceback.format_exc()` (or at least the "
-            "exception) before falling back, or re-raise. Fix it and call done again. If a handler "
-            "is deliberately silent, call done again unchanged; you will not be asked twice.")
+            "exception) before falling back, or re-raise -- and if the path it guards is NEW, declare "
+            "an `activation_markers` line that path prints when it runs, so an evaluation where it "
+            "fell back is caught instead of scored. Fix it and call done again. If a handler is "
+            "deliberately silent, call done again unchanged; you will not be asked twice.")

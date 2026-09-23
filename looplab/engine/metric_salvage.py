@@ -253,7 +253,10 @@ def unbound_subject_violation_rows(prov, metric, mode: str) -> list:
 # result. `oom` stays out for its own older reason (a memory failure says nothing about whether the
 # number that was already printed is real), and `setup` is IN, which is why its classification had
 # to stop reading a stderr prefix the candidate can write: see `RunResult.setup_failed`.
-NEVER_SALVAGED_REASONS = frozenset({"drift", "setup", "timeout", "diverged"})
+NEVER_SALVAGED_REASONS = frozenset({"drift", "setup", "timeout", "diverged",
+                                    # The number exists and is real -- about the WRONG code: the
+                                    # node's declared new path never ran (`engine/activation.py`).
+                                    "inert_path"})
 
 # Stage statuses that VETO salvage even when a reader can find a number.
 #

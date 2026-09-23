@@ -87,7 +87,14 @@ def _evidence_text(rec: dict, state: RunState) -> str:
         if n is None:
             parts.append(f"#{nid}: (no such experiment)")
         elif n.status is NodeStatus.failed:
-            parts.append(f"#{nid} {n.operator}: FAILED ({n.error_reason or 'error'}) — "
+            # `inert_path` is said in words, because it is the one failure that is NO evidence about
+            # the idea at all: the node's own declared new path never ran (`engine/activation.py`).
+            # Measured 2026-09-23 -- such a node used to score its parent's number and read, to any
+            # distiller, as "this idea does not help"; a lesson standing on it is exactly the
+            # over-generalization this guard exists to flag.
+            inert = (" — its new path NEVER RAN, so this is no evidence about the idea"
+                     if n.error_reason == "inert_path" else "")
+            parts.append(f"#{nid} {n.operator}: FAILED ({n.error_reason or 'error'}){inert} — "
                          f"{' '.join((n.idea.rationale or '').split())[:90]}")
         else:
             parts.append(f"#{nid} {n.operator}: metric={n.metric} — "

@@ -238,7 +238,7 @@ def test_the_concepts_guide_enumerates_every_failure_reason():
         f"{len(FAILURE_REASONS)} of FAILURE_REASONS")
     # And the WORD introducing it has to agree with the number of members.
     words = {8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve", 13: "thirteen",
-             14: "fourteen", 15: "fifteen"}
+             14: "fourteen", 15: "fifteen", 16: "sixteen"}
     expected = words.get(len(FAILURE_REASONS))
     assert expected, "extend the number-word table for the new registry size"
     head = text[max(0, text.index(anchor) - 200):text.index(anchor)]

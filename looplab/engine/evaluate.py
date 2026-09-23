@@ -1842,6 +1842,19 @@ class EvaluateMixin:
         # the STRIPPED text while keeping the unstripped bytes when there is content leaves
         # every non-blank tail byte-identical.
         _stderr_tail = self._redact(res.stderr[-500:])
+        _inert = getattr(res, "inert_path", None)
+        if _inert:
+            # Said FIRST and in full: this attempt did not fail in any way its stderr shows, so the
+            # tail below is context -- often the fallback's own traceback -- and not the diagnosis.
+            _named = ", ".join(repr(m) for m in (_inert.get("missing") or []))
+            return (f"[inert_path] the evaluation finished and printed metric {_inert.get('metric')!r}, "
+                    f"but the activation marker(s) this node declared its new path prints never "
+                    f"appeared: {_named}. So that number measured the path this node meant to "
+                    "replace, not the change -- it is withheld. Find why the new path did not run "
+                    "(a fallback that caught an exception, a flag or environment variable that was "
+                    "never set, a branch that is never taken), and make it run. If the change is "
+                    "meant to be conditional, declare no marker for it.\n"
+                    + (_stderr_tail if _stderr_tail.strip() else ""))
         _text = (_stderr_tail if _stderr_tail.strip() else "") or (
             f"metric drift: {res.drift}" if res.drift is not None else
             f"exit={res.exit_code} timed_out={res.timed_out} no_metric{_no_metric_hint}"
@@ -3087,6 +3100,21 @@ class EvaluateMixin:
         # before the silence. NOT for a real deadline timeout (that is still mid-training).
         a.ok = (a.res.metric is not None and not a.res.timed_out
               and (a.res.exit_code == 0 or getattr(a.res, "stalled", False)))
+        # THE NODE'S OWN ACTIVATION CONTRACT (`engine/activation.py`). Asked of a SUCCESS, before the
+        # invocation settles, because a success is exactly what it can overturn: a declared marker
+        # that nothing printed means the number measured the path this node meant to replace. The
+        # metric is withheld as `drift` withholds one, and `_failure_reason` names it `inert_path`.
+        if a.ok:
+            from looplab.engine.activation import missing_markers, read_markers
+            _declared = read_markers(a.workdir)
+            if _declared:
+                _missing = missing_markers(
+                    _declared, texts=(a.res.stdout or "", a.res.stderr or ""),
+                    workdir=a.workdir, since=a._t0)
+                if _missing:
+                    a.res.inert_path = {"missing": _missing, "metric": a.res.metric}
+                    a.res.metric = None
+                    a.ok = False
         # …and the receipt closes, BEFORE any of the branches below can write a terminal or return.
         # The pair must bracket the evaluator invocation and nothing else: settling it inside one of
         # those branches would leave every other branch's invocation open, which reads as a crash

@@ -1088,12 +1088,43 @@ class LLMRepoDeveloper:
         keeps its historical bounce — while it is off."""
         return {"reject_prompt": self._REJECT_PROMPT} if self._prompt_truths else {}
 
+    # THE ACTIVATION CONTRACT, as the model reads it at the moment of answering. One property on both
+    # `done`s (build and repair): the node that WROTE a switchable path is the only party that knows
+    # what its running looks like. See `engine/activation.py` for why it is declared, not guessed.
+    _ACTIVATION_MARKERS_PROPERTY = {
+        "type": "array", "items": {"type": "string"},
+        "description": (
+            "OPTIONAL, and worth it whenever your change can be switched off or fall back -- a flag, "
+            "a try/except around new code, a capability check. List 1-3 exact text fragments your "
+            "NEW code prints (stdout or stderr) ONLY when that new path actually runs, e.g. print("
+            "'prefix cache: ON'). After the evaluation the engine checks that each one appeared; if "
+            "one did not, the metric is withheld -- it measured the old path, not your change -- and "
+            "the node comes back to you for repair with that marker named. This replaces any "
+            "declaration the node inherited; pass [] to declare none.")}
+
+    def _record_activation(self, args, write) -> str:
+        """Persist the `activation_markers` a `done` declared, then return its summary.
+
+        Written as `looplab_activation.json` into the node's files, beside `looplab_stages.json` and
+        for the same reason: the evaluator reads the node's WORKDIR, and every developer backend
+        already ships its files there. Omitted -> an inherited declaration stands (the parent's path
+        is presumably still in the code). An explicit [] writes an EMPTY declaration rather than
+        deleting the file, so no deletion semantics are needed to retract one."""
+        args = args if isinstance(args, dict) else {}
+        if "activation_markers" in args:
+            from looplab.engine.activation import (ACTIVATION_MANIFEST_NAME, manifest_text,
+                                                   normalize_markers)
+            write.files[ACTIVATION_MANIFEST_NAME] = manifest_text(
+                normalize_markers(args.get("activation_markers")))
+        return args.get("summary", "")
+
     def _emit_spec(self) -> dict:
         from looplab.tools._base import fn_spec
         return fn_spec("done",
                         "Call once the file(s) are written and the eval command would run and print "
                         "its metric. Briefly summarize what you wrote.",
-                        {"summary": {"type": "string"}}, [])
+                        {"summary": {"type": "string"},
+                         "activation_markers": self._ACTIVATION_MARKERS_PROPERTY}, [])
 
     def _repair_emit_spec(self) -> dict:
         """The repair session's `done`, which carries ONE extra field the build sessions must not
@@ -1109,6 +1140,7 @@ class LLMRepoDeveloper:
                         "Call once the repair is written and the eval would run. Briefly summarize "
                         "what you changed.",
                         {"summary": {"type": "string"},
+                         "activation_markers": self._ACTIVATION_MARKERS_PROPERTY,
                          # The Developer's ONLY way to say "the stage that broke is not the stage
                          # that is wrong". Everything the engine does with it is in
                          # `engine/eval_stages.py::_rollback_start`; the two things the model has to
@@ -1510,7 +1542,7 @@ class LLMRepoDeveloper:
             # so the ledger stays the 3 exploration briefs (propose/stages/plan), never K-step bloat.
             run_phase(self.client, CompositeTools([write, EnvInspectTools(self._grader_packages(), task_python=self._task_python())] + self._scout_tools(write)),
                       messages, self._emit_spec(), label=f"Developer·implement step {idx}/{total}",
-                      handoff=False, finalize=lambda a: (a or {}).get("summary", ""),
+                      handoff=False, finalize=lambda a: self._record_activation(a, write),
                       validate=validate,
                       **(self._reject_kwargs() if validate is not None else {}),   # Q-1
                       fallback=lambda m: "", on_budget=self._note_session_budget,
@@ -2561,7 +2593,7 @@ class LLMRepoDeveloper:
                 def _finish(a):
                     if error:
                         self.last_rollback_stage = str((a or {}).get("rollback_stage", "")).strip()[:64]
-                    return (a or {}).get("summary", "")
+                    return self._record_activation(a, write)
 
                 # A REPAIR THAT DESCRIBES AN EDIT IT NEVER MADE gets ONE chance to actually make it.
                 # Measured on v8 node 1: 51 minutes, 108 tool calls, zero writes, and an emit naming
@@ -2921,7 +2953,7 @@ class LLMRepoDeveloper:
             # briefs + read-cache, but no wasted summary call (handoff=False).
             run_phase(self.client, tools, messages, self._emit_spec(),
                       label="Developer·implement", handoff=False,
-                      finalize=lambda a: (a or {}).get("summary", ""),
+                      finalize=lambda a: self._record_activation(a, write),
                       validate=validate_build,
                       **self._reject_kwargs(),                 # Q-1: a build's `done` is not an "idea"
                       fallback=lambda m: "", on_budget=self._note_session_budget,

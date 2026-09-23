@@ -201,6 +201,11 @@ def _failure_reason(res) -> str:
     diagnostician could not answer, which is a fact about the diagnostician and not about the eval.)"""
     if getattr(res, "drift", None) is not None:
         return "drift"
+    # The ENGINE's own check of a contract the node DECLARED (`engine/activation.py`), set only on an
+    # attempt that otherwise succeeded -- so no reason below it can also hold, and none above it
+    # outranks it but the trust gate that already discarded the metric.
+    if getattr(res, "inert_path", None):
+        return "inert_path"
     if res.timed_out:
         return "timeout"
     # THE SETUP FLAG, not the stderr prefix. `run_command_eval` sets `setup_failed` on the branch
@@ -530,6 +535,7 @@ _RULE_BLIND_REASON_WORDS = {
     "setup": "setup failure", "no_metric": "missing metric", "drift": "uncorroborated metric",
     "expect_failed": "artifact contract failure", "check_failed": "stage check failure",
     "needs_failed": "input contract failure", "check_false_positive": "disputed stage check",
+    "inert_path": "inactive new path",
 }
 
 # --- The triage-verdict contract ---------------------------------------------------------------

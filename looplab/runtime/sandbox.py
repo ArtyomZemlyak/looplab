@@ -467,6 +467,11 @@ class RunResult:
     # "tolerance"}. When set, `metric` is forced to None (an uncorroborated metric is not
     # trusted) and the orchestrator records a `spec_drift` event. None on the normal path.
     drift: Optional[dict] = None
+    # INERT PATH (`engine/activation.py`): set when an eval that otherwise succeeded did not print an
+    # activation marker the node DECLARED -- `{"missing": [...], "metric": <the value it printed>}`.
+    # Like `drift`, `metric` is then forced to None: the number measured the path the node meant to
+    # replace, not its change. None on the normal path and on every node that declared no marker.
+    inert_path: Optional[dict] = None
     # Multi-objective (#5, RepoTask): extra reported metrics {name: value} (audit) and unmet
     # hard constraints [{name,value,max,min}]. A node with violations stays measured but is
     # excluded from best-selection. None on the normal path.

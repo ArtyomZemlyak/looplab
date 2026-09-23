@@ -207,7 +207,19 @@ class _TextHost:
         return text
 
 
-_REASONS = sorted(FAILURE_REASONS) + ["idea_rejected", "developer_crash", "unknown_kind", ""]
+# FROZEN at the reasons the two digests below were pinned against, and not `sorted(FAILURE_REASONS)`:
+# this grid asserts that the OFF rung keeps the HISTORICAL bytes, and a reason added later has no
+# historical bytes to keep -- enumerating the live registry made every new member a digest change
+# that said nothing about the rule under test. `inert_path` (2026-09-23) is the first such member.
+_PINNED_REASONS = ("check_failed", "check_false_positive", "crash", "diverged", "drift",
+                   "expect_failed", "needs_failed", "no_metric", "not_learning", "oom",
+                   "rules_violation", "setup", "stalled", "timeout", "unclassified")
+_REASONS = sorted(_PINNED_REASONS) + ["idea_rejected", "developer_crash", "unknown_kind", ""]
+
+
+def test_the_pinned_grid_names_every_reason_but_the_ones_added_after_it():
+    assert set(FAILURE_REASONS) - set(_PINNED_REASONS) == {"inert_path"}
+    assert set(_PINNED_REASONS) <= set(FAILURE_REASONS)
 
 
 def _context_grid(record=None, **kw):

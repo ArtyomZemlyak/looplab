@@ -91,7 +91,7 @@ OPPOSED_DIRECTIVES = (
 # A copy of `engine/metric_salvage.py::NEVER_SALVAGED_REASONS`, deliberately (see
 # `triage_corpus.TORCH_OOM_MARKERS` for why a bench copies rather than imports what it measures).
 # `tests/test_triage_bench.py` asserts the two still agree.
-NEVER_SALVAGED_REASONS = frozenset({"drift", "setup", "timeout", "diverged"})
+NEVER_SALVAGED_REASONS = frozenset({"drift", "setup", "timeout", "diverged", "inert_path"})
 
 # The two members `metric_salvage` ALSO guards with the authenticated flag itself (`res.timed_out`,
 # `res.diverged`), immediately after the reason test. Getting the label wrong on one of these does

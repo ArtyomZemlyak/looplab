@@ -201,7 +201,12 @@ ENGINE_FINAL_REASONS: tuple[str, ...] = (
     # nothing a diagnostician could add changes what happened — and it is the one member the engine
     # did not itself measure but was TOLD by the command it launched (`triage.DECLARABLE_REASONS`).
     "rules_violation",
-    "needs_failed", "expect_failed")
+    "needs_failed", "expect_failed",
+    # The engine's own check of a contract the node DECLARED (`engine/activation.py`): a marker the
+    # node said its new path prints never appeared in an eval that otherwise succeeded. There is no
+    # failure text for a diagnostician to read -- the run was clean -- and nothing it could say would
+    # change which lines were printed.
+    "inert_path")
 
 # The deterministic answers `_failure_reason` still PRODUCES that are handed to the diagnostician as
 # evidence rather than kept as answers. Every one is a reason no out-of-band channel witnessed

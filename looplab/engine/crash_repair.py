@@ -938,6 +938,19 @@ class CrashRepairMixin:
             return ("[failure kind: not_learning]\n" + error + "\n"
                     + (_DIAGNOSED_NOT_LEARNING_LEAD if _diagnosed else _WATCHDOG_NOT_LEARNING_LEAD)
                     + _NOT_LEARNING_FIX)
+        if reason == "inert_path":
+            # NOT "diagnose the crash": nothing crashed that the engine saw. The eval exited 0 and
+            # printed a number; what failed is the node's own claim about what running looks like
+            # (`engine/activation.py`). The usual cause is a fallback that caught the real error, so
+            # the directive points at the log for it -- and at the declaration itself, since a marker
+            # can also be wrong while the path runs fine.
+            return ("[failure kind: inert_path]\n" + error + "\n"
+                    "Your change did not fail loudly; it did not RUN. Look in the evaluation log "
+                    "for why the new path was skipped: a try/except that caught an exception and fell "
+                    "back (print its traceback if it does not), a flag, environment variable or "
+                    "config value that was never set, a condition that is never true on this data. "
+                    "Fix that and keep the marker. Only if the path DID run and the marker text is "
+                    "wrong, correct the marker you declare in `done`.")
         if reason == "needs_failed":
             # The one directive that must NOT say "diagnose the crash": there was no crash. The stage
             # was refused before it started, so its code is not evidence of anything yet, and the two
