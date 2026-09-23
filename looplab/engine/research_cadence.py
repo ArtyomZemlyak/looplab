@@ -1052,6 +1052,35 @@ class ResearchCadenceMixin:
         if self.deep_researcher is None:
             return ResearchMemo(at_node=len(state.nodes), trigger=trigger,
                                 summary="(deep research unavailable: no model configured)")
+        # THE EVAL'S OWN CONTRACT REACHES THIS ROLE, and until 2026-09-18 it did not.
+        # `_set_complexity_hint` stamps `_gpu_budget_hint` and `_time_budget_hint` on the researcher
+        # it is handed — the PROPOSE path's `_r` — and this stage calls a DIFFERENT object
+        # (`self.deep_researcher`), so neither cue has ever been on it. MEASURED over every memo on
+        # this box: of 244, the wall clock appears in **0**, stage reuse in **0** and the faiss CPU
+        # fallback in 2, while the artifact contract (41%) and OOM (30%) — facts the memo can reach
+        # through its own tools and the run brief — appear routinely. The absence tracks what is
+        # STAMPED, not what the model can think about.
+        #
+        # It is the most expensive omission on this box: `runs/e5small-dr-unified-v11` node 2 was
+        # SIGKILLed by its own 10-hour wall at 84% of a schedule that measured 11.3 h, discarding
+        # 10.0 GPU-hours and then paying a full retrain. A stage that mines hard negatives pays ~51
+        # min to the faiss CPU fallback, and v14 is aimed at mining — a research memo that does not
+        # know the wall clock cannot size a mining sweep to fit inside it.
+        #
+        # REUSED TEXT, NOT A NEW CUE. Both hints already exist, are already worded, and already
+        # carry the numbers (`_time_budget_hint_text` even states the headroom and the grace); the
+        # only defect was the object they landed on. Writing a third cue here would have put a
+        # second spelling of the same ceiling in front of the same provider — the drift
+        # `RESEARCHER_PROMPT_CUES`' own comment exists to prevent. Stamped per call for the reason
+        # `_stamp_time_budget_hint` gives: `self.timeout` is retuned mid-run by `budget_extend` and
+        # by a granted Strategist decision, so a stale ceiling on a pooled role outlives the retune.
+        # Swallowing contract, same as the stampers': a role that rejects attribute writes (Toy)
+        # must not cost the run its memo over a prompt cue.
+        try:
+            self._stamp_gpu_budget_hint(researcher=self.deep_researcher)
+            self._stamp_time_budget_hint(researcher=self.deep_researcher)
+        except Exception:  # noqa: BLE001 — a prompt cue may never cost this stage its memo
+            pass
         try:
             if trace:
                 with self.tracer.span("deep_research", new_trace=True, trigger=trigger):

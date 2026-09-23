@@ -504,7 +504,8 @@ def _goal_excerpt(goal, brief_text) -> str:
     return f"{head} [... {dropped} chars of the goal elided ...] {tail}"
 
 
-def state_brief(state: RunState, max_nodes: int = 40) -> str:
+def state_brief(state: RunState, max_nodes: int = 40, *,
+                prompt_cues: tuple[str, ...] = ()) -> str:
     """Coverage-aware bounded view for deep research, plus THE BOARD THIS STAGE ITSELF FILLS.
 
     The prompt always receives the current champion, then samples early seeds, eligible top metrics,
@@ -765,10 +766,22 @@ def state_brief(state: RunState, max_nodes: int = 40) -> str:
         )
 
     def render(rows) -> str:
+        # THE CUES RIDE LAST, and the order is `agents/roles.py::RESEARCHER_PROMPT_CUES`' own rule
+        # rather than a choice made here: each budget states the CEILING for its axis, and the
+        # reader must end on the number it has to act on. In the PROPOSE prompt they are the final
+        # two lines; here the experiments list follows `prefix_lines`, so appending them to
+        # `prefix_lines` would have buried the wall clock above forty experiment rows.
+        #
+        # INSIDE the fitting loop, deliberately. `retained` grows while `render` fits under
+        # `_STATE_BRIEF_MAX_CHARS`, so counting the cues here means a tight brief drops an
+        # EXPERIMENT row rather than the ceiling — which is the right way round: an experiment is
+        # recoverable through `read_run_experiment`, and a ceiling the memo never saw is what cost
+        # `runs/e5small-dr-unified-v11` node 2 ten GPU-hours to its own wall.
         ordered = sorted(rows, key=lambda item: item[0].id)
         return "\n".join(
             prefix_lines + [coverage_line(len(rows)), "experiments:"]
             + [line for _node, line in ordered]
+            + [cue for cue in prompt_cues if str(cue or "").strip()]
         )
 
     retained = []
@@ -906,7 +919,9 @@ class DeepResearcher:
             # already retrieved. This stage runs before most of them on a cold start, so the block
             # is usually empty and the prompt is byte-identical; on a cadence firing mid-run it is
             # the one place the stage can see what the loop already paid for.
-            {"role": "user", "content": self._budget_note() + state_brief(state) +
+            {"role": "user", "content": self._budget_note() + state_brief(
+                state, prompt_cues=(getattr(self, "_gpu_budget_hint", ""),
+                                   getattr(self, "_time_budget_hint", ""))) +
                 answered_by_context(self.tools) + self._established_block() +
                 "\nReview the run. Consult sources if useful, then emit your memo."},
         ]

@@ -62,7 +62,9 @@ def test_a_missing_accountant_never_raises():
 def test_the_user_turn_leads_with_the_budget():
     import inspect
     src = inspect.getsource(DeepResearcher.research)
-    assert "self._budget_note() + state_brief(state)" in src, (
+    # `state_brief(` rather than `state_brief(state)`: the call now also hands the brief the eval's
+    # ceilings (`prompt_cues=`), which ride LAST inside it — the note still LEADS the turn.
+    assert "self._budget_note() + state_brief(" in src, (
         "the note must LEAD the user turn; appended after the brief it competes with the board "
         "rows the brief already fills to its character budget")
 
