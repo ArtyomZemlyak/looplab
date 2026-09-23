@@ -24,6 +24,7 @@ from typing import NamedTuple, Optional
 
 import anyio
 
+from looplab.core.containment import contain
 from looplab.core.errors import budget_stop_leaf
 from looplab.core.llm import BudgetExceeded, model_override
 from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, retry_tail_cas
@@ -5405,7 +5406,10 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         (each pair's per-build state — developer.last_files, researcher hints — is captured at node_created
         before the next batch reuses it, so reuse is safe). `role_factory` None or `n<=1` -> just the
         primary pair, and the caller stays serial. Fresh pairs are what isolate per-build role state so
-        concurrent drafts don't clobber each other."""
+        concurrent drafts don't clobber each other. A pair that cannot be BUILT (the factory raises or
+        returns no pair, a pooled Developer backend raises) caps the fan-out at the pairs already
+        built — logged with its exception and counted by `contain`, never raised unless it is the
+        run's spend ceiling — and the next call tries the factory again."""
         if n <= 1 or self.role_factory is None:
             return [(self.researcher, self.developer)]
         if self._role_pool is None:
@@ -5416,9 +5420,28 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         while len(self._role_pool) < n - 1:
             try:
                 pair = self.role_factory()
-            except Exception:  # noqa: BLE001 — a factory failure just caps fan-out, never crashes the run
+            except Exception as exc:  # noqa: BLE001 — a factory failure just caps fan-out, never crashes the run
+                # SAID, AND COUNTED (review 2026-09-22, ENG1-14 — doc 50 ES1-04). This `break` was
+                # silent, so a transient failure while BUILDING a pooled pair left only its
+                # consequence behind: the Layer-5 producer found no pair and closed its head
+                # `producer_failed` — the word for "the producer RAN and gave up" — which bars the
+                # Card from speculative election for the rest of the run, with no error text and no
+                # log line anywhere (driven: 1 pair, producer pair None, 0 log records). Capping the
+                # fan-out is still the containment; the failure is now on the span (`contain`, which
+                # also re-raises a spend ceiling) and in the log with its traceback, and
+                # `speculation.py::_start_head_producer` RETRIES a head whose pair could not be built
+                # instead of closing it.
+                contain("pooled role pair could not be built", exc)
+                _LOG.warning(
+                    "role_factory raised building pooled role pair %d; fan-out is capped at %d "
+                    "pair(s) for this call and the next one retries the factory: %s: %s",
+                    len(self._role_pool) + 1, len(self._role_pool) + 1, type(exc).__name__, exc,
+                    exc_info=True)
                 break
             if not (isinstance(pair, tuple) and len(pair) == 2):
+                _LOG.warning(
+                    "role_factory returned %s, not a (researcher, developer) pair; fan-out is "
+                    "capped at %d pair(s)", type(pair).__name__, len(self._role_pool) + 1)
                 break
             # THE PRIMARY'S FREE LAYERS, NONE OF ITS PAID ONES (review 2026-09-22, SCJ-02). The
             # factory's pair is bare, and the Layer-5 producer PROPOSES on it: under
@@ -5433,7 +5456,14 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             if self._pool_developer_override is not None and self.developer_factory is not None:
                 try:
                     pair = (pair[0], self.developer_factory(self._pool_developer_override))
-                except Exception:  # noqa: BLE001 - cap fan-out if the selected backend cannot be built
+                except Exception as exc:  # noqa: BLE001 - cap fan-out if the selected backend cannot be built
+                    # The same silent cap as the factory's above, one step later — said the same way.
+                    contain("pooled developer backend could not be built", exc)
+                    _LOG.warning(
+                        "developer_factory(%r) raised building pooled role pair %d; fan-out is "
+                        "capped at %d pair(s) for this call: %s: %s",
+                        self._pool_developer_override, len(self._role_pool) + 1,
+                        len(self._role_pool) + 1, type(exc).__name__, exc, exc_info=True)
                     break
             self._role_pool.append(pair)
         # workers are constructed lazily, after Engine.__init__ bound the primary role

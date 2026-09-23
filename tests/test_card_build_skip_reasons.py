@@ -200,6 +200,27 @@ def test_the_crash_recovery_close_NAMES_its_refusal():
         f"(`card_gone`) and a dropped one is PRESENT and dead (`card_dropped`), got {sorted(slugs)}")
 
 
+def test_a_head_with_no_producer_pair_is_released_producer_unavailable_never_producer_failed():
+    """`producer_failed` is the word for "the producer RAN and gave up", and the fold bars the Card
+    from speculative election on it. The no-pair close in `_start_head_producer` runs no producer, so
+    it closes `stale` with the registered `producer_unavailable` reason (review 2026-09-22, ENG1-14 —
+    doc 50 ES1-04). The retry and its bound are DRIVEN in `tests/test_card_speculation_engine.py`;
+    this pins the slug's one emitter where the vocabulary is.
+
+    MUTATION: restore `skipped="producer_failed"` there, or drop the reason."""
+    tree = ast.parse(_SRC)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "_start_head_producer")
+    coarse = [kw.value.value for call in ast.walk(fn)
+              if isinstance(call, ast.Call)
+              and getattr(call.func, "attr", None) == "_append_card_build_done"
+              for kw in call.keywords
+              if kw.arg == "skipped" and isinstance(kw.value, ast.Constant)]
+    assert coarse == ["stale"], coarse
+    assert _kwarg_slugs().get("_start_head_producer") == {"producer_unavailable"}
+    assert "producer_unavailable" in CARD_BUILD_SKIP_REASONS
+
+
 def test_the_two_dead_shapes_are_not_ONE_word():
     """They have different remedies — a merged card's work is under its canonical, a dropped card's
     is over — so collapsing them re-creates the coarse `stale` one level down.

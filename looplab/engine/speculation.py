@@ -97,6 +97,11 @@ CARD_BUILD_SKIP_REASONS = (
     "idea_changed",              # the reserved idea differs from the built one
     "commit_failed",             # the node commit raised
     "commit_not_ours",           # the committed node is not this build's
+    # NO PRODUCER PAIR could be had for the head — no `role_factory`, or one that built no pair for
+    # `_PRODUCER_PAIR_RETRY_TURNS` turns running — so no producer ever started and nothing was
+    # billed. Closed `stale`, never `producer_failed`: the Card is not at fault and stays electable
+    # (review 2026-09-22, ENG1-14 — doc 50 ES1-04; `_start_head_producer` has the account).
+    "producer_unavailable",
 )
 
 # WHY a consumed raw proposal staged nothing BEFORE the staging fence could say — the two
@@ -824,6 +829,12 @@ class SpeculationMixin:
         reads no researcher telemetry off this pair (the Developer's best-of-N pick it still reads);
         the build producer never proposes, and a value found there would be another proposal's.
         `search/researcher_stack.py` carries the full account and the proof the free layer is free.
+
+        None ANSWERS TWO QUESTIONS, and only one of them is permanent: no `role_factory` is wired,
+        or one is and `_build_role_pairs` built no usable pair on this call (it logs why). Nothing is
+        cached on a None, so the next call asks the factory again — which is what lets
+        `_start_head_producer` retry an open head instead of closing it (review 2026-09-22,
+        ENG1-14).
         """
 
         self._ensure_speculation_state()
@@ -2520,6 +2531,18 @@ class SpeculationMixin:
                 return True  # force a fresh fold before any scorer consult
         return False
 
+    # How many CONSECUTIVE session turns a durable head may wait for a producer pair that could not
+    # be BUILT before it is released `stale:producer_unavailable` (`_start_head_producer`). The
+    # `_CARD_CLAIM_RETIRE_AFTER` argument one module over, for the same shape: one is too few — the
+    # failure this retry exists for is a transient one while constructing roles, and giving up on it
+    # at once is the defect — and the bound is small because an open head holds the session open.
+    _PRODUCER_PAIR_RETRY_TURNS = 3
+    # `(head, consecutive misses)` for that bound. The head is its request key PLUS its queue
+    # position, so a later request for the same Card at the same epoch starts again at zero.
+    # CLASS-level and immutable like the `_eval_*` plumbing above: a stub that never ran `__init__`
+    # reads a defined value, and every write replaces the tuple.
+    _producer_pair_misses: tuple = (None, 0)
+
     def _start_head_producer(self, current: RunState, session: CardSession) -> bool:
         """Start the exact durable head in the same turn that elected it.
 
@@ -2528,6 +2551,10 @@ class SpeculationMixin:
         depth-one prefetch spuriously stale. Registering the producer before the next
         checkpoint preserves the documented live-backlog overlap without changing the
         durable request/commit authority.
+
+        Returns True when it started a producer or closed the head, False when it did neither —
+        including "no producer pair could be BUILT this turn", which leaves the head open for the
+        next turn (see the no-pair branch below).
         """
 
         head = self._head_request(current)
@@ -2549,12 +2576,49 @@ class SpeculationMixin:
             return False
         roles = self._producer_role_pair()
         if roles is None:
+            # NO PAIR IS NOT A PRODUCER FAILURE (review 2026-09-22, ENG1-14 — doc 50 ES1-04). This
+            # branch closed the head `producer_failed`, the word for "the producer RAN and gave up",
+            # and the fold turns that word into `card_build_producer_failed`: the Card was barred
+            # from speculative election for the rest of the run and routed through the serial lane,
+            # for a pair that merely could not be BUILT this turn — a factory that raised once, with
+            # no producer ever started and nothing billed. Reachable on a RESUME: the log carries an
+            # open head and the new process has no pool yet. (Everywhere else the election asks for
+            # the pair FIRST — `_request_card_build` — so a head only exists once a lease does, and
+            # the two things that drop a lease, a Developer swap and a BOHB switch, run in the outer
+            # loop, which a session never returns to while a head is open.) Now:
+            #
+            # * a factory is wired but gave no pair: RETRY. Return False with the head still open,
+            #   so the next turn asks the pool again (`_build_role_pairs` logs each failure with its
+            #   exception). Bounded by `_PRODUCER_PAIR_RETRY_TURNS` turns running against THIS head,
+            #   because an open head holds the session open (`_card_phase_decide_exit` counts it as
+            #   producer work) and a factory that never recovers must not become a session that
+            #   never returns;
+            # * no factory at all, or the bound is spent: CLOSE it `stale` with the registered
+            #   `producer_unavailable` reason — never `producer_failed`, since the Card is not at
+            #   fault and must stay electable. Nothing can re-elect it until a pair exists
+            #   (`_request_card_build` refuses election without one), so the release cannot spin,
+            #   and the outer serial lane builds it meanwhile, as it builds any Card while the pool
+            #   is down.
+            position = (key, int(current.card_builds_done))
+            previous, misses = self._producer_pair_misses
+            misses = misses + 1 if previous == position else 1
+            factory = getattr(self, "role_factory", None)
+            if factory is not None and misses < self._PRODUCER_PAIR_RETRY_TURNS:
+                self._producer_pair_misses = (position, misses)
+                return False
+            self._producer_pair_misses = (None, 0)
+            _LOG.warning(
+                "no producer pair for the Card-build head %s (%s); releasing it to the serial lane "
+                "as stale:producer_unavailable — the Card stays electable", key[0],
+                "no role_factory is wired" if factory is None
+                else f"the pool built none in {misses} consecutive turns")
             if self._append_card_build_done(
-                head, skipped="producer_failed",
+                head, skipped="stale", skipped_reason="producer_unavailable",
             ):
                 session.yield_outer = True
                 return True
             return False
+        self._producer_pair_misses = (None, 0)
         self._spec_build_inflight.add(key)
         # Receipt BEFORE the producer can reach a provider, and after the inflight
         # marker so a main-task service turn in between cannot mistake this process's

@@ -3018,8 +3018,140 @@ def test_no_isolated_pair_prevents_election_and_gives_up_replayed_head(
 
     events = engine.store.read_all()
     done = [event for event in events if event.type == EV_CARD_BUILD_DONE]
-    assert len(done) == 1 and done[0].data["skipped"] == "producer_failed"
+    # `stale:producer_unavailable`, not `producer_failed` (review 2026-09-22, ENG1-14): no producer
+    # ever ran, so nothing may bar the Card from speculative election — it is released to the serial
+    # lane and stays electable for a process that has a pool.
+    assert len(done) == 1 and done[0].data["skipped"] == "stale"
+    assert done[0].data["skipped_reason"] == "producer_unavailable"
     assert fold(events).card_builds_done == 1
+    assert fold(events).card_build_producer_failed == []
+    assert engine._card_requires_serial_fallback(idea.card_id) is False
+    assert not [event for event in events if event.type == EV_NODE_CREATED]
+
+
+def _resumed_head_with_factory(tmp_path, monkeypatch, name: str, factory_for):
+    """A RESUME over a log whose Card-build head is open: the one path a head meets no leased pair.
+
+    The first process elects (leasing a pair, so the durable head exists); the second is fresh — no
+    pool, no lease — and gets `factory_for(producer)` as its `role_factory`. Its evaluation is a stub
+    terminal so a committed build can finish the session."""
+    run_dir = tmp_path / name
+    first, _unused = _engine(run_dir)
+    _start(first)
+    idea = _add_ready_draft(first)
+    request = _request(first)
+
+    producer = _Developer()
+    recovered, _producer = _engine(run_dir, producer=producer)
+    recovered.role_factory = factory_for(producer)
+    _without_research(monkeypatch, recovered)
+
+    async def _terminal_eval(node_id, _limiter, _max_es):
+        node = fold(recovered.store.read_all()).nodes[node_id]
+        recovered.store.append(EV_NODE_EVALUATED, {
+            "node_id": node_id, "generation": node.attempt, "metric": 0.0, "eval_seconds": 0.0})
+
+    monkeypatch.setattr(recovered, "_evaluate", _terminal_eval)
+    starts: list[tuple[bool, bool]] = []
+    original_start = recovered._start_head_producer
+
+    def _recording_start(current, session):
+        opened = original_start(current, session)
+        head_open = recovered._head_request(fold(recovered.store.read_all())) is not None
+        starts.append((opened, head_open))
+        return opened
+
+    monkeypatch.setattr(recovered, "_start_head_producer", _recording_start)
+    return recovered, producer, idea, request, starts
+
+
+def _bounded_session(engine: Engine) -> None:
+    async def _run():
+        # A retry that never ends is the failure this bound exists for — fail, never hang the suite.
+        with anyio.fail_after(30):
+            await engine._run_card_session([], fold(engine.store.read_all()), None)
+
+    anyio.run(_run)
+
+
+def test_a_pair_that_could_not_be_BUILT_is_retried_and_its_card_is_never_barred(
+    tmp_path, monkeypatch, caplog,
+):
+    """ES1-04 (doc 50; still live per review 2026-09-22, ENG1-14). A transient failure while BUILDING
+    the producer's pair used to close the head `producer_failed` — the word for "the producer RAN
+    and gave up" — with no log line anywhere, and the fold then barred the Card from speculative
+    election for the rest of the run. Driven: a factory that raises ONCE, then works.
+
+    The first turn must leave the head open and start nothing; the second must start the producer;
+    the build must commit and the Card must stay electable; and the failure must be in the log with
+    its exception.
+
+    MUTATIONS, each red here: restore the `producer_failed` close (a skipped done, the Card barred),
+    close the head at once instead of retrying (a skipped done, no node), or drop the `_LOG.warning`
+    in `orchestrator.py::_build_role_pairs` (no record names the exception)."""
+    factory_calls: list[int] = []
+
+    def _factory_for(producer):
+        def _flaky_factory():
+            factory_calls.append(len(factory_calls))
+            if len(factory_calls) == 1:
+                raise RuntimeError("transient provider hiccup at pair construction")
+            return _Researcher(), producer
+        return _flaky_factory
+
+    engine, producer, idea, request, starts = _resumed_head_with_factory(
+        tmp_path, monkeypatch, "flaky-factory", _factory_for)
+    with caplog.at_level("WARNING", logger="looplab.engine.orchestrator"):
+        _bounded_session(engine)
+
+    assert starts[:2] == [(False, True), (True, True)], (
+        "turn 1 must leave the head OPEN and start nothing; turn 2 must start the producer", starts)
+    events = engine.store.read_all()
+    done = [event for event in events if event.type == EV_CARD_BUILD_DONE]
+    assert len(done) == 1 and "skipped" not in done[0].data, done
+    assert done[0].data["card_id"] == request["card_id"] and type(done[0].data["node_id"]) is int
+    from looplab.events.types import EV_CARD_BUILD_ATTEMPTED
+    assert len([event for event in events if event.type == EV_CARD_BUILD_ATTEMPTED]) == 1, (
+        "exactly one producer start is receipted: the failed turn started none")
+    assert len(factory_calls) == 2 and producer.calls == 1
+    state = fold(events)
+    assert state.card_build_producer_failed == []
+    assert engine._card_requires_serial_fallback(idea.card_id) is False
+    assert any("transient provider hiccup" in record.getMessage() and record.exc_info
+               for record in caplog.records), [record.getMessage() for record in caplog.records]
+
+
+def test_a_factory_that_never_recovers_releases_the_head_as_producer_unavailable(
+    tmp_path, monkeypatch,
+):
+    """The retry's BOUND. An open head holds the Card session open (`_card_phase_decide_exit` counts
+    it as producer work), so a factory that never recovers must not become a session that never
+    returns: after `_PRODUCER_PAIR_RETRY_TURNS` turns the head is released `stale` with the registered
+    `producer_unavailable` reason — and still never `producer_failed`, because no producer ran.
+
+    MUTATION: drop the bound (retry forever) and `anyio.fail_after` fires instead of the session
+    returning; close `producer_failed` and the Card is barred."""
+    factory_calls: list[int] = []
+
+    def _factory_for(_producer):
+        def _dead_factory():
+            factory_calls.append(len(factory_calls))
+            raise RuntimeError("provider down for good")
+        return _dead_factory
+
+    engine, producer, idea, _request_row, starts = _resumed_head_with_factory(
+        tmp_path, monkeypatch, "dead-factory", _factory_for)
+    _bounded_session(engine)
+
+    retries = Engine._PRODUCER_PAIR_RETRY_TURNS
+    assert starts == [(False, True)] * (retries - 1) + [(True, False)], starts
+    assert len(factory_calls) == retries and producer.calls == 0
+    events = engine.store.read_all()
+    done = [event for event in events if event.type == EV_CARD_BUILD_DONE]
+    assert len(done) == 1 and done[0].data["skipped"] == "stale"
+    assert done[0].data["skipped_reason"] == "producer_unavailable"
+    assert fold(events).card_build_producer_failed == []
+    assert engine._card_requires_serial_fallback(idea.card_id) is False
     assert not [event for event in events if event.type == EV_NODE_CREATED]
 
 
