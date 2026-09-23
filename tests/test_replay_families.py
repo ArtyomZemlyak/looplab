@@ -22,6 +22,7 @@ move itself can silently break three things, and each has a guard here:
 from __future__ import annotations
 
 import ast
+import importlib
 import inspect
 from pathlib import Path
 
@@ -45,6 +46,20 @@ def test_every_handler_is_defined_in_a_module_the_source_guards_read():
     assert not stray, (
         f"handlers outside every fold module the source guards read: {stray}. Name the module "
         "`events/replay_<family>.py` so `fold_source_paths` finds it")
+
+
+def test_every_family_table_is_merged_into_the_dispatch_table():
+    """A family keeps the rows of the events it folds in its own `HANDLERS`; a table `replay.py`
+    forgot to merge folds NOTHING — each of its events becomes an unknown type and silently no-ops.
+    MUTATION: drop `_CONCEPT_HANDLERS` from `replay._HANDLER_TABLES` -> named here."""
+    unmerged = {}
+    for path in fold_source_paths()[1:]:
+        table = getattr(importlib.import_module(f"looplab.events.{path.stem}"), "HANDLERS", {})
+        lost = sorted(etype for etype, handler in table.items()
+                      if replay._HANDLERS.get(etype) is not handler)
+        if lost:
+            unmerged[path.name] = lost
+    assert not unmerged, f"family handler rows `fold` never dispatches to: {unmerged}"
 
 
 def test_the_fold_modules_are_the_ones_on_disk_and_replay_py_leads():

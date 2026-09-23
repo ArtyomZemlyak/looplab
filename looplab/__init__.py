@@ -343,6 +343,7 @@ _LAYOUT = {
     # The fold's handler families split out of `replay` (review 2026-09-22, EVT-12), and the
     # context/generation vocabulary they all read.
     "replay_ctx": "events",
+    "replay_concepts": "events",
     "stop_account": "events",
     "repo_developer": "adapters",
     "repo_task": "adapters",
