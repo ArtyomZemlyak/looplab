@@ -21,7 +21,7 @@ from looplab.core.llm import BudgetExceeded
 from looplab.core.models import Idea, IdeaEmission, Node, RunState
 from looplab.core.parse import ParseError, parse_structured
 from looplab.core.prompts import PromptStore, render
-from looplab.agents.answered_by_context import answered_by_context
+from looplab.agents.answered_by_context import answered_by_context, offers_tool
 from looplab.agents.roles import (
     _CONCEPT_AUTHORING_GUIDANCE, _CONTEXT_BEFORE_TOOLS_RULE, _OPERATOR_NOTE,
     _UNTRUSTED_MEMORY_RULE,
@@ -350,6 +350,9 @@ class ToolUsingResearcher:
         self._board_prompt_attempt = prompt_attempt + 1
         self._visible_board_cards = next_board_prompt_cards(
             state, getattr(self, "_hyp_order", None), attempt=prompt_attempt)
+        # Whether this request offers `list_experiments`: the fitted digest's cut receipt names that
+        # call only when it does (`events/digest.py::_fit_receipt`).
+        offers_run_tools = offers_tool(self.tools, "list_experiments")
         messages = [
             {"role": "system",
              # Part V/P6/P8: the shared concept-mode contract, capability suffix (sweep offer — gated
@@ -373,7 +376,8 @@ class ToolUsingResearcher:
                                                      board_cards=self._visible_board_cards,
                                                      memo_verdicts=bool(getattr(
                                                          self, "_memo_verdict_cue", False)),
-                                                     fit=bool(getattr(self, "_brief_fit", False)))
+                                                     fit=bool(getattr(self, "_brief_fit", False)),
+                                                     run_tools=offers_run_tools)
                 + answered_by_context(self.tools)
                 + _established_block(_researcher_workspace(getattr(self, "_established", None)))
                 + hint_block + cue +

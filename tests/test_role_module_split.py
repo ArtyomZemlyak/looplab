@@ -251,8 +251,16 @@ def test_roles_is_no_longer_a_god_module():
     all three to the shipped roles in both directions — so it is a role CONTRACT, and fourteen of
     its fifteen lines are the why-comment that says what hiding a client behind a wrapper costs.
     It stays; the cap moves to measured + 1.
+
+    `roles.py` 828 -> 836 and `state_brief.py` 462 -> 523 on 2026-09-23 (Q-3, the Researcher's
+    context audit: `Settings.propose_brief_fit`). In `roles.py`: the switch's row in
+    `RESEARCHER_HINT_ATTRS` with its why-comment, the two keywords `LLMResearcher.propose` hands the
+    brief (the switch, and `run_tools=False` because that path offers no tools), and the two
+    re-export lines the rule above demands for the new `state_brief` helpers. In `state_brief.py`,
+    which IS the brief's builder: the fitted header and the belief-grouped board rows. Each is the
+    module's own job, so nothing moves out; both caps move to measured + 1.
     """
-    caps = {"agents/roles.py": 829, "agents/role_prompts.py": 302, "agents/state_brief.py": 463,
+    caps = {"agents/roles.py": 837, "agents/role_prompts.py": 302, "agents/state_brief.py": 524,
             "agents/role_wrappers.py": 467, "agents/toy_roles.py": 128}
     sizes = {rel: len((_PKG / rel).read_text(encoding="utf-8").splitlines()) for rel in caps}
     over = {rel: (n, caps[rel]) for rel, n in sizes.items() if n >= caps[rel]}

@@ -82,6 +82,8 @@ from looplab.agents.state_brief import (  # noqa: F401
     BOARD_PROMPT_CARDS,
     BOARD_PROMPT_SEED_BUDGET_CHARS,
     BOARD_SEED_CHARS_MAX,
+    _attempted_belief_groups,
+    _is_attempted_live,
     _state_brief,
     attempted_board_prompt_cards,
     bind_idea_to_board_card,
@@ -676,7 +678,8 @@ class LLMResearcher:
                                                      board_cards=visible_cards,
                                                      memo_verdicts=bool(getattr(
                                                          self, "_memo_verdict_cue", False)),
-                                                     fit=bool(getattr(self, "_brief_fit", False)))
+                                                     fit=bool(getattr(self, "_brief_fit", False)),
+                                                     run_tools=False)     # this path has no tools
                                         + "\n" + self.space_hint +
                                         hint_block + cues +
                                         "\nPropose the next Idea (operator, params, rationale, concept_mode, "

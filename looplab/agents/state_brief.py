@@ -390,7 +390,7 @@ def bind_idea_to_board_card(idea: Idea, cards: list) -> Idea:
 def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
                  hyp_order: Optional[list[str]] = None, board_cards: Optional[list] = None,
                  *, for_proposal: bool = True, memo_verdicts: bool = False,
-                 fit: bool = False) -> str:
+                 fit: bool = False, run_tools: bool = True) -> str:
     # Function-local for the same reason as the `experiments_digest` import below: `agents` may not
     # take a module-level edge on `events`. `unscored_metric_clause` is the ONE spelling of "the
     # eval refused to produce this number" (doc 53 §4a) — the headline count and this line are two
@@ -400,7 +400,8 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
     # passed ONLY by the two propose paths: the header states each fact once and every number in
     # the working set's one format, the digest spends its budget in whole rows with a receipt, and
     # a board row carries every node of its belief. Off (every other caller, and the historical
-    # propose) the brief is the historical bytes.
+    # propose) the brief is the historical bytes. `run_tools` — is this proposer offered the run
+    # tools — decides only whether the digest's cut receipt names the call that returns the rest.
     from looplab.events.digest import fmt_num, node_metric, unscored_metric_clause
     best = state.best()
     lines = [f"Goal: {state.goal}", f"Optimize direction: {state.direction}."]
@@ -467,7 +468,7 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
     # failures, theme map) so the Researcher proposes with awareness of what's already been tried,
     # not just `best` + `parent`. Depth (full experiments, code, data) lives behind the run tools.
     from looplab.events.digest import experiments_digest, lineage_lessons, sibling_digest
-    lines.append(experiments_digest(state, char_cap=digest_cap, fit=fit))
+    lines.append(experiments_digest(state, char_cap=digest_cap, fit=fit, run_tools=run_tools))
     # M1/A0c operator-scoped memory: draft/improve additionally see their SIBLINGS (diversity
     # pressure — aira-dojo MEM_OPS `sibling`) and, when refining, the LESSONS distilled from the
     # lineage under the refined node (D6 insight backpropagation, Arbor's Backpropagate step).

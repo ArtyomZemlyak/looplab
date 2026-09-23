@@ -952,7 +952,7 @@ def ablation_attribution(state: RunState) -> dict:
 
 
 def experiments_digest(state: RunState, top_k: int = 5, worst_n: int = 3,
-                       char_cap: int = 0, *, fit: bool = False) -> str:
+                       char_cap: int = 0, *, fit: bool = False, run_tools: bool = True) -> str:
     """A compact, budgeted snapshot of the whole search appended to the Researcher's prompt — its
     always-on "working set". Lists the strongest experiments, the weakest + recent failures (so the
     model doesn't repeat dead ends), and the theme map. Depth lives behind the run-introspection
@@ -962,7 +962,8 @@ def experiments_digest(state: RunState, top_k: int = 5, worst_n: int = 3,
     things and nothing else: rows are rendered compactly (`_node_line(fit=True)`), a list that holds
     EVERY scored node is titled for what it is rather than "Strongest", and the budget is spent in
     WHOLE rows with a receipt — see `_fitted_digest` for the measurement. Off, the render and its
-    cut are the historical bytes."""
+    cut are the historical bytes. `run_tools` is whether the reader is offered the run tools the
+    receipt names (`_fit_receipt`); it moves nothing but the receipt."""
     nodes = state.nodes
     if not nodes:
         return ""
@@ -1052,7 +1053,7 @@ def experiments_digest(state: RunState, top_k: int = 5, worst_n: int = 3,
         sections.append(("attr", None, [lines[-1]], [0]))
 
     if fit:
-        return _fitted_digest(lines[0], sections, char_cap)
+        return _fitted_digest(lines[0], sections, char_cap, calls=run_tools)
     out = "\n".join(lines)
     if len(out) > char_cap:
         out = out[:char_cap].rstrip() + " …"
@@ -1065,9 +1066,15 @@ _FIT_SECTION_NOUNS = {"win": "strongest", "avoid": "weakest/failed", "tune": "tu
                       "themes": "the theme map", "attr": "the component attribution"}
 
 
-def _fit_receipt(char_cap: int, sections: list, kept: dict) -> str:
+def _fit_receipt(char_cap: int, sections: list, kept: dict, *, calls: bool = True) -> str:
     """`_fitted_digest`'s one receipt line: how many rows of each section the budget left out and
-    the calls that return them — `""` when nothing was left out."""
+    the calls that return them — `""` when nothing was left out.
+
+    `calls` is whether the reader can MAKE those calls. The plain Researcher (`researcher_tools`
+    off) has no tools at all, and a receipt telling it `list_experiments returns them` names a call
+    its request does not offer — the one thing a bound's receipt must never do (the
+    `tools/_base.py` rule: the call that continues past the bound must be one the caller can make).
+    Without calls the receipt still says what was left out."""
     left_out, trials = [], ""
     for key, _title, rows, _order in sections:
         missing = len(rows) - len(kept.get(key) or [])
@@ -1078,11 +1085,13 @@ def _fit_receipt(char_cap: int, sections: list, kept: dict) -> str:
                 trials = "; read_experiment returns every trial"
     if not left_out:
         return ""
+    if not calls:
+        return f"[not shown within this {char_cap}-char budget: {', '.join(left_out)}]"
     return (f"[not shown within this {char_cap}-char budget: {', '.join(left_out)} — "
             f"list_experiments returns them (sort=recent includes the failed){trials}]")
 
 
-def _fitted_digest(header: str, sections: list, char_cap: int) -> str:
+def _fitted_digest(header: str, sections: list, char_cap: int, *, calls: bool = True) -> str:
     """The working set under its budget in WHOLE rows, the avoid-repeating rows kept beside the
     strongest, and a receipt naming what the budget left out (`Settings.propose_brief_fit`).
 
@@ -1126,7 +1135,7 @@ def _fitted_digest(header: str, sections: list, char_cap: int) -> str:
     sections = [(key, title, [row if len(row) <= row_cap else row[:row_cap - 1].rstrip() + "…"
                               for row in rows], order)
                 for key, title, rows, order in sections]
-    budget = char_cap - len(header) - len(_fit_receipt(char_cap, sections, {})) - 1
+    budget = char_cap - len(header) - len(_fit_receipt(char_cap, sections, {}, calls=calls)) - 1
     kept: dict[str, list[int]] = {}
     queues = [(key, title, rows, list(order)) for key, title, rows, order in sections if order]
     while queues:
@@ -1142,7 +1151,7 @@ def _fitted_digest(header: str, sections: list, char_cap: int) -> str:
             if not queue:
                 queues.remove(entry)
     lines = _render(kept)
-    receipt = _fit_receipt(char_cap, sections, kept)
+    receipt = _fit_receipt(char_cap, sections, kept, calls=calls)
     if receipt:
         lines.append(receipt)
     out = "\n".join(lines)

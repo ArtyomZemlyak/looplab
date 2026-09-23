@@ -114,6 +114,13 @@ def answered_by_context(tools) -> str:
     return chr(10) * 2 + _LEAD + render_inventory(rows) + _TRAILER
 
 
+def offers_tool(tools, name: str) -> bool:
+    """Whether this turn's request will carry the tool `name` — the inventory block's own reading of
+    the offer (`_offered`), so any other prompt text that names a call names one the model was
+    actually offered (Q-3: the fitted digest's cut receipt, `events/digest.py::_fit_receipt`)."""
+    return tools is not None and name in _offered(tools)
+
+
 def _offered(tools) -> frozenset:
     """The tool names this turn's request will actually carry.
 

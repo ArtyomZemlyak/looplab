@@ -266,6 +266,40 @@ def test_the_switch_reaches_both_propose_paths_through_the_engines_stamp(tmp_pat
             assert ("Scored so far, best first:" in turn) is fit
 
 
+def _receipt(turn: str) -> str:
+    return next(line for line in turn.split("\n") if line.startswith("[not shown within this "))
+
+
+def test_the_receipt_names_a_call_only_where_the_proposer_is_offered_it(tmp_path, monkeypatch):
+    """A bound's receipt names the call that returns the rest — and that call must be one the
+    reader can make. The plain Researcher (`researcher_tools` off) is offered NO tools, so its
+    receipt says what was left out and stops there; the agentic one names `list_experiments` exactly
+    when its request carries it. MUTATION: drop the `calls` switch -> the plain receipt names a call
+    its request does not offer -> red."""
+    from looplab.agents import agent as agent_mod
+    from looplab.agents.agent import ToolUsingResearcher
+    from looplab.tools.run_tools import RunTools
+
+    state = _repo_shaped(tmp_path / "s")
+    engine = make_engine(tmp_path / "e", propose_brief_fit=True,
+                         researcher=LLMResearcher(_Client()))
+    plain = _receipt(_propose(engine, state, state.nodes[1]))
+    assert "list_experiments" not in plain and plain.endswith("weakest/failed]"), plain
+    seen = {}
+
+    def _fake(client, tools, messages, emit_spec, **kw):
+        seen["m"] = [dict(m) for m in messages]
+        return Idea(operator="draft", params={}, rationale="ok")
+
+    monkeypatch.setattr(agent_mod, "run_phase", _fake)
+    for tools, named in ((RunTools(), True), (None, False)):
+        agentic = ToolUsingResearcher(client=object(), tools=tools)
+        engine._set_complexity_hint(state, state.nodes[1], researcher=agentic)
+        agentic.propose(state, state.nodes[1])
+        user = next(m["content"] for m in seen["m"] if m["role"] == "user")
+        assert ("list_experiments returns them" in _receipt(user)) is named, (tools, _receipt(user))
+
+
 # The HISTORICAL bytes, measured on the pre-change tree (origin/master 2026-09-23) over the
 # repo-shaped state above: OFF must reproduce them exactly, whatever this module does ON.
 _HISTORICAL_SHA256 = {
