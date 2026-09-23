@@ -88,11 +88,17 @@ class ConceptCadenceMixin:
         # `seed_boundary_due` for the table.
         if seed_boundary_due(n, last, self.n_seeds):
             return True
-        # Read BARE, like `n_seeds`/`strategist_every` beside it: `__init__` always assigns it (clamped
-        # to >= 1). The `getattr(..., 0)` it replaced handed a double the pre-F1 coupling to
-        # `strategist_every` that no real Engine has had since (review 2026-09-22, ENG1-03).
-        every = self.concept_retag_every or self.strategist_every
-        return cadence_due(n, last, every)
+        # Read BARE, like `n_seeds` beside it: `__init__` always assigns it (clamped to >= 1). The
+        # `getattr(..., 0)` it replaced handed a double the pre-F1 coupling to `strategist_every`
+        # that no real Engine has had since (review 2026-09-22, ENG1-03).
+        #
+        # And ALONE (review 2026-09-22, EM-13). It is a `Knob` settled through `max(1, v)`
+        # (`engine/knobs.py::EngineKnobs`), so every object of the Engine family — one `__init__`
+        # built from any `EngineOptions`, or a `__new__` stub settling from the library default —
+        # holds a truthy value, and the `or self.strategist_every` that followed it was dead for all
+        # of them. It was live only on a duck-typed double holding 0, where it re-coupled the concept
+        # map to the Strategist interval F1 decoupled it from; `cadence_due`'s rule is that 0 is OFF.
+        return cadence_due(n, last, self.concept_retag_every)
 
     @in_llm_lane("enrichment")
     def _maybe_snapshot_concept_coverage(self, state: RunState) -> RunState:

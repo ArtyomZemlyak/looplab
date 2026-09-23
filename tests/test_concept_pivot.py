@@ -150,14 +150,40 @@ def test_concept_cadence_decoupled_from_strategist_every():
     assert fire(12, last=2) is True          # concept_retag_every since the last snapshot
     assert fire(13, last=12) is False        # ...and the window reopens from THERE, not from a multiple
     assert fire(22, last=12) is True
-    # falls back to strategist_every when the knob is unset/zero (back-compat)
+    # 0 is OFF past the seed boundary, as it is for every cadence knob (`cadence.py::cadence_due`).
+    # It used to fall back to `strategist_every` here (review 2026-09-22, EM-13) — a fallback no
+    # built engine could reach (see the test below) and that only a double like this one exercised,
+    # re-coupling the concept map to the Strategist interval F1 decoupled it from.
     eng0 = SimpleNamespace(n_seeds=2, strategist_every=3, concept_retag_every=0)
     def fire0(k, last=0):
         return Engine._should_consult_concepts(
             eng0, SimpleNamespace(nodes={i: None for i in range(k)}, pending_nodes=lambda: []),
             marks=[{"at_node": last}] if last else None)
-    # since-last: a full `strategist_every` window past the LAST snapshot, not the next multiple
-    assert fire0(5, last=2) is True and fire0(8, last=5) is True and fire0(4, last=2) is False
+    assert fire0(2) is True                  # the seed boundary still fires once
+    assert not any(fire0(k, last=2) for k in (3, 4, 5, 8, 20))
+
+
+def test_every_built_engine_holds_a_live_concept_retag_interval(tmp_path):
+    """Why the `or self.strategist_every` fallback was DEAD, driven rather than asserted: the knob is
+    settled through `max(1, v)`, so a real Engine built from ANY value — the Settings floor is 1,
+    but `EngineOptions` accepts 0 and negatives — and an `Engine.__new__` stub (which settles from
+    the library default through the knob descriptor) all hold an interval >= 1. With that, the
+    retag cadence follows its own knob and never the Strategist's."""
+    from tests.factories import make_engine
+
+    for value in (0, -3, 1, 7):
+        eng = make_engine(tmp_path / f"run{value}", concept_retag_every=value, strategist_every=3)
+        assert eng.concept_retag_every == max(1, value)
+    stub = Engine.__new__(Engine)
+    assert stub.concept_retag_every >= 1
+
+    eng = make_engine(tmp_path / "run-live", n_seeds=2, concept_retag_every=7, strategist_every=3)
+
+    def fire(k, last):
+        return eng._should_consult_concepts(
+            SimpleNamespace(nodes={i: None for i in range(k)}, pending_nodes=lambda: []),
+            marks=[{"at_node": last}])
+    assert [k for k in range(3, 12) if fire(k, last=2)] == [9, 10, 11]   # 2 + 7, never 2 + 3
 
 
 def test_a_batch_stride_cannot_step_over_the_concept_cadence_window():
