@@ -1546,6 +1546,34 @@ def test_server_startup_does_not_create_waiter_for_unknown_liveness(tmp_path, mo
     assert spawns == [] and waiters == []
 
 
+def _registered_resume_waiter(rd: Path):
+    """The post-exit waiter `/resume` left for `rd`, taken while the old owner still holds
+    engine.lock. The route answers `resume_after_exit: True` whenever the owner was alive and it
+    did not spawn — including the paths where it installed NO waiter — so the answer alone does
+    not prove there is anything to wait for."""
+    from looplab.serve import engine_proc as ep
+
+    with ep._resume_after_exit_lock:
+        entry = ep._resume_waiter_threads.get(str(rd.resolve()))
+    assert entry is not None, "`/resume` answered resume_after_exit but installed no waiter"
+    return entry[0]
+
+
+def _joined_hand_off(rd: Path, waiter, spawned: list) -> None:
+    """JOIN the waiter instead of timing it. A wall-clock wait on the spawn could not tell a waiter
+    that was slow from one that exited without spawning, and CI run 2025 failed a 2 s wait once
+    with nothing to say which; the hand-off measures ~40 ms, so the bound below costs nothing."""
+    waiter.join(timeout=30.0)
+    if spawned:
+        return
+    state = fold(EventStore(rd / "events.jsonl").read_all())
+    raise AssertionError(
+        f"resume waiter did not hand off after engine.lock was released: waiter "
+        f"{'still ALIVE' if waiter.is_alive() else 'exited without spawning'}; "
+        f"resume_pending={state.resume_pending()} request_seq={state.last_resume_request_seq} "
+        f"served_seq={state.last_resume_served_seq} launch_seq={state.last_resume_launch_seq}")
+
+
 @pytest.mark.parametrize("intent", ["inject_node", "resume", "run_reopened"])
 def test_resume_during_post_finish_tail_spawns_once_after_engine_exit(
         tmp_path, monkeypatch, intent):
@@ -1584,8 +1612,10 @@ def test_resume_during_post_finish_tail_spawns_once_after_engine_exit(
         second = client.post(f"/api/runs/{run_id}/resume").json()
         assert first["resume_after_exit"] is True and second["resume_after_exit"] is True
         assert not spawned
+        waiter = _registered_resume_waiter(rd)
 
-    assert spawn_seen.wait(2.0), "resume waiter did not hand off after engine.lock was released"
+    _joined_hand_off(rd, waiter, spawned)
+    assert spawn_seen.is_set()
     assert len(spawned) == 1 and "resume" in spawned[0]
     state = fold(EventStore(rd / "events.jsonl").read_all())
     if intent == "inject_node":
@@ -1664,8 +1694,10 @@ def test_post_finish_tail_of_pending_abort_hands_off_to_finalize_not_resume(
         assert response.status_code == 200 and response.json()["resume_after_exit"] is True
         # Simulate the old owner accepting the abort after the handoff was durably classified.
         EventStore(rd / "events.jsonl").append("run_finished", {"reason": "operator"})
+        waiter = _registered_resume_waiter(rd)
 
-    assert seen.wait(2.0)
+    _joined_hand_off(rd, waiter, spawned)
+    assert seen.is_set()
     assert len(spawned) == 1
     assert "finalize" in spawned[0] and "resume" not in spawned[0]
     requests = [e for e in EventStore(rd / "events.jsonl").read_all()
