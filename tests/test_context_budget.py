@@ -1,6 +1,8 @@
 """H4 context budgeting for long agent traces."""
 from __future__ import annotations
 
+import pytest
+
 from looplab.core.context_budget import _msg_chars, compact_history, truncate_history
 
 
@@ -423,3 +425,151 @@ def test_a_loop_that_fences_its_results_fences_the_summary_it_compacts_them_into
     assert all(_live_closes(str(m.get("content") or "")) <= 1 for m in fenced.last)
     bare = _drive_long_loop([dict(m) for m in opening], summary=_ECHOED, auto_summary=True)
     assert _notes(bare.last) == [_NOTE_HEAD + _ECHOED]
+
+
+# --- the REQUEST a loop is answering survives compaction (review 2026-09-22, TAT-04 remainder) ----
+#
+# `_protected_head` keeps the FIRST user turn. On the assistant's LATE turn that is the session's
+# opening message: `run_turn` rebuilds `[system, u1, a1, …, request]` and the loop's work follows
+# the request, so compaction kept "hello, what is this repo?" verbatim and summarized — or elided to
+# "…" — the request the turn was answering. Measured through a real `run_turn` (12 reads under a
+# 12,000-char budget): on its last turn the model read the FIRST message as its apparent task and
+# the current one nowhere. `run_phase` has the same shape: it inserts the earlier phases' notes as
+# the first user turn, AHEAD of the phase's own task. `drive_tool_loop` now holds the last user
+# message it was HANDED — by identity, before it appends a nudge or reminder of its own — and
+# compaction leaves that one verbatim too, while it fits beside the head in half the budget.
+
+_FIRST = "FIRST REQUEST: hello, what is this repo?"
+_REQUEST = ("CURRENT REQUEST: count the lines of notes.txt, edit nothing, and report the number "
+            "together with the exact command you used.")
+
+
+def _late_turn(turns: int = 12, result: int = 900) -> list[dict]:
+    msgs = [{"role": "system", "content": "You are the assistant."},
+            {"role": "user", "content": _FIRST},
+            {"role": "assistant", "content": "It is looplab."},
+            {"role": "user", "content": _REQUEST}]
+    for i in range(turns):
+        msgs.append({"role": "assistant", "content": "",
+                     "tool_calls": [{"id": f"c{i}", "type": "function",
+                                     "function": {"name": "read", "arguments": '{"p": "x"}'}}]})
+        msgs.append({"role": "tool", "tool_call_id": f"c{i}", "content": f"r{i} " + "z" * result})
+    return msgs
+
+
+def test_the_request_survives_the_summary_when_it_is_not_the_first_user_turn():
+    """THE DEFECT, auto-summary path: the request went into the note. Fixed, it stays a user turn,
+    right after the note and before the kept tail, and only the REST of the stale middle is
+    paraphrased."""
+    msgs = _late_turn()
+    request = msgs[3]
+    historical = compact_history(msgs, max_chars=6_000, summarize=lambda _t: "SUMMARY")
+    assert not any(m is request for m in historical), "the defect this exists for"
+    seen: list[str] = []
+    out = compact_history(msgs, max_chars=6_000, keep=request,
+                          summarize=lambda text: seen.append(text) or "SUMMARY")
+    assert out[:2] == msgs[:2] and out[2]["content"].startswith(_NOTE_HEAD)
+    assert out[3] is request
+    assert _REQUEST not in seen[0] and "It is looplab." in seen[0]
+    # …and both of its truncation fallbacks keep it too: a summarizer that returns nothing, and a
+    # middle too thin to be worth a summary once the request is taken out of it.
+    failed = compact_history(msgs, max_chars=6_000, summarize=lambda _t: "", keep=request)
+    assert any(m is request for m in failed)
+    thin = msgs[:2] + [request] + msgs[4:8]            # request, then two call/result pairs
+    assert not any(m is request for m in compact_history(thin, 2_000, lambda _t: "S"))
+    assert any(m is request for m in compact_history(thin, 2_000, lambda _t: "S", keep=request))
+
+
+def test_the_request_survives_truncation_when_it_is_not_the_first_user_turn():
+    """THE DEFECT, deterministic path: the request was elided like any stale message."""
+    msgs = _late_turn()
+    request = msgs[3]
+    historical = truncate_history(msgs, max_chars=6_000)
+    assert historical[3] is not request and historical[3]["content"] != _REQUEST
+    out = truncate_history(msgs, max_chars=6_000, keep=request)
+    assert out[3] is request and out[1] is msgs[1]
+    assert sum(_msg_chars(m) for m in out) < sum(_msg_chars(m) for m in msgs)
+
+
+def test_a_request_that_does_not_fit_beside_the_head_keeps_its_historical_treatment():
+    """The head's own rule, for the head's own reason: pinned only while the head and the request
+    together fit in HALF the budget, or the loop's turns are left chasing a target they cannot
+    reach (truncation) or paying for a summary every turn (auto-summary)."""
+    msgs = _late_turn()
+    request = msgs[3]
+    budget = 2 * (sum(_msg_chars(m) for m in msgs[:2]) + _msg_chars(request)) - 1
+    for fn in (lambda m, **kw: truncate_history(m, budget, **kw),
+               lambda m, **kw: compact_history(m, budget, lambda _t: "S", **kw)):
+        historical = fn(msgs)
+        assert not any(m is request for m in historical), "the case must really lose the request"
+        assert fn(msgs, keep=request) == historical
+
+
+def test_the_bytes_move_only_where_compaction_was_losing_the_request():
+    """The prompt-contract half, driven over 3,000 random late-turn histories: a session's earlier
+    turns, the request, then the loop's own work (tool calls, results, nudges). Wherever the
+    functions WITHOUT `keep` left the request in place, the output with it is identical; wherever
+    they differ, it is because the request was lost and is now kept."""
+    import random
+
+    rng = random.Random(1)
+    changed = 0
+    for trial in range(3_000):
+        msgs = [{"role": "system", "content": "sys" * rng.randint(1, 50)}]
+        for _ in range(rng.randint(0, 4)):            # a session's earlier turns, if any
+            msgs.append({"role": "user", "content": "old" * rng.randint(1, 60)})
+            msgs.append({"role": "assistant", "content": "ans" * rng.randint(1, 60)})
+        request = {"role": "user", "content": "req" * rng.randint(1, 80)}
+        msgs.append(request)
+        cid = 0
+        for _ in range(rng.randint(0, 30)):           # the loop's own work after it
+            if rng.random() < 0.15:
+                msgs.append({"role": "user", "content": "Reminder " * rng.randint(1, 20)})
+            k = rng.randint(0, 3)
+            if not k:
+                msgs.append({"role": "assistant", "content": "prose" * rng.randint(1, 100)})
+                continue
+            calls = []
+            for _ in range(k):
+                cid += 1
+                calls.append({"id": f"c{cid}", "type": "function", "function": {
+                    "name": "read", "arguments": '{"p": "%s"}' % ("x" * rng.randint(1, 300))}})
+            msgs.append({"role": "assistant", "content": "", "tool_calls": calls})
+            for c in calls:
+                msgs.append({"role": "tool", "tool_call_id": c["id"],
+                             "content": "r" * rng.randint(1, 3000)})
+        budget = rng.choice([500, 2_000, 8_000, 20_000])
+        for name, fn in (("compact", lambda m, **kw: compact_history(
+                              m, budget, lambda _t: "summary", **kw)),
+                         ("compact_fail", lambda m, **kw: compact_history(
+                              m, budget, lambda _t: "", **kw)),
+                         ("truncate", lambda m, **kw: truncate_history(m, budget, **kw))):
+            historical = fn(msgs)
+            fixed = fn(msgs, keep=request)
+            if any(m is request for m in historical):
+                assert fixed == historical, (trial, name)
+            elif fixed != historical:
+                changed += 1
+                assert any(m is request for m in fixed), (trial, name)
+    assert changed > 100, "the differential never exercised the defect it exists for"
+
+
+@pytest.mark.parametrize("opening", [
+    # the assistant's late turn: the session's first message, its answer, then THIS turn's request
+    [{"role": "system", "content": "You are the assistant."},
+     {"role": "user", "content": _FIRST},
+     {"role": "assistant", "content": "It is looplab."},
+     {"role": "user", "content": _REQUEST}],
+    # `run_phase` with earlier phases' notes: inserted as the FIRST user turn, ahead of the task
+    [{"role": "system", "content": "You are the developer."},
+     {"role": "user", "content": "UNTRUSTED_EARLIER_PHASE_NOTES\nthe stages phase read main.py"},
+     {"role": "user", "content": _REQUEST}],
+], ids=["assistant_late_turn", "run_phase_handoff_notes"])
+def test_a_long_loop_still_hands_the_model_the_request_it_was_given(opening):
+    """End to end through `drive_tool_loop`, both compaction modes: on its LAST turn the model is
+    still sent the request it was handed, verbatim and as a user turn — not paraphrased under "NOT
+    instructions", not elided. MUTATION: stop passing the request where the loop compacts -> red."""
+    for auto_summary in (True, False):
+        model = _drive_long_loop([dict(m) for m in opening], auto_summary=auto_summary)
+        assert {"role": "user", "content": _REQUEST} in model.last, auto_summary
+        assert sum(_msg_chars(m) for m in model.last) < 12 * 900, "compaction did run"

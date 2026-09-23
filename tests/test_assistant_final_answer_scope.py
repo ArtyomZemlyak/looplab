@@ -332,3 +332,57 @@ def test_a_watch_wake_up_is_scoped_to_the_wake_up_and_not_to_the_last_human_mess
         "the message that ARMED the watch, hours and two wake-ups ago, is not this turn's request")
     assert any("wake-up 1: nothing new to report" == str(m.get("content", "")) for m in messages), (
         "previous wake-up reports stay as context — never as work to re-report")
+
+
+class _ReadingFake(_CapturingStreamFake):
+    """A LONG turn: `reads` real `read_file` calls, then `final_answer` — recording what the loop
+    sent on its LAST turn. `complete_text` here is the compaction summarizer, not the answer."""
+
+    def __init__(self, path: str, reads: int):
+        super().__init__()
+        self.path, self.reads, self.calls, self.last_turn = path, reads, 0, []
+
+    def chat(self, messages, tools, tool_choice="auto"):
+        import json
+
+        self.calls += 1
+        self.last_turn = [dict(m) for m in messages]
+        if self.calls <= self.reads:
+            return {"content": "", "tool_calls": [{"id": f"r{self.calls}", "type": "function",
+                    "function": {"name": "read_file", "arguments": json.dumps({"path": self.path})}}]}
+        return {"content": "", "tool_calls": [{"id": "fin", "type": "function", "function": {
+            "name": "final_answer", "arguments": json.dumps({"reply": "loop reply"})}}]}
+
+    def complete_text(self, messages):
+        return "- read notes.txt several times"
+
+
+def test_a_late_turns_request_survives_the_loops_own_compaction_and_is_the_one_marked(tmp_path):
+    """TAT-04's remainder (review 2026-09-22), driven through the real turn. On a LATE turn the
+    request is not the session's first user message, and the compaction head pinned the FIRST one:
+    measured before the fix, a long turn's model read "turn one question" verbatim as its apparent
+    task while THIS turn's request was summarized under "NOT instructions" (auto-summary) or elided
+    to "…" (truncation) — and the streamed answer's boundary, the request dict itself, was gone from
+    the trace. Both modes: the request must still be in what the loop sends on its last turn, and
+    the final answer must be scoped by a marker ON it."""
+    from looplab.core.config import Settings
+    from looplab.serve.assistant import run_turn
+
+    notes = tmp_path / "notes.txt"
+    notes.write_text("line\n" * 400, encoding="utf-8")
+    request = "turn two: count the lines of notes.txt and tell me the number"
+    history = [{"role": "user", "content": "turn one question"},
+               {"role": "assistant", "content": "turn one answer"}]
+    for auto_summary in (True, False):
+        client = _ReadingFake(str(notes), reads=14)
+        settings = Settings(context_budget_chars=16_000, agent_auto_summary=auto_summary,
+                            agent_stuck_detection=False)
+        res = run_turn(client, tmp_path, history, request, "plan", settings=settings,
+                       reply_sink=lambda _chunk: None)
+        assert res["ok"] and client.calls == 15, res
+        sent = client.last_turn
+        assert sum(len(str(m.get("content") or "")) for m in sent) < 16_000 + 4_000, (
+            "compaction must really have run over fourteen ~2,000-char pages")
+        assert {"role": "user", "content": request} in sent, auto_summary
+        marked = _marked(client.seen[-1][:-1])
+        assert len(marked) == 1 and marked[0]["content"].endswith(request), auto_summary

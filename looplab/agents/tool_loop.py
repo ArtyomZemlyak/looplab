@@ -668,7 +668,7 @@ def _render_plan(args: dict) -> str:
 
 
 def _compact_in_place(messages: list, context_budget_chars, auto_summary: bool, summarize, *,
-                      label: str = "") -> None:
+                      label: str = "", keep=None) -> None:
     """Bound a growing tool-loop history to `context_budget_chars`, once per turn.
 
     Compaction happens IN PLACE (slice-assign, same list object): callers like the assistant's
@@ -684,6 +684,10 @@ def _compact_in_place(messages: list, context_budget_chars, auto_summary: bool, 
     `label`: the loop's own `tool_result_label`. A summary paraphrases the results that label fenced,
     so it rides in the same fence (review 2026-09-22, doc 66 §6.4; `compact_history`); "" (every
     loop that does not fence its results) keeps the historical note.
+
+    `keep`: the request the loop was handed (`drive_tool_loop` holds it by identity), which both
+    compactors leave verbatim beside the protected head (review 2026-09-22, TAT-04 remainder;
+    `core/context_budget.py::_pinned_request`).
     """
     budget = context_budget_chars
     if auto_summary and budget is None:
@@ -693,10 +697,10 @@ def _compact_in_place(messages: list, context_budget_chars, auto_summary: bool, 
         return
     if auto_summary:                    # C2: summarize the stale middle once the history grows long
         from looplab.core.context_budget import compact_history
-        messages[:] = compact_history(messages, budget, summarize, label=label)
+        messages[:] = compact_history(messages, budget, summarize, label=label, keep=keep)
     else:                               # H4: else just middle-truncate stale tool output
         from looplab.core.context_budget import truncate_history
-        messages[:] = truncate_history(messages, budget)
+        messages[:] = truncate_history(messages, budget, keep=keep)
 
 
 def _tool_call_args(tc: dict) -> tuple[str, dict]:
@@ -1058,6 +1062,14 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     # dict per invocation, so a file legitimately re-read across phases (the reference in every
     # `plan_step`) never accumulates a count from an earlier loop. `_run_tool_call` owns its updates.
     read_state: dict[str, dict] = {}
+    # THE REQUEST THIS LOOP ANSWERS, held BY IDENTITY before the loop appends a single nudge,
+    # reminder or budget note of its own (review 2026-09-22, TAT-04 remainder): the last user message
+    # the caller handed in. Compaction keeps it verbatim beside the protected head, because that head
+    # holds the FIRST user turn — on the assistant's late turn the session's opening message, and in
+    # a `run_phase` with earlier-phase notes those notes — not the task being answered
+    # (`core/context_budget.py::_pinned_request`).
+    request = next((m for m in reversed(messages)
+                    if isinstance(m, dict) and m.get("role") == "user"), None)
     tool_specs = _compose_loop_tool_specs(tools, emit_spec, self_plan=self_plan)
     current_plan = ""
     started = time.monotonic()
@@ -1190,7 +1202,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                              detail=_spend_detail(client, _spend_at_start, cost_budget_usd))
                 break                   # out of money for THIS session -> salvage an emit below
         _compact_in_place(messages, context_budget_chars, auto_summary, summarize,
-                          label=tool_result_label)
+                          label=tool_result_label, keep=request)
         # C1: re-surface the agent's own plan periodically so a long loop can't drift off-goal. A
         # `user`-role reminder, not `system`: the plan is verbatim MODEL output (from update_plan
         # args), so a `system` reinjection would let content the model was steered into by injected
