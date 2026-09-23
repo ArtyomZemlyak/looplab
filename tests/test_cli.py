@@ -183,6 +183,40 @@ def test_ui_help_keeps_extra_name():
     assert "looplab[ui]" in result.output
 
 
+def test_every_help_placeholder_survives_the_markdown_renderer():
+    """The same defect class as the `[ui]` regression above, one character over.
+
+    Markdown mode keeps square brackets, but it reads `<run>` as an inline HTML TAG and Rich renders
+    no HTML — so the E2E sweep of 2026-09-23 found `export-bundle --help` printing "Bundle directory
+    (default: /bundle)", a path at the filesystem ROOT, for a source string that says
+    `<run>/bundle`; the notebook and SFT exports, `bait-materialize` (`<root>/<bait>/task.json`) and
+    `ui --root-path` (`/user/<name>/proxy/8765`) lost theirs the same way. `<run_dir>` survives only
+    because an underscore is not legal in a tag name, which is not a rule anyone writing help text
+    should have to know. A placeholder in inline code (backticks) renders literally.
+
+    Rendered through the REAL app for every command, and compared against the placeholders spelled
+    in that command's own source help, so a new help string that drops one is red here.
+    """
+    import re
+
+    from typer.main import get_command
+
+    group = get_command(app)
+    lost = {}
+    for name, command in sorted(group.commands.items()):
+        texts = [command.help or ""] + [getattr(p, "help", None) or "" for p in command.params]
+        spelled = {m for t in texts for m in re.findall(r"<[A-Za-z_][\w\-./]*>", t)}
+        if not spelled:
+            continue
+        result = runner.invoke(app, [name, "--help"], terminal_width=200)
+        assert result.exit_code == 0, result.output
+        rendered = re.sub(r"\s+", " ", result.output)
+        missing = sorted(p for p in spelled if p not in rendered)
+        if missing:
+            lost[name] = missing
+    assert lost == {}, f"--help dropped these placeholders (wrap them in backticks): {lost}"
+
+
 def test_atlas_and_claims_accept_d8_only_memory(tmp_path):
     import json
 

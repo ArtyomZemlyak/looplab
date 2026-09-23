@@ -117,7 +117,7 @@ def export_mlflow(
 @app.command(name="export-bundle")
 def export_bundle_cmd(
     run_dir: Path = typer.Argument(..., help="Run dir to bundle."),
-    out: Optional[Path] = typer.Option(None, help="Bundle directory (default: <run>/bundle)."),
+    out: Optional[Path] = typer.Option(None, help="Bundle directory (default: `<run>/bundle`)."),
     verify: bool = typer.Option(True, help="Re-check every packaged file against the crate's digests."),
 ):
     """Package the run for a REVIEWER as an RO-Crate (doc 52 row 23): the event log and trace, the
@@ -142,7 +142,8 @@ def export_bundle_cmd(
 @app.command(name="export-notebook")
 def export_notebook(
     run_dir: Path = typer.Argument(..., help="Run dir to export the champion from."),
-    out: Optional[Path] = typer.Option(None, help="Output .ipynb path (default: <run>/champion.ipynb)."),
+    out: Optional[Path] = typer.Option(
+        None, help="Output .ipynb path (default: `<run>/champion.ipynb`)."),
 ):
     """Export the run's champion solution as a runnable Jupyter notebook (.ipynb)."""
     from looplab.events.notebook import champion_notebook
@@ -162,7 +163,7 @@ def export_notebook(
 @app.command(name="export-sft")
 def export_sft(
     run_dir: Path = typer.Argument(..., help="Run dir to export the trajectories from."),
-    out: Optional[Path] = typer.Option(None, help="Output .jsonl (default: <run>/sft.jsonl)."),
+    out: Optional[Path] = typer.Option(None, help="Output .jsonl (default: `<run>/sft.jsonl`)."),
     only_successful: bool = typer.Option(
         False, help="Keep only turns whose node produced a usable metric and stayed feasible."),
     op: Optional[str] = typer.Option(None, help="Keep only this operation (propose, implement, …)."),

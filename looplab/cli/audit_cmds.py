@@ -74,7 +74,8 @@ def mlebench_extras_cmd(
 
 @app.command(name="bait-materialize")
 def bait_materialize_cmd(
-    root: Path = typer.Argument(..., help="Directory to write the three bait tasks under (<root>/<bait>/task.json)."),
+    root: Path = typer.Argument(
+        ..., help="Directory to write the three bait tasks under (`<root>/<bait>/task.json`)."),
 ):
     """Write the three BAIT tasks (doc 52 row 22, BAITBENCH's shape): ordinary small prediction
     tasks with a planted, rule-compliant shortcut each — a post-outcome `client_score` column, the

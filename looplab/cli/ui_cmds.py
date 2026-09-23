@@ -30,7 +30,7 @@ def ui(run_root: Path = typer.Option(
                 "gates /api/*. LOOPLAB_UI_ANONYMOUS=1 is the explicit opt-out."),
        port: int = typer.Option(8765, help="Bind port."),
        root_path: str = typer.Option(
-           "", help="ASGI root_path for a NON-prefix-stripping proxy (e.g. /user/<name>/proxy/8765). "
+           "", help="ASGI root_path for a NON-prefix-stripping proxy (e.g. `/user/<name>/proxy/8765`). "
                     "Auto-derived from JUPYTERHUB_SERVICE_PREFIX when unset; harmless for a stripping "
                     "proxy. Lets `looplab ui` work behind both proxy styles without raw uvicorn."),
        build: bool = typer.Option(True, "--build/--no-build",
