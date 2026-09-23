@@ -74,13 +74,24 @@ from typing import Optional
 # registry costs no layering.
 from looplab.events.types import EV_PHASE_PROGRESS, PROGRESS_STARTED
 
-# The four dispositions, each PROVABLE from the durable record and jointly exhaustive:
-#   finished     — a `run_finished` is folded. The run ended on its own terms.
-#   paused       — a `pause` is in effect. Resumable, not over; the reason is quoted.
-#   no_boundary  — a `run_started` is folded and neither of the above. The engine never recorded an
-#                  end, so it is either still running or the process writing it is gone. The log
-#                  alone cannot tell those apart, and this module does not pretend otherwise.
-#   no_log       — the fold saw no `run_started`. Nothing to account for.
+# The five dispositions, each PROVABLE from the durable record and jointly exhaustive:
+#   finished          — a `run_finished` is folded. The run ended on its own terms.
+#   paused            — a `pause` is in effect. Resumable, not over; the reason is quoted.
+#   awaiting_approval — neither of the above, and the run RECORDED a human gate it stopped at on
+#                       purpose: `approval_requested` (`require_approval`) or an agent-proposed
+#                       eval spec's `spec_approval_requested`. Owed an approval, then a resume.
+#   no_boundary       — a `run_started` is folded and none of the above. The engine never recorded
+#                       an end, so it is either still running or the process writing it is gone.
+#                       The log alone cannot tell those apart, and this module does not pretend
+#                       otherwise.
+#   no_log            — the fold saw no `run_started`. Nothing to account for.
+#
+# `awaiting_approval` is the FIFTH because the E2E sweep of 2026-09-23 drove the HITL flow end to end:
+# `looplab run --require-approval` stopped at its gate exactly as designed and printed the
+# `no_boundary` account — "a wall-clock kill, an OOM kill, a lost session, a power cut" — about a run
+# whose last two rows were `approval_requested` and `run_loop_exited {reason: awaiting_approval}`.
+# The engine's own exit vocabulary already had the word (`events/types.py::RUN_EXIT_REASONS`); this
+# record did not, so the one happy path that ends in a wait read as a crash.
 #
 # Deliberately NOT drawn from `core/models.py::FAILURE_REASONS`, and not extended into it. That
 # registry's own rule is stated in the two comments around it: every member is a verdict about ONE
@@ -90,7 +101,8 @@ from looplab.events.types import EV_PHASE_PROGRESS, PROGRESS_STARTED
 # it, and no repair budget it belongs to — so a member added here would be a member every consumer
 # of that registry (`options.py`, `failure_diagnosis`'s three sibling tuples, the Developer's own
 # emit enum) would have to be taught to ignore. Different question, different vocabulary.
-STOP_DISPOSITIONS: tuple[str, ...] = ("finished", "paused", "no_boundary", "no_log")
+STOP_DISPOSITIONS: tuple[str, ...] = ("finished", "paused", "awaiting_approval", "no_boundary",
+                                      "no_log")
 
 
 @dataclass(frozen=True)
@@ -181,7 +193,41 @@ def stop_account(state) -> StopAccount:
         body = (f"{head}\n  pause reason: {reason}" if reason else
                 f"{head}\n  the `pause` row names no reason — nobody can say why.")
         return StopAccount("paused", reason, body + _unserved_finalize(state))
+    # AFTER `paused`, the order `events/types.py::run_exit_reason` already uses for the same two
+    # states: a latched pause is the more specific answer and the one `resume` must lift first.
+    waiting = _awaiting_approval(state)
+    if waiting is not None:
+        return StopAccount("awaiting_approval", None, waiting + _unserved_finalize(state))
     return StopAccount("no_boundary", None, _NOBODY_SAID + _unserved_finalize(state))
+
+
+def _awaiting_approval(state) -> Optional[str]:
+    """The human gate this run RECORDED stopping at, as the account's line, or None.
+
+    Two gates, both a durable request the engine appended and then broke its loop on: the eval-spec
+    ratification of onboarding (`spec_approval_requested` on a proposed, unconfirmed spec —
+    `orchestrator.py::_run_spec_gates`) and the final-result approval of `require_approval`
+    (`approval_requested`, folded to `awaiting_approval` with the subject node). The remedies are the
+    ones `looplab approve` itself implements, spec first, in the same order it checks them.
+
+    The subject is named when the fold has one; nothing else about the request is quoted, because
+    the request carries no prose — the node id and the two commands are the whole of what a reader
+    needs, and a metric here would be a second spelling of the champion's.
+    """
+    if (getattr(state, "spec_approval_requested", False)
+            and not getattr(state, "spec_confirmed", False)):
+        return ("AWAITING APPROVAL of the agent-proposed eval spec — the run recorded "
+                "`spec_approval_requested` and stopped there on purpose; it is not finished and it was "
+                "not killed. It is OWED more work: `looplab approve RUN_DIR` ratifies the spec, then "
+                "`looplab resume RUN_DIR` continues the run.")
+    if getattr(state, "awaiting_approval", False):
+        subject = getattr(state, "approval_subject", None)
+        what = f"node {subject}" if subject is not None else "the run's final result"
+        return (f"AWAITING APPROVAL of {what} — the run recorded `approval_requested` "
+                f"(`require_approval`) and stopped there on purpose; it is not finished and it was "
+                f"not killed. It is OWED more work: `looplab approve RUN_DIR` grants the approval, "
+                f"then `looplab resume RUN_DIR` finishes the run.")
+    return None
 
 
 def _finalization_pending(state) -> bool:
@@ -199,15 +245,15 @@ def _unserved_finalize(state) -> str:
     one. A reader who resumes without knowing that gets a fresh search epoch stacked on an unfinished
     finalization.
 
-    CALLED ONLY FROM THE TWO BRANCHES WHERE NO `run_finished` EXISTS, and that is the whole reason
-    this needs no predicate of its own. On a run that HAS finished, "is a finalize still outstanding?"
+    CALLED ONLY FROM THE BRANCHES WHERE NO `run_finished` EXISTS (`paused`, `awaiting_approval`,
+    `no_boundary`), and that is the whole reason this needs no predicate of its own. On a run that HAS finished, "is a finalize still outstanding?"
     is a genuinely subtle question — `cli/run_cmds.py::classify_prior_run` answers it with a stop
     request NEWER than the accepted finish, or a finish whose own reason is `error` — and this module
     deliberately does not answer it a second time. BACKLOG §0.7 measured four implementations of one
     claim/verdict join and every drift was between the copies; a fifth spelling of the pending-finalize
     rung, living in a RECORD where nothing would exercise it, is that finding volunteering to recur.
-    Here `paused`/`no_boundary` have already established that no finish exists, so a truthy
-    `stop_requested` means "asked, never served" with nothing left to decide.
+    Here `paused`/`awaiting_approval`/`no_boundary` have already established that no finish exists,
+    so a truthy `stop_requested` means "asked, never served" with nothing left to decide.
 
     Not observed in any of the 20 corpus runs, and stated anyway: it needs an operator `finalize`, so
     absence in one automated campaign says nothing about the shape — and whoever needs this line will

@@ -564,12 +564,13 @@ twelve that *did* finish were no better: every one folded to `stop_reason="error
 crash, and not one had crashed — all twelve stopped on the operator's own `llm_budget_usd` ceiling,
 which the `run_finished` row named on the same row.
 
-The `disposition` is one of four:
+The `disposition` is one of five:
 
 | disposition | means | owed more work? |
 |---|---|---|
 | `finished` | the run wrote its own terminal | no — but read the detail: a spend ceiling is not a crash |
 | `paused` | resumable, with the pausing writer's own words quoted | yes — `looplab resume RUN_DIR` |
+| `awaiting_approval` | the run recorded a human gate and stopped there on purpose: `approval_requested` (`require_approval`, the node is named) or an agent-proposed eval spec's `spec_approval_requested` | yes — `looplab approve RUN_DIR`, then `looplab resume RUN_DIR` |
 | `no_boundary` | the log has no end in it: the process died without writing one | yes, and only the supervisor that killed it can say how |
 | `no_log` | there is no readable event log | nothing to say |
 

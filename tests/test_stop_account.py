@@ -476,3 +476,60 @@ def test_a_natural_completion_is_not_reported_as_an_old_log(tmp_path):
     _started(store)
     store.append("run_finished", {})                            # markerless: no handshake
     assert "an old log" in stop_account(_fold(legacy)).line
+
+
+# ------------------------------------------------ the HITL half: a wait the run RECORDED on purpose
+
+def test_a_run_awaiting_approval_is_not_reported_as_killed(tmp_path):
+    """E2E sweep 2026-09-23. `looplab run --require-approval` ran to its HITL gate, appended
+    `approval_requested` and exited 0 — and the `stop:` line it printed was the no-boundary account:
+    "this run recorded neither a `run_finished` nor a `pause` ... a wall-clock kill, an OOM kill, a
+    lost session, a power cut". The run had recorded exactly why it stopped; the account had no
+    branch for it, so every HITL run read as a crash on the one happy path that ends in a wait.
+
+    Driven through a REAL offline run, like the natural-completion test above: the engine's own HITL
+    gate writes the request, and the account is read off the log it left. Mutation: delete the
+    approval branch and this reads `no_boundary` again.
+    """
+    import anyio
+
+    from factories import make_engine
+
+    run_dir = tmp_path / "run"
+    state = anyio.run(make_engine(run_dir, n_seeds=2, max_nodes=3, require_approval=True).run)
+    assert state.awaiting_approval and not state.finished and not state.paused   # the gate fired
+
+    account = stop_account(_fold(run_dir / "events.jsonl"))
+    assert account.disposition == "awaiting_approval", account.line
+    assert account.reason is None, "the run wrote no prose reason; the account must not invent one"
+    assert f"node {state.approval_subject}" in account.line
+    assert "looplab approve" in account.line and "looplab resume" in account.line
+    for crash_word in ("WITHOUT A BOUNDARY", "OOM", "power cut", "still running"):
+        assert crash_word not in account.line, f"a recorded HITL wait read as {crash_word!r}"
+
+
+def test_a_pending_eval_spec_ratification_is_an_approval_wait_too(tmp_path):
+    """The onboarding twin (`orchestrator.py::_run_spec_gates`): the engine appends
+    `spec_approval_requested` and breaks the loop "for `LoopLab approve`", recording the same kind
+    of on-purpose wait with a different subject."""
+    p = tmp_path / "events.jsonl"
+    store = EventStore(p)
+    _started(store)
+    store.append("spec_proposed", {"eval_spec": {"command": ["python", "eval.py"]}})
+    store.append("spec_approval_requested", {"eval": {"command": ["python", "eval.py"]}})
+
+    account = stop_account(_fold(p))
+    assert account.disposition == "awaiting_approval", account.line
+    assert "eval spec" in account.line and "looplab approve" in account.line
+
+
+def test_a_pause_outranks_an_approval_wait(tmp_path):
+    """ORDER, the same one `events/types.py::run_exit_reason` uses: a latched pause is the more
+    specific answer and is what `resume` has to lift first, so it keeps the account."""
+    p = tmp_path / "events.jsonl"
+    store = EventStore(p)
+    _started(store)
+    store.append("spec_proposed", {"eval_spec": {"command": ["python", "eval.py"]}})
+    store.append("spec_approval_requested", {"eval": {"command": ["python", "eval.py"]}})
+    store.append("pause", {"reason": "operator stop"})
+    assert stop_account(_fold(p)).disposition == "paused"
