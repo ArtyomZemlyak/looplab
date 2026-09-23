@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from looplab.core.errors import EnvironmentRefusal
+from looplab.core.errors import RunSetupRefusal
 from looplab.core.models import (EXTRA_METRIC_AUTO, apply_engine_extra_metric_channels,
                                  normalize_extra_metric_channels, normalize_extra_metrics)
 from looplab.engine.evaluate import _redacted_tail
@@ -51,6 +51,15 @@ class EvalDispatchMixin:
     """The engine's eval-dispatch cluster. See the module docstring for the mixin convention
     (`self` is the Engine)."""
 
+    # THE LATCHED REFUSAL of this process's run-level setup (review 2026-09-22, ENG2-08): the
+    # `RunSetupRefusal` `_do_run_setup` raised, or None. Class-level, like `_eval_budget_stop` beside
+    # it in `speculation.py`, so the engine doubles the suite builds without `Engine.__init__`
+    # (`tests/test_events_replay.py::_fake_eval_engine`) read the same default. Held by the ENGINE
+    # OBJECT, exactly like `_run_setup_done`, and never durable on purpose: a resume (a new process,
+    # a new Engine) is the operator's "I fixed it", and the fold records `run_setup_done` only for a
+    # SUCCESSFUL command, so the resumed run runs the setup again.
+    _run_setup_refusal: Optional[BaseException] = None
+
     def _ensure_run_setup(self) -> None:
         """Run the eval's RUN-LEVEL `run_setup` exactly ONCE, before the first eval — e.g. a one-time
         dependency install into the shared interpreter (the autonomy default when deps are stable
@@ -71,7 +80,17 @@ class EvalDispatchMixin:
         interpreter permanently half-installed with no way forward, so the repeat happens — but it is
         stamped `after_interrupted_attempt` in the log instead of being indistinguishable from a first
         attempt. Give `run_setup` an idempotent command (a plain `pip install` is) whenever the repeat
-        would otherwise cost money or mutate shared state."""
+        would otherwise cost money or mutate shared state.
+
+        A FAILURE IS LATCHED, so the setup runs at most once per Engine (review 2026-09-22,
+        ENG2-08). The in-process guard below is set only on SUCCESS, which is right for the
+        evaluations queued on `_run_setup_lock` while the install runs — and was wrong for them the
+        moment it FAILED: each one took the lock in turn, found the flag still False and launched the
+        same failing install again, serially, into the shared interpreter. The refusal is now kept
+        on `_run_setup_refusal` and every later caller — a waiter on the lock or an evaluation that
+        arrives afterwards — raises it without running anything. It is a `RunSetupRefusal`, which
+        `_evaluate` treats as a deliberate stop and the eval-child wrappers defer to their owner, so
+        the run ENDS on it rather than terminalizing and pausing (see `core/errors.py`)."""
         if self._run_setup_done:
             return
         # Serialize the check-then-set: parallel eval worker threads would otherwise all see
@@ -79,6 +98,9 @@ class EvalDispatchMixin:
         with self._run_setup_lock:
             if self._run_setup_done:
                 return
+            # …and a waiter that queued here while the install FAILED — or any evaluation that
+            # arrives after it — stops on that failure without running anything.
+            self._raise_latched_run_setup_refusal()
             cmd = self._settle_declared_deps(list((self._eval_spec or {}).get("run_setup") or []))
             if not cmd or self.trust_mode != "trusted_local":
                 self._run_setup_done = True
@@ -95,14 +117,32 @@ class EvalDispatchMixin:
             # is held, so a concurrent worker that reached the lock-free fast path (top) still sees the
             # flag False mid-install and blocks on `_run_setup_lock` here — waiting for the install to
             # finish instead of racing ahead and evaluating against an unprepared interpreter. A failed
-            # install leaves the flag False and re-runs (a non-zero run_setup aborts the run anyway, and
-            # the fold records run_setup_done only for exit_code==0, so resume also re-runs a failed one).
+            # install leaves the flag False and LATCHES its refusal (the docstring's last
+            # paragraph): the waiters stop on it and the run aborts, and since the fold records
+            # run_setup_done only for exit_code==0, the resume the refusal asks for runs it again.
             # The Declaration travels only when the command is OURS: an operator's own `run_setup`
             # is run exactly as written or not at all, so it is never rewritten into a reduced form.
-            self._do_run_setup(cmd, declared=(self._declared_deps()
-                                              if getattr(self, "_deps_setup_derived", False)
-                                              else None))
+            try:
+                self._do_run_setup(cmd, declared=(self._declared_deps()
+                                                  if getattr(self, "_deps_setup_derived", False)
+                                                  else None))
+            except RunSetupRefusal as exc:
+                self._run_setup_refusal = exc
+                raise
             self._run_setup_done = True
+
+    def _raise_latched_run_setup_refusal(self) -> None:
+        """Stop on this process's failed run-level setup, if it failed — never run it again.
+
+        A FRESH `RunSetupRefusal` per caller, chained `from` the latched one, rather than the latched
+        object itself: several evaluation workers stop on it concurrently, and re-raising one
+        exception object from many threads interleaves their frames into a single traceback. The
+        sentence is the same one, so the CLI boundary prints the refusal once, and the original —
+        with the frames of the install that actually failed — is its `__cause__`.
+        """
+        latched = self._run_setup_refusal
+        if latched is not None:
+            raise RunSetupRefusal(*latched.args) from latched
 
     # The closed vocabulary of what a run DID about its repo's declared dependencies. A bare string
     # is what `deps_declared.action` carries into the durable log, so a typo'd literal here would be
@@ -479,8 +519,10 @@ class EvalDispatchMixin:
             # operator's own setup command failing on the operator's own box — a refusal about the
             # environment, which the CLI boundary prints as one sentence naming the fix instead of
             # the 42-frame traceback that reads as an engine crash. Same base class, so every
-            # `except RuntimeError` on the way up still catches it.
-            raise EnvironmentRefusal(
+            # `except RuntimeError` on the way up still catches it. Its `RunSetupRefusal` subclass
+            # is what makes it the RUN's stop rather than one node's fault (review 2026-09-22,
+            # ENG2-08) — see `core/errors.py::RunSetupRefusal`.
+            raise RunSetupRefusal(
                 f"run_setup failed (exit={rc}, timed_out={timed}){named}; see {log}. Fix the "
                 f"`eval.setup` command or the declared requirements it installs, then resume.\n"
                 + _redacted_tail(self._redact, err or out, 500))

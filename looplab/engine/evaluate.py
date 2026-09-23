@@ -53,7 +53,8 @@ import anyio
 from looplab.agents.roles import DeveloperResult
 import orjson
 
-from looplab.core.errors import BudgetExceeded, budget_stop_leaf, exception_leaves
+from looplab.core.errors import (BudgetExceeded, RunSetupRefusal, budget_stop_leaf,
+                                 exception_leaves)
 from looplab.core.models import (DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX, NodeStatus,
                                  coerce_node_id,
                                  developer_artifact_footprint, developer_stuck_reason,
@@ -1050,8 +1051,15 @@ _LOG = logging.getLogger(__name__)
 #     prediction was about to cross into the sandbox). Containment downgrades an ENVIRONMENT fault
 #     to one node's terminal, which is right because the box was at fault and the engine was not;
 #     recording this one that way hides the exact crossing the invariant exists to make impossible.
+#   * RunSetupRefusal — the RUN's environment never came up (its run-level `run_setup` failed), a
+#     fact about the run that merely surfaces in the first evaluation's worker, because that is where
+#     the setup runs. Contained, it was filed as that node's `engine_error` and the run PAUSED, where
+#     the guide promises an abort, and every evaluation queued behind the setup lock re-ran the
+#     failing install and earned an `engine_error` of its own (review 2026-09-22, ENG2-08). The nodes
+#     it never let start stay pending for the resume its sentence asks for, and an eval child defers
+#     it to its owner exactly like the ceiling (`core/errors.py::deferrable_run_stop`).
 _EVAL_DELIBERATE_STOPS = (KeyboardInterrupt, SystemExit, BudgetExceeded,
-                          SpeculativeEvaluationInvariantError)
+                          SpeculativeEvaluationInvariantError, RunSetupRefusal)
 
 
 

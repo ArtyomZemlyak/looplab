@@ -5544,8 +5544,10 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         #
         # The SAME sink holds a ceiling crossed INSIDE a parallel lane (ENG2-02, `_eval_in_slot`),
         # so one set of admission gates and one re-raise serve both producers. Imported here, not at
-        # module level, to keep this change inside the method it guards.
-        from looplab.core.errors import deferrable_budget_stop
+        # module level, to keep this change inside the method it guards. It holds a refused RUN
+        # SETUP too (ENG2-08): the run's other ending that surfaces inside one evaluation, deferred
+        # by the same lane on the same terms — see `core/errors.py::deferrable_run_stop`.
+        from looplab.core.errors import deferrable_run_stop
         budget_stop: list[BaseException] = []
         async with anyio.create_task_group() as bg_tg:
             self._spawn_research(_DeferredBudgetStop(bg_tg, budget_stop), state)
@@ -5721,13 +5723,15 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                             # A private single-token limiter -> `_evaluate`'s `async with limiter` is a
                             # no-op; the outer semaphore is what bounds fan-out and drives the refill.
                             await self._evaluate(nid, anyio.CapacityLimiter(1), max_es)
-                        except BaseException as exc:  # noqa: BLE001 — re-raised unless a pure ceiling
+                        except BaseException as exc:  # noqa: BLE001 — re-raised unless a run stop
                             # A SPEND CEILING THIS EVALUATION CROSSED is deferred into the same sink
                             # the overlapped research uses (review 2026-09-22, ENG2-02), never raised
                             # into `tg`, where it cancelled every sibling lane mid-score. The refill
                             # gate below then admits nothing more, and the method re-raises the stop
                             # once the batch has joined. See `core/errors.py::deferrable_budget_stop`.
-                            stop = deferrable_budget_stop(exc)
+                            # A refused run setup (ENG2-08) rides the same sink, so a batch whose
+                            # lanes all stopped on it ends the run on ONE refusal, not a group.
+                            stop = deferrable_run_stop(exc)
                             if stop is None:
                                 raise
                             budget_stop.append(stop)

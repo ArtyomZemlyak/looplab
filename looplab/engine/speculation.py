@@ -18,7 +18,7 @@ import anyio
 
 from looplab.core import tracing
 from looplab.core.advisory_payloads import bounded_cross_run_advisory_receipt
-from looplab.core.errors import deferrable_budget_stop
+from looplab.core.errors import deferrable_run_stop
 from looplab.core.models import (
     Idea,
     NodeStatus,
@@ -698,6 +698,9 @@ class SpeculationMixin:
     #                          into the run-scoped group (review 2026-09-22, ENG2-02) — the FIRST one;
     #                          admission refuses while it is held and `_raise_deferred_eval_budget_stop`
     #                          raises it once every sibling has landed.  `None`: nothing captured.
+    #                          It is the RUN-LEVEL deferred-stop sink, so it also holds the run's
+    #                          other ending that surfaces inside one evaluation — a refused run
+    #                          setup (`RunSetupRefusal`, ENG2-08) — under the same rules.
     _eval_task_group: Any = None
     _eval_notify: Any = None
     _eval_boundary_owed: bool = False
@@ -758,6 +761,12 @@ class SpeculationMixin:
         evaluation raises against the same ceiling and is deferred the same way, so the wait is
         bounded by work already started.  Cleared as it is raised, so an Engine that is run again
         does not inherit the stop of a run that already ended on it.
+
+        A REFUSED RUN SETUP is raised from here too (review 2026-09-22, ENG2-08) — the sink holds
+        whatever `core/errors.py::deferrable_run_stop` let a child park — and it is equally
+        unchanged: the `RunSetupRefusal` an evaluation stopped on, so `cli/run_cmds.py` records
+        `run_finished {"reason": "error"}` with the refusal's own sentence, which is the abort the
+        guide promises.
         """
         stop = self._eval_budget_stop
         if stop is None:
@@ -2525,12 +2534,18 @@ class SpeculationMixin:
         head raises the stop once the siblings have landed (`_raise_deferred_eval_budget_stop`).
         Everything else — a cancellation above all — propagates exactly as before
         (`core/errors.py::deferrable_budget_stop` says what may be deferred and why).
+
+        A REFUSED RUN SETUP IS DEFERRED THE SAME WAY (review 2026-09-22, ENG2-08): it is the run's
+        ending too, it surfaces in whichever evaluation ran the setup, and every child queued behind
+        that setup stops on the same latched refusal — raised into the group, it would cancel the
+        siblings and the host body and end the run on a group of N copies. Parked here, the first
+        wins and the owner raises exactly one (`core/errors.py::deferrable_run_stop`).
         """
 
         try:
             await self._evaluate(node_id, anyio.CapacityLimiter(1), max_eval_seconds)
-        except BaseException as exc:  # noqa: BLE001 — re-raised unless it is a pure spend ceiling
-            stop = deferrable_budget_stop(exc)
+        except BaseException as exc:  # noqa: BLE001 — re-raised unless it is a pure run-ending stop
+            stop = deferrable_run_stop(exc)
             if stop is None:
                 raise
             if self._eval_budget_stop is None:

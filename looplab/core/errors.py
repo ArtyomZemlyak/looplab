@@ -125,6 +125,29 @@ class EnvironmentRefusal(OperatorRefusal, RuntimeError):
     """
 
 
+class RunSetupRefusal(EnvironmentRefusal):
+    """The RUN's own environment never came up: its run-level `run_setup` failed
+    (`engine/eval_dispatch.py::_do_run_setup`). `docs/guide/tasks.md` says it plainly — "A failure
+    aborts the run."
+
+    A SUBCLASS AND NOT A FLAG, because the one thing that distinguishes it from every other
+    `EnvironmentRefusal` is WHOSE fact it is, and the engine has to decide that by type. The setup
+    runs inside the FIRST evaluation's worker (`_run_eval` calls `_ensure_run_setup` before
+    anything else), so its failure surfaces inside ONE node's evaluation — where `_evaluate`'s
+    containment, written for one node's environment fault (an ENOSPC, a vanished inode), filed it
+    as that node's `node_failed{reason: "engine_error"}` and PAUSED the run, and every evaluation
+    queued behind the setup lock re-ran the failing install and earned its own terminal (review
+    2026-09-22, ENG2-08: two executions and two `engine_error` nodes at width 2). It is a fact about
+    the RUN, like the spend ceiling: `engine/evaluate.py::_EVAL_DELIBERATE_STOPS` names it,
+    `deferrable_run_stop` below lets an eval child hand it to its owner, and the run ends on it.
+
+    Still an `EnvironmentRefusal` (so a `RuntimeError`): every `except RuntimeError` on the way up
+    and every `pytest.raises(EnvironmentRefusal)` keeps working, and the CLI boundary prints it as
+    the one sentence it is. It is a FAULT in `is_run_ending`'s sense — the operator repairs the
+    setup and resumes, which its own message says.
+    """
+
+
 class LLMError(OperatorRefusal, RuntimeError):
     """A reachable LLM transport/protocol failure (network down, HTTP error, non-JSON, no choices).
     Raised instead of leaking a raw urllib/JSON exception so the role layer's retry+fallback treats
@@ -252,5 +275,36 @@ def deferrable_budget_stop(exc: BaseException | None) -> BaseException | None:
         return None
     leaves = list(exception_leaves(exc))
     if not leaves or not all(isinstance(leaf, BudgetExceeded) for leaf in leaves):
+        return None
+    return leaves[0]
+
+
+def deferrable_run_stop(exc: BaseException | None) -> BaseException | None:
+    """The RUN-ENDING stop an evaluation's child task may DEFER — `deferrable_budget_stop`'s spend
+    ceiling, or a refused run-level setup (`RunSetupRefusal`) — or None, "raise it as before".
+
+    WHAT THE TWO HAVE IN COMMON is the whole reason they share the deferral. Each surfaces inside ONE
+    evaluation and is a fact about the RUN: the ceiling because one evaluation's own paid
+    bookkeeping crossed it, the refusal because the run-level setup happens to run in the first
+    evaluation's worker (review 2026-09-22, ENG2-08). Raised into the child's task group, either
+    would cancel every sibling at its next checkpoint — and the run-scoped group's host body with
+    them — for an ending the owner can raise cleanly once the siblings have landed. So the eval-child
+    wrappers (`speculation.py::_card_eval_one`, `_dispatch_evals`' `_eval_in_slot`) park it where
+    the ceiling is parked and the same owner raises it: `_raise_deferred_eval_budget_stop`, or the
+    dispatcher after its join. That is also what makes the run end on ONE refusal: every evaluation
+    queued behind the setup stops on it, and a group of N identical refusals is what `Engine.run`
+    would otherwise raise.
+
+    PURE PER KIND, like the ceiling and for its reasons: the ceiling keeps exactly the answer
+    `deferrable_budget_stop` gives it, and a refusal is deferred only when EVERY leaf is one. A group
+    mixing the two, a refusal beside an environment fault, and a cancellation whose `__context__` is
+    a refusal all keep today's propagation — deferral may drop nothing but the duplicates of the one
+    stop it parks. Any OTHER `EnvironmentRefusal` is one node's affair and is not deferred.
+    """
+    stop = deferrable_budget_stop(exc)
+    if stop is not None or exc is None:
+        return stop
+    leaves = list(exception_leaves(exc))
+    if not leaves or not all(isinstance(leaf, RunSetupRefusal) for leaf in leaves):
         return None
     return leaves[0]
