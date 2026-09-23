@@ -188,8 +188,8 @@ test('ScopeReport renders only current authority and ignores an old generation a
     cancelAnimationFrame: handle => clearTimeout(handle), IS_REACT_ACT_ENVIRONMENT: true,
     // Deliberately ignore AbortSignal here: a transport can still complete after local cancellation,
     // and the component's identity fence must remain the final line of defence.
-    fetch: (url, options) => new Promise(resolve => requests.push({
-      url: String(url), options, resolve,
+    fetch: (url, options) => new Promise((resolve, reject) => requests.push({
+      url: String(url), options, resolve, reject,
     })),
   }
   const previous = Object.fromEntries(Object.keys(installed)
@@ -276,6 +276,14 @@ test('ScopeReport renders only current authority and ignores an old generation a
     assert.doesNotMatch(document.body.textContent, /LATE A|VERDICT A|HEADLINE A/)
   } finally {
     if (root) await act(async () => root.unmount())
+    // What the test left UNANSWERED ends the way a page unload ends it — after every assertion
+    // above, so no proof changes. Left pending, the one still-open read — `completedGeneration`'s
+    // canonical re-read of scope-a after the late paid answer, which carries no signal ON PURPOSE
+    // (navigating away must not cancel a paid action's settlement) — held its 8 s `commandFetch`
+    // deadline and with it the whole process, ~8 s past this file's last test (UI-05).
+    for (const request of requests) {
+      request.reject(Object.assign(new Error('the test ended'), { name: 'AbortError' }))
+    }
     if (vite) await vite.close()
     for (const [key, descriptor] of Object.entries(previous)) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor)

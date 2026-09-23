@@ -122,7 +122,28 @@ async function commandFetch(path, options = {}, timeoutMs = COMMAND_REQUEST_TIME
       reject(commandTimeoutError(path, timeout))
     }, timeout)
   })
-  try { return await Promise.race([work, deadline]) }
+  // THE CALLER'S OWN ABORT SETTLES THE READ AT ONCE, as the shared primitive in `requestDeadline.js`
+  // already does ("It settles exactly once even when a transport ignores AbortSignal"). A browser's
+  // fetch rejects on abort by itself, so there this changes nothing observable; a transport that
+  // ignores the signal — every test double that leaves a request unanswered — used to keep this race
+  // AND its timer pending until the deadline fired, which is why three UI test files each held the
+  // process ~8 s after their last test (review 2026-09-22, UI-05). Measured before the change: no
+  // step of those files delivers a late answer to an ABORTED read, so no proof that a stale
+  // response is dropped rested on the old behaviour; a read that was never aborted still reaches its
+  // caller's own identity fence exactly as before.
+  // Its listener is unlinked in `finally` like `forwardAbort`'s: a caller that reuses one long-lived
+  // signal across many reads must not collect one dead listener per settled read.
+  let settleAborted = null
+  const aborted = externalSignal ? new Promise((_, reject) => {
+    settleAborted = () => {
+      const error = externalSignal.reason ?? new Error('request aborted')
+      if (!externalSignal.reason) error.name = 'AbortError'
+      reject(error)
+    }
+    if (externalSignal.aborted) settleAborted()
+    else externalSignal.addEventListener?.('abort', settleAborted, { once: true })
+  }) : null
+  try { return await Promise.race(aborted ? [work, deadline, aborted] : [work, deadline]) }
   catch (cause) {
     if (timedOut) throw cause?.code === 'COMMAND_REQUEST_TIMEOUT'
       ? cause : commandTimeoutError(path, timeout, cause)
@@ -130,6 +151,7 @@ async function commandFetch(path, options = {}, timeoutMs = COMMAND_REQUEST_TIME
   } finally {
     clearTimeout(timer)
     unlink()
+    if (settleAborted) externalSignal.removeEventListener?.('abort', settleAborted)
   }
 }
 
