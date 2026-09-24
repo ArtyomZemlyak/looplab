@@ -152,3 +152,47 @@ def test_the_spend_ceiling_inside_an_injected_build_ends_the_run(tmp_path):
     # The reservation is still closed (the operator's request never leaves a bare build behind).
     assert not fold(events).buildings
     assert [e.data["reason"] for e in events if e.type == EV_NODE_FAILED] == ["build_crash"]
+
+
+class _CountingDeveloper:
+    """Records every `implement` the engine asks for; builds nothing new itself."""
+
+    is_code_generating = False
+
+    def __init__(self, real):
+        self._real, self.calls = real, []
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def implement(self, idea):
+        self.calls.append(idea.operator)
+        return self._real.implement(idea)
+
+
+def test_an_inject_carrying_a_file_overlay_is_ready_made_and_skips_the_developer(tmp_path):
+    """minionerec-backbones-v8 (2026-09-24): an inject whose only artefact was a finished
+    `experiment.env` overlay was built AGAIN through Developer stages/plan/implement (60+ min, GPUs
+    idle), because `developer_called` looked at `code` only — the script-solution field. A repo
+    candidate IS its overlay. Mutation: key `developer_called` on `code` alone again (the manual
+    idea reaches `implement`)."""
+    eng = make_engine(tmp_path / "run", n_seeds=1, max_nodes=2)
+    dev = _CountingDeveloper(eng.developer)
+    eng.developer = dev
+    overlay = {"cfg/experiment.env": "BACKBONE=lfm25_1.2B\n"}
+    eng.store.append(EV_INJECT_NODE, dict(_INJECT, files=dict(overlay)))
+    state = anyio.run(eng.run)
+
+    assert "manual" not in dev.calls, "a ready-made overlay was sent back to the Developer"
+    manual = [n for n in state.nodes.values() if n.operator == "manual"]
+    assert len(manual) == 1 and state.injects_done == 1
+    assert dict(manual[0].files or {}) == overlay, "the overlay must be committed exactly as supplied"
+
+
+def test_an_inject_with_neither_code_nor_files_is_still_built_by_the_developer(tmp_path):
+    eng = make_engine(tmp_path / "run", n_seeds=1, max_nodes=2)
+    dev = _CountingDeveloper(eng.developer)
+    eng.developer = dev
+    eng.store.append(EV_INJECT_NODE, dict(_INJECT))
+    anyio.run(eng.run)
+    assert "manual" in dev.calls

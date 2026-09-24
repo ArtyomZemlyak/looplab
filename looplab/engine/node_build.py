@@ -2216,7 +2216,17 @@ class NodeBuildMixin:
         idea = reservation.idea.model_copy(deep=True)
         with self.tracer.span("create_node", new_trace=True, node_id=node_id,
                               generation=0, operator=idea.operator, source="manual"):
-            developer_called = not bool(code)
+            # READY-MADE MEANS EITHER HALF OF THE ARTEFACT (2026-09-24). `code` is the script-solution
+            # field; a REPO task's candidate is its file overlay, which the operator supplies as
+            # `files` / `deleted`. Keyed on `code` alone, an injected repo node carrying a complete
+            # overlay was built AGAIN from its rationale — `minionerec-backbones-v8` spent 60+ min of
+            # Developer·stages/plan/implement on an inject whose only file was the finished
+            # `experiment.env`, while four GPUs idled. The overlay is committed exactly as supplied
+            # below (`files=req.get("files")`), so skipping the session changes nothing it would
+            # have kept.
+            developer_called = not (code or req.get("files") or req.get("deleted"))
+            if not developer_called and code is None:
+                code = ""
             footprint_finalized = False
             _inj = None                     # the envelope, when the Developer was called (doc 52 row 12)
             if developer_called:
