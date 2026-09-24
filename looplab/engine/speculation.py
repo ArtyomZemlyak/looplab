@@ -102,6 +102,10 @@ CARD_BUILD_SKIP_REASONS = (
     # billed. Closed `stale`, never `producer_failed`: the Card is not at fault and stays electable
     # (review 2026-09-22, ENG1-14 — doc 50 ES1-04; `_start_head_producer` has the account).
     "producer_unavailable",
+    # The Strategist swapped the Developer backend while this build ran on the retired one (an
+    # adopted build, width > 1, outlives the session the swap waits for). Nothing is wrong with the
+    # Card; the build is simply not the treatment the run now uses.
+    "builder_replaced",
 )
 
 # WHY a consumed raw proposal staged nothing BEFORE the staging fence could say — the two
@@ -189,6 +193,23 @@ def notify_producer(notify, key) -> None:
         notify.send_nowait(key)
     except (anyio.WouldBlock, anyio.ClosedResourceError, anyio.BrokenResourceError):
         pass
+
+
+class _CurrentSessionNotify:
+    """The wake-up stream of whichever Card session is CURRENT, resolved at send time.
+
+    An adopted build (width > 1) outlives the session that started it, so the stream it was handed
+    may be closed by the time it finishes; the one it must reach is the live session's, which
+    `Engine._eval_notify` names — the same handle an adopted evaluation posts to. None between
+    sessions: the next session re-scans the result slots on its first turn anyway."""
+
+    def __init__(self, engine) -> None:
+        self._engine = engine
+
+    def send_nowait(self, key) -> None:
+        notify = getattr(self._engine, "_eval_notify", None)
+        if notify is not None:
+            notify.send_nowait(key)
 
 
 def raw_stage_source(action: Mapping[str, Any]) -> str:
@@ -461,6 +482,12 @@ class SpeculationMixin:
         current = int(getattr(self, "speculation_depth", 0) or 0)
         if current <= 0:
             return False
+        # NOT WITH SEVERAL PRODUCERS (2026-09-24). The ratchet's premise is that a prefetch pays
+        # only by hiding a build behind a RUNNING evaluation; with a build width above one the
+        # session is also where builds run side by side, and switching it off would put them back
+        # in a single file exactly where evaluations are short and builds long — the case it measures.
+        if self._speculative_producer_width(state) > 1:
+            return False
         # QUIESCENT ONLY. Turning the depth to 0 makes `_speculation_enabled()` False, and with it the
         # whole lane that SERVES an outstanding prefetch: an open request head would keep its physical
         # node reservation forever with nothing left able to close it, which leaks the budget and
@@ -696,6 +723,24 @@ class SpeculationMixin:
             self._spec_build_inflight: set[tuple[str, int]] = set()
         if not hasattr(self, "_spec_role_pair"):
             self._spec_role_pair: Optional[tuple[Any, Any]] = None
+        if not hasattr(self, "_spec_role_pairs"):
+            # Pairs 2..N of the producer pool (pair 1 is `_spec_role_pair`), and which producer holds
+            # each: a request key for a build, "raw" for the raw-proposal lane.
+            self._spec_role_pairs: list[tuple[Any, Any]] = []
+        if not hasattr(self, "_spec_pair_leases"):
+            self._spec_pair_leases: dict[object, int] = {}
+        if not hasattr(self, "_spec_adopted"):
+            # Build keys whose producer runs in the RUN-scoped group (width > 1) and so outlives
+            # the session that started it, like an adopted evaluation.
+            self._spec_adopted: set[tuple[str, int]] = set()
+        if not hasattr(self, "_card_boundary_debt"):
+            self._card_boundary_debt = False
+        if not hasattr(self, "_spec_builder_generation"):
+            # Bumped when the Strategist swaps the Developer backend (which drops every lease): a
+            # build started under an older generation is never committed (`_serve_card_builds`).
+            self._spec_builder_generation = 0
+        if not hasattr(self, "_spec_request_builder"):
+            self._spec_request_builder: dict[tuple[str, int], int] = {}
         if not hasattr(self, "_spec_raw_stage_inflight"):
             self._spec_raw_stage_inflight = False
         if not hasattr(self, "_spec_raw_stage_result"):
@@ -772,7 +817,11 @@ class SpeculationMixin:
         """
 
         self._eval_drain_requested = False
-        while self._evals_inflight():
+        # …and every ADOPTED build (width > 1): it outlives sessions the way an evaluation does,
+        # and a run that finalizes or raises its ceiling over one would lose paid work or leave its
+        # worker behind the teardown (`abandon_on_cancel=False`).
+        adopted = getattr(self, "_adopted_producers", None)   # absent on eval-only stub hosts
+        while self._evals_inflight() or (adopted is not None and adopted()):
             await anyio.sleep(0.05)
 
     async def _raise_deferred_eval_budget_stop(self) -> None:
@@ -856,6 +905,119 @@ class SpeculationMixin:
         self._spec_role_pair = pair
         return pair
 
+    def _speculative_producer_width(self, state: RunState) -> int:
+        """How many speculative Card producers may run at once — the run's BUILD width.
+
+        `llm_parallel` is the documented "concurrent node BUILDS" axis (docs/configuration.md, the
+        widths table); until 2026-09-24 the Card session ignored it and ran exactly one producer, so
+        a Card-mode run built one node at a time whatever it was given. Measured on a one-GPU
+        MiniOneRec run: builds of 40 min–3 h one after another against 48-second evaluations, the GPU
+        busy 0.74% of 12.7 h.
+
+        THREE RULES keep every existing treatment where it was.
+        * AUTO stays one producer. A launch that did not spell a build width (`llm_parallel=0`,
+          the Settings default) resolves it from the eval width, and on a multi-GPU box that would
+          silently widen a treatment nobody asked for; the speculation calibration profile pins 1.
+        * The width the run LAUNCHED with (its `run_started` pin, else this process's resolution) is
+          a ceiling nothing but the operator lifts: the Strategist and proposal re-pins may narrow
+          the live `_llm_parallel`, and a Strategist that widens it to 8 must not buy eight
+          concurrent Developer sessions the operator never authorised.
+        * An operator's `budget_extend` of `llm_parallel`/`parallel_build` is honoured as given."""
+        if getattr(self, "_llm_parallel_startup_auto", True):
+            return 1
+        try:
+            live = max(1, int(getattr(self, "_llm_parallel", 1) or 1))
+        except (TypeError, ValueError):
+            return 1
+        overrides = getattr(state, "budget_overrides", None) or {}
+        if any(key in overrides for key in ("parallel_build", "llm_parallel")):
+            return live
+        pin = getattr(state, "llm_parallel", 0)
+        launched = (pin if type(pin) is int and pin >= 1
+                    else getattr(self, "_llm_parallel_launched", 1))
+        try:
+            return max(1, min(live, int(launched)))
+        except (TypeError, ValueError):
+            return 1
+
+    def _producer_pair_for(self, holder: object, width: int) -> Optional[tuple[Any, Any]]:
+        """Lease a free isolated pair to `holder` (a request key, or "raw"), or None.
+
+        Pair 1 is `_producer_role_pair` — at width 1 it is the only pair and this returns it, exactly
+        as the single producer always used it. Wider, pairs 2..N are built once from the same Layer-2
+        pool (`_build_role_pairs(N+1)[1:]`: never the primary pair, whose output slots belong to
+        repairs and ordinary builds) and each is held by one producer at a time, because a pair's
+        Developer carries per-build output slots (`last_files`) two concurrent builds would cross."""
+        self._ensure_speculation_state()
+        if holder in self._spec_pair_leases:
+            index = self._spec_pair_leases[holder]
+            return self._spec_role_pair if index == 0 else self._spec_role_pairs[index - 1]
+        pool = self._ensure_producer_pool(width)
+        held = set(self._spec_pair_leases.values())
+        for index in range(pool):
+            if index not in held:
+                self._spec_pair_leases[holder] = index
+                return self._spec_role_pair if index == 0 else self._spec_role_pairs[index - 1]
+        return None
+
+    def _ensure_producer_pool(self, width: int) -> int:
+        """Build pairs up to `width` (pair 1 first, the historical single pair) and return how many
+        the session can use now — 0 when not even the first could be built. A pool the factory could
+        only partly build caps the producer count at what exists; the next call asks again."""
+        self._ensure_speculation_state()
+        first = self._producer_role_pair()
+        if first is None:
+            return 0
+        if width > 1 and len(self._spec_role_pairs) < width - 1:
+            pairs = self._build_role_pairs(width + 1)
+            extra = [pair for pair in pairs[2:]
+                     if isinstance(pair, tuple) and len(pair) == 2
+                     and pair[0] is not getattr(self, "researcher", None)
+                     and pair[1] is not getattr(self, "developer", None)
+                     and pair is not first]
+            if len(extra) > len(self._spec_role_pairs):
+                self._spec_role_pairs = extra[:width - 1]
+        return min(max(1, width), 1 + len(self._spec_role_pairs))
+
+    def _producer_capacity(self, state: RunState) -> int:
+        """Producers the session may run now: the build width, capped by the pairs that exist — and
+        never below one. With no pair at all the single-producer path decides what happens (the
+        election declines, the raw lane yields to the outer loop), exactly as it always did; a zero
+        here would short-circuit both and leave the session unable to hand back mid-eval."""
+        return max(1, self._ensure_producer_pool(self._speculative_producer_width(state)))
+
+    def _release_producer_pair(self, holder: object) -> None:
+        self._ensure_speculation_state()
+        self._spec_pair_leases.pop(holder, None)
+
+    def _adopted_producers(self) -> set:
+        self._ensure_speculation_state()
+        return set(self._spec_adopted) & set(self._spec_build_inflight)
+
+    def _drop_producer_pool(self) -> None:
+        """Forget every pooled producer pair and lease, and retire the builds running on them.
+
+        Called where the Strategist swaps the Developer backend (`strategy.py`). A single producer
+        could only be leased inside a session, and the swap runs between sessions, so nulling
+        `_spec_role_pair` was enough. Pairs 2..N and producers adopted into the run-scoped group
+        outlive the session, so they are dropped here too, and the generation bump makes
+        `_serve_card_builds` close — never commit — a result built by the retired backend."""
+        self._ensure_speculation_state()
+        self._spec_role_pair = None
+        self._spec_role_pairs = []
+        self._spec_pair_leases = {}
+        self._spec_builder_generation += 1
+
+    def _busy_producers(self, state: RunState) -> int:
+        """Producers occupied now: every open request (built, building or waiting for a pair), every
+        build still running for a request already closed, and the raw-proposal lane."""
+        self._ensure_speculation_state()
+        keys = {key for request in self._outstanding_requests(state)
+                if (key := self._request_key(request)) is not None}
+        keys |= set(self._spec_build_inflight)
+        raw = bool(self._spec_raw_stage_inflight or self._spec_raw_stage_result is not None)
+        return len(keys) + int(raw)
+
     @staticmethod
     def _request_key(request: object) -> Optional[tuple[str, int]]:
         if not isinstance(request, Mapping):
@@ -872,10 +1034,27 @@ class SpeculationMixin:
         return card_id, generation
 
     @staticmethod
-    def _outstanding_requests(state: RunState) -> list[dict]:
+    def _outstanding_positions(state: RunState) -> list[tuple[int, dict]]:
+        """Every open request with its queue POSITION, in position order. With one producer only the
+        head is ever open; with several, a position closed ahead of the cursor is skipped."""
         done = max(0, min(int(state.card_builds_done), len(state.card_build_requests)))
-        return [dict(request) for request in state.card_build_requests[done:]
-                if isinstance(request, Mapping)]
+        closed_ahead = set(getattr(state, "card_builds_done_ahead", None) or ())
+        return [(index, dict(request))
+                for index, request in enumerate(state.card_build_requests)
+                if index >= done and index not in closed_ahead and isinstance(request, Mapping)]
+
+    @classmethod
+    def _outstanding_requests(cls, state: RunState) -> list[dict]:
+        return [request for _index, request in cls._outstanding_positions(state)]
+
+    @classmethod
+    def _request_position(cls, state: RunState, key) -> Optional[int]:
+        """The queue position of the open request with this exact key, or None when it is closed.
+        Keys are unique among open requests: the election excludes every Card already requested."""
+        if key is None:
+            return None
+        return next((index for index, request in cls._outstanding_positions(state)
+                     if cls._request_key(request) == key), None)
 
     @classmethod
     def _head_request(cls, state: RunState) -> Optional[dict]:
@@ -984,6 +1163,24 @@ class SpeculationMixin:
             if (node.id, node.attempt) not in consumed
         )
         return len(cls._outstanding_requests(state)) + pending
+
+    @classmethod
+    def _unadmitted_prefetch(
+        cls,
+        state: RunState,
+        *,
+        consumed_inflight: set[tuple[int, int]] | frozenset[tuple[int, int]] = frozenset(),
+    ) -> int:
+        """Committed speculative Nodes no evaluation has taken yet — the INVENTORY half of
+        `_speculation_depth_used`, without the requests still being built.
+
+        The election weighs the two halves separately (review 2026-09-24): the ceiling bounds what
+        is HELD, because that is what the freshness gate discards, while how many builds run at once
+        is the producer width. With one producer an election needs no open request at all, so this
+        is exactly the number the single-producer election compared."""
+        return cls._speculation_depth_used(
+            state, consumed_inflight=consumed_inflight,
+        ) - len(cls._outstanding_requests(state))
 
     @classmethod
     def _prefetch_supply_used(
@@ -1099,8 +1296,7 @@ class SpeculationMixin:
         card_id, generation = key
         events = self.store.read_all()
         state = fold(events)
-        head = self._head_request(state)
-        if self._request_key(head) != key or generation != state.search_epoch:
+        if self._request_position(state, key) is None or generation != state.search_epoch:
             return None, None, {}
         card = state.cards.get(card_id)
         if card is None:
@@ -1553,7 +1749,11 @@ class SpeculationMixin:
         skipped: Optional[str] = None,
         skipped_reason: Optional[str] = None,
     ) -> bool:
-        """Close only the exact folded head, retrying a moving tail without skipping requests."""
+        """Close only this exact open request, retrying a moving tail without skipping requests.
+
+        The head closes positionally, byte for byte the row one producer always wrote. Any other
+        open request — a build that finished before one opened earlier — names its queue `index`,
+        which is what lets the fold close it without advancing past the head still building."""
 
         key = self._request_key(request)
         if key is None or (node_id is None) == (skipped is None):
@@ -1572,11 +1772,14 @@ class SpeculationMixin:
             payload.update({"node_id": node_id, "speculative": True})
         def _plan(events, tail) -> bool:
             state = fold(events)
-            if self._request_key(self._head_request(state)) != key:
+            position = self._request_position(state, key)
+            if position is None:
                 # Another main-task path may already have closed it.
-                return state.card_builds_done >= len(state.card_build_requests)
+                return not self._outstanding_positions(state)
+            row = (payload if position == int(state.card_builds_done)
+                   else {**payload, "index": position})
             with self._id_lock:
-                self.store.append(EV_CARD_BUILD_DONE, payload, expected_last_seq=tail)
+                self.store.append(EV_CARD_BUILD_DONE, row, expected_last_seq=tail)
             return True
 
         # The head stays open, so the queue is unchanged and the next serve pass re-closes it.
@@ -1598,25 +1801,28 @@ class SpeculationMixin:
         key = self._request_key(request)
         if key is None:
             return
+        position = self._request_position(state, key)
         try:
             self.store.append(EV_CARD_BUILD_ATTEMPTED, {
                 "card_id": key[0], "generation": key[1],
-                # The queue position this head occupies — see `_on_card_build_attempted`.
-                "index": int(state.card_builds_done)})
+                # The queue position this request occupies — see `_on_card_build_attempted`.
+                "index": int(state.card_builds_done) if position is None else position})
         except Exception:  # noqa: BLE001 — see the docstring: never block a build on its receipt
             pass
 
     @staticmethod
     def _head_has_unreconciled_attempt(state: RunState,
                                        key: tuple[str, int]) -> bool:
-        """Does the CURRENT open head already carry a producer attempt from a dead process?
+        """Does this open request (the head, or with several producers any open request) already carry a
+        producer attempt from a dead process?
 
         Position-exact on purpose: the same (card_id, generation) can legitimately be re-elected after
         an earlier request for it was closed, and that older — fully reconciled — attempt must not
         quarantine the new head. Callers must first rule out an attempt this process itself started
         (`_spec_build_inflight` / a present `_spec_builds` result).
         """
-        index = int(state.card_builds_done)
+        position = SpeculationMixin._request_position(state, key)
+        index = int(state.card_builds_done) if position is None else position
         return any(
             isinstance(attempt, dict)
             and attempt.get("index") == index
@@ -1691,9 +1897,8 @@ class SpeculationMixin:
         state = fold(events)
         if (
             state.halted
-            or self._head_request(state) is not None
-            or self._speculation_depth_used(
-                state, consumed_inflight=consumed_inflight)
+            or self._busy_producers(state) >= self._producer_capacity(state)
+            or self._unadmitted_prefetch(state, consumed_inflight=consumed_inflight)
             >= self._speculative_prefetch_ceiling()
         ):
             return False
@@ -1741,7 +1946,7 @@ class SpeculationMixin:
         result: SpecBuildResult,
         max_eval_seconds: Optional[float] = None,
     ) -> tuple[str, Optional[int]]:
-        """Reserve and commit an exact head result; never consult the ready-only serial claim."""
+        """Reserve and commit the result of an exact open request; never consult the ready-only serial claim."""
 
         key = self._request_key(request)
         if key is None or result.key != key or not result.success or result.idea is None:
@@ -1749,7 +1954,8 @@ class SpeculationMixin:
         card_id, generation = key
         events = self.store.read_all()
         state = fold(events)
-        if self._request_key(self._head_request(state)) != key:
+        position = self._request_position(state, key)
+        if position is None:
             return "closed", None
         # SPLIT INTO THREE NAMED REFUSALS, not because the branch was wrong but because the RECORD
         # was: all three wrote the one word `stale`, and on `e5small-dr-unified-v9` three builds
@@ -1767,7 +1973,7 @@ class SpeculationMixin:
         # node_building without double-charging it, but never cross a ceiling that was already full
         # when the request arrived (legacy/corrupt prefixes remain pending for budget_extend).
         if self._node_reservation_slots_remaining(
-            state, events=events, consume_request=True,
+            state, events=events, consume_request=True, request_index=position,
         ) < 1:
             return "budget", None
         selection_limit = self._speculative_selection_node_limit(state)
@@ -1898,12 +2104,17 @@ class SpeculationMixin:
         max_eval_seconds: Optional[float] = None,
         *,
         allow_commit: bool = True,
+        request: Optional[Mapping[str, Any]] = None,
     ) -> bool:
-        """Crash-recovery-first main-task service of one durable request."""
+        """Crash-recovery-first main-task service of one durable request: the head, or the named open
+        request when several producers hold requests at once."""
 
         self._ensure_speculation_state()
         state = self._session_state()
-        request = self._head_request(state)
+        if request is None:
+            request = self._head_request(state)
+        elif self._request_position(state, self._request_key(request)) is None:
+            return False
         key = self._request_key(request)
         if request is None or key is None:
             return False
@@ -1945,7 +2156,17 @@ class SpeculationMixin:
         world_moved = (key[1] != state.search_epoch
                        or self._terminal_intent(state)
                        or budget_exhausted)
-        if commit_refused_this_turn and not world_moved and key in self._spec_build_inflight:
+        # …AND LEFT OPEN WHEN THE BUILD HAS ALREADY FINISHED (2026-09-24). The rule above held the
+        # head only while the producer ran; the session then waited the build out (a live producer
+        # holds `_card_phase_decide_exit`), the result arrived under the same refused commit, and
+        # this branch closed it `commit_not_allowed` — a paid build discarded to buy the outer loop
+        # its turn. Measured on a MiniOneRec run: 5 of 19 finished builds. The result now waits in
+        # `_spec_builds`, the session returns (`_card_phase_decide_exit` no longer counts a finished
+        # result as work to wait for), the outer loop runs its cadences, and the next session commits
+        # it through `_claim_requested_card_build`, which re-checks epoch, freshness, budget and the
+        # Card itself — the boundary 8d9952a1 asked for is honoured, just not paid for with the build.
+        if (commit_refused_this_turn and not world_moved
+                and (key in self._spec_build_inflight or key in self._spec_builds)):
             return False
         if world_moved or commit_refused_this_turn:
             self._discard_spec_result(self._spec_builds.pop(key, None))
@@ -2017,6 +2238,14 @@ class SpeculationMixin:
                     request, skipped="stale",
                     skipped_reason="card_gone" if merged_away else "card_dropped")
             return False
+        if self._spec_request_builder.get(key, self._spec_builder_generation) != (
+                self._spec_builder_generation):
+            self._discard_spec_result(self._spec_builds.pop(key, None))
+            closed = self._append_card_build_done(
+                request, skipped="stale", skipped_reason="builder_replaced")
+            if closed:
+                self._spec_request_builder.pop(key, None)
+            return closed
         if not result.success:
             self._discard_spec_result(self._spec_builds.pop(key, None))
             closed = self._append_card_build_done(request, skipped="producer_failed")
@@ -2069,7 +2298,8 @@ class SpeculationMixin:
 
         if not self._speculation_enabled() or self._head_request(state) is None:
             return False
-        self._serve_card_builds(max_eval_seconds, allow_commit=False)
+        for _index, request in self._outstanding_positions(state):
+            self._serve_card_builds(max_eval_seconds, allow_commit=False, request=request)
         return True
 
     async def _run_isolated_producer(
@@ -2159,7 +2389,9 @@ class SpeculationMixin:
                 error=producer_error_text(exc),
             ),
             store=_store,
-            release=lambda: self._spec_build_inflight.discard(key),
+            release=lambda: (self._spec_build_inflight.discard(key),
+                             self._spec_adopted.discard(key),
+                             self._release_producer_pair(key)),
             notify=notify,
             notify_key=("producer", key),
             # Its OWN pool, not anyio's shared default -- see `novelty.card_build_limiter` for why
@@ -2276,6 +2508,7 @@ class SpeculationMixin:
             self._spec_raw_stage_result = result
 
         def _release() -> None:
+            self._release_producer_pair("raw")
             self._spec_raw_stage_inflight = False
 
         await self._run_isolated_producer(
@@ -2551,7 +2784,26 @@ class SpeculationMixin:
     _producer_pair_misses: tuple = (None, 0)
 
     def _start_head_producer(self, current: RunState, session: CardSession) -> bool:
-        """Start the exact durable head in the same turn that elected it.
+        """Start the producer for the durable head — `_start_request_producer` on the head."""
+        return self._start_request_producer(current, session)
+
+    def _start_request_producers(self, current: RunState, session: CardSession) -> bool:
+        """Start a producer for every open request that has none, in queue order. With one producer
+        the head is the only open request and this is `_start_head_producer`."""
+        started = False
+        for position, (_index, request) in enumerate(self._outstanding_positions(current)):
+            live = self._session_state()
+            # The head goes through `_start_head_producer`, the seam every single-producer test and
+            # caller already names; only the requests behind it need the explicit form.
+            if (self._start_head_producer(live, session) if position == 0
+                    else self._start_request_producer(live, session, request)):
+                started = True
+        return started
+
+    def _start_request_producer(self, current: RunState, session: CardSession,
+                                request: Optional[Mapping[str, Any]] = None) -> bool:
+        """Start the exact durable request (the head unless one is named) in the same turn that
+        elected it.
 
         Waiting for the next loop turn leaves a request visible but not yet executing.
         A fast admitted eval can then cross the search-epoch boundary first and make a
@@ -2564,11 +2816,13 @@ class SpeculationMixin:
         next turn (see the no-pair branch below).
         """
 
-        head = self._head_request(current)
+        head = self._head_request(current) if request is None else dict(request)
         key = self._request_key(head)
+        index = self._request_position(current, key)
         if (
             head is None
             or key is None
+            or index is None
             or key in self._spec_build_inflight
             or key in self._spec_builds
         ):
@@ -2578,10 +2832,17 @@ class SpeculationMixin:
         # has no result but capacity remains zero, so no worker can close it and this
         # session polls forever. Close recovered unbuildable heads before this gate.
         if self._node_reservation_slots_remaining(
-            current, consume_request=True,
+            current, consume_request=True, request_index=index,
         ) < 1:
             return False
-        roles = self._producer_role_pair()
+        width = self._speculative_producer_width(current)
+        roles = self._producer_pair_for(key, width)
+        if roles is not None:
+            # The build pool is sized for ONE producer (`novelty.py::_CARD_BUILD_THREADS`); a wider
+            # session widens it, never narrows it, or its second build would queue behind the first.
+            limiter = _card_build_limiter()
+            if limiter.total_tokens < width:
+                limiter.total_tokens = width
         if roles is None:
             # NO PAIR IS NOT A PRODUCER FAILURE (review 2026-09-22, ENG1-14 — doc 50 ES1-04). This
             # branch closed the head `producer_failed`, the word for "the producer RAN and gave up",
@@ -2606,7 +2867,7 @@ class SpeculationMixin:
             #   (`_request_card_build` refuses election without one), so the release cannot spin,
             #   and the outer serial lane builds it meanwhile, as it builds any Card while the pool
             #   is down.
-            position = (key, int(current.card_builds_done))
+            position = (key, index)
             previous, misses = self._producer_pair_misses
             misses = misses + 1 if previous == position else 1
             factory = getattr(self, "role_factory", None)
@@ -2631,12 +2892,23 @@ class SpeculationMixin:
         # marker so a main-task service turn in between cannot mistake this process's
         # own fresh attempt for a dead process's unreconciled one.
         self._record_card_build_attempt(current, head)
+        self._spec_request_builder[key] = self._spec_builder_generation
+        # WIDER THAN ONE, THE BUILD IS ADOPTED: it runs in the run-scoped group (`_eval_task_group`,
+        # opened by `Engine.run`) and outlives this session, so a session owed the outer boundary
+        # returns at once instead of holding the Strategist and every cadence behind hours of
+        # Developer work. Its wake-up goes to whichever session is CURRENT (`_eval_notify`). At
+        # width 1 the build stays in the session's group exactly as it always did.
+        adopt = width > 1 and self._eval_task_group is not None
+        group = self._eval_task_group if adopt else session.task_group
+        notify = _CurrentSessionNotify(self) if adopt else session.notify
+        if adopt:
+            self._spec_adopted.add(key)
         try:
-            session.task_group.start_soon(
+            group.start_soon(
                 self._produce_card_build,
                 dict(head),
                 roles,
-                session.notify,
+                notify,
             )
         # ACCEPTED asymmetry, stated. The rollback below discards only the in-memory
         # `_spec_build_inflight`; the DURABLE `card_build_attempted` receipt appended
@@ -2651,6 +2923,8 @@ class SpeculationMixin:
         # closes.
         except BaseException:
             self._spec_build_inflight.discard(key)
+            self._spec_adopted.discard(key)
+            self._release_producer_pair(key)
             raise
         return True
 
@@ -2797,7 +3071,7 @@ class SpeculationMixin:
             if self._request_card_build(consumed_inflight=session.eval_inflight):
                 # The election above APPENDED, so this snapshot re-folds: `_fold_current` serves the
                 # memo only while the observed tail is unmoved.
-                self._start_head_producer(self._session_state(), session)
+                self._start_request_producers(self._session_state(), session)
             else:
                 # A durable request, not Card reuse alone, is the success boundary.
                 # Return to the outer selector instead of repeating a paid proposal.
@@ -2868,42 +3142,41 @@ class SpeculationMixin:
         return False
 
     def _card_phase_serve_head(self, session: CardSession) -> None:
-        """Service one durable request head, or start the producer that will close it."""
+        """Service every open durable request in queue order — commit a finished build, close a dead
+        one — then start the producer for each open request that has none.
+
+        With one producer the head is the only open request, so this is the historical "serve the
+        head, else start its producer". With several, a build that finishes before one opened
+        earlier commits at once (its `card_build_done` names its position) instead of waiting
+        behind the slower head while its GPU slot idles."""
 
         current = self._session_state()
-        head = self._head_request(current)
-        key = self._request_key(head)
-        if head is None or key is None:
+        open_requests = self._outstanding_positions(current)
+        if not open_requests:
             return
-        # Recovery still links an already-created exact Node before consulting this
-        # flag. Once the admitted batch closes, every other head is acknowledged stale
-        # without another scorer consult/claim crossing the outer cadence boundary.
-        if self._serve_card_builds(
-            session.max_eval_seconds,
-            allow_commit=session.open_for_production(
-                self._session_gates(current, session)),
-        ):
+        # Recovery still links an already-created exact Node before consulting this flag. Once the
+        # admitted batch closes, every other request is acknowledged stale without another scorer
+        # consult/claim crossing the outer cadence boundary.
+        allow_commit = session.open_for_production(self._session_gates(current, session))
+        served = False
+        for _index, request in open_requests:
+            if self._serve_card_builds(
+                session.max_eval_seconds, allow_commit=allow_commit, request=request,
+            ):
+                served = True
+        if served:
             session.progressed = True
             if self._spec_force_outer:
                 session.yield_outer = True
                 self._spec_force_outer = False
             return
-        # `_serve_card_builds` can return False having appended (a committed build whose
-        # `card_build_done` close then lost its CAS is the live case), so both the head AND the
-        # gates below are re-derived from a snapshot taken after it, never from the one above.
+        # Nothing closed: start the producer for every open request that has none. A request the
+        # election just appended already has one (`_card_phase_request_build`); this is the
+        # recovery path — a resumed process whose log carries open requests and no producers.
         current = self._session_state()
-        head = self._head_request(current)
-        key = self._request_key(head)
-        if (
-            head is not None
-            and key is not None
-            and session.open_for_production(self._session_gates(current, session))
-            and key not in self._spec_build_inflight
-            and key not in self._spec_builds
-        ):
-            if self._start_head_producer(current, session):
+        if session.open_for_production(self._session_gates(current, session)):
+            if self._start_request_producers(current, session):
                 session.progressed = True
-
     async def _card_phase_admit_evals(self, session: CardSession) -> bool:
         """Admit fresh, resource-fitting pending Nodes up to the live consumer width.
 
@@ -3097,11 +3370,11 @@ class SpeculationMixin:
         if not (
             consumer_active
             and session.open_for_production(self._session_gates(current, session))
-            and self._head_request(current) is None
-            and not self._spec_build_inflight
-            and not self._spec_raw_stage_inflight
-            and self._spec_raw_stage_result is None
-            and self._speculation_depth_used(
+            # A free producer: every open request, running build and the raw lane holds one, and
+            # the width is `llm_parallel` (`_speculative_producer_width`). At width 1 this is the
+            # historical "no head, nothing in flight, no raw proposal".
+            and self._busy_producers(current) < self._producer_capacity(current)
+            and self._unadmitted_prefetch(
                 current,
                 consumed_inflight=session.eval_inflight,
             ) < self._speculative_prefetch_ceiling()
@@ -3132,7 +3405,7 @@ class SpeculationMixin:
             proposal_events = self.store.read_all()
             proposal_state = fold(proposal_events)
             if (
-                self._head_request(proposal_state) is None
+                self._busy_producers(proposal_state) < self._producer_capacity(proposal_state)
                 # The SAME ceiling as the durable election above, and this half matters most: a
                 # refusal there falls through to here, so leaving the raw lane on the bare depth
                 # would turn "do not buy a prefetch the gate must discard" into "buy a Researcher
@@ -3140,7 +3413,8 @@ class SpeculationMixin:
                 and self._prefetch_supply_used(
                     proposal_state,
                     consumed_inflight=session.eval_inflight,
-                ) < self._speculative_prefetch_ceiling()
+                ) - len(self._outstanding_requests(proposal_state))
+                < self._speculative_prefetch_ceiling()
             ):
                 raw_actions = speculative_raw_actions(
                     proposal_state,
@@ -3155,7 +3429,8 @@ class SpeculationMixin:
                         resource_envelope=self._resource_envelope(),
                     ),
                 )
-                roles = self._producer_role_pair()
+                roles = (self._producer_pair_for(
+                    "raw", self._producer_capacity(proposal_state)) if raw_actions else None)
                 if raw_actions and roles is not None:
                     proposal_node_ceiling = self._node_id_ceiling(
                         proposal_events, proposal_state,
@@ -3181,6 +3456,7 @@ class SpeculationMixin:
                         )
                     except BaseException:
                         self._spec_raw_stage_inflight = False
+                        self._release_producer_pair("raw")
                         raise
                     session.progressed = True
                 else:
@@ -3189,7 +3465,7 @@ class SpeculationMixin:
                     session.yield_outer = True
         if requested:
             # The election APPENDED, so this re-folds (see `_fold_current`).
-            self._start_head_producer(self._session_state(), session)
+            self._start_request_producers(self._session_state(), session)
             session.progressed = True
         return False
 
@@ -3220,6 +3496,25 @@ class SpeculationMixin:
             # The outer loop serves a queued fork/inject (`_serve_forced_requests`) before any
             # speculation; with the producer lane idle nothing here may hold it off any longer.
             return True
+        # What a CLOSING session must still wait for: work this session alone can finish. A finished
+        # result waits in `_spec_builds` for the next session's commit (`_serve_card_builds` leaves
+        # its request open), and a build running in the run-scoped group is adopted by the next
+        # session the way an evaluation is — neither is a reason to keep the outer loop waiting.
+        ready = {key for key in self._spec_builds}
+        adopted = self._adopted_producers()
+        waiting = {
+            key for request in self._outstanding_requests(current)
+            if (key := self._request_key(request)) is not None
+            and key not in ready and key not in adopted
+        }
+        closing_holds = bool(
+            building
+            or (set(self._spec_build_inflight) - adopted)
+            or self._spec_raw_stage_inflight
+            or self._spec_raw_stage_result is not None
+            or getattr(self, "_inject_lanes_inflight", 0)
+            or waiting
+        )
         if session.open_for_production(gates):
             # Still open for work, so a ready pending Node or a running eval keeps the session
             # alive — there is nothing to hand back to and a slot may free at any moment.
@@ -3256,7 +3551,14 @@ class SpeculationMixin:
             if tail == self._outer_boundary_served_tail:
                 return False              # nothing new to hand back; poll instead of ping-ponging
             self._outer_boundary_served_tail = tail
-        return not producer_inflight
+        if closing_holds:
+            return False
+        if self._outstanding_requests(current):
+            # Requests stay open across the hand-back (a result to commit, a build still running):
+            # the outer loop owes ONE cadence pass before it re-enters a session for them, or its
+            # head-open re-entry (`orchestrator.py`) would skip the very boundary this is returning for.
+            self._card_boundary_debt = True
+        return True
 
     async def _run_card_session(
         self,

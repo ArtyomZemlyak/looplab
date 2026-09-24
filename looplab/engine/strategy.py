@@ -587,6 +587,10 @@ class StrategyCadenceMixin:
                                    seed=index + 1), pair[1])
                 for index, pair in enumerate(self._role_pool)]
             self._spec_role_pair = None
+            # Pairs 2..N were taken from the same pool: re-derive them from the rewrapped one. The
+            # Developer is unchanged, so builds already running are not retired.
+            self._spec_role_pairs = []
+            self._spec_pair_leases = {}
 
     def _apply_strategy(
             self, strat: dict, *, _prepared_developer=_NO_PREPARED_DEVELOPER,
@@ -770,10 +774,11 @@ class StrategyCadenceMixin:
                 # cached parallel workers otherwise keep sending implementation calls
                 # through the previous backend after the primary Developer has visibly switched.
                 self._role_pool = None
-                # Layer-5 leases one pair out of that pool. Sessions are joined before the outer
-                # Strategist cadence runs, so invalidating the lease here is race-free and ensures the
-                # next speculative build observes the newly selected Developer backend.
-                self._spec_role_pair = None
+                # Layer-5 leases pairs out of that pool. A width-1 session is joined before the outer
+                # Strategist cadence runs; wider, builds are adopted and may still be running on the
+                # retired backend, so the drop also bumps the builder generation and their results
+                # are closed instead of committed (`speculation.py::_drop_producer_pool`).
+                self._drop_producer_pool()
                 self._pool_developer_override = dev
                 # Bind the replacement between calls, before its first implementation request.
                 bind_cost_accountants(self)

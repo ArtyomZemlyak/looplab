@@ -1063,9 +1063,14 @@ def test_terminal_gate_explicitly_closes_request_only_crash_prefix(tmp_path):
     assert engine._head_request(fold(events)) is None
 
 
-def test_delayed_producer_after_eval_terminal_closes_stale_without_late_claim(
+def test_delayed_producer_after_eval_terminal_is_kept_for_the_next_session_without_late_claim(
     tmp_path, monkeypatch,
 ):
+    """A build that finishes after the eval terminal owed the outer loop its turn is neither claimed
+    in this session (no scorer consult, no claim, no node after the boundary — 8d9952a1's rule) nor
+    DISCARDED: until 2026-09-24 it was closed `stale:commit_not_allowed`, 5 of 19 finished builds on
+    a measured MiniOneRec run. Its request stays open, the result waits in `_spec_builds`, and the
+    session hands back owing the outer loop one cadence pass (`_card_boundary_debt`)."""
     producer = _DelayedSecondBuildDeveloper()
     engine, _producer = _engine(
         tmp_path / "terminal-before-producer",
@@ -1150,9 +1155,11 @@ def test_delayed_producer_after_eval_terminal_closes_stale_without_late_claim(
         and event.data.get("card_id") == delayed_request["card_id"]
         and event.data.get("generation") == delayed_request["generation"]
     ]
-    assert len(delayed_done) == 1
-    assert delayed_done[0].data["skipped"] == "stale"
-    assert delayed_done[0].seq > boundary["seq"]
+    assert delayed_done == [], "the finished build must not be discarded at the boundary"
+    key = (delayed_request["card_id"], delayed_request["generation"])
+    assert engine._spec_builds[key].success is True, "its result waits for the next session"
+    assert engine._request_position(fold(events), key) is not None
+    assert engine._card_boundary_debt is True
     assert scorer_consults == []
     assert claim_calls == []
     assert not [

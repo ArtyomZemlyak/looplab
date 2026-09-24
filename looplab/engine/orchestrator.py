@@ -1911,7 +1911,15 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 if await self._close_developer_sentinel_once():
                     continue
                 speculative_state = fold(self.store.read_all())
-                if self._head_request(speculative_state) is not None or speculative_state.buildings:
+                # A result whose request another path closed releases its role telemetry here too:
+                # an adopted build (width > 1) can finish with no session left to sweep it.
+                self._discard_orphaned_spec_results(speculative_state)
+                # …ONCE the boundary a session handed back for has been paid. A session that returns
+                # with requests still open (a result to commit, an adopted build still running) sets
+                # `_card_boundary_debt`; without this the open head would send the loop straight back
+                # into a session and the cadences below — the turn it returned FOR — would never run.
+                if ((self._head_request(speculative_state) is not None or speculative_state.buildings)
+                        and not getattr(self, "_card_boundary_debt", False)):
                     await self._run_card_session(
                         [],
                         speculative_state,
@@ -1930,6 +1938,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             # folded rows are buffered by the sink and published by THIS task inside the
             # helper, so the tail read on the next line already carries them.
             state = await self._offload_cadence(functools.partial(self._run_cadences, state))
+            self._card_boundary_debt = False     # the boundary a Card session returned for is paid
             post_cadence_events = self.store.read_all()
             post_cadence_seq = post_cadence_events[-1].seq if post_cadence_events else -1
             if post_cadence_seq != decision_seq:
@@ -2318,7 +2327,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             return []
         if any(action.get("node_id") not in running for action in evals):
             return []                     # a slot could be filled from the board; do that instead
-        if state.buildings or self._head_request(state) is not None:
+        # An open request means "a build is already answering this" only while it holds every
+        # producer: with a build width above one (`_speculative_producer_width`) a free producer is
+        # exactly what this mid-eval production exists to feed. At width one that is any request.
+        if state.buildings or (self._head_request(state) is not None
+                               and self._busy_producers(state) >= self._producer_capacity(state)):
             return []                     # a build is already answering this
         # >= 1 by `occupancy_due`, which is the same arithmetic: it is due only while the supply is
         # short of the width. Spelled out rather than hard-coded to 1 because filling EVERY freed
@@ -2709,10 +2722,14 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             reservation.card_id: reservation
             for reservation in (_card_reservations or [])
         }
+        # Never while adopted Card builds run (width > 1): they hold pooled pairs from the same
+        # `_role_pool` this fan leases, so a pooled Developer would build two nodes at once and cross
+        # their `last_files`. With one producer the session is joined before this path runs.
         _pb_pairs = (self._build_role_pairs(min(self._llm_parallel, len(creates)))
                      if (self._llm_parallel > 1 and len(creates) > 1
                          and all(a.get("kind") == "draft" for a in creates)
-                         and not any(META_CARD_ID in a for a in creates)) else None)
+                         and not any(META_CARD_ID in a for a in creates)
+                         and not getattr(self, "_spec_build_inflight", None)) else None)
         if _pb_pairs and len(_pb_pairs) > 1 and self._steady_state_build:
             # NEVER THE PRIMARY PAIR, and this is the fourth invariant the barrier was protecting.
             # `_build_role_pairs` returns `[(self.researcher, self.developer)] + pool`, so pair 0 IS
@@ -3014,7 +3031,10 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             _add_materialized((node.idea.card_id, node.card_build_generation))
 
         unmaterialized: set[int] = set()
+        closed_ahead = set(state.card_builds_done_ahead)
         for request_index in range(done, len(state.card_build_requests)):
+            if request_index in closed_ahead:
+                continue
             request = state.card_build_requests[request_index]
             key = self._request_key(request)
             if key is None:
@@ -3037,11 +3057,14 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         *,
         events=None,
         consume_request: bool = False,
+        request_index: Optional[int] = None,
     ) -> int:
         """Return strict remaining physical slots at every new-Node append boundary.
 
-        ``consume_request`` is used only while converting the exact outstanding speculative head into
-        ``node_building``; that request already owns one slot and must not be charged twice.
+        ``consume_request`` is used only while converting an exact outstanding speculative request
+        into ``node_building``; that request already owns one slot and must not be charged twice.
+        ``request_index`` names WHICH request (its queue position) when several producers hold
+        requests at once; omitted, it is the head, as it always was with one producer.
         """
 
         if events is None:
@@ -3049,10 +3072,10 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         raw_used = self._node_id_ceiling(events, state)
         unmaterialized = self._unmaterialized_card_request_indices(state)
         request_used = len(unmaterialized)
-        head_index = max(
+        credited = (request_index if request_index is not None else max(
             0, min(int(state.card_builds_done), len(state.card_build_requests)),
-        )
-        if consume_request and head_index in unmaterialized:
+        ))
+        if consume_request and credited in unmaterialized:
             request_used -= 1
         return max(0, self._hard_node_reservation_limit(state) - raw_used - request_used)
 

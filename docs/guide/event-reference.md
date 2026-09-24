@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-157 event types — 112 folded into `RunState`, 45 diagnostic; 959 declared payload keys; 22 types whose whole payload is stored by the fold.
+157 event types — 112 folded into `RunState`, 45 diagnostic; 960 declared payload keys; 22 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -46,7 +46,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `card_added` | folded | A research Card minted into durable inventory: its id, statement and the action it owns. | — | `action`, `at_node`, `concepts`, `footprint`, `generation`, `id`, `idea`, `node_id`, `ownership_receipt`, `parent_card_id`, `parent_generations`, `parent_id`, `parent_ids`, `rationale`, `scored_against`, `scored_against_empty`, `scored_against_generation`, `source`, `statement`, `steering_context` |
 | `card_auto_dropped` | folded | The engine dropped a Card as a lifecycle effect, with the reason (`dropped_by=engine`). | `dropped_by`, `id`, `reason` | `by` |
 | `card_build_attempted` | folded | One dispatch attempt for a Card's build, indexed so a repeat is visible instead of silently re-issued. | `card_id`, `generation`, `index` | — |
-| `card_build_done` | folded | A Card's build finished: the node it produced, or the reason it was skipped. | `card_id`, `generation` | `node_id`, `skipped`, `skipped_reason`, `speculative` |
+| `card_build_done` | folded | A Card's build finished: the node it produced, or the reason it was skipped. | `card_id`, `generation` | `index`, `node_id`, `skipped`, `skipped_reason`, `speculative` |
 | `card_build_requested` | folded | The durable selection-and-compute gate for one Card's build. | `card_id`, `generation` | — |
 | `card_dropped` | folded | The operator stopped a Card (server-stamped). | `id` | `by`, `dropped_by`, `reason` |
 | `card_edited` | folded | The operator rewrote a Card's statement. | `id` | `source`, `statement` |

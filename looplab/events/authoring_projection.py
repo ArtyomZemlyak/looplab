@@ -87,8 +87,10 @@ def card_authoring(events, st) -> list[dict]:
     except (TypeError, ValueError):
         return []
     done = max(0, min(done, len(requests)))
+    closed_ahead = set(getattr(st, "card_builds_done_ahead", None) or ())
     open_heads = [(index, request) for index, request in enumerate(requests)
-                  if index >= done and isinstance(request, Mapping)]
+                  if index >= done and index not in closed_ahead
+                  and isinstance(request, Mapping)]
     if not open_heads:
         return []
 

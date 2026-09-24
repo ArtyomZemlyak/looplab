@@ -499,7 +499,18 @@ def _on_card_build_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> Non
     must duplicate the exact request identity and replay advances only the matching current head.
     Orphan/malformed/mismatched done rows are inert and can never skip a later real request.
     """
-    request_index = st.card_builds_done
+    # AN INDEXED CLOSE names the request position it completes; without `index` the row closes the
+    # head, exactly as every log written before several producers existed. The index must name a
+    # position still OPEN (at or past the cursor, not already closed ahead of it), so a replayed or
+    # forged row can never close a request twice or skip one it does not name.
+    named = d.get("index")
+    if named is None:
+        request_index = st.card_builds_done
+    elif (type(named) is not int or named < st.card_builds_done
+          or named in st.card_builds_done_ahead):
+        return
+    else:
+        request_index = named
     request = (st.card_build_requests[request_index]
                if request_index < len(st.card_build_requests) else None)
     card_id = _card_replay_id(d.get("card_id"))
@@ -513,8 +524,7 @@ def _on_card_build_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> Non
     # (the fold loop has no per-event try/except). Every other field this handler reads is
     # shape-guarded; this one is now too.
     if isinstance(skipped, str) and skipped in {"producer_failed", "stale"}:
-        st.card_builds_done += 1
-        st.card_build_outcomes.append(skipped)
+        _close_card_build_request(st, request_index, skipped)
         if skipped == "producer_failed" and card_id not in st.card_build_producer_failed:
             st.card_build_producer_failed.append(card_id)
         return
@@ -530,9 +540,27 @@ def _on_card_build_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> Non
         return
     # Keep only the exact bounded receipt consumed by depth/freshness recovery. Last write for a node
     # is harmless and deterministic; first-terminal lifecycle rules still own its actual node state.
-    st.card_builds_done += 1
-    st.card_build_outcomes.append("committed")
+    _close_card_build_request(st, request_index, "committed")
     st.speculative_nodes[node_id] = dict(request)
+
+
+def _close_card_build_request(st: RunState, request_index: int, outcome: str) -> None:
+    """Close one request position and record its outcome IN POSITION ORDER.
+
+    `card_build_outcomes[i]` is read as the outcome of request `i` once the queue is closed
+    (`search/speculation_quality.py`), so an out-of-order close is inserted after every earlier
+    position already closed rather than appended. The cursor then advances over every position
+    closed ahead of it. With in-order closes both steps reduce to the historical `append` and `+= 1`.
+    """
+    earlier = st.card_builds_done + sum(1 for i in st.card_builds_done_ahead if i < request_index)
+    st.card_build_outcomes.insert(earlier, outcome)
+    if request_index == st.card_builds_done:
+        st.card_builds_done += 1
+        while st.card_builds_done in st.card_builds_done_ahead:
+            st.card_builds_done_ahead.remove(st.card_builds_done)
+            st.card_builds_done += 1
+    else:
+        st.card_builds_done_ahead.append(request_index)
 
 
 # This family's rows of the fold's dispatch table. `replay.py::_HANDLERS` is assembled from every

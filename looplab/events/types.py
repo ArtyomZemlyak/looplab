@@ -1388,7 +1388,9 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # scan could not resolve. What IS always written is the pair below; `skipped_reason` is
         # written on the skip branch, is named in this row's own prose, and had no declaration.
         required=("card_id", "generation"),
-        optional=("node_id", "skipped", "skipped_reason", "speculative"),
+        # `index`: the queue position this row closes, written only when it is not the head — a
+        # build that finished before one opened earlier (several producers). Absent = the head.
+        optional=("index", "node_id", "skipped", "skipped_reason", "speculative"),
     ),
     "card_build_requested": PayloadContract(
         "The durable selection-and-compute gate for one Card's build.",

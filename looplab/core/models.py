@@ -2522,6 +2522,12 @@ class RunState(BaseModel):
     # not a public board payload; old logs therefore keep the exact serialized RunState shape.
     card_build_requests: list[dict] = Field(default_factory=list, exclude=True)
     card_builds_done: int = Field(default=0, exclude=True)
+    # Request POSITIONS closed ahead of the cursor above, by a `card_build_done` that names its
+    # `index`. With one producer requests close in order and this stays empty, so `card_builds_done`
+    # is both the cursor and the count; with several (`llm_parallel` > 1) a short build can finish
+    # before a long one opened earlier, and the cursor then stops at the first position still open.
+    # Hidden and empty on every log written before indexed closes existed.
+    card_builds_done_ahead: list[int] = Field(default_factory=list, exclude=True)
     # Paid-attempt receipts (`card_build_attempted`) per request identity, as `{card_id, generation}`
     # rows in append order. The request above is the LOGICAL gate ("build this Card"); this is the
     # PHYSICAL one ("a producer was started, so a provider call may already be paid for"). A head that

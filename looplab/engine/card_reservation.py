@@ -1463,6 +1463,40 @@ class CardReservationMixin:
             return None
         return state.search_epoch, parent, score
 
+    def _ceiling_moved_only_by_known_builds(self, events, state: RunState,
+                                            proposal_state: RunState,
+                                            proposal_node_ceiling: int) -> bool:
+        """Did the node-id ceiling move ONLY because a speculative build that was already running when
+        the proposal was written committed its node?
+
+        With several Card producers (`speculation.py::_speculative_producer_width`) the raw proposal
+        lane runs beside builds that take hours, and each commit mints a node id. The proposal was
+        written knowing those builds: their Cards were requests in `proposal_state`, excluded from
+        its selection. Refusing it for that id alone threw away a paid Researcher proposal for a
+        fact it had already accounted for. Every OTHER mover — a serial build, an inject, a build
+        requested after the proposal — still refuses, and the receipt fence below (epoch, parent,
+        score anchor) is untouched: a committed build that went on to move the champion refuses
+        there. With one producer no build runs beside the raw lane, so this is never consulted."""
+        outstanding = getattr(self, "_outstanding_requests", None)
+        if not callable(outstanding):
+            return False
+        known = {(request.get("card_id"), request.get("generation"))
+                 for request in outstanding(proposal_state)}
+        if not known:
+            return False
+        movers = [event.data for event in events
+                  if event.type == EV_NODE_BUILDING
+                  and isinstance(event.data.get("node_id"), int)
+                  and event.data["node_id"] >= proposal_node_ceiling]
+        if not movers:
+            return False
+        return all(
+            data.get("speculative") is True
+            and (data.get("card_id"), data.get("card_build_generation")) in known
+            for data in movers
+        ) and self._node_id_ceiling(events, state) == (
+            max(data["node_id"] for data in movers) + 1)
+
     def _stage_prepared_card(self, action: dict, idea: Idea, *, proposal_state: RunState,
                              proposal_node_ceiling: int, at_node: int, source: str,
                              steering_context=(), cross_run_receipt=None) -> Optional[str]:
@@ -1533,7 +1567,9 @@ class CardReservationMixin:
             state = _fold(events)
             if state.halted:
                 return _refuse("run_stopping")
-            if self._node_id_ceiling(events, state) != proposal_node_ceiling:
+            if (self._node_id_ceiling(events, state) != proposal_node_ceiling
+                    and not self._ceiling_moved_only_by_known_builds(
+                        events, state, proposal_state, proposal_node_ceiling)):
                 return _refuse("node_ceiling_moved")
             # ONE FENCE, EVALUATED ONCE, THEN ATTRIBUTED — the 2026-08-31 merge of two changes that
             # met here. The COMPARISON is this branch's and is untouched: `_proposal_receipt_fence`
