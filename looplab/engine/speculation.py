@@ -3406,6 +3406,14 @@ class SpeculationMixin:
             proposal_state = fold(proposal_events)
             if (
                 self._busy_producers(proposal_state) < self._producer_capacity(proposal_state)
+                # ONE raw proposal at a time, whatever the build width: the lane has ONE result slot
+                # (`_spec_raw_stage_result`), ONE lease ("raw") and ONE in-flight flag. Measured
+                # 2026-09-24 on MiniOneRec inf12 at width 2: counting the lane as one busy producer
+                # and nothing more let a free build slot start a second, third and fourth proposal
+                # on the SAME pair while the first ran — four concurrent Researcher sessions, their
+                # results overwriting one slot, one staged Card in an hour.
+                and not self._spec_raw_stage_inflight
+                and self._spec_raw_stage_result is None
                 # The SAME ceiling as the durable election above, and this half matters most: a
                 # refusal there falls through to here, so leaving the raw lane on the bare depth
                 # would turn "do not buy a prefetch the gate must discard" into "buy a Researcher

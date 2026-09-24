@@ -459,3 +459,65 @@ def test_a_build_on_a_retired_developer_is_closed_not_committed(tmp_path, monkey
     replaced = [e.data for e in engine.store.read_all()
                 if e.type == EV_CARD_BUILD_DONE and e.data.get("skipped_reason") == "builder_replaced"]
     assert replaced and all("node_id" not in r for r in replaced)
+
+
+# ------------------------------------------------------------ the raw proposal lane stays single
+
+class _CountingRawResearcher:
+    """Proposes slowly and records how many of its proposals overlap."""
+
+    def __init__(self, gauge):
+        self.gauge = gauge
+
+    def propose(self, _state, _parent):
+        import time
+        with self.gauge["lock"]:
+            self.gauge["live"] += 1
+            self.gauge["peak"] = max(self.gauge["peak"], self.gauge["live"])
+        time.sleep(0.3)
+        with self.gauge["lock"]:
+            self.gauge["live"] -= 1
+            self.gauge["calls"] += 1
+        return Idea(operator="draft", params={"x": 0.3 + self.gauge["calls"] / 100, "y": -1.0},
+                    rationale=f"raw proposal {self.gauge['calls']}",
+                    hypothesis=f"raw hypothesis {self.gauge['calls']}")
+
+
+def test_a_wide_session_never_runs_two_raw_proposals_at_once(tmp_path, monkeypatch):
+    """Measured 2026-09-24 (inf12, width 2): four concurrent raw proposals on one pair and one
+    result slot, one staged Card in an hour. The lane is single whatever the build width."""
+    engine, _unused = _engine(tmp_path / "raw-single", depth=1)
+    gauge = {"lock": threading.Lock(), "live": 0, "peak": 0, "calls": 0}
+    log: list = []
+    engine.role_factory = lambda: (_CountingRawResearcher(gauge), _GatedDeveloper(log))
+    engine._llm_parallel = 2
+    engine._llm_parallel_launched = 2
+    engine._llm_parallel_startup_auto = False
+    _without_research(monkeypatch, engine)
+    _start(engine)
+    _add_ready_draft(engine, "card-0", x=0.1)
+    _GatedDeveloper.gate = False
+    _commit_speculative_node(engine)            # the running eval; the board is then empty
+    release = threading.Event()
+
+    async def _held_eval(node_id, _limiter, _max_es):
+        await anyio.to_thread.run_sync(release.wait, 30)
+        node = fold(engine.store.read_all()).nodes[node_id]
+        engine.store.append(EV_NODE_EVALUATED, {
+            "node_id": node_id, "generation": node.attempt, "metric": 0.0, "eval_seconds": 0.0})
+
+    monkeypatch.setattr(engine, "_evaluate", _held_eval)
+
+    async def scenario():
+        async with anyio.create_task_group() as eval_tg:
+            engine._eval_task_group = eval_tg
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(engine._run_card_session, [], fold(engine.store.read_all()), None)
+                with anyio.fail_after(20):
+                    while gauge["calls"] < 2:
+                        await anyio.sleep(0.05)
+                release.set()
+                tg.cancel_scope.cancel()
+
+    anyio.run(scenario)
+    assert gauge["peak"] == 1, gauge
