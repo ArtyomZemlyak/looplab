@@ -346,3 +346,55 @@ def test_the_v3_node0_manifest_is_refused():
     refusal = build_declared_script_never_written(manifest, {}, exists=lambda _p: False)
     assert "MiniOneRec/looplab/prepare_cache.sh" in refusal
     assert not build_declared_script_never_written(manifest, {}, exists=lambda _p: True)
+
+
+# ------------------------------------------------------------ the same shot for a declared marker
+
+def _marker_gap_build(monkeypatch, *, write_in_gap: bool):
+    """A real `implement()` whose steps declare an activation marker and never write the code that
+    prints it (MiniOneRec inf12 node 4, 2026-09-24). Returns `(developer, gap_sessions)`."""
+    import looplab.agents.agent as agent_mod
+
+    gap_sessions: list = []
+    gap_title = "Write the new code path this build declares but never wrote"
+
+    def fake_loop(client, tools, messages, emit_spec, *, finalize, fallback, **opts):
+        name = emit_spec["function"]["name"]
+        if name == "declare_stages":
+            return finalize({"stages": []})
+        if name == "propose_plan":
+            return finalize({"steps": [{"title": "A", "detail": "a"}, {"title": "B", "detail": "b"}]})
+        user = str(messages[-1].get("content", ""))
+        if gap_title in user:
+            gap_sessions.append(user)
+            if write_in_gap:
+                tools.execute("write_file", {"path": "dedup.py",
+                                             "content": "print('DEDUP_STEP1_ACTIVE')\n"})
+            return finalize({"summary": "wrote it"})
+        return finalize({"summary": "planned it", "activation_markers": ["DEDUP_STEP1_ACTIVE"]})
+
+    monkeypatch.setattr(agent_mod, "drive_tool_loop", fake_loop)
+    from looplab.adapters.repo_task import EvalSpec, LLMRepoDeveloper, RepoTask
+    fixture = Path(__file__).resolve().parent / "fixtures" / "repo_fixture"
+    task = RepoTask(id="r", goal="g", direction="max", editable_path=str(fixture),
+                    edit_surface=["*"], protect=[],
+                    eval=EvalSpec(command=[sys.executable, "ttrain.py"],
+                                  metric={"kind": "stdout_json", "key": "metric"}))
+    dev = LLMRepoDeveloper(object(), task, plan_decompose=True, plan_min_steps=2)
+    dev.implement(Idea(operator="draft", params={}, rationale="dedupe the first decode step"))
+    return dev, gap_sessions
+
+
+def test_a_build_that_ENDS_with_its_marker_unwritten_gets_ONE_session_to_write_it(monkeypatch):
+    """Mutation: drop the `_close_declared_marker_gap` call — no session, the path never ships."""
+    dev, gaps = _marker_gap_build(monkeypatch, write_in_gap=True)
+    assert len(gaps) == 1 and "DEDUP_STEP1_ACTIVE" in gaps[0], gaps
+    assert "dedupe the first decode step" in gaps[0], "the session is told what the idea is"
+    assert "dedup.py" in dev.last_files
+
+
+def test_the_marker_gap_session_is_spent_at_most_once_and_keeps_the_declaration(monkeypatch):
+    dev, gaps = _marker_gap_build(monkeypatch, write_in_gap=False)
+    assert len(gaps) == 1
+    assert "DEDUP_STEP1_ACTIVE" in dev.last_files.get("looplab_activation.json", ""), (
+        "withdrawing the marker would credit the parent's metric to an idea that never ran")

@@ -3060,6 +3060,47 @@ class LLMRepoDeveloper:
               **self._session_opts())
         self._close_declared_script_gap(idea, write, system, stage_note=stage_note,
                                         base_note=base_note)
+        self._close_declared_marker_gap(idea, write, system, stage_note=stage_note,
+                                        base_note=base_note)
+
+    def _close_declared_marker_gap(self, idea: Idea, write, system: str, *, stage_note: str,
+                                   base_note: str) -> None:
+        """ONE focused session when the finished build declares an activation marker its code does
+        not contain — i.e. the path the idea is about was never written.
+
+        The emit-time bounce (`_marker_refusal`) only reaches an emit that can still buy a turn; a
+        step that ends on its wall budget is salvaged past it. Measured 2026-09-24 on MiniOneRec
+        inf12 node 4: a de-duplicated first decode step, planned in four steps, two of them cut at
+        ~57 min, the marker declared and no file ever written — then a 13-min triage, a 57-min
+        repair with ZERO edits, a 38-min triage and a second repair, ~6 h of Developer time for a
+        node that differed from its parent by the marker file alone. A fresh session with its own
+        budget and exactly one job is the cheap answer, as `_close_declared_script_gap` is for a
+        stage script. At most one: if the path is still unwritten, the eval's `inert_path` check
+        and the repair ladder take over exactly as before. The declaration is NOT withdrawn here —
+        dropping it would let the unchanged parent's metric be credited to an idea that never ran."""
+        import json as _json
+        from looplab.core import tracing
+        from looplab.engine.activation import ACTIVATION_MANIFEST_NAME
+        from looplab.engine.repair_verify import activation_markers_not_in_code
+        try:
+            declared = _json.loads(write.files.get(ACTIVATION_MANIFEST_NAME) or "{}").get("markers")
+        except (ValueError, AttributeError):
+            return
+        refusal = activation_markers_not_in_code(declared, write.files)
+        if not refusal:
+            return
+        self.last_budget_exhausted = ""
+        self.last_budget_facts = {}
+        rationale = " ".join(str(getattr(idea, "rationale", "") or "").split())[:1200]
+        step = {"title": "Write the new code path this build declares but never wrote",
+                "detail": (f"{refusal}\n\nThe idea being built: {rationale}\n\nThe rest of the "
+                           "build is done and reading is over: WRITE the code now — the new path, "
+                           "wired into what the evaluation runs, printing the declared marker when "
+                           "it is active — then call done. Use what you already know; do not "
+                           "re-survey the repository.")}
+        with tracing.operation("declared_marker_gap", detail=str(refusal)[:300]):
+            self._run_step(idea, step, 1, 1, write, system, stage_note=stage_note,
+                           baseline_note=base_note)
 
     def _close_declared_script_gap(self, idea: Idea, write, system: str, *, stage_note: str,
                                    base_note: str) -> None:
