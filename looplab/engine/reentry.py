@@ -51,7 +51,8 @@ from looplab.core.errors import OperatorRefusal
 from looplab.core.models import RunState
 from looplab.engine.finalize import incomplete_finalize_scope, is_guarded_abort
 from looplab.engine.shared import engine_fold as fold
-from looplab.engine.widths import EVAL_WIDTH_MAX, LLM_WIDTH_MAX, settled_width_refusal
+from looplab.engine.widths import (EVAL_WIDTH_MAX, LLM_WIDTH_MAX, operator_width_axes,
+                                   settled_width_refusal)
 from looplab.events.types import EV_LESSONS_STORE_UNAVAILABLE
 from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROFILE_DIGEST,
                                                     SPECULATION_POLICY_SCOPE)
@@ -570,6 +571,10 @@ class ReentryMixin:
             self.speculation_depth = _entry.speculation_depth
         # A7 Strategist: re-apply the last-decided strategy on (re)entry so a resumed run continues
         # with it WITHOUT re-consulting the Strategist (the decision lives in the event log).
+        # The operator's width pins first (`widths.py::operator_width_axes`), so the recorded
+        # strategy re-applied below cannot widen an axis the operator owns — even when its
+        # `strategy_decision` precedes the operator's `budget_extend` in the log.
+        self._operator_width_axes = operator_width_axes(_entry.budget_overrides)
         if _entry.active_strategy:
             # A recorded Developer backend is part of this run's treatment. If today's credential or
             # endpoint cannot reconstruct it, refuse re-entry instead of silently continuing on the

@@ -44,6 +44,32 @@ def settle_width(raw, upper: int) -> Optional[int]:
     return max(1, value)
 
 
+# The two width axes, as `(canonical, legacy)` — the same families `replay_requests.py::_on_budget_extend`
+# folds one key per family for. Spelled here beside `settle_width`, which both writers already share.
+_WIDTH_AXES = (("eval_parallel", "max_parallel"), ("llm_parallel", "parallel_build"))
+
+
+def operator_width_axes(budget_overrides) -> frozenset:
+    """The width axes (canonical names) an OPERATOR has decided via `budget_extend`, from the fold.
+
+    An operator's width is a durable PIN, not one more voice (incident
+    `runs/minionerec-backbones-v10`, 2026-09-24): the run launched at `max_parallel=1`, a Strategist
+    `strategy_decision` set `eval_parallel: 2`, two 4-GPU-sized evals ran on one GPU each and both
+    torchrun canaries bound port 29500. The operator's `budget_extend{max_parallel: 1}` was re-applied
+    at the next loop head, but every later `strategy_decision` — merged onto the active strategy, so it
+    carries the old `eval_parallel: 2` forward — re-applied the Strategist's width until that head,
+    and any eval dispatched in between ran wide. `Engine._strategy_may` refuses the Strategist an axis
+    this returns, so the operator's value is the only one that ever reaches the live attribute.
+
+    Derived from `state.budget_overrides` alone, which the fold keeps as ONE key per axis family, in
+    event order, for the rest of the run — so a resumed engine derives the same pin from the same log
+    whatever order the operator's control and the Strategist's decisions were recorded in.
+    """
+    bo = budget_overrides if isinstance(budget_overrides, dict) else {}
+    return frozenset(canonical for canonical, legacy in _WIDTH_AXES
+                     if canonical in bo or legacy in bo)
+
+
 def per_experiment_gpu_budget(pool, eval_parallel) -> Optional[int]:
     """How many GPUs ONE experiment may claim while ``eval_parallel`` of them still run at once.
 

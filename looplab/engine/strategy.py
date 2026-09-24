@@ -40,7 +40,8 @@ from looplab.core.llm_broker import LLM_LANES, in_llm_lane
 from looplab.core.models import RunState
 from looplab.engine.cadence import (at_creation_boundary, cadence_due, cadence_marks,
                                      plateau_due, seed_boundary_due)
-from looplab.engine.widths import EVAL_WIDTH_MAX, LLM_WIDTH_MAX, settle_width
+from looplab.engine.widths import (EVAL_WIDTH_MAX, LLM_WIDTH_MAX, operator_width_axes,
+                                   settle_width)
 from looplab.engine.costs import bind_cost_accountants
 from looplab.engine.governance_health import GovernanceLedgerUnavailable
 from looplab.engine.shared import effective_max_eval_timeout
@@ -419,8 +420,15 @@ class StrategyCadenceMixin:
     def _strategy_may(self, strat: dict, key: str) -> bool:
         """One governance verdict shared by Developer preparation and live strategy application."""
         pinned = set(strat.get("_pinned") or [])
-        if any(alias in pinned for alias in parallelism_aliases(key)):
+        aliases = parallelism_aliases(key)
+        if any(alias in pinned for alias in aliases):
             return True
+        # AN OPERATOR'S WIDTH OUTRANKS THE STRATEGIST'S for the rest of the run: a width axis the
+        # operator set by `budget_extend` is theirs (`widths.py::operator_width_axes` says why), so a
+        # Strategist grant for it is void from then on. Derived from the fold's `budget_overrides`
+        # (`_note_operator_width_axes`), so replay and resume reach the same verdict.
+        if aliases[0] in getattr(self, "_operator_width_axes", frozenset()):
+            return False
         if key == "card_scoring":
             controls = self._agent_control if isinstance(self._agent_control, dict) else {}
             if self.card_driven_selection and key not in controls:
@@ -846,6 +854,7 @@ class StrategyCadenceMixin:
         oscillated the policy every consult and dropped the Strategist's fidelity/operators)."""
         if getattr(self, "_speculation_gate_calibration", False) is True:
             return state
+        self._operator_width_axes = operator_width_axes(state.budget_overrides)
         pin = state.pending_strategy or {}
         raw_pin = {k: pin[k] for k in (
             "policy", "policy_params", "fidelity", "eval_parallel", "llm_parallel",
@@ -1007,6 +1016,13 @@ class StrategyCadenceMixin:
                     # owns no fields) so resume-time _apply_strategy still exempts the operator's knobs
                     # even though this record's top-level source is the strategist's (mega-review).
                     merged["_pinned"] = sorted(pin_fields)
+                    # An operator-owned width is not the Strategist's to record either: drop it
+                    # (including a stale value carried forward from `active_strategy`) so the
+                    # durable decision states only what the engine applies (`_strategy_may`).
+                    for _axis in self._operator_width_axes:
+                        for _alias in parallelism_aliases(_axis):
+                            if _alias not in pin_fields:
+                                merged.pop(_alias, None)
                     if self._strategy_core(merged) != self._strategy_core(state.active_strategy):
                         self._record_strategy(merged, state, ctx)
                         return fold(self.store.read_all())

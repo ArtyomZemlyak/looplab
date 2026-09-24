@@ -48,7 +48,7 @@ from looplab.core.errors import ConfigRefusal
 from looplab.core.llm_broker import LLMConcurrencyBroker, default_llm_lane_limits
 from looplab.core.models import RunState, effective_card_footprint
 from looplab.engine.widths import (EVAL_WIDTH_MAX, LLM_WIDTH_MAX, proposal_derived_width,
-                                   settle_width)
+                                   operator_width_axes, settle_width)
 from looplab.events.types import EV_RUN_WIDTH_SETTLED
 from looplab.runtime.command_eval import eval_timeout_override
 
@@ -299,6 +299,9 @@ class WidthSettlingMixin:
         # apply stays total even for a manually constructed/forward-version RunState;
         # replay normally sanitizes these first, but a poison ceiling must never disable a budget.
         max_s = _finite_ceiling("max_seconds", self.max_seconds)
+        # An operator's width is a pin the Strategist cannot override (`_strategy_may`); noted here,
+        # every turn, from the same fold the widths below are re-applied from.
+        self._operator_width_axes = operator_width_axes(_bo)
         # A `budget_extend` is a HUMAN control intent, NOT an agent decision: CONTROL_EVENTS are
         # UI/CLI-authored (see the engine-writer invariant), and the boss action-builder
         # (serve/routers/boss.py::_Action) can ONLY ever emit `add_nodes` — it carries no field for
