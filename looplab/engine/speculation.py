@@ -3084,6 +3084,11 @@ class SpeculationMixin:
         """
 
         current = self._session_state()
+        if self._operator_node_request_ready(current):
+            # A queued fork/inject owns the next build slot: electing another Card here is what
+            # starved v9's inject behind card after card. The exit decision hands it to the outer
+            # loop once the producer lane is idle.
+            return False
         consumer_active = bool(
             session.eval_inflight
             or any(self._session_admissible(node, current, session)
@@ -3205,11 +3210,16 @@ class SpeculationMixin:
             or self._spec_builds
             or self._spec_raw_stage_inflight
             or self._spec_raw_stage_result is not None
+            or getattr(self, "_inject_lanes_inflight", 0)
         )
         # PRODUCER work this session owns and no other turn can adopt: a durable request head it
         # elected, a `node_building` marker, an isolated build/raw-stage worker holding an
         # in-memory result slot.  Evals are deliberately NOT in here any more — see below.
         producer_inflight = bool(any((outstanding, building, memory_pending)))
+        if not producer_inflight and self._operator_node_request_ready(current):
+            # The outer loop serves a queued fork/inject (`_serve_forced_requests`) before any
+            # speculation; with the producer lane idle nothing here may hold it off any longer.
+            return True
         if session.open_for_production(gates):
             # Still open for work, so a ready pending Node or a running eval keeps the session
             # alive — there is nothing to hand back to and a slot may free at any moment.
@@ -3319,6 +3329,10 @@ class SpeculationMixin:
                             continue
                         self._card_phase_serve_head(session)
                         if await self._card_phase_admit_evals(session):
+                            continue
+                        # An operator inject beside the producer when the LIVE build width has a
+                        # free slot (`forced_requests.py`, "controls ON THE FLY").
+                        if self._card_phase_serve_operator_inject(session):
                             continue
                         if await self._card_phase_request_build(session):
                             continue

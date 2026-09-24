@@ -1126,6 +1126,13 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # stays the task's own recorded spec; every budget/timeout reader asks
         # `shared.py::effective_eval_spec`, which applies this to a copy.
         self._eval_timeout_override: Optional[float] = None
+        # The on-the-fly control watcher (`forced_requests.py::_control_watch_loop`): armed by the
+        # run loop's head, idle while the head keeps turning; `_inject_lanes_inflight` counts the
+        # Card session's concurrent inject builds (`_card_phase_serve_operator_inject`).
+        self._control_watch_armed: bool = False
+        self._control_watch_scope = None
+        self._loop_head_monotonic: float = 0.0
+        self._inject_lanes_inflight: int = 0
         # Ablation probes run via the solution.py sandbox path, which is wrong for a repo/eval-spec
         # run (the repo tree is absent) — so `_ablate` no-ops there. Tell the policy not to PROPOSE
         # ablate on such runs: the skip creates no refine_block node, so the ablate cadence would
@@ -1473,9 +1480,17 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 try:
                     async with anyio.create_task_group() as eval_tg:
                         self._eval_task_group = eval_tg
+                        # Operator controls applied ON THE FLY while the loop is inside a long
+                        # step (`forced_requests.py::_control_watch_loop`). Looked up defensively:
+                        # `Engine.run` is borrowed by host stubs that are not Engines.
+                        _start_watch = getattr(self, "_start_control_watch", None)
+                        if callable(_start_watch):
+                            _start_watch(eval_tg)
                         try:
                             return await self._run_with_llm_broker()
                         except BaseException as escaping:
+                            if callable(_start_watch):
+                                self._stop_control_watch()
                             # THE CEILING MUST NOT DISCARD WORK IT HAS ALREADY PAID FOR.  See
                             # `_drain_inflight_evaluation` for the measurement and the whole
                             # argument; the raise below is unconditional, so the hard stop is
@@ -1483,6 +1498,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                             await self._drain_inflight_evaluation(escaping)
                             raise
                         finally:
+                            if callable(_start_watch):
+                                self._stop_control_watch()
                             self._eval_task_group = None
                 except BaseExceptionGroup as group:
                     # A task group collapses even a LONE exception into a group, and `Engine.run`'s
@@ -1726,6 +1743,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             # extends the log after this fold, refold before doing domain work so neither a stale
             # reset nor a stale natural-finish decision can cross the newly-observed intent.
             self._ack_commands(decision_events)
+            self._mark_loop_head()
             observed_tail = self.store.read_all()
             if (observed_tail[-1].seq if observed_tail else -1) != decision_seq:
                 continue
@@ -2017,6 +2035,9 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             else:
                 await self._dispatch_evals(evals, state, max_es)
 
+        # The loop is over: nothing below is a step a control may be drained beside, and the wrap-up
+        # suffix is positional, so the on-the-fly watcher stands down before the drain/finalize.
+        self._control_watch_armed = False
         # Every `break` above can leave adopted evaluations running (the eval task group is owned by
         # `Engine.run`, not by this loop), and finalization reads the FOLD: champion, budget summary,
         # diversity archive, case store. Draining here — not at the task group's join, which happens
