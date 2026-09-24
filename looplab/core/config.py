@@ -790,6 +790,18 @@ class Settings(BaseSettings):
     # form a config file or `LOOPLAB_EVAL_ENV` carries — see `_eval_env_map` for why both.
     # SECRETS ARE REFUSED, by the same rule and for the durability reason stated there.
     eval_env: dict[str, str] = Field(default_factory=dict)
+    # THE EVAL CANARY (2026-09-24): before a node's FULL evaluation, run the same resolved stage chain
+    # once on a tiny slice — the engine sets `LOOPLAB_CANARY=1`, the task declares any extra env and
+    # the cap (`eval.canary = {"env": {...}, "timeout": 900}`, `adapters/repo_task.py::CanarySpec`)
+    # — in a scratch directory outside the node's workdir. A
+    # failing canary is the attempt's crash — the normal triage/repair path, with the canary's output
+    # as the evidence, and the full eval is never started; a passing one lets the full eval run. Its
+    # number is never the node's metric. Recorded as `eval_canary_started` / `eval_canary_finished`
+    # rows keyed on the node's code digest, so a resume does not re-run a canary that already passed
+    # for the same code. Motivated by multi-hour repo evals (MiniOneRec SFT: 30 min prep + 8 h train +
+    # 15 min scoring) that died in their scoring tail on a trivial defect. Off by default, and inert
+    # for a task that declares no `eval.canary` whatever this says (`engine/eval_canary.py`).
+    eval_canary: bool = False
     # Sandbox tier (ADR-13): "trusted_local" (subprocess, no Docker) for the CLI;
     # "untrusted" (Docker --network none, shared-kernel runtime) for hosted/multi-tenant UI;
     # "hostile" (untrusted + a true-isolation OCI runtime, gVisor `runsc` by default / Kata) for

@@ -853,7 +853,8 @@ class EvalDispatchMixin:
             return env
         return {**(env or {}), **declared}
 
-    def _run_eval(self, node, workdir, env=None, profile=None, cancel=None, start_stage=_UNSET):
+    def _run_eval(self, node, workdir, env=None, profile=None, cancel=None, start_stage=_UNSET,
+                  canary=None):
         """Eval dispatcher: RepoTask runs the operator's command + reads its metric;
         otherwise the classic solution.py sandbox path. Both return a `RunResult`, so all
         downstream metric/exit/timeout checks are identical.
@@ -866,7 +867,14 @@ class EvalDispatchMixin:
         derives it from `node.rerun_stage` (the operator node_reset seam). The inline-repair loop
         passes an EXPLICIT value (a stage name to reuse-into, or None for a full re-run) computed by
         its safe-reuse predicate — passing explicitly avoids the transient `rerun_stage` being reset
-        by the loop's re-fold."""
+        by the loop's re-fold.
+
+        `canary`: the EVAL CANARY's declaration (`engine/eval_canary.py::canary_spec`) — None, the
+        default, is the full eval, byte-identical. Given, the SAME chain runs with `canary["env"]`
+        overlaid LAST on the declared environment and every timeout capped at `canary["timeout"]`,
+        and the paid/recording hooks that would describe the node's REAL run (stage checks, the
+        deadline judge, the stage-progress beacons, the stage-identity recorder) are left off. The
+        caller owns `workdir` being a scratch directory and discards the result's metric."""
         # THE DECLARED ENVIRONMENT, composed ONCE and BEFORE anything spawns (F1d). Run level
         # (`Settings.eval_env`) then task level (`cmd.env`), most specific last; the per-stage layer
         # is applied by `_run_stages`, which is the only layer that differs per child.
@@ -881,6 +889,10 @@ class EvalDispatchMixin:
         # the read-fence marker), which is safe because `validate_env_map` refuses every name the
         # engine owns, so a declaration can never overwrite one.
         env = self._declared_eval_env(env, self._eval_spec)
+        if canary is not None:
+            # The canary's env (`LOOPLAB_CANARY=1` + the task's `eval.canary.env`) wins over every
+            # declared layer: it is what makes this run tiny.
+            env = {**(env or {}), **dict(canary.get("env") or {})}
         if self._eval_spec:
             from looplab.runtime import command_eval
             es = self._eval_spec
@@ -898,13 +910,17 @@ class EvalDispatchMixin:
             # It is the derivation only: `_ensure_run_setup`/`_sync_node_deps` above are the
             # dispatcher's own side effects and stay here, where a planner can never reach them.
             cmd, timeout, stages = self._eval_pipeline(node, workdir, profile)
+            if canary is not None:
+                from looplab.engine.eval_canary import capped_pipeline
+                timeout, stages = capped_pipeline(timeout, stages, float(canary["timeout"]))
             # Phase 3: inter-stage verify (only if any stage asks). `root` and `stages` are what let
             # the checker's `loss_unchanged_from_first_step` verdict be checked against the whole of
             # this attempt's stage log instead of the 4,000-char tail it is shown — the log lives in
             # `log_dir` (== `root`, below) and the plan comes from the SAME resolved list this eval
             # runs, so neither is derived from anything a model said. See `_stage_check_fn`.
             check_fn = (self._stage_check_fn(node, root, stages)
-                        if stages and any(s.get("check") for s in stages) else None)
+                        if stages and any(s.get("check") for s in stages) and canary is None
+                        else None)
             cwd = self._sandbox_cwd(workdir, es.get("cwd", "."))
             # PREFLIGHT the resolved chain for a PROTECTED script the workdir doesn't hold, BEFORE any
             # stage runs. The one failure the repair loop structurally cannot fix (the agent may not
@@ -998,21 +1014,23 @@ class EvalDispatchMixin:
                 # workdir ROOT, and the declared relative `cwd` rides separately as the fail-closed
                 # clause it is on `_safe_reuse_start` — the two arguments are the same pair that
                 # predicate takes, deliberately.
-                stage_key_fn=self._stage_key_fn(workdir, cwd=es.get("cwd") or None),
+                stage_key_fn=(self._stage_key_fn(workdir, cwd=es.get("cwd") or None)
+                              if canary is None else None),
                 # THE LIVE STAGE CURSOR. `stage_finished` lands only at a stage's COMPLETION, so
                 # between two rows nothing could say which of `mine`/`train`/`score` was running:
                 # `train_monitor.resolve_stage_log` guessed it from freshest-mtime (its own docstring
                 # concedes the cursor "genuinely is unobservable from here") and every UI status
                 # surface simply called the whole multi-hour pipeline "Training / evaluating".
                 # Diagnostic beacons only — nothing here folds, decides, kills or selects.
-                on_stage_event=self._stage_progress_fn(
+                on_stage_event=(self._stage_progress_fn(
                     node.id if node is not None else None,
-                    node.attempt if node is not None else 0, stages),
+                    node.attempt if node is not None else 0, stages)
+                    if canary is None else None),
                 # The one-shot deadline judge (doc 39 site #2). Both are needed and are separate on
                 # purpose: the callback may be None (no client) while the cap is set, and the cap is
                 # the OPERATOR'S number — `sandbox._granted_grace` clamps to it in the runtime, so a
                 # judge cannot name its own extension even if a future caller lets it try.
-                on_deadline=self._deadline_grace_fn(node),
+                on_deadline=(self._deadline_grace_fn(node) if canary is None else None),
                 deadline_grace_max_s=self.eval_deadline_grace_s,
                 # METRIC PROVENANCE: what the number is a claim ABOUT. Gated on the rung so `off` is
                 # byte-identical to the behaviour before this shipped — and so a RESUMED pre-2026-08-13

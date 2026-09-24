@@ -943,6 +943,45 @@ Corpus effect: **24 of the 58 folded nodes** now carry at least one row (12 of t
 `e5small-dr-unified-v2` node 1 joins `rubertlite-dr-unified-v8` node 3. `champion_metric_caveats`
 costs 26-35 ms per `/api/runs` poll on the two large repo runs, up from 15-17 ms.
 
+### A canary before a long eval (`eval.canary`)
+
+A repo eval can run for hours, and a trivial defect in its tail — a `KeyError` in the scoring code,
+a missing file, a wrong CLI flag — only surfaces after the whole run was paid for (measured: an
+8-hour MiniOneRec SFT eval that died in its 15-minute scoring stage). With the `eval_canary` setting
+on, the engine runs the SAME resolved stage chain once, before each node's full evaluation, on a
+tiny slice your eval script chooses:
+
+```yaml
+settings:
+  eval_canary: true
+task:
+  cmd:
+    stages: [...]
+    canary:
+      env: { MAX_USERS: "2000", MAX_TEST_QUERIES: "50" }   # optional; your script's own knobs
+      timeout: 900                                         # per stage AND for the whole chain
+```
+
+The engine always sets `LOOPLAB_CANARY=1` in the canary's environment (the `LOOPLAB_` namespace is
+the engine's, so it cannot be declared); `canary.env` is overlaid on top of the eval's declared
+environment. **What a canary means is your script's decision** — read `LOOPLAB_CANARY` and shrink
+the data, the steps and the test set so the whole path, scoring included, finishes in minutes. The
+canary runs in `<run>/canary/node_<id>`, never in the node's workdir, so nothing it writes can be
+read as the real run's output; it runs on the node's own GPU lease and its seconds are charged as
+eval seconds.
+
+- **Canary fails** (non-zero exit, no metric read, or over its `timeout`): it is that attempt's crash.
+  The node goes through the ordinary triage/repair path with the canary's output as the evidence,
+  the full eval is **not** started, and no salvage rung may recover a number from it. The failed
+  canary's logs stay in its scratch directory for you to read.
+- **Canary passes**: the full evaluation runs in the same attempt. The canary's own metric is
+  discarded — it is never the node's metric and never reaches selection.
+- **Resume**: `eval_canary_started` / `eval_canary_finished` rows (diagnostic) are keyed on the
+  node's code digest, so a resumed run does not re-run a canary that already passed for the same
+  code; a repaired node is canaried again, because its code is new.
+
+Without `eval.canary` the setting does nothing, and with the setting off `eval.canary` is ignored.
+
 ### What the number's coordinates ARE — `eval.metric.applied_config_glob`
 
 `declared_param_overrides` compares the declaration against **bytes the engine committed**, which is

@@ -943,6 +943,44 @@ class HostScorerSpec(BaseModel):
         return _scorer_reader("host_scorer", v)
 
 
+class CanarySpec(BaseModel):
+    """The EVAL CANARY's declaration (`eval.canary`): what else makes the task's own eval TINY, and
+    the wall-clock it must finish in.
+
+    A repo eval can run for many hours (measured: MiniOneRec SFT, 30 min data prep + 8 h training +
+    15 min scoring), and a trivial defect in its TAIL — a `KeyError` in the scorer, a missing file, a
+    wrong CLI flag — surfaces only at the very end and costs the whole run. Under `Settings.
+    eval_canary` the engine runs the SAME resolved stage chain once per code version, in a scratch
+    directory outside the node's workdir, with `LOOPLAB_CANARY=1` set BY THE ENGINE (the `LOOPLAB_`
+    namespace is engine-owned, so a task cannot declare it) plus `env` here overlaid on the eval's
+    declared environment, and every stage capped at `timeout` (`engine/eval_canary.py`); only a
+    passing canary lets the full eval start. WHAT THE CANARY MEANS IS THE EVAL SCRIPT'S TO DECIDE —
+    `LOOPLAB_CANARY=1` → "2000 users, 50 test queries, 10 steps", or `env` such as
+    `{"MAX_USERS": "2000"}` for a script that already reads its own knobs — the engine interprets
+    neither, and a canary's number is never the node's metric. Operator-owned like the rest of
+    `EvalSpec`; secrets are refused by the one shared rule (`core/envsafe.py::validate_env_map`)."""
+
+    _refuse_unknown = model_validator(mode="before")(
+        classmethod(refuse_unknown_task_keys))
+
+    env: dict[str, str] = Field(default_factory=dict)
+    timeout: float = 900.0
+
+    @field_validator("env")
+    @classmethod
+    def _env_valid(cls, v):
+        return _scorer_env("eval.canary", v)
+
+    @field_validator("timeout")
+    @classmethod
+    def _timeout_positive(cls, v):
+        import math
+        v = _scorer_timeout("eval.canary", v)
+        if not math.isfinite(v):
+            raise ValueError("eval.canary.timeout must be a finite number of seconds")
+        return v
+
+
 class HoldoutScorerSpec(BaseModel):
     """A HOST-HELD scorer, run ONCE at finish over the val-leaders — the WITHHELD half (doc 52 row
     10a's slice (b); AIRA2's "marginal" scoring).
@@ -1080,6 +1118,9 @@ class EvalSpec(BaseModel):
     # printed number is recorded as the node's `self_metric`, and a `stages` entry named `score` is
     # refused (the host scorer is the score stage).
     host_scorer: Optional[HostScorerSpec] = None
+    # THE EVAL CANARY (`CanarySpec`): the env that makes this eval tiny + its wall-clock cap. Read
+    # only under `Settings.eval_canary`; None (the default) = no canary, whatever the setting says.
+    canary: Optional[CanarySpec] = None
     # THE WITHHELD HALF (doc 52 row 10a slice (b)): the operator's own scorer over a split the HOST
     # holds, run ONCE at finish over the val-top-k and never during the search — see
     # `HoldoutScorerSpec` and `engine/holdout.py`. Its number is the node's `holdout_metric`, which

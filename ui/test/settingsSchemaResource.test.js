@@ -216,7 +216,9 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   221 -> 222 (2026-09-24): `inline_repair_same_failure_limit` — the repeated-failure floor that
   //   ends a repair chain whose failure did not move. A row on the critic's ground; the Python half
   //   moved in the same change.
-  assert.equal(Object.keys(schema.fieldByKey).length, 222)
+  //   222 -> 223 (2026-09-24): `eval_canary` — the node's own chain on the task's tiny slice before
+  //   its full evaluation. A row because it spends eval seconds; the Python half moved too.
+  assert.equal(Object.keys(schema.fieldByKey).length, 223)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

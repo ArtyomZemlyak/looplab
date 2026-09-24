@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-155 event types — 112 folded into `RunState`, 43 diagnostic; 943 declared payload keys; 22 types whose whole payload is stored by the fold.
+157 event types — 112 folded into `RunState`, 45 diagnostic; 959 declared payload keys; 22 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -82,6 +82,8 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `drift_unavailable` | diagnostic | Why the run could not compare its environment against the one it started in. | `reason` | — |
 | `effective_train_batch` | diagnostic | What the training process itself recorded as the batch it ran at, read off the node's own workdir at the metric read. | `disagree`, `generation`, `node_id`, `read_at`, `readings`, `train_batch_size` | `files_seen`, `truncated` |
 | `env_changed` | folded | A resume observed that the Python/library environment differs from the one the run started in. | `now`, `was` | — |
+| `eval_canary_finished` | diagnostic | The eval canary's result: whether the node's stage chain survived the task's tiny slice. | `attempt`, `code_digest`, `eval_seconds`, `generation`, `node_id`, `passed` | `error`, `exit_code`, `failed_stage`, `log_dir`, `timed_out` |
+| `eval_canary_started` | diagnostic | An eval canary is about to run the node's stage chain on the task's tiny slice. | `attempt`, `code_digest`, `generation`, `node_id`, `timeout` | — |
 | `eval_invocation_claimed` | diagnostic | One paid evaluation attempt is about to invoke the evaluator, under a reconciliable id. | `attempt`, `generation`, `invocation_id`, `node_id` | `after_interrupted_attempt` |
 | `eval_invocation_settled` | diagnostic | That evaluator invocation returned, with the outcome and the seconds it charged. | `attempt`, `eval_seconds`, `generation`, `invocation_id`, `node_id`, `outcome` | — |
 | `eval_noise_floor` | folded | The repeated-seed spread of ONE candidate's metric: the run's own evaluation noise floor. | `generation`, `mean`, `metrics`, `n`, `node_id`, `profile`, `search_metric`, `seeds`, `sem`, `spread`, `std` | `reason` |

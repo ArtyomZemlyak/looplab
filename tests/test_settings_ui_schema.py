@@ -100,7 +100,10 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 222
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 223
+    # 222 -> 223 on 2026-09-24: `eval_canary` -- each node's own stage chain on the task's tiny slice
+    # before its full evaluation. A ROW: it spends eval seconds and can end an attempt before the eval
+    # starts. Verified by INTERSECTION: 222 keys common to the previous keyset plus exactly that one.
     # 221 -> 222 on 2026-09-24: `inline_repair_same_failure_limit` -- the repeated-failure floor that
     # ends a repair chain whose failure signature did not move. A ROW on the critic's ground: a stop
     # the operator must be able to read and turn off. Verified by INTERSECTION: 221 keys common to
@@ -437,7 +440,8 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # BOTH counts move together). An AST scan of `Settings`' annotated assignments against the
     # pre-change tree reports exactly `['developer_parent_code']` added and `[]` removed.
     # 256 -> 257 on 2026-09-24: `inline_repair_same_failure_limit` (a curated row, so both counts move).
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 257
+    # 257 -> 258 on 2026-09-24: `eval_canary` (a curated row, so both counts move).
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 258
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

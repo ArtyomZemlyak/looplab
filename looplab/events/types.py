@@ -903,6 +903,19 @@ EV_REPAIR_CRITIC_VERDICT = "repair_critic_verdict"
 # node's outcome (invariant #2 — the terminal is still exactly one `node_evaluated`/`node_failed`).
 EV_EVAL_INVOCATION_CLAIMED = "eval_invocation_claimed"
 EV_EVAL_INVOCATION_SETTLED = "eval_invocation_settled"
+# THE EVAL CANARY'S RECEIPT (`engine/eval_canary.py`, `Settings.eval_canary`): the start and the result
+# of one canary run — the node's own stage chain on the task's declared tiny slice, in a scratch
+# directory — before that attempt's full evaluation. `code_digest` is the node's committed manifest
+# digest (`evaluate.py::_workdir_manifest_digest`), and a `passed` row for the same (node, generation,
+# code_digest) is what lets a resumed process skip a canary it already paid for: the side effect is
+# gated on this row, read straight off the log like `full_retrain_charged` (invariant #3).
+#
+# DIAGNOSTIC, for `eval_invocation_claimed`'s reason: appended per ATTEMPT from the eval child, so a
+# folded row would land inside the speculative election's compare-and-swap window. The fold never
+# reads it — a canary moves no metric, champion or selectability; its failure reaches the run only
+# through the attempt's ordinary repair rows and the node's one terminal.
+EV_EVAL_CANARY_STARTED = "eval_canary_started"
+EV_EVAL_CANARY_FINISHED = "eval_canary_finished"
 EV_WORKSPACE_SEEDED = "workspace_seeded"
 # FOLDED (moved out of DIAGNOSTIC_EVENTS): the start of an arbitrary operator `run_setup` command is
 # the only evidence that its side effects may have been applied. Without folding it, a kill between
@@ -1151,6 +1164,7 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_AGENT_PHASE_STARTED, EV_AGENT_CHECKPOINTED, EV_AGENT_PHASE_COMPLETED,
     EV_PRIOR_INJECTED, EV_MEMORY_READ,
     EV_EVAL_INVOCATION_CLAIMED, EV_EVAL_INVOCATION_SETTLED,
+    EV_EVAL_CANARY_STARTED, EV_EVAL_CANARY_FINISHED,
 })
 
 # ROWS THAT CANNOT MOVE A DECISION FENCE — one named predicate, because each fence spelling its own
@@ -1599,6 +1613,16 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "env_changed": PayloadContract(
         "A resume observed that the Python/library environment differs from the one the run started in.",
         required=("now", "was"),
+        optional=(),
+    ),
+    "eval_canary_finished": PayloadContract(
+        "The eval canary's result: whether the node's stage chain survived the task's tiny slice.",
+        required=("attempt", "code_digest", "eval_seconds", "generation", "node_id", "passed"),
+        optional=("error", "exit_code", "failed_stage", "log_dir", "timed_out"),
+    ),
+    "eval_canary_started": PayloadContract(
+        "An eval canary is about to run the node's stage chain on the task's tiny slice.",
+        required=("attempt", "code_digest", "generation", "node_id", "timeout"),
         optional=(),
     ),
     "eval_invocation_claimed": PayloadContract(

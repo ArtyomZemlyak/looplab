@@ -295,6 +295,8 @@ class EngineKnobs:
     # `run_started` recorded (invariant #6) — mutating the caller's Settings dict from here
     # would rewrite the launch config object a UI process may still be serving.
     _eval_env = Knob("eval_env", lambda v: dict(v or {}))
+    # The eval canary's switch (`engine/eval_canary.py`); inert without a task `eval.canary`.
+    _eval_canary = Knob("eval_canary", bool)
     _train_monitor = Knob("train_monitor", bool)
     _train_monitor_interval_s = Knob("train_monitor_interval_s")
     _train_monitor_kill = Knob("train_monitor_kill", bool)

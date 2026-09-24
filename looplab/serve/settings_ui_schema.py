@@ -29,7 +29,7 @@ SETTINGS_UI_SCHEMA_VERSION = 2
 # here reading as if 207 were derived while it is typed, which is the drift it warns about. The
 # unforgeable gate is `SETTINGS_UI_SCHEMA_KEYSET_REVISION` further down; this integer is the
 # human-readable half the docs sentence quotes, and `_load_schema` refuses when the two disagree.
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 222
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 223
 # On the KEYSET REVISION below: DERIVED, and deliberately no longer a hand-pinned review gate: a
 # bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
@@ -288,7 +288,12 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # evaluation slot (`engine/repair_judgment.py::repeated_failure_stop`). A row on the critic's ground:
 # it is a STOP an operator must be able to read and turn off (0), and it can only end a chain.
 # Re-derived by INTERSECTION: the 221 previous keys plus exactly that one, none removed.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "6870fe77d90492de580da13441a4befdbada1bd0927f087a0d0d986e7a3f11ff"
+# 222 -> 223 on 2026-09-24: `eval_canary`, beside `eval_noise_seeds` — whether each node's full
+# evaluation is preceded by its own stage chain on the task's tiny slice (`engine/eval_canary.py`).
+# A row because it SPENDS eval seconds and can end an attempt before its eval starts, so an operator
+# must be able to see it and turn it on per run. Re-derived by INTERSECTION: the 222 previous keys
+# plus exactly that one, none removed.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "16ce427291efd1342d6bb835ed3d0eb236b56a5d50f30804ad4b812523dc2206"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

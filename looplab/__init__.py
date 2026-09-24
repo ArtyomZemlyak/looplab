@@ -171,6 +171,7 @@ _LAYOUT = {
     "confirm": "trust",
     "confirm_phase": "engine",   # engine confirm mixin ("confirm" is taken by trust/confirm.py)
     "noise_floor": "engine",     # the eval noise-floor probe (doc 52 row 11)
+    "eval_canary": "engine",     # the opt-in eval canary preflight (`Settings.eval_canary`)
     "context_budget": "core",
     # the HTTP control-payload validator `run_commands.py` shed (doc 25 SC-01) — registered so the
     # package-layout audit sees it and the flat `looplab.control_validation` alias resolves

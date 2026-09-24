@@ -144,6 +144,8 @@ class EngineOptions:
     # `default_factory` rather than a bare `{}` because this dataclass is frozen but its FIELD
     # DEFAULT would still be one shared mutable object across every Engine in the process.
     eval_env: dict = dataclasses.field(default_factory=dict)
+    # THE EVAL CANARY (`engine/eval_canary.py`): off on BOTH sides, so no options-divergence row.
+    eval_canary: bool = False
     confirm_top_k: int = 0
     confirm_seeds: int = 0
     confirm_seed_base: int = 1           # D1: first confirm seed; 1 keeps confirm splits disjoint

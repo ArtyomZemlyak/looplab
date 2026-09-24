@@ -788,8 +788,11 @@ from looplab.engine.shared import engine_fold as fold
 # reader plus its `_MISSING` sentinel across the package boundary.
 from looplab.events.replay import event_generation_binds
 from looplab.runtime.sandbox import GpuPinUnenforceable
+from looplab.engine.eval_canary import (CanaryClock, canary_already_passed, canary_failure_detail,
+                                       canary_failure_result, canary_passed, canary_spec)
 from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_CARD_DROPPED, EV_DEPS_INSTALLED,
                                   EV_EVAL_INVOCATION_CLAIMED, EV_EVAL_INVOCATION_SETTLED,
+                                  EV_EVAL_CANARY_FINISHED, EV_EVAL_CANARY_STARTED,
                                   EV_NODE_BUILD_DELTA,
                                   EV_FULL_RETRAIN_CHARGED, EV_NODE_ABORT,
                                   EV_NODE_EVAL_STARTED,
@@ -1102,6 +1105,11 @@ class EvalAttempt:
     # terminal. Both stay None with the floor off, so no row gains a key.
     failure_sig: Any = None
     repeated_failure: Any = None
+    # True when THIS attempt's result is a FAILED eval canary's (`engine/eval_canary.py`) rather than
+    # the full eval's: bound by RUN_ATTEMPT (reset at its top), read by SALVAGE — which must never
+    # recover a number from a canary — and by APPLY_REPAIR, which must not reuse a stage the node's
+    # workdir never ran.
+    canary_failed: bool = False
 
     def charged_eval_seconds(self, extra: float = 0.0) -> float:
         """What this lifecycle's TERMINAL charges the run's eval budget: the attempts a DEAD process
@@ -2599,6 +2607,98 @@ class EvaluateMixin:
         a._resource_reservation = back
         a.eval_env = self._resource_eval_env(back, inherit_host=True)
 
+    def _eval_canary_due(self, a: "EvalAttempt") -> bool:
+        """Does THIS attempt owe an eval canary before its full eval (`engine/eval_canary.py`)?
+
+        All four, in the order that costs least: the operator switched it on (`Settings.eval_canary`),
+        the task has a command eval, the task DECLARES the canary's slice (`eval.canary`; without it
+        a canary would be the full eval run twice), and the log holds no PASSED canary for this
+        node's lifecycle and exact code (the durable gate, invariant #3 — a resume, or a dependency
+        round that changed no code, does not re-run a canary already paid for)."""
+        if not self._eval_canary or not self._eval_spec:
+            return False
+        if canary_spec(self._eval_spec) is None:
+            return False
+        return not canary_already_passed(self.store.read_all(), a.node_id, a.generation,
+                                         _workdir_manifest_digest(a.node))
+
+    def _run_canary_in_scratch(self, a: "EvalAttempt", spec: dict, scratch, cancel):
+        """The canary's blocking half, in a worker thread: a FRESH scratch tree from the node's own
+        manifest (the same `_materialize` the node's workdir is built by — never a copy of that
+        workdir, which may hold an earlier attempt's artifacts), then the eval under the canary's
+        env and caps, bounded as a whole by `CanaryClock`. Returns `(result, clock_expired)`."""
+        scratch.parent.mkdir(parents=True, exist_ok=True)
+        self._materialize(a.node, scratch)         # clears any earlier canary's tree first
+        with CanaryClock(cancel, spec["timeout"]) as clock:
+            res = self._run_eval(a.node, str(scratch), a.eval_env, None, clock.event, None,
+                                 canary=spec)
+        return res, clock.expired
+
+    async def _eval_run_canary(self, a: "EvalAttempt", cancel) -> bool:
+        """Run this attempt's eval canary; True = the full eval may start.
+
+        Both rows are DIAGNOSTIC (`events/types.py::EV_EVAL_CANARY_STARTED`), appended from the eval
+        child under `_write_lock` like the invocation receipt. On a FAILURE this binds `a.res` to
+        `eval_canary.canary_failure_result` and `a.canary_failed`, and returns False: the attempt is
+        a crash whose evidence is the canary's output. The canary's own metric is read by
+        `canary_passed` and dropped here — it is written nowhere, not even on the diagnostic row.
+
+        FAIL-OPEN ON AN ENGINE FAULT. The canary is a preflight: an exception from the engine's side
+        of it (a materialize `OSError`, an unenforceable GPU pin, ...) is recorded on the finished row
+        and the full eval runs exactly as it would with the canary off — where the same fault, if it
+        is real, meets the handler that already owns it. The deliberate stops are never contained.
+        """
+        spec = canary_spec(self._eval_spec)
+        digest = _workdir_manifest_digest(a.node)
+        scratch = self.run_dir / "canary" / f"node_{a.node_id}"
+        async with self._write_lock:
+            self.store.append(EV_EVAL_CANARY_STARTED, {
+                "node_id": a.node_id, "generation": a.generation, "attempt": a.attempt,
+                "code_digest": digest, "timeout": spec["timeout"]})
+        t0 = time.time()
+        res, expired, fault = None, False, None
+        try:
+            res, expired = await anyio.to_thread.run_sync(
+                self._run_canary_in_scratch, a, spec, scratch, cancel)
+        except _EVAL_DELIBERATE_STOPS:
+            raise
+        except Exception as exc:  # noqa: BLE001 — fail-open preflight: the full eval owns this fault
+            fault = f"{type(exc).__name__}: {exc}"[:300]
+        passed = fault is None and canary_passed(res, expired=expired)
+        interrupted = cancel.is_set() and not expired
+        row = {"node_id": a.node_id, "generation": a.generation, "attempt": a.attempt,
+               "code_digest": digest, "passed": passed,
+               "eval_seconds": round(time.time() - t0, 3), "log_dir": str(scratch)}
+        if res is not None:
+            row["exit_code"] = getattr(res, "exit_code", None)
+            row["timed_out"] = bool(getattr(res, "timed_out", False) or expired)
+            if getattr(res, "failed_stage", None):
+                row["failed_stage"] = str(res.failed_stage)
+        detail = ""
+        if fault is not None:
+            row["error"] = f"canary could not run (engine side; the full eval proceeds): {fault}"
+        elif not passed:
+            detail = ("interrupted by an operator intervention" if interrupted else
+                      canary_failure_detail(res, expired=expired, timeout=spec["timeout"]))
+            row["error"] = detail
+        async with self._write_lock:
+            self.store.append(EV_EVAL_CANARY_FINISHED, row)
+        a.sp.set("eval_canary", "passed" if passed else ("fault" if fault else "failed"))
+        if passed or fault is not None:
+            if passed:
+                # Nothing of a passed canary is kept (a failed one stays for its logs until the
+                # node's next canary rebuilds the tree). Best effort: disk, never correctness.
+                from looplab.core.atomicio import rmtree_readonly_aware
+                try:
+                    await anyio.to_thread.run_sync(rmtree_readonly_aware, scratch)
+                except OSError:
+                    pass
+            return True
+        a.res = canary_failure_result(res, detail=detail, log_dir=str(scratch),
+                                      env_names=spec["env"])
+        a.canary_failed = True
+        return False
+
     async def _land_terminal_before_ceiling(self, a: "EvalAttempt", exc: BaseException) -> None:
         """Land THIS node's terminal before a spend ceiling raised by its own post-score bookkeeping
         leaves the worker. No-op for every other stop, and for a node that has nothing to record.
@@ -2981,6 +3081,7 @@ class EvaluateMixin:
         # bound, and `_land_terminal_before_ceiling`, whose guard reads None as "nothing was
         # measured", wrote that stale result as this lifecycle's terminal.
         a.res = None
+        a.canary_failed = False
         a._t0 = time.time()
         # repair/retry attempts reuse the workdir and sandbox stage logs append.
         # When anything will READ those logs, snapshot every existing one before this attempt
@@ -3018,6 +3119,17 @@ class EvaluateMixin:
         async with anyio.create_task_group() as _tg:
             _tg.start_soon(self._watch_for_intervention, a.node_id, a.generation, a.start_seq,
                            _card_id, cancel, a._seen)
+            # THE EVAL CANARY (`engine/eval_canary.py`, opt-in): the node's own chain on the task's
+            # tiny slice, in a scratch directory, BEFORE the full eval and before the live-log
+            # watchdogs start (they watch the node's workdir, where a canary writes nothing). Under
+            # the watcher above, so an operator stop reaches it; inside `_t0`, so its seconds are
+            # this attempt's eval seconds; on `a.eval_env`, so it runs on this lifecycle's lease. A
+            # failed canary IS this attempt's result: SETTLE_OUTCOME and the repair path take it
+            # from here, and the full eval is never invoked (no invocation receipt is claimed).
+            if self._eval_canary_due(a) and not await self._eval_run_canary(a, cancel):
+                cancel.set()
+                _tg.cancel_scope.cancel()
+                return PHASE_NEXT
             # Training-log monitor (ON by default in the product Settings since 2026-08-04;
             # still off in a bare `Engine(...)`/`EngineOptions`): a sibling task that tails this eval's live
             # training log on a timer while it runs in the worker thread, asks the Developer to
@@ -3292,6 +3404,12 @@ class EvaluateMixin:
         # so the two windows onto the same bytes are visibly siblings rather than one being
         # discovered later at a write site. See `_durable_failure_evidence`.
         a.err_evidence = self._durable_failure_evidence(a.res)
+        if a.canary_failed:
+            # A FAILED CANARY IS NEVER SALVAGED: the only numbers and files it produced measured a
+            # slice, in a scratch directory, and no rung may turn them into this node's metric
+            # (`engine/eval_canary.py`). The node's workdir holds nothing from this attempt either.
+            a.salvaged = None
+            return PHASE_NEXT
         if a.watchdog_reason:
             # The diagnosis FIRST: it is the only part of this text that says what to
             # change, and the killed process's own tail says only that it was killed.
@@ -4378,6 +4496,11 @@ class EvaluateMixin:
                     "stage": _rollback_ask, "failed_stage": str(a.res.failed_stage or ""),
                     "accepted": bool(_suspect),
                     "refusal": str(_refusal or "")[:300]})
+        if a.canary_failed:
+            # The failure was the CANARY's: the node's workdir ran no stage this attempt, so there
+            # is nothing to reuse and nothing was discarded — the next attempt runs the full chain
+            # (after its own canary), and no re-train is charged for it.
+            a.next_start, _rolled_back = None, False
         # Which repairs count against the retrain cap, and why a renamed stage still does, is
         # `_repair_forces_full_retrain`. Asked BEFORE incrementing so cap=N runs exactly N.
         if _repair_forces_full_retrain(a.res, a.next_start, rolled_back=_rolled_back):

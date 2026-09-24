@@ -763,6 +763,13 @@
           "help": "Re-evaluate ONE candidate — the champion — this many times under the SEARCH's own protocol (its own eval profile, seeds 0..N-1) and record the spread of its metric: the run's evaluation NOISE FLOOR. 0 = off (and 1 is off too: one number has no spread). Not confirmation — confirm re-scores the top-k at the FULL profile from a DISJOINT seed base and its mean SELECTS; this repeats the same protocol on one node and selects nothing. The record (`eval_noise_floor`) carries the metrics, the mean, the sample std, the range and `sem`, the same quantity the >1-SE selection rule compares a margin against, so “is this champion's margin bigger than the noise?” becomes checkable. It spends real eval seconds — N full evaluations at the end of the run — which is why it is opt-in, and nothing that decides reads it."
         },
         {
+          "key": "eval_canary",
+          "label": "Eval canary",
+          "type": "bool",
+          "default": false,
+          "help": "Before each node's FULL evaluation, run the same stage chain once on a tiny slice in a scratch directory: the engine sets LOOPLAB_CANARY=1, and the task's `eval.canary` declares any extra env and the cap (e.g. {\"env\": {\"MAX_USERS\": \"2000\"}, \"timeout\": 900}). What the canary means is the eval script's decision. A failing canary is the attempt's crash — the normal repair path, with the canary's output as evidence — and the full eval never starts; a passing one lets it run, once per code version (a resume does not re-run a passed canary). The canary's number is never the node's metric. Its seconds count as eval seconds. Inert for a task that declares no `eval.canary`."
+        },
+        {
           "key": "holdout_fraction",
           "label": "Holdout fraction",
           "type": "float",
