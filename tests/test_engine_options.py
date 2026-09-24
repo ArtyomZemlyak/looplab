@@ -417,6 +417,9 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         asha_rung_nodes=settings.asha_rung_nodes,
         mcts_cost_weight=settings.mcts_cost_weight,
         mcts_value_weight=settings.mcts_value_weight,
+        # …and the repeated-failure floor (2026-09-24): 2 in Settings, 0 in the bare library, so
+        # the old-kwarg mapping must carry it or the two engines disagree about ending a chain.
+        inline_repair_same_failure_limit=settings.inline_repair_same_failure_limit,
     )
 
     # (b) the NEW single-bundle style.

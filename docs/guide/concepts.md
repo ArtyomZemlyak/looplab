@@ -1003,6 +1003,15 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   broken registry, and v6 node 5 halved a batch size three times against an OOM that never happened.
   None of the three may decide *what the result was* — no model's word moves a metric, a champion,
   selectability or a violation.
+  **Since 2026-09-24 the engine also stops a chain whose failure did not move**
+  (`inline_repair_same_failure_limit`, 2; 0 = off): when a crash ends on the same signature — the
+  exception type and normalised message, raised from the same `file:function`, in the same stage —
+  as the attempt before the last repair, the node is terminalized ABOVE the next triage call and its
+  evaluation slot goes to the next node. `node_failed` keeps the eval's own `reason` and carries
+  `repair_stop: repeated_failure` with the `failure_signature`; its rationale leads with the
+  signature, so the next proposal's failure reflection shows what not to retry. Measured on
+  `minionerec-backbones-v7`: three identical `KeyError`s, ~3 h, with a built node waiting on the
+  one slot. A failure that changes between attempts is never stopped by it.
   **Since 2026-09-23 the Developer is shown the same record** (`repair_context_record`, ON for new
   runs): the node's earlier repairs follow the stuck contract in the judge's own rendering, so the
   question "has every fix already been tried?" is one it can answer; a `not_learning` / `diverged`

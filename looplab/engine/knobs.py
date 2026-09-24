@@ -172,6 +172,10 @@ class EngineKnobs:
     # F8: how many durable repairs before the CRITIC is asked whether the chain is
     # circling. It is a cadence, not a bound — the critic can only stop, never extend.
     _repair_critic_after = Knob("repair_critic_after", lambda v: max(0, int(v)))
+    # The repeated-failure floor: how many identical failure signatures in a row, across repairs,
+    # end the chain (`repair_judgment.repeated_failure_stop`). 0 = off.
+    _inline_repair_same_failure_limit = Knob("inline_repair_same_failure_limit",
+                                             lambda v: max(0, int(v)))
     _inline_repair_reasons = Knob("inline_repair_reasons", lambda v: tuple(v or ("crash",)))
     _inline_repair_retrain_cap = Knob("inline_repair_retrain_cap", lambda v: max(0, int(v)))
     _dep_install_timeout = Knob("dep_install_timeout", float)

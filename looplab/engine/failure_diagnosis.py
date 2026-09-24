@@ -175,6 +175,7 @@ to spend them.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 
@@ -559,6 +560,44 @@ _HEADLINE_RE = re.compile(
     r"(?P<line>(?:[A-Za-z_][\w.]*\.)?[A-Za-z_]\w*(?:Error|Exception|Interrupt)\b.*)$", re.M)
 
 
+def _screened_tail(stderr, redact) -> str:
+    """The last `_HEADLINE_REACH` characters of `stderr`, REDACTED, or `""` — the one window both
+    `failure_headline` and `failure_signature` extract from (the C2 order: mask, then cut)."""
+    if not isinstance(stderr, str) or not stderr:
+        return ""
+    window = stderr[-_HEADLINE_REACH:]
+    if redact is not None:
+        try:
+            window = str(redact(window) or "")
+        except Exception:  # noqa: BLE001 - a redactor that raises must not lose the terminal…
+            return ""      # …but it must also never fail OPEN and let the raw text through
+    return window
+
+
+def _ranked_exception_lines(window: str) -> list[tuple[str, int]]:
+    """The window's distinct exception lines in `failure_headline`'s order, each with the offset of
+    its LAST occurrence.
+
+    The ranking is the headline's and is stated there: longest message body first, a later line
+    winning a tie. It lives here so the headline and `failure_signature` pick the SAME line — a
+    signature that disagreed with the headline the Developer was shown would stop a node over a line
+    nobody was asked to fix. The offset is the signature's (it locates the frame above the line);
+    the headline ignores it."""
+    seen: list[str] = []
+    last_at: dict[str, int] = {}
+    for m in _HEADLINE_RE.finditer(window):
+        text = m.group("line").strip()
+        if not text:
+            continue
+        if text not in last_at:
+            seen.append(text)
+        last_at[text] = m.start()
+    # Longest message body first; a later line wins a tie, which keeps the historical "the line the
+    # process ended on" preference wherever two lines say equally much.
+    ranked = sorted(enumerate(seen), key=lambda pair: (len(pair[1]), pair[0]), reverse=True)
+    return [(text, last_at[text]) for _index, text in ranked]
+
+
 def failure_headline(stderr: str, redact=None) -> str:
     """The exception line(s) a failed process ended on, or `""`.
 
@@ -607,27 +646,15 @@ def failure_headline(stderr: str, redact=None) -> str:
     shape rule no longer matches would land verbatim. Optional only so the shaping can be unit
     tested without an Engine; a redactor that raises yields NO headline, never the raw text.
     """
-    if not isinstance(stderr, str) or not stderr:
+    window = _screened_tail(stderr, redact)
+    if not window:
         return ""
-    window = stderr[-_HEADLINE_REACH:]
-    if redact is not None:
-        try:
-            window = str(redact(window) or "")
-        except Exception:  # noqa: BLE001 - a redactor that raises must not lose the terminal…
-            return ""      # …but it must also never fail OPEN and let the raw text through
-    seen: list[str] = []
-    for line in _HEADLINE_RE.findall(window):
-        text = line.strip()
-        if text and text not in seen:
-            seen.append(text)
-    if not seen:
+    ranked = _ranked_exception_lines(window)
+    if not ranked:
         return ""
-    # Longest message body first; a later line wins a tie, which keeps the historical "the line the
-    # process ended on" preference wherever two lines say equally much.
-    ranked = sorted(enumerate(seen), key=lambda pair: (len(pair[1]), pair[0]), reverse=True)
     out: list[str] = []
     budget = _HEADLINE_TOTAL
-    for _index, text in ranked[:_HEADLINE_LINES]:
+    for text, _at in ranked[:_HEADLINE_LINES]:
         piece = text[:min(_HEADLINE_KEEP, budget)]
         if not piece:
             break
@@ -636,6 +663,97 @@ def failure_headline(stderr: str, redact=None) -> str:
         if budget <= 0:
             break
     return " | ".join(out)
+
+
+# --- The failure's SIGNATURE: "is this the same failure as last time?" ------------------------------
+# Measured 2026-09-23 on `minionerec-backbones-v7` (eval_parallel=1): node 0 died on
+# `KeyError: 'history_item_sid'` three times in a row. Each round was a ~20-minute triage, a 30-45
+# minute Developer repair that twice rewrote only `looplab_stages.json` and never touched the code
+# that raised, and a re-evaluation that raised the identical line — ~3 hours during which the one
+# evaluation slot was held and the already-built node 1 could not start. The byte check
+# (`repair_verify.INERT_REPAIR_LIMIT`) could not see it: every repair DID change a file.
+#
+# So the engine answers one narrow question deterministically: did the process die on the same
+# exception, raised from the same place, in the same stage, as the attempt before the repair? It is a
+# DIGEST, not a classification — it names no reason and reaches no vocabulary, so the "text may
+# nominate, never decide" rule above is kept by what it is used for: `repair_judgment.
+# repeated_failure_stop` reads it only to STOP spending on a chain, never to say what the failure
+# was, and it fails OPEN — no exception line, no signature, never a stop.
+#
+# Three parts, each normalised so incidental bytes cannot make two identical failures differ:
+#   * the exception TYPE and MESSAGE — the line `failure_headline` would put first (one rule, so the
+#     signature and the headline the Developer was shown are the same line), with hex addresses,
+#     absolute paths and free-standing numbers replaced (a batch index, an allocation size, a tmp
+#     dir or an object id change between two runs of one bug); a quoted key keeps its text, because
+#     `'history_item_sid'` IS the bug;
+#   * WHERE it was raised — `file:function` of the innermost frame printed above that line, the file
+#     by basename (a workdir path differs by run, the module does not); absent when no frame was
+#     printed, and then the type and message alone must match;
+#   * the STAGE that failed, so one error in two different stages is two failures.
+# An exception line that merely MENTIONS an error name is not one (`_HEADLINE_RE` is anchored), and
+# the window is REDACTED before anything is extracted — the signature lands on durable rows and, via
+# the terminal's rationale, in the next proposal's failure reflection.
+_SIG_MESSAGE_CAP = 240
+_FRAME_RE = re.compile(
+    r'^[ \t]*(?:\[[^\]]{1,32}\]:[ \t]*)?File "(?P<file>[^"\n]{1,512})", line \d+, in (?P<func>\S{1,200})',
+    re.M)
+_SIG_HEX_RE = re.compile(r"\b0x[0-9a-fA-F]+\b")
+_SIG_PATH_RE = re.compile(r"(?<![\w.])(?:[A-Za-z]:[\\/]|/)[^\s'\"(),:;\]\[]+")
+_SIG_NUM_RE = re.compile(r"(?<![\w.])[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?(?![\w.])")
+
+
+def _normalise_signature_text(text: str) -> str:
+    """Hex addresses, absolute paths and free-standing numbers out; whitespace collapsed; capped."""
+    text = _SIG_HEX_RE.sub("0x_", text)
+    text = _SIG_PATH_RE.sub("<path>", text)
+    text = _SIG_NUM_RE.sub("N", text)
+    return " ".join(text.split())[:_SIG_MESSAGE_CAP]
+
+
+def failure_signature(stderr, failed_stage=None, redact=None):
+    """The normalised signature of the exception a failed process ended on, or `None`.
+
+    A dict `{"exception", "message", "where", "stage", "digest"}`; two failures are THE SAME failure
+    exactly when their `digest`s are equal (`digest` is over the other four). `None` when the window
+    holds no exception line — a timeout, a silent kill, a contract failure — and `None` never matches
+    anything (see the block comment above for the rule and the run that motivated it).
+
+    `redact` is `Engine._redact`, applied to the window BEFORE extraction for the reason
+    `failure_headline` states; a redactor that raises yields no signature, never the raw text."""
+    window = _screened_tail(stderr, redact)
+    if not window:
+        return None
+    ranked = _ranked_exception_lines(window)
+    if not ranked:
+        return None
+    line, at = ranked[0]
+    exc, _sep, message = line.partition(":")
+    exc = exc.strip()
+    frames = [m for m in _FRAME_RE.finditer(window) if m.start() < at]
+    where = ""
+    if frames:
+        last = frames[-1]
+        base = re.split(r"[\\/]", last.group("file"))[-1]
+        where = f"{base}:{last.group('func')}"[:200]
+    stage = str(failed_stage or "")[:120]
+    message = _normalise_signature_text(message)
+    digest = hashlib.sha256("\x1f".join((exc, message, where, stage)).encode("utf-8")).hexdigest()
+    return {"exception": exc[:120], "message": message, "where": where, "stage": stage,
+            "digest": digest[:16]}
+
+
+def signature_text(sig) -> str:
+    """One line a human (and the next proposal) can read: `Type: message at file:func (stage s)`."""
+    if not isinstance(sig, dict):
+        return ""
+    head = str(sig.get("exception") or "")
+    if sig.get("message"):
+        head = f"{head}: {sig.get('message')}"
+    if sig.get("where"):
+        head = f"{head} at {sig.get('where')}"
+    if sig.get("stage"):
+        head = f"{head} (stage {sig.get('stage')})"
+    return head
 
 
 

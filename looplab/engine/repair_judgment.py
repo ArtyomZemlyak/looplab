@@ -52,6 +52,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+from looplab.engine.failure_diagnosis import signature_text
+
 # --- The critic's verdict contract --------------------------------------------------------------
 # A duck-typed seam exactly like `triage.py::TRIAGE_ACTIONS` — the agent's emit schema
 # (`agents/unified_agent.py::repair_critic`), the engine's coercion
@@ -306,6 +308,85 @@ def repair_redone_work_stop(*, chain_seconds: float, pipeline_seconds: float,
             f"inline_repair_retrain_cap={cap} licenses ({cap} re-run(s) plus the original) against "
             f"a pipeline this task declares at {declared:.0f}s. That cap counts DISCARDED "
             "re-trains; this chain redid work without discarding any, so it is charged in seconds")
+
+
+# --- The floor over a failure that REPEATS, unchanged, across a repair --------------------------
+# WHY A DETERMINISTIC STOP HERE, after this module's whole argument that a count is the wrong shape.
+# That argument is about a count of ATTEMPTS, which cannot tell converging from circling. This is not
+# a count of attempts: it is the engine observing, from the failure itself, that the repair it just
+# paid for did not move the failure at all — the same exception, from the same `file:function`, in
+# the same stage (`failure_diagnosis.failure_signature`). Measured 2026-09-23 on
+# `minionerec-backbones-v7`: `KeyError: 'history_item_sid'` three times in a row on node 0, each
+# round a ~20-minute triage plus a 30-45 minute repair that edited only `looplab_stages.json` and a
+# re-evaluation, ~3 hours during which the one evaluation slot (`eval_parallel=1`) was held and the
+# already-built node 1 could not start. The judge said `repair` every time; the byte floor
+# (`repair_verify.INERT_REPAIR_LIMIT`) could not fire because every repair changed a file.
+#
+# WHAT IT IS NOT: the anti-stuck counter deleted 2026-08-05 (`RETIRED_SETTINGS[
+# "inline_repair_stuck_repeat"]`). That one counted how often a signature recurred anywhere in the
+# chain and was defeated by 0804's 369 distinct signatures; this one asks only whether the LAST
+# repair changed the failure, reads the streak off the durable rows (a resume continues it), and on a
+# chain whose failure moves — 0804's case — it never fires, so the judgment above keeps every chain it
+# kept. It can only STOP, never extend, and it never sets `reason`: the node terminalizes carrying the
+# eval's own classification exactly as an `abandon` does (doc 36's line), with the signature beside it.
+#
+# ITS EVIDENCE IS CANDIDATE TEXT, and that is acceptable only because the effect is monotone in the
+# safe direction: a candidate that forges a repeated traceback stops its own repair; one that varies
+# its traceback gets exactly the pre-floor behaviour. Deliberately narrow in what it reads:
+REPEATED_FAILURE_REASONS: tuple[str, ...] = ("crash",)
+# — only the engine's `crash`, a process that died on its own exception, whose last exception IS the
+# failure. Every engine-final reason (a deadline, a watchdog kill, a contract check) is excluded
+# because its stderr is whatever the process last wrote, and an early warning traceback repeated
+# across two timeouts would read as "the same failure" when the failure is the clock.
+
+# THE REGISTRY of in-node repair STOPS the engine records by name on the terminal
+# (`node_failed.repair_stop`). A duck-typed seam like `triage.py::TRIAGE_ACTIONS`: the writer in
+# `engine/evaluate.py` spells it from these constants, and `tests/test_repeated_failure_stop.py`
+# refuses a literal written there that is not a member. The older floors (the count cap, the
+# ceiling, the redone-work floor, the inert streak) predate the column and are named in their
+# prose only; their terminals are pinned byte for byte by `tests/test_repair_loop_golden.py`.
+REPAIR_STOP_REPEATED_FAILURE = "repeated_failure"
+REPAIR_STOP_REASONS: tuple[str, ...] = (REPAIR_STOP_REPEATED_FAILURE,)
+
+
+def repeated_failure_streak(signature, repair_log) -> int:
+    """How many attempts IN A ROW, ending with the current one, failed with `signature`.
+
+    `repair_log` is the ledger `_durable_repair_ledger` rebuilds and the loop extends, one row per
+    repair, each row carrying the signature of the failure THAT repair was asked to fix (absent on a
+    row written before the column, with the floor off, or by a `salvage_cause_fix` marker). The
+    current failure counts as 1; each trailing row whose signature has the same digest adds one; the
+    first row that differs — or carries none — ends the streak, on `inert_streak`'s rule: a row that
+    recorded nothing must never count as a repetition. `None` for the current signature is 0."""
+    digest = signature.get("digest") if isinstance(signature, dict) else None
+    if not digest:
+        return 0
+    n = 1
+    for row in reversed([r for r in (repair_log or []) if isinstance(r, dict)]):
+        sig = row.get("failure_signature")
+        if not (isinstance(sig, dict) and sig.get("digest") == digest):
+            break
+        n += 1
+    return n
+
+
+def repeated_failure_stop(*, signature, repair_log, limit: int, reason: str) -> Optional[str]:
+    """Has the same failure now repeated `limit` times in a row across repairs? The operator-facing
+    reason (under 300 characters — the terminal cuts `triage_rationale` there, and its first 90 are
+    what the next proposal's failure reflection shows), or None.
+
+    `limit` is `Settings.inline_repair_same_failure_limit`: 0 is OFF, and the floor never fires
+    before a repair has been made between two failures (a streak of 1 is just a failure). `reason` is
+    the attempt's ENGINE reason; outside `REPEATED_FAILURE_REASONS` this is silent."""
+    lim = int(limit) if isinstance(limit, int) and not isinstance(limit, bool) else 0
+    if lim <= 0 or str(reason) not in REPEATED_FAILURE_REASONS:
+        return None
+    n = repeated_failure_streak(signature, repair_log)
+    if n < max(2, lim):
+        return None
+    return (f"repeated failure: {signature_text(signature)[:150]} — identical after {n - 1} "
+            f"repair(s) in a row, so in-node repair stopped (inline_repair_same_failure_limit="
+            f"{lim}); a new attempt needs a different approach, not this fix again")
 
 
 # --- What the Developer is told it may say ------------------------------------------------------

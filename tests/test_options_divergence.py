@@ -43,6 +43,10 @@ EXPECTED = {
     # Every run in the corpus where it DID fire has sub-second evals.
     "deep_research_every": (0, -1),
     "failure_reflection": (True, False),
+    # The repeated-failure floor (2026-09-24): ON in the product surface (2 identical failure
+    # signatures in a row across a repair end the chain), OFF in the bare library for the kills'
+    # reason below — a direct `Engine(...)` must not gain the power to end a caller's repair chain.
+    "inline_repair_same_failure_limit": (2, 0),
     "lessons_every": (4, 0),
     "lessons_refresh_every": (4, 0),
     "merge_mode": ("auto", "mean"),

@@ -244,7 +244,14 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               genuinely different: under it, an eval that succeeded without printing a node's
 #               declared activation marker is a repairable failure with its metric withheld, where
 #               before it was a scored node (`engine/activation.py`).
-_EXPECTED_DIGEST = "sha256:a0b8fb2baa17095adefbed14315e773e6866f05ac1685383d21ac266ce6a68ac"
+#   2026-09-24  + inline_repair_same_failure_limit (the repeated-failure floor: a repair chain whose
+#               failure signature did not move across a repair ends). The 'field set changed too'
+#               branch: an AST scan of `Settings`' annotated assignments against the pre-change tree
+#               reports exactly `['inline_repair_same_failure_limit']` added and `[]` removed.
+#               `_EXPECTED_FIELD_COUNT` goes 253 -> 254 and both pins are re-set. INERT for a
+#               calibration replicate (its toy workload runs under `EngineOptions`, where the floor
+#               is 0); re-pinned on the COMPLETE-envelope rule.
+_EXPECTED_DIGEST = "sha256:59220bba4600f508168d0921f8ea390c466796b6c392de9f10b08f0424c6614c"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -730,7 +737,8 @@ _EXPECTED_DIGEST = "sha256:a0b8fb2baa17095adefbed14315e773e6866f05ac1685383d21ac
 #   2026-09-23  + prompt_truths_developer (review 2026-09-22, Q-1): 250 -> 251.
 #   2026-09-23  + developer_phase_context (review 2026-09-23, Q-2): 251 -> 252.
 #   2026-09-23  + developer_parent_code (review 2026-09-23, Q-2): 252 -> 253.
-_EXPECTED_FIELD_COUNT = 253
+#   2026-09-24  + inline_repair_same_failure_limit (the repeated-failure floor): 253 -> 254.
+_EXPECTED_FIELD_COUNT = 254
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

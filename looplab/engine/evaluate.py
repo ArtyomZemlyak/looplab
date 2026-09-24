@@ -96,7 +96,8 @@ from looplab.engine.metric_salvage import (DEFAULT_METRIC_SALVAGE, SALVAGE_CAUSE
 from looplab.engine.options import _UNSET
 from looplab.engine.repair_judgment import (CRITIC_STOP, critic_due, critic_evidence,
                                             declared_pipeline_seconds, developer_stuck_contract,
-                                            repair_floor_stop, repair_redone_work_stop)
+                                            repair_floor_stop, repair_redone_work_stop,
+                                            REPAIR_STOP_REPEATED_FAILURE, repeated_failure_stop)
 # `repair_log_tools` is deliberately NOT imported here any more (2026-08-20): the repair path now
 # builds `failure_diagnosis.diagnosis_tools`, which COMPOSES it with the workdir code scouts, so a
 # name bound here would be a decoy patch seam — a test monkeypatching `evaluate.repair_log_tools`
@@ -128,7 +129,7 @@ from looplab.engine.triage import _MAX_DEP_ROUNDS, DEFAULT_TRIAGE_ACTION, _failu
 # measurement behind the line, and for why the diagnostician IS the triage call rather than a second
 # agent (8.7 provider calls per failure, already paid).
 from looplab.engine.failure_diagnosis import (REASON_SOURCE_ENGINE, coerce_diagnosis_summary,
-                                             failure_headline,
+                                             failure_headline, failure_signature,
                                               diagnosis_repair_lead,
                                               coerce_evidence, coerce_findings,
                                               coerce_hypotheses,
@@ -651,6 +652,14 @@ def repair_ledger_row(d: dict, *, attempts: int) -> dict:
         row["reason"] = str(d.get("reason") or "")
     if "changed" in d:
         row["changed"] = list(d.get("changed") or [])
+    # The signature of the failure this repair addressed (`failure_diagnosis.failure_signature`),
+    # absent-means-absent like `verified` below: `repair_judgment.repeated_failure_streak` BREAKS
+    # the streak on a row without one, so a pre-column row can never read as a repetition. Only a
+    # dict with a digest is carried, re-shaped to the writer's own keys. Rendered by no prompt.
+    _sig = d.get("failure_signature")
+    if isinstance(_sig, dict) and _sig.get("digest"):
+        row["failure_signature"] = {k: str(_sig.get(k) or "")
+                                    for k in ("exception", "message", "where", "stage", "digest")}
     # The verification columns are read back the same way and for the same reason, with one
     # extra rule: an ABSENT `verified` key must stay absent. `repair_verify.inert_streak` reads
     # "no key" as "not inert" and breaks the streak on it, so a row from before this column
@@ -1087,6 +1096,12 @@ class EvalAttempt:
     _depth: int = 0
     triage: Any = None
     _monitor_verdicts: Any = None
+    # This attempt's failure signature (`failure_diagnosis.failure_signature`), bound by DECIDE_REPAIR
+    # when the repeated-failure floor is on and written onto the `node_repaired` row APPLY_REPAIR
+    # appends; `repeated_failure` is the same dict when that floor is what ended the chain, for the
+    # terminal. Both stay None with the floor off, so no row gains a key.
+    failure_sig: Any = None
+    repeated_failure: Any = None
 
     def charged_eval_seconds(self, extra: float = 0.0) -> float:
         """What this lifecycle's TERMINAL charges the run's eval budget: the attempts a DEAD process
@@ -3493,6 +3508,28 @@ class EvaluateMixin:
                 chain_seconds=a.prior_repair_seconds + a.total_eval,
                 pipeline_seconds=a.chain_pipeline_s,
                 retrain_cap=int(self._inline_repair_retrain_cap or 0))
+        # THE REPEATED-FAILURE FLOOR (2026-09-24): the same exception, from the same place, in the
+        # same stage, as the attempt before the last repair — the repair did not move the failure,
+        # so the next triage + repair + evaluation would buy the same line again while this node
+        # holds an evaluation slot. `repair_judgment.repeated_failure_stop` is the rule and carries
+        # the measured run; the streak is read off `repair_log`, which is seeded from the durable
+        # rows, so a resume continues it. Checked LAST so an operator's own bound is the one named
+        # when both hold, and ABOVE the triage call on purpose: stopping here saves the ~20-minute
+        # judge too. The signature is computed only with the floor on, so a run with it off writes
+        # exactly the rows it always wrote.
+        a.failure_sig = None
+        if self._inline_repair and self._inline_repair_same_failure_limit:
+            a.failure_sig = failure_signature(a.res.stderr, getattr(a.res, "failed_stage", None),
+                                              redact=self._redact)
+            # Only where the gate below could buy a repair at all: a reason the operator narrowed
+            # out of `inline_repair_reasons` closes silently there, and must not gain a terminal
+            # sentence from this floor instead.
+            if floor_stop is None and a.reason in self._inline_repair_reasons:
+                floor_stop = repeated_failure_stop(
+                    signature=a.failure_sig, repair_log=a.repair_log,
+                    limit=int(self._inline_repair_same_failure_limit), reason=a.reason)
+                if floor_stop is not None:
+                    a.repeated_failure = a.failure_sig
         # Inline-repair gate: feature on, repairable reason, no floor reached, a Developer that
         # can repair, and something to repair (whole-file code, multi-file edits, or a repo).
         # The truth table — and which bound it names when a floor is what said no — is
@@ -4091,6 +4128,10 @@ class EvaluateMixin:
                 "files": repaired_files,
                 "deleted": repaired_deleted,
                 "error_in": a.err, "triage_action": "repair",
+                # The signature of the failure THIS repair was asked to fix, read back by
+                # `repair_ledger_row` so the repeated-failure streak survives a resume. Absent with
+                # the floor off or when the failure printed no exception line.
+                **({"failure_signature": a.failure_sig} if a.failure_sig else {}),
                 # THE RECORD'S OWN WINDOW, beside the prompt's. Omitted when empty so a row
                 # with no column ("this predates the widening") stays distinguishable from a
                 # row with an empty one ("the eval wrote nothing to stderr") — the same
@@ -4652,6 +4693,12 @@ class EvaluateMixin:
                     # like both siblings, so masking can never be truncated away.
                     data["triage_action"], data["triage_rationale"] = (
                         a.triage_outcome[0], self._redact(str(a.triage_outcome[1]))[:300])
+                # WHICH REGISTERED STOP ended the chain, and on what, when it was the repeated-failure
+                # floor (`repair_judgment.REPAIR_STOP_REASONS`). Additive and omitted otherwise, so
+                # every other terminal is byte-identical; `reason` stays the eval's own.
+                if a.repeated_failure:
+                    data["repair_stop"] = REPAIR_STOP_REPEATED_FAILURE
+                    data["failure_signature"] = a.repeated_failure
                 self.store.append(EV_NODE_FAILED, data)
             self._maybe_crash()
 

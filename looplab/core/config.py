@@ -1058,6 +1058,31 @@ class Settings(BaseSettings):
     # recorded disasters — v6 node 5's batch-halving was visible at three attempts, and 0804's wall
     # was visible long before its 2,345th.
     repair_critic_after: int = Field(default=3, ge=0)
+    # THE REPEATED-FAILURE FLOOR (2026-09-24): how many failures IN A ROW, with a repair between each,
+    # may carry the same signature — the same exception type and normalised message, raised from the
+    # same `file:function`, in the same stage (`engine/failure_diagnosis.py::failure_signature`) —
+    # before the engine stops repairing the node and frees its evaluation slot. 0 = off. 1 is refused:
+    # a failure can only REPEAT across a repair, so the smallest meaningful streak is 2.
+    #
+    # Measured on `minionerec-backbones-v7` (eval_parallel=1): node 0 raised `KeyError:
+    # 'history_item_sid'` three times, each round a ~20-minute triage, a 30-45 minute repair that
+    # edited only `looplab_stages.json`, and a re-evaluation — ~3 hours with the one slot held and a
+    # built node 1 waiting, until the operator aborted by hand. Only the engine's `crash` is read
+    # (`repair_judgment.REPEATED_FAILURE_REASONS`); a failure whose signature moves is never stopped,
+    # so it is not the retired `inline_repair_stuck_repeat` count. A pre-field snapshot resumes at 0
+    # (`LEGACY_CONFIG_SNAPSHOT_DEFAULTS`): it can end a node the run's first half would have kept.
+    inline_repair_same_failure_limit: int = Field(default=2, ge=0)
+
+    @field_validator("inline_repair_same_failure_limit")
+    @classmethod
+    def _refuse_a_one_failure_streak(cls, v: int) -> int:
+        # A streak of ONE is a single failure, not a repetition: `1` would read as "stop after the
+        # first repair" while the rule can only ever fire at 2. Refused rather than silently read as 2,
+        # so the operator's number is never a different number at run time.
+        if v == 1:
+            raise ValueError("inline_repair_same_failure_limit must be 0 (off) or at least 2: a "
+                             "failure can only repeat across a repair, so 1 would mean nothing")
+        return v
     # Which failure reasons (`engine/triage.py::FAILURE_REASONS`) are eligible for inline repair.
     # Default: ALL of them, since 2026-08-12.
     #
@@ -3609,6 +3634,12 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # NOT the "magnitudes stay out" case: 0 here is a real OFF, not a disabled magnitude, which is
     # the same distinction that admits `inline_repair_attempts` and `deep_research_every`.
     "repair_critic_after": 0,
+    # THE REPEATED-FAILURE FLOOR, added 2026-09-24 defaulting to 2. (a) holds. (b) is an INTERVENTION,
+    # the same column `systemic_failure_stop` and the critic above take a row on: it ENDS a node's
+    # repair chain that the run's first half would have kept repairing, so a resumed run would change
+    # which nodes terminalize mid-log. (c) is `0`, a real OFF — the floor did not exist and the chain
+    # ran on the judge and the other floors alone, exactly what `0` restores.
+    "inline_repair_same_failure_limit": 0,
     # THE CADENCE PRECONDITION, added 2026-08-18 defaulting to True (backlog F1i). All three
     # conditions hold and (b) is the one that decides it. (a): the field did not exist before, so a
     # pre-field snapshot cannot have expressed a preference. (b): with it on, a resumed run's outer

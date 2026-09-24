@@ -306,6 +306,10 @@ class EngineOptions:
                                          # Settings on purpose: these two must not disagree about
                                          # what stops a repair loop.
     repair_critic_after: int = 3         # durable repairs before the critic is consulted (0 = off)
+    # Same failure signature this many times in a row, across repairs, ends the chain
+    # (`repair_judgment.repeated_failure_stop`). 0 = off in the bare library: a direct `Engine(...)`
+    # gains no authority to end a caller's repair chain it did not ask for; the product ships 2.
+    inline_repair_same_failure_limit: int = 0
     # ALL of `core/models.py::FAILURE_REASONS` since 2026-08-12 — see the field comment in
     # `core/config.py` for the run this default cost. Bound to the registry, not respelled:
     # this is the copy that would silently disagree with Settings.

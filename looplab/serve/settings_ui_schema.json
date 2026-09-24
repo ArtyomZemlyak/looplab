@@ -475,6 +475,13 @@
           "help": "How many repairs a node must already have made before a second model is asked whether the chain is circling rather than converging. It can only STOP the loop — it never decides what the failure was and never touches the result. 0 = no critic. Below 3 there is not enough trajectory for the question to be answerable."
         },
         {
+          "key": "inline_repair_same_failure_limit",
+          "label": "↳ stop on same failure after",
+          "type": "int",
+          "default": 2,
+          "help": "How many failures IN A ROW, with a repair between each, may end on the same exception (same type and normalised message, raised from the same file:function, in the same stage) before the engine stops repairing the node and frees its evaluation slot. Only process crashes are read. It can only STOP a chain, never extend one, and the node keeps the eval's own failure reason. 0 = off; 1 is refused (a failure can only repeat across a repair)."
+        },
+        {
           "key": "inline_repair_reasons",
           "label": "↳ inline repair reasons",
           "type": "list",

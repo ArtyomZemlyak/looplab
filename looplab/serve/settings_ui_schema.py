@@ -29,7 +29,7 @@ SETTINGS_UI_SCHEMA_VERSION = 2
 # here reading as if 207 were derived while it is typed, which is the drift it warns about. The
 # unforgeable gate is `SETTINGS_UI_SCHEMA_KEYSET_REVISION` further down; this integer is the
 # human-readable half the docs sentence quotes, and `_load_schema` refuses when the two disagree.
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 221
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 222
 # On the KEYSET REVISION below: DERIVED, and deliberately no longer a hand-pinned review gate: a
 # bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
@@ -283,7 +283,12 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # `developer_phase_context` — whether a script task's improve or merge shows the Developer the
 # parent's (and the co-parents') script. A row on the same PROMPT ground as the entries above.
 # Re-derived by INTERSECTION: the 220 previous keys plus exactly that one, none removed.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "0c01e1bebf2a9de2438797c2c48406a76aeb564902f63f0292f2f1babfe99980"
+# 221 -> 222 on 2026-09-24: `inline_repair_same_failure_limit`, beside `repair_critic_after` — how
+# many identical failure signatures in a row, across repairs, end a node's repair chain and free its
+# evaluation slot (`engine/repair_judgment.py::repeated_failure_stop`). A row on the critic's ground:
+# it is a STOP an operator must be able to read and turn off (0), and it can only end a chain.
+# Re-derived by INTERSECTION: the 221 previous keys plus exactly that one, none removed.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "6870fe77d90492de580da13441a4befdbada1bd0927f087a0d0d986e7a3f11ff"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

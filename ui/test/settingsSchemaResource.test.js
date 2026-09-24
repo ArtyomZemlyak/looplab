@@ -213,7 +213,10 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   220 -> 221 (2026-09-23): `developer_parent_code` (Q-2) — a script task's improve or merge
   //   shows the Developer the parent's script. A row because it changes a prompt and OFF is the
   //   historical bytes; the Python half moved in the same change.
-  assert.equal(Object.keys(schema.fieldByKey).length, 221)
+  //   221 -> 222 (2026-09-24): `inline_repair_same_failure_limit` — the repeated-failure floor that
+  //   ends a repair chain whose failure did not move. A row on the critic's ground; the Python half
+  //   moved in the same change.
+  assert.equal(Object.keys(schema.fieldByKey).length, 222)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')
