@@ -2182,6 +2182,13 @@ class RunState(BaseModel):
     # has to win over both. Excluded from the public dump like the pins they qualify.
     eval_parallel_settled: Optional[int] = Field(default=None, ge=1, le=1024, exclude=True)
     llm_parallel_settled: Optional[int] = Field(default=None, ge=1, le=64, exclude=True)
+    # The setting NAMES the operator spelled EXPLICITLY at launch (`-s`/typed `looplab run` flags, a
+    # Web/API launch's `settings`), as `run_started` recorded them — names only, never values. Read by
+    # `engine/widths.py::operator_width_axes`: an explicitly launched width axis is an operator pin the
+    # Strategist cannot override, for the whole run and after resume. Empty = not recorded (every log
+    # written before 2026-09-24, and every launch that spelled nothing) = no launch pins, so old runs
+    # replay unchanged. Excluded from the public dump so those logs keep their exact shape.
+    explicit_settings: list[str] = Field(default_factory=list, exclude=True)
     # D1 holdout-gated promotion (folded from run_started; False for old logs -> byte-identical
     # legacy selection). When True, best-selection prefers the holdout metric among the nodes
     # that carry one (the val-top-k re-scored on the unseen partition at finish).

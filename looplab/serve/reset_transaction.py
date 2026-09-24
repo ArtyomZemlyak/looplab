@@ -61,7 +61,12 @@ _RECEIPT_KEYS = frozenset({
 # and no suffix. Neither is optional in the sense of 'may be absent' — `_valid_artifacts` refuses a
 # receipt from which `_archive_suffix_of` derives nothing, so EXACTLY ONE of the two is required,
 # and that rule lives where the names are actually checked rather than in the key set.
-_OPTIONAL_RECEIPT_KEYS = frozenset({"archive_suffix", "archive_stamp"})
+#
+# `explicit_settings` is the replaced run's `run_started` record of which setting NAMES its operator
+# spelled explicitly at launch. Replay relaunches with a fresh `looplab run`, which writes a fresh
+# `run_started`; without the names the new generation would lose the operator's launch width pins
+# (`engine/widths.py::operator_width_axes`). Absent = the run recorded none (or predates the record).
+_OPTIONAL_RECEIPT_KEYS = frozenset({"archive_suffix", "archive_stamp", "explicit_settings"})
 _STATUS_FOR_PHASE = {
     "prepared": "pending",
     "archiving": "pending",
@@ -90,6 +95,7 @@ _IMMUTABLE_RECEIPT_FIELDS = frozenset({
     # moved, so a change to it mid-operation would orphan them under a name nothing looks for.
     "archive_suffix",
     "artifacts", "task_stage", "task_digest", "effective_config", "created_at",
+    "explicit_settings",
 })
 
 
@@ -185,6 +191,11 @@ def _validate_receipt(value: Any, *, path: Path) -> dict[str, Any]:
             or not isinstance(value.get("task_digest"), str)
             or _SHA256_RE.fullmatch(value["task_digest"]) is None
             or not isinstance(value.get("effective_config"), dict)
+            or ("explicit_settings" in value and not (
+                isinstance(value["explicit_settings"], list)
+                and len(value["explicit_settings"]) <= 1024
+                and all(isinstance(k, str) and 0 < len(k) <= 128
+                        for k in value["explicit_settings"])))
             or isinstance(value.get("created_at"), bool)
             or not isinstance(value.get("created_at"), (int, float))
             or not math.isfinite(value["created_at"])

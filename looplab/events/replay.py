@@ -263,6 +263,12 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.eval_parallel = (_eval_parallel if bounded_int(_eval_parallel, 0, 1024) else 0)
     _llm_parallel = d.get("llm_parallel", 0)
     st.llm_parallel = (_llm_parallel if bounded_int(_llm_parallel, 0, 64) else 0)
+    # The setting NAMES the operator spelled explicitly at launch (never values). Absent on old logs
+    # -> [] -> no launch pins. Bounded and coerced like every other run_started field: a hand-edited
+    # row must not park megabytes in RunState or smuggle a non-string into a set-membership test.
+    _es = d.get("explicit_settings")
+    st.explicit_settings = (sorted({k for k in _es if isinstance(k, str) and 0 < len(k) <= 128})
+                            if isinstance(_es, list) and len(_es) <= 1024 else [])
     # D1: recorded at start so replay applies the same selection rule. Absent in old
     # logs -> False -> byte-identical legacy selection.
     st.holdout_select = bool(d.get("holdout_select", False))

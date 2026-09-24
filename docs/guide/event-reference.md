@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-157 event types — 112 folded into `RunState`, 45 diagnostic; 960 declared payload keys; 22 types whose whole payload is stored by the fold.
+157 event types — 112 folded into `RunState`, 45 diagnostic; 961 declared payload keys; 22 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -160,7 +160,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `run_reopened` | folded | A finished run was reopened for more work. | — | — |
 | `run_setup_finished` | folded | The task's setup command finished: exit code, environment delta, stderr tail. | `command`, `dropped_requirements`, `env_delta`, `exit_code`, `stderr_tail`, `timed_out` | — |
 | `run_setup_started` | folded | The task's setup command started, in a named working directory. | `after_interrupted_attempt`, `command`, `cwd` | — |
-| `run_started` | folded | The run's launch record: task, goal, direction, and the settings pinned at launch (invariant #6). | — | `card_driven_selection`, `config_hash`, `direction`, `dirty_inputs`, `env`, `eval_env`, `eval_env_absent_from_task`, `eval_parallel`, `goal`, `holdout_fraction`, `holdout_select`, `llm_parallel`, `require_approval`, `run_id`, `run_uid`, `select_verifier`, `select_verifier_contract`, `select_verifier_samples`, `speculation_calibration_gpu_inventory`, `speculation_calibration_profile_digest`, `speculation_calibration_seed`, `speculation_depth`, `speculation_depth_auto`, `speculation_gate_receipt_digest`, `speculation_implementation_digest`, `speculation_policy_scope`, `speculation_runtime_scope_sha256`, `task_id`, `trust_gate`, `verifier_ci_tie`, `workspace` |
+| `run_started` | folded | The run's launch record: task, goal, direction, and the settings pinned at launch (invariant #6). | — | `card_driven_selection`, `config_hash`, `direction`, `dirty_inputs`, `env`, `eval_env`, `eval_env_absent_from_task`, `eval_parallel`, `explicit_settings`, `goal`, `holdout_fraction`, `holdout_select`, `llm_parallel`, `require_approval`, `run_id`, `run_uid`, `select_verifier`, `select_verifier_contract`, `select_verifier_samples`, `speculation_calibration_gpu_inventory`, `speculation_calibration_profile_digest`, `speculation_calibration_seed`, `speculation_depth`, `speculation_depth_auto`, `speculation_gate_receipt_digest`, `speculation_implementation_digest`, `speculation_policy_scope`, `speculation_runtime_scope_sha256`, `task_id`, `trust_gate`, `verifier_ci_tie`, `workspace` |
 | `run_width_settled` | folded | The run's live width was re-pinned, with the evidence behind the new value. | — | `evidence`, `finish_data`, `finish_report_planned`, `previous`, `reason`, `scope`, `step` |
 | `rung_promoted` | folded | The successive-halving rung that promoted a named set of survivors. | — | `finish_data`, `finish_report_planned`, `rung`, `scope`, `step`, `survivors` |
 | `score_metrics_backfilled` | folded | Secondary metrics read back off the score stage's own artifact after the fact. | `extra_metrics`, `generation`, `node_id`, `precision_decimals`, `read_at`, `unrecoverable` | `attempt` |

@@ -716,7 +716,7 @@ def _make_calibration_roles(task: TaskAdapter, settings: Settings, run_dir: Path
 
 def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
             crash_after: Optional[int], *, speculation_gate_calibration: bool = False,
-            wrap_up_only: bool = False) -> Engine:
+            wrap_up_only: bool = False, explicit_settings=()) -> Engine:
     from looplab.core.llm import run_cost_accountant, validate_bound_profiles
     from looplab.core.tracing import set_llm_capture
     from looplab.agents.reachability import llm_consumer_plan
@@ -948,6 +948,9 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
             model_arms=parse_model_arms(settings.model_arms))),
         options=EngineOptions.from_settings(settings),
         crash_after=crash_after,
+        # The setting NAMES spelled explicitly on this launch (`run_cmds.py::run`); `run_started`
+        # records them once, and an explicitly launched width is then an operator pin.
+        explicit_settings=explicit_settings,
         # Maintainer-only bootstrap path for producing the paired evidence that the public positive
         # speculation path requires.  The CLI admits this flag only for a fresh, bounded offline
         # quadratic run with a real GPU requirement; Engine keeps the seam private so Settings,

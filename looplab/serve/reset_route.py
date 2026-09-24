@@ -221,6 +221,10 @@ def _frozen_launch(
     for key in sorted(_ALLOWED_FIELDS - _SECRET_FIELDS):
         if effective.get(key) is None:
             spawn_args.extend(["--set", f"{key}=null"])
+    # The replaced run's launch pins, by NAME (their values are in the frozen snapshot above).
+    for key in record.get("explicit_settings") or ():
+        if key in _ALLOWED_FIELDS and key not in _SECRET_FIELDS:
+            spawn_args.extend(["--explicit-setting", key])
     launch_settings = {
         key: value for key, value in effective.items()
         if key in _ALLOWED_FIELDS and key not in _SECRET_FIELDS and value is not None
@@ -269,6 +273,27 @@ def _discard_unpublished_task_stage(task_stage: Path) -> None:
             "code": "replay_task_cleanup_failed",
             "message": "Replay could not clean up its unpublished task snapshot safely.",
         }) from exc
+
+
+def _recorded_explicit_settings(rd: Path) -> list[str]:
+    """The setting NAMES the replaced run's `run_started` recorded as explicitly set at launch.
+
+    Replay relaunches with a fresh `looplab run`, so the new generation writes its own `run_started`
+    and would otherwise lose the operator's launch pins — an explicitly launched width would turn
+    back into one the Strategist may move. Best-effort: a log this cannot read yields none, which is
+    exactly what a run launched before the record existed carries (Replay must stay usable on a
+    damaged log, which is often why it is being replayed).
+    """
+    path = rd / "events.jsonl"
+    if not path.is_file():
+        return []
+    from looplab.events.eventstore import EventLogCorruptionError, EventStore
+    from looplab.events.replay import fold_run_start
+    try:
+        names = fold_run_start(EventStore(path).read_all()).explicit_settings
+    except (OSError, ValueError, EventLogCorruptionError):
+        return []   # an unreadable log records no launch pins; Replay proceeds
+    return sorted(k for k in names if k in _ALLOWED_FIELDS and k not in _SECRET_FIELDS)
 
 
 def _prepare_receipt(
@@ -329,8 +354,10 @@ def _prepare_receipt(
         "archive": f"{name}.{archive_suffix}",
         "existed": os.path.lexists(rd / name),
     } for name in RESET_ARTIFACT_NAMES]
+    explicit_settings = _recorded_explicit_settings(rd)
     now = time.time()
     record = {
+        **({"explicit_settings": explicit_settings} if explicit_settings else {}),
         "version": 1,
         "id": operation_id,
         "run_id": rd.name,

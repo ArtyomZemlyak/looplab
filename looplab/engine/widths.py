@@ -49,8 +49,10 @@ def settle_width(raw, upper: int) -> Optional[int]:
 _WIDTH_AXES = (("eval_parallel", "max_parallel"), ("llm_parallel", "parallel_build"))
 
 
-def operator_width_axes(budget_overrides) -> frozenset:
-    """The width axes (canonical names) an OPERATOR has decided via `budget_extend`, from the fold.
+def operator_width_axes(budget_overrides, explicit_settings=()) -> frozenset:
+    """The width axes (canonical names) an OPERATOR has decided, from the fold: via `budget_extend`
+    (`budget_overrides`) or by spelling the axis EXPLICITLY at launch (`explicit_settings`, the
+    setting NAMES `run_started` recorded — `state.explicit_settings`).
 
     An operator's width is a durable PIN, not one more voice (incident
     `runs/minionerec-backbones-v10`, 2026-09-24): the run launched at `max_parallel=1`, a Strategist
@@ -64,10 +66,18 @@ def operator_width_axes(budget_overrides) -> frozenset:
     Derived from `state.budget_overrides` alone, which the fold keeps as ONE key per axis family, in
     event order, for the rest of the run — so a resumed engine derives the same pin from the same log
     whatever order the operator's control and the Strategist's decisions were recorded in.
+
+    A LAUNCH spelling is the same decision made earlier: `looplab run -s max_parallel=1` (or a Web/API
+    launch whose `settings` carries the key) is the operator choosing that width for this run, and
+    until `run_started` recorded WHICH settings were explicit the engine could not tell it from a
+    default. Read from the log's own record, so a resume keeps the pin whatever live config says, and
+    an old log (no record -> `()`) derives exactly the budget_extend-only set it always did.
     """
     bo = budget_overrides if isinstance(budget_overrides, dict) else {}
+    launch = (frozenset(k for k in explicit_settings if isinstance(k, str))
+              if isinstance(explicit_settings, (list, tuple, set, frozenset)) else frozenset())
     return frozenset(canonical for canonical, legacy in _WIDTH_AXES
-                     if canonical in bo or legacy in bo)
+                     if canonical in bo or legacy in bo or canonical in launch or legacy in launch)
 
 
 def per_experiment_gpu_budget(pool, eval_parallel) -> Optional[int]:

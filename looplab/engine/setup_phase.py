@@ -205,6 +205,17 @@ class SetupPhaseMixin:
                             # at risk.
                             **({"eval_env_absent_from_task": True}
                                if self._eval_env and not _task_declared_env(self.task) else {}),
+                            # The setting NAMES the operator spelled explicitly at launch (never
+                            # values; credentials cannot be spelled there at all). ABSENT when there
+                            # are none, so the default payload stays byte-identical, and never on the
+                            # calibration lane, whose receipt pins this payload's KEY SET
+                            # (`speculation_quality._CALIBRATION_RUN_STARTED_FIELDS`). The record is
+                            # what makes an explicit `-s max_parallel=1` an operator width pin the
+                            # Strategist cannot override (`engine/widths.py::operator_width_axes`),
+                            # for the whole run and after resume.
+                            **({"explicit_settings": list(self._explicit_settings)}
+                               if self._explicit_settings and not self._speculation_gate_calibration
+                               else {}),
                             # The SETTLED widths, not their AUTO sentinel: re-entry must never
                             # re-derive this run's execution treatment from a different box.
                             **self._run_start_settled_widths(),

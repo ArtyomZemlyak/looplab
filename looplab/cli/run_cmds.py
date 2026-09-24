@@ -732,7 +732,7 @@ def _refuse_held_out_labels_inside_the_workspace(task, out) -> None:
 
 
 def _open_and_drive(task, task_dict: dict, settings, out: Path, *, crash_after=None,
-                    speculation_gate_calibration: bool = False):
+                    speculation_gate_calibration: bool = False, explicit_settings=()):
     """THE RUN LIFECYCLE, from a resolved task + settings + run dir to a driven terminal: the startable
     checks, the healthy-log gate, the `engine.lock` singleton, the prior-run classification (refuse a
     different task, reopen a finished run, lift a stopped one), the engine build, the published
@@ -809,6 +809,11 @@ def _open_and_drive(task, task_dict: dict, settings, out: Path, *, crash_after=N
                 wrap_up_only=is_wrap_up(prior_kind),
                 **({"speculation_gate_calibration": True}
                    if speculation_gate_calibration else {}),
+                # Only a FIRST start records these (`run_started` is written once); on a dir that
+                # already has one, the log's own record stands (invariant #6). Never on the
+                # calibration lane, whose receipt pins the `run_started` key set.
+                **({"explicit_settings": tuple(explicit_settings)}
+                   if explicit_settings and not speculation_gate_calibration else {}),
             )
             # This existing prefix is still the authority until the new snapshots are published:
             # refuse a stale receipt, or a width this log never pinned, BEFORE the publish below.
@@ -843,6 +848,35 @@ def _open_and_drive(task, task_dict: dict, settings, out: Path, *, crash_after=N
         _record_engine_owner_boundary(eng)
         state = _run_engine_guarded(eng, mlflow_uri=settings.mlflow_tracking_uri)
     return state, eng, prior_kind
+
+
+def _explicit_setting_names(typed: dict, sets: dict, launcher_names) -> tuple[str, ...]:
+    """The setting NAMES this launch spelled explicitly: the typed flags, every `-s/--set` key, and
+    the names a launcher (the Web/API start route) passes by `--explicit-setting` — the settings its
+    operator set, whose values travel inside the materialized task file.
+
+    `run_started` records them (names only), and an explicitly launched width axis becomes an operator
+    pin the Strategist cannot override (`engine/widths.py::operator_width_axes`). A config file's
+    `settings:` block (and a `-s key=null`) is deliberately NOT counted: the start route materializes
+    EVERY resolved setting into that block, so on this side it cannot be told from a default —
+    counting it would pin every width of every Web launch.
+    """
+    # A `-s key=null` is NOT a choice: null means "no explicit override" here exactly as it does in
+    # the launch form (`serve/launch.py::_validate_settings_keys`) — and UI Replay spells every
+    # nullable frozen setting that way (`serve/reset_route.py::_frozen_launch`), which would otherwise
+    # pin every legacy-null width of every replayed run.
+    names = set(typed) | {k for k, v in sets.items() if v is not None}
+    for raw in launcher_names or ():
+        name = str(raw).strip()
+        try:
+            appconfig.refuse_unknown_settings_keys({name: None}, layer="--explicit-setting")
+        except ValueError as e:
+            raise typer.BadParameter(str(e))
+        from looplab.core.run_proposal import LAUNCH_SECRET_FIELDS
+        if name in LAUNCH_SECRET_FIELDS:
+            raise typer.BadParameter(f"{name} is runtime-only and cannot be a launch setting")
+        names.add(name)
+    return tuple(sorted(names))
 
 
 @app.command()
@@ -897,6 +931,10 @@ def run(
         "--speculation-gate-calibration",
         hidden=True,
         help="Maintainer hook: bootstrap bounded offline GPU speculation evidence."),
+    explicit_setting: list[str] = typer.Option(
+        [], "--explicit-setting", hidden=True, metavar="KEY",
+        help="Launcher hook (the Web/API start route): a setting NAME the operator set explicitly "
+             "in a launch whose values arrive through the task file. Repeatable; names only."),
 ):
     """Start a new run (or continue if the run dir already has events).
 
@@ -966,6 +1004,7 @@ def run(
         settings = appconfig.build_settings(file_settings, typed, sets)
     except ValidationError as e:
         raise typer.BadParameter(f"invalid settings: {e}")
+    explicit_settings = _explicit_setting_names(typed, sets, explicit_setting)
     # `parse_sets` returns a DICT, so intersect its keys — `set & dict` is a TypeError, and this line
     # runs on every `looplab run`, before any of the work the command exists to do.
     set_profile_replaced = bool({"llm_profile", "llm_profiles"} & sets.keys())
@@ -1050,7 +1089,8 @@ def run(
     out = out or (Path(file_out) if file_out else Path("runs/run_local"))
     _report_submit_notes(task, task_dict, out, settings, planned=genesis and goal is not None)
     driven = _open_and_drive(task, task_dict, settings, out, crash_after=crash_after,
-                             speculation_gate_calibration=speculation_gate_calibration)
+                             speculation_gate_calibration=speculation_gate_calibration,
+                             explicit_settings=explicit_settings)
     if driven is None:
         return
     state, eng, prior_kind = driven

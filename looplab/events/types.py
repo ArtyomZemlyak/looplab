@@ -2125,7 +2125,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         required=(),
         optional=(
             "card_driven_selection", "config_hash", "direction", "dirty_inputs", "env",
-            "eval_env", "eval_env_absent_from_task", "eval_parallel", "goal",
+            "eval_env", "eval_env_absent_from_task", "eval_parallel", "explicit_settings", "goal",
             "holdout_fraction", "holdout_select", "llm_parallel", "require_approval", "run_id",
             "run_uid", "select_verifier", "select_verifier_contract", "select_verifier_samples",
             "speculation_calibration_gpu_inventory", "speculation_calibration_profile_digest",

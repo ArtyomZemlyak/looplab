@@ -424,9 +424,10 @@ class StrategyCadenceMixin:
         if any(alias in pinned for alias in aliases):
             return True
         # AN OPERATOR'S WIDTH OUTRANKS THE STRATEGIST'S for the rest of the run: a width axis the
-        # operator set by `budget_extend` is theirs (`widths.py::operator_width_axes` says why), so a
+        # operator set by `budget_extend`, or spelled explicitly at launch (`run_started`'s
+        # `explicit_settings`), is theirs (`widths.py::operator_width_axes` says why), so a
         # Strategist grant for it is void from then on. Derived from the fold's `budget_overrides`
-        # (`_note_operator_width_axes`), so replay and resume reach the same verdict.
+        # and `explicit_settings`, so replay and resume reach the same verdict.
         if aliases[0] in getattr(self, "_operator_width_axes", frozenset()):
             return False
         if key == "card_scoring":
@@ -854,7 +855,8 @@ class StrategyCadenceMixin:
         oscillated the policy every consult and dropped the Strategist's fidelity/operators)."""
         if getattr(self, "_speculation_gate_calibration", False) is True:
             return state
-        self._operator_width_axes = operator_width_axes(state.budget_overrides)
+        self._operator_width_axes = operator_width_axes(state.budget_overrides,
+                                                        state.explicit_settings)
         pin = state.pending_strategy or {}
         raw_pin = {k: pin[k] for k in (
             "policy", "policy_params", "fidelity", "eval_parallel", "llm_parallel",

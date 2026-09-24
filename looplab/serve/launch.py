@@ -569,6 +569,13 @@ class LaunchPreflight:
     seed_chat: tuple[dict[str, str], ...]
     validation_token: str
     warnings: tuple[str, ...]
+    # The setting NAMES the request's own `settings` spelled (the launch form's non-blank fields, a
+    # confirmed card's settings) — the operator's explicit launch layer. The start route hands them
+    # to the child as `--explicit-setting` names, and `run_started` records them, so an explicitly
+    # launched width is an operator pin exactly like `looplab run -s max_parallel=1`. Saved UI
+    # settings and a task file's `settings:` block are not in it: those are defaults-like layers the
+    # CLI cannot tell from a default either (`cli/run_cmds.py::_explicit_setting_names`).
+    explicit_settings: tuple[str, ...] = ()
 
     @property
     def canonical_document(self) -> dict:
@@ -601,13 +608,18 @@ class LaunchPreflight:
         _base, base_digest = _base_settings_fingerprint()
         return _launch_token(
             self.run_id, self.canonical_task, self.effective_settings, source, paths,
-            _sha(saved), base_digest, self.seed_chat)
+            _sha(saved), base_digest, self.seed_chat, self.explicit_settings)
 
 
 def _launch_token(run_id: str, task: dict, settings: dict, source: dict | None,
                   paths: list[dict] | tuple[dict, ...], saved_digest: str,
-                  base_digest: str, seed_chat: tuple[dict[str, str], ...]) -> str:
+                  base_digest: str, seed_chat: tuple[dict[str, str], ...],
+                  explicit_settings: tuple[str, ...] = ()) -> str:
+    # Which settings are EXPLICIT is part of what the operator validated: spelling `max_parallel: 1`
+    # when the default is already 1 resolves the same settings but pins the width. Present only when
+    # non-empty, so every token minted for a launch that spelled nothing is unchanged.
     return _sha({
+        **({"explicit_settings": list(explicit_settings)} if explicit_settings else {}),
         "version": 2,
         "run_id": run_id,
         "task": task,
@@ -709,9 +721,10 @@ def preflight_start(srv, body: Any) -> LaunchPreflight:
     # inline calls here and a hand-written copy of them in `cli/run_cmds.py`, so a third warning
     # would have landed on whichever surface its author happened to be editing.
     warnings += task_adapters.submit_warnings(adapter)
+    explicit = tuple(sorted(str(k) for k in launch_settings))
     token = _launch_token(
         run_id, canonical_task, effective, source_fp, referenced_paths,
-        _sha(saved_settings), base_digest, seed_chat)
+        _sha(saved_settings), base_digest, seed_chat, explicit)
     return LaunchPreflight(
         run_id=run_id,
         run_dir=run_dir,
@@ -725,6 +738,7 @@ def preflight_start(srv, body: Any) -> LaunchPreflight:
         seed_chat=seed_chat,
         validation_token=token,
         warnings=warnings,
+        explicit_settings=explicit,
     )
 
 

@@ -217,6 +217,13 @@ error, and it cost determinism — two concurrent toy evals finish in wall-clock
 smoke produced a different `node_evaluated` order run to run. An explicitly spelled number is always
 honoured, CPU-parallel evals included.
 
+**An operator's width is a pin the Strategist cannot move.** A width axis the operator decided —
+spelled at launch (`looplab run -s max_parallel=1`, or a Web/API launch whose `settings` carries it)
+or set live by a `budget_extend` — voids the Strategist's grant for that axis for the rest of the run,
+resume included (`engine/widths.py::operator_width_axes`). `run_started` records the NAMES of the
+launch's explicit settings as `explicit_settings` (typed flags and `-s` keys, not a config file's
+`settings:` block and not `-s key=null`); an older log without it has no launch pins.
+
 **The width IS derived from the proposals (`proposal_width`, ON).** The run start settles the width
 from hardware, and then the *research* re-pins it. Once the Card board holds open proposals, the
 engine asks a different question — *how many of these can this box actually run at once, at the

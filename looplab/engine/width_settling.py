@@ -301,7 +301,7 @@ class WidthSettlingMixin:
         max_s = _finite_ceiling("max_seconds", self.max_seconds)
         # An operator's width is a pin the Strategist cannot override (`_strategy_may`); noted here,
         # every turn, from the same fold the widths below are re-applied from.
-        self._operator_width_axes = operator_width_axes(_bo)
+        self._operator_width_axes = operator_width_axes(_bo, state.explicit_settings)
         # A `budget_extend` is a HUMAN control intent, NOT an agent decision: CONTROL_EVENTS are
         # UI/CLI-authored (see the engine-writer invariant), and the boss action-builder
         # (serve/routers/boss.py::_Action) can ONLY ever emit `add_nodes` — it carries no field for

@@ -573,8 +573,10 @@ class ReentryMixin:
         # with it WITHOUT re-consulting the Strategist (the decision lives in the event log).
         # The operator's width pins first (`widths.py::operator_width_axes`), so the recorded
         # strategy re-applied below cannot widen an axis the operator owns — even when its
-        # `strategy_decision` precedes the operator's `budget_extend` in the log.
-        self._operator_width_axes = operator_width_axes(_entry.budget_overrides)
+        # `strategy_decision` precedes the operator's `budget_extend` in the log. A launch-time
+        # explicit width comes from `run_started` itself, never from today's command line.
+        self._operator_width_axes = operator_width_axes(_entry.budget_overrides,
+                                                        _entry.explicit_settings)
         if _entry.active_strategy:
             # A recorded Developer backend is part of this run's treatment. If today's credential or
             # endpoint cannot reconstruct it, refuse re-entry instead of silently continuing on the

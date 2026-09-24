@@ -599,6 +599,12 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         policy: SearchPolicy,
         options: Optional[EngineOptions] = None,
         crash_after: Optional[int] = None,
+        # The setting NAMES the operator spelled explicitly at launch (`looplab run` `-s`/typed flags,
+        # a Web/API launch's `settings`). Written into `run_started` ONCE, at first start, and read
+        # back from there (never from here) — an explicitly launched width axis is an operator pin
+        # the Strategist cannot override (`engine/widths.py::operator_width_axes`). A launch-surface
+        # fact, not a Settings value, which is why it is a caller kwarg like `crash_after`.
+        explicit_settings=(),
         onboarder=None,
         # --- A7 Strategist + richer-operator knobs (config-first; defaults == today's behavior) ---
         strategist=None,            # Optional[Strategist]; None => static config policy (default)
@@ -1001,6 +1007,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         self._eval_time_reservations: dict[tuple[int, object], float] = {}
         self.timeout = _opt("timeout")
         self.crash_after = crash_after
+        self._explicit_settings = tuple(sorted({str(k) for k in (explicit_settings or ())}))
+        # The width axes an OPERATOR owns (`engine/widths.py::operator_width_axes`), refreshed from the
+        # fold before any Strategist width can be applied (`_apply_control_overrides`,
+        # `_maybe_consult_strategist`, `_reentry_repin`); empty until the first of those runs.
+        self._operator_width_axes: frozenset = frozenset()
         # 4.3: load the hardened exploit ruleset grown by `looplab harden` (hacker-fixer-solver)
         # from <memory_dir>/exploits.jsonl — merged into the reward-hack scan so every
         # previously-discovered exploit stays guarded on later runs. None => built-in detector only.

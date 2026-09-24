@@ -549,8 +549,14 @@ def build_router(srv) -> APIRouter:
                     # From this assignment onward, an exception cannot prove whether the helper failed
                     # before or after the OS accepted Popen. Retain the claim and report uncertainty.
                     popen_boundary_entered = True
+                    # The operator's explicit launch settings travel as NAMES (their values are
+                    # already in the materialized file): `run_started` records them, so an explicitly
+                    # launched width is an operator pin (`cli/run_cmds.py::_explicit_setting_names`).
                     pid = _spawn_engine(
-                        ["run", str(task_file), "--out", str(rd)], env=env, run_dir=rd)
+                        ["run", str(task_file), "--out", str(rd),
+                         *(arg for name in plan.explicit_settings
+                           for arg in ("--explicit-setting", name))],
+                        env=env, run_dir=rd)
 
                 with srv.commands.sequence(rd):
                     srv.commands.record_external_spawn(rd, owner, pid)
