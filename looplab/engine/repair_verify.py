@@ -1616,6 +1616,31 @@ def _is_test_file(path: str) -> bool:
             or name.startswith("test_") or name.endswith("_test.py") or name == "conftest.py")
 
 
+def _printable_text(path, body: str) -> str:
+    """What a staged file could PRINT: for Python, its string literals minus docstrings and bare
+    string statements (comments are not in the tree at all); any other file, or Python that does not
+    parse, is taken whole.
+
+    Measured 2026-09-24: a node declared `FP8_DECODE_MLP_FALLBACK`, a name its module docstring used
+    for the fallback, while the code printed `FP8_DECODE_MLP_ACTIVE`/`..._DISABLED`. A substring
+    search of the file found the docstring, the declaration passed, and the node was filed
+    `inert_path` although its new path had run."""
+    if not str(path).endswith(".py"):
+        return body
+    try:
+        tree = ast.parse(body)
+    except (SyntaxError, ValueError):
+        return body
+    prose: set = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            prose.add(id(node.value))
+    return "\n".join(n.value for n in ast.walk(tree)
+                     if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                     and id(n) not in prose)
+
+
 def activation_markers_not_in_code(markers, written: dict) -> str:
     """The bounce text when a declared activation marker appears in no NON-TEST staged file, else "".
     Total, like the rules above."""
@@ -1626,14 +1651,18 @@ def activation_markers_not_in_code(markers, written: dict) -> str:
     code = {p: b for p, b in (written or {}).items()
             if isinstance(b, str) and not str(p).endswith(".json") and not _is_test_file(p)}
     tests = {p: b for p, b in (written or {}).items() if isinstance(b, str) and _is_test_file(p)}
-    missing = [m for m in markers if not any(m in body for body in code.values())]
+    printable = {p: _printable_text(p, b) for p, b in code.items()}
+    missing = [m for m in markers if not any(m in body for body in printable.values())]
     if not missing:
         return ""
     lines = []
     for m in missing:
         only_in = sorted(p for p, b in tests.items() if m in b)
+        prose = sorted(p for p, b in code.items() if m in b)
         where = (f" -- it appears only in {', '.join(only_in)}, which the evaluation does not run"
-                 if only_in else " -- it appears in no file this node wrote")
+                 if only_in else
+                 f" -- in {', '.join(prose)} it appears only in a docstring or comment, which "
+                 "nothing prints" if prose else " -- it appears in no file this node wrote")
         lines.append(f"  {m!r}{where}")
     return ("Your `done` declares activation marker(s) that the code the evaluation runs does not "
             "contain:\n" + "\n".join(lines) + "\n\nA marker is checked against what the evaluation "

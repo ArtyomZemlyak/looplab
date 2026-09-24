@@ -322,3 +322,24 @@ def test_a_marker_declared_on_an_earlier_step_is_still_checked_at_the_last(monke
     LLMRepoDeveloper(object(), task, plan_decompose=True, plan_min_steps=2).implement(
         Idea(operator="draft", params={}, rationale="x"))
     assert refusals and "'PATH_INIT_ACTIVE'" in refusals[0] and "'PATH_ACTIVE'" not in refusals[0]
+
+
+def test_a_marker_only_a_docstring_or_comment_names_is_bounced():
+    # Measured 2026-09-24: `FP8_DECODE_MLP_FALLBACK` was a docstring's word for the fallback; the
+    # code printed `FP8_DECODE_MLP_ACTIVE`. The substring search passed it, and a path that had run
+    # was filed `inert_path`.
+    from looplab.engine.repair_verify import activation_markers_not_in_code
+    body = ('"""Falls back to bf16 and prints ``FP8_DECODE_MLP_FALLBACK``."""\n'
+            "# FP8_DECODE_MLP_OFF is what the old version printed\n"
+            "def enable(chunk):\n"
+            "    print(f'FP8_DECODE_MLP_ACTIVE chunk={chunk}')\n")
+    out = activation_markers_not_in_code(["FP8_DECODE_MLP_FALLBACK"], {"svc/fp8.py": body})
+    assert "svc/fp8.py" in out and "docstring or comment" in out
+    assert activation_markers_not_in_code(["FP8_DECODE_MLP_OFF"], {"svc/fp8.py": body})
+    assert activation_markers_not_in_code(["FP8_DECODE_MLP_ACTIVE"], {"svc/fp8.py": body}) == ""
+
+
+def test_a_file_that_does_not_parse_or_is_not_python_is_searched_whole():
+    from looplab.engine.repair_verify import activation_markers_not_in_code
+    assert activation_markers_not_in_code(["GO_FAST on"], {"run.sh": "echo 'GO_FAST on'\n"}) == ""
+    assert activation_markers_not_in_code(["GO_FAST on"], {"a.py": "print('GO_FAST on'\n"}) == ""
