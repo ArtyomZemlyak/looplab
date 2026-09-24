@@ -319,6 +319,11 @@ class _WaitingDispatchHost(_DispatchHost):
     def _clear_eval_resource_reservation(self, node_id, generation) -> None:
         pass
 
+    def _settle_eval_resource_reservation(self, node_id, generation, admitted):
+        # This stub registers nothing, so the lane holds exactly what it was admitted with.
+        self._clear_eval_resource_reservation(node_id, generation)
+        self._release_gpus((admitted or {}).get("gpu_ids"))
+
     def _release_gpus(self, gpu_ids) -> None:
         self.released.append(list(gpu_ids or []))
 
@@ -624,6 +629,12 @@ class _CeilingEvalHost:
         pass
 
     def _eval_seed_ledgers(self, a):
+        pass
+
+    async def _reclaim_devices_for_attempt(self, a):   # this host reserves no devices
+        pass
+
+    def _yield_devices_for_repair(self, a):             # pragma: no cover
         pass
 
     async def _eval_run_attempt(self, a):

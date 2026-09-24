@@ -172,6 +172,11 @@ class _GpuDispatchStub(_DispatchStub):
     def _clear_eval_resource_reservation(self, node_id, generation):
         return None
 
+    def _settle_eval_resource_reservation(self, node_id, generation, admitted):
+        # This stub registers nothing, so the lane holds exactly what it was admitted with.
+        self._clear_eval_resource_reservation(node_id, generation)
+        self._release_gpus((admitted or {}).get("gpu_ids"))
+
     def _release_gpus(self, gpu_ids):
         self._free = min(self._total, self._free + len(gpu_ids or ()))
         self._epoch += 1

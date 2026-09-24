@@ -892,6 +892,64 @@ class ResourceSchedulingMixin:
         with self._gpu_condition:
             self._eval_gpu_reservations.pop((int(node_id), int(generation)), None)
 
+    def _settle_eval_resource_reservation(self, node_id: int, generation: int,
+                                          admitted: Optional[dict]) -> None:
+        """A lane's `finally`: drop this lifecycle's reservation and free the devices it HOLDS NOW.
+
+        Not the admission-time dict's devices: an inline repair hands its devices back while an LLM
+        works and takes fresh ones for the next attempt (`_yield_eval_devices`), so what the lane
+        holds at its end is the registry's entry, which may be different ids or none at all.
+        Releasing the admission ids instead would free a sibling's GPU and leak this lane's own.
+        `admitted` answers only for a lifecycle that never registered."""
+        self._ensure_resource_state()
+        with self._gpu_condition:
+            held = self._eval_gpu_reservations.pop((int(node_id), int(generation)), None)
+        self._release_gpus((held if held is not None else (admitted or {})).get("gpu_ids"))
+
+    def _yield_eval_devices(self, node_id: int, generation: int) -> list:
+        """Hand a lifecycle's devices back to the pool while it does work that needs none.
+
+        Measured 2026-09-24 on a one-GPU MiniOneRec run: an inline repair -- a triage call, then
+        Developer sessions, all LLM -- kept the node's reservation for 1h40m with the GPU at 0%
+        while the next node sat built and unevaluated behind it. The reservation still names the
+        lifecycle (its request fields, its key), only its devices go; `_reclaim_eval_devices` takes
+        the same count back before the next attempt launches. Returns the ids given up ([] when
+        there was nothing to give -- a CPU node, a fail-closed marker, an unregistered lifecycle)."""
+        self._ensure_resource_state()
+        key = (int(node_id), int(generation))
+        with self._gpu_condition:
+            held = self._eval_gpu_reservations.get(key)
+            ids = list((held or {}).get("gpu_ids") or [])
+            if not ids or held.get("admission_unpinnable") or held.get("required_unavailable"):
+                return []
+            self._eval_gpu_reservations[key] = {**held, "gpu_ids": [], "yielded_gpus": len(ids)}
+        self._release_gpus(ids)
+        return ids
+
+    async def _reclaim_eval_devices(self, node_id: int, generation: int) -> Optional[dict]:
+        """Take back as many devices as `_yield_eval_devices` gave up; the updated reservation, or
+        None when nothing was yielded. Waits on the pool like an admission does. The acquire and
+        the registry write happen with no await between them, so a cancel during the wait leaves
+        the entry deviceless and the lane's `finally` frees nothing it does not hold."""
+        self._ensure_resource_state()
+        key = (int(node_id), int(generation))
+        while True:
+            with self._gpu_condition:
+                held = self._eval_gpu_reservations.get(key)
+            count = int((held or {}).get("yielded_gpus") or 0)
+            if not count:
+                return None
+            epoch = self._gpu_pool_epoch()
+            ids = self._acquire_gpus(count, held.get("gpu_mem_mib"))
+            if ids:
+                back = {k: v for k, v in held.items() if k != "yielded_gpus"}
+                back["gpu_ids"] = ids
+                with self._gpu_condition:
+                    self._eval_gpu_reservations[key] = back
+                return dict(back)
+            await anyio.to_thread.run_sync(self._wait_for_gpu_change, epoch,
+                                           abandon_on_cancel=True)
+
     def _eval_reservation_under_other_generation(self, node_id: int, generation: int) -> bool:
         """True when this node holds a live eval reservation under a DIFFERENT generation.
 

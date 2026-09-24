@@ -1412,8 +1412,7 @@ class EvalDispatchMixin:
                         finally:
                             _release_eval_time(self, a["node_id"], generation)
                             if reservation is not None and generation is not None:
-                                self._clear_eval_resource_reservation(a["node_id"], generation)
-                                self._release_gpus(reservation.get("gpu_ids"))
+                                self._settle_eval_resource_reservation(a["node_id"], generation, reservation)
                 else:
                     # G3 distributed/parallel eval: CONTINUOUS dispatch. A pool of `max_parallel` slots
                     # is kept FULL — the instant any eval finishes and the dispatcher worker returns
@@ -1481,8 +1480,7 @@ class EvalDispatchMixin:
                             # by now and `total_eval_seconds` charges it.
                             _release_eval_time(self, nid, generation)
                             if reservation is not None and generation is not None:
-                                self._clear_eval_resource_reservation(nid, generation)
-                                self._release_gpus(reservation.get("gpu_ids"))
+                                self._settle_eval_resource_reservation(nid, generation, reservation)
                             slots.release()          # free the slot -> wakes the producer to admit next
 
                     async with anyio.create_task_group() as tg:

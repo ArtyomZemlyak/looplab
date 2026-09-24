@@ -2734,8 +2734,7 @@ class SpeculationMixin:
             from looplab.engine.eval_dispatch import _release_eval_time
             _release_eval_time(self, node_id, generation)
             if reservation is not None:
-                self._clear_eval_resource_reservation(node_id, generation)
-                self._release_gpus(reservation.get("gpu_ids"))
+                self._settle_eval_resource_reservation(node_id, generation, reservation)
             self._eval_inflight.discard((node_id, generation))
             notify_producer(self._eval_notify, ("eval", (node_id, generation)))
 

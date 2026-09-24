@@ -2489,6 +2489,7 @@ class EvaluateMixin:
                     await anyio.to_thread.run_sync(self._eval_prepare_workdir, a)
                     self._eval_seed_ledgers(a)
                     while True:
+                        await self._reclaim_devices_for_attempt(a)
                         if await self._eval_run_attempt(a) is PHASE_RETURN:
                             return
                         sig = await self._eval_settle_outcome(a)
@@ -2498,6 +2499,10 @@ class EvaluateMixin:
                             break
                         if await self._eval_salvage(a) is PHASE_SETTLED:
                             break
+                        # The repair below is LLM work -- a triage call, then Developer sessions,
+                        # measured at 1h40m on one node -- and needs no device. The devices go back
+                        # to the pool for its duration and are re-taken at the loop's top.
+                        self._yield_devices_for_repair(a)
                         sig = await self._eval_decide_repair(a)
                         if sig is PHASE_RETURN:
                             return               # a pause: no terminal, the chain resumes later
@@ -2575,6 +2580,24 @@ class EvaluateMixin:
                 await self._land_terminal_before_ceiling(a, exc)
                 raise
             await self._contain_eval_crash(node_id, a.generation, exc)
+
+    def _yield_devices_for_repair(self, a: "EvalAttempt") -> None:
+        """Give this lifecycle's GPUs back while its repair talks to an LLM (`resources.py::
+        _yield_eval_devices`). A no-op for a lifecycle holding none."""
+        if a.generation >= 0 and self._yield_eval_devices(a.node_id, a.generation):
+            a.sp.set("devices_yielded_for_repair", True)
+
+    async def _reclaim_devices_for_attempt(self, a: "EvalAttempt") -> None:
+        """Before an attempt launches, take back whatever the repair gave up, and re-pin the env to
+        the devices actually held now: they need not be the ones given up, and launching on the
+        old ids would put this candidate on a sibling's GPU."""
+        if a.generation < 0:
+            return
+        back = await self._reclaim_eval_devices(a.node_id, a.generation)
+        if back is None:
+            return
+        a._resource_reservation = back
+        a.eval_env = self._resource_eval_env(back, inherit_host=True)
 
     async def _land_terminal_before_ceiling(self, a: "EvalAttempt", exc: BaseException) -> None:
         """Land THIS node's terminal before a spend ceiling raised by its own post-score bookkeeping
@@ -2670,9 +2693,11 @@ class EvaluateMixin:
         a.sp.set("generation", a.generation)
         a.start_seq = a.events_at_start[-1].seq if a.events_at_start else -1
         a.sp.set("operator", a.node.operator)
-        # The dispatcher owns this reservation for the complete node lifecycle. Keeping the same
-        # devices across every inline repair/retry prevents a repaired process from jumping onto a
-        # sibling's GPU; the dispatcher releases it exactly once in its worker `finally`.
+        # The dispatcher owns this reservation for the complete node lifecycle and settles it exactly
+        # once in its worker `finally`. An inline repair hands the DEVICES back while it talks to an
+        # LLM and takes the same count back before the next attempt (`_yield_devices_for_repair`),
+        # re-pinning the env to what it then holds, so a repaired process can never land on a
+        # sibling's GPU.
         a._resource_reservation = self._eval_resource_reservation(a.node_id, a.generation)
         # The dispatcher registered this reservation under its ADMISSION-time generation, but
         # `generation` here is node.attempt from a fresher fold. An eval-stage node_reset landing in
