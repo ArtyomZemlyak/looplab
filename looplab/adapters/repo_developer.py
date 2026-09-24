@@ -24,6 +24,7 @@ exporting them, and this module needs nothing from `repo_task` at import time (n
 from __future__ import annotations
 
 import math as _math
+import threading
 
 from typing import Optional
 
@@ -438,8 +439,90 @@ def co_parent_block(co_parents, base: dict) -> str:
                 shown = shown[:max(0, _CO_PARENT_TOTAL_CHARS - used)]
             used += len(shown)
             out.append(f"--- {name} ---\n{shown}"
-                       + ("" if len(shown) == len(text) else f"\n… ({len(text) - len(shown)} chars omitted)"))
+                       + ("" if len(shown) == len(text) else
+                          f"\n… ({len(text) - len(shown)} chars omitted — read the whole file with "
+                          f"read_co_parent_file(node_id={getattr(node, 'id', '?')}, path={name!r}); "
+                          "copy what you recombine from it, never reconstruct it from this excerpt)"))
     return "\n".join(out)
+
+
+class CoParentFileTools:
+    """Read-only, paged access to an ensemble merge's CO-PARENT files, in full.
+
+    The co-parent block puts at most `_CO_PARENT_FILE_CHARS` of each differing file in the prompt,
+    and the Developer's other readers see only the working set (the primary parent). Measured
+    2026-09-24 on MiniOneRec inf12 card-5: the co-parent's module was 18.9 KB and its engine diff
+    53 KB, the plan's first step was "reconstruct the co-parent's module", and that step spent its
+    whole 46-minute budget on 45 turns of probes and reads with ZERO writes — the code it had to
+    recombine was nowhere it could read. These two tools are that place; they read the co-parent
+    Node's own recorded files and nothing else."""
+
+    _PAGE_CHARS = 3600
+
+    def __init__(self, co_parents) -> None:
+        self._nodes = {int(getattr(node, "id", -1)): dict(getattr(node, "files", {}) or {})
+                       for node in co_parents or ()}
+
+    def specs(self) -> list[dict]:
+        from looplab.tools._base import fn_spec
+        ids = ", ".join(str(n) for n in sorted(self._nodes))
+        return [
+            fn_spec("list_co_parent_files",
+                    f"List the files a co-parent of this merge recorded (node ids: {ids}), with sizes. "
+                    "Read-only.",
+                    {"node_id": {"type": "integer"}}, ["node_id"]),
+            fn_spec("read_co_parent_file",
+                    "Read one co-parent file IN FULL, one page (~3600 chars) at a time — the prompt "
+                    "shows only an excerpt. A page with more below ends with '… (more below — "
+                    "continue with start_line=N)'; a page without it is the end of the file. "
+                    "Read-only: to use the code, write it into your working set.",
+                    {"node_id": {"type": "integer"}, "path": {"type": "string"},
+                     "start_line": {"type": "integer", "description": "1-based (default 1)."}},
+                    ["node_id", "path"]),
+        ]
+
+    def capabilities(self):
+        from looplab.tools._base import capabilities_for_specs
+        return capabilities_for_specs(
+            self.specs(), effect="read", risk="low", idempotency="idempotent",
+            concurrency_safe=True, cancellable=False, approval="never",
+            source="looplab.adapters.repo_developer.CoParentFileTools")
+
+    def execute(self, name: str, args: dict) -> str:
+        args = args or {}
+        try:
+            node_id = int(args.get("node_id"))
+        except (TypeError, ValueError):
+            return "(node_id must be one of: " + ", ".join(map(str, sorted(self._nodes))) + ")"
+        files = self._nodes.get(node_id)
+        if files is None:
+            return "(not a co-parent of this merge; co-parents: " + ", ".join(
+                map(str, sorted(self._nodes))) + ")"
+        if name == "list_co_parent_files":
+            return "\n".join(f"{path}  ({len(str(body or ''))} chars)"
+                             for path, body in sorted(files.items())) or "(no files recorded)"
+        if name == "read_co_parent_file":
+            path = str(args.get("path") or "")
+            if path not in files:
+                return f"(node {node_id} recorded no file {path!r}; list_co_parent_files names them)"
+            lines = str(files[path] or "").splitlines(keepends=True)
+            try:
+                start = max(1, int(args.get("start_line") or 1))
+            except (TypeError, ValueError):
+                start = 1
+            out, used, index = [], 0, start - 1
+            while index < len(lines) and used + len(lines[index]) <= self._PAGE_CHARS:
+                out.append(lines[index])
+                used += len(lines[index])
+                index += 1
+            if index == start - 1 and index < len(lines):          # one line longer than a page
+                out.append(lines[index][:self._PAGE_CHARS])
+                index += 1
+            page = "".join(out)
+            if index < len(lines):
+                page += f"\n… (more below — continue with start_line={index + 1})"
+            return page or "(past the end of the file)"
+        return f"(unknown tool: {name})"
 
 
 
@@ -1652,6 +1735,8 @@ class LLMRepoDeveloper:
         store = getattr(self, "_established", None)
         return None if store is None else store.hook(phase)
 
+    _co_parent_session = threading.local()
+
     def _scout_tools(self, write=None):
         """Read-only repo scouts (read_file / grep / find_files / list_dir) so the Developer can READ
         the code it is EDITING and VERIFY an exact CLI flag / function signature / config key in the
@@ -1670,6 +1755,12 @@ class LLMRepoDeveloper:
         writing phases — that is a property of the boundary, not of the toolset it is composed into
         (`tools/dev_probe.py`)."""
         extra = []
+        # An ensemble merge's co-parents, readable in full (`CoParentFileTools`). Thread-local, not an
+        # attribute: this Developer instance is shared by concurrent sessions (a serial merge build and
+        # a sibling's inline repair), and each `_run` runs whole on its own worker thread.
+        co_parents = getattr(self._co_parent_session, "nodes", ())
+        if co_parents:
+            extra.append(CoParentFileTools(co_parents))
         if getattr(self, "_dev_commands", None):
             from looplab.tools.dev_commands import DevCommandTools
             extra.append(DevCommandTools(getattr(self, "_probe_repo_spec", None),
@@ -3165,11 +3256,17 @@ class LLMRepoDeveloper:
         recombination reads both lineages instead of one plus a 120-char digest."""
         files = dict(getattr(parent, "files", {}) or {})
         deleted = list(getattr(parent, "deleted", []) or [])
-        if not files and not deleted:
-            return self._run(idea, co_parents=tuple(co_parents or ()))
-        note = f"parent experiment #{getattr(parent, 'id', '?')}, metric={getattr(parent, 'metric', None)}"
-        return self._run(idea, base=files, base_note=note, base_deleted=deleted,
-                         co_parents=tuple(co_parents or ()))
+        co_parents = tuple(co_parents or ())
+        self._co_parent_session.nodes = co_parents        # read by `_scout_tools` on this thread
+        try:
+            if not files and not deleted:
+                return self._run(idea, co_parents=co_parents)
+            note = (f"parent experiment #{getattr(parent, 'id', '?')}, "
+                    f"metric={getattr(parent, 'metric', None)}")
+            return self._run(idea, base=files, base_note=note, base_deleted=deleted,
+                             co_parents=co_parents)
+        finally:
+            self._co_parent_session.nodes = ()
 
     def repair(self, idea: Idea, code: str, error: str) -> str:
         return self._run(idea, error=error)
