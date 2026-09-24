@@ -3367,8 +3367,14 @@ class SpeculationMixin:
             or any(self._session_admissible(node, current, session)
                    for node in current.pending_nodes())
         )
+        # WIDER THAN ONE, A FREE PRODUCER IS REASON ENOUGH (2026-09-24). "Consumer active" is the
+        # prefetch's premise — hide a build behind a RUNNING evaluation — and at width one it stays
+        # the gate. With several producers the session is where builds run side by side; measured on
+        # MiniOneRec inf12 (48-second evaluations, builds of hours), gating on a running eval meant
+        # at most one election per evaluation window and the second producer idle for hours.
+        wide = self._speculative_producer_width(current) > 1
         if not (
-            consumer_active
+            (consumer_active or wide)
             and session.open_for_production(self._session_gates(current, session))
             # A free producer: every open request, running build and the raw lane holds one, and
             # the width is `llm_parallel` (`_speculative_producer_width`). At width 1 this is the

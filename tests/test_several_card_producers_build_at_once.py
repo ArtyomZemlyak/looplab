@@ -521,3 +521,40 @@ def test_a_wide_session_never_runs_two_raw_proposals_at_once(tmp_path, monkeypat
 
     anyio.run(scenario)
     assert gauge["peak"] == 1, gauge
+
+
+def test_a_wide_session_fills_its_free_producer_without_a_running_eval(tmp_path, monkeypatch):
+    """The prefetch gate "an evaluation is running" is the width-1 premise. Wider, a free producer
+    is reason enough: with 48-second evaluations and builds of hours it was at most one election per
+    evaluation window and the second producer idle (MiniOneRec inf12, 2026-09-24)."""
+    engine, _unused = _engine(tmp_path / "no-eval", depth=1)
+    log: list = []
+    engine.role_factory = lambda: (_Researcher(), _GatedDeveloper(log))
+    engine._llm_parallel = 2
+    engine._llm_parallel_launched = 2
+    engine._llm_parallel_startup_auto = False
+    _without_research(monkeypatch, engine)
+    _start(engine)
+    _add_ready_draft(engine, "card-1", x=0.2)
+    _add_ready_draft(engine, "card-2", x=0.3)
+    assert engine._request_card_build() is True        # one open request, no node, no eval
+    _GatedDeveloper.gate = True
+    developers_released = threading.Event()
+
+    async def scenario():
+        async with anyio.create_task_group() as eval_tg:
+            engine._eval_task_group = eval_tg
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(engine._run_card_session, [], fold(engine.store.read_all()), None)
+                with anyio.fail_after(20):
+                    while _live(log) < 2:
+                        await anyio.sleep(0.02)
+                assert not engine._eval_inflight
+                _GatedDeveloper.gate = False
+                for _what, _card, developer in list(log):
+                    developer.release.set()
+                developers_released.set()
+                tg.cancel_scope.cancel()
+
+    anyio.run(scenario)
+    assert _building_now(log) == 2
