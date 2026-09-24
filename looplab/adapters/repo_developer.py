@@ -787,6 +787,14 @@ class LLMRepoDeveloper:
     cmd, writing `looplab_stages.json`), PLAN (read-only atomic-step decomposition), then IMPLEMENT
     (write the code, one bounded session per step). A REPAIR skips both and runs a single session."""
 
+    # It WRITES the candidate's code, so `merge_mode="auto"` must resolve to the code-recombination
+    # ensemble (`orchestrator.py`: seed from the primary parent, show the co-parents' differing files).
+    # Measured 2026-09-24 on a MiniOneRec run: without this marker the repo Developer read as
+    # templated, `auto` fell to the MEAN merge, and "mean-merge of nodes 0,1" was built FROM SCRATCH
+    # with neither parent's code in its prompt -- three hours of Developer sessions for a node that
+    # carried neither parent's change and scored 1.002 against parents at 1.035 and 1.019.
+    is_code_generating = True
+
     # PromptStore handle (docs/15 §P4.7): the intro/body blocks render through it, so an
     # operator's prompt_dir override applies to the REPO developer exactly like it always did to
     # the toy one. A CLASS-level default (not only an __init__ assignment): tests exercise these
