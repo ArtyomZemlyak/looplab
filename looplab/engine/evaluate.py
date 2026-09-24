@@ -3493,10 +3493,14 @@ class EvaluateMixin:
             # ("`_eval_pipeline`'s resolved timeout"); this is the derivation the rest of the
             # engine quotes to both roles (docs/29 F1h), so the floor and the budget the
             # Developer sized its schedule against are now one number.
+            # `effective_eval_spec`: the budget as the operator's live `budget_extend{eval_timeout}`
+            # makes it, the same spec `_eval_pipeline` ran this chain under — a license computed
+            # against the launch-time number would fire the floor at a third of a raised budget.
+            from looplab.engine.shared import effective_eval_spec
             from looplab.runtime.command_eval import eval_spec_time_budget
             _pipeline_s = declared_pipeline_seconds(
                 self._resolved_stages(a.node, a.workdir),
-                eval_spec_time_budget(self._eval_spec)
+                eval_spec_time_budget(effective_eval_spec(self))
                 if isinstance(self._eval_spec, dict) else None)
             # See `chain_pipeline_s` above: the spend is cumulative over every manifest
             # this chain has run, so the license must be too.

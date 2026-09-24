@@ -81,7 +81,54 @@ def effective_researcher_eval_timeout(engine, idea) -> Optional[float]:
     # 2026-09-22 (TAT-06): the Strategist's `timeout` is the same kind of agent request and was the
     # one that skipped the ceiling, so the rule moved to where both agents' seams can reach it.
     return governed_eval_timeout(getattr(idea, "eval_timeout", None),
-                                 getattr(engine, "max_eval_timeout", 3600.0))
+                                 effective_max_eval_timeout(engine))
+
+
+def effective_eval_spec(engine) -> dict:
+    """The run's eval spec as the operator's LIVE budget makes it — the ONE place the override meets it.
+
+    `engine._eval_spec` is the task's recorded spec (or the ratified onboarding one) and stays that:
+    it is also the metric/reader/stage contract, and nothing about a raised wall clock may reach
+    those. What `budget_extend{eval_timeout}` moves is every TIMEOUT the spec declares, through
+    `runtime/command_eval.py::with_eval_timeout` (whose `leashed_timeout` truth table is the rule).
+    Every reader of the per-eval budget or of the spec's timeouts asks HERE: the dispatcher and the
+    planners through `eval_stages.py::_eval_pipeline`, the budget quoted to the Researcher through
+    `effective_eval_time_budget`, the repair floor's pipeline license in `evaluate.py`. The repo
+    Developer cannot import `engine` and applies the same function to the same folded value
+    (`adapters/repo_developer.py::_eval_time_budget`).
+
+    `{}` for a run with no active spec; the spec itself (same object) when no override is recorded,
+    so the no-override path is the historical one byte for byte. A module function with `getattr`
+    defaults, like its siblings here, because stubs that skip `Engine.__init__` reach it."""
+    from looplab.runtime.command_eval import with_eval_timeout
+
+    es = getattr(engine, "_eval_spec", None) or {}
+    if not isinstance(es, dict) or not es:
+        return {}
+    return with_eval_timeout(es, getattr(engine, "_eval_timeout_override", None))
+
+
+def effective_max_eval_timeout(engine) -> float:
+    """The clamp an AGENT-requested eval timeout meets: `max_eval_timeout`, LIFTED to the operator's
+    live `budget_extend{eval_timeout}` when that is larger.
+
+    An operator who raises the per-eval ceiling to N has said an evaluation may run N seconds; a
+    Researcher or Strategist request up to N clamped at a lower launch-time `max_eval_timeout` would
+    be the operator's own ceiling refused by a number they have since overruled. Lifted, never
+    lowered: a SMALLER override leaves the launch clamp alone (the override is then the budget
+    itself, and the clamp only bounds what an agent may ask above it). Three readers —
+    `effective_researcher_eval_timeout`, the Researcher's headroom sentence
+    (`proposal_cues.py::_eval_timeout_headroom_text`) and the Strategist's validation context
+    (`strategy.py`) — so none can come to clamp at a different number."""
+    try:
+        base = float(getattr(engine, "max_eval_timeout", 3600.0))
+    except (TypeError, ValueError, OverflowError):
+        base = 3600.0
+    override = getattr(engine, "_eval_timeout_override", None)
+    if isinstance(override, (int, float)) and not isinstance(override, bool) \
+            and math.isfinite(override) and override > base:
+        return float(override)
+    return base
 
 
 def effective_eval_time_budget(engine) -> Optional[float]:
@@ -105,7 +152,8 @@ def effective_eval_time_budget(engine) -> Optional[float]:
       clamped by `max_eval_timeout` — which is why the hint that quotes this number also states the
       headroom rather than pretending the default is a hard wall.
 
-    Read PER PROPOSAL, never cached at construction: `self.timeout` is mutable mid-run by an
+    Read PER PROPOSAL, never cached at construction: the spec branch moves with an operator's
+    `budget_extend{eval_timeout}` (`effective_eval_spec`), and `self.timeout` is mutable mid-run by an
     operator's `budget_extend{timeout}` control (`_apply_control_overrides`) and by a granted
     Strategist retune (`engine/strategy.py`), so a number captured in `Engine.__init__` would keep
     quoting a budget nobody is running under — the same reason `_gpu_budget_hint` is stamped per
@@ -117,7 +165,10 @@ def effective_eval_time_budget(engine) -> Optional[float]:
     """
     from looplab.runtime.command_eval import eval_spec_time_budget
 
-    es = getattr(engine, "_eval_spec", None) or {}
+    # `effective_eval_spec`, not the raw `_eval_spec`: an operator's live `budget_extend{eval_timeout}`
+    # is the budget from the turn it is applied on, and a hint still quoting the task's launch-time
+    # number would size the next schedule against a wall nobody is running under any more.
+    es = effective_eval_spec(engine)
     if es:
         return eval_spec_time_budget(es)
     cand = getattr(engine, "timeout", None)

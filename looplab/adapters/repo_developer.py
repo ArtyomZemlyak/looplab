@@ -1876,10 +1876,21 @@ class LLMRepoDeveloper:
         things this role does with it — the note it is TOLD (`_time_budget_note`) and the bound its
         `declare_stages` is HELD TO (`RepoWriteTools(time_budget=…)`). Separately spelled, the prompt
         could announce one ceiling while the refusal enforced another, which is the F1h defect with
-        the roles swapped. Soft-fails to None for a bare/`__new__`-constructed dev carrying no task."""
-        from looplab.runtime.command_eval import eval_spec_time_budget
+        the roles swapped. Soft-fails to None for a bare/`__new__`-constructed dev carrying no task.
+
+        THE OPERATOR'S LIVE BUDGET (`budget_extend{eval_timeout}`, 2026-09-24) is read off the RunState
+        the engine binds before EVERY build and repair call (`node_build.py::_run_developer`,
+        `bind_state`), and applied by the SAME function the engine applies it with
+        (`command_eval.with_eval_timeout`) — so the note, the `declare_stages` bound and the engine's
+        dispatch are one number from the turn the event is folded. Without it this role kept sizing
+        `train` against the launch-time budget and the gate kept REFUSING the longer stage the
+        operator had just paid for. No new channel: the fold is the one the engine read."""
+        from looplab.runtime.command_eval import (eval_spec_time_budget, eval_timeout_override,
+                                                  with_eval_timeout)
         try:
-            return eval_spec_time_budget(self._cmd_context()[0])
+            state = getattr(self, "_memory_state", None)
+            override = eval_timeout_override(getattr(state, "budget_overrides", None))
+            return eval_spec_time_budget(with_eval_timeout(self._cmd_context()[0], override))
         except Exception:  # noqa: BLE001 — a bare/unit-test dev with no task states no budget
             return None
 

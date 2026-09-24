@@ -543,6 +543,25 @@ def _normalize_budget_extend(ctx: _ControlIntake) -> dict:
         if not math.isfinite(value) or value <= 0:
             raise HTTPException(400, f"{name} must be a finite positive number")
         data[name] = value
+    if data.get("eval_timeout") is not None:
+        # THE EVAL-SPEC BUDGET (2026-09-24): the per-evaluation wall clock of a repo/command task,
+        # which `timeout` above does not reach (`engine/shared.py::effective_eval_time_budget`).
+        # Bounded ABOVE as well as below, by the ceiling every launch is clamped to anyway
+        # (`runtime/sandbox.py::MAX_TIMEOUT_S`): a larger number would be accepted, announced to the
+        # roles as their budget, and then silently cut to 24 h at the launch — a false success.
+        from looplab.runtime.sandbox import MAX_TIMEOUT_S
+        value = data["eval_timeout"]
+        try:
+            if isinstance(value, bool):
+                raise TypeError("bool")
+            value = float(value)
+        except (TypeError, ValueError, OverflowError):
+            raise HTTPException(
+                400, f"eval_timeout must be a finite number of seconds in (0, {MAX_TIMEOUT_S:.0f}]")
+        if not math.isfinite(value) or value <= 0 or value > MAX_TIMEOUT_S:
+            raise HTTPException(
+                400, f"eval_timeout must be a finite number of seconds in (0, {MAX_TIMEOUT_S:.0f}]")
+        data["eval_timeout"] = value
     return data
 
 
@@ -1604,7 +1623,7 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
     EV_NODE_ABORT: frozenset({"node_id", "generation", "reason"}),
     EV_NODE_RESET: frozenset({"node_id", "generation", "from_stage"}),
     EV_BUDGET_EXTEND: frozenset(
-        {"add_nodes", "max_seconds", "max_eval_seconds", "timeout",
+        {"add_nodes", "max_seconds", "max_eval_seconds", "timeout", "eval_timeout",
          "eval_parallel", "llm_parallel", "max_parallel", "parallel_build"}),
     EV_HINT: frozenset({"text", "replace"}),
     EV_SET_STRATEGY: frozenset({"strategy"}),

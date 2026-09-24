@@ -45,7 +45,10 @@ def _on_budget_extend(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # compares these numerically (`total_eval_seconds >= max_es`), so an un-coerced string would
     # raise TypeError in the main loop — and because the event replays, EVERY resume re-crashes
     # (a permanent poison event). A non-numeric value is skipped, not stored.
-    for _k in ("max_seconds", "max_eval_seconds", "timeout"):
+    # `eval_timeout` (2026-09-24) is the operator's live per-eval budget of an EVAL-SPEC task — the
+    # number `Settings.timeout` is not, on that branch (`engine/shared.py::effective_eval_time_budget`).
+    # Absolute and last-write-wins like its siblings; its reader is `command_eval.eval_timeout_override`.
+    for _k in ("max_seconds", "max_eval_seconds", "timeout", "eval_timeout"):
         _raw = d.get(_k)
         if _raw is None or isinstance(_raw, bool):
             continue

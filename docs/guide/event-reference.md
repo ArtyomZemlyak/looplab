@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-155 event types — 112 folded into `RunState`, 43 diagnostic; 942 declared payload keys; 22 types whose whole payload is stored by the fold.
+155 event types — 112 folded into `RunState`, 43 diagnostic; 943 declared payload keys; 22 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -42,7 +42,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `belief_admission` | diagnostic | How many researcher-proposed beliefs one proposal turn offered and how many the board admitted. | `admitted`, `blank`, `board_read`, `capped`, `proposed`, `repeated`, `restated`, `shape` | — |
 | `best_confirmed` | folded | The champion the run confirmed by re-evaluation, and whether that confirmation was significant. | `generations`, `node_id`, `search_epoch`, `significant` | `attempt`, `generation` |
 | `budget` | diagnostic | The finalization budget receipt: wall clock, in-process seconds, evaluation seconds and node count. | — | `elapsed_s`, `eval_s`, `finalize_scope`, `finish_seq`, `nodes`, `process_s`, `speculation` |
-| `budget_extend` | folded | An operator raising a live run's node, time or parallelism budget. | — | `add_nodes`, `eval_parallel`, `llm_parallel`, `max_eval_seconds`, `max_parallel`, `max_seconds`, `parallel_build`, `timeout` |
+| `budget_extend` | folded | An operator raising a live run's node, time, eval-spec (`eval_timeout`) or parallelism budget. | — | `add_nodes`, `eval_parallel`, `eval_timeout`, `llm_parallel`, `max_eval_seconds`, `max_parallel`, `max_seconds`, `parallel_build`, `timeout` |
 | `card_added` | folded | A research Card minted into durable inventory: its id, statement and the action it owns. | — | `action`, `at_node`, `concepts`, `footprint`, `generation`, `id`, `idea`, `node_id`, `ownership_receipt`, `parent_card_id`, `parent_generations`, `parent_id`, `parent_ids`, `rationale`, `scored_against`, `scored_against_empty`, `scored_against_generation`, `source`, `statement`, `steering_context` |
 | `card_auto_dropped` | folded | The engine dropped a Card as a lifecycle effect, with the reason (`dropped_by=engine`). | `dropped_by`, `id`, `reason` | `by` |
 | `card_build_attempted` | folded | One dispatch attempt for a Card's build, indexed so a repeat is visible instead of silently re-issued. | `card_id`, `generation`, `index` | — |

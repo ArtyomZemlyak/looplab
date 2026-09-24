@@ -1121,6 +1121,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         self._repo_spec: dict = rs() if callable(rs) else {}
         es = getattr(task, "eval_spec", None)
         self._eval_spec: dict = es() if callable(es) else {}
+        # The operator's LIVE per-eval budget (`budget_extend{eval_timeout}`), re-read off the fold by
+        # `_apply_control_overrides` on every turn — None until one is recorded. `_eval_spec` itself
+        # stays the task's own recorded spec; every budget/timeout reader asks
+        # `shared.py::effective_eval_spec`, which applies this to a copy.
+        self._eval_timeout_override: Optional[float] = None
         # Ablation probes run via the solution.py sandbox path, which is wrong for a repo/eval-spec
         # run (the repo tree is absent) — so `_ablate` no-ops there. Tell the policy not to PROPOSE
         # ablate on such runs: the skip creates no refine_block node, so the ablate cadence would

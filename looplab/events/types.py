@@ -1335,11 +1335,11 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         ),
     ),
     "budget_extend": PayloadContract(
-        "An operator raising a live run's node, time or parallelism budget.",
+        "An operator raising a live run's node, time, eval-spec (`eval_timeout`) or parallelism budget.",
         required=(),
         optional=(
-            "add_nodes", "eval_parallel", "llm_parallel", "max_eval_seconds", "max_parallel",
-            "max_seconds", "parallel_build", "timeout"
+            "add_nodes", "eval_parallel", "eval_timeout", "llm_parallel", "max_eval_seconds",
+            "max_parallel", "max_seconds", "parallel_build", "timeout"
         ),
     ),
     "card_added": PayloadContract(

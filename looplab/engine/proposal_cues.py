@@ -1038,8 +1038,11 @@ class ProposalCuesMixin:
         if not (callable(may) and may("researcher", "timeout")):
             return (" That budget is fixed for this run: an `eval_timeout` you set is NOT honoured here, "
                     "so leave it null and size the experiment to the number above.")
+        # `effective_max_eval_timeout`: the launch clamp LIFTED to an operator's live
+        # `budget_extend{eval_timeout}`, the same number `effective_researcher_eval_timeout` clamps at.
+        from looplab.engine.shared import effective_max_eval_timeout
         try:
-            ceiling = float(getattr(self, "max_eval_timeout", 3600.0))
+            ceiling = float(effective_max_eval_timeout(self))
         except (TypeError, ValueError, OverflowError):
             return ""
         if not math.isfinite(ceiling) or ceiling <= 0 or ceiling <= budget:

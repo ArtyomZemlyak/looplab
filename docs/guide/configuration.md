@@ -179,7 +179,7 @@ looplab run examples/dataset_task.json -s profile=thorough -s confirm_top_k=5   
 | `asha_live_min_siblings` | `LOOPLAB_ASHA_LIVE_MIN_SIBLINGS` | `3` | Minimum finished sibling nodes required before ASHA ranks at all (never acts on too little evidence) |
 | `asha_live_kill_confidence` | `LOOPLAB_ASHA_LIVE_KILL_CONFIDENCE` | `0.8` | Minimum confidence (0–1) required from the ASHA judge's `stop` verdict before a flagged node is actually killed. Once the rank test fires past the grace window, the judge is shown the node's live curve, the same-resource sibling values and computed bar, the objective's direction, the other metrics the run is printing, and the training monitor's latest health verdict, and answers `continue`/`watch`/`stop` (a fold-ignored `asha_verdict` diagnostic + span). Because it is consulted only INSIDE the rank gate it can never stop a node the quantile test would have spared — it can only spare one the quantile test would have killed |
 | `timeout` | `LOOPLAB_TIMEOUT` | `30.0` | Per-evaluation wall-clock limit (seconds) — the budget on the script-solution path only; a task with an active eval spec takes its per-eval budget from `cmd.timeout`/the profile timeouts instead. Whichever of the two applies is announced to the roles that spend it, per proposal — see [Both roles are told the per-eval TIME budget](#both-roles-are-told-the-per-eval-time-budget) |
-| `max_eval_timeout` | `LOOPLAB_MAX_EVAL_TIMEOUT` | `3600.0` | Hard ceiling for an AGENT-chosen eval timeout: a Researcher-authored per-node `eval_timeout`, applied after the `agent_control.timeout` permission gate, and (since 2026-09-22) a Strategist's run-level `timeout`, clamped when the decision is validated so the recorded `strategy_decision` is the applied value (`core/config.py::governed_eval_timeout`). The run-wide `timeout` remains the fallback when no permitted override is supplied. The one-hour default admits existing heavy-model requests while remaining below the sandbox's defensive 24-hour subprocess ceiling. |
+| `max_eval_timeout` | `LOOPLAB_MAX_EVAL_TIMEOUT` | `3600.0` | Hard ceiling for an AGENT-chosen eval timeout: a Researcher-authored per-node `eval_timeout`, applied after the `agent_control.timeout` permission gate, and (since 2026-09-22) a Strategist's run-level `timeout`, clamped when the decision is validated so the recorded `strategy_decision` is the applied value (`core/config.py::governed_eval_timeout`). The run-wide `timeout` remains the fallback when no permitted override is supplied. The one-hour default admits existing heavy-model requests while remaining below the sandbox's defensive 24-hour subprocess ceiling. A live operator `budget_extend{eval_timeout}` larger than it LIFTS this clamp for the rest of the run (`engine/shared.py::effective_max_eval_timeout`); see [Raising a LIVE run's eval budget](#raising-a-live-runs-eval-budget-budget_extendeval_timeout). |
 | `sweep_timeout_mult` | `LOOPLAB_SWEEP_TIMEOUT_MULT` | `8.0` | A sweep node (a grid in one process) gets this × `timeout` |
 | `eval_stall_timeout_s` | `LOOPLAB_EVAL_STALL_TIMEOUT_S` | `1800.0` | STALL watchdog cap (seconds): a stage that is completely SILENT on stdout/stderr for this long — while still alive and below its wall-clock deadline — is tree-killed early with a STALLED marker (a hung dataloader/deadlock dies in minutes instead of burning a multi-hour timeout). The per-stage window is `min(this, the stage's own timeout)`. Set to `0` to DISABLE the watchdog (only the hard deadline applies) — for a legitimately quiet non-Python stage (block-buffered stdout, a script logging only to its own file). Threaded into the eval and surfaced to the Developer so its code emits periodic progress to stay alive. **Where it meets `eval_deadline_grace_s`**: a stage silent for a whole window is stall-killed BEFORE its deadline, so no grace is asked for (the judge's only input is a live log tail, and there is none) — but once a grace IS granted the order reverses and the silence kill is deferred for exactly the window bought, so the extension is real. A stage still silent when the grace runs out is then killed as STALLED, not as a timeout |
 | `eval_deadline_grace_s` | `LOOPLAB_EVAL_DEADLINE_GRACE_S` | `-1.0` (AUTO) | The most extra wall clock a live-log judge may buy for a stage that has reached its deadline, ONCE per command. `-1.0` — **the default since 2026-08-23** — is AUTO: at most 10% of the stage's OWN time limit, and never more than 1800 s. A fraction rather than a constant because 1800 s is 50% of a 3600 s score stage, 30x a 60 s smoke stage and 6% of a 28000 s train wall, so one number cannot mean the same thing twice. `0.0` keeps the unconditional tree-kill this always was, byte for byte, and is now the OFF switch rather than the default; a positive number is your own absolute ceiling. It exists because a deadline is a number that cannot see a progress bar: all NINE `stage_finished.status == "timeout"` rows in the shipped corpus land within seconds of their own declared wall and together discarded 57.6 GPU-hours, and the whole captured record of `rubertlite-dense-retrieval` node 72 ends `100%|##########| 664/664 [00:17<00:00, 38.13it/s]`. At the wall, a stage two seconds from writing its checkpoint and one that will never finish present the identical fact; only something reading the log separates them. The judge answers ONE WORD, never a number, and fails CLOSED — the opposite direction from the stage checker, because there an unreadable answer saves work and here it spends it. The operator's number is the ceiling: the runtime clamps to it, so a judge cannot name its own extension. It was opt-in until 2026-08-23 because turning it on lets a model reading the candidate's own live log spend GPU time; the operator flipped it on the ground that the opt-in put the whole of that 57.6-hour loss behind a switch nobody had turned, while the spend it authorises stays bounded, one-shot and fail-closed. A resumed pre-2026-08-23 run keeps `0.0` via `LEGACY_CONFIG_SNAPSHOT_DEFAULTS`, so no already-recorded run changes behaviour mid-log. The seconds it buys are seconds the process actually receives: the STALL watchdog's silence kill is deferred for the granted window (a stage that went quiet writing its checkpoint is the case this exists for), and the stage row's `seconds` and `deadline_grace_s` therefore agree. |
@@ -359,6 +359,45 @@ Who is told, and what else they are told:
 |---|---|---|
 | Researcher (both prompts) | the `TIME BUDGET` cue, stamped per proposal | whether its own `eval_timeout` is honoured at all (`agent_control.timeout`) and how far it may raise the budget (`max_eval_timeout` clamps it) |
 | Developer (repo) | the stages + implement prompts (and, on a repair, the implement prompt is the only one it gets) | that a stage `timeout` longer than the budget is not more budget — nothing clamps it at the wall, so it runs, spending GPU-hours the run was not planned around, and `declare_stages` therefore refuses to declare one |
+
+#### Raising a LIVE run's eval budget: `budget_extend{eval_timeout}`
+
+**Added 2026-09-24.** On an eval-spec task the budget above is the task's own recorded
+`cmd.timeout`/profile timeouts, and `budget_extend{timeout}` does not reach it (it moves `timeout`,
+which that branch never reads). `minionerec-backbones` needed 12 h instead of 4 h and had to be
+restarted. `eval_timeout` is the durable live lever:
+
+```json
+POST /api/runs/<run>/commands   (Idempotency-Key: <key>)
+{"type": "budget_extend", "data": {"eval_timeout": 43200}, "expected_generation": "<64-hex>"}
+```
+
+* **Validation**: a finite number of seconds in `(0, 86400]` — the 24-hour ceiling every launch is
+  clamped to (`runtime/sandbox.py::MAX_TIMEOUT_S`), so a larger value is refused rather than
+  announced and then silently cut. Anything else is a rejected `invalid_command` record.
+* **Durability**: absolute and last-write-wins in `RunState.budget_overrides["eval_timeout"]`,
+  re-applied by `_apply_control_overrides` on every turn, so replay reproduces it and a resume sees
+  the last value (invariant #6 is not in play: the task snapshot is untouched, the override is its
+  own event).
+* **What moves** is decided by ONE rule, `runtime/command_eval.py::leashed_timeout`, applied to the
+  spec's timeouts (`with_eval_timeout` — base, profiles, operator-declared `stages[].timeout`) and to
+  the resolved chain (`engine/eval_stages.py::_eval_pipeline` — a Developer's `looplab_stages.json`
+  too): a leash declared **at or above** the recorded budget moves to the new value (up or down); a
+  **shorter** one (a 600 s `prep`, a 60 s smoke profile) is kept, and only cut if the new value is
+  below it. So `eval_spec_time_budget` becomes the new value, the protected `score` stage and every
+  stage declaring no timeout run under it, and `LOOPLAB_EVAL_TIMEOUT_S`/`LOOPLAB_EVAL_DEADLINE` carry
+  it.
+* **Who sees it**: the dispatcher and planners (`_eval_pipeline`), the Researcher's TIME BUDGET cue
+  (`effective_eval_time_budget`), the repair floor's pipeline license, and the repo Developer's note
+  and `declare_stages` bound — read off the RunState the engine binds before every build/repair. A
+  larger value also lifts `max_eval_timeout` for agent-requested timeouts.
+* **When**: evaluations DISPATCHED after the engine's next turn. A running evaluation keeps every
+  leash it was dispatched with, including stages it has not started yet — applying a value mid-eval
+  would make which stage ran under which leash depend on thread timing rather than on the log.
+  Setup, `run_setup` and holdout-scorer timeouts are separate declarations and do not move; the
+  static per-profile timeouts in a repo Researcher's `space_hint` (built once at role construction)
+  keep the launch values, while the per-proposal TIME BUDGET cue states the new one. On a task with
+  no eval spec `eval_timeout` only lifts the clamp — `timeout` is that branch's lever.
 
 #### The DEVICE COUNT has the same shape, and only the Researcher knew it
 
@@ -906,7 +945,7 @@ truly locks it — not just a UI hint: the Strategist's whole applied control su
 an explicit canonical entry takes precedence, including an empty allow-list that revokes the grant.
 A `budget_extend`, by contrast, is a **human control intent** — the boss action-builder can only
 emit `add_nodes`, so its resource fields (`max_seconds`, `max_eval_seconds`, `timeout`,
-`eval_parallel`, `llm_parallel`, plus legacy aliases) reach the log only from an operator and are
+`eval_timeout`, `eval_parallel`, `llm_parallel`, plus legacy aliases) reach the log only from an operator and are
 applied after bounded validation. (A human/operator
 pin via the UI/snapshot always wins — the matrix governs the autonomous agents, not the human.) The
 default grants those resource/search-shape knobs to the agents and keeps provider infrastructure

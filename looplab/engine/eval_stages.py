@@ -82,7 +82,7 @@ def stage_check_verdict_line(text: str) -> str:
 
 
 def manifest_prefix_unchanged(prev_manifest: object, stages: list, failed_stage: str,
-                              params: object = None) -> bool:
+                              params: object = None, leash=None) -> bool:
     """Does a stage-manifest edit leave the stages BEFORE `failed_stage` byte-identical?
 
     The one narrowing of `_safe_reuse_start`'s manifest clause, hoisted out of it so the rule has a
@@ -134,6 +134,11 @@ def manifest_prefix_unchanged(prev_manifest: object, stages: list, failed_stage:
     FALSE on anything it cannot resolve, and that is the default: with no `prev_manifest` (the
     keyword's absent value at every call site that has not been taught to pass one) this returns
     False and the caller forfeits exactly as it did before this function existed.
+
+    `leash` (2026-09-24) is `EvalStagesMixin._leash_stages`: `stages` is the RESOLVED chain, whose
+    declared timeouts carry the operator's live `budget_extend{eval_timeout}`, while `prev_manifest` is
+    raw text. The same leash is applied to the previous side so the compare stays a compare of the two
+    DECLARATIONS — without it every raised budget would read as a manifest edit and forfeit the reuse.
     """
     import json
     from looplab.core.jsonutil import canonical_json
@@ -154,6 +159,8 @@ def manifest_prefix_unchanged(prev_manifest: object, stages: list, failed_stage:
     prev = _entries(prev_manifest)
     if prev is None or not stages or not failed_stage:
         return False
+    if callable(leash):
+        prev = leash(prev)
     # UNFILTERED, deliberately: `_safe_reuse_start` derives its own `fi` from exactly this
     # expression, and dropping a non-dict here would index a filtered list while slicing an
     # unfiltered one — two stage lists that agree on every name and disagree about where the
@@ -596,8 +603,14 @@ class EvalStagesMixin:
         `"full"`). So it is a parameter here and each side passes what it has. What deliberately
         stays OUT is the dispatcher's two SIDE EFFECTS — `_ensure_run_setup` and `_sync_node_deps` —
         because a question about what WOULD run must never install anything."""
+        from looplab.engine.shared import effective_eval_spec
         from looplab.runtime import command_eval
-        es = self._eval_spec
+        # The spec as the operator's LIVE budget makes it (`budget_extend{eval_timeout}`): base,
+        # profile and operator-stage timeouts leashed (`command_eval.with_eval_timeout`), so the
+        # `score` stage, the single-command eval and every stage that declares no timeout run under
+        # it — and `_resolve_stages` records a Developer manifest's over-budget stages against the
+        # budget in force NOW, which is the one the Developer is told.
+        es = effective_eval_spec(self)
         prof = profile or (node.idea.eval_profile if node is not None else None)
         # A7 Strategist fidelity override: when the active strategy pins smoke/full and the node
         # didn't request a profile, use the strategy's. An explicit `profile` arg (confirm=full)
@@ -608,7 +621,28 @@ class EvalStagesMixin:
         cmd, timeout = command_eval.build_command(es, params, prof)
         stages = self._resolve_stages(str(Path(workdir).resolve()), es, params,  # cmd-authoritative pipeline (+ %params% per stage)
                                       score_cmd=cmd, score_timeout=timeout)      # profile/timeout survive pipeline mode
-        return cmd, timeout, stages
+        # …and the DEVELOPER's declared leashes, which the spec rewrite cannot reach: a
+        # `looplab_stages.json` `train` declared AT the old budget was bounded by it and moves with it
+        # (`command_eval.leashed_timeout`). Applied to the RESOLVED chain here — after `_resolve_stages`
+        # has recorded the manifest's raw over-budget facts — so the dispatcher and every planner
+        # (the repair floor's `declared_pipeline_seconds`, the watchdogs' log plan) see the leash that
+        # will actually kill the stage. Idempotent over the operator stages already leashed above.
+        return cmd, timeout, self._leash_stages(stages)
+
+    def _leash_stages(self, stages):
+        """A resolved stage chain under the operator's live `budget_extend{eval_timeout}` — `stages`
+        unchanged when none is recorded. The budget each declaration was sized against is the task's
+        RECORDED spec's (`self._eval_spec`), not the effective one: `leashed_timeout` asks "was this
+        leash bounded by the ceiling in force before the override", and only the recorded spec can
+        answer that. One method so `_eval_pipeline` and the reuse predicate's previous-manifest side
+        (`manifest_prefix_unchanged(leash=…)`) leash by the same rule."""
+        from looplab.runtime import command_eval
+        override = getattr(self, "_eval_timeout_override", None)
+        if override is None or not isinstance(stages, list):
+            return stages
+        es = self._eval_spec if isinstance(getattr(self, "_eval_spec", None), dict) else {}
+        return command_eval.leashed_stages(
+            stages, command_eval.eval_spec_time_budget(es), override)
 
     def _resolved_stages(self, node, workdir, profile=None) -> list:
         """Re-resolve the eval pipeline the way `_run_eval` does — used by the inline-repair reuse
@@ -1083,7 +1117,8 @@ class EvalStagesMixin:
         # wearing the name keeps the historical refusal, through that very clause.
         _manifest = {c for c in changed if str(c) == STAGE_MANIFEST_NAME}
         if _manifest:
-            if not manifest_prefix_unchanged(prev_manifest, stages, failed_stage, params):
+            if not manifest_prefix_unchanged(prev_manifest, stages, failed_stage, params,
+                                             leash=self._leash_stages):
                 return None
             # ACQUITTED — and therefore taken OUT of the change set, so the clauses below judge what
             # is left rather than re-refusing on the same file (the non-`.py` clause catches the

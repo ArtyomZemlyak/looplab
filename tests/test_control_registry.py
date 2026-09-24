@@ -253,7 +253,7 @@ def test_every_registered_budget_field_satisfies_the_budget_check(tmp_path):
     rd = _seed(tmp_path)
     srv = _Srv(tmp_path)
     values = {"add_nodes": 5, "max_seconds": 30, "max_eval_seconds": 30, "timeout": 30,
-              "eval_parallel": 2, "llm_parallel": 2, "max_parallel": 2, "parallel_build": 2}
+              "eval_timeout": 30, "eval_parallel": 2, "llm_parallel": 2, "max_parallel": 2, "parallel_build": 2}
     assert set(values) == set(CONTROL_DATA_FIELDS[EV_BUDGET_EXTEND]), (
         "this test must cover exactly the registered budget fields")
     for field, value in values.items():

@@ -1840,6 +1840,12 @@ def eval_spec_time_budget(eval_spec: Optional[dict]) -> Optional[float]:
     Since 2026-08-14 that divergence is REFUSED WHERE IT IS AUTHORED and RECORDED where it is not —
     see `stages_over_time_budget` below. `_run_stages` is deliberately unchanged: a clamp at the
     wall costs more than the overspend it prevents (the arithmetic is in that helper's docstring).
+
+    A LIVE operator override (`budget_extend{eval_timeout}`) is not read here: this answers for the
+    spec it is HANDED, and every caller that must see the override hands it `with_eval_timeout(es,
+    override)` (below) — the engine through `engine/shared.py::effective_eval_spec`, the repo
+    Developer through `_eval_time_budget`. One rule for the override, applied to the spec, so no
+    reader of the budget can come to disagree with `build_command` about it.
     """
     es = eval_spec or {}
     if not es:
@@ -1855,6 +1861,129 @@ def eval_spec_time_budget(eval_spec: Optional[dict]) -> Optional[float]:
         vals.append(600.0)
     cand = max((finite_timeout(v, 0.0) for v in vals), default=0.0)
     return cand if math.isfinite(cand) and cand > 0 else None
+
+
+# ------------------------------------------------------------------ the operator's LIVE eval budget
+#
+# `budget_extend{eval_timeout}` (2026-09-24). The key the fold stores the operator's override under in
+# `RunState.budget_overrides`, spelled once: the engine (`engine/width_settling.py::
+# _apply_control_overrides`) and the repo Developer (`adapters/repo_developer.py::_eval_time_budget`,
+# through the state it is bound to before every call) both read it through `eval_timeout_override`.
+EVAL_TIMEOUT_OVERRIDE_KEY = "eval_timeout"
+
+
+def eval_timeout_override(overrides) -> Optional[float]:
+    """The operator's live per-eval budget off a folded `budget_overrides` map, or None.
+
+    TOTAL over junk: the fold already refuses a non-finite/non-positive value, but a manually built
+    or forward-version `RunState` reaches this too, and a poison ceiling must read as "no override",
+    never as a NaN deadline that is never reached. Capped at `sandbox.MAX_TIMEOUT_S` — the ceiling
+    every launch is clamped to anyway (`finite_timeout`), so a larger number would be announced to
+    the roles and then not run."""
+    from looplab.runtime.sandbox import MAX_TIMEOUT_S
+    if not isinstance(overrides, dict):
+        return None
+    raw = overrides.get(EVAL_TIMEOUT_OVERRIDE_KEY)
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return min(value, MAX_TIMEOUT_S)
+
+
+def leashed_timeout(declared, budget: Optional[float], override: Optional[float]):
+    """One declared timeout under the operator's live budget `override`. THE rule, as a truth table.
+
+    `budget` is the budget the declaration was SIZED AGAINST — `eval_spec_time_budget` of the task's
+    own recorded spec, i.e. the ceiling in force before any override.
+
+      * no override (None)                 -> `declared`, untouched (byte-identical to before);
+      * `declared >= budget`               -> `override`: a leash that sat AT (or above) the old
+        ceiling was bounded BY that ceiling, so it moves with it — up when the operator raises it,
+        down when they lower it;
+      * `declared <  budget`               -> `min(declared, override)`: a shorter leash is its
+        author's own estimate (a 600 s `data_prep`, a 60 s smoke profile). Raising the ceiling does
+        not lengthen it; lowering the ceiling below it cuts it.
+
+    Idempotent (`leashed(leashed(t)) == leashed(t)`), so a timeout the spec-level rewrite already
+    moved can be passed through the chain-level one again without drift. A declaration that is not a
+    number is returned as-is: `finite_timeout` at the launch is the defensive back-stop for it.
+
+    WHY THIS SHAPE AND NOT "replace every timeout with the override". A pipeline's timeouts are
+    CEILINGS per piece, and only the pieces that were bounded by the operator's number are the
+    operator's to move. Replacing them all would give a hung 600 s `data_prep` a twelve-hour leash the
+    moment the budget is raised for training, and would give the smoke profile the full profile's
+    wall. And why not "raise only the base timeout": on the shape that motivated this
+    (`minionerec-backbones`, one `eval.command` plus a Developer-declared `train` stage) the stage
+    that is killed is the Developer's, declared AT the budget it was told — the base timeout alone
+    moves only the protected `score` stage, which was never the one running out of time.
+    """
+    if override is None:
+        return declared
+    if isinstance(declared, bool):
+        return declared
+    try:
+        value = float(declared)
+    except (TypeError, ValueError, OverflowError):
+        return declared
+    if not math.isfinite(value):
+        return declared
+    if budget is not None and value >= budget:
+        return float(override)
+    return min(value, float(override))
+
+
+def with_eval_timeout(eval_spec: Optional[dict], override: Optional[float]) -> dict:
+    """The eval spec as the operator's live budget `override` makes it — a COPY, never the input.
+
+    Every timeout the operator declared in the spec goes through `leashed_timeout` against the spec's
+    own budget: the base `timeout` (set to the override outright when the spec declares none, since
+    then `build_command`'s 600 s default was the budget), each profile's, and each operator-declared
+    `stages[].timeout`. So `eval_spec_time_budget(with_eval_timeout(es, N)) == N` for any active spec,
+    and `build_command` over the result is what a stage that declares no timeout falls back to.
+
+    `None`/empty in -> the input unchanged (the same object for an empty/None override, so the no-
+    override path is byte-identical). Setup/run_setup/holdout timeouts are NOT the evaluation's budget
+    and are left alone: they bound installs and the private grade, which the operator declares on
+    their own axes."""
+    es = eval_spec or {}
+    if override is None or not es:
+        return eval_spec if isinstance(eval_spec, dict) else {}
+    budget = eval_spec_time_budget(es)
+    out = dict(es)
+    out["timeout"] = (leashed_timeout(es["timeout"], budget, override)
+                      if es.get("timeout") is not None else float(override))
+    profiles = es.get("profiles")
+    if isinstance(profiles, dict):
+        out["profiles"] = {
+            name: (dict(prof, timeout=leashed_timeout(prof["timeout"], budget, override))
+                   if isinstance(prof, dict) and "timeout" in prof else prof)
+            for name, prof in profiles.items()}
+    stages = es.get("stages")
+    if isinstance(stages, list):
+        out["stages"] = leashed_stages(stages, budget, override)
+    return out
+
+
+def leashed_stages(stages, budget: Optional[float], override: Optional[float]):
+    """A resolved stage chain with every DECLARED stage `timeout` through `leashed_timeout`.
+
+    A stage that declares no timeout is left without one — it already falls back to the eval's own
+    (override-resolved) timeout in `_run_stages`. `None` override or a non-list in -> the input as-is.
+    Entries are copied, never mutated: the chain a planner holds and the one the dispatcher runs are
+    derived separately and must not alias."""
+    if override is None or not isinstance(stages, list):
+        return stages
+    out = []
+    for stage in stages:
+        if isinstance(stage, dict) and stage.get("timeout") is not None:
+            stage = dict(stage, timeout=leashed_timeout(stage["timeout"], budget, override))
+        out.append(stage)
+    return out
 
 
 def format_time_budget(budget: float) -> str:

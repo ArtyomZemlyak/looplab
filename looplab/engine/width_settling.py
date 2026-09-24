@@ -50,6 +50,7 @@ from looplab.core.models import RunState, effective_card_footprint
 from looplab.engine.widths import (EVAL_WIDTH_MAX, LLM_WIDTH_MAX, proposal_derived_width,
                                    settle_width)
 from looplab.events.types import EV_RUN_WIDTH_SETTLED
+from looplab.runtime.command_eval import eval_timeout_override
 
 _LOG = logging.getLogger(__name__)
 
@@ -315,6 +316,12 @@ class WidthSettlingMixin:
                     self.timeout = max(0.1, _timeout)
             except (TypeError, ValueError, OverflowError):
                 pass
+        # THE EVAL-SPEC BUDGET (`budget_extend{eval_timeout}`, 2026-09-24). Stored, not applied here:
+        # `_eval_spec` stays the task's recorded spec and every reader of its budget/timeouts goes
+        # through `shared.py::effective_eval_spec`, so an eval DISPATCHED after this turn runs under the
+        # new number while one already running keeps the leash it was dispatched with. Re-read off the
+        # fold every turn like the siblings above, which is what makes a resume see the last value.
+        self._eval_timeout_override = eval_timeout_override(_bo)
         # Legacy first, canonical last: a modern command carrying both spellings is deterministic.
         # Live 0 settles to serial width 1; only launch-time Settings retain hardware/eval AUTO.
         for _key in ("max_parallel", "eval_parallel"):

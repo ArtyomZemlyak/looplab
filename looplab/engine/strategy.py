@@ -43,6 +43,7 @@ from looplab.engine.cadence import (at_creation_boundary, cadence_due, cadence_m
 from looplab.engine.widths import EVAL_WIDTH_MAX, LLM_WIDTH_MAX, settle_width
 from looplab.engine.costs import bind_cost_accountants
 from looplab.engine.governance_health import GovernanceLedgerUnavailable
+from looplab.engine.shared import effective_max_eval_timeout
 # Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
 from looplab.engine.shared import engine_fold as fold
 from looplab.events.types import EV_COVERAGE_SNAPSHOT, EV_STRATEGY_DECISION
@@ -144,7 +145,9 @@ class StrategyCadenceMixin:
             card_scoring=current_card_scoring,
             # The ceiling `validate_strategy` clamps a Strategist `timeout` to (review 2026-09-22,
             # TAT-06) — the same operator-owned bound the Researcher's override meets.
-            max_eval_timeout=self.max_eval_timeout,
+            # Lifted to an operator's live `budget_extend{eval_timeout}` when that is larger
+            # (`shared.py::effective_max_eval_timeout`, the one clamp both agents meet).
+            max_eval_timeout=effective_max_eval_timeout(self),
             available_policies=available_policies(),
             available_developers=self._available_developers(),
             defaults=defaults,
