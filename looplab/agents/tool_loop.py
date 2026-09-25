@@ -30,6 +30,7 @@ from looplab.core.containment import contain
 from looplab.core.phase_events import (PHASE_CHECKPOINTED, PHASE_COMPLETED, PHASE_STARTED,
                                        emit_phase_event)
 from looplab.tools.clock import LoopClock, set_current_clock
+from looplab.core.errors import LLMCancelled
 from looplab.core.llm import BudgetExceeded, cancel_check_scope
 from looplab.tools._base import (RESULT_CAP, ToolCapability, ToolResult, collect_inventory,
                                  capability_manifest)
@@ -531,6 +532,13 @@ def _read_loop_stuck(read_state: dict | None, name: str, args: dict, nudge_after
         return None
     return (f"`{path}` read {entry['reads']}× this phase, still piecemeal after the re-read note — "
             "work from the copies already in this conversation")
+
+
+def _turn_deadline_grace(time_budget_s: float) -> float:
+    """How long a turn already in flight may run past the session's wall-clock budget before it is
+    cancelled: a tenth of the budget, never under two minutes — room for a turn that was about to
+    answer, not for a runaway one."""
+    return max(120.0, 0.1 * float(time_budget_s))
 
 
 def _deadline_note(clock: "LoopClock", emit_name: str) -> str:
@@ -1293,8 +1301,37 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         # forever, but publishing it still tells the client a token exists, and the client then polls
         # its backoffs instead of sleeping them (`core/llm_transient.py::sleep_or_cancel`). A loop
         # nobody can cancel must stay byte-identical to one that never heard of cancellation.
-        with cancel_check_scope(_cancelled if cancel_check is not None else None):
-            msg = client.chat(messages, tool_specs, tool_choice="auto")
+        # …AND THE WALL CLOCK, WHILE A TURN IS STILL GENERATING (2026-09-25). `time_budget_s` was read
+        # only between turns, so a turn started a minute before the wall ran to completion whatever
+        # it cost. Measured on MiniOneRec inf12: six of nine Developer plan sessions overran their
+        # 2400 s budget by 1.5-27 min (~79 min in all), one on a single 221k-token turn that ran 30
+        # minutes and returned nothing. Past the budget plus a grace (`_turn_deadline_grace`) the
+        # request is cancelled through the same token and the loop takes the wall-clock exit —
+        # salvage from what was gathered — instead of the cancellation's raise.
+        _deadline_hit = [False]
+
+        def _turn_cancelled() -> bool:
+            if cancel_check is not None and _cancelled():
+                return True
+            if time_budget_s and (time.monotonic() - started) > (
+                    time_budget_s + _turn_deadline_grace(time_budget_s)):
+                _deadline_hit[0] = True
+                return True
+            return False
+
+        with cancel_check_scope(_turn_cancelled if (cancel_check is not None or time_budget_s)
+                                else None):
+            try:
+                msg = client.chat(messages, tool_specs, tool_choice="auto")
+            except LLMCancelled:
+                if not _deadline_hit[0]:
+                    raise
+                msg = None
+        if msg is None:
+            exhausted = True
+            _note_budget(on_budget, "time", turns=turn_idx, seconds=time.monotonic() - started,
+                         detail=_spend_detail(client, _spend_at_start, cost_budget_usd))
+            break                       # the turn overran the wall -> salvage an emit below
         calls = msg.get("tool_calls") or []
         if not calls:
             # Model replied in prose instead of calling a tool — it's done exploring. Force the
