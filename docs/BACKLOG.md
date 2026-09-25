@@ -7264,8 +7264,10 @@ and it may change the shape; do not quote it as evidence until someone has.
 > first completion wins) over a service that owns state, and it keeps NO metric column — node
 > freezing and run comparability are prompt conventions. That is the inverse split of this tree,
 > so the shape it suggests for this entry is "the coding agent drives, the engine evaluates and
-> records": a CLI surface over the existing `CONTROL_EVENTS` (doc 67
-> `no-cli-control-surface-for-an-external-driver`) beside the two markers below. The paragraphs
+> records": a CLI surface that is a CLIENT of the durable `/commands` protocol over the existing
+> `CONTROL_EVENTS` (doc 67 `no-cli-control-surface-for-an-external-driver`) beside the two markers
+> below. That is a different reading of the ask than "Claude Code replaces our loops" — which one is
+> wanted is the owner's call (doc 67 §5). The paragraphs
 > below were written before the read and are left as written.
 
 **Why this is worth a real design pass rather than another backend preset.** The money is in the
