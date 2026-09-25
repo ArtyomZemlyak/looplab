@@ -328,12 +328,15 @@ def literature_overlap(text: str, literature, *, floor: float = LITERATURE_OVERL
 def _prior_outcome(node) -> str:
     """A tried experiment's outcome as the novelty judge needs it: an `inert_path` node never ran
     its idea (`engine/activation.py`), which is the difference between "tried" and "not built"."""
+    from looplab.core.idea_report import idea_report_note
     status = getattr(getattr(node, "status", None), "value", str(getattr(node, "status", "")))
     if status == "failed":
-        return f"failed:{getattr(node, 'error_reason', None) or 'unknown'}"
-    if status == "evaluated":
-        return f"metric={getattr(node, 'metric', None)}"
-    return status or "unknown"
+        head = f"failed:{getattr(node, 'error_reason', None) or 'unknown'}"
+    elif status == "evaluated":
+        head = f"metric={getattr(node, 'metric', None)}"
+    else:
+        head = status or "unknown"
+    return head + idea_report_note(node)
 
 class BatchProposal(NamedTuple):
     """What ONE batched proposal produced: `_propose_batch`'s RETURN VALUE (review 2026-09-22,

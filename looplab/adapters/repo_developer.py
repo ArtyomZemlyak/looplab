@@ -1193,6 +1193,21 @@ class LLMRepoDeveloper:
             "the node comes back to you for repair with that marker named. This replaces any "
             "declaration the node inherited; pass [] to declare none.")}
 
+    # Measured 2026-09-25 (MiniOneRec inf12): nodes 13, 14 and 17 were built under "de-duplicate the
+    # first decode step" and none contained it; nothing said so, and the idea was re-proposed and
+    # rejected as "already tried" four times (`engine/activation.py::IDEA_REPORT_NAME`).
+    _IDEA_FIDELITY_PROPERTIES = {
+        "idea_implemented": {
+            "type": "string", "enum": ["as_proposed", "partly", "different", "not_implemented"],
+            "description": (
+                "Did you build the idea you were given? as_proposed / partly / different (you built "
+                "something else) / not_implemented. Say it honestly: a node recorded under an idea "
+                "it does not contain makes the search believe that idea was tried.")},
+        "built_instead": {
+            "type": "string",
+            "description": "When not as_proposed: one sentence on what you built instead and why."},
+    }
+
     def _record_activation(self, args, write) -> str:
         """Persist the `activation_markers` a `done` declared, then return its summary.
 
@@ -1207,6 +1222,10 @@ class LLMRepoDeveloper:
                                                    normalize_markers)
             write.files[ACTIVATION_MANIFEST_NAME] = manifest_text(
                 normalize_markers(args.get("activation_markers")))
+        from looplab.core.idea_report import IDEA_REPORT_NAME, idea_report_text
+        report = idea_report_text(args)
+        if report is not None:
+            write.files[IDEA_REPORT_NAME] = report
         return args.get("summary", "")
 
     def _emit_spec(self) -> dict:
@@ -1215,7 +1234,8 @@ class LLMRepoDeveloper:
                         "Call once the file(s) are written and the eval command would run and print "
                         "its metric. Briefly summarize what you wrote.",
                         {"summary": {"type": "string"},
-                         "activation_markers": self._ACTIVATION_MARKERS_PROPERTY}, [])
+                         "activation_markers": self._ACTIVATION_MARKERS_PROPERTY,
+                         **self._IDEA_FIDELITY_PROPERTIES}, [])
 
     def _repair_emit_spec(self) -> dict:
         """The repair session's `done`, which carries ONE extra field the build sessions must not
@@ -1232,6 +1252,7 @@ class LLMRepoDeveloper:
                         "what you changed.",
                         {"summary": {"type": "string"},
                          "activation_markers": self._ACTIVATION_MARKERS_PROPERTY,
+                         **self._IDEA_FIDELITY_PROPERTIES,
                          # The Developer's ONLY way to say "the stage that broke is not the stage
                          # that is wrong". Everything the engine does with it is in
                          # `engine/eval_stages.py::_rollback_start`; the two things the model has to

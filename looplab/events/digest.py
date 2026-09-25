@@ -835,9 +835,11 @@ def sibling_digest(state: RunState, parent, *, fit: bool = False) -> str:
         return ""
     sibs.sort(key=lambda n: n.id, reverse=True)
     lines = ["\nSiblings of this expansion (already tried — push diversity, don't repeat):"]
+    from looplab.core.idea_report import idea_report_note
     for n in sibs[:5]:
         why = " ".join((n.idea.rationale or "").split())[:90]
-        lines.append(_node_line(n, state, fit=fit) + (f" — {why}" if why else ""))
+        lines.append(_node_line(n, state, fit=fit) + (f" — {why}" if why else "")
+                     + idea_report_note(n))
     return "\n".join(lines)
 
 

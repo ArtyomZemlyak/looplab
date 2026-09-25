@@ -107,3 +107,4 @@ def missing_markers(markers: Iterable[str], *, texts: Iterable[str] = (), workdi
         logs = _fresh_logs(workdir, since)
         missing = [m for m in missing if not any(m in h for h in logs)]
     return missing
+
