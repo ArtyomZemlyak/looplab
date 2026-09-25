@@ -7258,6 +7258,16 @@ flexible, simple and universal". The named reference is `https://github.com/alph
 the session that wrote this entry, so every claim here is about THIS tree. Reading it is step one
 and it may change the shape; do not quote it as evidence until someone has.
 
+> *Read 2026-09-25 — [doc 67](67-external-works-synergy-2026-09-25.md) §5.* The reference was
+> cloned and read (README, system prompt, every `agent-skills/*/SKILL.md`, the Rust store and
+> compute code). What it changes here: its agent IS the scheduler (`orx exp run` / `orx exp wait`,
+> first completion wins) over a service that owns state, and it keeps NO metric column — node
+> freezing and run comparability are prompt conventions. That is the inverse split of this tree,
+> so the shape it suggests for this entry is "the coding agent drives, the engine evaluates and
+> records": a CLI surface over the existing `CONTROL_EVENTS` (doc 67
+> `no-cli-control-surface-for-an-external-driver`) beside the two markers below. The paragraphs
+> below were written before the read and are left as written.
+
 **Why this is worth a real design pass rather than another backend preset.** The money is in the
 loop, not in the ideas. Measured over 19 runs in `looplab-bench/plots/node-count-analysis.md`
 ($29.83, 6,666 generations, 10,830 tool calls, 64 nodes): **95.3 %** of the spend is tool-loop
