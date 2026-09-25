@@ -1403,8 +1403,14 @@ class SpeculationMixin:
         # The node names this trace afterwards — see `_create_precoded_node` and
         # `traceview.claimed_build_traces`.
         card_id, build_generation = key
+        # …AND THE SAME PHASE-HANDOFF SCOPE the serial build opens (`node_build.py::_create_node`).
+        # Without it `run_phase` had no ledger to write to, so a speculative build's plan handed its
+        # steps nothing: measured 2026-09-25 on MiniOneRec inf12, 20 plan and 58 plan_step sessions
+        # ran under `card_build` with no brief, against 4 and 15 on the serial path.
+        from looplab.agents.agent import handoff_scope
         with self._op_span("card_build", card_id=card_id,
-                           card_build_generation=build_generation) as span:
+                           card_build_generation=build_generation) as span, \
+                handoff_scope(enabled=getattr(self, "_phase_handoff_summary", False)):
             # Read the id from the ACTIVE span rather than from the handle: `_op_span` degrades to a
             # null context when no tracer is wired, and a build with no trace must carry no claim.
             build_trace = tracing.current_ids()[0] if span is not None else None

@@ -388,6 +388,10 @@ _REPO_DEV_CO_PARENT_BLOCK = (
     "DIFFER from your working set (an identical file is named and not repeated). Recombine the "
     "strongest components of both lineages — stack or average their predictions, or merge their "
     "best pieces — rather than re-implementing either from its description.\n")
+# The plan's own findings, carried to every step (2026-09-25): measured on MiniOneRec inf12, step
+# sessions re-read 73% of what their plan had just read, and three plans separately concluded that the
+# same premise was false, none of it reaching the steps. `_propose_plan` / `_plan_outline`.
+_PLAN_FINDINGS_CHARS = 2000
 _CO_PARENT_FILE_CHARS = 6000       # per co-parent file shown
 _CO_PARENT_TOTAL_CHARS = 16000     # across every co-parent's files
 _CO_PARENT_MAX = 3                 # co-parents rendered (an ensemble merge has one or two)
@@ -1440,7 +1444,13 @@ class LLMRepoDeveloper:
                         {"steps": {"type": "array", "items": {"type": "object", "properties": {
                             "title": {"type": "string", "description": "short imperative title"},
                             "detail": {"type": "string", "description": "concretely what to change and why"}},
-                            "required": ["title"]}}},
+                            "required": ["title"]}},
+                         "findings": {"type": "string", "description": (
+                             "OPTIONAL, <= 2000 chars: what you ESTABLISHED while planning that the "
+                             "steps must not re-derive — where each change goes (file:function or "
+                             "file:line), facts about the code and libraries you verified, and any "
+                             "premise you found FALSE (already done, cannot work, not where the time "
+                             "goes). Every step session is shown it.")}},
                         ["steps"])
 
     def _propose_plan(self, system: str, idea: Idea, write=None, baseline_note: str = "", *,
@@ -1528,7 +1538,9 @@ class LLMRepoDeveloper:
             plan = run_phase(
                 self.client, read_only, messages, self._plan_emit_spec(),
                 label="Developer·plan", next_label="the implement phase",
-                finalize=lambda a: (a or {}).get("steps", []), fallback=lambda m: [],
+                finalize=lambda a: {"steps": (a or {}).get("steps", []),
+                                    "findings": (a or {}).get("findings", "")},
+                fallback=lambda m: [],
                 on_tool_result=self._established_hook("plan"),
                 **fence_kwargs(self._evidence_envelope),     # TAT-02: absent when off
                 **self._session_opts())
@@ -1536,11 +1548,16 @@ class LLMRepoDeveloper:
             raise
         except Exception:  # noqa: BLE001 — a failed plan phase just degrades to a single session
             return []
+        findings = ""
+        if isinstance(plan, dict):
+            findings = " ".join(str(plan.get("findings") or "").split())[:_PLAN_FINDINGS_CHARS]
+            plan = plan.get("steps") or []
         steps = []
         for s in (plan or [])[: getattr(self, "_plan_max_steps", 8)]:
             if isinstance(s, dict) and (s.get("title") or s.get("detail")):
                 steps.append({"title": str(s.get("title", "")).strip(),
-                              "detail": str(s.get("detail", "")).strip()})
+                              "detail": str(s.get("detail", "")).strip(),
+                              **({"findings": findings} if findings else {})})
         return steps
 
     def _step_feedback(self, write, *, index: int = 0) -> str:
@@ -3075,12 +3092,19 @@ class LLMRepoDeveloper:
         """
         if not getattr(self, "_phase_context", False) or not steps:
             return ""
+        findings = str((steps[0] or {}).get("findings") or "")
+        if findings and getattr(self, "_evidence_envelope", False):
+            from looplab.core.evidence import EVIDENCE_LABEL, fence_untrusted
+            findings = fence_untrusted(findings, EVIDENCE_LABEL)
+        notes = ("\n\nWHAT YOUR PLAN PHASE ESTABLISHED (its own notes — act on them instead of "
+                 "re-reading and re-probing; verify only what this step depends on):\n" + findings
+                 if findings else "")
         rows = []
         for n, step in enumerate(steps, 1):
             title = str((step or {}).get("title") or (step or {}).get("detail") or "")[:160]
             rows.append(f"  {n}. {title}" + ("   <- THIS STEP" if n == idx else ""))
         return ("\n\nTHE WHOLE PLAN (from your PLAN phase; one session per step, in this order — "
-                "earlier steps have run, later ones will):\n" + "\n".join(rows))
+                "earlier steps have run, later ones will):\n" + "\n".join(rows) + notes)
 
     def _run_fresh(self, idea: Idea, write, system: str, messages: list, tools, *,
                    stage_note: str, base_note: str, validate_build, co_parents=(),
