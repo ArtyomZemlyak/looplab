@@ -97,6 +97,7 @@ LAZY_ENGINE_ATTRIBUTES: dict[str, tuple[str, ...]] = {
     '_spec_raw_stage_result': ('speculation.py::_ensure_speculation_state', 'speculation.py::_produce_raw_card_stage', 'speculation.py::_serve_raw_card_stage'),
     '_spec_pair_leases': ('speculation.py::_drop_producer_pool', 'speculation.py::_ensure_speculation_state', 'strategy.py::_ensure_surrogate'),
     '_spec_request_builder': ('speculation.py::_ensure_speculation_state',),
+    '_spec_raw_adopted': ('speculation.py::_card_phase_request_build', 'speculation.py::_ensure_speculation_state', 'speculation.py::_produce_raw_card_stage'),
     '_spec_reusable': ('speculation.py::_ensure_speculation_state',),
     '_spec_role_pair': ('speculation.py::_drop_producer_pool', 'speculation.py::_ensure_speculation_state', 'speculation.py::_producer_role_pair', 'strategy.py::_ensure_surrogate'),
     '_spec_role_pairs': ('speculation.py::_drop_producer_pool', 'speculation.py::_ensure_producer_pool', 'speculation.py::_ensure_speculation_state', 'strategy.py::_ensure_surrogate'),

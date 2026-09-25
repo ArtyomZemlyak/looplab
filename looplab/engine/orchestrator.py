@@ -1929,8 +1929,18 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 # with requests still open (a result to commit, an adopted build still running) sets
                 # `_card_boundary_debt`; without this the open head would send the loop straight back
                 # into a session and the cadences below — the turn it returned FOR — would never run.
-                if ((self._head_request(speculative_state) is not None or speculative_state.buildings)
-                        and not getattr(self, "_card_boundary_debt", False)):
+                # COMMIT FIRST, THEN PAY IT (2026-09-25, critic review of the boundary wait). A build
+                # that finished while the boundary was owed is committed here, before the cadences:
+                # 8d9952a1's rule was about STARTING work across the boundary, and the claim re-checks
+                # epoch, freshness, budget and the Card itself. Not while the run is stopping or an
+                # operator's fork/inject waits for the slot.
+                if self._commit_ready_builds_before_cadence(speculative_state, max_es):
+                    speculative_state = fold(self.store.read_all())
+                if (((self._head_request(speculative_state) is not None or speculative_state.buildings)
+                        and not getattr(self, "_card_boundary_debt", False))
+                        # A run-ahead proposal that finished between sessions (width > 1) is staged by a
+                        # session too, or the outer loop would propose the same next Card itself.
+                        or getattr(self, "_spec_raw_stage_result", None) is not None):
                     await self._run_card_session(
                         [],
                         speculative_state,

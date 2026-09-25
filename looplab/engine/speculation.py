@@ -739,6 +739,9 @@ class SpeculationMixin:
             # Bumped when the Strategist swaps the Developer backend (which drops every lease): a
             # build started under an older generation is never committed (`_serve_card_builds`).
             self._spec_builder_generation = 0
+        if not hasattr(self, "_spec_raw_adopted"):
+            # The raw proposal in flight runs in the run-scoped group (width > 1), not the session's.
+            self._spec_raw_adopted = False
         if not hasattr(self, "_spec_reusable"):
             # Finished builds closed `not_selected_now` (width > 1), kept for a re-election of the
             # same Card at the same epoch (`_serve_card_builds`, `_start_request_producer`).
@@ -825,7 +828,9 @@ class SpeculationMixin:
         # and a run that finalizes or raises its ceiling over one would lose paid work or leave its
         # worker behind the teardown (`abandon_on_cancel=False`).
         adopted = getattr(self, "_adopted_producers", None)   # absent on eval-only stub hosts
-        while self._evals_inflight() or (adopted is not None and adopted()):
+        while (self._evals_inflight() or (adopted is not None and adopted())
+               or (getattr(self, "_spec_raw_adopted", False)
+                   and getattr(self, "_spec_raw_stage_inflight", False))):
             await anyio.sleep(0.05)
 
     async def _raise_deferred_eval_budget_stop(self) -> None:
@@ -956,6 +961,13 @@ class SpeculationMixin:
         if holder in self._spec_pair_leases:
             index = self._spec_pair_leases[holder]
             return self._spec_role_pair if index == 0 else self._spec_role_pairs[index - 1]
+        if holder == "raw" and width > 1:
+            # THE RUN-AHEAD LANE'S OWN PAIR (2026-09-25): pair N+1, never one a build can lease, so
+            # a proposal runs while every build producer is busy (`_card_phase_request_build`).
+            if self._ensure_producer_pool(width + 1) <= width:
+                return None
+            self._spec_pair_leases[holder] = width
+            return self._spec_role_pairs[width - 1]
         pool = self._ensure_producer_pool(width)
         held = set(self._spec_pair_leases.values())
         for index in range(pool):
@@ -1021,6 +1033,8 @@ class SpeculationMixin:
         keys = {key for request in self._outstanding_requests(state)
                 if (key := self._request_key(request)) is not None}
         keys |= set(self._spec_build_inflight)
+        if self._speculative_producer_width(state) > 1:
+            return len(keys)            # the run-ahead proposal lane holds no build slot
         raw = bool(self._spec_raw_stage_inflight or self._spec_raw_stage_result is not None)
         return len(keys) + int(raw)
 
@@ -2306,6 +2320,27 @@ class SpeculationMixin:
                 self._discard_spec_result(result)
         return closed
 
+    def _commit_ready_builds_before_cadence(self, state: RunState,
+                                            max_eval_seconds: Optional[float]) -> bool:
+        """Commit every FINISHED build a session handed back with, before the outer cadence pass.
+
+        A session owed the boundary leaves a finished result in `_spec_builds` and sets
+        `_card_boundary_debt`; the outer loop used to run its whole cadence pass first. 8d9952a1's rule
+        concerns STARTING work across the boundary, and the claim (`_claim_requested_card_build`)
+        re-checks epoch, freshness, budget and the Card, so the commit need not wait (critic review,
+        2026-09-25). Not while the run is stopping or an operator's fork/inject waits for the slot.
+        True when anything was served."""
+        self._ensure_speculation_state()
+        if (not getattr(self, "_card_boundary_debt", False) or state.halted
+                or self._operator_node_request_ready(state)):
+            return False
+        served = False
+        for _index, request in self._outstanding_positions(state):
+            if self._request_key(request) in self._spec_builds:
+                served = self._serve_card_builds(
+                    max_eval_seconds, allow_commit=True, request=request) or served
+        return served
+
     def _close_card_build_before_terminal_gate(
         self,
         state: RunState,
@@ -2533,6 +2568,7 @@ class SpeculationMixin:
 
         def _release() -> None:
             self._release_producer_pair("raw")
+            self._spec_raw_adopted = False
             self._spec_raw_stage_inflight = False
 
         await self._run_isolated_producer(
@@ -3406,13 +3442,24 @@ class SpeculationMixin:
         # MiniOneRec inf12 (48-second evaluations, builds of hours), gating on a running eval meant
         # at most one election per evaluation window and the second producer idle for hours.
         wide = self._speculative_producer_width(current) > 1
+        # THE RUN-AHEAD LANE (2026-09-25, critic review of "K raw lanes"): wider than one, the raw
+        # proposal lane holds its own pair and no build slot, so it may propose the NEXT Card while
+        # every build producer is busy. Measured on MiniOneRec inf12: counting it as a build slot meant
+        # no Card was proposed while both producers built, and a freed producer then waited a whole
+        # 15-30 min proposal before its next build.
+        raw_lane_free = (wide and not self._spec_raw_stage_inflight
+                         and self._spec_raw_stage_result is None)
+        if not ((consumer_active or wide)
+                and session.open_for_production(self._session_gates(current, session))):
+            return False
+        # Asked only past the two cheap gates: it builds the producer pool, i.e. calls the role
+        # factory, and a dead factory must be asked once per turn, not once per question.
+        can_elect = self._busy_producers(current) < self._producer_capacity(current)
         if not (
-            (consumer_active or wide)
-            and session.open_for_production(self._session_gates(current, session))
-            # A free producer: every open request, running build and the raw lane holds one, and
-            # the width is `llm_parallel` (`_speculative_producer_width`). At width 1 this is the
-            # historical "no head, nothing in flight, no raw proposal".
-            and self._busy_producers(current) < self._producer_capacity(current)
+            # A free producer: every open request, running build and (at width 1) the raw lane holds
+            # one, and the width is `llm_parallel` (`_speculative_producer_width`). At width 1 this is
+            # the historical "no head, nothing in flight, no raw proposal".
+            (can_elect or raw_lane_free)
             and self._unadmitted_prefetch(
                 current,
                 consumed_inflight=session.eval_inflight,
@@ -3426,7 +3473,7 @@ class SpeculationMixin:
         ):
             await anyio.sleep(0)
             return True
-        requested = self._request_card_build(
+        requested = can_elect and self._request_card_build(
             consumed_inflight=session.eval_inflight,
         )
         if not requested:
@@ -3444,7 +3491,8 @@ class SpeculationMixin:
             proposal_events = self.store.read_all()
             proposal_state = fold(proposal_events)
             if (
-                self._busy_producers(proposal_state) < self._producer_capacity(proposal_state)
+                (wide or self._busy_producers(proposal_state)
+                 < self._producer_capacity(proposal_state))
                 # ONE raw proposal at a time, whatever the build width: the lane has ONE result slot
                 # (`_spec_raw_stage_result`), ONE lease ("raw") and ONE in-flight flag. Measured
                 # 2026-09-24 on MiniOneRec inf12 at width 2: counting the lane as one busy producer
@@ -3477,7 +3525,8 @@ class SpeculationMixin:
                     ),
                 )
                 roles = (self._producer_pair_for(
-                    "raw", self._producer_capacity(proposal_state)) if raw_actions else None)
+                    "raw", self._speculative_producer_width(proposal_state) if wide
+                    else self._producer_capacity(proposal_state)) if raw_actions else None)
                 if raw_actions and roles is not None:
                     proposal_node_ceiling = self._node_id_ceiling(
                         proposal_events, proposal_state,
@@ -3491,18 +3540,25 @@ class SpeculationMixin:
                     # below would keep counting it in `memory_pending`, and the
                     # NEXT `_run_card_session` could never reach a break condition.
                     self._spec_raw_stage_inflight = True
+                    # Wider than one the proposal is ADOPTED like a build: the run-scoped group runs
+                    # it and the current session serves its result, so a session owed the outer
+                    # boundary is not held open by a 15-30 min Researcher call (measured: card-14,
+                    # card-15 and card-8 waited 11, 21 and 59 min for exactly that, GPU idle).
+                    adopt = wide and self._eval_task_group is not None
+                    self._spec_raw_adopted = adopt
                     try:
-                        session.task_group.start_soon(
+                        (self._eval_task_group if adopt else session.task_group).start_soon(
                             self._produce_raw_card_stage,
                             dict(raw_actions[0]),
                             proposal_events,
                             proposal_state,
                             proposal_node_ceiling,
                             roles,
-                            session.notify,
+                            _CurrentSessionNotify(self) if adopt else session.notify,
                         )
                     except BaseException:
                         self._spec_raw_stage_inflight = False
+                        self._spec_raw_adopted = False
                         self._release_producer_pair("raw")
                         raise
                     session.progressed = True
@@ -3557,7 +3613,7 @@ class SpeculationMixin:
         closing_holds = bool(
             building
             or (set(self._spec_build_inflight) - adopted)
-            or self._spec_raw_stage_inflight
+            or (self._spec_raw_stage_inflight and not self._spec_raw_adopted)
             or self._spec_raw_stage_result is not None
             or getattr(self, "_inject_lanes_inflight", 0)
             or waiting

@@ -605,3 +605,93 @@ def test_a_build_closed_not_selected_now_is_reused_when_its_card_is_re_elected(t
     closes = [e.data for e in engine.store.read_all() if e.type == EV_CARD_BUILD_DONE]
     assert closes[-1]["card_id"] == "card-2" and "node_id" in closes[-1], closes
     assert calls.count("card-2") == 1, "the intact build was not paid for twice"
+
+
+# ------------------------------------------------------------ the run-ahead proposal lane (width > 1)
+
+def _run_ahead_engine(tmp_path, monkeypatch, gauge):
+    engine, _unused = _engine(tmp_path / "run-ahead", depth=1)
+    log: list = []
+    engine.role_factory = lambda: (_CountingRawResearcher(gauge), _GatedDeveloper(log))
+    engine._llm_parallel = 2
+    engine._llm_parallel_launched = 2
+    engine._llm_parallel_startup_auto = False
+    engine._eval_parallel = 4
+    _without_research(monkeypatch, engine)
+    _start(engine)
+    _add_ready_draft(engine, "card-0", x=0.1)
+    _add_ready_draft(engine, "card-1", x=0.2)
+    _add_ready_draft(engine, "card-2", x=0.3)
+    _GatedDeveloper.gate = False
+    _commit_speculative_node(engine)
+    _GatedDeveloper.gate = True
+    release = threading.Event()
+
+    async def _held_eval(node_id, _limiter, _max_es):
+        await anyio.to_thread.run_sync(release.wait, 30)
+        node = fold(engine.store.read_all()).nodes[node_id]
+        engine.store.append(EV_NODE_EVALUATED, {
+            "node_id": node_id, "generation": node.attempt, "metric": 0.0, "eval_seconds": 0.0})
+
+    monkeypatch.setattr(engine, "_evaluate", _held_eval)
+    return engine, log, release
+
+
+def test_the_next_card_is_proposed_while_every_build_producer_is_busy(tmp_path, monkeypatch):
+    """Critic review, 2026-09-25: counting the raw lane as a build slot meant no Card was proposed
+    while both producers built, and a freed producer then waited a whole proposal. At width 2 the
+    lane has its own pair and runs ahead."""
+    gauge = {"lock": threading.Lock(), "live": 0, "peak": 0, "calls": 0}
+    engine, log, release = _run_ahead_engine(tmp_path, monkeypatch, gauge)
+    seen = {}
+
+    async def scenario():
+        async with anyio.create_task_group() as eval_tg:
+            engine._eval_task_group = eval_tg
+            done = anyio.Event()
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(_outer_loop, engine, done.is_set)
+                with anyio.fail_after(20):
+                    while not (_live(log) >= 2 and gauge["calls"] >= 1):
+                        await anyio.sleep(0.02)
+                seen["builds_live"] = _live(log)
+                for _what, _card, developer in list(log):
+                    developer.release.set()
+                _GatedDeveloper.gate = False
+                release.set()
+                done.set()
+                tg.cancel_scope.cancel()
+
+    anyio.run(scenario)
+    assert seen["builds_live"] == 2 and gauge["calls"] >= 1
+    assert gauge["peak"] == 1, "still ONE proposal at a time"
+    builders = {id(developer) for _what, _card, developer in log}
+    assert len(builders) == 2, "the proposal lane never takes a build pair"
+
+
+def test_a_finished_build_is_committed_before_the_cadence_pass_but_not_while_stopping(tmp_path, monkeypatch):
+    from tests.test_card_speculation_engine import _build_result
+    engine, _unused = _engine(tmp_path / "commit-first", depth=1)
+    engine.role_factory = lambda: (_Researcher(), _GatedDeveloper([]))
+    engine._llm_parallel = 2
+    engine._llm_parallel_launched = 2
+    engine._llm_parallel_startup_auto = False
+    _GatedDeveloper.gate = False
+    _start(engine)
+    _add_ready_draft(engine, "card-1", x=0.2)
+    assert engine._request_card_build() is True
+    request = engine._head_request(fold(engine.store.read_all()))
+    result = _build_result(engine, request)
+    engine._spec_builds[result.key] = result
+    state = fold(engine.store.read_all())
+    assert engine._commit_ready_builds_before_cadence(state, None) is False, "no debt, no commit"
+    engine._card_boundary_debt = True
+    engine.store.append("pause", {"reason": "operator"})
+    paused = fold(engine.store.read_all())
+    assert paused.halted
+    assert engine._commit_ready_builds_before_cadence(paused, None) is False, "not while stopping"
+    engine.store.append("resume", {})
+    state = fold(engine.store.read_all())
+    assert engine._commit_ready_builds_before_cadence(state, None) is True
+    closes = [e.data for e in engine.store.read_all() if e.type == EV_CARD_BUILD_DONE]
+    assert "node_id" in closes[-1], closes
