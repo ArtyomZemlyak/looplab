@@ -1201,7 +1201,7 @@ def test_propose_batch_uses_a_native_backend_when_present(tmp_path):
     eng.researcher = _BatchResearcher()
     original_gate = eng._apply_novelty_gate
 
-    def _record_gate(state, idea, repropose=None, researcher=None, prospective_node_id=None):
+    def _record_gate(state, idea, repropose=None, researcher=None, prospective_node_id=None, **_kw):
         gated.append((idea.params["x"], callable(repropose), researcher is eng.researcher,
                       prospective_node_id))
         return original_gate(
@@ -1353,7 +1353,7 @@ def test_serial_draft_improve_and_batch_bind_the_exact_persisted_idea(tmp_path):
     def _capture(eng):
         bindings = []
 
-        def _gate(state, idea, repropose=None, researcher=None, prospective_node_id=None):
+        def _gate(state, idea, repropose=None, researcher=None, prospective_node_id=None, **_kw):
             bindings.append(eng._proposal_binding(state, idea, prospective_node_id))
             return idea
 
@@ -1427,7 +1427,7 @@ def test_capability_expand_operator_is_bound_before_improve_novelty(tmp_path, mo
     eng.researcher = _Researcher()
     seen = []
 
-    def _gate(state, idea, repropose=None, researcher=None, prospective_node_id=None):
+    def _gate(state, idea, repropose=None, researcher=None, prospective_node_id=None, **_kw):
         seen.append((idea.operator, eng._proposal_binding(state, idea, prospective_node_id)))
         return idea
 

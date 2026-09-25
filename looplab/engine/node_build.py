@@ -916,7 +916,8 @@ class NodeBuildMixin:
     def _prepare_node_idea(self, action: dict, state: RunState, *, researcher,
                            prospective_node_id: int, source: str,
                            proposal_events=None, preproposed=None,
-                           already_gated: bool = False) -> Optional[Idea]:
+                           already_gated: bool = False,
+                           drop_repeated_duplicate: bool = False) -> Optional[Idea]:
         """Finish the concrete Idea before Card/node reservation, without implementing code.
 
         A native ownership receipt binds the final operator/params/space/profile/footprint, so the
@@ -1088,7 +1089,8 @@ class NodeBuildMixin:
                     state, idea,
                     repropose=lambda: _link(self._canonicalize_draft_idea(
                         researcher.propose(state, None))),
-                    researcher=researcher, prospective_node_id=prospective_node_id)
+                    researcher=researcher, prospective_node_id=prospective_node_id,
+                    drop_repeated_duplicate=drop_repeated_duplicate)
             return _link(final)
 
         if kind == "merge":
@@ -1144,7 +1146,8 @@ class NodeBuildMixin:
                                  node_id=prospective_node_id, prospective=True, operator=kind):
             final = self._apply_novelty_gate(
                 state, idea, repropose=_repropose,
-                researcher=researcher, prospective_node_id=prospective_node_id)
+                researcher=researcher, prospective_node_id=prospective_node_id,
+                drop_repeated_duplicate=drop_repeated_duplicate)
         return _link(final, receipt_from=answered_by[0])
 
     @in_llm_lane("build")
@@ -1240,7 +1243,7 @@ class NodeBuildMixin:
                     action, proposal_state, researcher=researcher,
                     prospective_node_id=prospective_node_id,
                     source=source, proposal_events=proposal_events, preproposed=preproposed,
-                    already_gated=already_gated)
+                    already_gated=already_gated, drop_repeated_duplicate=True)
             if idea is None:
                 self._discard_node_build_telemetry(researcher=researcher, developer=developer)
                 return

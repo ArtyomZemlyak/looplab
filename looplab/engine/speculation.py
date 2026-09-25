@@ -2458,6 +2458,7 @@ class SpeculationMixin:
                     prospective_node_id=proposal_node_ceiling,
                     source=source,
                     proposal_events=proposal_events,
+                    drop_repeated_duplicate=True,
                 )
                 audit_events.extend(captured)
             steering = tuple(getattr(researcher, "_steering_context", []) or [])

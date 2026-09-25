@@ -324,6 +324,17 @@ def literature_overlap(text: str, literature, *, floor: float = LITERATURE_OVERL
     return out[:limit]
 
 
+
+def _prior_outcome(node) -> str:
+    """A tried experiment's outcome as the novelty judge needs it: an `inert_path` node never ran
+    its idea (`engine/activation.py`), which is the difference between "tried" and "not built"."""
+    status = getattr(getattr(node, "status", None), "value", str(getattr(node, "status", "")))
+    if status == "failed":
+        return f"failed:{getattr(node, 'error_reason', None) or 'unknown'}"
+    if status == "evaluated":
+        return f"metric={getattr(node, 'metric', None)}"
+    return status or "unknown"
+
 class BatchProposal(NamedTuple):
     """What ONE batched proposal produced: `_propose_batch`'s RETURN VALUE (review 2026-09-22,
     ENG1-12).
@@ -643,22 +654,14 @@ class NoveltyGateMixin:
             return best_n, best_s
         return None, best_s
 
-    def _llm_novelty_gate(self, state: RunState, idea: Idea, repropose=None, researcher=None,
-                          prospective_node_id=None) -> Idea:
-        """novelty_mode="llm": an LLM (not an embedding/param-distance heuristic) judges whether the
-        proposed idea near-duplicates an already-tried experiment — READING the real experiments via
-        tools when unsure — and, if it does and a `repropose` callable is given, asks the Researcher once
-        more for a meaningfully different idea (surfacing the duplicate's outcome). Loop-safe + best-
-        effort: any failure just returns the original idea. Emits the same `novelty_rejected` audit
-        event (kind="llm") the algorithmic gate does."""
-        if not state.nodes:
-            return idea
-        try:
-            client = self._reflect_client()
-        except Exception:  # noqa: BLE001
-            client = None
-        if client is None:
-            return idea
+    def _llm_duplicate_verdict(self, state: RunState, idea: Idea, client):
+        """The adjudication itself: `(duplicated node, reason)`, or None when the idea is novel or the
+        judge could not answer. Split out of `_llm_novelty_gate` so a RE-PROPOSAL can be judged by the
+        same call (2026-09-25): until then the gate's second proposal was never checked, and on
+        MiniOneRec inf12 the Researcher handed back the rejected idea reworded (card-17, card-18),
+        which became a Card and a build."""
+        if not state.nodes or client is None:
+            return None
         from pydantic import BaseModel
         from looplab.agents.agent import agentic_struct
         from looplab.tools.run_tools import readonly_run_tools
@@ -678,7 +681,7 @@ class NoveltyGateMixin:
             node_operator = json.dumps(
                 _bounded_prompt_text(getattr(node, "operator", ""), 160), ensure_ascii=False)
             row = (
-                f"#{node.id} node_operator={node_operator}: "
+                f"#{node.id} node_operator={node_operator} outcome={_prior_outcome(node)}: "
                 f"{self._idea_prompt_identity(node.idea, prose_chars=240)}"
             )
             if used + len(row) + (1 if prior_rows else 0) > _IDEA_PROMPT_PRIOR_CHARS:
@@ -698,6 +701,10 @@ class NoveltyGateMixin:
                              "approach, component, loss, data or direction is NOVEL. Compare both the claim "
                              "and the bounded action identity: operator, params, search space, eval profile "
                              "and the governed evaluation-timeout override are part of what was tried. "
+                             "An experiment whose recorded idea NEVER RAN is not a tried idea: an "
+                             "`inert_path` outcome, or code that shows the idea was not implemented "
+                             "(read_code / diff when the outcome alone does not settle it), means the "
+                             "idea is still untested, and a proposal to actually implement it is NOVEL. "
                              "Prefer NOVEL unless clearly a repeat."},
                  {"role": "user",
                   "content": f"PROPOSED idea: {self._idea_prompt_identity(idea, prose_chars=800)}"
@@ -709,7 +716,7 @@ class NoveltyGateMixin:
         # block proposing.
         tools = readonly_run_tools(state)
         if tools is None:
-            return idea
+            return None
         try:
             # `read_experiment` / `read_code` return the candidates' own code and output, fenced when
             # the run's evidence envelope is on (review 2026-09-22, TAT-02).
@@ -721,20 +728,71 @@ class NoveltyGateMixin:
             # 2026-09-22, TAT-01 / SCJ-03 / ENG1-09).
             raise
         except Exception:  # noqa: BLE001 — a failed adjudication admits: this gate must never block proposing
-            return idea
+            return None
         if not (v and getattr(v, "is_duplicate", False)
                 and isinstance(v.near_node_id, int) and v.near_node_id in state.nodes):
+            return None
+        return state.nodes[v.near_node_id], str(v.reason)
+
+    def _llm_novelty_gate(self, state: RunState, idea: Idea, repropose=None, researcher=None,
+                          prospective_node_id=None, drop_repeated_duplicate: bool = False
+                          ) -> Optional[Idea]:
+        """novelty_mode="llm": an LLM (not an embedding/param-distance heuristic) judges whether the
+        proposed idea near-duplicates an already-tried experiment — READING the real experiments via
+        tools when unsure — and, if it does and a `repropose` callable is given, asks the Researcher once
+        more for a meaningfully different idea (surfacing the duplicate's outcome). Loop-safe + best-
+        effort: any failure just returns the original idea. Emits the same `novelty_rejected` audit
+        event (kind="llm") the algorithmic gate does."""
+        if not state.nodes:
             return idea
-        dup = state.nodes[v.near_node_id]
+        try:
+            client = self._reflect_client()
+        except Exception:  # noqa: BLE001
+            client = None
+        if client is None:
+            return idea
+        verdict = self._llm_duplicate_verdict(state, idea, client)
+        if verdict is None:
+            return idea
+        dup, reason = verdict
         outcome = (f"it FAILED ({dup.error_reason})" if dup.status is NodeStatus.failed
                    else f"it scored {dup.metric}")
-        return self._reject_and_repropose(
+        reproposed = self._reject_and_repropose(
             state, idea, dup, kind="llm",
             hint=(f"\nNOVELTY GATE (LLM): your proposal near-duplicates experiment #{dup.id} — "
-                  f"{outcome} ({str(v.reason)[:160]}). Propose something MEANINGFULLY DIFFERENT "
+                  f"{outcome} ({reason[:160]}). Propose something MEANINGFULLY DIFFERENT "
                   "(another approach, component or direction), not a rewording."),
-            payload={"reason": str(v.reason)[:200]}, repropose=repropose,
+            payload={"reason": reason[:200]}, repropose=repropose,
             researcher=researcher, prospective_node_id=prospective_node_id)
+        if not drop_repeated_duplicate or reproposed is None or reproposed is idea:
+            return reproposed
+        # THE SECOND PROPOSAL IS JUDGED TOO, where nothing is reserved yet (the raw lane and Card
+        # staging pass `drop_repeated_duplicate`): a re-proposal that is still a duplicate is dropped
+        # rather than minted into a Card and built.
+        again = self._llm_duplicate_verdict(state, reproposed, client)
+        if again is None:
+            return reproposed
+        self._append_proposal_event(EV_NOVELTY_REJECTED, {
+            **self._rejection_audit(state, reproposed, again[0], kind="llm",
+                                    payload={"reason": again[1][:200]},
+                                    prospective_node_id=prospective_node_id),
+            "action": "dropped"})
+        return None
+
+    def _rejection_audit(self, state, idea, dup, *, kind: str, payload: dict,
+                         prospective_node_id) -> dict:
+        """The one `novelty_rejected` payload body, shared by the reject-and-repropose protocol and the
+        drop of a re-proposal that is still a duplicate; each caller adds only its `action`."""
+        return {
+            **self._proposal_binding(state, idea, prospective_node_id),
+            **self._near_binding(state, dup.id), "kind": kind, **payload,
+            "stance": self._novelty_stance,
+            # The papers this run READ that describe the same thing (doc 52 row 32). On the audit row
+            # rather than in the decision: the gate rejected a duplicate of a NODE, and whether the
+            # literature also describes it is a separate fact a reader needs and the gate must not act
+            # on — running an experiment a paper describes is often exactly the right move.
+            **self._literature_note(state, idea),
+        }
 
     def _reject_and_repropose(self, state, idea, dup, *, kind: str, hint: str,
                               payload: dict, repropose, researcher, prospective_node_id):
@@ -755,16 +813,8 @@ class NoveltyGateMixin:
         """
         original = idea
         original_digest = idea_proposal_digest(original)
-        audit = {
-            **self._proposal_binding(state, original, prospective_node_id),
-            **self._near_binding(state, dup.id), "kind": kind, **payload,
-            "stance": self._novelty_stance,
-            # The papers this run READ that describe the same thing (doc 52 row 32). On the audit row
-            # rather than in the decision: the gate rejected a duplicate of a NODE, and whether the
-            # literature also describes it is a separate fact a reader needs and the gate must not act
-            # on — running an experiment a paper describes is often exactly the right move.
-            **self._literature_note(state, original),
-        }
+        audit = self._rejection_audit(state, original, dup, kind=kind, payload=payload,
+                                      prospective_node_id=prospective_node_id)
         if callable(repropose):
             try:
                 # THE PROMPT HALF, and the only one behind the flag: when the run's own reading
@@ -1648,7 +1698,8 @@ class NoveltyGateMixin:
 
     @in_llm_lane("novelty_dedup")
     def _apply_novelty_gate(self, state: RunState, idea: Idea, repropose=None, researcher=None,
-                            prospective_node_id=None) -> Idea:
+                            prospective_node_id=None, drop_repeated_duplicate: bool = False
+                            ) -> Optional[Idea]:
         """E1+T5: novelty/dedup gate over fresh proposals, BEFORE any compute is spent.
         Two layers:
         (1) SEMANTIC (T5, ShinkaEvolve `novelty rejection before evaluation`): if the idea TEXT is a
@@ -1704,7 +1755,8 @@ class NoveltyGateMixin:
         if mode == "llm":
             return self._llm_novelty_gate(
                 state, idea, repropose, researcher=researcher,
-                prospective_node_id=prospective_node_id)
+                prospective_node_id=prospective_node_id,
+                drop_repeated_duplicate=drop_repeated_duplicate)
         # "off" reaches here only under an "explore" stance (the guard at the top of this function),
         # which is exactly when the stance means to engage the cheap deterministic dedup.
         if not (mode == "algo" or self._novelty_stance == "explore"):
