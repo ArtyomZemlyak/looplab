@@ -2798,6 +2798,29 @@ class RunState(BaseModel):
         return [c for c in self.research_cards()
                 if c.verdict == "open" and c.status != "dropped" and c.seed_statement.strip()]
 
+    def cards_being_built(self) -> set:
+        """Cards a build is already answering: an OPEN speculative build request, or a
+        `node_building` marker naming the card. Neither has a node yet, so the card still reads as
+        untested. Measured 2026-09-25 on MiniOneRec inf12: card-17 was requested at 08:25 and built
+        at 10:51; in between node 18's proposal saw it as "Untested … return its CARD_ID", claimed
+        it, and the novelty gate rejected it as a duplicate of the build already running."""
+        ids: set = set()
+        ahead = set(self.card_builds_done_ahead)
+        for index in range(max(0, int(self.card_builds_done)), len(self.card_build_requests)):
+            request = self.card_build_requests[index]
+            if index not in ahead and isinstance(request, dict) and request.get("card_id"):
+                ids.add(request["card_id"])
+        for marker in (self.buildings or {}).values():
+            if isinstance(marker, dict) and marker.get("card_id"):
+                ids.add(marker["card_id"])
+        return ids
+
+    def card_status_now(self, card) -> str:
+        """The card's status as a reader should see it: "building" while a build answers it
+        (`cards_being_built`) and it has no node yet, else the folded status."""
+        return ("building" if card.id in self.cards_being_built() and not card.evidence
+                else card.status)
+
     def open_research_beliefs(self, *, only=None) -> list["Card"]:
         """The open, UNTESTED research board as distinct BELIEFS (peer review): the
         `[open_research_cards() with no evidence yet]` list the Researcher proposal feed and foresight

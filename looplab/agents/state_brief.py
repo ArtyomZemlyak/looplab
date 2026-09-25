@@ -44,8 +44,8 @@ BOARD_PROMPT_SEED_BUDGET_CHARS = 20_000
 def next_board_prompt_cards(
     state: RunState, hyp_order: Optional[list[str]] = None, *, attempt: int = 0,
 ) -> list:
-    """Return a fair, whole-item Card prompt window (five Cards / 20k seed characters)."""
-    cards = list(state.open_research_beliefs())
+    """A fair, whole-item Card window (5 Cards / 20k chars), never a card `cards_being_built`."""
+    cards = [c for c in state.open_research_beliefs() if c.id not in state.cards_being_built()]
     if not cards:
         return []
     if hyp_order:
@@ -76,13 +76,13 @@ def next_board_prompt_cards(
     return selected
 
 
-def _is_attempted_live(card) -> bool:
+def _is_attempted_live(card, in_flight=frozenset()) -> bool:
     """Is this card LIVE work on a question that already has an experiment — the one predicate the
     "ALREADY on the board" rows and their belief groups share (see the docstring below for each
     clause: a seed to show, evidence or a node in flight, and not a closed work item)."""
     if not (card.seed_statement or "").strip():
         return False
-    if not (card.evidence or card.status in {"building", "running", "evaluated"}):
+    if not (card.evidence or card.status in {"building", "running", "evaluated"} or card.id in in_flight):
         return False
     return not (card.status in {"dropped", "gated"} or card.verdict == "abandoned"
                 or card.dropped_reason is not None)
@@ -93,7 +93,7 @@ def _attempted_belief_groups(state: RunState) -> dict:
     board" row stands for when `Settings.propose_brief_fit` renders it (`board_prompt_lines`)."""
     groups: dict = {}
     for card in state.research_cards():
-        if _is_attempted_live(card):
+        if _is_attempted_live(card, state.cards_being_built()):
             belief = card.belief_id or hypothesis_statement_digest(card.seed_statement)
             groups.setdefault(belief, []).append(card)
     return groups
@@ -141,7 +141,7 @@ def attempted_board_prompt_cards(state: RunState, shown=(), *,
     rows = []
     seen_beliefs: set = set()
     for c in state.research_cards():
-        if c.id in already or not _is_attempted_live(c):
+        if c.id in already or not _is_attempted_live(c, state.cards_being_built()):
             continue
         belief = c.belief_id or hypothesis_statement_digest(c.seed_statement)
         if belief in shown_beliefs or belief in seen_beliefs:
@@ -293,7 +293,7 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
             drift = card_drift_brief(card)
             lines.append(
                 f"- CARD_ID={card.id} BELIEF_ID={card.belief_id or ''} "
-                f"STATUS={card.status} VERDICT={card.verdict} "
+                f"STATUS={state.card_status_now(card)} VERDICT={card.verdict} "
                 f"NODES={nodes} "
                 + (f"{drift} " if drift else "")
                 + f"SEED_STATEMENT_JSON={json.dumps(card.seed_statement, ensure_ascii=False)}")
