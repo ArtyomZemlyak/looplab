@@ -193,6 +193,25 @@ def _refusal_prefixes() -> tuple:
     return tuple(out)
 
 
+# LIBRARY FACTS (2026-09-25). Measured on MiniOneRec inf12: `run_probe` turns were 35% of the
+# Developer's plan time (188 of 534 LLM-minutes), and 95 of 115 plan probes only inspected LIBRARY
+# source — `inspect.getsource(GenerationMixin._beam_search)` 33 times over 4 builds, the Qwen2 MLP and
+# RMSNorm forward in 7 — every build re-deriving the same facts about an environment that does not
+# change within a run. A probe that touches nothing of the repo (no module of it, no file) answers
+# the same in every build, so its code and output are carried forward like a page, under their own
+# budget and NOT scoped to a build's workspace. A probe that names a repo module or reads a file is
+# never carried: its answer depends on the staged code.
+_PROBE_TOOL = "run_probe"
+_PROBE_BUDGET_BYTES = 8192
+_PROBE_CODE_CHARS = 600
+_PROBE_OUTPUT_CHARS = 2400
+_PROBE_FILE_HINTS = ("open(", "Path(", "listdir", "glob", "read_text", "read_bytes", "os.walk",
+                     "subprocess", "./", "../")
+_PROBE_HEADER = ("\n=== LIBRARY FACTS ALREADY PROBED IN THIS RUN (same environment; these probes "
+                 "touch no repo code or file, so their answers hold for every build — do not re-run "
+                 "them) ===\n")
+
+
 class EstablishedContext:
     """The per-run ledger of file reads, and the block a new chain is seeded with."""
 
@@ -240,6 +259,55 @@ class EstablishedContext:
         # comparison and gets an INDEX ROW naming the call that re-reads it — the remedy a caller
         # has not already spent — instead of another experiment's bytes.
         self._ws = threading.local()
+        self._probes: dict[str, dict] = {}
+        self._local_names: set = set()
+
+    def note_local_names(self, names) -> None:
+        """The repo's OWN top-level module/directory names: a probe naming one is not a library fact."""
+        with self._lock:
+            self._local_names.update(str(n) for n in names or () if n)
+
+    def record_probe(self, args: dict, result: str, *, phase: str = "") -> bool:
+        """Record one `run_probe` whose code touches no repo module or file and that exited 0."""
+        import re as _re
+        code = str((args or {}).get("code") or "")
+        text, _truncated = _strip_notes(str(result or ""))
+        if not code.strip() or not text.startswith("exit=0"):
+            return False
+        with self._lock:
+            local = set(self._local_names)
+        if any(hint in code for hint in _PROBE_FILE_HINTS) or any(
+                _re.search(rf"\b{_re.escape(name)}\b", code) for name in local):
+            return False
+        key = hashlib.sha256(" ".join(code.split()).encode("utf-8")).hexdigest()[:12]
+        with self._lock:
+            item = self._probes.setdefault(key, {"code": code, "output": text, "count": 0,
+                                                 "phases": []})
+            item["count"] += 1
+            item["output"] = text
+            if phase and phase not in item["phases"]:
+                item["phases"].append(phase)
+        return True
+
+    def render_probes(self) -> str:
+        """The library-facts block, most re-run first, under its own budget; "" when none."""
+        with self._lock:
+            rows = sorted((dict(v) for v in self._probes.values()), key=lambda r: -r["count"])
+        if not rows:
+            return ""
+        out, used = [_PROBE_HEADER], len(_PROBE_HEADER.encode("utf-8"))
+        for row in rows:
+            output = row["output"][:_PROBE_OUTPUT_CHARS]
+            if self.evidence_envelope:
+                output = fence_untrusted(output, EVIDENCE_LABEL)
+            body = (f"\n--- probe (run {row['count']}x) ---\n{row['code'][:_PROBE_CODE_CHARS]}\n"
+                    f"--- its output ---\n{output}\n")
+            size = len(body.encode("utf-8"))
+            if used + size > _PROBE_BUDGET_BYTES:
+                continue
+            out.append(body)
+            used += size
+        return "".join(out) if len(out) > 1 else ""
 
     @property
     def _workspace(self):
@@ -354,7 +422,9 @@ class EstablishedContext:
         def _on_tool_result(name, args, result):
             # The write half first: a tool is one or the other, and a writer must drop the page it
             # invalidates even on the turn that also re-reads it.
-            if not self.invalidate(name, args):
+            if name == _PROBE_TOOL:
+                self.record_probe(args, result, phase=phase)
+            elif not self.invalidate(name, args):
                 self.record(name, args, result, phase=phase)
             if inner is not None:
                 inner(name, args, result)

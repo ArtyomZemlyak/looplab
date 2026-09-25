@@ -1667,6 +1667,24 @@ class LLMRepoDeveloper:
             return f"(step {idx} error: {e})"
         return ""
 
+    def _repo_top_level_names(self) -> set:
+        """Every top-level file stem and directory name of the editable roots — what a probe must not
+        name for its answer to count as a library fact (`agents/established.py::record_probe`)."""
+        from pathlib import Path as _P
+        names: set = set()
+        for ed in (getattr(self, "_editables", None) or []):
+            root = _P(str((ed or {}).get("path") or ""))
+            try:
+                entries = list(root.iterdir()) if root.is_dir() else []
+            except OSError:
+                continue
+            for entry in entries:
+                if not entry.name.startswith("."):
+                    names.add(entry.stem if entry.is_file() else entry.name)
+            if (ed or {}).get("name"):
+                names.add(str(ed["name"]))
+        return names
+
     def _repo_import_names(self) -> list:
         """Top-level modules the editable repo imports, minus its OWN modules. Bounded: a repo is
         read for its import lines, not parsed in full, and the scan stops at 400 files."""
@@ -1747,7 +1765,7 @@ class LLMRepoDeveloper:
         store = getattr(self, "_established", None)
         if store is None:
             return ""
-        block = store.render()
+        block = store.render() + store.render_probes()
         return ("\n\n" + block) if block else ""
 
     def _established_hook(self, phase: str):
@@ -2605,6 +2623,7 @@ class LLMRepoDeveloper:
         _est = getattr(self, "_established", None)
         if _est is not None:
             _est.enter_workspace((id(self), self._build_serial))
+            _est.note_local_names(self._repo_top_level_names())
         # Resolved ONCE for the whole node: operator `cmd.stages` make declare_stages refuse (P12)
         # and drive the stage notes below; data-mount names make mount refusals honest.
         op_stages = self._operator_stage_list()
