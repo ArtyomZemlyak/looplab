@@ -25,7 +25,8 @@ attempt loop's control flow, and the loop-local counters those rules round-trip 
 
 Since 2026-09-06 (doc 52 row 21) that driver is EXPLICIT: `_evaluate` opens the span, builds one
 `EvalAttempt` — the record of the lifecycle's evaluation, the fifty loop-carried locals declared once
-— and runs the nine `_eval_*` phases (`_eval_admit`, `_eval_prepare_workdir`, `_eval_seed_ledgers`,
+— and runs the ten `_eval_*` phases (`_eval_admit`, `_eval_recover_settled` (an `ok` settle the
+dead process never terminalized, 2026-09-25), `_eval_prepare_workdir`, `_eval_seed_ledgers`,
 then per attempt `_eval_run_attempt` -> `_eval_settle_outcome` -> `_eval_salvage` ->
 `_eval_decide_repair` -> `_eval_apply_repair`, and `_eval_write_terminal`). A phase reports the loop
 control it cannot execute as a closed `PHASE_*` signal. The cut moved text and nothing else: each
@@ -619,6 +620,40 @@ def unsettled_eval_invocations(events, node_id: int, generation: int) -> frozens
                      if kind == EV_EVAL_INVOCATION_CLAIMED)
 
 
+def settled_ok_awaiting_terminal(events, node_id: int, generation: int):
+    """The `ok` settle this lifecycle's terminal was never written for, or None.
+
+    The OTHER question the receipt pair answers, and the one nothing asked until 2026-09-25
+    (`engine/settled_recovery.py`): `unsettled_eval_invocations` reads a settled invocation as
+    closed, i.e. as nothing, so a process killed between an `ok` settle and `node_evaluated` left a
+    node that re-ran its whole evaluation on resume. The caller asks this only of a node the fold
+    still holds `pending` under `generation` — that IS "no terminal" — so the rule here is the
+    receipt's own: the LAST invocation row of the lifecycle is a settle whose outcome is `ok`. An
+    `ok` attempt is always the chain's last (a success goes straight to the terminal), so a later
+    claim of any key means a newer invocation owns the answer and this returns None.
+
+    Returns `(claim_ts, settle_seq, settle_data)`; `claim_ts` is the timestamp of the claim that
+    opened that invocation (None if the log has none), the floor a re-read of its output keys on.
+    """
+    last = None
+    claim_ts: dict[str, float] = {}
+    for e in events or []:
+        if e.type not in (EV_EVAL_INVOCATION_CLAIMED, EV_EVAL_INVOCATION_SETTLED):
+            continue
+        d = e.data or {}
+        if not _durable_row_belongs(d, node_id, generation):
+            continue
+        if e.type == EV_EVAL_INVOCATION_CLAIMED:
+            claim_ts[str(d.get("invocation_id") or "")] = float(e.ts)
+        last = e
+    if last is None or last.type != EV_EVAL_INVOCATION_SETTLED:
+        return None
+    d = last.data or {}
+    if d.get("outcome") != "ok" or not d.get("invocation_id"):
+        return None
+    return claim_ts.get(str(d["invocation_id"])), last.seq, d
+
+
 def repair_ledger_row(d: dict, *, attempts: int) -> dict:
     """ONE `node_repaired` payload as the row the repair judge and the F8 critic read.
 
@@ -791,7 +826,8 @@ from looplab.runtime.sandbox import GpuPinUnenforceable
 from looplab.engine.eval_canary import (CanaryClock, canary_already_passed, canary_failure_detail,
                                        canary_failure_result, canary_passed, canary_spec)
 from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_CARD_DROPPED, EV_DEPS_INSTALLED,
-                                  EV_EVAL_INVOCATION_CLAIMED, EV_EVAL_INVOCATION_SETTLED,
+                                  EV_EVAL_INVOCATION_CLAIMED, EV_EVAL_INVOCATION_RECOVERED,
+                                  EV_EVAL_INVOCATION_SETTLED, EV_WORKSPACE_SEEDED,
                                   EV_EVAL_CANARY_FINISHED, EV_EVAL_CANARY_STARTED,
                                   EV_NODE_BUILD_DELTA,
                                   EV_FULL_RETRAIN_CHARGED, EV_NODE_ABORT,
@@ -806,6 +842,7 @@ from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_CARD_DROPPED, EV_DEPS_IN
 # Module level, like `hashlib` above and for the same reason: a function-local import of these names
 # would bind them for the WHOLE of the method it appears in. `trust/` imports nothing from `engine/`,
 # so this is a leaf import and not a cycle.
+from looplab.engine import settled_recovery as _settled
 from looplab.trust import scan_receipt as _scan_receipt
 from looplab.trust.scan_receipt import (TRUST_DETECTOR_CODE_LEAKAGE, TRUST_DETECTOR_CRITIC,
                                         TRUST_DETECTOR_EXPLOIT_SUITE, TRUST_DETECTOR_FEATURE_CV,
@@ -1396,6 +1433,17 @@ class EvaluateMixin:
         row = {"node_id": a.node_id, "generation": a.generation, "attempt": a.attempt,
                "invocation_id": a.invocation_id, "outcome": outcome,
                "eval_seconds": round(float(seconds), 3)}
+        # AN `ok` SETTLE CARRIES WHAT IT MEASURED. The terminal is appended several statements (and,
+        # on a busy lock, seconds) later, and a process killed in between used to leave only this
+        # row — which says the evaluation succeeded and not what it found — so the resume re-ran it
+        # (run minionerec-backbones-v10 node 0: 26,830 s). With the parsed result here, the resumed
+        # process writes the terminal from it instead (`_eval_recover_settled`). Only on `ok`: every
+        # other outcome's next step is a repair or a terminal that re-reads nothing from this row.
+        if outcome == "ok" and a.res is not None:
+            row["result"] = _settled.settled_result_record(
+                a.res,
+                stdout_tail=self._scored_stdout_tail(a.res),
+                stderr_tail=self._scored_output_evidence(a.res))
         a.invocation_id = ""
         async with self._write_lock:
             self.store.append(EV_EVAL_INVOCATION_SETTLED, row)
@@ -1780,6 +1828,13 @@ class EvaluateMixin:
         """
         return _redacted_tail(self._redact, getattr(res, "stderr", ""),
                               _DURABLE_EVIDENCE_CHARS)
+
+    def _scored_stdout_tail(self, res) -> str:
+        """The `stdout_tail` column of a scored terminal. A method rather than an inline call since
+        2026-09-25 because it has two readers that must agree byte for byte: the terminal itself, and
+        the `ok` settle row that stands in for it when the process dies before the terminal is
+        written (`engine/settled_recovery.py`) — a recovered node must carry the tail it would have."""
+        return _redacted_tail(self._redact, getattr(res, "stdout", ""), _SCORED_EVIDENCE_CHARS)
 
     def _scored_output_evidence(self, res) -> str:
         """The SAME question on the terminal that says the node WORKED: what did the eval say about
@@ -2469,8 +2524,9 @@ class EvaluateMixin:
         # process is going down and a terminal claiming the node failed would be a lie about why.
         #
         # THE PHASES (doc 52 row 21). The body below is a DRIVER over `EvalAttempt` — the record of one
-        # node lifecycle's evaluation — and nine `_eval_*` phase methods, cut along the comments the
-        # 2,000-line method used to carry: ADMIT (the pre-start fence), PREPARE_WORKDIR,
+        # node lifecycle's evaluation — and ten `_eval_*` phase methods, cut along the comments the
+        # 2,000-line method used to carry: ADMIT (the pre-start fence), RECOVER_SETTLED (added
+        # 2026-09-25: finalize an `ok` settle whose terminal a dead process never wrote), PREPARE_WORKDIR,
         # SEED_LEDGERS (every loop-carried counter off the durable rows), then per attempt
         # RUN_ATTEMPT -> SETTLE_OUTCOME -> SALVAGE -> DECIDE_REPAIR -> APPLY_REPAIR, and
         # WRITE_TERMINAL. Every append, every `_write_lock` block, every fold and every branch is
@@ -2486,6 +2542,10 @@ class EvaluateMixin:
                 with self.tracer.span("evaluate", new_trace=True, node_id=node_id) as sp:
                     a.sp = sp
                     if await self._eval_admit(a) is PHASE_RETURN:
+                        return
+                    # BEFORE the workdir is touched: an invocation that already settled `ok` is
+                    # finalized from its recorded evidence, part of which lives in that workdir.
+                    if await self._eval_recover_settled(a) is PHASE_RETURN:
                         return
                     # IN A WORKER THREAD (review 2026-09-22, ENG2-11): the workdir build is a seed
                     # copy measured at up to 1,017 MB, and on the loop it froze every session turn,
@@ -2886,6 +2946,98 @@ class EvaluateMixin:
         async with self._write_lock:
             self._record_eval_start_boundary(a.node)
         return PHASE_NEXT
+
+    async def _eval_recover_settled(self, a: "EvalAttempt") -> str:
+        """RECOVER_SETTLED — a lifecycle whose last invocation settled `ok` in a process that died
+        before the terminal is FINALIZED from the recorded evidence instead of re-run
+        (`engine/settled_recovery.py` has the rule and the incident). `PHASE_RETURN` after the one
+        terminal it wrote through `_eval_write_terminal`; `PHASE_NEXT` when there is nothing to
+        recover, or — after an `eval_invocation_recovered {"action": "rerun"}` row naming why — when
+        no evidence was usable, and the lifecycle then evaluates exactly as it always did.
+
+        Runs BEFORE `_eval_prepare_workdir` on purpose: materialization `rmtree`s the node directory,
+        and the captured `eval.log` a pre-record settle can only be recovered from is in it."""
+        found = settled_ok_awaiting_terminal(a.events_at_start, a.node_id, a.generation)
+        if found is None:
+            return PHASE_NEXT
+        claim_ts, settle_seq, settled = found
+        settled_attempt = _durable_int(settled.get("attempt"), default=None)
+        # The same durable seeds a live chain starts from — the repair ledger that prices the
+        # terminal's `eval_seconds` and names the attempt, read from the same log.
+        self._eval_seed_ledgers(a)
+        a.workdir = self.run_dir / "nodes" / f"node_{a.node_id}"
+        a._superseded_marker = a.workdir / ".looplab-superseded"
+        a._manifest_stamp = a.workdir / ".looplab-manifest"
+        res, source = None, None
+        if settled_attempt != a.attempt:
+            # An `ok` is always its chain's last attempt, so a ledger that has moved past it means
+            # the log holds something this rule does not understand: re-run rather than guess.
+            reason = f"attempt_mismatch:settled={settled_attempt},ledger={a.attempt}"
+        else:
+            res, reason = _settled.result_from_record(settled.get("result"))
+            source = _settled.SOURCE_SETTLE_RECORD
+            if res is None:
+                record_reason = reason
+                res, reason = await anyio.to_thread.run_sync(
+                    self._settled_workdir_evidence, a, claim_ts, settle_seq)
+                source = _settled.SOURCE_WORKDIR_LOG
+                reason = f"{record_reason}; {reason}" if res is None else ""
+        _invocation = str(settled.get("invocation_id"))
+        if res is None:
+            a.sp.set("settled_recovery", _settled.RECOVERY_RERUN)
+            async with self._write_lock:
+                self.store.append(EV_EVAL_INVOCATION_RECOVERED, {
+                    "node_id": a.node_id, "generation": a.generation, "attempt": settled_attempt,
+                    "invocation_id": _invocation, "action": _settled.RECOVERY_RERUN,
+                    "reason": str(reason)[:400]})
+            return PHASE_NEXT
+        assert source in _settled.RECOVERY_SOURCES, f"unregistered recovery source: {source!r}"
+        a.res = res
+        a.ok = True
+        # THIS invocation's charge, as its settle recorded it; the attempts before it are already in
+        # `prior_repair_seconds` off their `node_repaired` rows (`charged_eval_seconds`).
+        a.total_eval = round(float(settled.get("eval_seconds") or 0.0), 3)
+        a.sp.set_many(settled_recovery=_settled.RECOVERY_FINALIZED, settled_recovery_source=source)
+        async with self._write_lock:
+            self.store.append(EV_EVAL_INVOCATION_RECOVERED, {
+                "node_id": a.node_id, "generation": a.generation, "attempt": settled_attempt,
+                "invocation_id": _invocation, "action": _settled.RECOVERY_FINALIZED,
+                "source": source})
+            # The attempt's pipeline record, which the dead process appends only AFTER the settle —
+            # re-appended from the record; the fold's last-wins-by-name rule makes a repeat of a
+            # row that did land a no-op.
+            for _st in (a.res.stages or []):
+                if isinstance(_st, dict):
+                    self.store.append(EV_STAGE_FINISHED,
+                                      {"node_id": a.node_id, **_st, "generation": a.generation})
+        await self._eval_write_terminal(a)
+        return PHASE_RETURN
+
+    def _settled_workdir_evidence(self, a: "EvalAttempt", claim_ts, settle_seq: int):
+        """Rule 2 of `engine/settled_recovery.py`: the settled invocation's captured output, read
+        from the node workdir under the current spec — only while nothing says that workdir has
+        been rebuilt since. `(RunResult | None, reason)`; never raises."""
+        _spec = getattr(self, "_eval_spec", None)
+        if not isinstance(_spec, dict) or not isinstance(_spec.get("metric"), dict):
+            return None, "no_command_eval_spec"      # the toy/solution.py path keeps no eval.log
+        if claim_ts is None:
+            return None, "no_claim_row"
+        if any(e.type == EV_WORKSPACE_SEEDED and e.seq > settle_seq
+               and (e.data or {}).get("node_id") == a.node_id for e in a.events_at_start):
+            return None, "workdir_rematerialized_after_settle"
+        try:
+            if not a.workdir.is_dir():
+                return None, "workdir_missing"
+            if a._superseded_marker.exists():
+                return None, "workdir_superseded"
+        except OSError:
+            return None, "workdir_unreadable"
+        if not a.workdir_matches(a.node):
+            return None, "workdir_manifest_mismatch"
+        return _settled.result_from_workdir_log(
+            a.workdir, getattr(self, "_eval_spec", None), since=float(claim_ts),
+            pipeline_stages=self._resolved_stages(a.node, a.workdir),
+            enforce_drift=(getattr(self, "eval_trust_mode", "ratify_freeze") == "ratify_freeze_drift"))
 
     def _eval_prepare_workdir(self, a: "EvalAttempt") -> None:
         """PREPARE_WORKDIR — the node directory: reuse it on a stage-scoped re-run whose manifest
@@ -4636,8 +4788,7 @@ class EvaluateMixin:
                     # its sibling below, because widening a TAIL cut moves where a straddling
                     # secret is severed — and stdout is the channel `core/redact.py` was written
                     # for (an eval that prints `os.environ`).
-                    "stdout_tail": _redacted_tail(self._redact, a.res.stdout,
-                                                  _SCORED_EVIDENCE_CHARS),
+                    "stdout_tail": self._scored_stdout_tail(a.res),
                     "eval_seconds": a.charged_eval_seconds(),
                     "extra_metrics": _extras,   # #5 multi-objective
                     "violations": a.res.violations or [],

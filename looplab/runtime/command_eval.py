@@ -3418,6 +3418,85 @@ def _run_single(command: list, ex: _EvalExec, *, timeout: float) -> _EvalRun:
     return run
 
 
+def captured_result_fields(out: str, workdir: str, metric: dict, m: Optional[float], *,
+                           timed_out: bool = False, metrics: Optional[dict] = None,
+                           constraints: Optional[list] = None, cross_check: Optional[dict] = None,
+                           enforce_drift: bool = False, drift_tolerance: float = 1e-6, wrap=None,
+                           since: Optional[float] = None, env: Optional[dict] = None) -> dict:
+    """Everything a `RunResult` records ABOUT the captured output once the primary metric `m` has
+    been read: the drift cross-check, the declared and auto-captured extra metrics with their
+    channels and directions, the constraint violations and the sweep trials.
+
+    ONE SPELLING, for two callers that must agree: `run_command_eval` below, over the output it has
+    just captured, and `engine/settled_recovery.py`, which finalizes an evaluator invocation that
+    settled `ok` in a process that died before writing the node's terminal — re-reading the SAME
+    captured bytes under the CURRENT spec rather than re-running hours of paid evaluation. A second
+    hand-written copy of this block is how the two would have disagreed about which extras and
+    which violations a recovered node carries.
+
+    Returns the keyword arguments for `RunResult` (`metric` included, because the drift check can
+    withhold it)."""
+    to = timed_out
+    drift = None
+    if enforce_drift and cross_check and m is not None:
+        cross = read_metric(out, workdir, cross_check, wrap=wrap, since=since, env=env)
+        if _drift(m, cross, drift_tolerance):
+            drift = {"primary": m, "cross": cross, "tolerance": drift_tolerance}
+            m = None                                   # uncorroborated -> not trusted
+    declared = ({name: v for name, spec in metrics.items()
+                 if (v := read_metric(out, workdir, spec, wrap=wrap, since=since,
+                                      env=env)) is not None}
+                if (metrics and not to) else {})   # a MISSED reader (None) must not erase a
+    #                                                successfully auto-captured value of the same name
+    # Auto-capture: every other numeric key on the metric's own JSON line is also reported (no config
+    # needed), so an experiment that prints {"metric": x, "recall@10": y, ...} surfaces them all. A
+    # declared spec wins over the auto-captured value of the same name.
+    auto = (json_line_extras(out, metric.get("key", "metric"))
+            if (not to and metric.get("kind", "stdout_json") == "stdout_json") else {})
+    extra = ({**auto, **declared} or None)
+    # WHICH DOOR EACH VALUE CAME THROUGH, recorded beside the values themselves. These two channels
+    # are not equally trustworthy and until 2026-08-14 the record could not tell them apart: the
+    # `declared` half is operator-owned and refuses an agent-authored `adapter` reader (the check
+    # ten lines up), while `auto` is EVERY other numeric key on the candidate's own stdout — no
+    # declaration, no reader spec, no gate. On the preserved corpus `declared` produced 0 of the
+    # 1,642 recorded values and `auto` produced all of them, including a schema VERSION number
+    # recorded as a metric, and all of them reached the operator, MLflow and the reviewer beside the
+    # protected primary. Tagging (rather than dropping) is what docs/36 asks for here: the RECORD
+    # stays deterministic over authenticated evidence by SAYING which evidence is authenticated, and
+    # the `auto_extra_metrics` gate one layer up is then expressible over the TAG instead of a
+    # second, drift-prone re-derivation of the same question.
+    #
+    # ONLY TWO CHANNELS HERE, and that is a fact about this tier rather than an omission. The third,
+    # `EXTRA_METRIC_ENGINE`, names keys printed by source the ENGINE spliced into the artifact — and
+    # the one splicer that exists, `agents/toy_roles.py::ToyObjectiveDeveloper`'s CUDA probe, produces a
+    # `solution.py` artifact and never a repo eval COMMAND. A repo task's argv runs the operator's
+    # own program over the agent's working set; nothing the engine authored is inside it, so every
+    # undeclared number on its stdout really is the candidate's. If that ever stops being true, the
+    # third arm is granted where the engine can ATTEST it wrote the artifact
+    # (`engine/eval_dispatch.py` over `core/models.py::apply_engine_extra_metric_channels`) —
+    # never from the artifact's own bytes here, which are the candidate's, and never from a name list.
+    # Same precedence as the values (`declared` wins a name collision), for the same reason.
+    extra_channels = ({**{k: EXTRA_METRIC_AUTO for k in auto},
+                       **{k: EXTRA_METRIC_DECLARED for k in declared}} or None)
+    # WHICH WAY IS BETTER, from the DECLARING spec and nowhere else. Only names that actually
+    # produced a value are oriented, so a spec whose reader missed contributes no orphan direction
+    # for a key the record does not carry — the same rule the `declared` dict one line up follows.
+    # `auto` keys are deliberately absent: nothing declared them, so nothing said which way is
+    # better, and inventing an answer here is exactly the silent inversion this map exists to stop.
+    extra_directions = ({name: d for name in declared
+                         if (d := (metrics.get(name) or {}).get("direction")) in DIRECTIONS}
+                        or None)
+    viol = (_violations(out, workdir, constraints, wrap, since=since, env=env)
+            if (constraints and not to and m is not None) else None)
+    # Intra-node sweep: a RepoTask command may emit the same `{"trials": [...]}` stdout line; carry
+    # it so the engine can collapse it to the node's best metric (no eval_spec change required).
+    trials = json_line_trials(out) if not to else None
+    return {"metric": m, "drift": drift, "extra_metrics": extra,
+            "extra_metrics_provenance": extra_channels,
+            "extra_metrics_direction": extra_directions,
+            "violations": (viol or None), "trials": trials}
+
+
 def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                      env: Optional[dict] = None, max_output_bytes: int = 64_000,
                      setup: Optional[list] = None, setup_timeout: float = 600.0,
@@ -3658,60 +3737,10 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                          trials=(json_line_trials(out) if not to else None),
                          stages=stage_results, stalled=_salvageable_stall(_sig),
                          diverged=bool(_sig.get("diverged")), metric_subject=_run.metric_subject)
-    drift = None
-    if enforce_drift and cross_check and m is not None:
-        cross = read_metric(out, str(wd), cross_check, wrap=wrap, since=_reader_since, env=env)
-        if _drift(m, cross, drift_tolerance):
-            drift = {"primary": m, "cross": cross, "tolerance": drift_tolerance}
-            m = None                                   # uncorroborated -> not trusted
-    declared = ({name: v for name, spec in metrics.items()
-                 if (v := read_metric(out, str(wd), spec, wrap=wrap, since=_reader_since,
-                                      env=env)) is not None}
-                if (metrics and not to) else {})   # a MISSED reader (None) must not erase a
-    #                                                successfully auto-captured value of the same name
-    # Auto-capture: every other numeric key on the metric's own JSON line is also reported (no config
-    # needed), so an experiment that prints {"metric": x, "recall@10": y, ...} surfaces them all. A
-    # declared spec wins over the auto-captured value of the same name.
-    auto = (json_line_extras(out, metric.get("key", "metric"))
-            if (not to and metric.get("kind", "stdout_json") == "stdout_json") else {})
-    extra = ({**auto, **declared} or None)
-    # WHICH DOOR EACH VALUE CAME THROUGH, recorded beside the values themselves. These two channels
-    # are not equally trustworthy and until 2026-08-14 the record could not tell them apart: the
-    # `declared` half is operator-owned and refuses an agent-authored `adapter` reader (the check
-    # ten lines up), while `auto` is EVERY other numeric key on the candidate's own stdout — no
-    # declaration, no reader spec, no gate. On the preserved corpus `declared` produced 0 of the
-    # 1,642 recorded values and `auto` produced all of them, including a schema VERSION number
-    # recorded as a metric, and all of them reached the operator, MLflow and the reviewer beside the
-    # protected primary. Tagging (rather than dropping) is what docs/36 asks for here: the RECORD
-    # stays deterministic over authenticated evidence by SAYING which evidence is authenticated, and
-    # the `auto_extra_metrics` gate one layer up is then expressible over the TAG instead of a
-    # second, drift-prone re-derivation of the same question.
-    #
-    # ONLY TWO CHANNELS HERE, and that is a fact about this tier rather than an omission. The third,
-    # `EXTRA_METRIC_ENGINE`, names keys printed by source the ENGINE spliced into the artifact — and
-    # the one splicer that exists, `agents/toy_roles.py::ToyObjectiveDeveloper`'s CUDA probe, produces a
-    # `solution.py` artifact and never a repo eval COMMAND. A repo task's argv runs the operator's
-    # own program over the agent's working set; nothing the engine authored is inside it, so every
-    # undeclared number on its stdout really is the candidate's. If that ever stops being true, the
-    # third arm is granted where the engine can ATTEST it wrote the artifact
-    # (`engine/eval_dispatch.py` over `core/models.py::apply_engine_extra_metric_channels`) —
-    # never from the artifact's own bytes here, which are the candidate's, and never from a name list.
-    # Same precedence as the values (`declared` wins a name collision), for the same reason.
-    extra_channels = ({**{k: EXTRA_METRIC_AUTO for k in auto},
-                       **{k: EXTRA_METRIC_DECLARED for k in declared}} or None)
-    # WHICH WAY IS BETTER, from the DECLARING spec and nowhere else. Only names that actually
-    # produced a value are oriented, so a spec whose reader missed contributes no orphan direction
-    # for a key the record does not carry — the same rule the `declared` dict one line up follows.
-    # `auto` keys are deliberately absent: nothing declared them, so nothing said which way is
-    # better, and inventing an answer here is exactly the silent inversion this map exists to stop.
-    extra_directions = ({name: d for name in declared
-                         if (d := (metrics.get(name) or {}).get("direction")) in DIRECTIONS}
-                        or None)
-    viol = (_violations(out, str(wd), constraints, wrap, since=_reader_since, env=env)
-            if (constraints and not to and m is not None) else None)
-    # Intra-node sweep: a RepoTask command may emit the same `{"trials": [...]}` stdout line; carry
-    # it so the engine can collapse it to the node's best metric (no eval_spec change required).
-    trials = json_line_trials(out) if not to else None
+    _fields = captured_result_fields(
+        out, str(wd), metric, m, timed_out=to, metrics=metrics, constraints=constraints,
+        cross_check=cross_check, enforce_drift=enforce_drift, drift_tolerance=drift_tolerance,
+        wrap=wrap, since=_reader_since, env=env)
     # THE CANDIDATE'S OWN NUMBER, beside the host's (doc 52 row 10a). Read with the TASK's reader off
     # the last candidate-side stage's stdout, only when a host scorer actually ran — `out` is the
     # host stage's stdout, so the primary read above cannot see the self-report, and a reader that
@@ -3722,10 +3751,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
         with _sp("read_self_metric", kind=(self_metric or metric).get("kind", "stdout_json")):
             _self_m = read_metric(_run.self_out, str(wd), self_metric or metric, wrap=wrap,
                                   since=_eval_started, env=env)
-    return RunResult(exit_code=rc, stdout=out, stderr=err, metric=m, timed_out=to, drift=drift,
-                     extra_metrics=extra, extra_metrics_provenance=extra_channels,
-                     extra_metrics_direction=extra_directions,
-                     violations=(viol or None), trials=trials,
+    return RunResult(exit_code=rc, stdout=out, stderr=err, timed_out=to, **_fields,
                      stages=stage_results, stalled=_salvageable_stall(_sig),
                      diverged=bool(_sig.get("diverged")), metric_subject=_run.metric_subject,
                      self_metric=_self_m, host_scorer=_run.host_receipt,

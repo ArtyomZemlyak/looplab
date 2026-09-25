@@ -82,7 +82,14 @@
         "attempt": 1,
         "invocation_id": "legacy:r:n0:g0:a1",
         "outcome": "ok",
-        "eval_seconds": "<volatile>"
+        "eval_seconds": "<volatile>",
+        "result": {
+          "v": 1,
+          "metric": 0.1,
+          "exit_code": 0,
+          "stdout_tail": "{\"metric\": 0.1}\n",
+          "stderr_tail": ""
+        }
       }
     ],
     [
@@ -1583,7 +1590,57 @@
         "attempt": 0,
         "invocation_id": "legacy:r:n0:g0:a0",
         "outcome": "ok",
-        "eval_seconds": "<volatile>"
+        "eval_seconds": "<volatile>",
+        "result": {
+          "v": 1,
+          "metric": 0.99,
+          "exit_code": 0,
+          "extra_metrics": {
+            "loss": 0.2,
+            "auc": 0.9
+          },
+          "extra_metrics_provenance": {
+            "loss": "declared",
+            "auc": "auto"
+          },
+          "extra_metrics_direction": {
+            "loss": "min"
+          },
+          "violations": [],
+          "metric_subject": {
+            "subject_bound": true,
+            "subjects": [
+              {
+                "path": "out/model.bin"
+              }
+            ]
+          },
+          "eval_inputs": {
+            "files": [
+              {
+                "path": "data/test.csv",
+                "sha256": "abababababababababababababababababababababababababababababababab"
+              }
+            ]
+          },
+          "applied_params": {
+            "committed": {
+              "x": 1.0
+            },
+            "resolved": {},
+            "conflicts": []
+          },
+          "self_metric": 0.97,
+          "host_scorer": {
+            "argv": [
+              "python",
+              "score.py"
+            ],
+            "program": "score.py"
+          },
+          "stdout_tail": "{\"metric\": 0.99}\n",
+          "stderr_tail": "note: scored on the held split\n"
+        }
       }
     ],
     [
@@ -1695,7 +1752,19 @@
         "attempt": 0,
         "invocation_id": "legacy:r:n0:g0:a0",
         "outcome": "ok",
-        "eval_seconds": "<volatile>"
+        "eval_seconds": "<volatile>",
+        "result": {
+          "v": 1,
+          "metric": 0.99,
+          "exit_code": 0,
+          "metric_subject": {
+            "subject_bound": false,
+            "unbound_reason": "not_declared",
+            "subjects": []
+          },
+          "stdout_tail": "{\"metric\": 0.99}\n",
+          "stderr_tail": ""
+        }
       }
     ],
     [

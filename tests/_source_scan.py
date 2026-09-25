@@ -265,18 +265,18 @@ def scan(pattern: re.Pattern | str, *, pkg: Path = PKG) -> dict[str, set[str]]:
 
 
 # --------------------------------------------------------------------------- the eval attempt loop
-# `_evaluate` is a DRIVER over `EvalAttempt` and nine phase methods since 2026-09-06 (doc 52 row 21).
+# `_evaluate` is a DRIVER over `EvalAttempt` and nine (ten since 2026-09-25) phase methods since 2026-09-06 (doc 52 row 21).
 # A guard that used to read "the attempt loop" off `inspect.getsource(EvaluateMixin._evaluate)` now
 # reads the driver plus every phase, IN THE ORDER THE DRIVER RUNS THEM — so an index-order pin over
 # the concatenation still says what it said about one method, and a "called exactly once" pin counts
 # across the phases. Prefer naming the phase when the property belongs to one.
-EVAL_PHASES = ("_eval_admit", "_eval_prepare_workdir", "_eval_seed_ledgers", "_eval_run_attempt",
+EVAL_PHASES = ("_eval_admit", "_eval_recover_settled", "_eval_prepare_workdir", "_eval_seed_ledgers", "_eval_run_attempt",
                "_eval_settle_outcome", "_eval_salvage", "_eval_decide_repair", "_eval_apply_repair",
                "_eval_write_terminal")
 
 
 def eval_attempt_functions() -> list:
-    """The driver, the nine phases in driver order, then the reset terminal the phases share."""
+    """The driver, the ten phases in driver order, then the reset terminal the phases share."""
     from looplab.engine.evaluate import EvaluateMixin
 
     return [getattr(EvaluateMixin, name)

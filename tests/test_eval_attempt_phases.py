@@ -1,4 +1,4 @@
-"""The EvalAttempt split (doc 52 row 21): a driver, nine phases, one record, a closed signal vocabulary.
+"""The EvalAttempt split (doc 52 row 21): a driver, ten phases, one record, a closed signal vocabulary.
 
 `_evaluate` was a 2,016-line method carrying fifty locals across the regions its own comments named.
 It is now a DRIVER over `EvalAttempt` and the `_eval_*` phases, cut with every append, `_write_lock`
@@ -90,7 +90,7 @@ def test_the_driver_runs_the_phases_in_the_one_order_and_dispatches_on_identity(
     phases = [c for c in called_or_offloaded_names(EvaluateMixin._evaluate)
               if c.startswith("self._eval_")]
     assert phases == [
-        "self._eval_admit", "self._eval_prepare_workdir", "self._eval_seed_ledgers",
+        "self._eval_admit", "self._eval_recover_settled", "self._eval_prepare_workdir", "self._eval_seed_ledgers",
         "self._eval_run_attempt", "self._eval_settle_outcome", "self._eval_salvage",
         "self._eval_decide_repair", "self._eval_apply_repair", "self._eval_write_terminal"], phases
     assert tuple(p.removeprefix("self.") for p in phases) == EVAL_PHASES, "the registry lists the driver's order"

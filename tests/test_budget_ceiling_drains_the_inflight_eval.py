@@ -600,7 +600,7 @@ class _NullSpan:
 class _CeilingEvalHost:
     """A host for the REAL `_evaluate` driver and the REAL `_land_terminal_before_ceiling`.
 
-    The nine phases are stubs, because what is under test is the DRIVER's unwind path and not any
+    The ten phases are stubs, because what is under test is the DRIVER's unwind path and not any
     phase's body: RUN_ATTEMPT binds the record exactly as the real one does (a result and an `ok`),
     the next phase raises the ceiling, and the question is only whether the terminal is written
     before that raise leaves the worker. `_eval_write_terminal` records into the same fake log the
@@ -623,6 +623,9 @@ class _CeilingEvalHost:
         a.generation = 0
         a.node = object()
         a.sp = _NullSpan()
+        return "next"
+
+    async def _eval_recover_settled(self, a):          # nothing settled before this host
         return "next"
 
     def _eval_prepare_workdir(self, a):

@@ -903,6 +903,12 @@ EV_REPAIR_CRITIC_VERDICT = "repair_critic_verdict"
 # node's outcome (invariant #2 — the terminal is still exactly one `node_evaluated`/`node_failed`).
 EV_EVAL_INVOCATION_CLAIMED = "eval_invocation_claimed"
 EV_EVAL_INVOCATION_SETTLED = "eval_invocation_settled"
+# …and what a RESUMED process did with an invocation that settled `ok` but whose node never got its
+# terminal (the process died in between): `finalized` — the terminal was written from the recorded
+# evidence (the settle row's own `result`, or the workdir's captured output) without re-running the
+# evaluator — or `rerun`, with the `reason` no evidence was usable, so a repeat is never silent
+# (`engine/settled_recovery.py`). Diagnostic for the receipt pair's own reason.
+EV_EVAL_INVOCATION_RECOVERED = "eval_invocation_recovered"
 # THE EVAL CANARY'S RECEIPT (`engine/eval_canary.py`, `Settings.eval_canary`): the start and the result
 # of one canary run — the node's own stage chain on the task's declared tiny slice, in a scratch
 # directory — before that attempt's full evaluation. `code_digest` is the node's committed manifest
@@ -1163,7 +1169,7 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     # the drift note is emitted once, not re-appended on every resume of an upgraded run.
     EV_AGENT_PHASE_STARTED, EV_AGENT_CHECKPOINTED, EV_AGENT_PHASE_COMPLETED,
     EV_PRIOR_INJECTED, EV_MEMORY_READ,
-    EV_EVAL_INVOCATION_CLAIMED, EV_EVAL_INVOCATION_SETTLED,
+    EV_EVAL_INVOCATION_CLAIMED, EV_EVAL_INVOCATION_SETTLED, EV_EVAL_INVOCATION_RECOVERED,
     EV_EVAL_CANARY_STARTED, EV_EVAL_CANARY_FINISHED,
 })
 
@@ -1634,10 +1640,18 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # re-invokes an evaluator whose previous invocation of the SAME id never settled.
         optional=("after_interrupted_attempt",),
     ),
+    "eval_invocation_recovered": PayloadContract(
+        "An ok-settled invocation with no terminal, on resume: finalized from its evidence, or re-run "
+        "and why.",
+        required=("action", "attempt", "generation", "invocation_id", "node_id"),
+        optional=("reason", "source"),
+    ),
     "eval_invocation_settled": PayloadContract(
         "That evaluator invocation returned, with the outcome and the seconds it charged.",
         required=("attempt", "eval_seconds", "generation", "invocation_id", "node_id", "outcome"),
-        optional=(),
+        # `result` rides an `ok` settle only: the parsed result the terminal is written from, so a
+        # process that dies before that terminal does not cost the evaluation (`settled_recovery`).
+        optional=("result",),
     ),
     "eval_noise_floor": PayloadContract(
         "The repeated-seed spread of ONE candidate's metric: the run's own evaluation noise floor.",
