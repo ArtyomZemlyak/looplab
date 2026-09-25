@@ -739,6 +739,10 @@ class SpeculationMixin:
             # Bumped when the Strategist swaps the Developer backend (which drops every lease): a
             # build started under an older generation is never committed (`_serve_card_builds`).
             self._spec_builder_generation = 0
+        if not hasattr(self, "_spec_reusable"):
+            # Finished builds closed `not_selected_now` (width > 1), kept for a re-election of the
+            # same Card at the same epoch (`_serve_card_builds`, `_start_request_producer`).
+            self._spec_reusable: dict[tuple[str, int], SpecBuildResult] = {}
         if not hasattr(self, "_spec_request_builder"):
             self._spec_request_builder: dict[tuple[str, int], int] = {}
         if not hasattr(self, "_spec_raw_stage_inflight"):
@@ -1007,6 +1011,8 @@ class SpeculationMixin:
         self._spec_role_pairs = []
         self._spec_pair_leases = {}
         self._spec_builder_generation += 1
+        for key in list(getattr(self, "_spec_reusable", {})):
+            self._discard_spec_result(self._spec_reusable.pop(key, None))
 
     def _busy_producers(self, state: RunState) -> int:
         """Producers occupied now: every open request (built, building or waiting for a pair), every
@@ -1277,6 +1283,11 @@ class SpeculationMixin:
         for key in list(self._spec_builds):
             if key not in outstanding:
                 self._discard_spec_result(self._spec_builds.pop(key, None))
+        for key in list(self._spec_reusable):
+            card = state.cards.get(key[0])
+            if (key[1] != state.search_epoch or card is None
+                    or card.status == "dropped" or card.merged_into is not None):
+                self._discard_spec_result(self._spec_reusable.pop(key, None))
 
     @classmethod
     def _acknowledged_pending_ids(cls, state: RunState) -> set[int]:
@@ -2280,7 +2291,19 @@ class SpeculationMixin:
             closed = self._append_card_build_done(
                 request, skipped="stale", skipped_reason=stale_reason or None)
         if closed:
-            self._discard_spec_result(self._spec_builds.pop(key, None))
+            result = self._spec_builds.pop(key, None)
+            if (stale_reason == "not_selected_now"
+                    and self._speculative_producer_width(state) > 1 and result is not None):
+                # "the board moved and the build is INTACT" (`CARD_BUILD_SKIP_REASONS`). With several
+                # producers the claim and the election can disagree for a turn: measured 2026-09-24
+                # on MiniOneRec inf12, card-8's finished build was closed here because a Card staged
+                # seconds earlier outranked it, and the freed producer re-elected card-8 in the same
+                # turn and rebuilt it from scratch. Keep the result; a re-election of the same Card at
+                # the same epoch takes it instead of paying for the build again, and its commit still
+                # goes through every check of `_claim_requested_card_build`.
+                self._spec_reusable[key] = result
+            else:
+                self._discard_spec_result(result)
         return closed
 
     def _close_card_build_before_terminal_gate(
@@ -2836,6 +2859,15 @@ class SpeculationMixin:
         ) < 1:
             return False
         width = self._speculative_producer_width(current)
+        reusable = self._spec_reusable.pop(key, None)
+        if reusable is not None:
+            if key[1] == current.search_epoch and self._spec_request_builder.get(
+                    key, self._spec_builder_generation) == self._spec_builder_generation:
+                # A paid build of this exact Card at this epoch is already in hand: no producer, no
+                # attempt receipt (nothing new is billed), and the commit re-checks everything.
+                self._spec_builds[key] = reusable
+                return True
+            self._discard_spec_result(reusable)
         roles = self._producer_pair_for(key, width)
         if roles is not None:
             # The build pool is sized for ONE producer (`novelty.py::_CARD_BUILD_THREADS`); a wider

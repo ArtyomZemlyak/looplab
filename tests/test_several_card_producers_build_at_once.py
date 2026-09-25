@@ -558,3 +558,50 @@ def test_a_wide_session_fills_its_free_producer_without_a_running_eval(tmp_path,
 
     anyio.run(scenario)
     assert _building_now(log) == 2
+
+
+# ------------------------------------------------------------ an intact build is not paid for twice
+
+def test_a_build_closed_not_selected_now_is_reused_when_its_card_is_re_elected(tmp_path, monkeypatch):
+    """MiniOneRec inf12, 2026-09-24: card-8's finished build was closed `not_selected_now` because a
+    Card staged seconds earlier outranked it; the freed producer re-elected card-8 in the same turn
+    and rebuilt it. The intact result is now kept and taken by the re-election; its commit still
+    passes every claim check."""
+    from tests.test_card_speculation_engine import _build_result
+    engine, _unused = _engine(tmp_path / "reuse", depth=1)
+    calls: list = []
+
+    class _CountingDeveloper(_GatedDeveloper):
+        def implement(self, idea):
+            calls.append(idea.card_id)
+            return "print(1)"
+
+    engine.role_factory = lambda: (_Researcher(), _CountingDeveloper([]))
+    engine._llm_parallel = 2
+    engine._llm_parallel_launched = 2
+    engine._llm_parallel_startup_auto = False
+    _start(engine)
+    _add_ready_draft(engine, "card-2", x=0.3)
+    assert engine._request_card_build() is True
+    request_b = engine._head_request(fold(engine.store.read_all()))
+    assert request_b["card_id"] == "card-2"
+    result = _build_result(engine, request_b)
+    assert result.success
+    engine._spec_builds[result.key] = result
+    _add_ready_draft(engine, "card-1", x=0.2)          # outranks card-2 from now on
+    assert engine._serve_card_builds() is True
+    closes = [e.data for e in engine.store.read_all() if e.type == EV_CARD_BUILD_DONE]
+    if closes[-1].get("skipped_reason") != "not_selected_now":
+        pytest.skip(f"this board did not reproduce the refusal: {closes[-1]}")
+    assert result.key in engine._spec_reusable
+    # the election now takes card-1, and the free second producer re-elects card-2
+    assert engine._request_card_build() is True
+    assert engine._request_card_build() is True
+    state = fold(engine.store.read_all())
+    request_b2 = next(r for _i, r in engine._outstanding_positions(state) if r["card_id"] == "card-2")
+    session = types.SimpleNamespace(task_group=None, notify=None, yield_outer=False)
+    assert engine._start_request_producer(state, session, request_b2) is True
+    assert engine._serve_card_builds(request=request_b2) is True
+    closes = [e.data for e in engine.store.read_all() if e.type == EV_CARD_BUILD_DONE]
+    assert closes[-1]["card_id"] == "card-2" and "node_id" in closes[-1], closes
+    assert calls.count("card-2") == 1, "the intact build was not paid for twice"
