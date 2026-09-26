@@ -948,6 +948,12 @@ class ProposalCuesMixin:
             setattr(_r, "_brief_fit", bool(getattr(self, "_propose_brief_fit", False)))
         except (AttributeError, TypeError, ValueError):
             pass
+        try:
+            # `Settings.card_verdict_support` (doc 67 67.1): whether a supported card's board row
+            # says what its verdict rests on — the same stamp, for the same reason, same OFF default.
+            setattr(_r, "_verdict_support", bool(getattr(self, "_card_verdict_support", False)))
+        except (AttributeError, TypeError, ValueError):
+            pass
 
     def _time_budget_hint_text(self) -> str:
         """The per-eval WALL-CLOCK ceiling the Researcher sizes the SCHEDULE against, as prose.

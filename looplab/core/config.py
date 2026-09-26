@@ -955,6 +955,22 @@ class Settings(BaseSettings):
     # (`engine/proposal_cues.py::ProposalCuesMixin._stamp_brief_switches`). It moves no metric,
     # champion, selection or violation.
     propose_brief_fit: bool = True
+    # WHAT A `supported` CARD VERDICT RESTS ON (doc 67 67.1, 2026-09-26). The proposal board shows
+    # each card's verdict to the Researcher, and `supported` means ONE measurement of one experiment
+    # beat its parent or the standing record (`events/card_ledger.py::_evidence_verdict`) — no look at
+    # the run's replications (`confirmed_mean` over `confirmed_seeds`, which already decide the
+    # champion), at the >1-SE rule, or at the measured eval noise floor — so a gain inside the noise
+    # read as a finding and steered the next proposals. ON: a supported card's row carries
+    # `SUPPORT=replicated|single_run|within_noise|not_replicated`
+    # (`events/card_ledger.py::verdict_support`) with a one-line legend. The VERDICT itself does
+    # not move (selection reads `open`, lesson distillation reads `supported`). Reaches ONLY the two
+    # propose paths. It changes a PROMPT and buys no call, so `false` reproduces the historical prompt
+    # BYTE FOR BYTE, every constructor defaults it OFF, and a pre-field snapshot resumes OFF (its
+    # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row). Read through ONE reader, the engine knob
+    # `_card_verdict_support`, stamped per proposal onto the Researcher as `_verdict_support`
+    # (`engine/proposal_cues.py::ProposalCuesMixin._stamp_brief_switches`). It moves no metric,
+    # champion, selection or violation.
+    card_verdict_support: bool = True
     # A4 (LATS-style): feed a summary of the most recent FAILED branches (operator + error reason)
     # back into the proposal prompt so the proposer reflects on and avoids repeating them. ON by
     # default: it is SELECTIVE by construction (injects only when recent failures exist — the
@@ -3590,6 +3606,12 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # one; the field's comment and `tests/test_propose_brief_fit.py` hold that `false` is the
     # historical prompt, byte for byte.
     "propose_brief_fit": False,
+    # THE BOARD'S VERDICT SUPPORT, added 2026-09-26 defaulting ON (doc 67 67.1). (a) holds. (b) is
+    # the rows above's DIFFERENT-PROMPT ground: ON, a supported card's board row gains a SUPPORT token
+    # and the board a legend line, so a resumed run would change what its Researcher is told mid-log.
+    # (c) is `False`, pointable at every commit before this one; the field's comment and
+    # `tests/test_card_verdict_support.py` hold that `false` is the historical prompt, byte for byte.
+    "card_verdict_support": False,
     # THE JUDGES' PROMPT TRUTHS, added 2026-09-23 defaulting ON (review 2026-09-22, Q-1). (a) holds.
     # (b) is the two rows above's DIFFERENT-PROMPT ground: ON, the pilot, the triage judge and the
     # repair critic are handed different bytes (the triage opening, its watchdog sentence and scout

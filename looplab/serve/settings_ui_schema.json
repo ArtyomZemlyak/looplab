@@ -259,6 +259,13 @@
           "help": "The proposal's summary of the search keeps whole rows within its budget — the failures to avoid beside the strongest — and says what it left out; each number is stated once in one format, and a failure with no triage verdict shows its own last error line. Off = the pre-2026-09-23 proposal prompt, byte for byte."
         },
         {
+          "key": "card_verdict_support",
+          "label": "Board verdict support",
+          "type": "bool",
+          "default": true,
+          "help": "A supported card on the proposal board says what its verdict rests on: replicated (its confirmation seeds hold the gain beyond 1 SE), a single measurement, one inside the run's measured eval noise, or a gain its confirmation seeds did not hold. The verdict itself does not change. Off = the pre-2026-09-26 proposal prompt, byte for byte."
+        },
+        {
           "key": "feature_engineering",
           "label": "Feature engineering",
           "type": "bool",

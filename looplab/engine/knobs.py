@@ -159,6 +159,9 @@ class EngineKnobs:
     # Q-3: the fitted proposal brief. Read by three cues here and stamped per proposal onto the
     # Researcher as `_brief_fit` (`proposal_cues._stamp_brief_switches`) for `roles._state_brief`.
     _propose_brief_fit = Knob("propose_brief_fit", bool)
+    # doc 67 67.1: the board's verdict support, stamped per proposal onto the Researcher as
+    # `_verdict_support` (`proposal_cues._stamp_brief_switches`) for `roles._state_brief`.
+    _card_verdict_support = Knob("card_verdict_support", bool)
     _failure_reflection = Knob("failure_reflection")
     _watchdog_reflection = Knob("watchdog_reflection")
     _deep_repair = Knob("deep_repair")

@@ -218,7 +218,9 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   moved in the same change.
   //   222 -> 223 (2026-09-24): `eval_canary` — the node's own chain on the task's tiny slice before
   //   its full evaluation. A row because it spends eval seconds; the Python half moved too.
-  assert.equal(Object.keys(schema.fieldByKey).length, 223)
+  //   223 -> 224 (2026-09-26): `card_verdict_support` — a supported card's board row says what its
+  //   verdict rests on. A row because it changes a prompt; the Python half moved too.
+  assert.equal(Object.keys(schema.fieldByKey).length, 224)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

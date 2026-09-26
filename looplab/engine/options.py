@@ -238,6 +238,10 @@ class EngineOptions:
     # with a cut receipt, each fact once. A divergence-table row on `node_budget_cue`'s ground: a
     # prompt flag, OFF here so a bare `Engine(...)` keeps the historical bytes.
     propose_brief_fit: bool = False
+    # doc 67 67.1 (2026-09-26): a supported card's board row says what its verdict rests on
+    # (`Settings.card_verdict_support`). A divergence-table row on `node_budget_cue`'s ground: a
+    # prompt flag, OFF here so a bare `Engine(...)` keeps the historical bytes.
+    card_verdict_support: bool = False
     failure_reflection: bool = False     # A4: reflect on recent failed branches in the prompt
     watchdog_reflection: bool = False    # feed recent live-watchdog (train-monitor/ASHA) flags to proposals
     deep_repair: bool = False            # C3: structured failure-taxonomy repair context

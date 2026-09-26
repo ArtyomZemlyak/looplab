@@ -142,6 +142,36 @@ def standard_error_difference(std: float, n: int, incumbent_std: float, incumben
     return math.sqrt(a * a + b * b)
 
 
+def one_se_better(
+    candidate: float,
+    incumbent: float,
+    std: float,
+    n: int,
+    direction: str = "min",
+    incumbent_std: float = 0.0,
+    incumbent_n: int = 0,
+) -> bool:
+    """True if `candidate` is better than `incumbent` by more than 1 SE of the
+    *difference* of the two estimates.
+
+    `std`/`n` describe the candidate's spread; `incumbent_std`/`incumbent_n` (optional)
+    the incumbent's. SE_diff = sqrt(SE_cand^2 + SE_inc^2). With no usable variance on
+    either side it falls back to a strict comparison.
+
+    The >1-SE rule of `trust/gate.py` (I10, ADR-15), which re-exports it as the SAME object: it
+    moved down here, verbatim, on 2026-09-26 so the fold-derived Card ledger (`events/`, which may
+    import only `core`) can hold a `supported` verdict to the same rule the confirm gate uses
+    (doc 67 67.1, `events/card_ledger.py::verdict_support`) rather than to a second spelling of it.
+    """
+    strict = candidate < incumbent if direction == "min" else candidate > incumbent
+    se = standard_error_difference(std, n, incumbent_std, incumbent_n)
+    if se <= 0.0:
+        return strict
+    if direction == "min":
+        return candidate < incumbent - se
+    return candidate > incumbent + se
+
+
 # R1-c: the neutral verifier "score" for an unscored node (the §12 verifier's own `unclear` midpoint).
 # In a metric-tie, a node scored ABOVE this beats an unscored node and one scored BELOW loses to it —
 # so an unverified contender is treated as "no signal", neither promoted nor penalized past the midpoint.

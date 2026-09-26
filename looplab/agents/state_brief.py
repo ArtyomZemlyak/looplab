@@ -161,9 +161,18 @@ def attempted_board_prompt_cards(state: RunState, shown=(), *,
     return list(reversed(selected))
 
 
+# Said once under the rows, and only when a row carries a SUPPORT token — a board with no supported
+# card, and every board with the switch off, renders its historical bytes.
+SUPPORT_LEGEND = ("SUPPORT, on a supported card, says what the verdict rests on: replicated = its "
+                  "confirmation seeds hold the gain beyond 1 SE; single_run = one measurement, not "
+                  "replicated; within_noise = one measurement whose gain is inside this run's "
+                  "measured eval noise; not_replicated = its confirmation seeds did not hold the gain.")
+
+
 def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
                        board_cards: Optional[list] = None, *,
-                       for_proposal: bool = True, fit: bool = False) -> list[str]:
+                       for_proposal: bool = True, fit: bool = False,
+                       support: bool = False) -> list[str]:
     """The board a prompt must read before it names a direction — BOTH halves, ONE vocabulary.
 
     Extracted from `_state_brief` so the deep-research memo prompt renders the SAME rows in the SAME
@@ -270,6 +279,7 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
     # (its status is the question's current state: a retry still running reads as running) with the
     # union of every live card's nodes.
     grouped = _attempted_belief_groups(state) if fit else {}
+    qualified = False
     if attempted:
         lines.append("Research questions ALREADY on the board (each already has an experiment — "
                      "do NOT propose one of these again as if it were new):")
@@ -291,12 +301,24 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
             # card-132 says batch 4096 / lr 0.001 / 3 epochs and node 13 ran 2048 / 0.0005 / ONE
             # epoch. Silent when the two agree, so the loud case stays loud.
             drift = f"{card_drift_brief(card)} {state.card_substitution_brief(card)}".strip()
+            # …AND WHAT A `supported` VERDICT RESTS ON (`Settings.card_verdict_support`, doc 67 67.1):
+            # the verdict is one measurement beating its parent, and read bare it steered the next
+            # proposals as a finding even inside the eval's noise. Over the card's OWN evidence, the
+            # set its verdict was computed from (`events/card_ledger.py::verdict_support`).
+            level = None
+            if support and card.verdict == "supported":
+                from looplab.events.card_ledger import verdict_support
+                level = verdict_support(card.evidence, state)
+                qualified = qualified or level is not None
             lines.append(
                 f"- CARD_ID={card.id} BELIEF_ID={card.belief_id or ''} "
                 f"STATUS={state.card_status_now(card)} VERDICT={card.verdict} "
-                f"NODES={nodes} "
+                + (f"SUPPORT={level} " if level else "")
+                + f"NODES={nodes} "
                 + (f"{drift} " if drift else "")
                 + f"SEED_STATEMENT_JSON={json.dumps(card.seed_statement, ensure_ascii=False)}")
+        if qualified:
+            lines.append(SUPPORT_LEGEND)
         if for_proposal:
             # THE PROMISE THAT WAS MADE HERE AND NEVER EXISTED, removed rather than implemented, and
             # the choice is deliberate. It read: "If one of these genuinely needs another attempt,
@@ -424,7 +446,7 @@ def drop_concept_authoring(brief: str) -> str:
 def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
                  hyp_order: Optional[list[str]] = None, board_cards: Optional[list] = None,
                  *, for_proposal: bool = True, memo_verdicts: bool = False,
-                 fit: bool = False, run_tools: bool = True) -> str:
+                 fit: bool = False, run_tools: bool = True, verdict_support: bool = False) -> str:
     # Function-local for the same reason as the `experiments_digest` import below: `agents` may not
     # take a module-level edge on `events`. `unscored_metric_clause` is the ONE spelling of "the
     # eval refused to produce this number" (doc 53 §4a) — the headline count and this line are two
@@ -434,7 +456,9 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
     # passed ONLY by the two propose paths: the header states each fact once and every number in
     # the working set's one format, the digest spends its budget in whole rows with a receipt, and
     # a board row carries every node of its belief. Off (every other caller, and the historical
-    # propose) the brief is the historical bytes. `run_tools` — is this proposer offered the run
+    # propose) the brief is the historical bytes. `verdict_support` is `Settings.card_verdict_support`
+    # (doc 67 67.1), passed by the same two paths: a supported card's board row says what its
+    # verdict rests on (`board_prompt_lines`). `run_tools` — is this proposer offered the run
     # tools — decides only whether the digest's cut receipt names the call that returns the rest.
     from looplab.events.digest import fmt_num, node_metric, unscored_metric_clause
     best = state.best()
@@ -548,5 +572,5 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
     # an existing question shares (`board_prompt_lines`). The deep-research memo prompt renders
     # the SAME rows; it had this exact defect and did not get this exact fix.
     lines.extend(board_prompt_lines(state, hyp_order, board_cards, for_proposal=for_proposal,
-                                    fit=fit))
+                                    fit=fit, support=verdict_support))
     return "\n".join(line for line in lines if line)

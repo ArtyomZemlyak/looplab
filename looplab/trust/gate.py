@@ -8,29 +8,10 @@ detectors) extends this module; this is the minimal, unit-tested core.
 """
 from __future__ import annotations
 
-from looplab.core.fitness import standard_error_difference
+# The rule itself lives in `core/fitness.py` since 2026-09-26 (moved verbatim, doc 67 67.1): the
+# fold-derived Card ledger holds a `supported` verdict to it, and `events/` may import only `core`.
+# Re-exported here as the SAME object, so `trust.gate.one_se_better` — its readers' spelling — keeps
+# resolving (and `standard_error_difference`, which this module has always carried).
+from looplab.core.fitness import one_se_better, standard_error_difference  # noqa: F401 — re-exported
 
-
-def one_se_better(
-    candidate: float,
-    incumbent: float,
-    std: float,
-    n: int,
-    direction: str = "min",
-    incumbent_std: float = 0.0,
-    incumbent_n: int = 0,
-) -> bool:
-    """True if `candidate` is better than `incumbent` by more than 1 SE of the
-    *difference* of the two estimates.
-
-    `std`/`n` describe the candidate's spread; `incumbent_std`/`incumbent_n` (optional)
-    the incumbent's. SE_diff = sqrt(SE_cand^2 + SE_inc^2). With no usable variance on
-    either side it falls back to a strict comparison.
-    """
-    strict = candidate < incumbent if direction == "min" else candidate > incumbent
-    se = standard_error_difference(std, n, incumbent_std, incumbent_n)
-    if se <= 0.0:
-        return strict
-    if direction == "min":
-        return candidate < incumbent - se
-    return candidate > incumbent + se
+__all__ = ["one_se_better"]

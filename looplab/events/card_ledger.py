@@ -34,7 +34,7 @@ from looplab.core.concepts import (
     concept_materialization_receipt,
     normalized_concept_materialization_receipt,
 )
-from looplab.core.fitness import counts_toward_best, is_usable_metric
+from looplab.core.fitness import counts_toward_best, is_usable_metric, one_se_better
 from looplab.core.jsonutil import valid_digest_ref
 from looplab.core.models import (CARD_ACTION_DIGEST_V1_FIELDS, CARD_ACTION_DIGEST_V2_FIELDS,
                      CARD_CHILD_LIMIT, CARD_CONCEPT_TAG_LIMIT, CARD_LINEAGE_MAX_DEPTH,
@@ -615,6 +615,105 @@ def _evidence_verdict(evidence_ids: Iterable[int], nodes: dict[int, Node], direc
     else:
         status = "tested"                          # all evidence evaluated, none improved
     return best_delta, status, supported
+
+
+# WHAT A `supported` VERDICT RESTS ON (doc 67 67.1). `_evidence_verdict` calls a card supported when
+# ONE measurement of one experiment beat its parent, or the standing record — strictly, with no look
+# at the replications the run may already hold (`confirmed_mean` over `confirmed_seeds`, which
+# already decide the CHAMPION in `events/replay_selection.py`), at the >1-SE rule, or at the run's
+# measured noise floor (`RunState.eval_noise_floor`). The proposal board shows that verdict to the
+# Researcher, so a gain inside the noise read as a finding and steered the next proposals. The
+# VERDICT is left exactly as it is — `search/card_selection.py` reads `open` off it and lesson
+# distillation reads `supported` — and this says, beside it, how much it rests on. Strongest first:
+SUPPORT_REPLICATED = "replicated"          # its confirmation seeds hold the gain beyond 1 SE
+SUPPORT_SINGLE_RUN = "single_run"          # one measurement; nothing measured says it is noise
+SUPPORT_WITHIN_NOISE = "within_noise"      # one measurement, inside the run's measured noise floor
+SUPPORT_NOT_REPLICATED = "not_replicated"  # its confirmation seeds did NOT hold the gain beyond 1 SE
+SUPPORT_LEVELS = (SUPPORT_REPLICATED, SUPPORT_SINGLE_RUN, SUPPORT_WITHIN_NOISE,
+                  SUPPORT_NOT_REPLICATED)
+
+
+def _replicated(node: Node) -> bool:
+    """The node carries a confirmation over at least two seeds — a MEAN, with a spread."""
+    seeds = node.confirmed_seeds
+    return (is_usable_metric(node.confirmed_mean) and isinstance(seeds, int)
+            and not isinstance(seeds, bool) and seeds >= 2)
+
+
+def _gain_support(candidate: Node, incumbent: Node, direction: str, noise_std: float) -> str:
+    """How much ONE measured gain of `candidate` over `incumbent` rests on (`SUPPORT_LEVELS`).
+
+    A replicated candidate is held to `core/fitness.py::one_se_better` — the confirm gate's own rule
+    — against the incumbent's confirmed mean when it has one, else its single measurement. A single
+    measurement is held to the run's measured floor: `std` there is the spread of ONE evaluation of
+    one unchanged candidate, so a difference of two single measurements has sd `std·√2`, the 1-SE
+    reading of the same rule (`standard_error_difference` gives a single measurement no SE of its
+    own, which is right for a gate that compares only means, and would make every gain clear it)."""
+    if _replicated(candidate):
+        inc_mean = _replicated(incumbent)
+        held = one_se_better(
+            candidate.confirmed_mean,
+            incumbent.confirmed_mean if inc_mean else incumbent.metric,
+            candidate.confirmed_std or 0.0, candidate.confirmed_seeds, direction,
+            (incumbent.confirmed_std or 0.0) if inc_mean else 0.0,
+            incumbent.confirmed_seeds if inc_mean else 0)
+        return SUPPORT_REPLICATED if held else SUPPORT_NOT_REPLICATED
+    if noise_std > 0:
+        gain = ((candidate.metric - incumbent.metric) if direction == "max"
+                else (incumbent.metric - candidate.metric))
+        if gain <= noise_std * math.sqrt(2):
+            return SUPPORT_WITHIN_NOISE
+    return SUPPORT_SINGLE_RUN
+
+
+def _record_bases(nodes: dict[int, Node], direction: str, *,
+                  excluded: Collection[int] = frozenset(),
+                  aborted: Collection[int] = frozenset()) -> dict[int, int]:
+    """{record setter: the node whose standing record it beat} — `_record_setter_ids`' loop, with
+    the incumbent kept. The establisher beat nothing and has no entry; the SAME guard object
+    (`_sota_eligible`) as the two helpers above, for the reason `_record_establisher_id` gives."""
+    better = (lambda a, b: a > b) if direction == "max" else (lambda a, b: a < b)
+    bases: dict[int, int] = {}
+    holder: Node | None = None
+    for n in sorted(nodes.values(), key=lambda x: x.id):
+        if _sota_eligible(n, excluded, aborted):
+            if holder is None or better(n.metric, holder.metric):
+                if holder is not None:
+                    bases[n.id] = holder.id
+                holder = n
+    return bases
+
+
+def verdict_support(evidence_ids: Iterable[int], st: RunState) -> str | None:
+    """How much a card's `supported` verdict rests on — a `SUPPORT_LEVELS` member, or None when the
+    evidence supports nothing (the card is not `supported`, or supported only by the establisher).
+
+    The SAME gains `_evidence_verdict` counts, over the SAME population (`_usable_evidence`, with the
+    champion's exclusions): each usable evaluated experiment that beat its best feasible parent, and
+    each that beat the standing record, is classified against what it beat (`_gain_support`), and
+    the card reads its STRONGEST — one replicated gain is a replicated finding, whatever else ran.
+    Read by the proposal board under `Settings.card_verdict_support` (`agents/state_brief.py::
+    board_prompt_lines`); nothing decides on it."""
+    direction = st.direction
+    excluded = frozenset(st.breed_excluded or ())
+    aborted = frozenset(st.aborted_nodes or ())
+    better = (lambda a, b: a > b) if direction == "max" else (lambda a, b: a < b)
+    floor = st.eval_noise_floor if isinstance(st.eval_noise_floor, dict) else {}
+    noise_std = floor.get("std") if is_usable_metric(floor.get("std")) else 0.0
+    bases = _record_bases(st.nodes, direction, excluded=excluded, aborted=aborted)
+    _ev, evaluated = _usable_evidence(evidence_ids, st.nodes, excluded=excluded, aborted=aborted)
+    found: set[str] = set()
+    for n in evaluated:
+        parents = [st.nodes[p] for p in n.parent_ids
+                   if p in st.nodes and st.nodes[p].metric is not None and st.nodes[p].feasible]
+        if parents:
+            parent = (max if direction == "max" else min)(parents, key=lambda p: p.metric)
+            if better(n.metric, parent.metric):
+                found.add(_gain_support(n, parent, direction, noise_std))
+        beaten = st.nodes.get(bases[n.id]) if n.id in bases else None
+        if beaten is not None:
+            found.add(_gain_support(n, beaten, direction, noise_std))
+    return next((level for level in SUPPORT_LEVELS if level in found), None)
 
 
 def _bounded_card_enrichment(value, *, depth: int = 0, budget: list[int] | None = None):

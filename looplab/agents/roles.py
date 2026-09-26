@@ -397,7 +397,9 @@ RESEARCHER_HINT_ATTRS: tuple[str, ...] = (
     # Q-3 (2026-09-23): `Settings.propose_brief_fit` as the BOOLEAN both propose paths hand
     # `_state_brief` (the `_memo_verdict_cue` shape), stamped per proposal by
     # `engine/proposal_cues.py::ProposalCuesMixin._stamp_brief_switches`.
-    "_brief_fit")
+    "_brief_fit",
+    # doc 67 67.1 (2026-09-26): `Settings.card_verdict_support`, the same shape and the same stamp.
+    "_verdict_support")
 """Ephemeral hint attributes communicated to the ACTIVE Researcher via `setattr` and consumed
 with `getattr(obj, name, default)`. Writers: the engine (`_digest_cap` in orchestrator.py
 `__init__`; `_complexity_hint`/`_sweep_hint` in engine/proposal_cues.py `_set_complexity_hint`;
@@ -683,7 +685,9 @@ class LLMResearcher:
                                                      memo_verdicts=bool(getattr(
                                                          self, "_memo_verdict_cue", False)),
                                                      fit=bool(getattr(self, "_brief_fit", False)),
-                                                     run_tools=False)     # this path has no tools
+                                                     run_tools=False,     # this path has no tools
+                                                     verdict_support=bool(getattr(
+                                                         self, "_verdict_support", False)))
                                         + "\n" + self.space_hint +
                                         hint_block + cues +
                                         "\nPropose the next Idea (operator, params, rationale, concept_mode, "
