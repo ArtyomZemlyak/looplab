@@ -184,7 +184,7 @@ const notifyCommandRecord = (callback, record) => {
 // property of the view.
 export async function submitRunCommand(runId, type, data = {}, {
   idempotencyKey = createIdempotencyKey(), expectedGeneration,
-  requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS, allowRunMutationModes = [],
+  requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS, allowRunMutationModes = [], drainOnly = false,
 } = {}) {
   const path = runApiPath(runId, '/commands')
   assertNotReviewMutation(path)
@@ -200,7 +200,12 @@ export async function submitRunCommand(runId, type, data = {}, {
     const record = await commandJson(path, {
       method: 'POST',
       headers: _authHeaders({ 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey }),
-      body: JSON.stringify({ type, data: data || {}, expected_generation: expectedGeneration }),
+      // `drain_only` (doc 68 68.3b) is HOW a node_reset is served — a drain, not a resumed search —
+      // and part of the command's identity; sent only when asked, so every other body is unchanged.
+      body: JSON.stringify({
+        type, data: data || {}, expected_generation: expectedGeneration,
+        ...(drainOnly === true ? { drain_only: true } : {}),
+      }),
     }, requestTimeoutMs, { submission: true })
     return validatedCommandRecord(record, path)
   }
@@ -291,7 +296,7 @@ export async function retryRunCommand(runId, commandId, {
 export async function runCommand(runId, type, data = {}, {
   waitMs = 8000, pollMs = 250, idempotencyKey = createIdempotencyKey(), submitRetries = 1,
   retryMs = 150, requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS, onRecord = null,
-  expectedGeneration = undefined, allowRunMutationModes = [],
+  expectedGeneration = undefined, allowRunMutationModes = [], drainOnly = false,
 } = {}) {
   // New intent: bind once to the current event-log generation. Transport retries and id-less
   // recovery pass this exact token back; they never silently substitute a generation observed later.
@@ -311,6 +316,7 @@ export async function runCommand(runId, type, data = {}, {
     try {
       record = await submitRunCommand(runId, type, data, {
         idempotencyKey, expectedGeneration: generation, requestTimeoutMs, allowRunMutationModes,
+        drainOnly,
       })
       notifyCommandRecord(onRecord, record)
       break

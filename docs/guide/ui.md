@@ -176,6 +176,11 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   reusing earlier stages' artifacts. Same node id, no proliferation. The command service wakes or
   attaches the driver automatically. Its exact `command_ack` means the engine accepted that reset
   intent; re-development/re-evaluation may still be running and remains visible as normal run work.
+  **re-score, then pause** is the same `eval` reset served as a DRAIN (doc 68 68.3b): the engine the
+  command starts evaluates what is owed and pauses (`looplab resume --drain-only`) rather than
+  resuming the search. It is refused — nothing recorded — on a run an engine is already driving, and
+  wherever the drain itself would refuse (a finalize pending, a holdout disclosed, a host-graded
+  split re-carved since the incumbents were measured).
 - **Chat / boss** — an agentic run chat turns one message into a plan of ordered actions, with each
   action narrated in a durable feed (`chat.jsonl`). That feed is capped at **32 MiB** per run; past the
   cap further turns are refused with HTTP 413 so one long-lived conversation cannot fill the disk or

@@ -302,7 +302,7 @@ looplab resume RUN_DIR [OPTIONS]
 
 **`--drain-only` finishes the owed evaluations and stops** (doc 68 68.3a). It evaluates every
 pending node a reset re-opened or whose evaluation started and never finished
-(`engine/orchestrator.py::drain_owed`) through the ordinary dispatch — its own repairs included —
+(`engine/run_boundary.py::drain_owed`) through the ordinary dispatch — its own repairs included —
 with no deep research overlapping it, and prints what it owes before it starts. A node the search
 built and has not dispatched yet (a Card's speculative build) stays pending for the next resume:
 whether it runs at all is a search decision. No node is created, no queued fork, inject, confirm or
@@ -322,18 +322,20 @@ every node failed — never finishes a drain. It refuses before appending anythi
 finalize is pending; when lifting a pause or a finish would open a new search epoch after a holdout
 disclosure, re-queuing every evaluated node; and when owed nodes were RE-QUEUED by that rotation
 rather than reset — after a disclosure one reset re-opens every incumbent for a full re-evaluation,
-and it names them; and when the run is FINISHED, host-graded and holds a holdout split — lifting a
-finish opens a new search epoch, which re-carves the rows the host scores the search on, so the
-drained node would be ranked against incumbents measured on other rows (doc 68 68.3c). It does
+and it names them; and when the run is host-graded and holds a holdout split that lifting its
+finish would re-carve, or that was already re-carved since an incumbent was measured (a reset of a
+finished run opens a new search epoch too) — the drained node would be ranked against incumbents
+measured on other rows (doc 68 68.3c). It does
 nothing when nothing is owed (exit `0`; a `node_reset` re-opens a finished run itself); any other
 finished run that still owes work — the eval budget finalized it with a reset node pending — is
 lifted and drained. The mode belongs to that one invocation and is not
 recorded as the run's.
 
-Where the owed work comes from: an evaluation a crash interrupted, or a reset recorded while no
-server will drive the run. The Inspector's stage reset is a server command that starts a PLAIN
-`resume` when no engine owns the run — the whole search — and cannot ask for a drain yet (doc 68
-68.3b).
+Where the owed work comes from: an evaluation a crash interrupted, a reset recorded while no server
+will drive the run, or the Inspector's **re-score, then pause**: a `node_reset` command with
+`drain_only`, whose worker starts this very `resume --drain-only` instead of a plain resume (doc 68
+68.3b). The server asks the same refusals first — on the log plus the reset it would append — so a
+drain it admits is one this command drives, and a refused one records nothing.
 
 The original launch settings are restored from `config.snapshot.json`, so run-only flags are not silently
 dropped. Seven comparison/selection fields (`card_driven_selection`, `speculation_depth`, `holdout_fraction`,

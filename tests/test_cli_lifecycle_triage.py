@@ -22,6 +22,7 @@ import json
 import pytest
 
 from looplab.cli import run_cmds
+from looplab.engine import run_boundary
 from looplab.cli.run_cmds import (
     WRAP_UP_NOTICE, announce_wrap_up, classify_prior_run, terminal_projection_incomplete,
 )
@@ -91,14 +92,16 @@ def test_the_scope_half_of_the_predicate_is_read_from_the_events():
         calls.append(events)
         return _Scope() if events else None
 
-    original = run_cmds.incomplete_finalize_scope
-    run_cmds.incomplete_finalize_scope = _incomplete
+    # The READER moved to `engine/run_boundary.py` (doc 68 68.3b: the server's command worker asks
+    # the same ladder), so the patch names that module — a patch on the CLI's re-export would miss.
+    original = run_boundary.incomplete_finalize_scope
+    run_boundary.incomplete_finalize_scope = _incomplete
     try:
         assert terminal_projection_incomplete(_Prior(), ["an event"]) is True
         assert terminal_projection_incomplete(_Prior(), []) is False
         assert classify_prior_run(_Prior(), ["an event"]) == "finalization_pending"
     finally:
-        run_cmds.incomplete_finalize_scope = original
+        run_boundary.incomplete_finalize_scope = original
     assert calls, "the scope check must actually consult the events it was handed"
 
 

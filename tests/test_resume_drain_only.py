@@ -453,3 +453,56 @@ def test_a_time_budget_hands_one_node_per_turn(tmp_path, monkeypatch, max_second
     monkeypatch.setattr(Engine, "_dispatch_evals", evaluate)
     assert _drain(rd).exit_code == 0
     assert handed == batches
+
+
+def _host_graded_log(tmp_path, *, finished):
+    """Two evaluated nodes on a host-graded run whose split is salted by the search epoch."""
+    store = EventStore(tmp_path / "hg" / "events.jsonl")
+    (tmp_path / "hg").mkdir(parents=True, exist_ok=True)
+    store.append("run_started", {"run_id": "hg", "task_id": "t", "goal": "g", "direction": "max",
+                                 "holdout_fraction": 0.25})
+    store.append("host_grading", {"predictions": "predictions.json", "scorer": "accuracy"})
+    for nid, metric in ((0, 0.4), (1, 0.5)):
+        store.append("node_created", {"node_id": nid, "parent_ids": [], "operator": "draft",
+                                      "idea": {"operator": "draft", "params": {}, "rationale": "r"},
+                                      "code": f"print({nid})"})
+        store.append("node_evaluated", {"node_id": nid, "generation": 0, "metric": metric,
+                                        "violations": []})
+    store.append("run_finished" if finished else "pause",
+                 {"reason": "done"} if finished else {})
+    store.append("node_reset", {"node_id": 1, "from_stage": "eval", "generation": 0})
+    return store.read_all()
+
+
+def test_a_split_re_carved_since_the_incumbents_were_measured_refuses_the_drain(tmp_path):
+    """MEDIUM (critic 2026-09-26, driven): a reset of a FINISHED host-graded run opens a new search
+    epoch itself and clears the finish, so the finished-run clause never saw it, and the drain scored
+    the reset node on re-carved rows against incumbents measured on the old ones. Decided from the
+    epoch each incumbent was MEASURED in (`engine/run_boundary.py::measured_epochs`)."""
+    from looplab.engine.run_boundary import classify_prior_run, measured_epochs
+
+    paused = _host_graded_log(tmp_path / "p", finished=False)
+    state = fold(paused)
+    assert state.search_epoch == 0 and measured_epochs(paused) == {0: 0, 1: 0}
+    assert drain_only_refusal(state, classify_prior_run(state, paused), paused) is None, (
+        "the split never moved: the drain proceeds")
+
+    reopened = _host_graded_log(tmp_path / "f", finished=True)
+    state = fold(reopened)
+    assert state.search_epoch == 1 and not state.finished, "the reset reopened it, epoch and all"
+    code, message = drain_only_refusal(state, classify_prior_run(state, reopened), reopened)
+    assert code == 2 and "re-carved (search epoch 1) after node(s) 0 were measured" in message
+
+
+def test_a_reset_of_a_finished_host_graded_run_is_not_drained_across_its_split(
+        tmp_path, monkeypatch):
+    """The CLI end of the same rule: finish, reset, drain — refused before anything is appended."""
+    _isolated(monkeypatch, tmp_path)
+    rd, store = _finished_run(tmp_path)
+    store.append("host_grading", {"predictions": "predictions.json", "scorer": "accuracy"})
+    _reset(store, 1)
+    before = [e.seq for e in store.read_all()]
+    out = _drain(rd)
+    assert out.exit_code == 2, out.output
+    assert "was re-carved (search epoch 1) after node(s) 0, 2, 3 were measured" in out.output
+    assert [e.seq for e in store.read_all()] == before

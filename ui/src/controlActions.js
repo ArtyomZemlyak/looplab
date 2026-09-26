@@ -41,8 +41,11 @@ export const CONTROL = {
     rid, 'node_abort', { node_id: id, generation, reason: 'ui' }),
   // Re-run an existing node IN PLACE from a stage (no new node): eval=re-score (keep code),
   // implement=re-run the Developer (keep the idea), propose=full redo. The command service drives it.
-  resetNode: (rid, id, stage, generation) => runCommand(
-    rid, 'node_reset', { node_id: id, generation, from_stage: stage }),
+  // `drainOnly` (doc 68 68.3b) serves it as a DRAIN: the engine the command starts evaluates what is
+  // owed and pauses (`looplab resume --drain-only`) instead of resuming the search.
+  resetNode: (rid, id, stage, generation, { drainOnly = false } = {}) => runCommand(
+    rid, 'node_reset', { node_id: id, generation, from_stage: stage },
+    drainOnly === true ? { drainOnly: true } : {}),
   approve: (rid, id, generation) => runCommand(
     rid, 'approval_granted', { node_id: id, generation }),
   ratify: (rid) => runCommand(rid, 'spec_approved', {}),

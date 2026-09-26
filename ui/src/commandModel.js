@@ -49,6 +49,7 @@ export const STORED_ERROR_CODES = new Set([
   'ratification_not_requested', 'invalid_transition',
   'invalid_run_generation', 'run_generation_changed', 'run_generation_unavailable',
   'config_snapshot_incompatible', 'config_snapshot_invalid',
+  'drain_refused', 'drain_needs_stopped_run',
 ])
 // The two refusals the server answers at admission, nothing appended, when the driver it would start
 // could not read the run's config.snapshot.json (`serve/engine_proc.py::spawn_snapshot_refusal`,
@@ -76,11 +77,27 @@ const DEADLINE_SETTLE_COPY = Object.freeze({
     'Nothing was appended. Retry this command, or submit the action again.',
   ]),
 })
+// A node_reset asked to be served as a DRAIN (doc 68 68.3b) — evaluate what is owed, then pause —
+// and the server refused: at admission, with nothing recorded, or at the spawn. "Refresh state…" is
+// not the remedy for either (`serve/run_commands.py::RunCommandService._drain_refusal`).
+const DRAIN_REFUSAL_COPY = Object.freeze({
+  drain_refused: Object.freeze([
+    'A drain would not drive this run',
+    'Reset without “then pause” to rescore inside a resumed search, or resolve what the refusal '
+      + 'named, then submit a new command.',
+  ]),
+  drain_needs_stopped_run: Object.freeze([
+    'An engine is already driving this run',
+    'Stop the run and wait for it to stop, then reset with “then pause” again — or reset without '
+      + 'it to rescore inside the running search.',
+  ]),
+})
 // Restored command records intentionally contain only a stable code, never server-authored text.
 // Generate their copy from that code instead of eagerly shipping a large near-duplicate dictionary.
 const storedErrorCopy = code => {
   if (Object.hasOwn(CONFIG_SNAPSHOT_REFUSAL_COPY, code)) return CONFIG_SNAPSHOT_REFUSAL_COPY[code]
   if (Object.hasOwn(DEADLINE_SETTLE_COPY, code)) return DEADLINE_SETTLE_COPY[code]
+  if (Object.hasOwn(DRAIN_REFUSAL_COPY, code)) return DRAIN_REFUSAL_COPY[code]
   const title = code === 'engine_failed' ? 'The run engine reported a failure'
     : code.replaceAll('_', ' ')
   let remediation = 'Refresh state before acting again.'

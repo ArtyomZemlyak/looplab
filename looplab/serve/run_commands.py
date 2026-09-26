@@ -48,8 +48,8 @@ from looplab.events.eventstore import (
     decode_event_record, event_sequence_continues, iter_event_jsonl)
 from looplab.events.replay import fold
 from looplab.events.types import (
-    EV_APPROVAL_GRANTED, EV_CARD_RESOURCE_PINNED, EV_HINT, EV_HYPOTHESIS_UPDATED, EV_PAUSE,
-    EV_RESTART, EV_RUN_ABORT, EV_SPEC_APPROVED, standing_hint_dedup_key)
+    EV_APPROVAL_GRANTED, EV_CARD_RESOURCE_PINNED, EV_HINT, EV_HYPOTHESIS_UPDATED, EV_NODE_RESET,
+    EV_PAUSE, EV_RESTART, EV_RUN_ABORT, EV_SPEC_APPROVED, standing_hint_dedup_key)
 from looplab.serve import control_validation
 from looplab.serve import engine_proc as _engine_proc   # `_PENDING_RECHECK_S`, read at call time
 from looplab.serve.command_observation import CommandObservation, CommandObservationIndex
@@ -577,6 +577,35 @@ def admission_spawns_driver(policy: EnginePolicy, alive: bool) -> bool:
     if policy is EnginePolicy.NO_SPAWN:
         return False
     return policy is EnginePolicy.RESTART_AFTER_EXIT or not alive
+
+
+# A DRAIN is a property of how a `node_reset` command is SERVED, not of the event it appends (doc 68
+# 68.3b): the worker starts `looplab resume --drain-only` instead of a plain resume, so the engine it
+# spawns evaluates what is owed and pauses rather than resuming the search. It rides the command
+# record (`drain_only`), never the event log — the reset event is byte-identical either way.
+DRAIN_REFUSED = "drain_refused"
+DRAIN_NEEDS_STOPPED_RUN = "drain_needs_stopped_run"
+
+
+def _normalize_drain_only(value, event_type: str) -> bool:
+    """The command body's `drain_only`: absent or false is the plain command; true is admitted only
+    on a `node_reset`, and anything but a JSON boolean is refused."""
+    if value is None or value is False:
+        return False
+    if value is not True:
+        raise HTTPException(400, "drain_only must be a boolean")
+    if event_type != EV_NODE_RESET:
+        raise HTTPException(400, "drain_only applies only to a node_reset command")
+    return True
+
+
+def _drain_decision(record: dict) -> dict:
+    """`_decision`'s keywords for this record: `{"drain": <the reset it would append>}` when it asked
+    for a drain — what `_decision` folds on top of the log to ask the drain question before the
+    append — and `{}` otherwise, so a plain command asks `_decision(rd, event_type)` as it always
+    has (tests stub that exact call)."""
+    return ({"drain": dict(record.get("data") or {})} if record.get("drain_only") is True
+            else {})
 
 
 class RunCommandService:
@@ -2389,6 +2418,10 @@ class RunCommandService:
         spec = CONTROL_SPECS.get(str(record.get("event_type") or ""))
         if spec is None:
             return record
+        if (record.get("error") or {}).get("code") == DRAIN_REFUSED:
+            # A refused DRAIN is not rescued by a later ack: that ack comes from whatever engine
+            # serves the reset next — a plain resume's search — which is not the drain (68.3b).
+            return record
         if self._postcondition(rd, record, observation):
             updated = dict(record)
             updated["reconciled_from"] = status
@@ -2555,11 +2588,14 @@ class RunCommandService:
             for hint in self.srv.state(rd).pending_hints
         )
 
-    def _decision(self, rd: Path, event_type: str) -> tuple[str, Optional[dict]]:
+    def _decision(self, rd: Path, event_type: str,
+                  *, drain: Optional[dict] = None) -> tuple[str, Optional[dict]]:
         """Choose what this command does to the engine: append / attach / noop / reject.
 
         The per-event rule is `ControlSpec.decide`, which returns None when the shared engine-policy
-        tail below already answers correctly for that event (doc 25 SC-02).
+        tail below already answers correctly for that event (doc 25 SC-02). `drain` is the reset a
+        command that asked for a drain would append (`_drain_decision`): such a command is admitted
+        only where `looplab resume --drain-only` would drive the run (`_drain_refusal`).
         """
         # Command-only collaboration never requires STARTING a driver. A live driver may observe an
         # intent (notably operator Card drop), but the strict append lock is the only ownership
@@ -2587,7 +2623,46 @@ class RunCommandService:
             return "reject", _error(
                 "engine_finishing", "the engine is still completing its terminal write-out",
                 "retry after engine_running becomes false", retryable=True)
+        if drain is not None:
+            refused = self._drain_refusal(rd, drain, alive=alive)
+            if refused is not None:
+                return "reject", refused
         return self._refuse_unreadable_spawn(rd, spec, alive, ("append", None))
+
+    def _drain_refusal(self, rd: Path, reset: Optional[dict], *,
+                       alive: bool = False) -> Optional[dict]:
+        """Why a drain may not be served (doc 68 68.3b), as a coded error, or None.
+
+        The drain's own rule, not a copy of it: `engine/run_boundary.py::drain_only_refusal` over
+        the log as it stands PLUS `reset`, the reset this command would append — folded, never
+        appended (None once the reset is in the log: the pre-spawn re-check). A drain the CLI
+        refuses exits before it builds an engine, so it never writes the `command_ack` this command
+        waits for; admitted, it would buy a re-spawn every monitor pass until the observation
+        deadline. Refused HERE, before the append, the reset is not recorded either — the operator
+        asked for a rescore that stops, and gets neither half rather than a search that resumes.
+
+        A LIVE engine refuses too: it would serve the reset inside the search it is running, which
+        is exactly what a drain was asked not to buy."""
+        if alive:
+            return _error(
+                DRAIN_NEEDS_STOPPED_RUN,
+                "an engine is already driving this run, and it would serve the reset inside its "
+                "search — a drain applies only when this command starts the engine",
+                "stop the run (pause) and wait for it to stop, then reset with the drain again; or "
+                "reset without it to rescore inside the running search", retryable=False)
+        from looplab.engine.run_boundary import classify_prior_run, drain_only_refusal
+        events = EventStore(self._events_path(rd)).read_all()
+        if reset is not None:
+            events = [*events, Event(v=1, seq=(events[-1].seq + 1) if events else 0,
+                                     ts=time.time(), type=EV_NODE_RESET, data=dict(reset))]
+        state = fold(events)
+        refused = drain_only_refusal(state, classify_prior_run(state, events), events)
+        if refused is None:
+            return None
+        return _error(
+            DRAIN_REFUSED, f"a drain would not drive this run: {refused[1]}",
+            ("nothing was served as a drain; resolve what the message names, or reset without the "
+             "drain to rescore inside a resumed search"), retryable=False)
 
     @staticmethod
     def _refuse_unreadable_spawn(rd: Path, spec, alive: bool,
@@ -2610,7 +2685,7 @@ class RunCommandService:
                                 retryable=bool(refused["retryable"]))
 
     def submit(self, rd: Path, idempotency_key: str, event_type: str, data,
-               *, expected_generation: object = None) -> dict:
+               *, expected_generation: object = None, drain_only: object = None) -> dict:
         key = str(idempotency_key or "")
         if not key or len(key) > 512:
             raise HTTPException(400, "Idempotency-Key is required and must be at most 512 characters")
@@ -2619,7 +2694,13 @@ class RunCommandService:
         raw_data = {} if data is None else data
         if not isinstance(raw_data, dict):
             raise HTTPException(400, "command data must be a JSON object")
+        drain = _normalize_drain_only(drain_only, event_type)
         _raw, payload_digest = self._payload(event_type, raw_data)
+        if drain:
+            # WHAT was asked includes how it is served: the same key with the drain added or dropped
+            # is a different command (409), and a record without one keeps its historical digest.
+            payload_digest = hashlib.sha256(
+                (payload_digest + ":drain_only").encode("ascii")).hexdigest()
         # The precondition itself is a strict wire contract even for an idempotent replay. A valid
         # stale token may resolve an existing same-key record below, but missing/malformed input must
         # never be silently accepted just because a record happens to exist.
@@ -2792,6 +2873,8 @@ class RunCommandService:
                         "driver_was_alive": (None if event_type in COLLABORATION_EVENTS
                                              else self._engine_state(rd)),
                     }
+                    if drain:
+                        record["drain_only"] = True
                     try:
                         if normalization_error is not None:
                             raise normalization_error
@@ -2804,7 +2887,8 @@ class RunCommandService:
                             event_type, normalized)
                         record["engine_policy"] = CONTROL_SPECS[event_type].engine_policy.value
                         record["postcondition"] = CONTROL_SPECS[event_type].postcondition
-                        decision, err = self._decision(rd, event_type)
+                        decision, err = self._decision(
+                            rd, event_type, **({"drain": normalized} if drain else {}))
                         if (decision == "append"
                                 and self._standing_hint_duplicate(rd, event_type, normalized)):
                             decision = "noop"
@@ -3252,7 +3336,7 @@ class RunCommandService:
                 retryable=True)
         return None
 
-    def _spawn(self, rd: Path) -> Optional[int]:
+    def _spawn(self, rd: Path, *, drain_only: bool = False) -> Optional[int]:
         task_file = task_file_for(rd)
         if not task_file:
             raise RuntimeError("run has no task.snapshot.json or usable ui_meta.json")
@@ -3265,7 +3349,8 @@ class RunCommandService:
                 # before or after the OS accepted Popen, and context release can fail after return.
                 popen_boundary_entered = True
                 return self.spawn_engine(
-                    ["resume", str(rd), "--task-file", str(task_file)],
+                    ["resume", str(rd), "--task-file", str(task_file),
+                     *(["--drain-only"] if drain_only else [])],
                     env=secret_env, run_dir=rd)
         except BaseException as exc:
             if popen_boundary_entered:
@@ -3466,6 +3551,14 @@ class RunCommandService:
         if self._settle_if_expired(rd, path, record, command_id):
             return True, None
         verb = "restart" if restarting else "start"
+        drain = record.get("drain_only") is True
+        if drain and (refused := self._drain_refusal(rd, None)) is not None:
+            # THE DRAIN, asked again on the log that now holds this command's reset (doc 68 68.3b):
+            # `_decision` asked it before the append, but a control can land in between, and a
+            # refused child would never ack — so each spawn, the monitor's re-spawn included, asks
+            # first and a refusal is this command's terminal answer rather than a re-spawn loop.
+            self._terminal(path, record, "failed", error=refused)
+            return True, None
         self._record_spawn_claim(rd, command_id, None)
         # THE HANDSHAKE'S READ (review 2026-09-22, SRV1-09): only NOW, with this lease published,
         # ask whether a log-ledger spawner has claimed a launch that has not reached engine.lock.
@@ -3481,9 +3574,15 @@ class RunCommandService:
             claimed_elsewhere = False
         if claimed_elsewhere:
             self._clear_spawn_claim(rd, command_id)
+            if drain:
+                # That launch is a PLAIN resume/finalize (the log ledger has no drain): it serves
+                # this reset inside the search it resumes. Said on the record rather than hidden.
+                record["drain_superseded"] = True
+                record["updated_at"] = time.time()
+                self._save(path, record)
             return False, LAUNCH_IN_FLIGHT
         try:
-            pid = self._spawn(rd)
+            pid = self._spawn(rd, drain_only=drain)
         except Exception as exc:  # noqa: BLE001 - Popen/task failures become records
             uncertain = isinstance(exc, EngineSpawnOutcomeUnknown)
             if not uncertain:
@@ -3721,7 +3820,7 @@ class RunCommandService:
                 # `[-1].seq` off a fresh full parse re-read and re-validated the entire log on every
                 # command request. The append below is CAS'd on this value, so it stays authoritative.
                 decision_baseline = self._observe(rd).latest_seq
-                decision, err = self._decision(rd, event_type)
+                decision, err = self._decision(rd, event_type, **_drain_decision(record))
                 if (decision == "append"
                         and self._standing_hint_duplicate(
                             rd, event_type, record.get("data"))):

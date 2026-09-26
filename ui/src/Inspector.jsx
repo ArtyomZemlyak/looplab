@@ -96,22 +96,28 @@ function ResetBtn({ runId, id, generation, onToast }) {
   const rootRef = useRef(null)
   const triggerRef = useRef(null)
   const menuRef = useRef(null)
+  // The fourth row is the same eval reset served as a DRAIN (doc 68 68.3b): the engine the command
+  // starts evaluates what is owed and pauses (`looplab resume --drain-only`) instead of resuming the
+  // search. The server refuses it on a run an engine is already driving, and wherever the drain
+  // itself would refuse — nothing is recorded then.
   const STAGES = [
     ['eval', 're-score', 'keep the idea + code, just re-run the evaluation (an infra / API-key blip)'],
+    ['eval', 're-score, then pause', 'evaluate this node and pause the run — the search does not resume (a drain; the run must be stopped)', true],
     ['implement', 're-run the Developer', "keep the Researcher's idea, re-write the code (its code crashed)"],
     ['propose', 'full redo', 're-propose the idea, re-develop, then re-evaluate'],
   ]
-  const doReset = async (stage) => {
+  const doReset = async (stage, drainOnly = false) => {
     if (busy) return
     setOpen(false)
     requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }))
     setBusy(true)
+    const how = drainOnly ? ', then pause' : ''
     try {
       // `transport` deliberately WITHHOLDS the thrown message here: a reset menu is a dense control
       // surface and the actionable half is "it never reached the server, press it again".
-      await submitCommand(CONTROL.resetNode(runId, id, stage, generation), {
-        success: `Reset #${id} from ${stage} applied — the engine is processing it`, noop: `#${id} already reflects that reset`,
-        executing: `Reset #${id} from ${stage} requested — waiting for the engine`, failure: `Reset #${id} failed`,
+      await submitCommand(CONTROL.resetNode(runId, id, stage, generation, { drainOnly }), {
+        success: `Reset #${id} from ${stage}${how} applied — the engine is processing it`, noop: `#${id} already reflects that reset`,
+        executing: `Reset #${id} from ${stage}${how} requested — waiting for the engine`, failure: `Reset #${id} failed`,
         transport: `Reset #${id} could not be submitted. Try again.`,
       }, onToast)
     }
@@ -148,9 +154,9 @@ function ResetBtn({ runId, id, generation, onToast }) {
       onBlur={event => {
         if (event.relatedTarget !== triggerRef.current && !event.currentTarget.contains(event.relatedTarget)) setOpen(false)
       }}>
-      {STAGES.map(([stage, label, desc]) =>
-        <button type="button" role="menuitem" key={stage} className="reset-stage-option"
-             tabIndex={-1} title={desc} onClick={() => doReset(stage)}>
+      {STAGES.map(([stage, label, desc, drainOnly = false]) =>
+        <button type="button" role="menuitem" key={`${stage}:${drainOnly}`} className="reset-stage-option"
+             tabIndex={-1} title={desc} onClick={() => doReset(stage, drainOnly)}>
           <span className="reset-option-title"><b>{label}</b> <span className="muted">from {stage}</span></span>
           <span className="muted reset-option-description">{desc}</span>
         </button>)}

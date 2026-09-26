@@ -85,6 +85,7 @@ _LAYOUT = {
     "git_export": "events",      # `looplab export-git`: the node DAG as git history (doc 67 67.15)
     "node_import": "events",     # the ONE cross-run import snapshot, server + launch (doc 67 67.2)
     "seed_from_run": "engine",   # `Settings.seed_from_run`: a new run seeded from a prior node (67.2)
+    "run_boundary": "engine",    # the prior-run ladder + the drain rules, CLI and server (68.3b)
     "headroom": "core",          # a run's gain over the task's declared baseline/target (67.14)
     "attention": "serve",
     "archive": "search",

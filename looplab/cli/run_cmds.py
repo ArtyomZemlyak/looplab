@@ -27,9 +27,21 @@ from looplab.engine.orchestrator import (
     Engine,
     SPECULATION_CALIBRATION_PROFILE_DIGEST,
     RunStartPinError,
-    drain_owed,
 )
-from looplab.engine.finalize import finalize_run, incomplete_finalize_scope, is_guarded_abort
+# The prior-run ladder and the drain rules live in `engine/run_boundary.py` since doc 68 68.3b — the
+# server's command worker asks the same drain question before it spawns `resume --drain-only`. Every
+# name keeps its old spelling here (`_awaiting_rebuild`/`_requeued_by_epoch` included).
+from looplab.engine.run_boundary import (  # noqa: F401 - re-exported under the CLI's spellings
+    WRAP_UP_KINDS,
+    awaiting_rebuild as _awaiting_rebuild,
+    classify_prior_run,
+    drain_only_refusal,
+    drain_owed,
+    is_wrap_up,
+    requeued_by_epoch as _requeued_by_epoch,
+    terminal_projection_incomplete,
+)
+from looplab.engine.finalize import finalize_run, incomplete_finalize_scope
 from looplab.engine.seed_from_run import (check_seed_direction, resolve_seed, seed_ignored_note,
                                           seed_intent, seed_summary)
 from looplab.events.replay import fold
@@ -318,17 +330,6 @@ def _preflight_settled_widths(eng: Engine, events=None, *, surface: str) -> None
     guard(fold(source), source=surface)
 
 
-def terminal_projection_incomplete(state, events) -> bool:
-    """Whether a folded run has an ACCEPTED terminal boundary whose wrap-up did not complete.
-
-    `run_finished` lands BEFORE the engine's finalization checklist, and a richer scoped checklist
-    can be interrupted part-way, so "finished" never answers "is the wrap-up done" on its own. Three
-    commands need this exact disjunction and each used to spell it out (doc 25 CT-03) — and it is
-    replay-critical, because it decides whether a command may append a lifecycle event at all.
-    """
-    return incomplete_finalize_scope(events) is not None or state.finalization_pending()
-
-
 # The two notices that were byte-identical in `run` and `resume`. Both mean the same thing — respect
 # the wrap-up already on disk, do NOT lift the run — so the mapping is owned here.
 WRAP_UP_NOTICE = {
@@ -337,140 +338,8 @@ WRAP_UP_NOTICE = {
     "pending_finalize":
         "run has a pending finalize — wrapping it up (report / cross-run lessons / cost)",
 }
-
-
-def classify_prior_run(prior, prior_events) -> str:
-    """Which lifecycle boundary a folded prior run sits at, before a command re-enters the loop.
-
-    `run` and `resume` each carried this ladder inline with identical echo strings for the first two
-    rungs, and `finalize` a third variant of the same predicates. It decides WHICH EVENT, if any, is
-    appended before re-entry, so a fix applied to one copy and not the others silently gives the
-    entry points different lifecycles (doc 25 CT-03).
-
-    The ORDER is the contract, not an implementation detail:
-
-    * an incomplete terminal projection outranks everything — the wrap-up on disk owns the boundary;
-    * a stop request newer than the finish, or a finish whose reason is `error`, is a PENDING
-      FINALIZE and must be respected rather than lifted (the UI's finalize path spawns `resume` and
-      still has to finalize);
-    * only then the liftable states: a plain finish, then a plain pause.
-
-    Callers keep their surface-specific differences — `run` REOPENS a finished dir while `resume`
-    appends `resume` to it — because those genuinely differ; only the classification is shared.
-    """
-    if terminal_projection_incomplete(prior, prior_events):
-        return "finalization_pending"
-    # The CLASS, not the literal: a ceiling-ended run finishes `budget_exhausted` through the same
-    # guarded path as `error`, and a literal here excluded it from `pending_finalize` — the
-    # ordinary terminal of every budgeted campaign read as a clean finish with nothing owed.
-    if prior.stop_requested and (
-            not prior.finished or is_guarded_abort(prior.stop_reason)):
-        return "pending_finalize"
-    if prior.finished:
-        return "finished"
-    if prior.paused:
-        return "paused"
-    return "live"
-
-
-def _awaiting_rebuild(prior, node) -> bool:
-    """A reset from implement/propose the loop head rebuilds before the drain evaluates it."""
-    return (node.status is NodeStatus.pending and not node.tombstoned
-            and node.id not in prior.aborted_nodes
-            and node.rerun_from in ("implement", "propose"))
-
-
-def _requeued_by_epoch(prior, prior_events, owed) -> list[int]:
-    """The owed nodes whose CURRENT lifecycle the holdout epoch rotation opened — re-queued for a
-    full re-evaluation on the newly hidden rows, not reset by anyone (doc 68 68.3a, critic
-    2026-09-26). Read off the one derivation of which event opened each lifecycle,
-    `events/git_export.py::node_lifecycles` (`requeued_at` on the lifecycle the rotation ended)."""
-    from looplab.events.git_export import node_lifecycles
-    from looplab.events.types import EV_HOLDOUT_EVALUATED
-
-    # A rotation re-queues only after a disclosure, so a log that never disclosed one cannot hold a
-    # re-queued lifecycle — and the fold walk below is skipped for it (critic 2026-09-26).
-    if not owed or not any(getattr(e, "type", None) == EV_HOLDOUT_EVALUATED
-                           for e in prior_events or ()):
-        return []
-    superseded, _born = node_lifecycles(prior_events or ())
-    out = []
-    for node_id in owed:
-        node = prior.nodes[node_id]
-        ended = superseded.get((node_id, node.attempt - 1)) if node.attempt > 0 else None
-        if ended is not None and getattr(ended, "requeued_at", ""):
-            out.append(node_id)
-    return sorted(out)
-
-
-def drain_only_refusal(prior, prior_kind: str, prior_events=None) -> Optional[tuple[int, str]]:
-    """Why `resume --drain-only` (doc 68 68.3a) will not drive this run — `(exit code, message)`,
-    decided BEFORE anything is appended — or None to proceed. Critic 2026-09-26, driven: the plain
-    lift below appends `resume`, and on a FINISHED run that opens a new search epoch; after a holdout
-    disclosure the epoch rotation re-queues every evaluated node, which the drain then counted as
-    owed and re-evaluated, all of them, on a run nobody had reset.
-
-    * a wrap-up boundary: a finalize is pending, and a drain never finalizes (exit 2);
-    * nothing owed at all (`engine/orchestrator.py::drain_owed`, or a reset from implement/propose
-      still waiting for the loop head's rebuild): nothing to drain, and a finish or a pause is not
-      lifted only to be put back (exit 0) — a `node_reset` re-opens a finished run itself;
-    * a holdout was disclosed and lifting a pause or a finish would rotate the epoch, re-queuing
-      every evaluated node (exit 2);
-    * owed nodes the epoch rotation RE-QUEUED rather than anyone reset — one reset after a
-      disclosure re-opens every incumbent, and a drain would retrain each of them from scratch
-      without having said so (exit 2);
-    * a FINISHED host-graded run with a holdout split: lifting a finish opens a new search epoch,
-      which re-carves the rows the host scores the search on, so the drained node would be ranked
-      against incumbents measured on other rows (exit 2; critic 2026-09-26, driven; the root is
-      doc 68 68.3c);
-    * any other FINISHED run that still owes work — the eval budget finalized it with a reset node
-      pending — is lifted and drained like a paused one.
-    """
-    if is_wrap_up(prior_kind):
-        return 2, ("a finalize is pending on this run and --drain-only never finalizes; run "
-                   "`looplab resume` without it (or `looplab finalize`) to complete it")
-    owed = sorted(node.id for node in prior.nodes.values() if drain_owed(prior, node))
-    rebuild = [node.id for node in prior.nodes.values() if _awaiting_rebuild(prior, node)]
-    if not (owed or rebuild):
-        if prior_kind == "finished":
-            return 0, ("run is finished and nothing is owed an evaluation — nothing to drain. A "
-                       "`node_reset` re-opens a finished run; lifting the finish here would open a "
-                       "new search epoch instead")
-        return 0, "nothing is owed an evaluation — nothing to drain; the run is left as it was"
-    if prior_kind in ("paused", "finished") and prior.holdout_evaluated_ids:
-        return 2, ("a holdout was disclosed on this run: lifting its "
-                   + ("pause" if prior_kind == "paused" else "finish")
-                   + " opens a new search epoch and re-queues every evaluated node for "
-                   "re-evaluation on the newly hidden rows, which --drain-only will not buy on its "
-                   "own; resume without --drain-only if that is the intent")
-    if (prior_kind == "finished" and getattr(prior, "host_grading", None)
-            and float(getattr(prior, "holdout_fraction", None) or 0) > 0):
-        return 2, ("this host-graded run is finished, and lifting a finish opens a new search epoch, "
-                   "which re-carves the split the host scores the search on (`holdout_fraction` "
-                   f"{float(prior.holdout_fraction):g}): node(s) "
-                   f"{', '.join(map(str, owed or rebuild))} would be scored on other rows than every "
-                   "incumbent they are ranked against (doc 68 68.3c). --drain-only will not mix the "
-                   "two; a plain `looplab resume` would")
-    requeued = _requeued_by_epoch(prior, prior_events, owed)
-    if requeued:
-        return 2, (f"node(s) {', '.join(map(str, requeued))} were re-queued by the holdout epoch "
-                   "rotation, not reset: after a holdout disclosure one reset re-opens every "
-                   "evaluated node for a full re-evaluation on the newly hidden rows, and a drain "
-                   f"would retrain all {len(owed)} owed node(s); resume without --drain-only if "
-                   "that is the intent")
-    return None
-
-
-def is_wrap_up(kind: str) -> bool:
-    """Whether this boundary is WRAP-UP ONLY: the loop may complete the terminal the log already
-    carries, and cannot start new work.
-
-    Separate from `announce_wrap_up` because it is needed EARLIER and without the echo: `_engine`
-    decides refuse-vs-warn on an unreachable LLM endpoint from exactly this predicate (a run that
-    can only finish an existing wrap-up has no proposal left to degrade), and that decision happens
-    before the engine exists, while the notice belongs at the point where the run is re-entered.
-    """
-    return kind in WRAP_UP_NOTICE
+# One notice per wrap-up kind, and no other: the kinds are the engine's (`is_wrap_up` reads them).
+assert set(WRAP_UP_NOTICE) == WRAP_UP_KINDS, "a wrap-up kind with no notice, or a notice for none"
 
 
 def announce_wrap_up(kind: str) -> bool:
@@ -1254,10 +1123,11 @@ def resume(
 ):
     """Resume a crashed/incomplete run by re-entering the loop (replay-based).
 
-    `--drain-only` (doc 68 68.3a) finishes the OWED evaluations (`orchestrator.py::drain_owed`) and
-    pauses, so a `node_reset {from_stage: "score"}` can be rescored without resuming the search; a
-    later plain `resume` continues it. `drain_only_refusal` decides, before anything is appended,
-    which runs it will not drive."""
+    `--drain-only` (doc 68 68.3a) finishes the OWED evaluations (`engine/run_boundary.py::
+    drain_owed`) and pauses, so a `node_reset {from_stage: "score"}` can be rescored without resuming
+    the search; a later plain `resume` continues it. `drain_only_refusal` decides, before anything
+    is appended, which runs it will not drive — and the server's command worker asks it too before
+    it spawns a drain for a `node_reset` command (doc 68 68.3b)."""
     # Called as a plain function too (see the `max_nodes` note below): an omitted option is Typer's
     # `OptionInfo` sentinel there, which must read as "off", never as a truthy object.
     drain_only = drain_only is True

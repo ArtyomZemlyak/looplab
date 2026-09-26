@@ -52,6 +52,14 @@ class RunCommandRequest(BaseModel):
     type: str
     data: dict[str, Any] | None = None
     expected_generation: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    # How a `node_reset` is SERVED (doc 68 68.3b): true starts `looplab resume --drain-only` — the
+    # owed evaluations, then a pause — instead of resuming the search. Refused on any other type, on
+    # a run an engine is already driving, and where the drain itself would refuse; part of the
+    # command's identity for its Idempotency-Key. Never written to the event log.
+    drain_only: bool | None = Field(
+        default=None,
+        description=("node_reset only: serve the reset as a drain (evaluate what is owed, then "
+                     "pause) instead of resuming the search"))
 
 
 class RunCommandError(BaseModel):
@@ -191,7 +199,8 @@ def build_router(srv) -> APIRouter:
         # submit() takes the run flock and folds the log — offload so it never blocks the event loop.
         return await anyio.to_thread.run_sync(lambda: srv.commands.submit(
             rd, idem, body.get("type"), body.get("data"),
-            expected_generation=body.get(EXPECTED_RUN_GENERATION_FIELD)))
+            expected_generation=body.get(EXPECTED_RUN_GENERATION_FIELD),
+            drain_only=body.get("drain_only")))
 
     @router.get(
         "/api/runs/{run_id}/commands/{command_id}",

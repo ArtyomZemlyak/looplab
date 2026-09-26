@@ -118,6 +118,9 @@ from looplab.engine.triage import (_MAX_DEP_ROUNDS,  # noqa: F401
                                    _dir_fingerprint, _failure_reason, _holdout_indices,
                                    _rule_triage, _shallow_fingerprint)
 from looplab.core.models import BENIGN_TERMINAL_REASONS, Event, NodeStatus, RunState
+# `drain_owed` lives with the drain rules the server's command worker also asks (doc 68 68.3b);
+# the drain turn below reads it, and the name stays importable from here.
+from looplab.engine.run_boundary import drain_owed  # noqa: F401 - re-exported
 from looplab.core.errors import ConfigRefusal, EnvironmentRefusal
 from looplab.core.llm_budget import RunBudget
 from looplab.core.phase_events import phase_sink_scope
@@ -183,21 +186,6 @@ DRAIN_ONLY_EVAL_BUDGET_REMEDY = ("raise `max_eval_seconds` in the run's config.s
                                  "same budget")
 DRAIN_ONLY_TIME_BUDGET_REMEDY = ("drain again: the time budget is this invocation's (`max_seconds` in "
                                  "config.snapshot.json sets its length)")
-
-
-def drain_owed(state: RunState, node) -> bool:
-    """Whether `looplab resume --drain-only` owes `node` an evaluation (doc 68 68.3a).
-
-    Pending, not withdrawn (tombstoned, aborted), not waiting on the loop head's rebuild (a reset
-    from `implement`/`propose`), and its CURRENT lifecycle either opened by a reset —
-    `Node.attempt > 0`: a `node_reset`, or the epoch requeue a reset after holdout disclosure
-    causes — or started an evaluation that never landed a terminal (`Node.eval_started`). A node
-    the SEARCH built and has not dispatched is not owed: whether it runs at all is a search
-    decision (a Card's freshness gate may yet discard it), so it waits for the next plain resume."""
-    return bool(node.status is NodeStatus.pending and not node.tombstoned
-                and node.id not in state.aborted_nodes
-                and node.rerun_from not in ("implement", "propose")
-                and (node.attempt > 0 or node.eval_started))
 
 
 # ------------------------------------------------------------------ THE CADENCE OFFLOAD (F1i / EM-01)
@@ -2299,7 +2287,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         WHAT IT OWES is `drain_owed`: a lifecycle a reset opened, or an evaluation that started and
         never landed a terminal. A build the search made and has not dispatched stays pending. Which
         runs may be drained at all — never a finished one, never one with a finalize pending — is
-        the CLI's to refuse before anything is appended (`cli/run_cmds.py::drain_only_refusal`).
+        the CLI's to refuse before anything is appended (`engine/run_boundary.py::drain_only_refusal`).
 
         EVERY WAY IT STOPS IS A PAUSE with a stated reason, through the same control event an
         operator's pause is — the engine's own precedent is the confirm phase's auto-pause — so a

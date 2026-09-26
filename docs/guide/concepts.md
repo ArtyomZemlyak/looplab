@@ -398,6 +398,13 @@ pending; only `succeeded` or `noop` mean the requested postcondition was observe
 guidance. Clients poll the GET route for a bounded time and keep saying **requested/pending** if the
 server has not reached a terminal state.
 
+A `node_reset` may add `"drain_only": true` beside `data`: the command then starts `looplab resume
+--drain-only` — the owed evaluations, then a pause — instead of resuming the search (doc 68 68.3b).
+It is how the reset is SERVED, never a field of the event, and it is part of the command's identity
+below. It is refused on any other type, on a run an engine is already driving, and wherever the
+drain itself would refuse (`engine/run_boundary.py::drain_only_refusal`, asked before the reset is
+appended and again before every spawn).
+
 An idempotency key is scoped to one payload. A retry with the same key and payload returns the same
 command, so a lost HTTP response cannot append the control event or start the engine twice; the same
 key with a different payload is rejected. A failed/timed-out command whose intent is already durable
