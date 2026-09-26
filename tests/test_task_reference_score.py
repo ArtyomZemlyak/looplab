@@ -16,7 +16,7 @@ from typer.testing import CliRunner
 
 from looplab.adapters.tasks import validate_task
 from looplab.cli import app
-from looplab.core.headroom import headroom, normalized_reference
+from looplab.core.headroom import headroom, headroom_line, normalized_reference
 from looplab.core.setup_identity import setup_config_hash
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
@@ -88,6 +88,10 @@ def test_every_registered_task_model_carries_the_field_excluded():
     {"baseline": {"value": float("nan"), "source": "s"}},
     {"baseline": {"value": 1.0, "source": "s", "sorce": "t"}},
     {"target": {"value": 1.0, "source": "s"}},
+    # A NUMBER, as the fold holds it: the lax float coercion took `true` as 1.0 and "9.5" as 9.5
+    # while the fold refuses a bool (critic 2026-09-26).
+    {"baseline": {"value": True, "source": "s"}},
+    {"baseline": {"value": "9.5", "source": "s"}},
 ])
 def test_an_unsourced_or_malformed_reference_is_refused_at_submit(bad):
     with pytest.raises(ValueError):
@@ -129,3 +133,59 @@ def test_an_undeclared_reference_leaves_run_started_as_it_was(tmp_path, monkeypa
     out, events = _run(tmp_path, monkeypatch, {"kind": "quadratic", "id": "toy", "goal": "g"})
     assert "reference_score" not in next(e.data for e in events if e.type == "run_started")
     assert fold(events).reference_score is None and "headroom:" not in out.output
+
+
+def test_a_web_launch_keeps_the_declaration(tmp_path):
+    """HIGH (critic 2026-09-26, driven): the field is excluded from the task's dump — which the web
+    preflight used as the canonical task — so every web, TUI and assistant launch wrote a
+    `task.input.json` without it, and `run_started` is written once. The preflight carries it back."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from looplab.serve.server import make_app
+
+    body = TestClient(make_app(tmp_path)).post("/api/start/preflight", json={
+        "run_id": "web-ref",
+        "task": {"benchmark": "quadratic", "goal": "minimize the objective", "direction": "min",
+                 "reference_score": _REF}}).json()
+    assert body["ok"] is True, body
+    assert body["preview"]["task"]["reference_score"] == _REF
+    # …and what the spawned run re-validates from that file still declares it.
+    assert validate_task(body["preview"]["task"]).reference_score.baseline.value == 9.0
+
+
+def test_headroom_is_finite_or_none_and_names_the_best_it_measured(tmp_path):
+    """LOW (critic 2026-09-26, driven): two finite marks can overflow, and a non-finite float is not
+    JSON — the run list answered 500 for every run. And the row showed the raw `best_metric` beside a
+    gain measured from the robust metric: `best` now rides the result."""
+    room = headroom(5.0, {"baseline": {"value": 0.0, "source": "s"},
+                          "target": {"value": -1e-310, "source": "t"}}, "min")
+    assert room["gap_closed"] is None and room["best"] == 5.0 and room["gain"] == -5.0
+    json.dumps(room, allow_nan=False)
+    assert "is not a finite number" in headroom_line(room)
+    huge = headroom(1.7e308, {"baseline": {"value": -1.7e308, "source": "s"}}, "max")
+    assert huge["gain"] is None
+    json.dumps(huge, allow_nan=False)
+    assert "a gain that is not a finite number" in headroom_line(huge)
+
+
+def test_the_calibration_lane_never_pins_a_reference(tmp_path, monkeypatch):
+    """LOW (critic 2026-09-26): the calibration envelope reads the task's dump, which excludes the
+    field, so a declaring Toy task was admitted — and its receipt pins the `run_started` KEY SET, so
+    the paid evidence would have been refused as a non-writer schema. The lane pins none. (The
+    lane's own run-start envelope needs a GPU profile; its pinned VALUES are borrowed from the plain
+    lane, since the question here is only which keys the payload carries.)"""
+    from factories import make_engine
+
+    task = validate_task({"kind": "quadratic", "goal": "g", "direction": "min",
+                          "reference_score": _REF})
+    pinned = {}
+    for lane in (False, True):
+        eng = make_engine(tmp_path / f"lane_{lane}", task=task)
+        values = eng._run_start_pinned_values()
+        eng._speculation_gate_calibration = lane
+        monkeypatch.setattr(eng, "_run_start_pinned_values", lambda values=values: values)
+        eng._setup_phase(fold(eng.store.read_all()))
+        started = next(e.data for e in eng.store.read_all() if e.type == "run_started")
+        pinned[lane] = started.get("reference_score")
+    assert pinned == {False: _REF, True: None}

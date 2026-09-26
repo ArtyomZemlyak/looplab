@@ -383,7 +383,13 @@ def _requeued_by_epoch(prior, prior_events, owed) -> list[int]:
     2026-09-26). Read off the one derivation of which event opened each lifecycle,
     `events/git_export.py::node_lifecycles` (`requeued_at` on the lifecycle the rotation ended)."""
     from looplab.events.git_export import node_lifecycles
+    from looplab.events.types import EV_HOLDOUT_EVALUATED
 
+    # A rotation re-queues only after a disclosure, so a log that never disclosed one cannot hold a
+    # re-queued lifecycle — and the fold walk below is skipped for it (critic 2026-09-26).
+    if not owed or not any(getattr(e, "type", None) == EV_HOLDOUT_EVALUATED
+                           for e in prior_events or ()):
+        return []
     superseded, _born = node_lifecycles(prior_events or ())
     out = []
     for node_id in owed:
@@ -410,8 +416,12 @@ def drain_only_refusal(prior, prior_kind: str, prior_events=None) -> Optional[tu
     * owed nodes the epoch rotation RE-QUEUED rather than anyone reset — one reset after a
       disclosure re-opens every incumbent, and a drain would retrain each of them from scratch
       without having said so (exit 2);
-    * a FINISHED run that still owes work — the eval budget finalized it with a reset node pending —
-      is lifted and drained like a paused one.
+    * a FINISHED host-graded run with a holdout split: lifting a finish opens a new search epoch,
+      which re-carves the rows the host scores the search on, so the drained node would be ranked
+      against incumbents measured on other rows (exit 2; critic 2026-09-26, driven; the root is
+      doc 68 68.3c);
+    * any other FINISHED run that still owes work — the eval budget finalized it with a reset node
+      pending — is lifted and drained like a paused one.
     """
     if is_wrap_up(prior_kind):
         return 2, ("a finalize is pending on this run and --drain-only never finalizes; run "
@@ -430,6 +440,14 @@ def drain_only_refusal(prior, prior_kind: str, prior_events=None) -> Optional[tu
                    + " opens a new search epoch and re-queues every evaluated node for "
                    "re-evaluation on the newly hidden rows, which --drain-only will not buy on its "
                    "own; resume without --drain-only if that is the intent")
+    if (prior_kind == "finished" and getattr(prior, "host_grading", None)
+            and float(getattr(prior, "holdout_fraction", None) or 0) > 0):
+        return 2, ("this host-graded run is finished, and lifting a finish opens a new search epoch, "
+                   "which re-carves the split the host scores the search on (`holdout_fraction` "
+                   f"{float(prior.holdout_fraction):g}): node(s) "
+                   f"{', '.join(map(str, owed or rebuild))} would be scored on other rows than every "
+                   "incumbent they are ranked against (doc 68 68.3c). --drain-only will not mix the "
+                   "two; a plain `looplab resume` would")
     requeued = _requeued_by_epoch(prior, prior_events, owed)
     if requeued:
         return 2, (f"node(s) {', '.join(map(str, requeued))} were re-queued by the holdout epoch "
@@ -1326,7 +1344,8 @@ def resume(
                 if not announce_wrap_up(prior_kind) and prior_kind in ("finished", "paused"):
                     typer.echo(
                         f"run was {'finished' if prior_kind == 'finished' else 'stopped'} — "
-                        "resuming to continue with the current settings")
+                        + ("lifting it for the drain; it pauses again when the drain ends"
+                           if drain_only else "resuming to continue with the current settings"))
                     eng.store.append(EV_RESUME, {})
                 # P1-1: we hold the singleton lock and are about to drive the loop, so FULFILL any
                 # outstanding durable resume intent. A direct CLI recovery has no such intent, but

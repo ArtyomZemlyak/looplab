@@ -243,13 +243,17 @@ class SetupPhaseMixin:
                                 getattr(self, "_speculation_depth_auto", False)),
                             "select_verifier_contract": VERIFIER_SELECTION_CONTRACT,
                             # doc 67 67.14: the task's declared baseline/target scores, WHEN it
-                            # declares them — absent otherwise, so the default payload and the
-                            # calibration lane's pinned key set stay byte-identical (its Toy task
-                            # declares none). Read through the `reference_score` task hook and
-                            # normalized by the fold's own rule; reporting only — the run row reads
-                            # it (`core/headroom.py::headroom`), nothing that decides does.
+                            # declares them — absent otherwise, so the default payload stays
+                            # byte-identical — and never on the calibration lane, whose receipt pins
+                            # this payload's KEY SET: its envelope check reads the task's dump, which
+                            # excludes the field, so a declaring Toy task was admitted and its paid
+                            # evidence then refused as a non-writer schema (critic 2026-09-26). Read
+                            # through the `reference_score` task hook and normalized by the fold's
+                            # own rule; reporting only — the run row reads it
+                            # (`core/headroom.py::headroom`), nothing that decides does.
                             **({"reference_score": _reference}
-                               if (_reference := _declared_reference(self.task)) else {}),
+                               if not self._speculation_gate_calibration
+                               and (_reference := _declared_reference(self.task)) else {}),
                         },
                     )
                 # AGENTS.md (I18): run-level task-contract provenance. Repo backends receive their

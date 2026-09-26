@@ -167,14 +167,22 @@ SPECULATION_CALIBRATION_VARIANT_FIELDS = SPECULATION_CALIBRATION_PROFILE_VARIANT
 # The reasons `looplab resume --drain-only` pauses with (doc 68 68.3a, `Engine._drain_only_turn`):
 # nothing it owes is left, a dispatch admitted none of what it owes, or a budget the loop head would
 # finalize the run on has run out. Module constants so the tests read the one spelling.
-DRAIN_ONLY_PAUSE_REASON = ("drain-only resume: every reset or interrupted evaluation finished; "
-                           "`looplab resume` (without --drain-only) continues the search")
+# "reached its terminal", not "finished": a drained evaluation that FAILED ends the drain the same
+# way, and the old word read as success (critic 2026-09-26, driven: a crashed and a stalled owed eval).
+DRAIN_ONLY_PAUSE_REASON = ("drain-only resume: every reset or interrupted evaluation reached its "
+                           "terminal (evaluated or failed — see each node); `looplab resume` "
+                           "(without --drain-only) continues the search")
 DRAIN_ONLY_STUCK_REASON = ("drain-only resume: no evaluation could be admitted for node(s) {ids}; "
                            "`looplab resume` (without --drain-only) continues the search")
-DRAIN_ONLY_BUDGET_REASON = ("drain-only resume: {budget}, so node(s) {ids} were not evaluated; "
-                            "raise it in the run's config (`max_eval_seconds` / `max_seconds` in "
-                            "config.snapshot.json) and drain again — a plain `looplab resume` "
-                            "would finalize the run on the same budget")
+DRAIN_ONLY_BUDGET_REASON = "drain-only resume: {budget}, so node(s) {ids} were not evaluated; {remedy}"
+# The remedy is the budget's own: the EVAL budget is the run's and a plain resume would finalize on it;
+# `max_seconds` is per invocation, so draining again is itself the remedy (critic 2026-09-26: the one
+# sentence claimed a plain resume "would finalize on the same budget" of both).
+DRAIN_ONLY_EVAL_BUDGET_REMEDY = ("raise `max_eval_seconds` in the run's config.snapshot.json and drain "
+                                 "again — a plain `looplab resume` would finalize the run on the "
+                                 "same budget")
+DRAIN_ONLY_TIME_BUDGET_REMEDY = ("drain again: the time budget is this invocation's (`max_seconds` in "
+                                 "config.snapshot.json sets its length)")
 
 
 def drain_owed(state: RunState, node) -> bool:
@@ -2314,17 +2322,21 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             if max_es is not None and state.total_eval_seconds >= max_es:
                 reason = DRAIN_ONLY_BUDGET_REASON.format(
                     budget=f"the run's eval budget is spent ({state.total_eval_seconds:g} s "
-                           f"of {max_es:g} s)", ids=ids)
+                           f"of {max_es:g} s)", ids=ids, remedy=DRAIN_ONLY_EVAL_BUDGET_REMEDY)
             elif (max_s is not None and started_at is not None
                   and time.time() - started_at >= max_s):
                 reason = DRAIN_ONLY_BUDGET_REASON.format(
-                    budget=f"this invocation's time budget ({max_s:g} s) has run out", ids=ids)
+                    budget=f"this invocation's time budget ({max_s:g} s) has run out", ids=ids,
+                    remedy=DRAIN_ONLY_TIME_BUDGET_REMEDY)
             else:
-                # With a per-invocation TIME budget, one node per turn, so the check above sits
-                # between evaluations: the dispatch re-checks the eval budget before each eval but
-                # never the wall clock, and a batch ran every owed node past it (critic 2026-09-26,
-                # driven: `max_seconds=2`, four 1.5 s evals, all four ran).
-                handed = dict(sorted(owed.items())[:1] if max_s is not None
+                # With a per-invocation TIME budget, one eval WIDTH per turn, so the check above sits
+                # between batches: the dispatch re-checks the eval budget before each eval but never
+                # the wall clock, and one batch ran every owed node past it (critic 2026-09-26,
+                # driven: `max_seconds=2`, four 1.5 s evals, all four ran). The width — not one node
+                # — is the normal loop's own overshoot bound, and one node serialized a parallel
+                # drain under ANY time budget (critic 2026-09-26, driven: 4.3 s became 6.4 s).
+                width = max(1, int(self._eval_parallel or 1))
+                handed = dict(sorted(owed.items())[:width] if max_s is not None
                               else sorted(owed.items()))
                 await self._dispatch_evals([{"kind": "evaluate", "node_id": node_id}
                                             for node_id in handed],

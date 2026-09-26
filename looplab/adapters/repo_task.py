@@ -118,6 +118,15 @@ class ReferenceMark(BaseModel):
     value: float
     source: str = Field(min_length=1, max_length=500)
 
+    @field_validator("value", mode="before")
+    @classmethod
+    def _a_number(cls, v):
+        # A NUMBER, as the fold holds it (`core/headroom.py::normalized_reference` refuses a bool):
+        # the lax float coercion accepted `true` as 1.0 and `"9.5"` as 9.5 (critic 2026-09-26).
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError("a reference score must be a number, not a string or a boolean")
+        return v
+
     @field_validator("value")
     @classmethod
     def _finite(cls, v):

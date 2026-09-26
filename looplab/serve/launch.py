@@ -708,6 +708,14 @@ def preflight_start(srv, body: Any) -> LaunchPreflight:
         canonical_task.pop("comparison_contract", None)
     else:
         canonical_task["comparison_contract"] = canonical_contract
+    # `reference_score` (doc 67 67.14) is declared `exclude=True` on every task model, so the
+    # `run_started.config_hash` the speculation receipts re-derive does not move — which drops it
+    # from THIS dump too, and so from `task.input.json` and the spawned run's snapshot and pin
+    # (critic 2026-09-26, driven: every web, TUI and assistant launch lost the declaration, and
+    # `run_started` is written once). Carried back explicitly, as the comparison contract is above.
+    reference = None if isinstance(adapter, dict) else getattr(adapter, "reference_score", None)
+    if reference is not None:
+        canonical_task["reference_score"] = reference.model_dump(mode="json", exclude_none=True)
     referenced_paths = _validated_path_fingerprints(canonical_task)
 
     launch_settings = _validate_settings_keys(body.get("settings") or {}, "launch")

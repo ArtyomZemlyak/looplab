@@ -288,7 +288,8 @@ def test_a_budget_finalized_run_that_owes_work_is_drained_once_the_budget_is_rai
     _reset(store, 2)
     assert _drain(rd).exit_code == 0                         # paused: the budget is spent
     reason = [e.data.get("reason") for e in store.read_all() if e.type == "pause"][-1]
-    assert "raise it in the run's config" in reason and "would finalize the run" in reason
+    assert "raise `max_eval_seconds` in the run's config" in reason
+    assert "would finalize the run" in reason
     assert CliRunner().invoke(app, ["resume", str(rd)]).exit_code == 0   # the plain resume...
     state = fold(store.read_all())
     assert state.finished and state.nodes[2].status.value == "pending"  # ...finalized it
@@ -296,8 +297,34 @@ def test_a_budget_finalized_run_that_owes_work_is_drained_once_the_budget_is_rai
     out = _drain(rd)
     assert out.exit_code == 0, out.output
     assert "drain-only: 1 evaluation(s) owed (node(s) 2)" in out.output
+    # Not "resuming to continue with the current settings" right after "then pausing" (NIT).
+    assert "run was finished — lifting it for the drain; it pauses again" in out.output
     after = fold(store.read_all())
     assert after.nodes[2].metric is not None and after.paused and not after.finished
+
+
+def test_a_finished_host_graded_run_is_not_lifted_across_its_split(tmp_path, monkeypatch):
+    """MEDIUM (critic 2026-09-26, driven on a host-graded task): lifting a FINISH opens a new search
+    epoch, and the holdout split the host scores the search on is salted by it — the drained node
+    was ranked against incumbents measured on other rows (0.5111 against 0.4444, where the leader's
+    own code scored 0.4889 on the new rows). Refused before anything is appended (doc 68 68.3c)."""
+    _isolated(monkeypatch, tmp_path)
+    rd, store = _finished_run(tmp_path, "-s", "max_eval_seconds=0.000001", nodes=3)
+    _reset(store, 2)
+    assert _drain(rd).exit_code == 0                                   # budget pause
+    assert CliRunner().invoke(app, ["resume", str(rd)]).exit_code == 0  # finalized, node 2 owed
+    # The run as a host-graded one: the grading row setup appends, and the split `run_started`
+    # pinned (the default 0.25).
+    store.append("host_grading", {"predictions": "predictions.json", "scorer": "accuracy"})
+    state = fold(store.read_all())
+    assert state.finished and state.host_grading and state.holdout_fraction == 0.25
+    _config(rd, max_eval_seconds=1e9)
+    before = [e.seq for e in store.read_all()]
+    out = _drain(rd)
+    assert out.exit_code == 2, out.output
+    assert "re-carves the split the host scores the search on" in out.output
+    assert "node(s) 2 would be scored on other rows" in out.output
+    assert [e.seq for e in store.read_all()] == before, "refused before anything was appended"
 
 
 def test_a_reset_after_a_disclosure_is_refused_rather_than_retraining_every_incumbent(
@@ -333,7 +360,43 @@ def test_a_time_budget_pauses_between_evaluations(tmp_path, monkeypatch):
     tail = [e for e in store.read_all() if e.seq > mark]
     reasons = [e.data.get("reason") for e in tail if e.type == "pause"]
     assert len(reasons) == 1 and "this invocation's time budget" in reasons[0], reasons
+    assert "drain again: the time budget is this invocation's" in reasons[0], (
+        "not the eval budget's remedy: `max_seconds` resets per invocation (critic 2026-09-26)")
     assert not any(e.type == "node_evaluated" for e in tail)
+
+
+def test_a_time_budget_hands_one_eval_width_per_turn(tmp_path, monkeypatch):
+    """LOW (critic 2026-09-26, driven): one node per turn serialized a parallel drain under ANY time
+    budget (4.3 s became 6.4 s at `max_parallel=2`). The width is the normal loop's own overshoot
+    bound, and the clock is asked between batches."""
+    _isolated(monkeypatch, tmp_path)
+    rd, store = _finished_run(tmp_path, "-s", "eval_parallel=2")
+    for node_id in (1, 2, 3):
+        _reset(store, node_id)
+    _config(rd, max_seconds=1e9)
+    handed = []
+
+    async def record(self, evals, state, max_es, *, research=True):
+        handed.append([a["node_id"] for a in evals])
+
+    monkeypatch.setattr(Engine, "_dispatch_evals", record)
+    out = _drain(rd)
+    assert out.exit_code == 0, out.output
+    assert handed == [[1, 2]], handed        # one width, then nothing moved: a stated stall pause
+
+
+def test_the_requeue_walk_is_skipped_on_a_log_that_never_disclosed(tmp_path, monkeypatch):
+    """NIT (critic 2026-09-26): the lifecycle walk behind the requeue refusal ran a full fold pass on
+    every drain; a rotation re-queues only after a disclosure, so a log without one skips it."""
+    import looplab.events.git_export as git_export
+
+    _isolated(monkeypatch, tmp_path)
+    rd, store = _finished_run(tmp_path)
+    _reset(store, 1)
+    monkeypatch.setattr(git_export, "node_lifecycles",
+                        lambda *a, **k: pytest.fail("walked a log that never disclosed a holdout"))
+    out = _drain(rd)
+    assert out.exit_code == 0, out.output
 
 
 def test_a_lifecycle_that_moves_mid_dispatch_is_progress_not_a_stall(tmp_path, monkeypatch):
