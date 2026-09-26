@@ -11,7 +11,8 @@ CALL it — beside a fourth that was already a function:
     something to repair — and which bound to name when a floor is what said no.
   * `triage_verdict_outcome` — what the triage judge's ACTION does to the attempt: settle it (and
     with what terminal outcome, reason, failure text and run-level pause), or let it go on to the
-    install and the critic.
+    install and the critic. Asked AFTER `deferred_triage_verdict`, which holds a `reject_idea` on a
+    node's first refusal by the operator's host scorer until one repair has been made.
   * `evaluated_terminal` — what the scored terminal row says about its own number: the violations
     it carries and the `metric_provenance` it records (salvage, a corrected declaration, the
     subject and its `require` row, the host scorer's receipt, the evaluation inputs and
@@ -354,6 +355,55 @@ def triage_verdict_outcome(action, rationale, *, err: str, node_id) -> TriageVer
                                                       f"this node stopped rather than repairing "
                                                       f"blind — {_judge_err}"))
     return TriageVerdictOutcome(False)
+
+
+# ------------------------------------- a first refusal by the operator's scorer buys one repair
+
+# The rule a deferral names on the `node_repaired` row it buys, and in the judge's history after it.
+FIRST_HOST_REFUSAL_DEFERRAL = "first_host_refusal_buys_one_repair"
+
+
+@dataclass(frozen=True)
+class DeferredVerdict:
+    """A judge's verdict the engine did not act on YET: what it answered, and the rule that held it."""
+    action: str
+    rule: str
+
+    def as_row(self) -> dict:
+        return {"action": self.action, "rule": self.rule}
+
+
+def deferred_triage_verdict(action, *, engine_reason, host_contract_refused: bool,
+                            repairs_done: int) -> Optional[DeferredVerdict]:
+    """MAY THE JUDGE END A NODE WITH `reject_idea` ON ITS FIRST HOST REFUSAL? Not yet.
+
+    A refusal by the operator's host scorer (`host_scorer.expect.numeric`, e.g. `refused == 0`)
+    measures THIS BUILD'S OUTPUT against the operator's own gate. Whether the IDEA is wrong is a
+    different question, and one build is not enough evidence to answer it: the build may carry a
+    defect a repair removes. MEASURED 2026-09-26 on MiniOneRec inf13: node 5 (a ragged single pass,
+    4.4x) and node 6 (the same pass under a CUDA graph, 3.9x, full-width users byte-identical) were
+    both refused on quality, and the judge answered `reject_idea` at zero repairs both times — node
+    6's rationale resting on a premise the task states the opposite of ("the recall gate demands
+    byte-exact answers"; it is a paired recall test). The idea was never given the one repair the
+    refusal's own diagnosis was written for.
+
+    FOUR conjuncts, every one required: the verdict is `reject_idea`; the ENGINE's own reason is
+    `expect_failed`; the failing stage is the engine-built HOST stage and what failed there is its
+    declared numeric contract; and this lifecycle has made no repair. Then the verdict waits — the
+    attempt goes on to a repair with the refusal in hand — and the NEXT refusal is the judge's to
+    rule on, `reject_idea` included. So the deferral buys at most one repair per lifecycle, and only
+    after `repair_gate` has already admitted one (the operator's caps and floors are asked first).
+
+    What it deliberately does NOT hold: `abandon` (the judge saying no repair can help is a
+    statement about repairs, and one forced over it would be a blind repair), the two non-answers (a
+    provider failure must still reach the breaker), any failure other than a host contract refusal,
+    and any verdict after the first repair. Reachable only by a task that declares
+    `host_scorer.expect`, so no run that predates that field can meet it.
+    """
+    if (action == "reject_idea" and engine_reason == "expect_failed" and host_contract_refused
+            and repairs_done == 0):
+        return DeferredVerdict(str(action), FIRST_HOST_REFUSAL_DEFERRAL)
+    return None
 
 
 # ------------------------------------------------ what the scored terminal says about its number

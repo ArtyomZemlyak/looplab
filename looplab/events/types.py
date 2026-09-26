@@ -1925,7 +1925,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         optional=(
             "attribution", "budget_exhausted", "code", "edit_calls", "engine_reason",
             "error_evidence", "eval_seconds", "failure_signature", "footprint_finalized",
-            "idea_footprint",
+            "idea_footprint", "judge_deferred",
             "param_overrides", "reason", "reason_evidence", "reason_evidence_resolved",
             "reason_findings", "reason_hypotheses", "reason_override_refused", "reason_source",
             "reason_summary", "salvaged_metric", "unmet", "unparseable_repairs", "verified"

@@ -84,7 +84,7 @@ from looplab.engine.comparability import comparability_record, protocol_record
 from looplab.engine.eval_attempt_rules import (  # noqa: F401 — the ladder's rungs, re-exported
     _REPAIR_ANSWER_EDIT, _REPAIR_ANSWER_PROVIDER_FAILURE, _REPAIR_ANSWER_STUCK,
     RepairGateContext, _classify_repair_answer, _repair_change_set, _repair_provider_failure,
-    evaluated_terminal, repair_gate, triage_verdict_outcome)
+    deferred_triage_verdict, evaluated_terminal, repair_gate, triage_verdict_outcome)
 from looplab.engine.crash_repair import developer_repair_history
 from looplab.engine.eval_stages import STAGE_MANIFEST_NAME
 from looplab.engine.shared import repair_context_record
@@ -655,6 +655,28 @@ def settled_ok_awaiting_terminal(events, node_id: int, generation: int):
     return claim_ts.get(str(d["invocation_id"])), last.seq, d
 
 
+def _host_contract_refused(res, stages) -> bool:
+    """Did the operator's HOST stage refuse this result through its declared numeric contract?
+
+    Read off the resolved PIPELINE (the stage that failed must be the one the engine built and
+    stamped `HOST_STAGE_KEY` — no stage NAME is trusted, since only `_host_scorer_stage` can stamp
+    it) and off the result's own row for that stage (`expect_failed` WITH `numeric_declared`, i.e. the
+    `host_scorer.expect.numeric` refusal and not an artifact or input contract). The one input
+    `eval_attempt_rules.deferred_triage_verdict` needs from a result, computed here because the
+    rules module is a leaf and does not import the runtime."""
+    from looplab.runtime.command_eval import HOST_STAGE_KEY, NUMERIC_DECLARED_KEY
+    failed = getattr(res, "failed_stage", None)
+    if not failed:
+        return False
+    if not any(isinstance(s, dict) and s.get("name") == failed and s.get(HOST_STAGE_KEY)
+               for s in (stages or [])):
+        return False
+    row = next((r for r in reversed(getattr(res, "stages", None) or [])
+                if isinstance(r, dict) and r.get("name") == failed), None)
+    return bool(row is not None and row.get("status") == "expect_failed"
+                and row.get(NUMERIC_DECLARED_KEY))
+
+
 def repair_ledger_row(d: dict, *, attempts: int) -> dict:
     """ONE `node_repaired` payload as the row the repair judge and the F8 critic read.
 
@@ -696,6 +718,13 @@ def repair_ledger_row(d: dict, *, attempts: int) -> dict:
     if isinstance(_sig, dict) and _sig.get("digest"):
         row["failure_signature"] = {k: str(_sig.get(k) or "")
                                     for k in ("exception", "message", "where", "stage", "digest")}
+    # THE VERDICT THIS REPAIR WAS BOUGHT OVER, when a rule held the judge's answer
+    # (`eval_attempt_rules.deferred_triage_verdict`): absent-means-absent, and only the two keys the
+    # writer spells, so `crash_repair._format_repair_log` can tell the next judge that "the fix
+    # claimed" on this row is a rejection the engine did not act on, not a fix.
+    _deferred = d.get("judge_deferred")
+    if isinstance(_deferred, dict) and _deferred.get("action"):
+        row["judge_deferred"] = {k: str(_deferred.get(k) or "") for k in ("action", "rule")}
     # The verification columns are read back the same way and for the same reason, with one
     # extra rule: an ABSENT `verified` key must stay absent. `repair_verify.inert_streak` reads
     # "no key" as "not inert" and breaks the streak on it, so a row from before this column
@@ -1143,6 +1172,11 @@ class EvalAttempt:
     # terminal. Both stay None with the floor off, so no row gains a key.
     failure_sig: Any = None
     repeated_failure: Any = None
+    # The judge's verdict DECIDE_REPAIR held back (`eval_attempt_rules.deferred_triage_verdict`: a
+    # node's first refusal by the operator's host scorer buys one repair before `reject_idea`), bound
+    # there on every attempt it reaches and written onto the `node_repaired` row APPLY_REPAIR appends.
+    # None on every other attempt, so no row gains a key.
+    judge_deferred: Any = None
     # True when THIS attempt's result is a FAILED eval canary's (`engine/eval_canary.py`) rather than
     # the full eval's: bound by RUN_ATTEMPT (reset at its top), read by SALVAGE — which must never
     # recover a number from a canary — and by APPLY_REPAIR, which must not reuse a stage the node's
@@ -3667,6 +3701,9 @@ class EvaluateMixin:
         # already reads this flag for the same reason ("the gates were never run"); the repair path
         # is the other half and had no clause. Read as a FLAG, not through the classifier's label:
         # it is a property of the RESULT, the argument `diverged` is read on further down.
+        # A deferral held on an EARLIER attempt of this lifecycle is that attempt's, and must not ride
+        # onto a row this attempt writes: cleared before any branch below can settle or go on.
+        a.judge_deferred = None
         if getattr(a.res, "gate_readers_refused", False):
             a.triage_outcome = ("abandon",
                                 "the task's declared metric/constraint readers were refused: this "
@@ -4028,6 +4065,20 @@ class EvaluateMixin:
         # second explanation with its own confidence is evidence for a human and for the next
         # diagnosis, not a second instruction for this one.
         a._hypotheses = coerce_hypotheses(a.triage, self._redact)
+        # A FIRST REFUSAL BY THE OPERATOR'S SCORER IS JUDGED AFTER ONE REPAIR (2026-09-26). The
+        # rule and its measurement are `eval_attempt_rules.deferred_triage_verdict`: a host-stage
+        # contract refusal measures this BUILD, so a `reject_idea` on the first one waits for one
+        # repair, and the next refusal is the judge's to rule on. ASKED ON EVERY ATTEMPT THAT GETS
+        # HERE and bound either way, so the `node_repaired` row APPLY_REPAIR writes carries only this
+        # attempt's deferral. The pipeline is resolved only on the ENGINE's `expect_failed` (a planner
+        # read, totalized to `[]` by `_resolved_stages`), so every other failure pays nothing for it.
+        a.judge_deferred = deferred_triage_verdict(
+            action, engine_reason=a._engine_reason,
+            host_contract_refused=(a._engine_reason == "expect_failed" and _host_contract_refused(
+                a.res, self._resolved_stages(a.node, a.workdir))),
+            repairs_done=a.attempt)
+        if a.judge_deferred is not None:
+            action = "repair"
         # WHAT THE VERDICT DOES TO THE ATTEMPT. `abandon` and `reject_idea` (the idea itself is
         # wrong -> mark the lineage; steer to a new idea) end it on the judge's word; a judge that
         # produced no usable verdict ends it too, in the two shapes that are not the same condition
@@ -4434,6 +4485,12 @@ class EvaluateMixin:
                 # `repair_ledger_row` so the repeated-failure streak survives a resume. Absent with
                 # the floor off or when the failure printed no exception line.
                 **({"failure_signature": a.failure_sig} if a.failure_sig else {}),
+                # THE JUDGE'S ANSWER THIS REPAIR WAS BOUGHT OVER, when a rule held it
+                # (`eval_attempt_rules.deferred_triage_verdict`). `triage_action` above stays
+                # "repair" — it is what the ENGINE did, and the fold counts repairs off it — while
+                # `rationale` below keeps the judge's own words; this column is what says the two
+                # disagreed. Absent on every row no rule held, so no existing row changes shape.
+                **({"judge_deferred": a.judge_deferred.as_row()} if a.judge_deferred else {}),
                 # THE RECORD'S OWN WINDOW, beside the prompt's. Omitted when empty so a row
                 # with no column ("this predates the widening") stays distinguishable from a
                 # row with an empty one ("the eval wrote nothing to stderr") — the same
