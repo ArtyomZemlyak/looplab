@@ -70,6 +70,19 @@ def test_builds_in_flight_are_children_and_discarded_or_aborted_ones_are_not(tmp
     assert (4, 0) in [(n.id, c) for n, c in node_frontier(discarded)["promising"]]
 
 
+def test_a_build_marker_whose_parents_are_not_a_list_counts_no_child(tmp_path):
+    """A `node_building` row is read as written, not as a fold-validated Node: `"parent_ids": 3`
+    raised `TypeError` out of every proposal's cue while the marker stood (critic 2026-09-26)."""
+    _state(tmp_path)
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append("node_building", {"node_id": 20, "operator": "improve", "parent_ids": 5})
+    store.append("node_building", {"node_id": 21, "operator": "improve", "parent_ids": ["5", None]})
+    store.append("node_building", {"node_id": 22, "operator": "improve", "parent_ids": ["x"]})
+    frontier = node_frontier(fold(store.read_all()))
+    assert (5, 1) in [(n.id, count) for n, count in frontier["promising"]], (
+        "only the coercible id of a list counts: node 5 has one build under way")
+
+
 def test_a_tombstoned_child_is_no_child(tmp_path):
     frontier = node_frontier(_state(tmp_path, tombstoned=(7,)))
     assert (1, 2) in [(n.id, count) for n, count in frontier["promising"]], (

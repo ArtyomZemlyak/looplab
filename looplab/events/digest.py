@@ -12,7 +12,7 @@ import math
 from typing import Optional
 
 from looplab.core.jsonutil import surrogate_safe_tree
-from looplab.core.models import NodeStatus, RunState
+from looplab.core.models import NodeStatus, RunState, coerce_node_id
 # Both moved to `core/numeric.py` (doc 25 XP-12): neither reads an event log, and keeping them here
 # forced `runtime` to import `events` purely to reach a math function. Re-exported so the historical
 # import path — which several modules and tests still use — keeps resolving to the SAME objects.
@@ -273,7 +273,13 @@ def node_frontier(state: RunState, k: int = 5, *, max_children: int = 2,
             _count(node.parent_ids)
     for node_id, marker in (state.buildings or {}).items():
         if node_id not in state.nodes and isinstance(marker, dict):
-            _count(marker.get("parent_ids"))
+            # A build marker is the `node_building` row as written, not a fold-validated Node: only
+            # a LIST of ids that coerce is a parent list (critic 2026-09-26, driven: `"parent_ids": 3`
+            # raised `TypeError` out of every proposal's cue while the marker stood).
+            raw = marker.get("parent_ids")
+            _count([parent_id for parent_id in (coerce_node_id({"node_id": value})
+                                                for value in (raw if isinstance(raw, list) else ()))
+                    if parent_id is not None])
     better = (lambda a, b: a > b) if state.direction == "max" else (lambda a, b: a < b)
     by_id = {n.id: n for n in feasible}
 
