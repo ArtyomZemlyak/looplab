@@ -153,7 +153,10 @@ def test_index_mentions_every_numbered_document():
     #   65 -> 66 (2026-09-25): doc 67, the September external-works synergy (RPM, ScientistTwo,
     #   Agora, OpenResearch, DisCo, GLM, RSI). No collision — 67 was claimed by checking the glob,
     #   the index table and the mkdocs nav together; all four move in this one change.
-    assert len(numbered) == 66, "the derived numbered-document inventory changed"
+    #   66 -> 67 (2026-09-26): doc 68, operator lessons from minionerec-backbones-v10 (a draft that
+    #   still needs verification and critique). No collision — 68 was claimed by checking the glob,
+    #   the index table and the mkdocs nav together; all four move in this one change.
+    assert len(numbered) == 67, "the derived numbered-document inventory changed"
     #   51 -> 52 (2026-09-05): the development plan (doc 52). No collision — the number was
     #   claimed by checking the glob AND the index table together.
     #   52 -> 53 (2026-09-06): the agent guide's narratives, archived verbatim when `CLAUDE.md`
