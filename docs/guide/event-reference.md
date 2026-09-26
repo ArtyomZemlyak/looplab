@@ -23,11 +23,11 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-158 event types — 112 folded into `RunState`, 46 diagnostic; 969 declared payload keys; 22 types whose whole payload is stored by the fold.
+158 event types — 112 folded into `RunState`, 46 diagnostic; 970 declared payload keys; 22 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
-| `ablate` | folded · whole | One ablation of the champion's code: which blocks were removed and what each removal cost the metric. | `generation`, `impacts`, `parent_id` | `ablation_id`, `attempt`, `blocks`, `eval_seconds`, `mode`, `skipped`, `superseded`, `top_block` |
+| `ablate` | folded · whole | One ablation of the champion's code: which blocks were removed and what each removal cost the metric. | `generation`, `impacts`, `parent_id` | `ablation_id`, `attempt`, `blocks`, `eval_seconds`, `mode`, `signed_impacts`, `skipped`, `superseded`, `top_block` |
 | `agent_checkpointed` | diagnostic | An agentic role's mid-loop checkpoint: the turn, the plan it works from, the todo updates it just made. | `label`, `plan`, `plan_updates`, `todos`, `turn` | — |
 | `agent_decision` | folded · whole | The unified agent's pick of the next action, beside the legal set it was offered. | `at_node`, `chosen`, `legal`, `rationale`, `recommended` | — |
 | `agent_phase_completed` | diagnostic | One agentic phase ended: how it exited, after how many turns and seconds. | `exit`, `label`, `plan_updates`, `seconds`, `turns` | — |

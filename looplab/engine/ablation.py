@@ -38,6 +38,13 @@ from looplab.runtime.sandbox import GpuPinUnenforceable
 _ABLATION_RESOURCE_TICKS = 120
 
 
+def _signed_gain(probe_metric: float, base: float, direction: str) -> float:
+    """How much BETTER the objective measured with the component removed: `probe - base` on a
+    maximized metric, `base - probe` on a minimized one. Positive means the run did better without
+    it; negative, that it needed it."""
+    return (probe_metric - base) if direction == "max" else (base - probe_metric)
+
+
 class AblationMixin:
     """The engine's ablation cluster. See the module docstring for the mixin convention
     (`self` is the Engine)."""
@@ -172,6 +179,12 @@ class AblationMixin:
             return
         base = parent.metric if parent.metric is not None else 0.0
         impacts: dict[str, float] = {}
+        # THE DIRECTION THE SENSITIVITY THROWS AWAY (doc 67 67.4): `impacts` is MLE-STAR's `|Δ|`,
+        # which is how the digest, the UI and the narrative read it — and it cannot tell a component
+        # the run is better WITHOUT from one it cannot do without. Recorded beside it, never in its
+        # place: `_signed_gain` below, positive when the probe measured the objective BETTER with
+        # the component removed. Nothing reads it to decide yet.
+        signed_impacts: dict[str, float] = {}
         abl_seconds = 0.0                       # P1-2: sum the probe wall-clock so it's budgeted
         superseded = False
         with self.tracer.span(
@@ -201,6 +214,7 @@ class AblationMixin:
                     break
                 if res.metric is not None and res.exit_code == 0 and not res.timed_out:
                     impacts[p] = abs(res.metric - base)
+                    signed_impacts[p] = _signed_gain(res.metric, base, state.direction)
                 if superseded:
                     break
         async with self._write_lock:
@@ -209,6 +223,7 @@ class AblationMixin:
             self.store.append(EV_ABLATE, {
                 "parent_id": parent_id, "generation": generation,
                 "ablation_id": ablation_id, "impacts": impacts,
+                "signed_impacts": signed_impacts,
                 "eval_seconds": round(abl_seconds, 3),
                 **({"superseded": True} if superseded else {})})
 
@@ -374,6 +389,9 @@ class AblationMixin:
         base = parent.metric if parent.metric is not None else 0.0
         blocks = self._segment_blocks(code)
         impacts: dict[str, Optional[float]] = {}
+        # Signed beside the sensitivity, as in `_ablate`; None where `impacts` is None (the run broke
+        # without the block, so there is no measured objective to sign).
+        signed_impacts: dict[str, Optional[float]] = {}
         abl_seconds = 0.0                       # P1-2: budget the code-block probes too
         superseded = False
         with self.tracer.span(
@@ -399,8 +417,10 @@ class AblationMixin:
                     break
                 if res.metric is not None and res.exit_code == 0 and not res.timed_out:
                     impacts[str(idx)] = round(abs(res.metric - base), 6)
+                    signed_impacts[str(idx)] = round(_signed_gain(res.metric, base, state.direction), 6)
                 else:
                     impacts[str(idx)] = None   # removing this block broke the run => essential block
+                    signed_impacts[str(idx)] = None
                 if superseded:
                     break
 
@@ -412,7 +432,7 @@ class AblationMixin:
         async with self._write_lock:
             self.store.append(EV_ABLATE, {"parent_id": parent_id, "generation": generation,
                                          "ablation_id": ablation_id,
-                                         "impacts": impacts,
+                                         "impacts": impacts, "signed_impacts": signed_impacts,
                                          "mode": "code_blocks", "blocks": len(blocks),
                                          "top_block": top, "eval_seconds": round(abl_seconds, 3),
                                          **({"superseded": True} if superseded else {})})

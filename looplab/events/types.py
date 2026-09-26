@@ -1254,8 +1254,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         "One ablation of the champion's code: which blocks were removed and what each removal cost the metric.",
         required=("generation", "impacts", "parent_id"),
         optional=(
-            "ablation_id", "attempt", "blocks", "eval_seconds", "mode", "skipped", "superseded",
-            "top_block"
+            "ablation_id", "attempt", "blocks", "eval_seconds", "mode", "signed_impacts", "skipped",
+            "superseded", "top_block"
         ),
         stored_whole=True,
     ),

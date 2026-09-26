@@ -339,3 +339,39 @@ def test_a_probe_that_never_got_its_resource_did_not_run_and_is_not_an_essential
     assert len(events) == 1
     assert events[0].data["impacts"] == {}, events[0].data
     assert events[0].data["eval_seconds"] == 0.0
+
+
+def test_the_signed_gain_keeps_the_direction_the_sensitivity_drops():
+    """Doc 67 67.4: `impacts` is `|Δ|`, so a component the run is BETTER without reads exactly like
+    one it cannot do without. The signed gain is positive when the probe measured the objective
+    better with the component removed, on either objective direction."""
+    from looplab.engine.ablation import _signed_gain
+
+    assert _signed_gain(0.9, 0.8, "max") == pytest.approx(0.1)       # better without it
+    assert _signed_gain(0.7, 0.8, "max") == pytest.approx(-0.1)      # it was needed
+    assert _signed_gain(0.7, 0.8, "min") == pytest.approx(0.1)       # lower loss without it
+    assert _signed_gain(0.9, 0.8, "min") == pytest.approx(-0.1)
+
+
+def test_every_measured_probe_records_its_signed_gain_beside_the_sensitivity(tmp_path):
+    """Driven over the toy objective `(x-3)^2 + (y+1)^2`, MINIMIZED: a probe zeroes one parameter,
+    so its measured objective is known in closed form from the parent's params, and the recorded sign
+    must say whether the run did better (positive) or worse without that parameter."""
+    state = anyio.run(_engine(tmp_path / "run", ablate_every=1).run)
+    assert state.direction == "min"
+    rows = [e.data for e in EventStore(tmp_path / "run" / "events.jsonl").read_all()
+            if e.type == "ablate" and e.data.get("impacts")]
+    assert rows, "expected at least one measured ablation pass"
+    signs = set()
+    for data in rows:
+        parent = state.nodes[data["parent_id"]]
+        params = {"x": 0.0, "y": 0.0, **parent.idea.params}
+        signed = data["signed_impacts"]
+        assert set(signed) == set(data["impacts"])
+        for name, value in signed.items():
+            probe = {**params, name: 0.0}
+            probe_metric = (probe["x"] - 3.0) ** 2 + (probe["y"] + 1.0) ** 2
+            assert value == pytest.approx(parent.metric - probe_metric), (name, data)
+            assert abs(value) == pytest.approx(data["impacts"][name])
+            signs.add(value > 0)
+    assert False in signs, "a parameter the toy optimum needs must read as NEEDED (negative)"
