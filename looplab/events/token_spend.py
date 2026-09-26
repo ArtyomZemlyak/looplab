@@ -441,15 +441,25 @@ def spend_around_champion(events, state) -> Optional[dict]:
     ledger only PARTLY priced (a gateway that began pricing mid-run) sums a cost over the priced calls
     alone: every part carries `priced_calls` beside `calls`.
 
+    A SHARE IS A CLAIM ABOUT THE WHOLE RUN (third critic pass, driven): a ledger that begins MID-run
+    before the champion — no roll-up, first row after some nodes — folds to a reach that is only the
+    ledger's part of it, and "50.0 % after" read as the run's own number; a roll-up followed by a
+    gap before the first row printed 14.3 %. `ledger_covers_run` is the one condition a share is
+    printed under: no roll-up base, and the first `llm_usage` row precedes the first `node_created`
+    (every node since the run's first was built with the ledger on). It can be False for a run the
+    ledger does cover — a first node built without a model call — and that direction only withholds
+    a share, never prints a wrong one.
+
     `after_seconds` runs from the champion's terminal to the LAST `llm_usage` row after it — the
     window the "after" spend was made in, not the log's last row: an operator's comment appended a
     week later is not the run spending. `None` when nothing was spent after.
     Returns `{node_id, seq, reach, after, total, after_share_tokens, after_share_cost,
-    after_seconds, ledger_starts_after, rolled_up_before}`, each of `reach`/`after`/`total` being
-    `{tokens, cost, calls, priced_calls}`.
+    after_seconds, ledger_starts_after, rolled_up_before, ledger_covers_run}`, each of
+    `reach`/`after`/`total` being `{tokens, cost, calls, priced_calls}`; the two shares are the
+    arithmetic, and a caller prints them only under `ledger_covers_run`.
     """
     from looplab.events.replay import fold
-    from looplab.events.types import EV_LLM_COST, EV_LLM_USAGE
+    from looplab.events.types import EV_LLM_COST, EV_LLM_USAGE, EV_NODE_CREATED
 
     best = state.best() if state is not None and hasattr(state, "best") else None
     seq = getattr(best, "terminal_event_seq", None) if best is not None else None
@@ -466,6 +476,7 @@ def spend_around_champion(events, state) -> Optional[dict]:
     base = [event.seq for event in rows if event.type == EV_LLM_COST and event.seq < first_usage]
     if base and base[-1] > seq:
         return None
+    first_node = next((event.seq for event in rows if event.type == EV_NODE_CREATED), None)
     prefix = [event for event in rows if event.seq <= seq]
     reached = fold(prefix).llm_cost or {}
 
@@ -496,4 +507,5 @@ def spend_around_champion(events, state) -> Optional[dict]:
         "after_seconds": after_seconds,
         "ledger_starts_after": first_usage > seq,
         "rolled_up_before": bool(base),
+        "ledger_covers_run": not base and (first_node is None or first_usage < first_node),
     }

@@ -98,9 +98,10 @@ class EnginePolicy(str, Enum):
 
 
 # The `error.code` a durable command record settles with when its engine spawn crossed the boundary
-# after which the server cannot tell whether a child started (`run_commands.py::SPAWN_CLAIM_HATCH`,
-# which takes it from here): the record is terminal, yet an engine may still be importing — so
-# `looplab stop --wait` reads a RECENT one as a possible engine start.
+# after which the server cannot tell whether a child started: the record is terminal, yet an engine
+# may still be importing — so `looplab stop --wait` reads a RECENT one as a possible engine start.
+# Every Python record site (`serve/run_commands.py`, `SPAWN_CLAIM_HATCH` included) spells it through
+# this constant; the React client keeps its own literal (`ui/src/commandModel.js`).
 ENGINE_START_UNCERTAIN = "engine_start_uncertain"
 
 CONTROL_EVENTS = frozenset({

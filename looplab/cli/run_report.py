@@ -585,23 +585,39 @@ def echo_spend_around_champion(*, state, ev_path: Path) -> None:
     # cost" above a line saying the reach was unrecorded). No share either way: without a roll-up
     # both are 100 % by construction; with one, both parts are floors — the spend between that
     # roll-up and the ledger's first row is in neither.
-    late = split["ledger_starts_after"]
-    if late and not split["rolled_up_before"]:
-        reach_text = ("what reaching it cost is unrecorded (the per-call ledger starts after it "
-                      "landed — a run begun on a build without it)")
+    #
+    # A SHARE IS PRINTED ONLY WHEN THE LEDGER COVERS THE RUN (third pass, 2026-09-26, driven): a
+    # ledger that begins mid-run before the champion printed a complete-looking reach and "50.0 %"
+    # after it, and a roll-up followed by a gap printed "14.3 %". Every other shape keeps its parts
+    # and says in one line why no share stands beside them.
+    late, rolled = split["ledger_starts_after"], split["rolled_up_before"]
+    if late and not rolled:
+        # Two causes the record cannot tell apart, so both are named: nothing before the champion
+        # was ledgered, or nothing before it was spent.
+        reach_text = ("what reaching it cost is unrecorded or nothing (no per-call ledger row "
+                      "precedes it: a run begun on a build without the ledger, or a champion built "
+                      "without a model call)")
     else:
         reach_text = f"{reach['tokens']:,} tokens ({_money(reach)}) spent to reach it"
     cost_share = f", {_share(split['after_share_cost'])} of cost" if priced and fully else ""
-    shares = "" if late else f"; {_share(split['after_share_tokens'])} of tokens{cost_share}"
+    shares = (f"; {_share(split['after_share_tokens'])} of tokens{cost_share}"
+              if split["ledger_covers_run"] else "")
     tail = ("" if split["after_seconds"] is None
             else f", over the {split['after_seconds'] / 3600:.1f} h that followed")
     typer.echo(f"champion   : node {split['node_id']} landed at seq {split['seq']} — "
                f"{reach_text}; {after['tokens']:,} tokens ({_money(after)}{shares}) spent after it "
                f"was in hand{tail}")
-    if late and split["rolled_up_before"]:
-        typer.echo("             the per-call ledger starts after the champion landed: the reach is "
-                   "the last cost roll-up before it, and spend between that roll-up and the "
-                   "ledger's first row is in neither part — both are floors, so no share is printed")
+    if rolled:
+        typer.echo("             the per-call ledger starts after a cost roll-up"
+                   + (" and after the champion landed" if late else "")
+                   + ": the reach counts that roll-up, and spend between it and the ledger's first "
+                   "row is in neither part — "
+                   + ("both are floors" if late else "the reach and the total are floors")
+                   + ", so no share is printed")
+    elif not late and not split["ledger_covers_run"]:
+        typer.echo("             the per-call ledger's first row comes after the run's first node "
+                   "(a run begun on a build without the ledger, or a first node built without a "
+                   "model call): the reach may be a floor, so no share is printed")
 
 
 def echo_edit_types(state) -> None:

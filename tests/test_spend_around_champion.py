@@ -58,7 +58,7 @@ def test_the_ledger_is_split_at_the_champions_terminal(tmp_path):
     assert split["node_id"] == 1
     assert split["reach"] == {"tokens": 4000, "calls": 2, "priced_calls": 2, "cost": 0.4}
     assert split["after"] == {"tokens": 6000, "calls": 2, "priced_calls": 2, "cost": 0.6}
-    assert split["ledger_starts_after"] is False
+    assert split["ledger_starts_after"] is False and split["ledger_covers_run"] is True
     assert split["total"]["tokens"] == state.llm_cost["total_tokens"] == 10000
     assert split["after_share_tokens"] == pytest.approx(0.6)
     assert split["after_share_cost"] == pytest.approx(0.6)
@@ -177,6 +177,10 @@ def test_a_ledger_that_starts_after_the_champion_says_the_reach_is_unrecorded(tm
     out = CliRunner().invoke(app, ["tokens", str(rd)])
     line = next(ln for ln in out.output.splitlines() if ln.startswith("champion"))
     assert "what reaching it cost is unrecorded" in line, line
+    # The record cannot tell "nothing before it was ledgered" from "nothing before it was spent", so
+    # the line names both causes (third critic pass) rather than asserting the first.
+    assert ("a run begun on a build without the ledger, or a champion built without a model call"
+            in line), line
     # Not "0 tokens ($0.0000) spent to reach it ... 100.0 % of cost" above that sentence (second
     # critic pass): no zero reach and no share.
     assert "spent to reach it" not in line and "%" not in line, line
@@ -198,7 +202,9 @@ def test_a_ledger_that_starts_after_the_champion_says_the_reach_is_unrecorded(tm
     assert split3["reach"]["tokens"] == 3000
     (rd3 / "spans.jsonl").write_text("", encoding="utf-8")
     out3 = CliRunner().invoke(app, ["tokens", str(rd3)])
-    assert "the reach is the last cost roll-up before it" in out3.output, out3.output
+    assert ("the per-call ledger starts after a cost roll-up and after the champion landed: the "
+            "reach counts that roll-up" in out3.output), out3.output
+    assert "both are floors, so no share is printed" in out3.output, out3.output
     line3 = next(ln for ln in out3.output.splitlines() if ln.startswith("champion"))
     assert "3,000 tokens" in line3 and "%" not in line3, "both parts are floors: no share"
 
@@ -225,3 +231,61 @@ def test_the_after_window_ends_at_the_last_spend_not_the_last_row(tmp_path, monk
     store2.append("annotation", {"node_id": 0, "text": "done"})
     events2 = store2.read_all()
     assert spend_around_champion(events2, fold(events2))["after_seconds"] is None
+
+
+def _champion_lines(rd):
+    (rd / "spans.jsonl").write_text("", encoding="utf-8")
+    out = CliRunner().invoke(app, ["tokens", str(rd)])
+    lines = out.output.splitlines()
+    at = next(i for i, ln in enumerate(lines) if ln.startswith("champion"))
+    return lines[at], lines[at + 1] if at + 1 < len(lines) else ""
+
+
+def test_a_ledger_that_begins_mid_run_prints_no_share(tmp_path):
+    """Third critic pass, driven: a session on a build without the ledger created node 0 and was
+    stopped with no roll-up; the resumed build ledgered the rest. The reach is only the ledger's part
+    of it, so "50.0 % of tokens, 50.0 % of cost" read as the run's own number. No share; one line
+    says why."""
+    rd, store = _log(tmp_path, [("node", 0, 0.5), ("usage", 1000, 0.10), ("node", 1, 0.9),
+                                ("usage", 1000, 0.10)])
+    events = store.read_all()
+    split = spend_around_champion(events, fold(events))
+    assert split["ledger_starts_after"] is False and split["rolled_up_before"] is False
+    assert split["ledger_covers_run"] is False
+    line, caveat = _champion_lines(rd)
+    assert "1,000 tokens ($0.1000) spent to reach it" in line and "%" not in line, line
+    assert caveat.strip().startswith("the per-call ledger's first row comes after the run's first "
+                                     "node"), caveat
+    assert "the reach may be a floor, so no share is printed" in caveat, caveat
+
+
+def test_a_roll_up_followed_by_a_gap_prints_no_share(tmp_path):
+    """Third critic pass, driven: a roll-up, then spend nothing recorded, then the per-call ledger —
+    all before the champion. The reach and the total both miss the gap, and "14.3 %" was a ratio of
+    two floors."""
+    rd = tmp_path / "gap"
+    rd.mkdir()
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_started", {"run_id": "gap", "task_id": "t", "goal": "g", "direction": "max"})
+    store.append("llm_cost", {"cost": 0.3, "calls": 3, "total_tokens": 3000})
+    store.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                  "idea": {"operator": "draft", "params": {}, "rationale": "s"},
+                                  "code": "pass\n"})
+    store.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": 0.5, "violations": []})
+    store.append("llm_usage", {"calls": 1, "priced_calls": 1, "total_tokens": 1000, "cost": 0.1})
+    store.append("node_created", {"node_id": 1, "parent_ids": [], "operator": "draft",
+                                  "idea": {"operator": "draft", "params": {}, "rationale": "s"},
+                                  "code": "pass\n"})
+    store.append("node_evaluated", {"node_id": 1, "generation": 0, "metric": 0.9, "violations": []})
+    store.append("llm_usage", {"calls": 1, "priced_calls": 1, "total_tokens": 700, "cost": 0.07})
+    events = store.read_all()
+    split = spend_around_champion(events, fold(events))
+    assert split["node_id"] == 1
+    assert split["ledger_starts_after"] is False and split["rolled_up_before"] is True
+    assert split["ledger_covers_run"] is False
+    assert split["reach"]["tokens"] == 4000 and split["after"]["tokens"] == 700
+    line, caveat = _champion_lines(rd)
+    assert "4,000 tokens ($0.4000) spent to reach it" in line and "%" not in line, line
+    assert ("the per-call ledger starts after a cost roll-up: the reach counts that roll-up"
+            in caveat), caveat
+    assert "the reach and the total are floors, so no share is printed" in caveat, caveat

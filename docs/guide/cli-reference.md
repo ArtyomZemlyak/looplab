@@ -396,14 +396,21 @@ looplab stop RUN_DIR [--wait [--timeout SECONDS]]
 `looplab resume` already waiting on it, which takes it straight back and lifts the stop, is waited on
 rather than missed — and within about a second if none was running. It exits `1` if it timed out,
 cannot observe the lock at all (a filesystem without working file locks), or the stop stopped
-standing: a later `resume` lifted it; a resume request is pending that a LoopLab server serves by
-starting an engine again; or a server command that starts an engine (`node_reset`,
-`budget_extend`, `fork`, `inject_node`, … — anything whose worker waits for the exit and then runs
-`looplab resume`) is still unsettled in the run's `.commands/` with a worker that showed life in the
-last 30 s (or settled "engine start uncertain" that recently). An unsettled one whose worker has gone
-quiet — a server killed mid-command — starts nothing now, so it is a `note:` line and the exit stays
-`0`; a server that re-reads it will start an engine and lift the stop. With no server running, a
-pending resume request starts nothing either, and the message says so.
+standing: a later `resume` lifted it; a resume request is pending (the first LoopLab server started
+on the run's root serves it by starting an engine, and so does `looplab resume`); or a server command
+that starts an engine is still unsettled in the run's `.commands/` with a worker that showed life in
+the last 30 s. Such a command (`node_reset`, `budget_extend`, `fork`, `inject_node`, …) is one the
+engine did not acknowledge because its loop had already left for the drain when the command landed;
+its worker waits for the exit and then runs `looplab resume` — if the exit comes inside the command's
+own observation deadline (20 min by default; later, the command times out and starts nothing). The
+pulse is the fresher of the worker's `.executing` claim and the record's `updated_at`; a command that
+settled "engine start uncertain" that recently counts too, and so does an unreadable record, which
+`POST /api/runs/<run>/resolve-activity-claims` quarantines. Two `note:` lines keep the exit at `0`.
+An unsettled command no worker has driven for 30 s (a server killed mid-command) starts nothing now,
+but nothing cancels it either: any LoopLab server that reads it again — a GET of the command, which an
+open LoopLab tab makes on its own — re-drives it, starts an engine and lifts the stop. An older
+"engine start uncertain" is named for the detached child it may have left, which lifts the stop if it
+takes the lock. The pulse is advisory: a server killed in the last 30 s still reads as coming.
 
 ## `finalize`
 
@@ -909,11 +916,15 @@ about when its spend happened, so it gets no split rather than a false one. An u
 provider that bills nothing through this client) prints `unpriced`, never `$0.0000`; a PARTLY priced
 one (a gateway that began pricing mid-run) names its priced calls on each part whose cost sums only
 some of them (`$0.1000 over 1 of 2 calls priced`) and prints no cost share. The hours are the window
-the *after* spend was made in — to the last `llm_usage` row, not to a comment appended later. And a
-ledger whose per-call rows begin only after the champion landed (a run begun on a build without
-them) says what reaching it cost is unrecorded rather than printing a zero — or, when a cost roll-up
-came before the champion, prints that roll-up and a second line saying both parts are floors — and in
-either case prints no share.
+the *after* spend was made in — to the last `llm_usage` row, not to a comment appended later. A
+share is a claim about the whole run, so it is printed only when the per-call ledger covers the whole
+run: no cost roll-up before its first row, and that row comes before the run's first node. Otherwise
+the parts stand without a share and a second line says why. A ledger whose rows begin only after the
+champion landed says what reaching it cost is "unrecorded or nothing", naming both causes the record
+cannot tell apart (a run begun on a build without the ledger, or a champion built without a model
+call). One that begins mid-run before the champion prints its reach and says it may be a floor. After
+a cost roll-up, the reach counts the roll-up, and the line says which parts are floors: spend between
+the roll-up and the ledger's first row is in neither part.
 
 **A SECOND table answers "which EXPERIMENT spent it, and was that experiment ever evaluated".**
 Phase says which *kind* of work the tokens bought; it cannot say that a particular build was thrown

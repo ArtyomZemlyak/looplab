@@ -1447,7 +1447,7 @@ class RunCommandService:
                     return {"ok": True, "resolved": True, "reason": "child_definitively_gone"}
                 if self._claim_child_exactly_alive(row):
                     raise HTTPException(409, {
-                        "code": "engine_start_uncertain",
+                        "code": ENGINE_START_UNCERTAIN,
                         "message": "The exact claimed child process is still alive.",
                         "remediation": "Inspect the process; never clear a live LoopLab child claim.",
                     })
@@ -2157,7 +2157,7 @@ class RunCommandService:
             })
         if self._recent_spawn_claim(rd):
             raise HTTPException(409, {
-                "code": "engine_start_uncertain",
+                "code": ENGINE_START_UNCERTAIN,
                 "message": f"Cannot {operation} while an engine start is unresolved.",
                 # NAME THE ESCAPE. Waiting is the ordinary answer, but a claim whose PID cannot be
                 # judged (an inaccessible process, a legacy identity-less row) never becomes
@@ -2392,7 +2392,7 @@ class RunCommandService:
             updated = dict(record)
             updated["reconciled_from"] = status
             return self._succeeded(rd, path, updated)
-        if ((record.get("error") or {}).get("code") == "engine_start_uncertain"
+        if ((record.get("error") or {}).get("code") == ENGINE_START_UNCERTAIN
                 and not self._recent_spawn_claim(rd)):
             # GET remains observation-only: it does not restart anything. It merely makes the same
             # command explicitly retryable once lock evidence or definitive PID death removes the
@@ -2722,7 +2722,7 @@ class RunCommandService:
                 else:
                     if event_type not in COLLABORATION_EVENTS and self._recent_spawn_claim(rd):
                         raise HTTPException(409, {
-                            "code": "engine_start_uncertain",
+                            "code": ENGINE_START_UNCERTAIN,
                             "message": "An earlier engine start has not exposed its lock or exited.",
                             "remediation": (
                                 "Wait for engine_running or definitive child exit; if neither ever "
@@ -2902,7 +2902,7 @@ class RunCommandService:
             if (record.get("event_type") not in COLLABORATION_EVENTS
                     and self._recent_spawn_claim(rd)):
                 raise HTTPException(409, {
-                    "code": "engine_start_uncertain",
+                    "code": ENGINE_START_UNCERTAIN,
                     "existing_command_id": command_id,
                     "current_status": record.get("status"),
                     "message": "The prior detached engine may still be starting without a live lock.",
@@ -3456,7 +3456,7 @@ class RunCommandService:
             if not uncertain:
                 self._clear_spawn_claim(rd, command_id)
             self._terminal(path, record, "failed", error=_error(
-                "engine_start_uncertain" if uncertain else "spawn_failed",
+                ENGINE_START_UNCERTAIN if uncertain else "spawn_failed",
                 (f"run engine {'restart' if restarting else 'creation'} crossed an uncertain "
                  "process boundary" if uncertain else
                  f"could not {verb} the run engine: {exc}"),
@@ -3515,7 +3515,7 @@ class RunCommandService:
                 self._clear_spawn_claim(rd, command_id)
             if uncertain_start:
                 self._terminal(path, record, "timed_out", error=_error(
-                    "engine_start_uncertain",
+                    ENGINE_START_UNCERTAIN,
                     "the detached engine has not exposed engine.lock and is not known to have exited",
                     "wait and GET this command; do not retry or launch another driver while quarantined",
                     retryable=False))

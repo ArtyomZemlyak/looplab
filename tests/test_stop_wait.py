@@ -156,6 +156,7 @@ def test_a_pending_resume_request_is_not_a_stopped_run(tmp_path):
     out = CliRunner().invoke(app, ["stop", str(rd), "--wait"])
     assert out.exit_code == 1, out.output
     assert "does not stand" in out.output and "resume request is pending" in out.output
+    assert "the run stays stopped" not in out.output, "it does not stand and stays stopped at once"
 
 
 @pytest.mark.parametrize("argv", [["--timeout", "5"], ["--wait", "--timeout", "-1"]])
@@ -320,7 +321,7 @@ def test_a_command_no_live_worker_holds_is_a_note_not_a_failure(tmp_path):
     imminent restart failed every later `stop --wait` (second critic pass, driven with SIGKILL).
     Nothing starts it NOW, so the stop stands — and the wait SAYS what would lift it."""
     rd = _run_dir(tmp_path, in_flight=False)
-    _command_record(rd, event_type="node_reset", policy="ensure_running")
+    _command_record(rd, event_type="node_reset", policy="ensure_running", age_s=3600)
     claim = rd / ".commands" / f".cmd_{'0' * 32}.executing"
     claim.write_text(json.dumps({"pid": 999999, "created_at": 0}), encoding="utf-8")
     old = time.time() - 3600
@@ -329,7 +330,43 @@ def test_a_command_no_live_worker_holds_is_a_note_not_a_failure(tmp_path):
     out = CliRunner().invoke(app, ["stop", str(rd), "--wait"])
     assert out.exit_code == 0, out.output
     assert "no engine was running" in out.output
-    assert "note: server command(s) `node_reset`" in out.output and "no live worker" in out.output
+    assert "note: server command(s) `node_reset`" in out.output
+    assert "no worker has shown life for 30 s" in out.output
+    # ...and what brings it back, since nothing cancels it (third critic pass: the first note sent
+    # the operator to a "Commands view" that does not exist).
+    assert "a GET of the command, which an open LoopLab tab makes" in out.output
+    assert "Commands view" not in out.output
+
+
+def test_the_fresher_of_the_claim_and_the_record_is_the_pulse(tmp_path):
+    """A record written a moment ago is not stale because an OLD claim file sits beside it."""
+    from looplab.cli.run_cmds import server_commands_restarting
+
+    rd = _run_dir(tmp_path, in_flight=False)
+    _command_record(rd, event_type="fork", policy="ensure_running")
+    claim = rd / ".commands" / f".cmd_{'0' * 32}.executing"
+    claim.write_text("{}", encoding="utf-8")
+    import os
+    os.utime(claim, (1, 1))
+    assert server_commands_restarting(rd)["coming"] == [f"`fork` (cmd_{'0' * 32}, executing)"]
+
+
+def test_an_old_uncertain_start_is_a_note_about_the_child_it_may_have_left(tmp_path):
+    rd = _run_dir(tmp_path, in_flight=False)
+    _command_record(rd, event_type="fork", policy="ensure_running", status="failed",
+                    error={"code": "engine_start_uncertain"}, age_s=3600)
+    out = CliRunner().invoke(app, ["stop", str(rd), "--wait"])
+    assert out.exit_code == 0, out.output
+    assert "could not tell whether they started an engine" in out.output
+
+
+def test_an_unreadable_record_names_its_remedy(tmp_path):
+    rd = _run_dir(tmp_path, in_flight=False)
+    (rd / ".commands").mkdir()
+    (rd / ".commands" / f"cmd_{'7' * 32}.json").write_text("{not json", encoding="utf-8")
+    out = CliRunner().invoke(app, ["stop", str(rd), "--wait"])
+    assert out.exit_code == 1, out.output
+    assert "resolve-activity-claims" in out.output
 
 
 def test_a_recent_uncertain_engine_start_counts_as_coming(tmp_path):
@@ -339,28 +376,29 @@ def test_a_recent_uncertain_engine_start_counts_as_coming(tmp_path):
     rd = _run_dir(tmp_path, in_flight=False)
     _command_record(rd, event_type="fork", policy="ensure_running", status="failed",
                     error={"code": "engine_start_uncertain"})
-    assert server_commands_restarting(rd) == ([f"`fork` (cmd_{'0' * 32}, engine start uncertain)"],
-                                              [])
+    assert server_commands_restarting(rd) == {
+        "coming": [f"`fork` (cmd_{'0' * 32}, engine start uncertain)"], "stale": [],
+        "uncertain": []}
 
 
 def test_only_an_unsettled_engine_starting_record_counts(tmp_path):
     from looplab.cli.run_cmds import server_commands_restarting
 
     rd = _run_dir(tmp_path, in_flight=False)
-    assert server_commands_restarting(rd) == ([], [])                  # no `.commands/` at all
+    assert server_commands_restarting(rd) == {"coming": [], "stale": [], "uncertain": []}
     _command_record(rd, event_type="budget_extend", policy="ensure_running", status="succeeded",
                     name="1" * 32)
     _command_record(rd, event_type="hint", policy="no_spawn", name="2" * 32)
     _command_record(rd, event_type="run_abort", policy="ensure_driver_preserve_stop",
                     name="3" * 32)                     # a finalize driver never lifts the pause
-    assert server_commands_restarting(rd) == ([], [])
+    assert server_commands_restarting(rd) == {"coming": [], "stale": [], "uncertain": []}
     _command_record(rd, event_type="restart", policy="restart_after_exit", status="accepted",
                     name="4" * 32)
     (rd / ".commands" / f"cmd_{'5' * 32}.json").write_text("{not json", encoding="utf-8")
     _command_record(rd, event_type="fork", policy="ensure_running", name="6" * 32, age_s=3600)
-    assert server_commands_restarting(rd) == (
-        [f"`restart` (cmd_{'4' * 32}, accepted)", f"cmd_{'5' * 32} (unreadable)"],
-        [f"`fork` (cmd_{'6' * 32}, executing)"])
+    assert server_commands_restarting(rd) == {
+        "coming": [f"`restart` (cmd_{'4' * 32}, accepted)", f"cmd_{'5' * 32} (unreadable)"],
+        "stale": [f"`fork` (cmd_{'6' * 32}, executing)"], "uncertain": []}
 
 
 def test_the_record_a_real_command_worker_leaves_is_the_one_read(tmp_path):
@@ -391,10 +429,11 @@ def test_the_record_a_real_command_worker_leaves_is_the_one_read(tmp_path):
     while client.get(f"/api/runs/run/commands/{hint['id']}").json()["status"] != "succeeded":
         assert time.monotonic() < deadline, "the hint never settled"
         time.sleep(0.02)
-    assert server_commands_restarting(rd) == ([], [])
+    assert server_commands_restarting(rd) == {"coming": [], "stale": [], "uncertain": []}
     assert post_command(client, "budget_extend", {"add_nodes": 2}, run_id="run").status_code < 300
-    coming, stale = server_commands_restarting(rd)
-    assert len(coming) == 1 and coming[0].startswith("`budget_extend` (cmd_") and not stale, coming
+    found = server_commands_restarting(rd)
+    assert (len(found["coming"]) == 1 and found["coming"][0].startswith("`budget_extend` (cmd_")
+            and not found["stale"]), found
 
 
 @pytest.mark.parametrize("value", ["nan", "inf"])
@@ -475,3 +514,20 @@ def test_a_lock_retaken_after_the_release_is_waited_on_not_reported_exited(tmp_p
     out = CliRunner().invoke(app, ["stop", str(rd), "--wait", "--timeout", "20"])
     assert out.exit_code == 1, out.output
     assert "does not stand: the stop was lifted" in out.output and "has exited" not in out.output
+
+
+@FLOCK
+def test_a_command_waiting_on_a_live_engine_is_named_after_its_exit(tmp_path):
+    """The engine was SEEN holding the lock: the coming command starts an engine "now that this one
+    has exited" — the branch the first two passes left undriven."""
+    rd = _run_dir(tmp_path, in_flight=True)
+    _command_record(rd, event_type="budget_extend", policy="ensure_running")
+    release, held = threading.Event(), threading.Event()
+    holder = threading.Thread(target=_hold_lock, args=(rd, release, held), daemon=True)
+    holder.start()
+    assert held.wait(5)
+    threading.Timer(1.0, release.set).start()
+    out = CliRunner().invoke(app, ["stop", str(rd), "--wait"])
+    holder.join(5)
+    assert out.exit_code == 1, out.output
+    assert "will start an engine now that this one has exited" in out.output
