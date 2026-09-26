@@ -218,9 +218,18 @@ def test_the_competition_task_refuses_a_typo_before_it_touches_the_competition()
 def test_the_synthetic_field_order_the_config_hash_reads_is_unchanged():
     """`core/setup_identity.py::setup_config_hash` dumps the task WITHOUT sorted keys, so a model's
     field order is load-bearing (`adapters/synthetic.py`'s docstring). A validator is not a field;
-    this pins that attaching one moved nothing."""
+    this pins that attaching one moved nothing.
+
+    What the hash READS is the DUMP, so the pin is over the fields the dump emits: a field declared
+    `exclude=True` is in `model_fields` but never in the dump, at any position (doc 67 67.14's
+    `reference_score`, reporting only). The excluded set is pinned too, so the next one is a
+    decision, not an accident."""
     from looplab.adapters.toytask import ToyTask
 
-    assert list(ToyTask.model_fields) == ["kind", "id", "goal", "direction",
-                                          "comparison_contract", "bounds", "seed", "step", "noise"]
+    dumped = [name for name, field in ToyTask.model_fields.items() if not field.exclude]
+    assert dumped == ["kind", "id", "goal", "direction",
+                      "comparison_contract", "bounds", "seed", "step", "noise"]
+    assert [name for name, field in ToyTask.model_fields.items() if field.exclude] == [
+        "reference_score"]
+    assert list(ToyTask(id="t", goal="g").model_dump(mode="json")) == dumped
 

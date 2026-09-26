@@ -881,6 +881,7 @@
   "proposed_spec": null,
   "proxy_scores": {},
   "proxy_skipped": [],
+  "reference_score": null,
   "repair_ledger": [],
   "repair_ledger_omitted": {},
   "report": null,
