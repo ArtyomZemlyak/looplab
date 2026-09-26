@@ -1589,6 +1589,12 @@ class Node(BaseModel):
     confirmed_mean: Optional[float] = None
     confirmed_std: Optional[float] = None
     confirmed_seeds: Optional[int] = None   # how many seeds actually succeeded (I12)
+    # The RULER that mean was measured on — the `profile` facet digest of the protocol every counted
+    # seed ran under (`node_confirmed.protocol_profile`, `engine/comparability.py::agreed_ruler`), or
+    # None when the seeds recorded none or disagreed. Confirm asks for `full` by NAME; only this says
+    # what that resolved to, which `events/fidelity_agreement.py` compares against the search's own
+    # record (doc 68 68.5). Off the public dump like `resource_curve`: one instrument reads it.
+    confirmed_ruler: Optional[str] = Field(default=None, exclude=True)
     # D1 holdout-gated promotion (B6): metric of this node on the FINAL holdout partition the
     # search never saw (set by a `holdout_evaluated` event at finish, val-top-k only). When
     # `holdout_select` was recorded on the run, best-selection ranks holdout-carrying nodes by

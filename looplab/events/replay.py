@@ -1031,6 +1031,7 @@ def _requeue_partition_bound_results(st: RunState, *, fresh_node_ids: set[int]) 
         n.confirmed_mean = None
         n.confirmed_std = None
         n.confirmed_seeds = None
+        n.confirmed_ruler = None
         n.holdout_metric = None
         n.generalization_gap = None
         n.verifier_score = None   # R1-c: a soundness score judged the OLD attempt's result — discard it
@@ -1367,6 +1368,7 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         n.confirmed_mean = None
         n.confirmed_std = None
         n.confirmed_seeds = None
+        n.confirmed_ruler = None
         n.agent_report = None
         # The PER-SEED confirm memo must reset with the node too: the confirm phase memo-skips
         # every seed already in `confirm_seed_results`, so a stale entry would re-emit
@@ -1622,6 +1624,10 @@ def _on_node_confirmed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
         n.confirmed_mean = mean
         n.confirmed_std = std
         n.confirmed_seeds = seeds
+        # The ruler of THIS certificate (a later one without it clears it): bounded, and compared
+        # only for equality by its one reader, so a junk value can only withhold a pair.
+        ruler = d.get("protocol_profile")
+        n.confirmed_ruler = ruler if isinstance(ruler, str) and 0 < len(ruler) <= 64 else None
         if verifier_evidence_digest(st.direction, n) != prior_evidence:
             n.verifier_score = None
 
@@ -1694,7 +1700,7 @@ def _on_eval_noise_floor(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> No
         "spread": _finite_metric(d.get("spread")),
         "search_metric": _finite_metric(d.get("search_metric")),
         "profile": str(d.get("profile"))[:64] if isinstance(d.get("profile"), str) else None,
-        # The RULER the counted repeats measured (`engine/noise_floor.py::floor_protocol`), bounded
+        # The RULER the counted repeats measured (`engine/comparability.py::agreed_ruler`), bounded
         # like `profile`, and the mixed flag only as True. Its one reader
         # (`card_ledger.py::_floor_std`) compares it for EQUALITY with a node's recorded facet, so a
         # junk value can only withhold the floor, never lend it to a gain.

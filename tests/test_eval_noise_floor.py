@@ -24,7 +24,8 @@ import pytest
 from looplab.adapters.toytask import ToyTask
 from looplab.core.config import Settings
 from looplab.core.fitness import standard_error_difference
-from looplab.engine.noise_floor import floor_protocol, noise_floor_summary
+from looplab.engine.comparability import agreed_ruler
+from looplab.engine.noise_floor import noise_floor_summary
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
 from looplab.events.types import (ALL_EVENT_TYPES, DIAGNOSTIC_EVENTS, EV_EVAL_NOISE_FLOOR,
@@ -92,7 +93,7 @@ SMOKE, FULL = "a" * 16, "b" * 16
 ])
 def test_the_floor_names_one_ruler_only_when_every_counted_repeat_ran_on_it(rulers, counted,
                                                                              expected):
-    assert floor_protocol(rulers, counted) == expected
+    assert agreed_ruler(rulers, counted) == expected
 
 
 # ----------------------------------------------------------------- the mechanism, on a real run

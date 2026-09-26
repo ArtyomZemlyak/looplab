@@ -1541,7 +1541,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "confirm_eval": PayloadContract(
         "One seed of a champion-confirmation re-evaluation, with its metric and eval seconds.",
         required=("eval_seconds", "generation", "metric", "node_id", "seed"),
-        optional=("attempt", "error", "reason", "superseded"),
+        optional=("attempt", "error", "protocol_profile", "reason", "superseded"),
     ),
     "coverage_snapshot": PayloadContract(
         "The search's coverage snapshot at one node.",
@@ -1875,7 +1875,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "node_confirmed": PayloadContract(
         "A node's confirmation statistics over its seeds (mean, std).",
         required=("generation", "mean", "node_id", "seeds", "std"),
-        optional=("attempt",),
+        optional=("attempt", "protocol_mixed", "protocol_profile"),
     ),
     "node_created": PayloadContract(
         "A node exists: its idea, the code and files the Developer wrote, and its parents.",

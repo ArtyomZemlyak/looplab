@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-158 event types — 112 folded into `RunState`, 46 diagnostic; 973 declared payload keys; 22 types whose whole payload is stored by the fold.
+158 event types — 112 folded into `RunState`, 46 diagnostic; 976 declared payload keys; 22 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -68,7 +68,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `concept_lens_started` | diagnostic | The durable idempotency claim for one paid concept-lens projection. | — | `generation`, `lens_request_id`, `request_digest` |
 | `concept_tag_edited` | folded | The operator re-tagged one node's concepts; the classifier cadence must not clobber it. | `node_id` | `concepts`, `node_generation` |
 | `confirm_done` | folded | The fulfillment receipt for one `force_confirm` request. | `generation`, `node_id` | `attempt` |
-| `confirm_eval` | folded | One seed of a champion-confirmation re-evaluation, with its metric and eval seconds. | `eval_seconds`, `generation`, `metric`, `node_id`, `seed` | `attempt`, `error`, `reason`, `superseded` |
+| `confirm_eval` | folded | One seed of a champion-confirmation re-evaluation, with its metric and eval seconds. | `eval_seconds`, `generation`, `metric`, `node_id`, `seed` | `attempt`, `error`, `protocol_profile`, `reason`, `superseded` |
 | `coverage_snapshot` | folded · whole | The search's coverage snapshot at one node. | — | `at_node`, `dominant_theme_frac`, `niches`, `nodes`, `operators`, `projection_token`, `recent_dominant_frac`, `theme_entropy`, `themes`, `top_themes` |
 | `cross_run_prior` | folded · whole | Concepts of this proposal a SIMILAR earlier run already tried, and how those runs went. | — | `concept_source`, `literature`, `matched_concepts`, `prior_runs`, `prior_runs_complete`, `prior_runs_omitted`, `prior_runs_total`, `stance`, `v` |
 | `data_leakage` | folded · whole | The deterministic leakage scan's verdicts over the task's data. | `leak`, `verdicts` | — |
@@ -122,7 +122,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `node_build_delta` | diagnostic | A build byte-identical to another node's — the duplicate is surfaced, never refused. | `generation`, `identical_to`, `node_id`, `parent_ids`, `source_digest` | — |
 | `node_building` | folded | A node id was reserved and its build started; `node_created` clears the marker. | `node_id`, `operator`, `parent_ids` | `attempt`, `card_build_generation`, `card_id`, `generation`, `speculative` |
 | `node_concepts` | folded | The concept ids one node was tagged with, by which mode, against a named vocabulary. | `at_vocab`, `concepts`, `generation`, `mode`, `node_id` | `at_pending`, `attempt` |
-| `node_confirmed` | folded | A node's confirmation statistics over its seeds (mean, std). | `generation`, `mean`, `node_id`, `seeds`, `std` | `attempt` |
+| `node_confirmed` | folded | A node's confirmation statistics over its seeds (mean, std). | `generation`, `mean`, `node_id`, `seeds`, `std` | `attempt`, `protocol_mixed`, `protocol_profile` |
 | `node_created` | folded | A node exists: its idea, the code and files the Developer wrote, and its parents. | `code`, `files`, `idea`, `node_id`, `operator`, `parent_ids` | `attempt`, `card_build_generation`, `deleted`, `eval_start_boundary`, `footprint_finalized`, `forked_from`, `generation`, `materialize_aborted_intent`, `model_arm`, `origin`, `parent_generations`, `research_origin`, `seed`, `speculative` |
 | `node_eval_started` | folded | A node's evaluation was dispatched — the promise `node_created`'s eval-start boundary made. | `generation`, `node_id` | `attempt` |
 | `node_evaluated` | folded | A node's terminal: its metric, the trials behind it, its secondary metrics and any trust violations. | `eval_seconds`, `extra_metrics`, `generation`, `metric`, `node_id`, `stdout_tail`, `trials`, `violations` | `attempt`, `extra_metrics_direction`, `extra_metrics_provenance`, `metric_provenance`, `resource_curve`, `self_metric`, `stderr_tail` |

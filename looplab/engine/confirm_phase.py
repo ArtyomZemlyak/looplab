@@ -13,7 +13,8 @@ via `robust_selection` so the two can never drift.
 
 Named `confirm_phase` (not `confirm`) on purpose: the flat-import shim in looplab/__init__.py
 already maps `looplab.confirm` to trust/confirm.py. Layering: no runtime import of the
-orchestrator (TYPE_CHECKING only) and never serve — only trust, events, core and stdlib."""
+orchestrator (TYPE_CHECKING only) and never serve — only trust, events, core and stdlib, plus the
+engine leaf `comparability` for the one spelling of the ruler a seed ran on."""
 from __future__ import annotations
 
 import threading
@@ -22,6 +23,7 @@ import time
 import anyio
 
 from looplab.core.models import NodeStatus, RunState
+from looplab.engine import comparability
 # Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
 from looplab.engine.shared import engine_fold as fold
 from looplab.events.types import (EV_BEST_CONFIRMED, EV_CONFIRM_DONE, EV_CONFIRM_EVAL,
@@ -271,11 +273,17 @@ class ConfirmPhaseMixin:
             current = self._confirmation_node_current(nd.id, generation)
             valid = (current and res.metric is not None
                      and res.exit_code == 0 and not res.timed_out)
+            # The RULER this seed ran on, the digest a node's own terminal records beside its metric:
+            # confirm asks for `full` by name, and only the record says what that resolved to — the
+            # base command when no profile is declared, no override at all under operator stages
+            # (`comparability.py::result_ruler`; doc 68 68.5, critic 2026-09-26).
+            ruler = comparability.result_ruler(res)
             async with self._write_lock:            # confirm-seed eval cost (#2) + memo (#0)
                 self.store.append(EV_CONFIRM_EVAL, {
                     "node_id": nd.id, "generation": generation, "seed": s,
                     "eval_seconds": round(time.time() - _t0, 3),
                     "metric": res.metric if valid else None,
+                    **({"protocol_profile": ruler} if ruler else {}),
                     **({"superseded": True} if not current else {})})
                 if current and res.drift is not None:  # Phase 4: drop + audit drifted seeds
                     self.store.append(EV_SPEC_DRIFT,
@@ -382,6 +390,15 @@ class ConfirmPhaseMixin:
             if scores:
                 summ = cv_summary(scores)
                 summaries.append({"node_id": nd.id, **summ})
+                # …and the ruler the MEAN was measured on, when every seed it counts agrees — the
+                # full level a cheap/full comparison reads (`events/fidelity_agreement.py`). The
+                # counted seeds are the memo's measured ones, which is exactly what `scores` holds.
+                events = self.store.read_all()
+                counted = [seed for seed, metric in
+                           fold(events).confirm_seed_results.get(nd.id, {}).items()
+                           if metric is not None]
+                ruler = comparability.agreed_ruler(comparability.recorded_seed_rulers(
+                    events, EV_CONFIRM_EVAL, nd.id, nd.attempt), counted)
                 async with self._write_lock:
                     if (not self._confirmation_snapshot_current(generations)
                             or not self._confirmation_node_current(nd.id, nd.attempt)):
@@ -389,6 +406,9 @@ class ConfirmPhaseMixin:
                     self.store.append(EV_NODE_CONFIRMED, {
                         "node_id": nd.id, "generation": nd.attempt, "mean": summ["mean"],
                         "std": summ["std"], "seeds": len(scores),
+                        **({"protocol_profile": ruler["protocol_profile"]}
+                           if ruler.get("protocol_profile") else {}),
+                        **({"protocol_mixed": True} if ruler.get("protocol_mixed") else {}),
                     })
 
         if summaries:

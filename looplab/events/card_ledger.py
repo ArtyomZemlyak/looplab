@@ -648,7 +648,7 @@ def _replicated(node: Node) -> bool:
             and not isinstance(seeds, bool) and seeds >= 2)
 
 
-def _measured_ruler(node: Node) -> str | None:
+def measured_ruler(node: Node) -> str | None:
     """The ruler `node`'s number was measured on: the `profile` facet of the protocol its terminal
     recorded (`engine/comparability.py::protocol_record`, at `metric_provenance.comparability.
     protocol.profile`), read with `record_of`'s rule — a record with no `keys` is no record. Spelled
@@ -671,8 +671,8 @@ def _floor_std(floor: dict, candidate: Node, incumbent: Node) -> float:
     scored at the Strategist's fidelity of its day, the probe at the one in force at the END of the
     search, so a floor measured on `full` recorded `profile: None` like every smoke-scored node and
     rated their gains `within_noise`; and null and `smoke` — one ruler, by the Researcher prompt's own
-    words — never matched. So the RECORDED ruler decides (`_measured_ruler`, and the floor's
-    `protocol_profile`, `engine/noise_floor.py::floor_protocol`):
+    words — never matched. So the RECORDED ruler decides (`measured_ruler`, and the floor's
+    `protocol_profile`, `engine/comparability.py::agreed_ruler`):
 
     * the floor recorded one → both numbers must have been measured on exactly it;
     * the floor recorded none but a number did → no match (a floor from before the record);
@@ -686,7 +686,7 @@ def _floor_std(floor: dict, candidate: Node, incumbent: Node) -> float:
     if not is_usable_metric(std) or std <= 0 or floor.get("reason") or floor.get("protocol_mixed"):
         return 0.0
     recorded = floor.get("protocol_profile")
-    rulers = [_measured_ruler(n) for n in (candidate, incumbent)]
+    rulers = [measured_ruler(n) for n in (candidate, incumbent)]
     if recorded:
         if any(ruler != recorded for ruler in rulers):
             return 0.0

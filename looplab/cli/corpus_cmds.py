@@ -71,7 +71,7 @@ def _folded(runs_root: Path) -> Iterator[tuple[str, object, Path, list]]:
     aborting the corpus: an instrument that answers nothing because one of forty runs is damaged is
     an instrument nobody runs.
     """
-    from looplab.events.eventstore import EventLogCorruptionError, EventStore
+    from looplab.events.eventstore import EventLogCorruptionError, EventStore, log_integrity
     from looplab.events.replay import fold
 
     for run_dir in _run_dirs(runs_root):
@@ -81,6 +81,16 @@ def _folded(runs_root: Path) -> Iterator[tuple[str, object, Path, list]]:
             typer.echo(f"  ! {run_dir.name}: unreadable event log ({type(exc).__name__}) — skipped",
                        err=True)
             continue
+        # A log damaged part-way READS as its valid prefix — `EventLogCorruptionError` fires on an
+        # append, never on `read_all` — so without this line a corrupt run was counted as a whole
+        # one, with whatever its prefix held (critic 2026-09-26, driven). The receipt is the ONE
+        # operator-facing statement of that (`eventstore.py::log_integrity`).
+        integrity = log_integrity(run_dir / _EVENTS)
+        if not integrity.get("complete"):
+            typer.echo(f"  ! {run_dir.name}: the event log is damaged part-way — only its first "
+                       f"{len(events)} event(s) are read"
+                       + (f", {integrity['dropped_lines']} line(s) behind the break are not"
+                          if integrity.get("dropped_lines") else ""), err=True)
         yield run_dir.name, fold(events), run_dir, events
 
 
@@ -281,12 +291,14 @@ def fidelity_agreement_cmd(
 ):
     """Does the CHEAP evaluation level rank candidates the way the FULL one does? (doc 68 68.5)
 
-    Over the nodes that carry BOTH levels — the search's number and the confirm phase's full-profile
-    mean (`confirm_top_k`) — the pairwise ordering agreement and Spearman's rho, per run and pooled
-    (each pair lies inside one run). A node searched at `full` already measures seed noise, not
-    fidelity, and is counted apart. The comparison also crosses seed sets (search at seed 0, confirm
-    from `confirm_seed_base`). It arms nothing: whether the cheap level may be trusted to prune is
-    the operator's call once this number exists (`events/fidelity_agreement.py`).
+    Over the nodes that carry BOTH levels — the search's number and the confirm phase's mean
+    (`confirm_top_k` >= 2 with `confirm_seeds` >= 1) — the pairwise ordering agreement and
+    Spearman's rho, per run and pooled (each pair lies inside one run). The level is what each
+    number was MEASURED under (its recorded protocol), never the profile's name: a node measured on
+    one ruler at both measures seed noise and is counted apart, and one with no record on a side is
+    `unknown`. Confirmation takes the top-K by the search number, so this reads the ordering of the
+    candidates the search PROMOTED, not of those it pruned; and the pairs cross seed sets. It arms
+    nothing (`events/fidelity_agreement.py`).
     """
     from looplab.events.fidelity_agreement import fidelity_agreement_report, fidelity_rank_agreement
 
@@ -301,21 +313,26 @@ def fidelity_agreement_cmd(
         _emit_json({**report, "per_run": rows})
         return
     typer.echo(f"{report['runs']} run(s); {report['runs_with_pairs']} with an ordered cheap/full "
-               f"pair; {report['nodes_with_both']} node(s) carry both levels, "
-               f"{report['same_level']} more were searched at full already")
-    for row in sorted(rows, key=lambda r: (-r["pairs"], r["run"]))[:max(0, limit)]:
-        if not row["nodes"]:
-            continue
+               f"pair; {report['nodes_with_both']} node(s) carry both levels; "
+               f"{report['same_level']} more were measured on one ruler at both (seed noise, not "
+               f"fidelity), {report['unknown']} recorded no ruler on a side (unknown)")
+    # The runs WITH a pair to show are chosen first, and only then limited: a limit that counted
+    # the empty ones hid a confirmed run behind two that had nothing (critic 2026-09-26, driven).
+    shown = sorted((row for row in rows if row["nodes"]), key=lambda r: (-r["pairs"], r["run"]))
+    for row in shown[:max(0, limit)]:
         agreement = "n/a" if row["agreement"] is None else f"{100 * row['agreement']:.1f} %"
         rho = "n/a" if row["spearman"] is None else f"{row['spearman']:+.3f}"
         typer.echo(f"  {row['run']:<34} {len(row['nodes']):>3} node(s)  {row['pairs']:>4} pair(s)  "
                    f"agreement {agreement}  spearman {rho}  ties {row['ties']}")
+    if len(shown) > max(0, limit):
+        typer.echo(f"  … +{len(shown) - max(0, limit)} more run(s) with both levels (--limit)")
     if report["agreement"] is None:
-        typer.echo("\nNO ORDERED PAIR — no run confirmed two nodes it had searched at a cheaper "
+        typer.echo("\nNO ORDERED PAIR — no run confirmed two nodes it had measured at a cheaper "
                    "level, so nothing on this corpus says whether the cheap level ranks like the "
-                   "full one. Confirmation (`confirm_top_k` >= 2) is what records the pairs.")
+                   "full one. Confirmation (`confirm_top_k` >= 2, `confirm_seeds` >= 1) is what "
+                   "records the pairs.")
     else:
         typer.echo(f"\npooled: {report['concordant']} of {report['pairs']} ordered pair(s) agree "
                    f"({100 * report['agreement']:.1f} %), {report['ties']} tie(s) set apart — "
-                   "across seed sets as well as levels, so a disagreement is fidelity OR noise.")
+                   f"{report['caveat']}.")
 

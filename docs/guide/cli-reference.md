@@ -1520,18 +1520,31 @@ looplab fidelity-agreement RUNS_ROOT [--limit 20] [--json]
 
 The search scores on a cheap profile, and the cascade trusts that ordering to decide what survives.
 The only place a run records both levels for one node is the confirm phase, which re-evaluates the
-top-K at the `full` profile (`confirm_top_k` >= 2 records pairs). This reads each confirmed node's
-search number beside its full-profile mean. It reports pairwise ordering agreement per run and
-pooled across runs (each pair lies inside one run), and Spearman's rho over average ranks when a run
-has three or more such nodes. A tie on either side is no ordering: it is counted apart, never as a
-disagreement.
+top-K by the search number at `full` (`confirm_top_k` >= 2 with `confirm_seeds` >= 1 records pairs;
+both default to 0). This reads each confirmed node's search number beside its confirmation mean. It
+reports pairwise ordering agreement per run and pooled across runs (each pair lies inside one run),
+and Spearman's rho over average ranks when a run has three or more such nodes on one ruler. A tie on
+either side is no ordering: it is counted apart, never as a disagreement.
 
-A node already searched at `full` measures seed noise, not fidelity, and is counted apart. The
-comparison also crosses seed sets (the search at seed 0, confirm from `confirm_seed_base`), so a
-disagreement is fidelity OR noise, and the report says so. Only nodes whose number counts toward the
-best are read. With no ordered pair anywhere it says `NO ORDERED PAIR` rather than printing an
-agreement. It arms nothing: whether a cheap level may be trusted to prune is the operator's call,
-and doc 52's `smoke-full-rank-fidelity-unmeasured` is the box measurement it exists for.
+A number's LEVEL is the protocol it was measured under, as its record says: the search number's
+`metric_provenance.comparability.protocol.profile`, and the digest every counted confirm seed ran on
+(`node_confirmed.protocol_profile`). Never the profile's name: a node that leaves `eval_profile` null
+is scored at the Strategist's fidelity, which the rule Strategist sets to `full` in the endgame, and
+on a task that declares no profiles `smoke` and `full` are both the base command. A node measured on
+one ruler at both measures seed noise, not fidelity, and is counted apart; one with no record on a
+side (every log before the records, every task with no profiles) is `unknown`; and pairs form only
+among nodes sharing one (search ruler, confirm ruler) pair.
+
+Two limits the report states with every reading: confirmation takes the top-K by the search number,
+so this is the ordering of the candidates the search PROMOTED, never of those it pruned; and the
+comparison crosses seed sets (the search at seed 0, confirm from `confirm_seed_base`, 1 by default),
+so a disagreement is fidelity OR noise. An operator-forced confirmation writes no `node_confirmed`
+and is not read. Only nodes whose number counts toward the best are read. A run whose event log is
+damaged part-way is read to its valid prefix and says so on stderr. With no ordered pair anywhere it
+says `NO ORDERED PAIR` rather than printing an agreement. It arms nothing, and doc 52's
+`smoke-full-rank-fidelity-unmeasured` is the box measurement it exists for.
+
+---
 
 ## `asha-rungs`
 

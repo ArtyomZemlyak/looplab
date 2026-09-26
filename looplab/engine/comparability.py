@@ -311,6 +311,48 @@ def protocol_record(*, eval_protocol=None, host_scorer=None, fingerprint=None) -
     return facets or None
 
 
+def result_ruler(result) -> Optional[str]:
+    """The RULER one evaluation ran on: the `profile` facet of its resolved protocol — the digest
+    `protocol_record` writes beside every node's metric — or None when it recorded none (the
+    solution tier, which has no eval profiles). ONE spelling for every repeat that re-measures a node
+    (`engine/noise_floor.py`, `engine/confirm_phase.py`), so their rows compare to a node's record."""
+    return (protocol_record(eval_protocol=getattr(result, "eval_protocol", None)) or {}).get("profile")
+
+
+def recorded_seed_rulers(events, event_type: str, node_id: int, generation: int) -> dict:
+    """{seed: the ruler its latest MEASURED row of `event_type` recorded, or None} for one lifecycle.
+
+    Read off the log rather than off the pass that is running, so a pass resumed by another process
+    names the rulers its earlier seeds ran on. A row with no metric measured nothing and is skipped:
+    only the seeds a summary COUNTS are asked about (`agreed_ruler`)."""
+    rulers: dict = {}
+    for event in events or ():
+        data = getattr(event, "data", None) or {}
+        if (getattr(event, "type", None) != event_type or data.get("node_id") != node_id
+                or data.get("generation") != generation or data.get("metric") is None):
+            continue
+        seed = data.get("seed")
+        if isinstance(seed, int) and not isinstance(seed, bool):
+            ruler = data.get("protocol_profile")
+            rulers[seed] = ruler if isinstance(ruler, str) and ruler else None
+    return rulers
+
+
+def agreed_ruler(rulers: dict, counted_seeds) -> dict:
+    """The ruler a summary over repeated seeds was measured on, as the keys its row carries.
+
+    `{"protocol_profile": digest}` when every COUNTED seed recorded that one digest; `{}` when none
+    recorded any (no profiles to tell apart); `{"protocol_mixed": True}` otherwise — repeats on two
+    rulers, or a pass resumed across the record, whose spread or mean is no ONE evaluation's."""
+    recorded = [rulers.get(seed) for seed in counted_seeds]
+    present = {ruler for ruler in recorded if ruler}
+    if not present:
+        return {}
+    if len(present) == 1 and all(recorded):
+        return {"protocol_profile": next(iter(present))}
+    return {"protocol_mixed": True}
+
+
 def comparability_record(*, task=None, inputs_prov=None, substrate=None,
                          protocol=None) -> Optional[dict]:
     """The record that rides beside a metric — `{"version", "authority", "keys"}` — or `None`.
