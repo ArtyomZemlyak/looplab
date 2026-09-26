@@ -273,6 +273,13 @@
           "help": "A supported card on the proposal board says what its verdict rests on: replicated (it and what it beat were each re-run over seeds and the gain held beyond 1 SE), a single measurement of each, one inside the run's measured eval noise, or a gain the re-runs did not hold beyond 1 SE. Re-runs and the noise floor come from the end-of-search confirm and noise-floor passes, so during the search a card reads single measurement. The verdict itself does not change. Off = the pre-2026-09-26 proposal prompt, byte for byte."
         },
         {
+          "key": "brief_mixed_comparability",
+          "label": "Brief names mixed rulers",
+          "type": "bool",
+          "default": false,
+          "help": "The proposal brief names each leader whose number was measured on a different ruler than the champion's (another eval profile, scorer, printed fingerprint, source tree or evaluation inputs), and on what. Off = the historical prompt, byte for byte."
+        },
+        {
           "key": "feature_engineering",
           "label": "Feature engineering",
           "type": "bool",

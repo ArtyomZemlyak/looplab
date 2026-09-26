@@ -100,7 +100,11 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 225
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 226
+    # 225 -> 226 on 2026-09-26: `brief_mixed_comparability` (doc 68 68.1a) -- the proposal brief
+    # names the leaders measured on another ruler than the champion. A ROW on the PROMPT ground, OFF
+    # by default. Verified by INTERSECTION: 225 keys common to the previous keyset plus exactly that
+    # one, none removed.
     # 224 -> 225 on 2026-09-26: `ablation_probe_hint` (doc 67 67.4) -- whether the refine proposal
     # after a parameter ablation is told each probe's signed result. A ROW on the PROMPT ground: OFF
     # is the historical bytes. Verified by INTERSECTION: 224 keys common to the previous keyset plus
@@ -451,7 +455,8 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # 257 -> 258 on 2026-09-24: `eval_canary` (a curated row, so both counts move).
     # 258 -> 259 on 2026-09-26: `card_verdict_support` (a curated row, so both counts move).
     # 259 -> 260 on 2026-09-26: `ablation_probe_hint` (a curated row, so both counts move).
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 260
+    # 260 -> 261 on 2026-09-26: `brief_mixed_comparability` (a curated row, so both counts move).
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 261
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

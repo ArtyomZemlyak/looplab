@@ -222,7 +222,9 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   verdict rests on. A row because it changes a prompt; the Python half moved too.
   //   224 -> 225 (2026-09-26): `ablation_probe_hint` — the ablation refiner is told its probes'
   //   signed results. A row because it changes a prompt; the Python half moved too.
-  assert.equal(Object.keys(schema.fieldByKey).length, 225)
+  //   225 -> 226 (2026-09-26): `brief_mixed_comparability` — the proposal brief names the leaders
+  //   measured on another ruler. A row because it changes a prompt; the Python half moved too.
+  assert.equal(Object.keys(schema.fieldByKey).length, 226)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

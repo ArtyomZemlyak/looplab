@@ -987,6 +987,18 @@ class Settings(BaseSettings):
     # (`engine/proposal_cues.py::ProposalCuesMixin._stamp_brief_switches`). It moves no metric,
     # champion, selection or violation.
     card_verdict_support: bool = True
+    # THE LEADERS WERE NOT ALL MEASURED ON ONE RULER (doc 68 68.1a, 2026-09-26). A run can score its
+    # search on `smoke` and its endgame on `full`, edit its host scorer mid-run or promote a fix into
+    # the editable repo; the champion then carries `mixed_comparability` on every operator surface,
+    # but the proposal brief read the leaders as one ranking. ON: the proposal cue names each leader
+    # the digest shows whose comparability record is PROVABLY DIFFERENT from the champion's, and on
+    # what (`engine/proposal_cues.py::_cue_mixed_comparability`) — never an unknown pair. OFF by
+    # default, and doc 68 says why: a new prompt mechanism is measured before it is enabled. It
+    # changes a PROMPT and buys no call, so `false` is the historical prompt byte for byte, every
+    # constructor defaults it OFF, and a pre-field snapshot resumes OFF (its
+    # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row). Read through ONE reader, the engine knob
+    # `_brief_mixed_comparability`. It moves no metric, champion, selection or violation.
+    brief_mixed_comparability: bool = False
     # A4 (LATS-style): feed a summary of the most recent FAILED branches (operator + error reason)
     # back into the proposal prompt so the proposer reflects on and avoids repeating them. ON by
     # default: it is SELECTIVE by construction (injects only when recent failures exist — the
@@ -3634,6 +3646,11 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # mid-log. (c) is `False`, pointable at every commit before this one; the field's comment and
     # `tests/test_ablation.py` hold that `false` is the historical prompt, byte for byte.
     "ablation_probe_hint": False,
+    # THE BRIEF'S MIXED-RULER LINE, added 2026-09-26 defaulting OFF (doc 68 68.1a). (a) holds. (b) is
+    # the rows above's DIFFERENT-PROMPT ground, should an operator turn it on for a resumed run. (c)
+    # is `False`, pointable at every commit before this one; the field's comment and
+    # `tests/test_brief_mixed_comparability.py` hold that `false` is the historical prompt.
+    "brief_mixed_comparability": False,
     # THE JUDGES' PROMPT TRUTHS, added 2026-09-23 defaulting ON (review 2026-09-22, Q-1). (a) holds.
     # (b) is the two rows above's DIFFERENT-PROMPT ground: ON, the pilot, the triage judge and the
     # repair critic are handed different bytes (the triage opening, its watchdog sentence and scout

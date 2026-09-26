@@ -82,6 +82,7 @@ class ProposalCuesMixin:
         "_cue_cross_run_tools",
         "_cue_concept_authoring",
         "_cue_concept_slug_reuse",
+        "_cue_mixed_comparability",
     )
 
     def _cue_complexity(self, state: RunState, parent, _r):
@@ -568,6 +569,42 @@ class ProposalCuesMixin:
                 "To DECODE a slug (what it is + where it ranked within comparable prior runs) call "
                 "concept_card('<slug>').",
                 [{"kind": "concept_slug_reuse"}])
+
+    def _cue_mixed_comparability(self, state: RunState, parent, _r):
+        """THE LEADERS WERE NOT ALL MEASURED ON ONE RULER (doc 68 68.1a), under
+        `Settings.brief_mixed_comparability`, OFF by default.
+
+        A run can score its search nodes on `smoke` and its endgame nodes on `full`, edit its host
+        scorer mid-run, or promote a fix into the editable repo, and the champion then carries
+        `mixed_comparability` — on the run row, in the reviewer bundle, in `looplab comparability`,
+        and to an agent that asks for a node diff. Not in what the Researcher is handed every turn:
+        it read the leaders as one ranking and sized its next idea against a number measured with
+        another ruler. This names each leader the digest shows (`events/digest.py::top_nodes`) whose
+        record is `DIFFERENT` from the champion's, and on what (`comparability.py::
+        difference_reason`) — never an `UNKNOWN` pair: silence is not a second ruler."""
+        # The settled default is `False` (`EngineOptions`), which a mixin double reads here too.
+        if not getattr(self, "_brief_mixed_comparability", False):
+            return "", []
+        from looplab.engine.comparability import difference_reason, record_of
+        from looplab.events.digest import fmt_num, node_metric, top_nodes
+
+        champion = state.best()
+        mine = record_of(champion) if champion is not None else None
+        if mine is None:
+            return "", []
+        named: list[tuple[int, str]] = []
+        for node in top_nodes(state, 5):
+            reason = None if node.id == champion.id else difference_reason(mine, record_of(node))
+            if reason:
+                named.append((node.id, f"node {node.id} (metric={fmt_num(node_metric(node))}) "
+                                       f"{reason}"))
+        if not named:
+            return "", []
+        return ("\nMEASURED WITH DIFFERENT RULERS: " + "; ".join(text for _id, text in named)
+                + f". Those numbers are not on the scale of the best so far, node {champion.id}, "
+                "so neither is a target for the other: compare an idea only with the leaders "
+                "measured the way it will be.",
+                [{"kind": "mixed_comparability", "node_ids": [node_id for node_id, _t in named]}])
 
     def _set_complexity_hint(self, state: RunState, parent, researcher=None) -> None:
         """Inject the engine-computed proposal cues into the next prompt: A0d (breadth-keyed

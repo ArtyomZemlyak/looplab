@@ -268,7 +268,12 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               INERT for a calibration replicate on `node_budget_cue`'s ground (the replicate never
 #               ablates, and `ToyResearcher` renders no prompt); re-pinned on the COMPLETE-envelope
 #               rule.
-_EXPECTED_DIGEST = "sha256:f6fc8403fefe9189bbee260a34289bb0548f2ff060bc8229469e89ce3f5cf079"
+#   2026-09-26  + brief_mixed_comparability (doc 68 68.1a: the proposal brief names the leaders
+#               measured on another ruler than the champion). The 'field set changed too' branch:
+#               exactly `['brief_mixed_comparability']` added and `[]` removed;
+#               `_EXPECTED_FIELD_COUNT` goes 257 -> 258 and both pins are re-set. INERT for a
+#               calibration replicate: off on both surfaces, and `ToyResearcher` renders no prompt.
+_EXPECTED_DIGEST = "sha256:970a84ba487b812db2ce766d567ba951d017121c23be46c62d66296f73a7517a"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -758,7 +763,8 @@ _EXPECTED_DIGEST = "sha256:f6fc8403fefe9189bbee260a34289bb0548f2ff060bc8229469e8
 #   2026-09-24  + eval_canary (the eval canary preflight): 254 -> 255.
 #   2026-09-26  + card_verdict_support (doc 67 67.1): 255 -> 256; see the digest history above.
 #   2026-09-26  + ablation_probe_hint (doc 67 67.4): 256 -> 257; see the digest history above.
-_EXPECTED_FIELD_COUNT = 257
+#   2026-09-26  + brief_mixed_comparability (doc 68 68.1a): 257 -> 258; see the digest history above.
+_EXPECTED_FIELD_COUNT = 258
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

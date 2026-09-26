@@ -165,6 +165,8 @@ class EngineKnobs:
     # doc 67 67.4: the ablation refiner's probes, stamped onto the Researcher as
     # `_ablation_probe_hint` for the ONE refine proposal (`engine/ablation.py::_ablate`).
     _ablation_probe_hint = Knob("ablation_probe_hint", bool)
+    # doc 68 68.1a: the brief's mixed-ruler line (`proposal_cues._cue_mixed_comparability`).
+    _brief_mixed_comparability = Knob("brief_mixed_comparability", bool)
     _failure_reflection = Knob("failure_reflection")
     _watchdog_reflection = Knob("watchdog_reflection")
     _deep_repair = Knob("deep_repair")

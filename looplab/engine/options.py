@@ -246,6 +246,10 @@ class EngineOptions:
     # (`Settings.ablation_probe_hint`). A divergence-table row on `node_budget_cue`'s ground: a
     # prompt flag, OFF here so a bare `Engine(...)` keeps the historical bytes.
     ablation_probe_hint: bool = False
+    # doc 68 68.1a (2026-09-26): the proposal cue names the leaders measured on another ruler than the
+    # champion (`Settings.brief_mixed_comparability`). OFF on both surfaces: a prompt flag not yet
+    # measured, so no divergence-table row.
+    brief_mixed_comparability: bool = False
     failure_reflection: bool = False     # A4: reflect on recent failed branches in the prompt
     watchdog_reflection: bool = False    # feed recent live-watchdog (train-monitor/ASHA) flags to proposals
     deep_repair: bool = False            # C3: structured failure-taxonomy repair context

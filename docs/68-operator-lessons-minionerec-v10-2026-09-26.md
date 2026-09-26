@@ -190,12 +190,7 @@ seed). Движок складывает его в провенанс и при 
   `substrate`, пофасетно). Проверка критиком нашла живую дыру того же рода без всякого скрипта: узлы
   на `smoke` и на `full` ранжировались в одном пуле — теперь чемпион такого прогона несёт
   `mixed_comparability`.*
-- **68.1a** OPEN[mixed-protocol-absent-from-brief] бриф Researcher'а (канал PUSH) не говорит, что
-  лидеры измерены разными линейками (профиль, скорер, отпечаток): расхождение видно в UI, в бандле
-  ревьюера, в `looplab comparability` и агенту, который сам вызовет сравнение узлов (`tools/node_diff.py`,
-  канал PULL), но не в том, что Researcher получает каждый ход. Это изменение промпта — флаг по
-  умолчанию OFF и строка `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` (§1).
-  proof:absent:run_split_by_key@looplab/agents+absent:champion_metric_caveats@looplab/agents
+- **68.1a** *Закрыто 2026-09-26: здесь стоял `mixed-protocol-absent-from-brief`. Под флагом `Settings.brief_mixed_comparability` (по умолчанию OFF, строка `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` — OFF; OFF — исторический промпт байт в байт) последняя из `PROPOSAL_CUES` (`engine/proposal_cues.py::_cue_mixed_comparability`) называет каждого лидера из дайджеста (`events/digest.py::top_nodes`), чья запись сравнимости ДОКАЗАННО отличается от записи чемпиона, и чем — исходным деревом, фасетом протокола (профиль, скорер, отпечаток) или ключом входов (`engine/comparability.py::difference_reason`, тот же порядок, что у `comparability_status`); пара `UNKNOWN` не называется никогда — молчание не вторая линейка. Узлы записываются в `steering_context` видом `mixed_comparability`.*
 - **68.2** OPEN[no-metric-retarget-command] смена ключа цели как операторское событие с пересчётом
   `node.metric` из записанных `extra_metrics` вместо правки журнала (§2). proof:absent:metric_retarget@looplab
 - **68.3** *Пересмотрено 2026-09-26 проверкой критиком: здесь стоял `no-node-rescore-command`, а

@@ -579,6 +579,23 @@ def comparability_notice(this: Optional[dict], other: Optional[dict], *,
     return _NOTICES[UNKNOWN].format(who=who)
 
 
+def difference_reason(this: Optional[dict], other: Optional[dict]) -> Optional[str]:
+    """WHY `other`'s number is not on `this` one's scale, as a clause — or None unless the pair is
+    `DIFFERENT`. Asked in `comparability_status`'s own order, through the same two mismatch helpers:
+    the source tree, then the first protocol facet both recorded and disagree on, then the shared
+    authority's key. For a surface that names the difference without the digests
+    (`engine/proposal_cues.py::_cue_mixed_comparability`, doc 68 68.1a)."""
+    if comparability_status(this, other) != DIFFERENT:
+        return None
+    if _substrate_mismatch(this, other) is not None:
+        return "ran on a different source tree"
+    facet_pair = _protocol_mismatch(this, other)
+    if facet_pair is not None:
+        return _PROTOCOL_CLAUSES[facet_pair[0]]
+    authority = _common_authority(this or {}, other or {}) or AUTHORITY_INFERRED
+    return f"was measured against different evaluation inputs (its {authority} key differs)"
+
+
 def group_token(record: Optional[dict]) -> str:
     """`"<authority>:<key>"` for one record, or `""` when it has none — a PARTITION label.
 

@@ -57,6 +57,10 @@ EXPECTED_ORDER = (
     "_cue_cross_run_tools",
     "_cue_concept_authoring",
     "_cue_concept_slug_reuse",
+    # PINNED 2026-09-26 (doc 68 68.1a): LAST, after everything that says what to build — it is a
+    # warning about how to READ the leaders the brief lists above, and it is empty unless
+    # `Settings.brief_mixed_comparability` is on AND a leader is provably on another ruler.
+    "_cue_mixed_comparability",
 )
 
 
@@ -90,6 +94,7 @@ class _Host(ProposalCuesMixin):
         self._prefer_sweep = False
         self._novelty_stance = "off"
         self._strategy_fidelity = None
+        self._brief_mixed_comparability = False
 
     # Stubbed so this file tests the REGISTRY, not the two text builders (which have their own
     # tests); both are empty in the default, advisory-off configuration anyway.
