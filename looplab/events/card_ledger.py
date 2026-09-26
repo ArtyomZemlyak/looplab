@@ -648,21 +648,52 @@ def _replicated(node: Node) -> bool:
             and not isinstance(seeds, bool) and seeds >= 2)
 
 
+def _measured_ruler(node: Node) -> str | None:
+    """The ruler `node`'s number was measured on: the `profile` facet of the protocol its terminal
+    recorded (`engine/comparability.py::protocol_record`, at `metric_provenance.comparability.
+    protocol.profile`), read with `record_of`'s rule — a record with no `keys` is no record. Spelled
+    here because this module is a leaf over `core`. None for every solution-tier eval (no profiles
+    to tell apart) and every log older than the record."""
+    provenance = getattr(node, "metric_provenance", None)
+    record = provenance.get("comparability") if isinstance(provenance, dict) else None
+    if not isinstance(record, dict) or not isinstance(record.get("keys"), dict) or not record["keys"]:
+        return None
+    protocol = record.get("protocol")
+    ruler = protocol.get("profile") if isinstance(protocol, dict) else None
+    return ruler if isinstance(ruler, str) and ruler else None
+
+
 def _floor_std(floor: dict, candidate: Node, incumbent: Node) -> float:
     """The floor's per-evaluation spread when it measured the ruler BOTH numbers were read on, else 0.
 
-    The probe re-measures the champion under its own `idea.eval_profile` (`engine/noise_floor.py`),
-    and a spread measured on `full` says nothing about a gain read on `smoke` (critic 2026-09-26,
-    driven: a `full` floor rated a `smoke` gain `within_noise`). The names are compared as recorded:
-    the fold holds no eval spec that could resolve two names to one set of overrides, and an
-    unmatched floor only withholds `within_noise`, never mints it. A floor the probe itself marked
-    (`reason`, e.g. `superseded`) is not a measurement of what it names, and is not used."""
+    A spread measured on `full` says nothing about a gain read on `smoke`, and the NAME cannot say
+    which ruler ran (critic 2026-09-26, driven twice): a node that leaves `eval_profile` null is
+    scored at the Strategist's fidelity of its day, the probe at the one in force at the END of the
+    search, so a floor measured on `full` recorded `profile: None` like every smoke-scored node and
+    rated their gains `within_noise`; and null and `smoke` — one ruler, by the Researcher prompt's own
+    words — never matched. So the RECORDED ruler decides (`_measured_ruler`, and the floor's
+    `protocol_profile`, `engine/noise_floor.py::floor_protocol`):
+
+    * the floor recorded one → both numbers must have been measured on exactly it;
+    * the floor recorded none but a number did → no match (a floor from before the record);
+    * neither side recorded any → the names, compared as recorded: the solution tier, which has no
+      eval profiles, and logs older than the record.
+
+    A floor over repeats on two rulers (`protocol_mixed`) and one the probe itself marked (`reason`,
+    e.g. `superseded`) are not a measurement of one evaluation, and are not used. An unmatched floor
+    only withholds `within_noise`, never mints it."""
     std = floor.get("std")
-    if not is_usable_metric(std) or std <= 0 or floor.get("reason"):
+    if not is_usable_metric(std) or std <= 0 or floor.get("reason") or floor.get("protocol_mixed"):
         return 0.0
-    profile = floor.get("profile")
-    if any(getattr(getattr(n, "idea", None), "eval_profile", None) != profile
-           for n in (candidate, incumbent)):
+    recorded = floor.get("protocol_profile")
+    rulers = [_measured_ruler(n) for n in (candidate, incumbent)]
+    if recorded:
+        if any(ruler != recorded for ruler in rulers):
+            return 0.0
+    elif any(rulers):
+        return 0.0
+    elif any(getattr(getattr(n, "idea", None), "eval_profile", None) != floor.get("profile")
+             for n in (candidate, incumbent)):
         return 0.0
     return float(std)
 
@@ -717,15 +748,18 @@ def _record_bases(nodes: dict[int, Node], direction: str, *,
     return bases
 
 
-def verdict_support(evidence_ids: Iterable[int], st: RunState) -> str | None:
+def verdict_support(evidence_ids: Iterable[int], st: RunState, *,
+                    untested: Collection[int] = frozenset()) -> str | None:
     """How much a card's `supported` verdict rests on — a `SUPPORT_LEVELS` member, or None when the
     evidence supports nothing (the card is not `supported`, or supported only by the establisher).
 
     The SAME gains `_evidence_verdict` counts, over the SAME population (`_usable_evidence`, with the
-    champion's exclusions): each usable evaluated experiment that beat its best feasible parent, and
-    each that beat the standing record, is classified against what it beat (`_gain_support`), and
-    the card reads its STRONGEST — one replicated gain is a replicated finding, whatever else ran.
-    Read by the proposal board under `Settings.card_verdict_support` (`agents/state_brief.py::
+    champion's exclusions AND the card's `substituted_nodes` as `untested` — a build that ran
+    something else is never this card's support, so it cannot lend the card a stronger level
+    either): each usable evaluated experiment that beat its best feasible parent, and each that beat
+    the standing record, is classified against what it beat (`_gain_support`), and the card reads
+    its STRONGEST — one replicated gain is a replicated finding, whatever else ran. Read by the
+    proposal board under `Settings.card_verdict_support` (`agents/state_brief.py::
     board_prompt_lines`); nothing decides on it."""
     direction = st.direction
     excluded = frozenset(st.breed_excluded or ())
@@ -733,7 +767,8 @@ def verdict_support(evidence_ids: Iterable[int], st: RunState) -> str | None:
     better = (lambda a, b: a > b) if direction == "max" else (lambda a, b: a < b)
     floor = st.eval_noise_floor if isinstance(st.eval_noise_floor, dict) else {}
     bases = _record_bases(st.nodes, direction, excluded=excluded, aborted=aborted)
-    _ev, evaluated = _usable_evidence(evidence_ids, st.nodes, excluded=excluded, aborted=aborted)
+    _ev, evaluated = _usable_evidence(evidence_ids, st.nodes, excluded=excluded, aborted=aborted,
+                                      untested=frozenset(untested))
     found: set[str] = set()
     for n in evaluated:
         parents = [st.nodes[p] for p in n.parent_ids

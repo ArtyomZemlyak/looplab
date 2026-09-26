@@ -1694,6 +1694,14 @@ def _on_eval_noise_floor(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> No
         "spread": _finite_metric(d.get("spread")),
         "search_metric": _finite_metric(d.get("search_metric")),
         "profile": str(d.get("profile"))[:64] if isinstance(d.get("profile"), str) else None,
+        # The RULER the counted repeats measured (`engine/noise_floor.py::floor_protocol`), bounded
+        # like `profile`, and the mixed flag only as True. Its one reader
+        # (`card_ledger.py::_floor_std`) compares it for EQUALITY with a node's recorded facet, so a
+        # junk value can only withhold the floor, never lend it to a gain.
+        **({"protocol_profile": d["protocol_profile"]}
+           if isinstance(d.get("protocol_profile"), str) and 0 < len(d["protocol_profile"]) <= 64
+           else {}),
+        **({"protocol_mixed": True} if d.get("protocol_mixed") is True else {}),
         **({"reason": str(d.get("reason"))[:200]} if isinstance(d.get("reason"), str) else {}),
     }
 

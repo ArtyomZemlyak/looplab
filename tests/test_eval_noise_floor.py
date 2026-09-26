@@ -16,6 +16,7 @@ here may be read as having produced it.
 from __future__ import annotations
 
 import shutil
+from pathlib import Path
 
 import anyio
 import pytest
@@ -23,7 +24,7 @@ import pytest
 from looplab.adapters.toytask import ToyTask
 from looplab.core.config import Settings
 from looplab.core.fitness import standard_error_difference
-from looplab.engine.noise_floor import noise_floor_summary
+from looplab.engine.noise_floor import floor_protocol, noise_floor_summary
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
 from looplab.events.types import (ALL_EVENT_TYPES, DIAGNOSTIC_EVENTS, EV_EVAL_NOISE_FLOOR,
@@ -75,6 +76,23 @@ def test_the_repeats_ignore_a_seed_that_produced_no_metric():
     the spread of what actually ran — the same rule the confirm phase applies to a failed seed."""
     assert noise_floor_summary([1.0, None, 3.0])["n"] == 2
     assert noise_floor_summary([1.0, None, 3.0])["spread"] == pytest.approx(2.0)
+
+
+SMOKE, FULL = "a" * 16, "b" * 16
+
+
+@pytest.mark.parametrize("rulers,counted,expected", [
+    ({0: SMOKE, 1: SMOKE}, [0, 1], {"protocol_profile": SMOKE}),
+    ({0: None, 1: None}, [0, 1], {}),                        # the solution tier: nothing to tell
+    ({}, [0, 1], {}),
+    ({0: SMOKE, 1: FULL}, [0, 1], {"protocol_mixed": True}),
+    ({0: SMOKE, 1: None}, [0, 1], {"protocol_mixed": True}),  # a pass resumed across the record
+    ({0: SMOKE, 1: FULL}, [0], {"protocol_profile": SMOKE}),  # only COUNTED repeats decide
+    ({0: SMOKE}, [], {}),
+])
+def test_the_floor_names_one_ruler_only_when_every_counted_repeat_ran_on_it(rulers, counted,
+                                                                             expected):
+    assert floor_protocol(rulers, counted) == expected
 
 
 # ----------------------------------------------------------------- the mechanism, on a real run
@@ -219,3 +237,57 @@ def test_both_types_are_registered_and_folded(tmp_path):
     are FOLDED (one is a resume memo, the other a completion gate), so neither may be diagnostic."""
     assert {EV_EVAL_NOISE_SEED, EV_EVAL_NOISE_FLOOR} <= ALL_EVENT_TYPES
     assert not ({EV_EVAL_NOISE_SEED, EV_EVAL_NOISE_FLOOR} & DIAGNOSTIC_EVENTS)
+
+
+def _probe_on(engine, monkeypatch, protocols):
+    """Make the probe's repeats report the protocol they RAN under — `protocols[seed]` — the way a
+    command-tier eval does (`eval_dispatch.py::_run_eval` sets `res.eval_protocol`); the toy
+    solution tier records none of its own. The search's evaluations are left untouched."""
+    real = engine._run_eval
+
+    def _run_eval(node, workdir, env=None, *args, **kwargs):
+        res = real(node, workdir, env, *args, **kwargs)
+        seed = (env or {}).get("LOOPLAB_EVAL_SEED")
+        if seed is not None and engine.run_dir / "noise" in Path(workdir).parents:
+            res.eval_protocol = dict(protocols[int(seed)])
+        return res
+
+    monkeypatch.setattr(engine, "_run_eval", _run_eval)
+
+
+def test_each_repeat_and_the_floor_record_the_ruler_that_ran(tmp_path, monkeypatch):
+    """Critic 2026-09-26, driven on a repo task: the champion was scored on `smoke`, the probe ran
+    at the endgame's `full` fidelity, and nothing on the floor said so — it recorded the node's null
+    `eval_profile` like every node. Each repeat now records the `profile` facet of the protocol it
+    ran under, the digest a node's terminal records, and the floor records it when all agree."""
+    from looplab.engine.comparability import protocol_record
+
+    full = {"profile": "full", "overrides": ["steps=100"]}
+    task = ToyTask.load(TOY_TASK)
+    engine = make_engine(tmp_path / "ruler", task=task, n_seeds=3, max_nodes=6, eval_noise_seeds=3)
+    _probe_on(engine, monkeypatch, {0: full, 1: full, 2: full})
+    anyio.run(engine.run)
+    expected = protocol_record(eval_protocol=full)["profile"]
+    seeds = _rows(engine, EV_EVAL_NOISE_SEED)
+    assert [row.get("protocol_profile") for row in seeds] == [expected] * 3
+    floor = _rows(engine, EV_EVAL_NOISE_FLOOR)[0]
+    assert floor["protocol_profile"] == expected and "protocol_mixed" not in floor
+    assert fold(engine.store.read_all()).eval_noise_floor["protocol_profile"] == expected
+
+
+def test_a_floor_over_repeats_on_two_rulers_says_so(tmp_path, monkeypatch):
+    smoke = {"profile": "smoke", "overrides": ["steps=1"]}
+    full = {"profile": "full", "overrides": ["steps=100"]}
+    task = ToyTask.load(TOY_TASK)
+    engine = make_engine(tmp_path / "mixed", task=task, n_seeds=3, max_nodes=6, eval_noise_seeds=3)
+    _probe_on(engine, monkeypatch, {0: smoke, 1: full, 2: full})
+    anyio.run(engine.run)
+    floor = _rows(engine, EV_EVAL_NOISE_FLOOR)[0]
+    assert floor.get("protocol_mixed") is True and "protocol_profile" not in floor
+
+
+def test_a_solution_tier_floor_names_no_ruler(tmp_path):
+    engine = _run(tmp_path / "toy", eval_noise_seeds=3)
+    assert all("protocol_profile" not in row for row in _rows(engine, EV_EVAL_NOISE_SEED))
+    floor = _rows(engine, EV_EVAL_NOISE_FLOOR)[0]
+    assert "protocol_profile" not in floor and "protocol_mixed" not in floor

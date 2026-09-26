@@ -170,7 +170,7 @@ def attempted_board_prompt_cards(state: RunState, shown=(), *,
 SUPPORT_LEVEL_TEXT = {
     "replicated": ("replicated = it and what it beat were each re-run over seeds, and the gain held "
                    "beyond 1 SE"),
-    "single_run": "single_run = one measurement of it and of what it beat, not re-run",
+    "single_run": "single_run = one search measurement of each side; they were not both re-run",
     "within_noise": ("within_noise = one measurement of each, and the gain is inside this run's "
                      "measured eval noise"),
     "not_replicated": ("not_replicated = it and what it beat were each re-run over seeds, and the "
@@ -324,7 +324,7 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
             level = None
             if support and card.verdict == "supported":
                 from looplab.events.card_ledger import verdict_support
-                level = verdict_support(card.evidence, state)
+                level = verdict_support(card.evidence, state, untested=card.substituted_nodes)
                 if level is not None:
                     shown_levels.add(level)
             lines.append(

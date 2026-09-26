@@ -31,10 +31,21 @@ from looplab.events.replay import fold
 from tests.factories import make_engine
 
 
+# Two protocol `profile` facets, as `engine/comparability.py::protocol_record` digests them.
+SMOKE, FULL = "a" * 16, "b" * 16
+
+
+def _provenance(ruler: str) -> dict:
+    """A terminal's `metric_provenance` carrying the ruler its number was measured on."""
+    return {"comparability": {"version": 1, "authority": "declared", "keys": {"declared": "d" * 16},
+                              "protocol": {"profile": ruler}}}
+
+
 def _run(tmp_path, nodes, *, direction="max", confirmed=(), floor_std=None, floor=None,
-         profiles=None):
+         profiles=None, rulers=None):
     """`nodes` is [(id, parents, metric)]; `confirmed` is [(id, mean, std, seeds)]; `floor` adds
-    keys to the `eval_noise_floor` row (its `profile`, a `reason`); `profiles` is {id: eval_profile}."""
+    keys to the `eval_noise_floor` row (its `profile`, `protocol_profile`, a `reason`); `profiles` is
+    {id: eval_profile}; `rulers` is {id: the protocol facet its terminal recorded}."""
     store = EventStore(tmp_path / "events.jsonl")
     store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g",
                                  "direction": direction})
@@ -47,7 +58,9 @@ def _run(tmp_path, nodes, *, direction="max", confirmed=(), floor_std=None, floo
                                       "generation": 0})
         store.append("node_evaluated", {"node_id": i, "generation": 0, "metric": metric,
                                         "eval_seconds": 1.0, "extra_metrics": {}, "stdout_tail": "",
-                                        "trials": [], "violations": []})
+                                        "trials": [], "violations": [],
+                                        **({"metric_provenance": _provenance(rulers[i])}
+                                           if rulers and i in rulers else {})})
     for i, mean, std, seeds in confirmed:
         store.append("node_confirmed", {"node_id": i, "generation": 0, "mean": mean, "std": std,
                                         "seeds": seeds})
@@ -118,6 +131,30 @@ def test_a_confirmed_candidate_over_an_unconfirmed_incumbent_is_not_a_replicatio
     assert verdict_support([1], alone) == SUPPORT_SINGLE_RUN
 
 
+def test_each_side_is_held_to_its_own_seed_count(tmp_path):
+    """SE of the difference = sqrt(c_std²/c_n + i_std²/i_n): the incumbent's 10 seeds shrink its
+    spread's share to 0.0316, which the +0.05 gain clears; read over the candidate's 2 seeds it
+    would be 0.0707, which it does not (critic 2026-09-26: a seed-count swap survived)."""
+    st = _run(tmp_path, [(0, [], 0.70), (1, [0], 0.75)],
+              confirmed=[(0, 0.70, 0.1, 10), (1, 0.75, 0.001, 2)])
+    assert verdict_support([1], st) == SUPPORT_REPLICATED
+
+
+def test_two_seeds_a_side_is_a_replication(tmp_path):
+    st = _run(tmp_path, [(0, [], 0.70), (1, [0], 0.75)],
+              confirmed=[(0, 0.70, 0.001, 2), (1, 0.75, 0.001, 2)])
+    assert verdict_support([1], st) == SUPPORT_REPLICATED
+
+
+def test_a_substituted_build_lends_its_card_no_level(tmp_path):
+    """A build its Developer reported as something else is never its card's evidence (`untested`
+    in `_usable_evidence`, 033ed1c6), so it cannot lend the card a stronger level either."""
+    st = _run(tmp_path, [(0, [], 0.70), (1, [0], 0.72), (2, [0], 0.80)],
+              confirmed=[(0, 0.70, 0.01, 3), (2, 0.80, 0.01, 3)])
+    assert verdict_support([1, 2], st) == SUPPORT_REPLICATED
+    assert verdict_support([1, 2], st, untested={2}) == SUPPORT_SINGLE_RUN
+
+
 def test_one_confirmation_seed_is_not_a_replication(tmp_path):
     """A mean needs a spread: one seed each is two more single measurements."""
     st = _run(tmp_path, [(0, [], 0.70), (1, [0], 0.73)],
@@ -125,10 +162,12 @@ def test_one_confirmation_seed_is_not_a_replication(tmp_path):
     assert verdict_support([1], st) == SUPPORT_SINGLE_RUN
 
 
-@pytest.mark.parametrize("ratio,level", [(1.2, SUPPORT_WITHIN_NOISE), (1.7, SUPPORT_SINGLE_RUN)])
+@pytest.mark.parametrize("ratio,level", [(1.2, SUPPORT_WITHIN_NOISE), (1.41, SUPPORT_WITHIN_NOISE),
+                                         (1.42, SUPPORT_SINGLE_RUN), (1.7, SUPPORT_SINGLE_RUN)])
 def test_the_noise_bound_is_the_difference_of_two_single_measurements(tmp_path, ratio, level):
-    """std·√2 ≈ 1.414·std: a gain of 1.2·std is inside it and 1.7·std is not — which pins the √2
-    (1.5 or 2 would move the 1.7 case, and no factor would move neither)."""
+    """std·√2 ≈ 1.4142·std, pinned from both sides: 1.41·std is inside it and 1.42·std is not, so a
+    factor of 1.4 moves the first case and 1.5 the second (critic 2026-09-26: with only 1.2 and 1.7,
+    every factor in (√2, 1.7) survived)."""
     st = _run(tmp_path, [(0, [], 0.0), (1, [0], ratio * 0.1)], floor_std=0.1)
     assert verdict_support([1], st) == level
 
@@ -150,6 +189,70 @@ def test_a_floor_measured_on_another_profile_is_not_this_gains_noise(tmp_path):
     mixed = _run(tmp_path / "mixed", nodes, floor_std=0.02, floor={"profile": "full"},
                  profiles={1: "full"})
     assert verdict_support([1], mixed) == SUPPORT_SINGLE_RUN, "the parent was read on another"
+    child = _run(tmp_path / "child", nodes, floor_std=0.02, floor={"profile": "full"},
+                 profiles={0: "full"})
+    assert verdict_support([1], child) == SUPPORT_SINGLE_RUN, "the child was read on another"
+    unnamed = _run(tmp_path / "unnamed", nodes, floor_std=0.02, profiles={0: "full", 1: "full"})
+    assert verdict_support([1], unnamed) == SUPPORT_SINGLE_RUN, "an unnamed floor is not a wildcard"
+
+
+def test_the_floor_counts_on_the_ruler_it_measured_not_on_the_profile_name(tmp_path):
+    """Critic 2026-09-26, driven on a repo task: both nodes left `eval_profile` null and were scored
+    on `smoke`; the probe ran at the endgame's `full` fidelity and recorded `profile: None` like
+    them, so the NAMES matched and a deterministic smoke eval's gains read `within_noise`. The
+    recorded rulers do not match."""
+    nodes, rulers = [(0, [], 0.70), (1, [0], 0.72)], {0: SMOKE, 1: SMOKE}
+    full = _run(tmp_path / "full", nodes, floor_std=0.02, floor={"protocol_profile": FULL},
+                rulers=rulers)
+    assert verdict_support([1], full) == SUPPORT_SINGLE_RUN
+    smoke = _run(tmp_path / "smoke", nodes, floor_std=0.02, floor={"protocol_profile": SMOKE},
+                 rulers=rulers)
+    assert verdict_support([1], smoke) == SUPPORT_WITHIN_NOISE
+
+
+def test_null_and_smoke_are_one_ruler_when_the_record_says_so(tmp_path):
+    """The same finding's other half: a null profile and `smoke` run the same overrides (the
+    Researcher prompt says so), and the name comparison withheld the floor from every such pair."""
+    st = _run(tmp_path, [(0, [], 0.70), (1, [0], 0.72)], floor_std=0.02,
+              floor={"profile": "smoke", "protocol_profile": SMOKE},
+              rulers={0: SMOKE, 1: SMOKE}, profiles={1: "smoke"})
+    assert verdict_support([1], st) == SUPPORT_WITHIN_NOISE
+
+
+@pytest.mark.parametrize("rulers", [{0: SMOKE}, {1: SMOKE}, {0: SMOKE, 1: FULL},
+                                    {0: FULL, 1: SMOKE}])
+def test_both_numbers_must_have_been_measured_on_the_floors_ruler(tmp_path, rulers):
+    st = _run(tmp_path, [(0, [], 0.70), (1, [0], 0.72)], floor_std=0.02,
+              floor={"protocol_profile": SMOKE}, rulers=rulers)
+    assert verdict_support([1], st) == SUPPORT_SINGLE_RUN
+
+
+def test_a_floor_that_recorded_no_ruler_is_not_used_for_numbers_that_did(tmp_path):
+    """A floor written before the record, over nodes written after it: nothing says it matches."""
+    st = _run(tmp_path, [(0, [], 0.70), (1, [0], 0.72)], floor_std=0.02,
+              rulers={0: SMOKE, 1: SMOKE})
+    assert verdict_support([1], st) == SUPPORT_SINGLE_RUN
+
+
+def test_a_floor_over_two_rulers_is_no_one_evaluations_spread(tmp_path):
+    """No ruler recorded anywhere, names equal — the one flag decides."""
+    nodes = [(0, [], 0.70), (1, [0], 0.72)]
+    assert verdict_support([1], _run(tmp_path / "a", nodes, floor_std=0.02)) == (
+        SUPPORT_WITHIN_NOISE)
+    mixed = _run(tmp_path / "b", nodes, floor_std=0.02, floor={"protocol_mixed": True})
+    assert verdict_support([1], mixed) == SUPPORT_SINGLE_RUN
+
+
+def test_the_fold_keeps_the_floors_ruler_only_in_the_shape_its_writer_spells(tmp_path):
+    nodes = [(0, [], 0.70), (1, [0], 0.72)]
+    kept = _run(tmp_path / "kept", nodes, floor_std=0.02,
+                floor={"protocol_profile": SMOKE, "protocol_mixed": True}).eval_noise_floor
+    assert kept["protocol_profile"] == SMOKE and kept["protocol_mixed"] is True
+    for index, junk in enumerate(({"protocol_profile": 7, "protocol_mixed": "yes"},
+                                  {"protocol_profile": "x" * 65, "protocol_mixed": 1},
+                                  {"protocol_profile": ""})):
+        floor = _run(tmp_path / f"junk{index}", nodes, floor_std=0.02, floor=junk).eval_noise_floor
+        assert "protocol_profile" not in floor and "protocol_mixed" not in floor, junk
 
 
 def test_a_floor_the_probe_marked_is_not_used(tmp_path):
@@ -234,6 +337,31 @@ def test_the_legend_is_said_once_and_defines_only_the_levels_the_board_shows(tmp
     assert SUPPORT_LEVEL_TEXT[SUPPORT_WITHIN_NOISE] in on
     for level in (SUPPORT_REPLICATED, SUPPORT_SINGLE_RUN, SUPPORT_NOT_REPLICATED):
         assert SUPPORT_LEVEL_TEXT[level] not in on, level
+
+
+def test_a_board_with_two_levels_defines_both_in_the_ledgers_order(tmp_path):
+    """Node 1 (+0.01) sits inside the floor and node 2 (+0.10) outside it: two supported rows at
+    two levels, one legend defining both, strongest first (critic 2026-09-26: a legend of only the
+    first level seen survived, because no board carried two)."""
+    st = _run(tmp_path, [(0, [], 0.70), (1, [0], 0.71), (2, [0], 0.80)], floor_std=0.02)
+    on = _state_brief(st, st.nodes[1], verdict_support=True)
+    assert "SUPPORT=within_noise NODES=[1] " in _row(on, "[1]")
+    assert "SUPPORT=single_run NODES=[2] " in _row(on, "[2]")
+    assert support_legend({SUPPORT_SINGLE_RUN, SUPPORT_WITHIN_NOISE}) in on
+    single, noise = (on.index(SUPPORT_LEVEL_TEXT[level])
+                     for level in (SUPPORT_SINGLE_RUN, SUPPORT_WITHIN_NOISE))
+    assert single < noise
+
+
+def test_the_board_reads_a_cards_support_without_its_substituted_builds(tmp_path):
+    """The board hands `verdict_support` the card's own `substituted_nodes`: a card whose evidence
+    holds a replicated substitution and one real single-run gain says `single_run`."""
+    st = _run(tmp_path, [(0, [], 0.70), (1, [0], 0.72), (2, [0], 0.80)],
+              confirmed=[(0, 0.70, 0.01, 3), (2, 0.80, 0.01, 3)])
+    card = next(c for c in st.cards.values() if c.evidence == [1])
+    card.evidence, card.substituted_nodes = [1, 2], [2]
+    on = _state_brief(st, st.nodes[1], verdict_support=True)
+    assert "SUPPORT=single_run NODES=[1, 2] " in _row(on, "[1, 2]")
 
 
 def test_the_legend_is_keyed_and_ordered_as_the_ledgers_levels():

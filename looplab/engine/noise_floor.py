@@ -18,8 +18,21 @@ WHAT IT IS NOT. It is not confirmation, even though both run seeds:
     DISJOINT from the search's implicit seed 0, and its mean SELECTS — that is a generalization
     signal about a different split (D1);
   * the probe re-evaluates ONE candidate — the champion, the node whose margin is the question —
-    under the SEARCH's own protocol: the node's own `idea.eval_profile`, seeds 0..N-1, so the first
-    repeat re-measures the exact configuration the search scored. It selects nothing.
+    under the node's own `idea.eval_profile`, seeds 0..N-1. It selects nothing.
+
+  WHICH RULER IT MEASURED, and why each row says so (critic 2026-09-26, driven). A node that left
+  `eval_profile` null is scored at the Strategist's fidelity IN FORCE AT ITS EVAL, and the probe at
+  the one in force at the END of the search — `RuleStrategist`'s endgame rule sets `full`. So the
+  floor of a run searched on `smoke` was measured on `full`, recorded `profile: None` like every
+  node, and rated smoke-against-smoke gains `within_noise` on a deterministic smoke eval. Each
+  repeat now records the ruler that actually ran — the `profile` facet of its resolved protocol,
+  the digest `engine/comparability.py::protocol_record` writes beside every node's metric — and the
+  summary records it when every counted repeat agrees (`floor_protocol`). The one reader,
+  `events/card_ledger.py::_floor_std`, holds a gain to the floor only when both numbers were
+  measured on that same ruler. Making the probe MEASURE the ruler the champion was scored on
+  instead, so the floor is not merely withheld, is still owed:
+  OPEN[noise-probe-measures-the-fidelity-at-the-end]
+  proof:absent:_noise_probe_profile@looplab/engine/noise_floor.py
 
   It is also not a node TERMINAL. Every repeat writes `eval_noise_seed`, never
   `node_evaluated`/`node_failed` — invariant #2 is one terminal per node, and a candidate that
@@ -34,8 +47,8 @@ own spread, and does when asked. What the spread IS on a GPU-graded task, and wh
 margin this repo has ever published exceeds it, is a box measurement (doc 52 row 11's arm).
 
 Layering: engine-level, and the same import set `confirm_phase.py` has — `core`, `events`,
-`runtime.sandbox`, `trust.cv` and stdlib, with no runtime import of the orchestrator (the mixin gets
-everything off `self`)."""
+`runtime.sandbox`, `trust.cv` and stdlib — plus the engine LEAF `comparability.py` for the ruler's
+one spelling, with no runtime import of the orchestrator (the mixin gets everything off `self`)."""
 from __future__ import annotations
 
 import time
@@ -45,6 +58,7 @@ import anyio
 from looplab.core.containment import contain
 from looplab.core.fitness import standard_error_difference
 from looplab.core.models import RunState
+from looplab.engine.comparability import protocol_record
 # Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
 from looplab.engine.shared import engine_fold as fold
 from looplab.events.types import EV_EVAL_NOISE_FLOOR, EV_EVAL_NOISE_SEED
@@ -86,6 +100,31 @@ def noise_floor_summary(metrics: list[float]) -> dict:
     return {"n": n, "mean": float(summ["mean"]), "std": std,
             "sem": standard_error_difference(std, n, 0.0, 0),
             "spread": max(usable) - min(usable)}
+
+
+def probe_ruler(result) -> str | None:
+    """The `profile` facet of the protocol one repeat RAN under — the same digest a node's terminal
+    records at `metric_provenance.comparability.protocol.profile` — or None when it recorded none
+    (the solution tier, which has no eval profiles, or a result from before the record)."""
+    record = protocol_record(eval_protocol=getattr(result, "eval_protocol", None))
+    return (record or {}).get("profile")
+
+
+def floor_protocol(rulers: dict, counted_seeds) -> dict:
+    """The ruler the floor's COUNTED repeats were measured on, as `eval_noise_floor` keys.
+
+    `rulers` is {seed: the `protocol_profile` its latest row recorded, or None}; `counted_seeds` the
+    seeds whose metric the summary counts. `{"protocol_profile": digest}` when every counted repeat
+    recorded that one digest; `{}` when none recorded any (no profiles to tell apart); and
+    `{"protocol_mixed": True}` otherwise — repeats on two rulers, or a pass resumed across the
+    record, whose spread is no ONE evaluation's and must not be read as one."""
+    recorded = [rulers.get(seed) for seed in counted_seeds]
+    present = {ruler for ruler in recorded if ruler}
+    if not present:
+        return {}
+    if len(present) == 1 and all(recorded):
+        return {"protocol_profile": next(iter(present))}
+    return {"protocol_mixed": True}
 
 
 class NoiseFloorMixin:
@@ -158,11 +197,13 @@ class NoiseFloorMixin:
             current = self._confirmation_node_current(nd.id, generation)
             valid = bool(current and res.metric is not None
                          and res.exit_code == 0 and not res.timed_out)
+            ruler = probe_ruler(res)
             async with self._write_lock:
                 self.store.append(EV_EVAL_NOISE_SEED, {
                     "node_id": nd.id, "generation": generation, "seed": s,
                     "eval_seconds": round(time.time() - _t0, 3),
                     "metric": res.metric if valid else None,
+                    **({"protocol_profile": ruler} if ruler else {}),
                     **({"superseded": True} if not current else {})})
         return res.metric if valid else None
 
@@ -208,16 +249,28 @@ class NoiseFloorMixin:
         # Read the metrics back off the FOLD rather than off what this pass happened to run: a
         # resumed pass and a fresh one then summarize the same rows in the same order, and the
         # summary can never disagree with the per-seed record it claims to summarize.
-        recorded = fold(self.store.read_all()).eval_noise_seed_results.get(nd.id, {})
+        events = self.store.read_all()
+        recorded = fold(events).eval_noise_seed_results.get(nd.id, {})
         metrics = [recorded.get(s) for s in seeds]
         reason = None if self._confirmation_node_current(nd.id, generation) else "superseded"
+        # The ruler of each counted repeat, off the SAME rows the fold's memo keeps (the latest row
+        # per seed of this lifecycle), so a resumed pass reads what an earlier process ran.
+        rulers = {}
+        for event in events:
+            data = event.data or {}
+            if (event.type == EV_EVAL_NOISE_SEED and data.get("node_id") == nd.id
+                    and data.get("generation") == generation and data.get("seed") in seeds):
+                ruler = data.get("protocol_profile")
+                rulers[data["seed"]] = ruler if isinstance(ruler, str) and ruler else None
         await self._append_noise_floor(
             nd.id, generation, seeds, metrics, nd.metric,
-            getattr(nd.idea, "eval_profile", None), reason)
+            getattr(nd.idea, "eval_profile", None), reason,
+            protocol=floor_protocol(rulers, [s for s in seeds if recorded.get(s) is not None]))
 
     async def _append_noise_floor(self, node_id, generation, seeds, metrics, search_metric,
-                                  profile, reason) -> None:
-        """The ONE writer of `eval_noise_floor`, so the summary and its arithmetic cannot drift."""
+                                  profile, reason, *, protocol=None) -> None:
+        """The ONE writer of `eval_noise_floor`, so the summary and its arithmetic cannot drift.
+        `protocol` is `floor_protocol`'s answer: the ruler the counted repeats measured."""
         summary = noise_floor_summary(metrics)
         async with self._write_lock:
             self.store.append(EV_EVAL_NOISE_FLOOR, {
@@ -226,4 +279,5 @@ class NoiseFloorMixin:
                 "n": summary["n"], "mean": summary["mean"], "std": summary["std"],
                 "sem": summary["sem"], "spread": summary["spread"],
                 "search_metric": search_metric, "profile": profile,
+                **(protocol or {}),
                 **({"reason": reason} if reason else {})})
