@@ -415,8 +415,11 @@ def test_speculation_gate_calibration_rejects_non_gpu_or_ambient_receipt(tmp_pat
         "--speculation-gate-calibration",
     ])
     assert result.exit_code == 2
-    assert "restricted" in result.output
-    assert "receipt must be unset" in result.output
+    # Rich wraps the error inside its box at the terminal's width, so the sentence can break across
+    # a border line; read it with the box and the wrapping taken out.
+    said = " ".join(result.output.replace("│", " ").split())
+    assert "restricted" in said
+    assert "receipt must be unset" in said
 
 
 def test_speculation_gate_calibration_rejects_reusing_a_run_dir(tmp_path, monkeypatch):
