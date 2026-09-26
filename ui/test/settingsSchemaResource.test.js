@@ -236,7 +236,10 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   diagnosis leads the repair. The Python half moved too.
   //   231 -> 232 (2026-09-26): `host_scorer_account` — whether a host refusal's failure text is the
   //   scorer's own account instead of the stderr tail. The Python half moved too.
-  assert.equal(Object.keys(schema.fieldByKey).length, 232)
+  //   232 -> 233 (2026-09-27): `card_select_k` — the operator's Card lane width, how many concurrent
+  //   builds the freshness gate keeps. A row because it is a width an operator sets per run; the
+  //   Python half moved too.
+  assert.equal(Object.keys(schema.fieldByKey).length, 233)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

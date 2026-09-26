@@ -225,6 +225,7 @@ class EngineKnobs:
     _asha_rung_nodes = Knob("asha_rung_nodes")
     _mcts_cost_weight = Knob("mcts_cost_weight")
     _mcts_value_weight = Knob("mcts_value_weight")
+    _card_select_k = Knob("card_select_k")
     _research_verify = Knob("research_verify", bool)
     # D8 PUSH half: `roles._state_brief` renders the latest memo's SUMMARY into every Researcher,
     # crash-triage and repair-critic prompt, and the verifier never checks a summary — so the cue

@@ -309,7 +309,17 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               82148327…; the branch's own 257 -> 258 and a3c14635… were cut against a tree without
 #               origin's six fields). INERT for a calibration replicate (the profile ships it False,
 #               and the toy workload declares no host scorer); re-pinned on the COMPLETE-envelope rule.
-_EXPECTED_DIGEST = "sha256:bb52777578bd27e9916c7908ec05d196fbe84a83301c46b70c660cbe4bfd54bd"
+#   2026-09-27  + card_select_k (the operator's Card lane width, `card_selection.py::card_lane_width`).
+#               The 'field set changed too' branch: an AST scan of `Settings`' annotated assignments
+#               against the pre-change tree reports exactly `['card_select_k']` added and `[]` removed;
+#               `_EXPECTED_FIELD_COUNT` goes 264 -> 265 and both pins are re-set. INERT for a
+#               calibration replicate (None on both surfaces = the policy's own width, the historical
+#               lane exactly); re-pinned on the COMPLETE-envelope rule. The PRODUCT lane's authority
+#               token does not bind the settings map (`speculation_product_authority_digests`), so a
+#               product-lane run already underway resumes unchanged. The branch pinned 255 -> 256 and
+#               e2f26066… against a tree without the nine fields above; RECOMPUTED from the merged
+#               module (the pre-change tree re-derives bb527775…).
+_EXPECTED_DIGEST = "sha256:789843b8bfea0a3a142f3354902df0ced78b82422d6adf0793b94c85672074b5"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -805,7 +815,8 @@ _EXPECTED_DIGEST = "sha256:bb52777578bd27e9916c7908ec05d196fbe84a83301c46b70c660
 #   2026-09-27  + max_launch_timeout_s (the configurable launch ceiling): 260 -> 261; see above.
 #   2026-09-26  + host_refusal_deferral, host_refusal_repair_lead: 261 -> 263; see the digest history.
 #   2026-09-26  + host_scorer_account: 263 -> 264; see the digest history.
-_EXPECTED_FIELD_COUNT = 264
+#   2026-09-27  + card_select_k (the operator's Card lane width): 264 -> 265.
+_EXPECTED_FIELD_COUNT = 265
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

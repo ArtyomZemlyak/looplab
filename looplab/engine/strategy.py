@@ -752,7 +752,8 @@ class StrategyCadenceMixin:
                     asha_rung_nodes=self._asha_rung_nodes,
                     mcts_cost_weight=self._mcts_cost_weight,
                     mcts_value_weight=self._mcts_value_weight,
-                    model_arms=self._model_arms), **pp})
+                    model_arms=self._model_arms,
+                    card_select_k=self._card_select_k), **pp})
                 self.policy.ablation_capable = getattr(self, "_ablation_capable", True)  # re-stamp: a repo/eval-spec run must not propose ablate (see orchestrator init)
                 self._base_max_nodes = getattr(self.policy, "max_nodes", self.max_nodes)  # new base for the live override
                 # A3 BOHB = ASHA racing + the surrogate proposer. make_policy only builds the racing

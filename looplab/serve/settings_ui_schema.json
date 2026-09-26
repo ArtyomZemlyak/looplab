@@ -425,6 +425,14 @@
           "help": "LLM value estimate (mcts policy only): how much a model’s opinion of a branch’s REMAINING headroom counts in the UCB1 value term, so an unexpanded branch stops scoring like a spent one at the same metric. 0 = off and buys no calls; 0.4 = a once-visited branch the model calls spent loses 0.2 reward and one it calls wide open gains 0.2, decaying as the subtree is really measured."
         },
         {
+          "key": "card_select_k",
+          "label": "Card lane width",
+          "type": "int",
+          "default": null,
+          "placeholder": "policy's own",
+          "help": "How many Cards one selection turn may keep, so how many concurrent builds the freshness gate keeps instead of discarding the runner-up. Blank = the policy's own width (1 for greedy, elite for evolutionary, n_seeds for mcts). 2 lets a greedy run build the top two Cards side by side. Survives every Strategist policy switch; ASHA/BOHB derive their own lane and ignore it. Build concurrency itself is still llm_parallel."
+        },
+        {
           "key": "digest_char_cap",
           "label": "Digest budget (chars)",
           "type": "int",

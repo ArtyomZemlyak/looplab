@@ -369,6 +369,8 @@ class EngineOptions:
     asha_rung_nodes: int = 0
     mcts_cost_weight: float = 0.0
     mcts_value_weight: float = 0.0
+    # The operator's Card lane width (`Settings.card_select_k`); None = the policy's own.
+    card_select_k: Optional[int] = None
     # T5 embedding-similarity dedup inside the "algo" gate. False matches the Settings default
     # and the documented rationale (novelty is the agentic Researcher's job by default): the old
     # True made a direct `Engine(novelty_gate=True)` behave differently from the identical

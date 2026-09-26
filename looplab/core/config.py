@@ -1432,6 +1432,21 @@ class Settings(BaseSettings):
     # Only the `mcts` policy reads it (greedy/evolutionary/asha ignore it, as they ignore `c`), and
     # it buys ONE bounded structured call per unestimated candidate per creation boundary.
     mcts_value_weight: float = 0.0
+    # THE CARD LANE WIDTH, operator-set: how many Cards ONE selection turn may retain, and therefore
+    # how many committed-but-unconsumed prefetches the freshness gate keeps
+    # (`search/card_selection.py::card_lane_width`, which has always read a policy's `card_select_k`
+    # — nothing set it). None = the policy's own width, the historical behaviour exactly: 1 for
+    # `greedy`, `elite` for `evolutionary`, `n_seeds` for `mcts`. MEASURED on MiniOneRec inf13: after
+    # the Strategist switched to greedy the run built ONE Card at a time for 3+ hours against
+    # 1-3-minute evaluations (GPU busy 3.5% of the run), and a second concurrent build of the
+    # runner-up Card is exactly what a width-1 freshness set discards `not_selected_now` on arrival.
+    # 2 keeps the runner-up. It travels with every policy the run builds, the launch's and each
+    # Strategist rebuild's (`policy_knobs`), and a Strategist's `policy_params` cannot restate it
+    # (`RUN_OWNED_POLICY_KNOBS`). ASHA/BOHB derive their lane per rung and ignore it. It narrows
+    # nothing: the prefetch ceiling is still `min(speculation_depth, width)`, and how many builds run
+    # at once is still `llm_parallel`. No `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row: None IS the pre-field
+    # value.
+    card_select_k: int | None = Field(default=None, ge=1, le=64)
     # THE MODEL ARMS of the operator x model router (doc 52 row 19): `{arm: "model-id[@cost]"}` —
     # the models the bandit branch may route a BUILD to beside the configured Developer model (the
     # implicit `default` arm), `cost` the arm's price relative to it (1.0), declared because it is a
