@@ -17,7 +17,6 @@ Reads the metric from the last stdout line that is JSON containing a "metric" ke
 from __future__ import annotations
 
 import hashlib
-import itertools
 import json
 import os
 import re
@@ -650,9 +649,9 @@ def _last_json_dict(text: str, pred) -> Optional[dict]:
     A line `json.loads` cannot turn into a value is not a JSON line, whatever the reason: malformed
     (`JSONDecodeError`), an integer literal past the interpreter's 4,300-digit conversion limit (a
     plain `ValueError`), or nested past ~1,000 levels (`RecursionError`). The metric, the extras, the
-    trials, the fingerprint and the MLE-bench grader all read candidate stdout through this scan, so
-    either of the last two escaping turned one printed line into an exception out of the metric
-    read — `node_failed engine_error`, run paused (critic 2026-09-26, driven)."""
+    trials and the fingerprint read candidate stdout through this scan (the MLE-bench grade reads its
+    grader child's), so either of the last two escaping turned one printed line into an exception
+    out of the metric read — `node_failed engine_error`, run paused (critic 2026-09-26, driven)."""
     for line in reversed(text.splitlines()):
         line = line.strip()
         if not line.startswith("{"):
@@ -809,8 +808,12 @@ def trial_record(entry):
             continue
         value = entry[field]
         if field == "params":
-            record[field] = ({surrogate_safe(str(name)): _trial_scalar(v, None)
-                              for name, v in value.items()} if isinstance(value, dict) else None)
+            params = ({surrogate_safe(str(name)): _trial_scalar(v, None)
+                       for name, v in value.items()} if isinstance(value, dict) else None)
+            # Two names that differ only in a lone surrogate COLLIDE once made safe, and the merge
+            # could keep the number and drop the text param the fold refuses the trial for
+            # (critic 2026-09-26, driven): such a trial is refused, as any unreadable params are.
+            record[field] = (params if params is None or len(params) == len(value) else None)
         elif field == "extra_metrics":
             record[field] = normalize_extra_metrics(value)
         elif field == "error":

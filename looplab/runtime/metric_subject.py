@@ -332,11 +332,14 @@ def bind_one(workdir, rel: str, *, since: Optional[float] = None,
     # holding lone surrogates, and the event store's orjson refuses it — every row recording it
     # (the settle row first) failed the node's terminal, `engine_error`, run paused. Refused, never
     # skipped, for `bind_glob`'s reason: what the candidate controls may only ever refuse a binding.
-    if surrogate_safe(str(rel)) != str(rel):
-        return {"path": surrogate_safe(str(rel)), "bound": False, "reason": "unreadable"}
+    # Containment is asked FIRST, so a name that also escapes says so — every row names it
+    # surrogate-safe either way.
+    name = surrogate_safe(str(rel))
     p = confine(workdir, rel) if confine is not None else _fallback_confine(workdir, rel)
     if p is None:
-        return {"path": rel, "bound": False, "reason": "escapes"}
+        return {"path": name, "bound": False, "reason": "escapes"}
+    if name != str(rel):
+        return {"path": name, "bound": False, "reason": "unreadable"}
     try:
         st = os.stat(p)
     except OSError:
@@ -353,7 +356,10 @@ def bind_one(workdir, rel: str, *, since: Optional[float] = None,
                 return {"path": rel, "bound": False, "reason": "empty"}
             row["kind"] = "dir"
             row["entries"] = entries
-            row["bytes"] = total
+            # Clamped like the mtime: the byte TOTAL of a directory the candidate filled is its to
+            # set too — five sparse files of 2**62 bytes sum past 64 bits (tmpfs, XFS and btrfs
+            # allow them), and the settle append refused the row (critic 2026-09-26, driven).
+            row["bytes"] = _storable_int(total)
         else:
             if st.st_size <= 0:
                 return {"path": rel, "bound": False, "reason": "empty"}

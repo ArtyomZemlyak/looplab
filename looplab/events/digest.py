@@ -11,6 +11,7 @@ import json
 import math
 from typing import Optional
 
+from looplab.core.jsonutil import surrogate_safe_tree
 from looplab.core.models import NodeStatus, RunState
 # Both moved to `core/numeric.py` (doc 25 XP-12): neither reads an event log, and keeping them here
 # forced `runtime` to import `events` purely to reach a math function. Re-exported so the historical
@@ -361,7 +362,11 @@ def _last_json_object(text: str) -> Optional[dict]:
             # the CANDIDATE's own stdout — one deep line must render nothing, not raise.
             continue
         if isinstance(obj, dict):
-            return obj
+            # SURROGATE-SAFE: the tail itself is decoded text, but a `\ud800` ESCAPE in the line
+            # parses into a lone surrogate, and this object's `no_<x>.reason` is rendered into every
+            # later Researcher prompt — which the LLM client then could not encode, raising out of
+            # `Engine.run()` on every resume (critic 2026-09-26, driven).
+            return surrogate_safe_tree(obj)
     return None
 
 

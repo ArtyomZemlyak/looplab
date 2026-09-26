@@ -175,7 +175,7 @@ def declared_output_paths(manifest_text: str) -> list[tuple]:
     """
     try:
         obj = json.loads(manifest_text or "")
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):   # a manifest nested past ~1,000 levels
         return []
     stages = obj.get("stages") if isinstance(obj, dict) else obj
     out: list[tuple] = []

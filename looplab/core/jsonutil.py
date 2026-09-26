@@ -157,3 +157,18 @@ def surrogate_safe(text: str) -> str:
         return text
     except UnicodeEncodeError:
         return text.encode("utf-8", "replace").decode("utf-8")
+
+
+def surrogate_safe_tree(value):
+    """`value` with every string in it — dict keys included — made `surrogate_safe`, through dicts,
+    lists and tuples; anything else passes through as the same object. For a PARSED candidate value
+    that will be rendered or sent on, where one lone surrogate anywhere in it is enough to make the
+    whole thing unencodable (a prompt the LLM client cannot serialize, a payload orjson refuses)."""
+    if isinstance(value, str):
+        return surrogate_safe(value)
+    if isinstance(value, dict):
+        return {(surrogate_safe(k) if isinstance(k, str) else k): surrogate_safe_tree(v)
+                for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(surrogate_safe_tree(v) for v in value)
+    return value

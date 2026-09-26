@@ -45,6 +45,7 @@ except ModuleNotFoundError:  # pragma: no cover - deps are declared; guard is fo
     httpx = None   # type: ignore[assignment]
     openai = None  # type: ignore[assignment]
 
+from looplab.core.jsonutil import surrogate_safe_tree
 from looplab.core import tracing
 from looplab.core.llm_broker import llm_request_permit
 # ONE derivation of the run's USD ceiling, shared with the reserve half (`core/llm_budget.py`):
@@ -1397,6 +1398,12 @@ class OpenAICompatibleClient:
         header-WAIT (join_s = the header budget; `_accumulate_stream` then governs the body) and the
         non-stream whole-call bound (join_s covers the trickled body too)."""
         box: dict = {}
+        # THE LAST LINE BEFORE BYTES LEAVE: a lone surrogate anywhere in the request — a tool result,
+        # a rendered log line, a parsed candidate string — cannot be encoded, and the SDK raised
+        # `UnicodeEncodeError` building the request, out of whatever called the model (driven,
+        # critic 2026-09-26: one printed `no_score` reason took `Engine.run()` down). Replacing it
+        # with `?` changes nothing that could have been sent, so no prompt contract moves.
+        kwargs = surrogate_safe_tree(kwargs)
 
         def _call():
             try:

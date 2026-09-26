@@ -27,6 +27,8 @@ import os
 from pathlib import Path
 from typing import Iterable, Optional
 
+from looplab.core.node_evidence import open_untrusted_regular, read_bounded_regular_file
+
 ACTIVATION_MANIFEST_NAME = "looplab_activation.json"
 MAX_MARKERS = 8
 MAX_MARKER_CHARS = 200
@@ -61,11 +63,23 @@ def manifest_text(markers: Iterable[str]) -> str:
     return json.dumps({"markers": list(markers)}, indent=1)
 
 
+# The largest activation manifest read. A list of short marker strings; anything bigger is not one.
+_MAX_MANIFEST_BYTES = 1 << 20
+
+
 def read_markers(workdir) -> list:
-    """The markers declared in a node's workdir, or [] -- a malformed file is no declaration."""
+    """The markers declared in a node's workdir, or [] -- a malformed file is no declaration.
+
+    Read as the CANDIDATE's file it is (`core/node_evidence.py::read_bounded_regular_file`: no link,
+    no FIFO, bounded) and parsed for everything `json.loads` raises: a FIFO under this name blocked
+    the event loop and a manifest nested past ~1,000 levels raised `RecursionError` out of
+    `_eval_settle_outcome` — the node's `engine_error`, the run paused (critic 2026-09-26, driven)."""
+    raw = read_bounded_regular_file(Path(workdir) / ACTIVATION_MANIFEST_NAME, _MAX_MANIFEST_BYTES + 1)
+    if raw is None or len(raw) > _MAX_MANIFEST_BYTES:
+        return []
     try:
-        data = json.loads((Path(workdir) / ACTIVATION_MANIFEST_NAME).read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
+        data = json.loads(raw.decode("utf-8"))
+    except (ValueError, TypeError, RecursionError):
         return []
     return normalize_markers(data.get("markers") if isinstance(data, dict) else None)
 
@@ -84,10 +98,13 @@ def _fresh_logs(workdir, since: Optional[float]) -> list:
             st = path.stat()
             if since is not None and st.st_mtime + 1.0 < float(since):
                 continue
-            with open(path, "rb") as fh:
-                if st.st_size > _MAX_LOG_BYTES:
-                    fh.seek(st.st_size - _MAX_LOG_BYTES)
-                out.append(fh.read().decode("utf-8", "replace"))
+            # The candidate's own file: no link, no FIFO — `x.log` as a FIFO blocked this read on
+            # the event loop (critic 2026-09-26, driven) — and the size bound read off the SAME entry.
+            with open_untrusted_regular(path) as fh:
+                size = os.fstat(fh.fileno()).st_size
+                if size > _MAX_LOG_BYTES:
+                    fh.seek(size - _MAX_LOG_BYTES)
+                out.append(fh.read(_MAX_LOG_BYTES).decode("utf-8", "replace"))
         except OSError:
             continue
     return out

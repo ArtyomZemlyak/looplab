@@ -110,3 +110,8 @@ NOFOLLOW_OPEN = pytest.mark.posix_only(
 # grant's trailing separator away, harmlessly, since an `open` of a directory reads nothing.
 KERNEL_READ_RUNG = pytest.mark.posix_only(
     "the dev probe's Landlock kernel read rung (each grant opened O_PATH under the live hook)")
+
+# A file NAME that is not valid UTF-8: POSIX names are bytes, so `os.makedirs(b"\xff")` makes one
+# and `Path.glob` hands it back holding a lone surrogate; Windows names are UTF-16 and refuse it.
+BYTES_FILENAMES = pytest.mark.posix_only(
+    "a filename that is not valid UTF-8 (POSIX names are bytes; Windows' are UTF-16)")

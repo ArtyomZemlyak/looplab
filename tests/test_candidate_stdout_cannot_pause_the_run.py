@@ -44,6 +44,7 @@ from looplab.events.replay import fold
 from looplab.runtime.sandbox import (TRIAL_NOT_A_NUMBER, SubprocessSandbox, _last_json_dict,
                                      json_line_trials, trial_record)
 from looplab.search.policy import GreedyTree
+from tests._posix_gates import BYTES_FILENAMES, POSIX_ONLY_OS_CALLS
 from tests.factories import make_engine
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -226,6 +227,7 @@ def test_predictions_the_solution_tier_grades_cannot_pause_the_run(tmp_path, pre
     assert node.metric == expected
 
 
+@BYTES_FILENAMES
 def test_a_directory_name_that_is_not_utf8_is_refused_not_recorded(tmp_path):
     """`Path.rglob`/`glob` hand such a name back holding lone surrogates. A `trainer_state.json`
     under one, and a `subject_glob` match under one, each failed the node's settle append."""
@@ -336,9 +338,12 @@ def test_what_the_reduction_writes():
         1, None, {"params": {"x": 1.0, "bad": "text", "deep": None}, "metric": 0.5,
                   "extra_metrics": {"n": 3.0}},
         {"metric": TRIAL_NOT_A_NUMBER}]
-    # Never larger than the entry but for the optional numbers' stand-in: a line of empty objects
-    # stays a line of empty objects.
+    # A line of empty objects stays a line of empty objects (a record grows by under 2x at worst:
+    # a container read as `null`, `1` as `1.0`, a 64-bit-plus int as its float repr).
     assert json_line_trials('{"trials": [{}, {}]}') == [{}, {}]
+    # Two param names that differ only in a lone surrogate collide once made safe; the merge must
+    # not keep the number and drop the text param the fold refuses the trial for.
+    assert trial_record({"params": {"\ud800opt": "adam", "?opt": 0.1}}) == {"params": None}
 
 
 def test_the_other_readers_of_candidate_output_skip_what_they_cannot_parse():
@@ -361,3 +366,177 @@ def test_the_other_readers_of_candidate_output_skip_what_they_cannot_parse():
     assert last_readings('{"loss": ' + "9" * 400 + "}", ["loss"]) == {"loss": float("inf")}
     assert host_score("rmse", [10 ** 400, 1, 1], [1, 2, 3]) is None
     assert host_score("accuracy", [10 ** 400, 2, 3], [1, 2, 3]) == pytest.approx(2 / 3)
+
+
+# ------------------------------------------------------------------ second critic pass (2026-09-26)
+def _no_score_state(tmp_path):
+    """A node whose final line carries a `no_score` account whose reason ESCAPES a lone surrogate —
+    ASCII in the stored tail, a surrogate once parsed."""
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "max"})
+    store.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                  "idea": {"operator": "draft", "params": {}, "rationale": "r"},
+                                  "code": "pass\n"})
+    store.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": 0.5, "violations": [],
+                                    "stdout_tail": '{"metric": 0.5, "no_score": {"reason": '
+                                                   '"\\ud800 why"}}'})
+    return fold(store.read_all())
+
+
+def test_a_surrogate_in_a_printed_account_never_reaches_a_prompt(tmp_path):
+    """The digest renders `no_score.reason` into every later Researcher prompt; parsed, it held a
+    lone surrogate the LLM client could not encode — raised out of `Engine.run()`, on every
+    resume (driven by the critic against a real client). The digest now reads a surrogate-safe tree."""
+    from looplab.agents.roles import _state_brief
+
+    state = _no_score_state(tmp_path)
+    brief = _state_brief(state, state.nodes[0])
+    brief.encode("utf-8")                        # the request body an SDK builds from it
+    assert "? why" in brief
+
+
+def test_no_request_leaves_with_a_lone_surrogate_in_it():
+    """The last line before bytes leave (`core/llm.py::_bounded_create`): whatever reaches a
+    request — a tool result, a log line, a parsed candidate string — is sent surrogate-safe, where
+    the SDK raised `UnicodeEncodeError` building it."""
+    from looplab.core.llm import OpenAICompatibleClient
+
+    sent = {}
+
+    class _Completions:
+        def create(self, **kwargs):
+            sent.update(kwargs)
+            json.dumps(kwargs, ensure_ascii=False).encode("utf-8")   # what the SDK does with it
+            return {"ok": True}
+
+    client = OpenAICompatibleClient(base_url="http://127.0.0.1:9/v1", api_key="k", model="m")
+    client._sdk = SimpleNamespace(chat=SimpleNamespace(completions=_Completions()))
+    out = client._bounded_create({"model": "m", "messages": [
+        {"role": "user", "content": "log line: \ud800 end"},
+        {"role": "tool", "content": [{"type": "text", "text": "x\udfff"}]}]}, 5.0)
+    assert out == {"ok": True}
+    assert sent["messages"][0]["content"] == "log line: ? end"
+
+
+def test_an_activation_manifest_the_candidate_nests_deep_is_no_declaration(tmp_path):
+    code = ("import json; open('looplab_activation.json', 'w').write("
+            "'{\"markers\": ' + '[' * 5000 + ']' * 5000 + '}'); print(json.dumps({'metric': 0.5}))")
+    state, _events = _repo_run(tmp_path, code)
+    node = _settled(state)
+    assert node.status is NodeStatus.evaluated and node.metric == 0.5
+
+
+def _returns_promptly(fn, *args, seconds=10.0):
+    import threading
+
+    box = {}
+    worker = threading.Thread(target=lambda: box.update(value=fn(*args)), daemon=True)
+    worker.start()
+    worker.join(seconds)
+    assert not worker.is_alive(), f"{fn.__name__} blocked on a FIFO"
+    return box.get("value")
+
+
+@POSIX_ONLY_OS_CALLS
+def test_a_fifo_in_the_workdir_blocks_no_reader(tmp_path):
+    """A FIFO under the activation manifest's name, or as `x.log`, blocked a plain `open` forever —
+    on the event loop (critic 2026-09-26, driven: no terminal after 100 s against a 2 s baseline)."""
+    import os
+
+    from looplab.engine.activation import _fresh_logs, read_markers
+    from looplab.engine.eval_log_plan import snapshot_training_logs
+    from looplab.runtime.effective_batch import _read_state
+
+    os.mkfifo(tmp_path / "looplab_activation.json")
+    os.mkfifo(tmp_path / "evil.log")
+    os.mkfifo(tmp_path / "trainer_state.json")
+    (tmp_path / "train.log").write_text("loss 0.5\n", encoding="utf-8")
+    assert _returns_promptly(read_markers, tmp_path) == []
+    assert _returns_promptly(_fresh_logs, tmp_path, None) == ["loss 0.5\n"]
+    snapshot = _returns_promptly(snapshot_training_logs, tmp_path)
+    cursors = {Path(k).name if "/" in str(k) else str(k): v for k, v in snapshot.cursors.items()}
+    assert any(c.offset is None for c in cursors.values()), "the FIFO is an unreadable cursor"
+    assert _returns_promptly(_read_state, tmp_path / "trainer_state.json") is None
+
+
+def test_the_other_candidate_file_parsers_skip_what_they_cannot_parse(tmp_path):
+    from looplab.adapters.repo_write_tools import declared_output_paths
+    from looplab.runtime.effective_batch import _read_state
+
+    deep = "[" * 5000 + "]" * 5000
+    assert declared_output_paths(deep) == []
+    (tmp_path / "trainer_state.json").write_text('{"a": ' + deep + "}", encoding="utf-8")
+    assert _read_state(tmp_path / "trainer_state.json") is None
+
+
+def test_a_submission_field_past_the_csv_limit_is_no_score(tmp_path):
+    """`csv.Error` is not a `ValueError`: one 200,000-character field in the candidate's submission
+    raised it out of the MLE-bench search grade — the default protocol — pausing the run."""
+    from looplab.adapters.mlebench_grade import grade_search_split_in_subprocess
+
+    sub = tmp_path / "submission.csv"
+    sub.write_text("id,label\n1," + "x" * 200_000 + "\n", encoding="utf-8")
+    assert grade_search_split_in_subprocess("comp", sub, "id,label\n1,a\n", ["1"]) is None
+
+
+def test_a_directory_byte_total_past_64_bits_is_stored_clamped(tmp_path):
+    """Five sparse files of 2**62 bytes sum past 64 bits (tmpfs, XFS, btrfs allow them) and the
+    settle append refused the directory subject's row. Driven where the filesystem allows it."""
+    import os
+    import tempfile
+
+    import orjson
+
+    from looplab.runtime.metric_subject import bind_one
+
+    shm = Path("/dev/shm")
+    base = shm if shm.is_dir() and os.access(shm, os.W_OK) else tmp_path
+    with tempfile.TemporaryDirectory(dir=base) as d:
+        ckpt = Path(d) / "ckpt"
+        ckpt.mkdir()
+        try:
+            for i in range(5):
+                with open(ckpt / f"shard{i}.bin", "wb") as fh:
+                    fh.truncate(2 ** 62)
+        except (OSError, OverflowError):
+            pytest.skip("this filesystem refuses a 2**62-byte sparse file")
+        row = bind_one(d, "ckpt", confine=lambda wd, rel: Path(wd) / rel)
+        orjson.dumps(row)                       # what the event store does with it
+        assert row["bytes"] == 2 ** 64 - 1
+
+
+@BYTES_FILENAMES
+def test_an_ambiguous_glob_over_names_that_are_not_utf8_is_named_safely(tmp_path):
+    code = ("import json, os\n"
+            "for d in (b'out/\\xff', b'out/\\xfe'):\n"
+            "    os.makedirs(d, exist_ok=True); open(d + b'/model.bin', 'wb').write(b'w')\n"
+            "print(json.dumps({'metric': 0.5}))\n")
+    state, _events = _repo_run(tmp_path, code, metric={**_METRIC,
+                                                       "subject_glob": ["out/*/model.bin"]})
+    node = _settled(state)
+    prov = node.metric_provenance or {}
+    assert prov.get("unbound_reason") == "ambiguous"
+    assert sorted(prov["subjects"][0]["matched"]) == ["out/?/model.bin", "out/?/model.bin"]
+
+
+def test_a_deep_prediction_file_at_the_holdout_grade_is_no_holdout_metric(tmp_path, monkeypatch):
+    """The FINISH-phase holdout grade reads each top node's predictions again: a file too deep to
+    parse there raised out of the finish (the search-phase grade had its guard; this one had not)."""
+    from looplab.runtime import command_eval
+    from tests.test_holdout import _HostGradedTask, _PredsDeveloper, _PredsResearcher
+
+    real, calls = command_eval.read_candidate_file, []
+
+    def _deep_after_the_search(path, *a, **k):
+        calls.append(path)
+        return real(path, *a, **k) if len(calls) == 1 else "[" * 5000 + "]" * 5000
+
+    monkeypatch.setattr(command_eval, "read_candidate_file", _deep_after_the_search)
+    engine = make_engine(tmp_path / "run", task=_HostGradedTask(), researcher=_PredsResearcher(),
+                         developer=_PredsDeveloper(), sandbox=SubprocessSandbox(),
+                         policy=GreedyTree(n_seeds=1, max_nodes=1), holdout_fraction=0.25,
+                         holdout_select=True, holdout_top_k=1)
+    final = anyio.run(engine.run)
+    assert final.finished and not final.paused, "the finish-phase grade raised"
+    rows = [e.data for e in engine.store.read_all() if e.type == "holdout_evaluated"]
+    assert rows and all(row["metric"] is None for row in rows) and len(calls) >= 2

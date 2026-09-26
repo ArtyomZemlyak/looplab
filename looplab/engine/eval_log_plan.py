@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from looplab.core.node_evidence import open_untrusted_regular
 from looplab.engine.loss_trajectory import (
     LossTrajectory,
     summarize_loss_window,
@@ -493,7 +494,7 @@ def snapshot_training_logs(workdir) -> TrainingLogSnapshot:
     for path in paths:
         key = _log_path_key(path)
         try:
-            with open(path, "rb") as fh:
+            with open_untrusted_regular(path) as fh:
                 stat_result = os.fstat(fh.fileno())
                 size = max(0, int(stat_result.st_size))
                 probe_start = max(0, size - _CURSOR_PROBE_BYTES)
@@ -533,7 +534,7 @@ def read_training_tail_raw(workdir, *, max_read_bytes: int = 131_072,
     if limit == 0:
         return ""
     try:
-        with open(path, "rb") as fh:
+        with open_untrusted_regular(path) as fh:
             size = max(0, int(os.fstat(fh.fileno()).st_size))
             floor = attempt_byte_floor(fh, path, snapshot)
             if floor is None:
@@ -637,7 +638,7 @@ def monitor_log_sources(workdir, plan: Optional[EvalLogPlan] = None,
             role = LOG_ROLE_UNKNOWN
         floor = 0
         try:
-            with open(path, "rb") as fh:
+            with open_untrusted_regular(path) as fh:
                 boundary = attempt_byte_floor(fh, path, snapshot)
             if boundary is None:
                 continue          # fail closed — the same direction `read_training_tail_raw` fails
@@ -691,7 +692,7 @@ def read_stage_trajectory(path, *, floor: int = 0,
         want = STAGE_TRAJECTORY_WINDOWS
     rows: list = []
     try:
-        with open(path, "rb") as fh:
+        with open_untrusted_regular(path) as fh:
             size = max(0, int(os.fstat(fh.fileno()).st_size))
             start = max(0, int(floor or 0))
             region = size - start
@@ -766,7 +767,7 @@ def stage_check_trajectory(workdir, stage: str, *, plan: Optional[EvalLogPlan] =
             return LossTrajectory()
     try:
         path = Path(workdir) / name
-        with open(path, "rb") as fh:
+        with open_untrusted_regular(path) as fh:
             floor = attempt_byte_floor(fh, path, snapshot)
     except (OSError, TypeError, ValueError, OverflowError):
         return LossTrajectory()

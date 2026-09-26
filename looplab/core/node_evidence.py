@@ -7,6 +7,7 @@ attempt.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import stat
@@ -57,33 +58,47 @@ def read_bounded_regular_file(path: str | os.PathLike, limit: int, *,
     if type(limit) is not int or limit < 0:
         raise ValueError("limit must be a non-negative integer")
     try:
-        before = os.lstat(path)
+        with open_untrusted_regular(path) as fh:
+            if tail:
+                size = os.fstat(fh.fileno()).st_size
+                if size > limit:
+                    fh.seek(size - limit)
+            chunks, remaining = [], limit
+            while remaining > 0:
+                chunk = fh.read(min(remaining, _UNTRUSTED_READ_CHUNK))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            return b"".join(chunks)
     except OSError:
         return None
+
+
+def open_untrusted_regular(path: str | os.PathLike):
+    """`open(path, "rb")` for ONE regular file a candidate may have written — the rule
+    `read_bounded_regular_file` above reads by, for a reader that needs the FILE (positioned reads,
+    its `fstat`) rather than a bounded byte string: `lstat` refuses a link, a directory, a FIFO or a
+    device before any open; the `_UNTRUSTED_READ_FLAGS` open cannot follow a link or BLOCK (a FIFO
+    answers at once); `fstat` must show the same regular entry the `lstat` saw.
+
+    RAISES `OSError` for each refusal — absent, not regular, a link, swapped — and never blocks, so
+    a caller that wrote `with open(path, "rb")` keeps its own `except OSError` answer for all of them.
+    Found 2026-09-26 (critic, driven): `engine/activation.py` and `engine/eval_log_plan.py` opened
+    the eval's `*.log` files and its activation manifest with blocking, link-following opens, and a
+    FIFO named `x.log` stopped the event loop."""
+    before = os.lstat(path)
     if is_reparse(before) or not stat.S_ISREG(before.st_mode):
-        return None
-    try:
-        fd = os.open(path, _UNTRUSTED_READ_FLAGS)
-    except OSError:
-        return None
+        raise OSError(errno.EINVAL, "not a regular file", str(path))
+    fd = os.open(path, _UNTRUSTED_READ_FLAGS)
     try:
         opened = os.fstat(fd)
         if not stat.S_ISREG(opened.st_mode) or same_file_entry(opened) != same_file_entry(before):
-            return None
-        if tail and opened.st_size > limit:
-            os.lseek(fd, opened.st_size - limit, os.SEEK_SET)
-        chunks, remaining = [], limit
-        while remaining > 0:
-            chunk = os.read(fd, min(remaining, _UNTRUSTED_READ_CHUNK))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        return b"".join(chunks)
-    except OSError:
-        return None
-    finally:
+            raise OSError(errno.EINVAL, "not the regular file that was checked", str(path))
+        return os.fdopen(fd, "rb")
+    except BaseException:
         os.close(fd)
+        raise
 
 
 def node_workdir(run_dir: str | os.PathLike, nid: int) -> Optional[Path]:

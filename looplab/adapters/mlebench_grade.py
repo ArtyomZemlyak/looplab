@@ -125,6 +125,7 @@ def grade_search_split_in_subprocess(competition_id: str, submission_path, answe
     dir (holding `private/test.csv`) already is — the trust model's disclosed caveat, no wider — and
     the Docker tier sees neither. `(None)` for a missing/malformed submission, a grader failure or a
     timeout, exactly like `grade_in_subprocess`."""
+    import csv
     import shutil
     import tempfile
 
@@ -142,7 +143,10 @@ def grade_search_split_in_subprocess(competition_id: str, submission_path, answe
                 return None
             (tmp / "submission.csv").write_text(filter_submission(text, hidden_ids, keep=True),
                                                 encoding="utf-8")
-        except (OSError, ValueError):
+        except (OSError, ValueError, csv.Error):
+            # `csv.Error` is not a ValueError: one field past the csv module's 131,072-character
+            # limit in the CANDIDATE's submission raised it out of the eval — `engine_error`, run
+            # paused, on the default search-split protocol (critic 2026-09-26, driven).
             return None
         (tmp / "answers.csv").write_text(answers_csv, encoding="utf-8")
         argv = [sys.executable, "-m", "looplab.adapters.mlebench_grade",

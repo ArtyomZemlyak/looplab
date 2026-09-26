@@ -56,6 +56,7 @@ import json
 from pathlib import Path
 from typing import Optional
 
+from looplab.core.node_evidence import read_bounded_regular_file
 from looplab.runtime.metric_subject import bind_one
 
 # The artifact, its field, and what that library means by the field. A REGISTRY of one: the string is
@@ -103,14 +104,16 @@ def _state_files(workdir) -> list:
 
 
 def _read_state(path) -> Optional[dict]:
-    """One state file's parsed object, or None. Bounded, and total over everything it can raise."""
+    """One state file's parsed object, or None. Bounded, no link and no FIFO followed
+    (`core/node_evidence.py::read_bounded_regular_file`: the candidate's own file), and total over
+    everything the parse raises — a state nested past ~1,000 levels raised `RecursionError`, which
+    only the caller's broad handler used to contain (critic 2026-09-26)."""
+    raw = read_bounded_regular_file(path, MAX_STATE_BYTES + 1)
+    if raw is None or len(raw) > MAX_STATE_BYTES:
+        return None
     try:
-        with open(path, "rb") as fh:
-            raw = fh.read(MAX_STATE_BYTES + 1)
-        if len(raw) > MAX_STATE_BYTES:
-            return None
         obj = json.loads(raw.decode("utf-8", "replace"))
-    except (OSError, ValueError, UnicodeError):
+    except (ValueError, UnicodeError, RecursionError):
         return None
     return obj if isinstance(obj, dict) else None
 
