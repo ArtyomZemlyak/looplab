@@ -30,6 +30,7 @@ from typing import Optional
 
 # The replacement-only file-identity tier the stage-log cursor keys on (`_stage_log_cursor`).
 from looplab.core.atomicio import same_file_entry
+from looplab.core.node_evidence import open_untrusted_regular, read_bounded_regular_target
 # The DECLARED ENVIRONMENT rule lives in `core/envsafe.py` — `core/config.py::Settings.eval_env`
 # is the third declarer of the same contract and `core` may not import `runtime`, so the rule sits
 # where all three can reach it. Re-exported here because THIS is where the stage contract is read.
@@ -441,16 +442,16 @@ def read_candidate_file(p) -> Optional[str]:
     grade, the generic host grade, the holdout scorer, the private grade — re-spelled `read_text` and
     got no bound: a sparse multi-GB `predictions.json` took down the ENGINE, not the node. Path
     CONFINEMENT stays the caller's (`_candidate_output`, `_confined`); this owns only the SIZE rule."""
-    try:
-        p = Path(p)
-        if p.stat().st_size > _MAX_METRIC_FILE_BYTES:
-            return None
-        return p.read_text(encoding="utf-8-sig", errors="replace")
-    except OSError:
+    # A REGULAR file, opened without blocking, the entry opened the one checked, a link FOLLOWED
+    # (confinement is the caller's) — `core/node_evidence.py::read_bounded_regular_target`, whose
+    # docstring has the FIFO this used to wait on forever (critic 2026-09-26).
+    data = read_bounded_regular_target(p, _MAX_METRIC_FILE_BYTES, refuse_larger=True)
+    if data is None:
         return None
+    # `read_text`'s own decoding, universal newlines included, so no reader sees other text.
+    return data.decode("utf-8-sig", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
 
 
-# The pre-2026-09-22 private spelling, kept for the module's own call sites.
 _read_metric_file = read_candidate_file
 
 
@@ -1593,7 +1594,9 @@ def _attempt_log_tail(path, cursor: Optional[tuple], cap: int = _NUMERIC_LOG_TAI
     printed its declared key passed on the value a DEAD attempt had printed.
     """
     try:
-        with open(path, "rb") as fh:
+        # The stage's own log, in a workdir the stage writes: a stage that swapped it for a FIFO hung
+        # `run_command_eval` here (critic 2026-09-26, driven), so it is read by the untrusted rule.
+        with open_untrusted_regular(path) as fh:
             st = os.fstat(fh.fileno())
             size = max(0, int(st.st_size))
             floor = 0

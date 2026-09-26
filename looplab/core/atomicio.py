@@ -556,7 +556,16 @@ def best_effort_fsync_parent(path: str | os.PathLike) -> None:
         os.close(descriptor)
 
 
-def atomic_write_bytes(path: str | os.PathLike, data: bytes) -> None:
+def atomic_write_bytes(path: str | os.PathLike, data: bytes, *, mode: int | None = None) -> None:
+    """Write `data` to `path` through a temp file and a rename — which REPLACES whatever entry
+    `path` names (a symlink, a hard link to another file) instead of writing through it. That is also
+    why every engine write into a directory a candidate can write goes through here (critic
+    2026-09-26, driven: a report written with `write_text` through a planted
+    `mlebench_report.json -> ../../events.jsonl` truncated the run's event log).
+
+    `mode` sets the published file's permission bits; `None` keeps mkstemp's `0o600`, right for the
+    engine's own state and wrong for a file a sandboxed child (another uid, on the Docker tier) must
+    read."""
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     # UNIQUE temp name (not a fixed `<name>.tmp`): the engine subprocess and the UI server both write
@@ -566,6 +575,8 @@ def atomic_write_bytes(path: str | os.PathLike, data: bytes) -> None:
     fd, tmpname = tempfile.mkstemp(dir=str(p.parent), prefix=f".{p.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
+            if mode is not None:
+                os.chmod(tmpname, mode)
             f.write(data)
             f.flush()
             best_effort_fsync(f.fileno())
@@ -591,8 +602,8 @@ def atomic_write_bytes(path: str | os.PathLike, data: bytes) -> None:
         raise
 
 
-def atomic_write_text(path: str | os.PathLike, text: str) -> None:
-    atomic_write_bytes(path, text.encode("utf-8"))
+def atomic_write_text(path: str | os.PathLike, text: str, *, mode: int | None = None) -> None:
+    atomic_write_bytes(path, text.encode("utf-8"), mode=mode)
 
 
 def _ensure_strict_parent(parent: Path) -> None:

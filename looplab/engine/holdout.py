@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Optional
 
 import anyio
 
+from looplab.core.atomicio import atomic_write_text
 from looplab.core.errors import ConfigRefusal
 from looplab.core.models import RunState
 from looplab.engine.triage import _holdout_indices
@@ -129,8 +130,10 @@ class HoldoutGrader:
             # Pareto objective). Persist it as a per-node artifact instead: files-as-truth, inspectable.
             if report is not None:
                 try:
-                    (Path(workdir) / "mlebench_report.json").write_text(
-                        _json.dumps(report), encoding="utf-8")
+                    # Through a rename: the workdir is the candidate's, and a `write_text` through a
+                    # planted `mlebench_report.json -> ../../events.jsonl` truncated the run's event
+                    # log (critic 2026-09-26, driven).
+                    atomic_write_text(Path(workdir) / "mlebench_report.json", _json.dumps(report))
                 except OSError:
                     pass
             return res
@@ -524,7 +527,7 @@ class HoldoutGrader:
                 shutil.rmtree(tmp, ignore_errors=True)
         if report is not None:
             try:
-                (workdir / "mlebench_report.json").write_text(_json.dumps(report), encoding="utf-8")
+                atomic_write_text(workdir / "mlebench_report.json", _json.dumps(report))   # see above
             except OSError:
                 pass
         gap = None

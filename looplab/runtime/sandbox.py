@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Protocol
 
+from looplab.core.atomicio import atomic_write_text
 from looplab.core.errors import BudgetExceeded, ConfigRefusal
 from looplab.core.numeric import parse_mem_bytes  # noqa: F401 (re-export; moved to core, CORE-05)
 from looplab.core.jsonutil import surrogate_safe
@@ -1421,7 +1422,12 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
     logf = None
     if log_path:                                    # log_path=None -> memory-bounded drain, no file
         try:
-            logf = open(log_path, "a", encoding="utf-8", errors="replace")
+            # NOT a plain `open(log_path, "a")`: the log sits in the node workdir, which an earlier
+            # stage wrote, and a planted FIFO blocked this open while a planted link to the run's
+            # `events.jsonl` had this stage's stdout appended to the event log (critic 2026-09-26,
+            # driven). `open_untrusted_append` refuses both, and a hard link, without blocking.
+            from looplab.core.node_evidence import open_untrusted_append
+            logf = open_untrusted_append(log_path)
         except (OSError, ValueError):
             # ValueError too: an embedded NUL in the path raises it (not OSError), which would escape
             # here AFTER the child was spawned and leak the process tree (arch-review §3 P0-7 / §4 P1-5).
@@ -2040,7 +2046,9 @@ class SubprocessSandbox:
             env: Optional[dict] = None, cancel=None) -> RunResult:
         wd = Path(workdir).resolve()  # absolute -> safe regardless of caller's cwd
         wd.mkdir(parents=True, exist_ok=True)
-        (wd / "solution.py").write_text(code, encoding="utf-8")
+        # Through a rename, never through the name: a repair reuses this workdir, and the attempt
+        # before it may have left `solution.py` as a link to anything the engine can write.
+        atomic_write_text(wd / "solution.py", code, mode=0o644)
         rc, out, err, to = _run_argv(
             [self.python, "solution.py"],  # by name, relative to cwd -> no path doubling
             str(wd), timeout, env, self.max_output_bytes, cancel,
@@ -2091,7 +2099,9 @@ class DockerSandbox:
         require_docker_cli("solution")
         wd = Path(workdir).resolve()
         wd.mkdir(parents=True, exist_ok=True)
-        (wd / "solution.py").write_text(code, encoding="utf-8")
+        # Through a rename, never through the name: a repair reuses this workdir, and the attempt
+        # before it may have left `solution.py` as a link to anything the engine can write.
+        atomic_write_text(wd / "solution.py", code, mode=0o644)
         # Bound BEFORE int() and BEFORE embedding the deadline into the container argv.  Bounding only
         # inside host-side run_argv is too late: NaN/inf crash int(), while a huge finite value leaves
         # the daemon-owned container running long after the bounded docker CLI has been killed.

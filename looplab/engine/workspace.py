@@ -19,6 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from looplab.core.atomicio import atomic_write_bytes, atomic_write_text
 from looplab.engine.triage import _dir_fingerprint, _shallow_fingerprint
 from looplab.events.types import EV_WORKSPACE_SEEDED
 
@@ -137,11 +138,13 @@ class WorkspaceSeeder:
         # (`c.encode(...) if isinstance(c, str) else bytes(c)`). `write_text` raises TypeError on
         # bytes, so a task exposing a BINARY asset passed setup cleanly and then crashed every
         # single node materialization.
+        # THROUGH A RENAME, never through the name (critic 2026-09-26): a reused workdir is the
+        # candidate's, and an asset written through a planted link — or a hard link, which
+        # `resolve()` cannot see — lands wherever it points. `0o644`, as `write_text` created it,
+        # because the sandboxed child (another uid on the Docker tier) must read it.
         for name, content in self._e._assets.items():
-            if isinstance(content, str):
-                (wd / name).write_text(content, encoding="utf-8")
-            else:
-                (wd / name).write_bytes(bytes(content))
+            data = content.encode("utf-8") if isinstance(content, str) else bytes(content)
+            atomic_write_bytes(wd / name, data, mode=0o644)
 
     def write_node_files(self, node, workdir) -> None:
         """Materialize a multi-file solution's helper files (ADR-7 patch-gated agent)
@@ -186,7 +189,7 @@ class WorkspaceSeeder:
             if _protected_after_resolve(target):
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
+            atomic_write_text(target, content, mode=0o644)      # a rename: see `write_assets`
         # Apply accepted deletions (the agent removed an in-surface file). Skip protected names
         # and never escape the workdir; missing is fine (idempotent).
         for name in deleted:

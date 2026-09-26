@@ -70,7 +70,14 @@ class CarvedSplit:
 
 
 def _parse(text: str) -> tuple[list, list]:
-    rows = list(csv.reader(io.StringIO(text)))
+    try:
+        rows = list(csv.reader(io.StringIO(text)))
+    except csv.Error as exc:
+        # NOT a ValueError, so it escaped every caller's `except (OSError, ValueError)`: a
+        # candidate's submission with one field over the csv module's limit raised out of
+        # `Engine.run()` at the private grade (critic 2026-09-26, driven). Refused here, where both
+        # graders and the carve at run start read through.
+        raise SplitUndecidable(f"the CSV cannot be parsed: {exc}") from None
     if not rows:
         raise SplitUndecidable("an empty CSV has no header")
     header, body = rows[0], [r for r in rows[1:] if r]

@@ -64,6 +64,7 @@ import anyio
 from looplab.agents.roles import DeveloperResult
 import orjson
 
+from looplab.core.atomicio import atomic_write_text
 from looplab.core.errors import (BudgetExceeded, RunSetupRefusal, budget_stop_leaf,
                                  exception_leaves)
 from looplab.core.models import (DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX, NodeStatus,
@@ -1166,14 +1167,16 @@ class EvalAttempt:
     def mark_superseded_workdir(self) -> None:
         try:
             self.workdir.mkdir(parents=True, exist_ok=True)
-            self._superseded_marker.write_text(str(self.generation), encoding="ascii")
+            # Through a rename (critic 2026-09-26): the workdir is the candidate's, and a stamp
+            # written through a planted link writes wherever the link points.
+            atomic_write_text(self._superseded_marker, str(self.generation))
         except OSError:
             import shutil
             shutil.rmtree(self.workdir, ignore_errors=True)
 
     def stamp_workdir(self, n) -> None:
         try:
-            self._manifest_stamp.write_text(_workdir_manifest_digest(n), encoding="ascii")
+            atomic_write_text(self._manifest_stamp, _workdir_manifest_digest(n))   # see above
         except OSError:
             pass          # unstamped => the next reuse check fails closed and rematerializes
 

@@ -21,6 +21,7 @@ from typing import Callable, Optional
 
 from looplab.core import tracing
 from looplab.core.config import DEVELOPER_BACKENDS
+from looplab.core.jsonutil import surrogate_safe
 from looplab.core.llm import CostAccountant, request_cancelled
 from looplab.core.models import Idea, developer_artifact_footprint
 from looplab.core.validate import AgentRun
@@ -427,7 +428,10 @@ class CliAgentDeveloper:
             env = {key: value for key, value in os.environ.items()
                    if not is_secret_env(key, value)}
             env.update(self.spec.env(self.host))
-            prompt = (self.brief + "\n\n" + message).strip()
+            # A lone surrogate cannot be encoded into argv or the prompt file, and `UnicodeEncodeError`
+            # is not the `OSError` the launch path answers — the rule `core/llm.py::_bounded_create`
+            # applies at the HTTP transport, applied at this one (critic 2026-09-26).
+            prompt = surrogate_safe((self.brief + "\n\n" + message).strip())
             base = self._launch_base()
             argv_message, via_file = self._prompt_delivery(prompt, base)
             if via_file:                          # batch shim: keep untrusted text out of cmd.exe

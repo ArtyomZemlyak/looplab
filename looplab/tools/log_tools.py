@@ -275,6 +275,7 @@ from typing import Callable, Optional, Sequence, Union
 # The bucket median. It was a private copy here and a byte-identical one in
 # `engine/train_monitor.py`, which reduces the SAME log one trust tier over (the deterministic
 # loss-trajectory veto's per-window median) — see `core/numeric.py::median`.
+from looplab.core.node_evidence import open_untrusted_regular
 from looplab.core.numeric import median
 from looplab.tools._base import RESULT_CAP, clip, fit_rows, fn_spec
 
@@ -755,7 +756,11 @@ def _read_window(source: LogSource, *, want: int, where: str, start: Optional[in
         lo = max(floor, min(int(start or 0), size))
     else:
         lo = max(floor, size - want)
-    with open(path, "rb") as fh:
+    # THE UNTRUSTED RULE at every open in this module (critic 2026-09-26): the log is in a workdir a
+    # LIVE candidate writes, `monitor_log_sources` checks a source once and each read reopens it by
+    # path, and a `train.log` swapped for a FIFO in between would block a judge whose worker is
+    # joined — so the eval would never end. `open_untrusted_regular` raises `OSError` instead.
+    with open_untrusted_regular(path) as fh:
         fh.seek(lo)
         raw = fh.read(want)
     return raw.decode("utf-8", "replace"), lo, lo + len(raw), size
@@ -787,7 +792,7 @@ def _resumed_at_boundary(path, lo: int) -> bool:
     if lo <= 0:
         return False
     try:
-        with open(path, "rb") as fh:
+        with open_untrusted_regular(path) as fh:
             fh.seek(lo - 1)
             return fh.read(1) in (b"\n", b"\r")
     except OSError:
@@ -814,7 +819,7 @@ def _records_before(path, *, floor: int, lo: int, ceiling: int) -> tuple:
     seen = 0
     stopped = ""
     try:
-        with open(path, "rb") as fh:
+        with open_untrusted_regular(path) as fh:
             fh.seek(floor)
             # `size=lo` makes the prefix its own file, so the final record ends at `lo` exactly.
             for batch in _record_batches(fh, lo=floor, size=lo, ceiling=max(ceiling, span)):
@@ -998,7 +1003,7 @@ def _search_scan(source: LogSource, rx: re.Pattern, *, start: Optional[int], cei
     # a test proving the sweep is otherwise total passes.
     deadline_s = _SEARCH_DEADLINE_S if deadline_s is None else deadline_s
     deadline = (time.monotonic() + deadline_s) if deadline_s and deadline_s > 0 else None
-    with open(path, "rb") as fh:
+    with open_untrusted_regular(path) as fh:
         fh.seek(lo)
         for batch in _record_batches(fh, lo=lo, size=size, ceiling=ceiling):
             hi = batch.hi
@@ -1092,7 +1097,7 @@ def _record_range_scan(source: LogSource, *, start: int, count: int, ceiling: in
     seen = 0
     stopped = ""
     hi = floor
-    with open(path, "rb") as fh:
+    with open_untrusted_regular(path) as fh:
         fh.seek(floor)
         for batch in _record_batches(fh, lo=floor, size=size, ceiling=ceiling):
             hi = batch.hi

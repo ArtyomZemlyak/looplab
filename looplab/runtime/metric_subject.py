@@ -335,6 +335,14 @@ def bind_one(workdir, rel: str, *, since: Optional[float] = None,
     # Containment is asked FIRST, so a name that also escapes says so — every row names it
     # surrogate-safe either way.
     name = surrogate_safe(str(rel))
+    try:
+        os.fsencode(str(rel))
+    except UnicodeEncodeError:
+        # A name no filesystem call can even spell — a lone surrogate outside `surrogateescape`'s
+        # range, e.g. a JSON `\ud800` — has no location to be inside or outside of: `resolve()`
+        # raised on it and the containment guard read that as "escapes", which the rendered reason
+        # then stated as a fact (critic 2026-09-26, driven).
+        return {"path": name, "bound": False, "reason": "unreadable"}
     p = confine(workdir, rel) if confine is not None else _fallback_confine(workdir, rel)
     if p is None:
         return {"path": name, "bound": False, "reason": "escapes"}

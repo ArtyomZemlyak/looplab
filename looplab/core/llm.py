@@ -1398,11 +1398,13 @@ class OpenAICompatibleClient:
         header-WAIT (join_s = the header budget; `_accumulate_stream` then governs the body) and the
         non-stream whole-call bound (join_s covers the trickled body too)."""
         box: dict = {}
-        # THE LAST LINE BEFORE BYTES LEAVE: a lone surrogate anywhere in the request — a tool result,
-        # a rendered log line, a parsed candidate string — cannot be encoded, and the SDK raised
-        # `UnicodeEncodeError` building the request, out of whatever called the model (driven,
-        # critic 2026-09-26: one printed `no_score` reason took `Engine.run()` down). Replacing it
-        # with `?` changes nothing that could have been sent, so no prompt contract moves.
+        # THE LAST LINE BEFORE BYTES LEAVE THIS TRANSPORT: a lone surrogate anywhere in the request —
+        # a tool result, a rendered log line, a parsed candidate string — cannot be encoded, and the
+        # SDK raised `UnicodeEncodeError` building the request, out of whatever called the model
+        # (driven, critic 2026-09-26: one printed `no_score` reason took `Engine.run()` down).
+        # Replacing it with `?` changes nothing that could have been sent, so no prompt contract
+        # moves. Not the only transport: `agents/cli_agent.py` applies the same rule to the prompt it
+        # hands a coding CLI through argv or a file.
         kwargs = surrogate_safe_tree(kwargs)
 
         def _call():

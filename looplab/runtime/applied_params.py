@@ -111,6 +111,7 @@ from __future__ import annotations
 from typing import Optional
 
 from looplab.core import param_carriers
+from looplab.core.node_evidence import read_bounded_regular_target
 from looplab.runtime.metric_subject import bind_one, resolve_glob
 
 # Authority vocabulary, strongest first. A REGISTRY (CLAUDE.md): `engine/champion_caveats.py` and the
@@ -207,13 +208,14 @@ def _offer(readings: dict, key: str, value: float, rel: str, line: int, how: str
 
 
 def _read(path) -> Optional[str]:
-    """One carrier's text, or None. Bounded, and total over everything a filesystem can raise."""
+    """One carrier's text, or None. Bounded, total over everything a filesystem can raise, and never
+    BLOCKING: a carrier `bind_one` checked can be swapped for a FIFO before this reopens it by path
+    (critic 2026-09-26), so it is read by `core/node_evidence.py::read_bounded_regular_target`."""
     try:
-        with open(path, "rb") as fh:
-            raw = fh.read(MAX_CARRIER_BYTES)
-        return raw.decode("utf-8", "replace")
-    except (OSError, ValueError):
+        raw = read_bounded_regular_target(path, MAX_CARRIER_BYTES)
+    except ValueError:
         return None
+    return None if raw is None else raw.decode("utf-8", "replace")
 
 
 def _resolved_carrier(workdir, pattern, *, since, confine=None):
