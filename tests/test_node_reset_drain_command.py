@@ -204,35 +204,26 @@ def test_a_drain_reset_of_a_finished_host_graded_run_is_refused_across_its_split
 
 # ------------------------------------------------------------------ critic 2026-09-26, 68.3b pass
 
-def test_a_drain_never_attaches_to_a_pending_plain_reset_nor_the_reverse(tmp_path):
+def test_a_drain_never_attaches_to_a_pending_plain_reset_nor_the_reverse(tmp_path, monkeypatch):
     """MEDIUM (critic 2026-09-26, driven): the unresolved-intent guard matched on the payload alone,
     so a "re-score, then pause" click was answered `retry_existing_command` naming a pending PLAIN
     reset — which the UI attaches to — and the whole search resumed. How a reset is served is part
-    of the intent."""
-    rd = _seed(tmp_path, paused=True)
-    driver = _Driver(alive=True)            # an engine that never acks: the plain reset stays open
-    client, _srv = _client(tmp_path, driver, timeout=0.08, observation=0.25)
-    plain = _terminal(client, _post(client, "node_reset", _reset(), "plain-open").json())
-    assert plain["status"] == "timed_out", plain
-    drain = _post(client, "node_reset", _reset(), "drain-fresh", drain_only=True)
-    # Its own record, answered on its own terms (here: the plain reset already moved the node's
-    # generation) — never a 409 pointing the UI at the plain command to attach to.
-    assert drain.status_code == 200, drain.text
-    assert drain.json()["id"] != plain["id"] and drain.json()["status"] == "rejected"
-
-    other = tmp_path / "other"
-    rd2 = _seed(other, paused=True)
-    driver2 = _Driver()
-    driver2.on_spawn = lambda: setattr(driver2, "alive", True)   # starts, never acks
-    client2, _srv2 = _client(other, driver2, timeout=0.08, observation=0.25)
-    pending_drain = _terminal(client2, _post(client2, "node_reset", _reset(), "drain-open",
-                                             drain_only=True).json())
-    assert pending_drain["status"] == "timed_out", pending_drain
-    again = _post(client2, "node_reset", _reset(), "plain-fresh")
-    assert not (again.status_code == 409
-                and again.json()["detail"].get("existing_command_id") == pending_drain["id"]), (
-        again.text)
-    assert "node_reset" in _types(rd2)
+    of the intent: the second command is now just "another command in progress", which the UI does
+    not attach to. Pending = accepted by a server that died before admitting it (a parked worker)."""
+    for first_drain in (False, True):
+        root = tmp_path / f"first-drain-{first_drain}"
+        rd = _seed(root, paused=True)
+        client, srv = _client(root, _Driver())
+        monkeypatch.setattr(srv.commands, "_start_worker", lambda *a: None)
+        pending = _post(client, "node_reset", _reset(), "pending",
+                        **({"drain_only": True} if first_drain else {})).json()
+        assert pending["status"] == "accepted", pending
+        second = _post(client, "node_reset", _reset(), "second",
+                       **({} if first_drain else {"drain_only": True}))
+        assert second.status_code == 409, second.text
+        detail = second.json()["detail"]
+        assert detail["code"] == "command_in_progress", detail
+        assert "node_reset" not in _types(rd)
 
 
 def test_a_failed_drain_is_promoted_only_by_a_drains_own_ack(tmp_path):
