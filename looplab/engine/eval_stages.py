@@ -23,6 +23,7 @@ import re
 import stat
 from pathlib import Path
 
+from looplab.core.atomicio import file_identity
 from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.node_evidence import (normalized_newlines, read_bounded_regular_file,
@@ -294,7 +295,9 @@ def _say_manifest_refused(path: Path, raw) -> None:
             why = "it is not a regular file"
         else:
             why = "it could not be read"              # a permission, or swapped after the check
-    said = (str(path), why) + ((st.st_dev, st.st_ino, st.st_mtime_ns) if st is not None else ())
+    # Said once per (name, reason, FILE): a manifest rewritten or replaced under the same name is a
+    # new refusal and is said again — `file_identity`, the "same file AND unchanged" tier.
+    said = (str(path), why) + (file_identity(st) if st is not None else ())
     if said in _MANIFEST_REFUSALS_SAID:
         return
     if len(_MANIFEST_REFUSALS_SAID) >= _MANIFEST_REFUSALS_SAID_MAX:
