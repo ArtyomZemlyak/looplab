@@ -23,6 +23,7 @@ from pathlib import Path
 
 from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
+from looplab.core.node_evidence import read_bounded_regular_file, read_bounded_regular_target
 
 # The reply protocol the inter-stage checker answers in, and the ONLY three things it can mean. The
 # vocabulary itself lives in `runtime/command_eval.py` beside the code that acts on it; this is the
@@ -241,6 +242,10 @@ def parse_deadline_reply(text: str) -> bool:
     return m is not None and m.group(1).upper() == _DEADLINE_FINISHING
 
 
+# The largest workdir `.py` the reuse predicate reads to trace imports; a bigger one makes the stage
+# opaque (no reuse), the fail-closed direction.
+_REACHABLE_SOURCE_MAX_BYTES = 16 * 1024 * 1024
+
 # `_resolve_stages`' "the caller did not ask `_operator_stages` yet" — distinct from its `None`
 # answer ("no valid operator list"), which a caller may already hold.
 _ASK = object()
@@ -351,9 +356,16 @@ class EvalStagesMixin:
         # drift (M7).
         preceding = None
         mf = Path(workdir) / "looplab_stages.json"
-        if mf.exists():
+        # THE UNTRUSTED READ (critic 2026-09-26, driven): the manifest sits in the candidate's
+        # workdir, and a FIFO planted under its name blocked the ENGINE's event loop here for good,
+        # three times per node, while a link to `/dev/zero` cost a gigabyte of RSS. Read by the rule
+        # the server's log view already applied to the same file (`serve/routers/runs.py::node_logs`):
+        # no link followed, nothing that blocks, `STAGE_MANIFEST_MAX_BYTES` at most — anything else is
+        # no manifest, which is the single-command fallback below.
+        raw = read_bounded_regular_file(mf, command_eval.STAGE_MANIFEST_MAX_BYTES + 1)
+        if raw is not None and len(raw) <= command_eval.STAGE_MANIFEST_MAX_BYTES:
             try:
-                preceding = command_eval.materialized_stages(json.loads(mf.read_text(encoding="utf-8")))
+                preceding = command_eval.materialized_stages(json.loads(raw.decode("utf-8")))
             except Exception:  # noqa: BLE001 — a malformed manifest just falls back to the single command
                 preceding = None
         if preceding:
@@ -890,10 +902,14 @@ class EvalStagesMixin:
             p = wd / rel
             if not p.exists():
                 continue
-            try:
-                src = p.read_text(encoding="utf-8", errors="replace")
-            except Exception:  # noqa: BLE001
-                continue
+            # BOUNDED, NON-BLOCKING, and a file it cannot read makes the stage OPAQUE rather than
+            # skipped (critic 2026-09-26): the module was swappable for a FIFO before this blocking
+            # read, and skipping it — what this did on any error — drops its imports from the
+            # closure, which is the MISSED-dependency direction that scores a stale checkpoint.
+            data = read_bounded_regular_target(p, _REACHABLE_SOURCE_MAX_BYTES + 1)
+            if data is None or len(data) > _REACHABLE_SOURCE_MAX_BYTES:
+                return None
+            src = data.decode("utf-8", errors="replace")
             # Strip `#` comments BEFORE both import scans: the paren pattern's `[^)]*` group stops
             # at the FIRST ')', so a ')' inside a trailing comment (`vit,  # backbone (legacy)`)
             # would end the group early and silently drop every name after it from the closure.

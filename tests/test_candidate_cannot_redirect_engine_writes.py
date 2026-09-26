@@ -241,3 +241,95 @@ def test_a_name_no_filesystem_call_can_spell_is_unreadable_not_escaping(tmp_path
     row = bind_one(str(tmp_path), "\ud800.bin")
     assert row["bound"] is False and row["reason"] == "unreadable"
     assert "\ud800" not in row["path"]
+
+
+# --------------------------------------------------------------------- the engine's own readers (5th pass)
+def _repo_engine(tmp_path):
+    from looplab.adapters.repo_task import NoOpRepoDeveloper, RepoParamResearcher
+    from tests.factories import make_engine
+    from tests.test_eval_protocol_comparability import _task
+
+    return make_engine(tmp_path / "run", task=_task(), researcher=RepoParamResearcher({}),
+                       developer=NoOpRepoDeveloper(), n_seeds=1, max_nodes=1)
+
+
+@POSIX_ONLY_OS_CALLS
+def test_the_stage_manifest_is_read_by_the_untrusted_rule(tmp_path, monkeypatch):
+    """Critic 2026-09-26, driven: a FIFO planted as `looplab_stages.json` blocked the engine's event
+    loop in `_resolve_stages` for good, and a link to `/dev/zero` cost a gigabyte of RSS."""
+    import json
+
+    from looplab.runtime import command_eval
+
+    engine = _repo_engine(tmp_path)
+    es = dict(engine._eval_spec)
+    wd = _workdir(tmp_path)
+    score = ([sys.executable, "ttrain_cli.py"], 60.0)
+    os.mkfifo(wd / "looplab_stages.json")
+    assert _returns_promptly(engine._resolve_stages, str(wd), es, None, *score) is None
+    os.unlink(wd / "looplab_stages.json")
+    (wd / "looplab_stages.json").symlink_to("/dev/zero")
+    assert _returns_promptly(engine._resolve_stages, str(wd), es, None, *score) is None
+    os.unlink(wd / "looplab_stages.json")
+    manifest = {"stages": [{"name": "prep", "command": [sys.executable, "prep.py"]}]}
+    (wd / "looplab_stages.json").write_text(json.dumps(manifest), encoding="utf-8")
+    stages = engine._resolve_stages(str(wd), es, None, *score)
+    assert [stage["name"] for stage in stages] == ["prep", "score"], "a regular manifest is read"
+    monkeypatch.setattr(command_eval, "STAGE_MANIFEST_MAX_BYTES", 10)
+    assert engine._resolve_stages(str(wd), es, None, *score) is None, "over the bound: no manifest"
+
+
+@POSIX_ONLY_OS_CALLS
+def test_a_module_the_reuse_closure_cannot_read_makes_the_stage_opaque(tmp_path):
+    """Skipping an unreadable module — what the closure did on any error — drops its imports, the
+    MISSED-dependency direction that scores a stale checkpoint; a FIFO also blocked the read."""
+    from looplab.engine.eval_stages import EvalStagesMixin
+
+    wd = _workdir(tmp_path)
+    (wd / "train.py").write_text("import loss\nprint(1)\n", encoding="utf-8")
+    (wd / "loss.py").write_text("X = 1\n", encoding="utf-8")
+    stages = [{"name": "train", "command": [sys.executable, "train.py"]}]
+    reached = EvalStagesMixin._stage_reachable_files(stages, wd)
+    assert reached is not None and {"train.py", "loss.py"} <= set(reached)
+    os.unlink(wd / "loss.py")
+    os.mkfifo(wd / "loss.py")
+    assert _returns_promptly(EvalStagesMixin._stage_reachable_files, stages, wd) is None
+
+
+@POSIX_ONLY_OS_CALLS
+def test_the_tamper_audit_never_follows_a_planted_link_or_reads_unbounded(tmp_path, monkeypatch):
+    """Critic 2026-09-26, driven: `grader.py -> big.bin` had the audit read the whole target on the
+    event loop. A link, a FIFO or a directory in place of the file the engine wrote is a tamper."""
+    from looplab.core import node_evidence
+    from looplab.engine import audit as audit_module
+
+    engine = _repo_engine(tmp_path)
+    engine._assets = {"grader.py": "ANSWERS = [1, 2]\n", "key.bin": b"\x00\x01"}
+    wd = _workdir(tmp_path)
+    big = wd / "big.bin"
+    big.write_bytes(b"x" * (1 << 20))
+    (wd / "grader.py").symlink_to(big)
+    os.mkfifo(wd / "key.bin")
+    reads = []
+    real = node_evidence.read_bounded_regular_file
+    monkeypatch.setattr(audit_module, "read_bounded_regular_file",
+                        lambda path, limit, **kw: reads.append((str(path), limit))
+                        or real(path, limit, **kw))
+    sigs = _returns_promptly(engine._audit_workdir_writes, wd, {"grader.py", "key.bin"})
+    assert sorted(s["signal"] for s in sigs) == ["protected_write", "protected_write"], sigs
+    assert all("link or a non-regular file" in s["detail"] for s in sigs)
+    assert reads == [], "nothing a link points at is read"
+    # An honest copy is clean, and the read is bounded by the baseline, not the file.
+    os.unlink(wd / "grader.py")
+    os.unlink(wd / "key.bin")
+    (wd / "grader.py").write_bytes(b"ANSWERS = [1, 2]\r\n")          # a text-mode writer's newline
+    (wd / "key.bin").write_bytes(b"\x00\x01")
+    assert engine._audit_workdir_writes(wd, {"grader.py", "key.bin"}) == []
+    assert all(limit <= 2 * 17 + 2 for _path, limit in reads), reads
+
+
+def test_the_server_and_the_engine_bound_the_stage_manifest_alike():
+    from looplab.runtime.command_eval import STAGE_MANIFEST_MAX_BYTES
+    from looplab.serve.routers import runs
+
+    assert runs._STAGE_MANIFEST_MAX_BYTES == STAGE_MANIFEST_MAX_BYTES

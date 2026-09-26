@@ -129,7 +129,11 @@ _LEGACY_LOG_MAX_ROWS = 100_000
 _LEGACY_LOG_MAX_BYTES = 64 * 1024 * 1024        # ~64 MiB aggregate response ceiling for the flat array
 # The Developer's `looplab_stages.json` as `node_logs` reads it on every poll: a manifest is a few KiB,
 # so a larger file is not one and is read as absent (review 2026-09-22, SRV2-03 — it was `read_text`).
+# The same bound the engine reads the manifest by (`runtime/command_eval.py::STAGE_MANIFEST_MAX_BYTES`), spelled
+# here because `serve` reaches `runtime` only through deferred imports; `tests/test_candidate_cannot_redirect_engine_writes.py`
+# pins the two equal.
 _STAGE_MANIFEST_MAX_BYTES = 1024 * 1024
+
 
 def _conversation_etag(run_id: str, node_id: int, run_generation: Optional[str],
                        attempt: int, span_cap: int, source_revision: str, *,

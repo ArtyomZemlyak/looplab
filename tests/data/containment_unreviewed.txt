@@ -21,7 +21,6 @@ looplab/engine/costs.py::find_cost_accountants#1
 looplab/engine/costs.py::reconcile_cost_accountants#1
 looplab/engine/eval_stages.py::EvalStagesMixin._deadline_grace_fn#0
 looplab/engine/eval_stages.py::EvalStagesMixin._stage_check_fn#0
-looplab/engine/eval_stages.py::EvalStagesMixin._stage_reachable_files#0
 looplab/engine/evaluate.py::EvaluateMixin._record_node_build_delta#1
 looplab/engine/evaluate.py::EvaluateMixin._repair_salvaged_cause#0
 looplab/engine/evaluate.py::EvaluateMixin._salvage_reader_root#0

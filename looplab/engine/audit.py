@@ -14,15 +14,23 @@ record beside it (`_record_distribution_shift`)."""
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
 
 from looplab.agents.role_wrappers import audit_extra_of
 from looplab.core.containment import contain
+from looplab.core.node_evidence import read_bounded_regular_file
+from looplab.core.pathsafe import is_reparse
 from looplab.events.types import (EV_AGENT_VALIDATED, EV_CARD_RANKED, EV_DATA_LEAKAGE,
                                   EV_DATA_SHIFT, EV_FORESIGHT_SELECTED, EV_HYPOTHESIS_RANKED,
                                   EV_NODE_EVALUATED)
 from looplab.trust.drift import distribution_shift, rows_to_columns
 from looplab.trust.leakage import target_leakage, temporal_leakage, train_test_contamination
+
+
+def _normalized_newlines(text: str) -> str:
+    """`text` with CRLF and lone CR read as LF — what a text-mode reader would have handed back."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 class AuditMixin:
@@ -293,28 +301,51 @@ class AuditMixin:
                     continue                        # no baseline placed -> genuinely un-judgeable
                 p = wd / name
                 try:
-                    if not p.is_file():
+                    try:
+                        st = os.lstat(p)
+                    except FileNotFoundError:
+                        st = None
+                    if st is None:
                         # The engine placed this protected file; it is now GONE. A deletion is a tamper
                         # the static write-scan never sees (os.remove/os.unlink/Path.unlink). Never clean.
                         sigs.append({"signal": "protected_missing",
                                      "detail": f"protected file '{name}' was deleted at runtime"})
                         continue
-                    # Compare as TEXT for str assets: `_write_assets` writes them via `Path.write_text`
-                    # (text mode translates '\n' -> os.linesep), so a raw-BYTES compare would flag EVERY
-                    # honest eval where os.linesep != '\n' (Windows CRLF) as a tamper. Bytes byte-exact.
+                    # The engine placed a REGULAR file here. Anything else — a link, a FIFO, a directory
+                    # — is the candidate's replacement, and it is never followed (critic 2026-09-26,
+                    # driven: `grader.py -> big.bin` had this read the whole target, unbounded, on the
+                    # event loop inside the terminal write).
+                    if not stat.S_ISREG(st.st_mode) or is_reparse(st):
+                        sigs.append({"signal": "protected_write",
+                                     "detail": f"protected file '{name}' was replaced at runtime by a "
+                                               "link or a non-regular file"})
+                        continue
+                    expected = (original.encode("utf-8") if isinstance(original, str)
+                                else bytes(original))
+                    # BOUNDED: an untampered file is at most every '\n' widened to '\r\n', so a read
+                    # of twice the baseline plus one byte tells a match from a larger file.
+                    raw = read_bounded_regular_file(p, 2 * len(expected) + 2)
+                    if raw is None:
+                        sigs.append({"signal": "protected_unreadable",
+                                     "detail": f"protected file '{name}' is unreadable after the eval"})
+                        continue
+                    # Compare as TEXT for str assets, newlines normalized on BOTH sides: a text-mode
+                    # writer (the engine's own, before its writes became byte-exact renames) widened
+                    # '\n' to os.linesep, and a raw-BYTES compare would flag every such honest eval as
+                    # a tamper. Bytes assets compare byte-exact.
                     if isinstance(original, str):
                         try:
-                            got = p.read_text(encoding="utf-8")
-                        except (OSError, UnicodeDecodeError):
+                            got = raw.decode("utf-8")
+                        except UnicodeDecodeError:
                             # Unreadable protected input is NOT clean: an eval that corrupts the answer
                             # key to invalid bytes must not read as untampered (the old code set got=None
                             # and fell through to tampered=False). Surface it as a hard signal.
                             sigs.append({"signal": "protected_unreadable",
                                          "detail": f"protected file '{name}' is unreadable after the eval"})
                             continue
-                        tampered = got != original
+                        tampered = _normalized_newlines(got) != _normalized_newlines(original)
                     else:
-                        tampered = p.read_bytes() != bytes(original)
+                        tampered = raw != expected
                     if tampered:
                         sigs.append({"signal": "protected_write",
                                      "detail": f"protected file '{name}' was modified at runtime"})

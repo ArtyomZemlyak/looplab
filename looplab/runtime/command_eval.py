@@ -1804,6 +1804,12 @@ def stage_output_producers(stages, upto: int) -> dict:
     return out
 
 
+# The largest `looplab_stages.json` any reader of it takes — the engine's pipeline resolution
+# (`engine/eval_stages.py::_resolve_stages`) and the server's log view (`serve/routers/runs.py`) —
+# ONE bound, since both read the same candidate-written file. A real manifest is a few hundred bytes.
+STAGE_MANIFEST_MAX_BYTES = 1024 * 1024
+
+
 def materialized_stages(manifest_obj, *, reserved: tuple = ("score",)) -> Optional[list]:
     """The validated PRECEDING stage list from a PARSED `looplab_stages.json` object, or None when it
     declares no usable pipeline / fails validation. Accepts BOTH the wrapped ``{"stages":[...]}`` shape
