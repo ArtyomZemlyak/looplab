@@ -322,6 +322,8 @@ foresight's). Land or explicitly defer each.
 4. Old event semantics remain foldable and are covered by the golden replay gate. The core model is not
    byte-identical to the original public dump: `RunState.hypotheses` was removed. The server now derives a
    deprecated read-only `hypotheses` compatibility projection from Cards; new consumers use `cards`.
+   Its `evidence` keeps the old meaning — the nodes that TESTED the card — so since 2026-09-26 it
+   leaves out `substituted_nodes` (builds that ran something else), which `cards[].evidence` keeps.
 5. `FoldCursor.snapshot()` deep-copies before finalize — the `_derive_cards` post-pass must be
    destructive-safe on the copy and never leak into the next suffix.
 

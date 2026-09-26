@@ -140,6 +140,11 @@ def _repair_change_set(prev_files, prev_deleted, repaired_files,
     # The repair's REAL change set = files whose content actually differs from the pre-repair
     # node (last_files is cumulative — see prev_files above), plus THIS repair's deletions.
     changed = {f for f, c in repaired_files.items() if prev_files.get(f) != c}
+    # The idea report (`core/idea_report.py`) is the Developer's ANSWER about the build, not an input
+    # to anything the eval runs: a repair that rewrote only it moved no code — counting it would
+    # re-evaluate identical code and invalidate every reusable stage checkpoint for nothing.
+    from looplab.core.idea_report import IDEA_REPORT_NAME
+    changed.discard(IDEA_REPORT_NAME)
     # Deletions likewise get the delta, not the cumulative set: a deletion that predates
     # the completed train stage cannot invalidate its checkpoint — the stage already ran
     # (and passed) without that file on disk. Blocking on the cumulative `repaired_deleted`

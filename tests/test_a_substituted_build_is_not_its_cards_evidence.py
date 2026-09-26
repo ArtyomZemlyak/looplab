@@ -428,3 +428,23 @@ def test_a_struck_rebuild_is_not_work_the_return_waits_on(tmp_path):
     card = fold(engine.store.read_all()).cards["card-2"]
     assert card.evidence == sorted([first, second])
     assert "work_terminal" in card.selection_blockers
+
+
+def test_the_deprecated_hypotheses_rows_list_only_the_nodes_that_tested_the_card(tmp_path):
+    """The old Hypothesis `evidence` meant "the nodes that TESTED it". A card retired on two builds
+    its Developer reported as something else keeps them in `cards[].evidence` (the audit set), but
+    the `/state` compat row — same old shape, `tests/test_server.py` pins it — must not call them
+    tests."""
+    from fastapi.testclient import TestClient
+
+    from looplab.serve.server import make_app
+
+    engine, producer = _setup(tmp_path, "subrun")
+    first = _build(engine, producer, "card-2", _report("different"), x=0.3)
+    _evaluate(engine, first, 0.9)
+    producer.last_files = _report("different", "again")
+    second = _commit_speculative_node(engine)
+    _evaluate(engine, second, 0.8)
+    state = TestClient(make_app(tmp_path)).get("/api/runs/subrun/state").json()["state"]
+    assert state["cards"]["card-2"]["evidence"] == sorted([first, second])
+    assert state["hypotheses"]["card-2"]["evidence"] == []

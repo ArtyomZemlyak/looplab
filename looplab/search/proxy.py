@@ -20,6 +20,14 @@ from looplab.core.models import Node, RunState
 from looplab.core.numeric import euclidean, knn_idw
 
 
+
+def _neighbours(state: RunState, node: Node) -> list:
+    """The evaluated breedable nodes the kill may predict `node` from — the ONE population both
+    `score_with_uncertainty` and `support_radius` read (see the former for why substitutions leave)."""
+    from looplab.core.idea_report import idea_not_tested
+    return [n for n in state.breedable_nodes()
+            if n.id != node.id and n.metric is not None and not idea_not_tested(n, state.nodes)]
+
 class ProxyScorer:
     """Predict a candidate's metric from the nearest evaluated neighbours in parameter space and
     skip the bottom `kill_fraction` predicted to be doomed. `warmup` evaluated nodes are required
@@ -54,12 +62,16 @@ class ProxyScorer:
         respect (doc 51 §5). Returns None when there's no numeric signal to predict from (proxy
         abstains). `breedable_nodes` (not feasible_nodes) drops trust-gate cheaters so their
         inflated metric can't pull the prediction toward the cheated params (doc 14 §2.2); a no-op
-        under audit."""
+        under audit.
+
+        A node whose Developer built something ELSE (`core/idea_report.py`) is no neighbour either:
+        its number measured another idea at these params, and the one candidate that sits EXACTLY on
+        them is its returned card's rebuild — an exact match the kill would read as a certainty and
+        discard on the substitution's number. (The endgame surrogate keeps it: a sweep varies the
+        code that ran, which is what that sample measured.)"""
         target = self._numeric(node.idea.params)
         neighbours = []
-        for n in state.breedable_nodes():
-            if n.id == node.id or n.metric is None:
-                continue
+        for n in _neighbours(state, node):
             p = self._numeric(n.idea.params)
             keys = set(target) & set(p)
             if not keys:
@@ -76,9 +88,7 @@ class ProxyScorer:
         nearest-neighbour distance among the breedable evaluated nodes, over the same per-pair key
         subspaces `score_with_uncertainty` measures in. None below two such nodes."""
         pts = []
-        for n in state.breedable_nodes():
-            if n.id == node.id or n.metric is None:
-                continue
+        for n in _neighbours(state, node):
             p = self._numeric(n.idea.params)
             if p:
                 pts.append(p)

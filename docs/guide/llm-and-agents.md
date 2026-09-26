@@ -400,7 +400,8 @@ the minimum), and neither a parent's nor a previous build's report is carried in
 `different` / `not_implemented` node keeps its metric but is not a test of its card: the card's
 verdict ignores it and the idea goes back on the board once (`Card.substituted_nodes`; the Cards bullet
 of [the UI guide](ui.md#what-it-does)), and every surface that shows the node's rationale labels it
-`NOT A TEST OF card-N's IDEA`.
+`NOT A TEST OF card-N's IDEA`. A repair whose only change is the report moved no code: it is not an
+edit, so it neither re-evaluates identical code nor invalidates a reusable stage checkpoint.
 
 A **repair** skips stages+plan and is one focused session. The first **two** phases are read-only: they
 get the repo scouts, the env inspector, the probe, and any operator-pinned preflight commands
