@@ -6,8 +6,10 @@ Driven through the real CLI on a real toy run, read back off the run's own log.
 """
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
+import pytest
 from typer.testing import CliRunner
 
 from looplab.cli import app
@@ -127,10 +129,13 @@ def test_what_the_cli_refuses_to_drain():
 
     assert drain_only_refusal(state(nodes=[owed]), "pending_finalize")[0] == 2
     assert drain_only_refusal(state(nodes=[owed]), "finalization_pending")[0] == 2
-    assert drain_only_refusal(state(nodes=[owed]), "finished")[0] == 0
+    assert drain_only_refusal(state(), "finished")[0] == 0, "finished, nothing owed: no lift"
     assert drain_only_refusal(state(), "paused")[0] == 0, "nothing owed: no lift, no re-pause"
     assert drain_only_refusal(state(nodes=[owed], holdout=[0]), "paused")[0] == 2
+    assert drain_only_refusal(state(nodes=[owed], holdout=[0]), "finished")[0] == 2
     assert drain_only_refusal(state(nodes=[owed]), "paused") is None
+    assert drain_only_refusal(state(nodes=[owed]), "finished") is None, (
+        "a finished run that still owes work — the eval budget finalized it — is drained")
     assert drain_only_refusal(state(nodes=[owed]), "live") is None
     waiting = SimpleNamespace(**{**vars(owed), "attempt": 0, "rerun_from": "implement"})
     assert drain_only_refusal(state(nodes=[waiting]), "live") is None, "the loop head rebuilds it"
@@ -246,3 +251,142 @@ def test_a_dispatch_that_admits_nothing_pauses_instead_of_spinning(tmp_path, mon
     assert [e.data.get("reason") for e in tail if e.type == "pause"] == [
         DRAIN_ONLY_STUCK_REASON.format(ids="1")]
     assert fold(store.read_all()).nodes[1].status.value == "pending"
+
+
+def _config(rd, **values):
+    path = rd / "config.snapshot.json"
+    path.write_text(json.dumps({**json.loads(path.read_text()), **values}))
+
+
+def test_a_drain_is_never_finished_as_a_systemic_failure(tmp_path, monkeypatch):
+    """Critic 2026-09-26, driven: every other node failed, the operator fixed the environment and
+    reset one — and the systemic-failure gate above the hook FINISHED the run, the reset node left
+    pending and the run's lessons written to cross-run memory."""
+    _isolated(monkeypatch, tmp_path)
+    rd, store = _finished_run(tmp_path)
+    for node_id in range(4):
+        _reset(store, node_id)
+        store.append("node_failed", {"node_id": node_id, "generation": 1, "error": "env broken",
+                                     "reason": "crash"})
+    _reset(store, 0)
+    mark = store.read_all()[-1].seq
+    out = _drain(rd)
+    assert out.exit_code == 0, out.output
+    tail = [e for e in store.read_all() if e.seq > mark]
+    assert "run_finished" not in {e.type for e in tail}, [e.type for e in tail]
+    assert fold(store.read_all()).nodes[0].metric is not None
+    assert [e.data.get("reason") for e in tail if e.type == "pause"] == [DRAIN_ONLY_PAUSE_REASON]
+
+
+def test_a_budget_finalized_run_that_owes_work_is_drained_once_the_budget_is_raised(
+        tmp_path, monkeypatch):
+    """The budget pause's remedy is the run's config, not a plain resume — which finalizes the run
+    on the same budget, the reset node still pending. The drain then saw a FINISHED run and said
+    "nothing owed" while the node was (critic 2026-09-26, driven)."""
+    _isolated(monkeypatch, tmp_path)
+    rd, store = _finished_run(tmp_path, "-s", "max_eval_seconds=0.000001", nodes=3)
+    _reset(store, 2)
+    assert _drain(rd).exit_code == 0                         # paused: the budget is spent
+    reason = [e.data.get("reason") for e in store.read_all() if e.type == "pause"][-1]
+    assert "raise it in the run's config" in reason and "would finalize the run" in reason
+    assert CliRunner().invoke(app, ["resume", str(rd)]).exit_code == 0   # the plain resume...
+    state = fold(store.read_all())
+    assert state.finished and state.nodes[2].status.value == "pending"  # ...finalized it
+    _config(rd, max_eval_seconds=1e9)
+    out = _drain(rd)
+    assert out.exit_code == 0, out.output
+    assert "drain-only: 1 evaluation(s) owed (node(s) 2)" in out.output
+    after = fold(store.read_all())
+    assert after.nodes[2].metric is not None and after.paused and not after.finished
+
+
+def test_a_reset_after_a_disclosure_is_refused_rather_than_retraining_every_incumbent(
+        tmp_path, monkeypatch):
+    """One reset after a holdout disclosure re-opens EVERY evaluated node (the epoch rule), and the
+    drain retrained all four while saying "every reset or interrupted evaluation finished" (critic
+    2026-09-26, driven). The re-queued nodes are named and the drain refuses before anything."""
+    _isolated(monkeypatch, tmp_path)
+    rd, store = _finished_run(tmp_path)
+    for node_id in (0, 2, 3):
+        store.append("holdout_evaluated", {"node_id": node_id, "generation": 0, "metric": 1.0,
+                                           "search_epoch": 0})
+    _reset(store, 1)
+    before = [e.seq for e in store.read_all()]
+    out = _drain(rd)
+    assert out.exit_code == 2, out.output
+    assert "node(s) 0, 2, 3 were re-queued by the holdout epoch rotation, not reset" in out.output
+    assert [e.seq for e in store.read_all()] == before, "refused before anything was appended"
+
+
+def test_a_time_budget_pauses_between_evaluations(tmp_path, monkeypatch):
+    """The dispatch re-checks the eval budget before each evaluation but never the wall clock, so a
+    batch ran every owed node past `max_seconds` (critic 2026-09-26). With a time budget the drain
+    hands one node per turn and asks the clock between them."""
+    _isolated(monkeypatch, tmp_path)
+    rd, store = _finished_run(tmp_path)
+    _reset(store, 1)
+    _reset(store, 2)
+    _config(rd, max_seconds=0.000001)
+    mark = store.read_all()[-1].seq
+    out = _drain(rd)
+    assert out.exit_code == 0, out.output
+    tail = [e for e in store.read_all() if e.seq > mark]
+    reasons = [e.data.get("reason") for e in tail if e.type == "pause"]
+    assert len(reasons) == 1 and "this invocation's time budget" in reasons[0], reasons
+    assert not any(e.type == "node_evaluated" for e in tail)
+
+
+def test_a_lifecycle_that_moves_mid_dispatch_is_progress_not_a_stall(tmp_path, monkeypatch):
+    """A reset landing while the dispatch runs moves the node to a new generation: the next turn
+    hands it again, and only a turn in which nothing moved pauses as stuck."""
+    _isolated(monkeypatch, tmp_path)
+    rd, store = _finished_run(tmp_path)
+    _reset(store, 1)
+    calls = []
+
+    async def reset_once(self, evals, state, max_es, *, research=True):
+        calls.append([a["node_id"] for a in evals])
+        if len(calls) == 1:
+            _reset(self.store, 1)
+        elif len(calls) > 3:
+            raise AssertionError(f"the drain spun: {calls}")
+
+    monkeypatch.setattr(Engine, "_dispatch_evals", reset_once)
+    out = _drain(rd)
+    assert out.exit_code == 0, out.output
+    assert calls == [[1], [1]], calls
+    assert fold(store.read_all()).nodes[1].attempt == 2
+
+
+def test_an_implement_reset_is_counted_as_a_rebuild_before_it_is_owed(tmp_path, monkeypatch):
+    _isolated(monkeypatch, tmp_path)
+    rd, store = _finished_run(tmp_path)
+    _reset(store, 1, "implement")
+    out = _drain(rd)
+    assert out.exit_code == 0, out.output
+    assert "0 evaluation(s) owed and 1 reset(s) to rebuild first (node(s) 1)" in out.output
+    assert fold(store.read_all()).nodes[1].metric is not None
+
+
+@pytest.mark.parametrize("max_seconds,batches", [(None, [[1, 2]]), (1e9, [[1], [2]])])
+def test_a_time_budget_hands_one_node_per_turn(tmp_path, monkeypatch, max_seconds, batches):
+    """Without a time budget every owed node goes to one dispatch; with one, a node per turn, so
+    the wall clock is asked between evaluations (the dispatch itself only re-checks eval seconds)."""
+    _isolated(monkeypatch, tmp_path)
+    rd, store = _finished_run(tmp_path)
+    _reset(store, 1)
+    _reset(store, 2)
+    if max_seconds is not None:
+        _config(rd, max_seconds=max_seconds)
+    handed = []
+
+    async def evaluate(self, evals, state, max_es, *, research=True):
+        handed.append([a["node_id"] for a in evals])
+        for a in evals:
+            node = fold(self.store.read_all()).nodes[a["node_id"]]
+            self.store.append("node_evaluated", {"node_id": node.id, "generation": node.attempt,
+                                                 "metric": 1.0, "violations": []})
+
+    monkeypatch.setattr(Engine, "_dispatch_evals", evaluate)
+    assert _drain(rd).exit_code == 0
+    assert handed == batches

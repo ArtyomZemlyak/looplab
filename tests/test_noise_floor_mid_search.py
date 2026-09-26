@@ -99,6 +99,11 @@ def test_the_mid_search_question_and_the_end_question(tmp_path):
     on._eval_inflight = {(0, 0)}
     assert not on._noise_floor_mid_search_due(state), "an evaluation is in flight: wait for it"
     on._eval_inflight = set()
+    # …nor while a Card build is in flight: the pass's rows would move the log its receipt is fenced
+    # on (critic 2026-09-26, driven with speculation on: a build request closed stale).
+    building = fold([*store.read_all(), *EventStore(tmp_path / "b.jsonl").read_all()])
+    building.buildings = {7: {"parent_ids": [0]}}
+    assert not on._noise_floor_mid_search_due(building), "a build is in flight: wait for it"
     assert not make_engine(tmp_path / "off", eval_noise_seeds=3)._noise_floor_mid_search_due(state)
     assert not make_engine(tmp_path / "noseeds",
                            noise_floor_mid_search=True)._noise_floor_mid_search_due(state)
@@ -109,6 +114,13 @@ def test_the_mid_search_question_and_the_end_question(tmp_path):
     state = fold(store.read_all())
     assert not on._noise_floor_mid_search_due(state), "mid-search is asked once, never retried"
     assert on._noise_floor_due(state), "…and the end ladder owns the retry of an empty pass"
+    # …but only while a seed is left to RUN: repeats that ran and failed are recorded (paid for,
+    # and charged once per seed by the fold), and the end pass would skip every one of them
+    # (critic 2026-09-26, driven: a second empty row, no second measurement).
+    for seed in (0, 1, 2):
+        store.append("eval_noise_seed", {"node_id": 0, "generation": 0, "seed": seed,
+                                         "metric": None, "eval_seconds": 1.0})
+    assert not on._noise_floor_due(fold(store.read_all())), "nothing left to run: not due"
     store.append("eval_noise_floor", {**floor, "n": 3, "metrics": [4.0, 4.0, 4.0], "mean": 4.0,
                                       "std": 0.0, "sem": 0.0, "spread": 0.0, "mid_search": True})
     assert not on._noise_floor_due(fold(store.read_all())), "a mid-search pass that counted stands"

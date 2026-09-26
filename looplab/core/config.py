@@ -1679,9 +1679,10 @@ class Settings(BaseSettings):
     # `events/card_ledger.py::verdict_support`) holds a single-run gain to this floor, and a floor
     # that lands only after the search is never read BY the search — a critic's three toy runs with
     # both instruments on printed 18 SUPPORT tokens, all 18 `single_run`. The same N evaluations,
-    # spent earlier, on the champion of that moment. A mid-search pass that counted fewer than two
-    # repeats (every seed abstained on a busy device) leaves the end-of-search pass due, so this can
-    # only move the measurement earlier, never lose it. OFF (the shipped default: it spends
+    # spent earlier, on the champion of that moment. A mid-search pass whose repeats ABSTAINED (a busy
+    # device, so fewer than two counted and those seeds carry no row) leaves the end-of-search pass
+    # due for them, so an abstention never costs the measurement; repeats that ran and failed are a
+    # measurement of failure and are not re-run (the fold charges each seed once). OFF (the shipped default: it spends
     # evaluations at a moment the operator did not ask for them) is the historical end-of-search
     # pass; the one reader is the engine knob `_noise_floor_mid_search`.
     noise_floor_mid_search: bool = False

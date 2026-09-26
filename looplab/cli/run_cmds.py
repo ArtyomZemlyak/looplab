@@ -370,7 +370,31 @@ def classify_prior_run(prior, prior_events) -> str:
     return "live"
 
 
-def drain_only_refusal(prior, prior_kind: str) -> Optional[tuple[int, str]]:
+def _awaiting_rebuild(prior, node) -> bool:
+    """A reset from implement/propose the loop head rebuilds before the drain evaluates it."""
+    return (node.status is NodeStatus.pending and not node.tombstoned
+            and node.id not in prior.aborted_nodes
+            and node.rerun_from in ("implement", "propose"))
+
+
+def _requeued_by_epoch(prior, prior_events, owed) -> list[int]:
+    """The owed nodes whose CURRENT lifecycle the holdout epoch rotation opened — re-queued for a
+    full re-evaluation on the newly hidden rows, not reset by anyone (doc 68 68.3a, critic
+    2026-09-26). Read off the one derivation of which event opened each lifecycle,
+    `events/git_export.py::node_lifecycles` (`requeued_at` on the lifecycle the rotation ended)."""
+    from looplab.events.git_export import node_lifecycles
+
+    superseded, _born = node_lifecycles(prior_events or ())
+    out = []
+    for node_id in owed:
+        node = prior.nodes[node_id]
+        ended = superseded.get((node_id, node.attempt - 1)) if node.attempt > 0 else None
+        if ended is not None and getattr(ended, "requeued_at", ""):
+            out.append(node_id)
+    return sorted(out)
+
+
+def drain_only_refusal(prior, prior_kind: str, prior_events=None) -> Optional[tuple[int, str]]:
     """Why `resume --drain-only` (doc 68 68.3a) will not drive this run — `(exit code, message)`,
     decided BEFORE anything is appended — or None to proceed. Critic 2026-09-26, driven: the plain
     lift below appends `resume`, and on a FINISHED run that opens a new search epoch; after a holdout
@@ -378,34 +402,41 @@ def drain_only_refusal(prior, prior_kind: str) -> Optional[tuple[int, str]]:
     owed and re-evaluated, all of them, on a run nobody had reset.
 
     * a wrap-up boundary: a finalize is pending, and a drain never finalizes (exit 2);
-    * a finished run: nothing is owed — a `node_reset` RE-OPENS a finished run itself, so a
-      finished one was reset by nobody (exit 0, nothing appended);
     * nothing owed at all (`engine/orchestrator.py::drain_owed`, or a reset from implement/propose
-      still waiting for the loop head's rebuild): nothing to drain, and a pause is not lifted only to
-      be put back (exit 0);
-    * a PAUSED run whose holdout is disclosed: lifting the pause rotates the epoch and re-queues
-      every evaluated node for re-evaluation on the newly hidden rows — a full retrain a drain will
-      not buy on its own (exit 2).
+      still waiting for the loop head's rebuild): nothing to drain, and a finish or a pause is not
+      lifted only to be put back (exit 0) — a `node_reset` re-opens a finished run itself;
+    * a holdout was disclosed and lifting a pause or a finish would rotate the epoch, re-queuing
+      every evaluated node (exit 2);
+    * owed nodes the epoch rotation RE-QUEUED rather than anyone reset — one reset after a
+      disclosure re-opens every incumbent, and a drain would retrain each of them from scratch
+      without having said so (exit 2);
+    * a FINISHED run that still owes work — the eval budget finalized it with a reset node pending —
+      is lifted and drained like a paused one.
     """
     if is_wrap_up(prior_kind):
         return 2, ("a finalize is pending on this run and --drain-only never finalizes; run "
                    "`looplab resume` without it (or `looplab finalize`) to complete it")
-    if prior_kind == "finished":
-        return 0, ("run is finished and nothing is owed an evaluation — nothing to drain. A "
-                   "`node_reset` re-opens a finished run; lifting the finish here would open a new "
-                   "search epoch instead")
-    owed = [node.id for node in prior.nodes.values()
-            if drain_owed(prior, node) or (
-                node.status is NodeStatus.pending and not node.tombstoned
-                and node.id not in prior.aborted_nodes
-                and node.rerun_from in ("implement", "propose"))]
-    if not owed:
+    owed = sorted(node.id for node in prior.nodes.values() if drain_owed(prior, node))
+    rebuild = [node.id for node in prior.nodes.values() if _awaiting_rebuild(prior, node)]
+    if not (owed or rebuild):
+        if prior_kind == "finished":
+            return 0, ("run is finished and nothing is owed an evaluation — nothing to drain. A "
+                       "`node_reset` re-opens a finished run; lifting the finish here would open a "
+                       "new search epoch instead")
         return 0, "nothing is owed an evaluation — nothing to drain; the run is left as it was"
-    if prior_kind == "paused" and prior.holdout_evaluated_ids:
-        return 2, ("a holdout was disclosed on this run: lifting its pause opens a new search epoch "
-                   "and re-queues every evaluated node for re-evaluation on the newly hidden rows, "
-                   "which --drain-only will not buy on its own; resume without --drain-only if that "
-                   "is the intent")
+    if prior_kind in ("paused", "finished") and prior.holdout_evaluated_ids:
+        return 2, ("a holdout was disclosed on this run: lifting its "
+                   + ("pause" if prior_kind == "paused" else "finish")
+                   + " opens a new search epoch and re-queues every evaluated node for "
+                   "re-evaluation on the newly hidden rows, which --drain-only will not buy on its "
+                   "own; resume without --drain-only if that is the intent")
+    requeued = _requeued_by_epoch(prior, prior_events, owed)
+    if requeued:
+        return 2, (f"node(s) {', '.join(map(str, requeued))} were re-queued by the holdout epoch "
+                   "rotation, not reset: after a holdout disclosure one reset re-opens every "
+                   "evaluated node for a full re-evaluation on the newly hidden rows, and a drain "
+                   f"would retrain all {len(owed)} owed node(s); resume without --drain-only if "
+                   "that is the intent")
     return None
 
 
@@ -1242,7 +1273,7 @@ def resume(
                 if drain_only:
                     # Refused or a no-op BEFORE the engine is built, and before `resume` could lift
                     # anything (`drain_only_refusal`).
-                    refusal = drain_only_refusal(prior, prior_kind)
+                    refusal = drain_only_refusal(prior, prior_kind, prior_events)
                     if refusal is not None:
                         code, message = refusal
                         typer.echo(message, err=code != 0)
@@ -1251,8 +1282,12 @@ def resume(
                         return
                     owed_ids = sorted(node.id for node in prior.nodes.values()
                                       if drain_owed(prior, node))
+                    rebuild_ids = sorted(node.id for node in prior.nodes.values()
+                                         if _awaiting_rebuild(prior, node))
                     typer.echo(f"drain-only: {len(owed_ids)} evaluation(s) owed"
                                + (f" (node(s) {', '.join(map(str, owed_ids))})" if owed_ids else "")
+                               + (f" and {len(rebuild_ids)} reset(s) to rebuild first (node(s) "
+                                  f"{', '.join(map(str, rebuild_ids))})" if rebuild_ids else "")
                                + " — evaluating them, then pausing")
                 # …and so does the REFUSE-VS-WARN decision that depends on it. `resume` is the one
                 # entry point that is wrap-up-only SOMETIMES: it LIFTS a finished/paused run back

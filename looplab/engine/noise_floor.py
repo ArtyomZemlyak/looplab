@@ -39,8 +39,9 @@ WHAT IT IS NOT. It is not confirmation, even though both run seeds:
   at the first creation boundary where a champion exists and no evaluation is in flight
   (`_noise_floor_mid_search_due`), because the proposal board's SUPPORT token holds a gain to this
   floor and a floor that lands after the search is never read BY it. A mid-search pass that counted
-  fewer than two repeats leaves the end pass due (`_noise_floor_due`); the flag can move the
-  measurement earlier, never lose it.
+  fewer than two repeats leaves the end pass due while it has a seed left to run
+  (`_noise_floor_due`): an ABSTAINED repeat is re-run at the end, a repeat that ran and failed is a
+  measurement of failure and is not.
 
   It is also not a node TERMINAL. Every repeat writes `eval_noise_seed`, never
   `node_evaluated`/`node_failed` — invariant #2 is one terminal per node, and a candidate that
@@ -123,14 +124,27 @@ class NoiseFloorMixin:
         did not ask for the probe is byte-identical to one built before it existed.
 
         A MID-SEARCH pass (`_noise_floor_mid_search_due`, doc 67 67.1a) that counted fewer than two
-        repeats — every seed abstained on a device another evaluation held — measured nothing, and
-        leaves this pass due: the flag may move the measurement earlier, never lose it. The END pass
-        carries no `mid_search` mark, so whatever it counts, it is the last."""
+        repeats — its seeds abstained on a device another evaluation held — measured nothing, and
+        leaves this pass due for the seeds it did not run. The END pass carries no `mid_search`
+        mark, so whatever it counts, it is the last."""
         if self.eval_noise_seeds <= 0:
             return False
         floor = state.eval_noise_floor
-        return floor is None or (isinstance(floor, dict) and floor.get("mid_search") is True
-                                 and (floor.get("n") or 0) < 2)
+        if floor is None:
+            return True
+        if not (isinstance(floor, dict) and floor.get("mid_search") is True
+                and (floor.get("n") or 0) < 2):
+            return False
+        # …and only when the end pass has a seed left to RUN (critic 2026-09-26, driven): a repeat
+        # that ran and failed is recorded — paid for, and charged once per seed by the fold — so the
+        # pass skips it, and a retry over a champion whose every seed is recorded measured nothing
+        # a second time. What the retry recovers is the ABSTAINED repeat (no row), or a champion the
+        # search has changed since.
+        champion = state.best()
+        if champion is None or champion.metric is None:
+            return False
+        recorded = state.eval_noise_seed_results.get(champion.id, {})
+        return any(seed not in recorded for seed in range(self.eval_noise_seeds))
 
     def _noise_floor_mid_search_due(self, state: RunState) -> bool:
         """Measure the floor NOW, mid-search (doc 67 67.1a, `Settings.noise_floor_mid_search`)?
@@ -145,6 +159,12 @@ class NoiseFloorMixin:
         if not (getattr(self, "_noise_floor_mid_search", False) and self.eval_noise_seeds > 0):
             return False
         if state.eval_noise_floor is not None or self._running_eval_node_ids():
+            return False
+        # Nor while a Card build is in flight or a build request is open: the pass's rows move the
+        # log a proposal's receipt is fenced on, and a build requested before it closed stale and
+        # was requested again (critic 2026-09-26, driven with speculation on).
+        head = getattr(self, "_head_request", None)
+        if state.buildings or (callable(head) and head(state) is not None):
             return False
         champion = state.best()
         return champion is not None and champion.metric is not None

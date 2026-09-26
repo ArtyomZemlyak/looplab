@@ -172,8 +172,9 @@ DRAIN_ONLY_PAUSE_REASON = ("drain-only resume: every reset or interrupted evalua
 DRAIN_ONLY_STUCK_REASON = ("drain-only resume: no evaluation could be admitted for node(s) {ids}; "
                            "`looplab resume` (without --drain-only) continues the search")
 DRAIN_ONLY_BUDGET_REASON = ("drain-only resume: {budget}, so node(s) {ids} were not evaluated; "
-                            "extend the budget and drain again, or `looplab resume` (without "
-                            "--drain-only) to let the search settle it")
+                            "raise it in the run's config (`max_eval_seconds` / `max_seconds` in "
+                            "config.snapshot.json) and drain again — a plain `looplab resume` "
+                            "would finalize the run on the same budget")
 
 
 def drain_owed(state: RunState, node) -> bool:
@@ -1897,7 +1898,12 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             # whether anything has EVER worked — see `systemic_failure_stop_reason` for why that is
             # the line between "the environment is broken, stop the run" and "this idea is broken,
             # stop the node". Off once any node has been evaluated, and off entirely at threshold 0.
-            _systemic = systemic_failure_stop_reason(state, self.systemic_failure_stop)
+            # …except under `looplab resume --drain-only` (doc 68 68.3a), which never finalizes: a
+            # drain re-scoring the one node the operator fixed on a run whose other nodes all failed
+            # was FINISHED here as a systemic failure, the owed node left pending (critic
+            # 2026-09-26, driven). The drain pauses on its own terms below.
+            _systemic = (None if self._drain_only
+                         else systemic_failure_stop_reason(state, self.systemic_failure_stop))
             if _systemic is not None:
                 # Through the SAME ladder as every other terminal gate, not a bare finish. This gate
                 # sits BEFORE the speculation block below, so unlike the `_finish_with_report_if_
@@ -2314,16 +2320,22 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 reason = DRAIN_ONLY_BUDGET_REASON.format(
                     budget=f"this invocation's time budget ({max_s:g} s) has run out", ids=ids)
             else:
+                # With a per-invocation TIME budget, one node per turn, so the check above sits
+                # between evaluations: the dispatch re-checks the eval budget before each eval but
+                # never the wall clock, and a batch ran every owed node past it (critic 2026-09-26,
+                # driven: `max_seconds=2`, four 1.5 s evals, all four ran).
+                handed = dict(sorted(owed.items())[:1] if max_s is not None
+                              else sorted(owed.items()))
                 await self._dispatch_evals([{"kind": "evaluate", "node_id": node_id}
-                                            for node_id in sorted(owed)],
+                                            for node_id in handed],
                                            state, max_es, research=False)
                 after = fold(self.store.read_all())
                 # Still owed, on the lifecycle it was handed on: nothing moved it. An abort or a
                 # reset landing meanwhile is a move — the next turn re-derives what is owed.
-                stuck = sorted(node_id for node_id, generation in owed.items()
+                stuck = sorted(node_id for node_id, generation in handed.items()
                                if (node := after.nodes.get(node_id)) is not None
                                and node.attempt == generation and drain_owed(after, node))
-                if len(stuck) < len(owed):
+                if len(stuck) < len(handed):
                     return "continue"
                 reason = DRAIN_ONLY_STUCK_REASON.format(ids=", ".join(map(str, stuck)))
         async with self._write_lock:

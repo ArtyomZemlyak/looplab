@@ -298,12 +298,18 @@ from `implement` or `propose` is still rebuilt: the operator asked for that node
 Every way it stops is a PAUSE with a stated reason, so a later plain `resume` continues the search:
 nothing owed is left (`drain-only resume: every reset or interrupted evaluation finished`); the run's
 eval budget is spent or this invocation's time budget ran out — which would otherwise FINALIZE the
-run — naming the nodes left unevaluated; or a dispatch admitted none of what is owed. A pause or stop
-already recorded still wins. It refuses before appending anything when a finalize is pending (exit
-`2`) or when lifting a pause would open a new search epoch after a holdout disclosure — every
-evaluated node re-queued (exit `2`) — and does nothing on a finished run or when nothing is owed
-(exit `0`; a `node_reset` re-opens a finished run itself). The mode belongs to that one invocation
-and is not recorded as the run's.
+run — naming the nodes left unevaluated (raise `max_eval_seconds` / `max_seconds` in the run's
+`config.snapshot.json` and drain again: a plain `resume` finalizes on the same budget); or a dispatch
+admitted none of what is owed. With a time budget it hands one node per turn, so the clock is asked
+between evaluations. A pause or stop already recorded still wins, and the systemic-failure stop —
+every node failed — never finishes a drain. It refuses before appending anything (exit `2`) when a
+finalize is pending; when lifting a pause or a finish would open a new search epoch after a holdout
+disclosure, re-queuing every evaluated node; and when owed nodes were RE-QUEUED by that rotation
+rather than reset — after a disclosure one reset re-opens every incumbent for a full re-evaluation,
+and it names them. It does nothing when nothing is owed (exit `0`; a `node_reset` re-opens a
+finished run itself); a finished run that still owes work — the eval budget finalized it with a
+reset node pending — is lifted and drained. The mode belongs to that one invocation and is not
+recorded as the run's.
 
 Where the owed work comes from: an evaluation a crash interrupted, or a reset recorded while no
 server will drive the run. The Inspector's stage reset is a server command that starts a PLAIN
