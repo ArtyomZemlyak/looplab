@@ -142,6 +142,10 @@ class SpecBuildResult:
     # provenance, never queue authority — `compare=False` because two results are the same result
     # whether or not tracing was wired, and an empty string is simply "no tracer".
     build_trace: str = field(default="", compare=False)
+    # Set when this result is handed back out of `_spec_reusable` for a re-election: a SECOND
+    # `not_selected_now` of a result that was already a reuse is not kept again
+    # (`_serve_card_builds`). Bookkeeping, never queue authority — `compare=False`.
+    reused: bool = field(default=False, compare=False)
 
     @property
     def key(self) -> tuple[str, int]:
@@ -2332,7 +2336,17 @@ class SpeculationMixin:
                 request, skipped="stale", skipped_reason=stale_reason or None)
         if closed:
             result = self._spec_builds.pop(key, None)
-            if (stale_reason == "not_selected_now"
+            if (stale_reason == "not_selected_now" and result is not None and result.reused):
+                # REFUSED TWICE, and the second time as a reuse: the election chose this Card again
+                # and its claim refused it again, so they disagree about the board, and keeping the
+                # result a third time would make the next cycle as free as this one. That is the
+                # shape of the last-slot livelock (2026-09-26: 22 of 50 toy runs spun at ~97 % CPU
+                # inside ONE `_run_card_session` call, where the run loop's `no_mint_turns` bound
+                # cannot see it). The result is released and the session yields to the outer loop,
+                # so a disagreement that persists becomes an outer turn that bound counts.
+                self._discard_spec_result(result)
+                self._spec_force_outer = True
+            elif (stale_reason == "not_selected_now"
                     and self._speculative_producer_width(state) > 1 and result is not None):
                 # "the board moved and the build is INTACT" (`CARD_BUILD_SKIP_REASONS`). With several
                 # producers the claim and the election can disagree for a turn: measured 2026-09-24
@@ -2341,14 +2355,8 @@ class SpeculationMixin:
                 # turn and rebuilt it from scratch. Keep the result; a re-election of the same Card at
                 # the same epoch takes it instead of paying for the build again, and its commit still
                 # goes through every check of `_claim_requested_card_build`.
-                # OPEN[reused-card-build-refusal-never-yields] a refusal of a result that was ITSELF
-                # a reuse keeps it again and yields nothing, so any election/claim disagreement at
-                # width > 1 spins inside ONE `_run_card_session` call, where the run loop's
-                # `no_mint_turns` bound cannot see it: the last-slot one (fixed 2026-09-26, see
-                # `_claim_requested_card_build`) held 22 of 50 toy runs at ~97 % CPU until killed.
-                # Drop a reuse after its first refusal, or set `_spec_force_outer`, so a second
-                # disagreement surfaces as an outer turn instead:
-                # proof:absent:_spec_reuse_refused@looplab/engine/speculation.py
+                # Kept ONCE: a result that was already a reuse and is refused again takes the
+                # branch above instead.
                 self._spec_reusable[key] = result
             else:
                 self._discard_spec_result(result)
@@ -2936,7 +2944,7 @@ class SpeculationMixin:
                     key, self._spec_builder_generation) == self._spec_builder_generation:
                 # A paid build of this exact Card at this epoch is already in hand: no producer, no
                 # attempt receipt (nothing new is billed), and the commit re-checks everything.
-                self._spec_builds[key] = reusable
+                self._spec_builds[key] = replace(reusable, reused=True)
                 return True
             self._discard_spec_result(reusable)
         roles = self._producer_pair_for(key, width)

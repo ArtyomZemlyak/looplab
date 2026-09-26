@@ -196,3 +196,37 @@ def test_a_claim_that_loses_its_append_race_gives_the_open_request_its_slot_back
     assert engine._head_request(state) is not None, "the request is still open"
     engine._refresh_speculation_budget(state)
     assert after == engine.policy.max_nodes == card_budget_used(state)
+
+
+def test_a_reuse_refused_again_is_released_and_the_session_hands_back(tmp_path, monkeypatch):
+    """DEFENSE IN DEPTH, whatever makes an election and its claim disagree. The claim is forced to
+    refuse every build `not_selected_now`: the first refusal keeps the paid result for a re-election
+    (the measured MiniOneRec case that rule exists for), the re-election reuses it, and the SECOND
+    refusal — of a result that was already a reuse — releases it and yields the session. Before, it
+    was kept again and the same free cycle repeated hundreds of times a second inside one session
+    call, where the run loop's `no_mint_turns` bound cannot see it."""
+    engine, producer = _engine(tmp_path / "wide", depth=1)
+    engine.role_factory = lambda: (_Researcher(), producer)
+    engine._llm_parallel = 2
+    engine._llm_parallel_launched = 2
+    engine._llm_parallel_startup_auto = False
+    _without_research(monkeypatch, engine)
+    _last_slot_board(engine)
+    monkeypatch.setattr(engine, "_claim_requested_card_build",
+                        lambda request, result, max_eval_seconds=None: (
+                            "stale:not_selected_now", None))
+
+    async def _session() -> bool:
+        with anyio.move_on_after(10) as scope:
+            await engine._run_card_session([], fold(engine.store.read_all()), None)
+        return scope.cancelled_caught
+
+    spun = anyio.run(_session)
+    events = engine.store.read_all()
+    requests = [e.data for e in events if e.type == EV_CARD_BUILD_REQUESTED]
+    refused = [e.data for e in events if e.type == EV_CARD_BUILD_DONE
+               and e.data.get("skipped_reason") == "not_selected_now"]
+    assert not spun, f"the session never handed back: {len(requests)} requests"
+    assert len(requests) == len(refused) == 2, (requests, refused)
+    assert producer.calls == 1, "the second request reused the first build, and nothing more"
+    assert not engine._spec_reusable, "released, not kept a third time"
