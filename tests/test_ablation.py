@@ -535,6 +535,47 @@ def test_a_parent_with_no_metric_gets_no_invented_impact_and_no_highest_impact_c
     assert idea.rationale.endswith(f"refine '{sorted(row['impacts'])[0]}'"), "the historical pick"
 
 
+def test_a_measured_parent_keeps_the_historical_rationale_when_no_probe_measured(
+        tmp_path, monkeypatch):
+    """The rationale keys on the PARENT, not on the probes (critic 2026-09-26, driven: a measured
+    parent whose probes all crashed was described as "node 0 has no measured metric")."""
+    from types import SimpleNamespace
+
+    engine = _crafted(tmp_path / "crashed", metric=0.5)
+    built = []
+
+    async def _probe(source, workdir, parent_id, generation):
+        return SimpleNamespace(metric=None, exit_code=1, timed_out=False), 1.0, True
+
+    monkeypatch.setattr(engine, "_timed_ablation_probe", _probe)
+    monkeypatch.setattr(engine, "_build_refine_block_child",
+                        lambda parent, parent_id, generation, idea, state: built.append(idea))
+    anyio.run(engine._ablate, 0)
+    (idea,) = built
+    assert idea.rationale.startswith("ablation: refine highest-impact '")
+    assert idea.rationale.endswith("(impacts={})"), "the historical bytes, empty impacts and all"
+
+
+def test_code_block_mode_builds_nothing_when_nothing_is_known(tmp_path, monkeypatch):
+    """An unmeasured parent whose blocks all survived: no block has a delta and none is essential,
+    so no paid child refines "block #None" (critic 2026-09-26). The ablate row is still written."""
+    from types import SimpleNamespace
+
+    engine = _crafted(tmp_path / "blocks", metric=None, ablate_code_blocks=True)
+    built = []
+
+    async def _probe(source, workdir, parent_id, generation):
+        return SimpleNamespace(metric=1.0, exit_code=0, timed_out=False), 1.0, True
+
+    monkeypatch.setattr(engine, "_segment_blocks", lambda code: [(0, 1), (2, 3)])
+    monkeypatch.setattr(engine, "_timed_ablation_probe", _probe)
+    monkeypatch.setattr(engine, "_build_refine_block_child", lambda *a, **k: built.append(1))
+    anyio.run(engine._ablate, 0)
+    row = next(e.data for e in engine.store.read_all() if e.type == "ablate")
+    assert row["impacts"] == {} and row["top_block"] is None
+    assert built == []
+
+
 def test_code_block_mode_ranks_only_the_essential_blocks_of_an_unmeasured_parent(
         tmp_path, monkeypatch):
     """With no measured parent a surviving block has no delta, and `None` means ESSENTIAL: only the

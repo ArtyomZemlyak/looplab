@@ -144,25 +144,27 @@ class NoiseFloorMixin:
         if ruler(historical) == target:
             return None
         declared = es.get("profiles") if isinstance(es.get("profiles"), dict) else {}
-        matches = {}
-        for name in {"smoke", "full", *(n for n in declared if isinstance(n, str))}:
+        # The ruler digest covers the OVERRIDES only, so two names can match and differ in their
+        # timeout, which is not inert either: a candidate sizes its epochs from
+        # `LOOPLAB_EVAL_TIMEOUT_S` (`adapters/repo_developer.py`'s prompt says so). The pick loop is
+        # reached only when the champion was measured at the Strategist's fidelity — `smoke` or
+        # `full` — so those two names come first, then the rest by name (critic 2026-09-26, driven:
+        # the alphabet's first match was a malformed `broken` entry, and a 5 s `debug` profile won
+        # over `full`'s 7200 s; the longest timeout that replaced it picked an 86400 s `overnight`).
+        rank = {"full": 0, "smoke": 1}
+        for name in sorted({"smoke", "full", *(n for n in declared if isinstance(n, str))},
+                           key=lambda n: (rank.get(n, 2), n)):
             if ruler(name) != target:
                 continue
-            # Only a profile `build_command` can RUN, and its timeout (critic 2026-09-26, driven): a
-            # malformed entry reports the empty-override ruler through `eval_protocol`'s tolerance
-            # and then fails every repeat, so the floor recorded n=0.
+            # Only a profile `build_command` can RUN: a malformed entry reports the empty-override
+            # ruler through `eval_protocol`'s tolerance and then fails every repeat, so the floor
+            # recorded n=0. `OverflowError` is a 400-digit timeout `finite_timeout` cannot convert.
             try:
-                matches[name] = build_command(es, {}, name)[1]
-            except (AttributeError, KeyError, TypeError, ValueError):
+                build_command(es, {}, name)
+            except (AttributeError, KeyError, OverflowError, TypeError, ValueError):
                 continue
-        if not matches:
-            return None
-        # The ruler digest covers the OVERRIDES only, so two names can match and differ in their
-        # timeout — a `debug` profile's 5 s would kill the repeat that `full`'s 7200 s let finish.
-        # The LONGEST timeout (it changes whether a run finishes, never what it measures), then
-        # `full`, `smoke` and the rest by name: deterministic, never the alphabet's first.
-        rank = {"full": 0, "smoke": 1}
-        return min(matches, key=lambda name: (-matches[name], rank.get(name, 2), name))
+            return name
+        return None
 
     async def _run_noise_seed(self, nd, s: int, profile: "str | None" = None):
         """One repeat of node `nd`'s evaluation under seed `s`, recorded as `eval_noise_seed`.

@@ -13,6 +13,7 @@ import {
 import { Bars, MultiTrajectory, ParallelCoords, Scatter } from './charts.jsx'
 import { EXTRA_METRIC_CHANNEL_HELP, unverifiedExtraMetricKeys } from './extraMetrics.js'
 import { hyperImportance } from './report.js'
+import { sensitivityBars } from './sensitivityModel.js'
 import Markdown, { stripMd } from './markdown.jsx'
 import { OpIcon } from './icons.jsx'
 import CodeViewer from './CodeViewer.jsx'
@@ -640,10 +641,8 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly 
 }
 
 export function SensitivityPanel({ state, onClose, onSelect }) {
-  // Aggregate ablation impacts across all ablate events (latest wins per param).
-  const impacts = {}
-  ;(state.ablations || []).forEach(a => Object.entries(a.impacts || {}).forEach(([k, v]) => { impacts[k] = Math.abs(v) }))
-  const bars = Object.entries(impacts).map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value)
+  // Aggregate ablation impacts across all ablate events (latest MEASURED wins per param).
+  const bars = sensitivityBars(state.ablations)
   return (
     <Panel title="Parameter sensitivity" onClose={onClose} wide>
       <div className="section-h">Ablation impact (|Δmetric| when param zeroed)</div>

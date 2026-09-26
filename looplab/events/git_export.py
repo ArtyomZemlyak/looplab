@@ -99,7 +99,7 @@ from looplab.events.eventstore import integrity_sentence
 from looplab.events.replay import (FoldCursor, flagged_node_ids, hard_flagged_ids,
                                    promotion_eligible_nodes)
 from looplab.events.replay_ctx import event_timestamp
-from looplab.events.types import EV_NODE_CREATED, EV_NODE_RESET
+from looplab.events.types import DIAGNOSTIC_EVENTS, EV_NODE_CREATED, EV_NODE_RESET
 
 GIT_IDENTITY = "LoopLab <looplab@invalid>"
 SOLUTION_PATH = "solution.py"
@@ -291,11 +291,14 @@ class _Lifecycle:
     requeued_at: str = ""            # superseded by the holdout epoch's requeue: the event type
 
 
-def _lifecycle(node, *, superseded_by=None, requeued: bool = False) -> _Lifecycle:
+def _lifecycle(node, *, superseded_by=None, requeued: bool = False, generation=None,
+               reached=None) -> _Lifecycle:
     files = getattr(node, "files", None)
     deleted = getattr(node, "deleted", None)
     idea = getattr(node, "idea", None)
-    common = dict(node_id=node.id, generation=int(getattr(node, "attempt", 0) or 0),
+    common = dict(node_id=node.id,
+                  generation=(int(generation) if generation is not None
+                              else int(getattr(node, "attempt", 0) or 0)),
                   operator=str(getattr(node, "operator", "") or ""),
                   code=str(getattr(node, "code", "") or ""),
                   files=files if isinstance(files, dict) else {},
@@ -310,7 +313,8 @@ def _lifecycle(node, *, superseded_by=None, requeued: bool = False) -> _Lifecycl
     status = getattr(node, "status", "")
     common["files"] = dict(common["files"])
     return _Lifecycle(idea=idea.model_copy(deep=True) if hasattr(idea, "model_copy") else idea,
-                      reached=str(getattr(status, "value", status) or ""),
+                      reached=(reached if reached is not None
+                               else str(getattr(status, "value", status) or "")),
                       reset_stage="" if requeued else str(data.get("from_stage", "eval")),
                       requeued_at=str(getattr(superseded_by, "type", "") or "") if requeued else "",
                       **common)
@@ -353,17 +357,23 @@ def node_lifecycles(events) -> tuple[dict, dict]:
                   if etype == EV_NODE_RESET and before is not None else None)
         # The requeue's pool, as the fold held it before this event: the evaluated, live incumbents
         # other than the event's own node (a reset's own node is `ending`'s; a new node was never
-        # evaluated). Copied only while a disclosure stands, the one state a rotation starts from.
-        pool = ({other.id: _lifecycle(other, superseded_by=event, requeued=True)
-                 for other in raw.nodes.values()
+        # evaluated), watched only while a disclosure stands — the one state a rotation starts from —
+        # and never across a fold-ignored diagnostic row. Their GENERATIONS only: copying every
+        # lifecycle at every row made a disclosed tail quadratic (critic 2026-09-26, driven: 49 s at
+        # 1000 nodes x 2000 rows). A node the event did re-open is copied after it, from the node
+        # itself: a requeue moves the generation and wipes the evaluation, never the code, files,
+        # idea, operator or parents a superseded commit carries.
+        pool = ({other.id: other.attempt for other in raw.nodes.values()
                  if other.id != nid and other.status is NodeStatus.evaluated
                  and not other.tombstoned and other.id not in raw.aborted_nodes}
-                if raw.holdout_evaluated_ids else {})
+                if raw.holdout_evaluated_ids and etype not in DIAGNOSTIC_EVENTS else {})
         cursor.extend((event,))
-        for other_id, was in pool.items():
+        for other_id, generation in pool.items():
             now = raw.nodes.get(other_id)
-            if now is not None and now.attempt == was.generation + 1:
-                superseded[(other_id, was.generation)] = was
+            if now is not None and now.attempt == generation + 1:
+                superseded[(other_id, generation)] = _lifecycle(
+                    now, superseded_by=event, requeued=True, generation=generation,
+                    reached=NodeStatus.evaluated.value)
                 opened.setdefault((other_id, now.attempt), _git_time(event))
         after = raw.nodes.get(nid) if nid is not None else None
         if after is None:

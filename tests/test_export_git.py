@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -431,6 +432,62 @@ def test_a_reset_after_a_disclosure_ends_the_other_incumbents_lifecycles_too(tmp
     assert "epoch rotated at `node_reset` and re-opened node-1" in _body(repo, "node-1.g0")
     for tag in ("node-0", "node-1", "node-2"):
         assert _git(repo, "log", "-1", "--format=%at", tag) == "1790000100", tag
+
+
+def _disclosed(extra):
+    """Nodes 0 and 1 (1 built from 0) evaluated, node 1's holdout disclosed, then `extra` rows."""
+    return [
+        ("run_started", 1_790_000_000.0, {"run_id": "run", "task_id": "t", "goal": "g",
+                                          "direction": "max"}),
+        ("node_created", 1_790_000_010.0, _created(0, [], code="print(0)\n")),
+        ("node_evaluated", 1_790_000_020.0, {"node_id": 0, "generation": 0, "metric": 0.5,
+                                             "violations": []}),
+        ("node_created", 1_790_000_030.0, _created(1, [0], code="print(1)\n",
+                                                   parent_generations={"0": 0})),
+        ("node_evaluated", 1_790_000_040.0, {"node_id": 1, "generation": 0, "metric": 0.6,
+                                             "violations": []}),
+        ("holdout_evaluated", 1_790_000_050.0, {"node_id": 1, "generation": 0, "metric": 0.55,
+                                                "search_epoch": 0}),
+        *extra,
+    ]
+
+
+@pytest.mark.parametrize("opener,requeued", [
+    # A genuinely NEW candidate after the disclosure (an inject, a fork, a policy action).
+    (("node_created", 1_790_000_100.0, _created(2, [1], code="print(2)\n",
+                                                parent_generations={"1": 0})), {0, 1}),
+    # A tombstone: the candidate set changed, so the epoch rotates and the survivor re-opens.
+    (("node_tombstoned", 1_790_000_100.0, {"node_ids": [1]}), {0}),
+])
+def test_every_kind_of_requeue_is_watched_not_just_resume_and_reset(tmp_path, opener, requeued):
+    """Critic 2026-09-26: a fix that watched only `resume` and `node_reset` passed every test while
+    an inject or a tombstone after the disclosure still lost the superseded lifecycles."""
+    superseded, born = git_export.node_lifecycles(
+        [SimpleNamespace(seq=i, ts=ts, type=etype, data=data)
+         for i, (etype, ts, data) in enumerate(_disclosed([opener]))])
+    assert {node_id for node_id, _gen in superseded} == requeued
+    for node_id in requeued:
+        assert superseded[(node_id, 0)].requeued_at == opener[0]
+        assert born[(node_id, 1)] == 1_790_000_100
+
+
+def test_watching_the_requeue_pool_copies_nothing_until_a_rotation(monkeypatch):
+    """The cost is a copy per RE-OPENED lifecycle, not per node per row: 200 folded rows after a
+    disclosure copy nothing (critic 2026-09-26, driven: copying at every row was quadratic)."""
+    copies = []
+    real = git_export._lifecycle
+    monkeypatch.setattr(git_export, "_lifecycle",
+                        lambda *a, **k: copies.append(k.get("requeued")) or real(*a, **k))
+    quiet = [("annotation", 1_790_000_060.0 + i, {"node_id": 0, "text": f"note {i}"})
+             for i in range(200)]
+    rows = _disclosed(quiet)
+    git_export.node_lifecycles([SimpleNamespace(seq=i, ts=ts, type=etype, data=data)
+                                for i, (etype, ts, data) in enumerate(rows)])
+    assert copies == []
+    rows = _disclosed([*quiet, ("resume", 1_790_000_900.0, {})])
+    git_export.node_lifecycles([SimpleNamespace(seq=i, ts=ts, type=etype, data=data)
+                                for i, (etype, ts, data) in enumerate(rows)])
+    assert copies == [True, True], "exactly the two re-opened lifecycles, once each"
 
 
 def test_the_champion_is_the_fold_best_and_a_promote_is_published_beside_it(tmp_path):

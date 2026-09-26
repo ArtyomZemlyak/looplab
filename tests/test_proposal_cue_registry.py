@@ -257,18 +257,19 @@ def test_every_steering_kind_has_an_operator_label_in_the_card_board():
 
 
 def _js_code(text: str) -> str:
-    """`text` with its JavaScript comments removed, quotes respected: a label commented out is not a
-    label (critic 2026-09-26: `// mixed_comparability: '…'` kept the pin above green)."""
+    """`text` with its JavaScript comments removed and every string EMPTIED, quotes kept: a label
+    commented out is not a label (critic 2026-09-26: `// mixed_comparability: '…'` kept the pin above
+    green), and neither is one written inside another value's text (`sweep: "… node_frontier: 'y'"`).
+    A regex literal holding a quote is beyond this lexer, and the object it reads holds none."""
     out, i, quote = [], 0, None
     while i < len(text):
         ch = text[i]
         if quote:
-            out.append(ch)
             if ch == "\\" and i + 1 < len(text):
-                out.append(text[i + 1])
                 i += 2
                 continue
             if ch == quote:
+                out.append(ch)
                 quote = None
         elif ch in "'\"`":
             quote = ch
@@ -288,6 +289,7 @@ def _js_code(text: str) -> str:
 
 
 def test_a_commented_out_label_is_not_a_label():
-    code = _js_code("a: 'x', // b: 'y'\n/* c: 'z' */ d: 'http://w', e: 'it\\'s'\n")
+    code = _js_code("a: 'x', // b: 'y'\n/* c: 'z' */ d: 'http://w', e: 'it\\'s',\n"
+                    "f: \"see g: 'y' there\"\n")
     import re
     assert set(re.findall(r"(?:^|[\s,{])([a-z_]+):\s*'", code)) == {"a", "d", "e"}

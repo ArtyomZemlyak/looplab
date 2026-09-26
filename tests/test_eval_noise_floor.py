@@ -343,10 +343,14 @@ def test_the_probe_runs_at_the_declared_profile_the_champion_was_measured_on(tmp
     assert engine._noise_probe_profile(_node_with_ruler(tmp_path / "f", digest([]))) is None
 
 
-def test_the_probe_picks_a_profile_it_can_run_for_as_long_as_the_search_ran(tmp_path):
-    """Critic 2026-09-26, driven. The ruler digest covers the overrides only, and the pick was the
-    alphabet's first match: a malformed `broken` entry (reported as the empty-override ruler) failed
-    every repeat, and a `debug` profile with `full`'s overrides ran the repeats under 5 s."""
+def test_the_probe_picks_a_profile_it_can_run_full_and_smoke_first(tmp_path):
+    """Critic 2026-09-26, driven twice. The ruler digest covers the overrides only, and the pick was
+    the alphabet's first match: a malformed `broken` entry (reported as the empty-override ruler)
+    failed every repeat, and a 5 s `debug` profile with `full`'s overrides won over `full`. The
+    longest timeout that replaced it picked an 86400 s `overnight` over `full` — and a timeout is not
+    inert, candidates size their epochs from it. The pick loop runs only for a champion measured at
+    the Strategist's fidelity, so `full` and `smoke` come first, then the rest by name, and only a
+    profile `build_command` can build."""
     from looplab.engine.comparability import protocol_record
 
     def digest(overrides):
@@ -354,16 +358,20 @@ def test_the_probe_picks_a_profile_it_can_run_for_as_long_as_the_search_ran(tmp_
 
     engine = make_engine(tmp_path / "e")
     engine._strategy_fidelity = None                      # historical: `smoke`
-    engine._eval_spec = {"command": ["python", "score.py"],
-                         "profiles": {"smoke": {"overrides": ["steps=1"]}, "full": {},
-                                      "broken": "not-a-dict"}}
-    full_node = _node_with_ruler(tmp_path / "a", digest([]))
-    assert engine._noise_probe_profile(full_node) == "full", "never the profile that cannot run"
-    engine._eval_spec = {"command": ["python", "score.py"], "timeout": 600,
-                         "profiles": {"smoke": {"overrides": ["steps=1"], "timeout": 60},
-                                      "full": {"overrides": ["steps=100"], "timeout": 7200},
-                                      "debug": {"overrides": ["steps=100"], "timeout": 5}}}
+    base = {"command": ["python", "score.py"], "timeout": 600}
+    engine._eval_spec = {**base, "profiles": {"smoke": {"overrides": ["steps=1"]}, "full": {},
+                                              "broken": "not-a-dict"}}
+    assert engine._noise_probe_profile(_node_with_ruler(tmp_path / "a", digest([]))) == "full"
+    engine._eval_spec = {**base, "profiles": {
+        "smoke": {"overrides": ["steps=1"], "timeout": 60},
+        "full": {"overrides": ["steps=100"], "timeout": 7200},
+        "debug": {"overrides": ["steps=100"], "timeout": 5},
+        "overnight": {"overrides": ["steps=100"], "timeout": 86400}}}
     long_node = _node_with_ruler(tmp_path / "b", digest(["steps=100"]))
-    assert engine._noise_probe_profile(long_node) == "full", "the longest timeout, not `debug`'s 5 s"
-    engine._eval_spec["profiles"]["full"]["timeout"] = 5
-    assert engine._noise_probe_profile(long_node) == "full", "a tie goes to `full`, then `smoke`"
+    assert engine._noise_probe_profile(long_node) == "full", "`full` first, whatever the timeouts"
+    # Neither conventional name matches: the rest BY NAME, skipping what cannot be built — a
+    # malformed entry, and a timeout `finite_timeout` cannot convert (it raised `OverflowError`).
+    engine._eval_spec = {**base, "profiles": {
+        "smoke": {"overrides": ["steps=1"]}, "full": {"overrides": ["steps=100"]},
+        "alpha": "not-a-dict", "beta": {"timeout": 10 ** 400}, "gamma": {}}}
+    assert engine._noise_probe_profile(_node_with_ruler(tmp_path / "c", digest([]))) == "gamma"

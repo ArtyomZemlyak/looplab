@@ -3455,12 +3455,13 @@ class RunCommandService:
         its intent appended and an engine spawned 1.01 s past `absolute_deadline_at`). `_admit` asks
         once it holds the sequencer, but its append and observations still run between that check
         and this line, and the monitor's re-spawn waits for the sequencer after its own loop check;
-        asked here, nothing of THIS service's runs between the answer and the spawn. What it does
-        not cover (critic 2026-09-26, read): `_spawn` still enters the launch-environment context
-        and the process-wide spawn gate (`engine_proc.py::_engine_spawn_gate`), each of which can
-        wait on another launch or a settings writer, and the deadline is not asked again inside
-        them — a deadline that passes during those waits is honoured by the monitor's next check,
-        not by the Popen.
+        asked here, it is the LAST deadline question before the spawn, not an instant before it
+        (critic 2026-09-26, driven): the spawn-claim write and the handshake's log observation
+        (`_record_spawn_claim`, `_observe(rd).launch_claim_fresh`) run after it, and `_spawn` then
+        enters the launch-environment context and the process-wide spawn gate
+        (`engine_proc.py::_engine_spawn_gate`), each of which can wait on another launch or a
+        settings writer. A deadline that passes in that window is honoured by the monitor's next
+        check, not by the Popen.
         """
         if self._settle_if_expired(rd, path, record, command_id):
             return True, None

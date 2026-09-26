@@ -291,9 +291,12 @@ class AblationMixin:
         new_params = dict(parent.idea.params)
         if top is not None and top in proposal.params:
             new_params[top] = proposal.params[top]
-        rationale = (f"ablation: refine highest-impact '{top}' (impacts={impacts})" if measured else
-                     f"ablation: node {parent_id} has no measured metric, so no parameter's impact "
-                     f"could be measured; refine '{top}'")
+        # The historical rationale, byte for byte, whenever the PARENT was measured — even when no
+        # probe was (critic 2026-09-26: keyed on the probes, a measured parent whose probes all
+        # crashed was described as having no metric). Only an unmeasured parent is said to be one.
+        rationale = (f"ablation: refine highest-impact '{top}' (impacts={impacts})" if measured_base
+                     else f"ablation: node {parent_id} has no measured metric, so no parameter's "
+                          f"impact could be measured; refine '{top}'")
         idea = Idea(operator="refine_block", params=new_params, rationale=rationale,
                     footprint=proposal.footprint,
                     concept_mode="delta", concepts_added=[], concepts_removed=[])
@@ -508,6 +511,11 @@ class AblationMixin:
                                          "top_block": top, "eval_seconds": round(abl_seconds, 3),
                                          **({"superseded": True} if superseded else {})})
         if superseded or not self._ablation_parent_current(parent_id, generation):
+            return
+        if top is None and not measured_base:
+            # An unmeasured parent whose blocks all survived: nothing is known about any block, so
+            # there is nothing to refine — no paid child for "block #None" (critic 2026-09-26). The
+            # `ablate` row above still closes an operator's forced-ablate gate.
             return
         top_src = ""
         if top is not None:
