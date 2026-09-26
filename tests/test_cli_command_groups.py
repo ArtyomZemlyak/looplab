@@ -135,7 +135,7 @@ GROUPS = {
     # subject is nearest — `inspect_cmds` (1194 lines against a 1200 cap) and `governance_cmds`
     # (1092 against 1100) — are both at the bound below, whose own stated norm is that an overrun is
     # answered by an extraction or a new home and never by a raise.
-    "corpus_cmds": {"belief-key-split", "card-ladder", "asha-rungs"},
+    "corpus_cmds": {"belief-key-split", "card-ladder", "asha-rungs", "fidelity-agreement"},
     # OFFLINE RECORD REPAIRS. Its own group rather than `governance_cmds` because the subject is a
     # SINGLE run's account of itself — a node whose durable record kept the proposal and lost what
     # actually ran — not the cross-run store. It appends events, so it is not `inspect_cmds` either;

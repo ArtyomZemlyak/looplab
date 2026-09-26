@@ -510,7 +510,9 @@ decide". Box-only. proof:missing:docs/audit/foresight-hit-rate.md
 OPEN[smoke-full-rank-fidelity-unmeasured] `EvalSpec.profiles` (smoke / full) is LoopLab's evaluation
 cascade rung — AlphaEvolve's cascade, OpenEvolve's `cascade_evaluation`, LEVI's rank-preserving proxy
 benchmark — and nothing measures whether smoke rank order survives at full, which is what decides
-whether promotion may read it. Box-only. proof:missing:docs/audit/smoke-full-rank-fidelity.md
+whether promotion may read it. The instrument exists since 2026-09-26 (`looplab fidelity-agreement`,
+doc 68 68.5: pairwise agreement and Spearman over confirmed nodes); the NUMBER on the box is what is
+owed. Box-only. proof:missing:docs/audit/smoke-full-rank-fidelity.md
 
 *Closed 2026-09-06 (row 17 shipped): the marker `skills-load-flat-not-by-tier` stood here.
 `tools/skills.py::skill_tier` settles every skill into HASTE's three tiers — a declared `tier:`

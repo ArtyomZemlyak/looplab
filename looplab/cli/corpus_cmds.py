@@ -1,5 +1,6 @@
 """`looplab` CORPUS instruments: read-only measurements over a RUNS ROOT that answer a deferred
-design decision's own TRIGGER — `belief-key-split`, `card-ladder`, `asha-rungs`.
+design decision's own TRIGGER — `belief-key-split`, `card-ladder`, `asha-rungs`,
+`fidelity-agreement`.
 
 THE DOMAIN, and why it is a group rather than three commands scattered across the existing ones.
 Each command here exists because a `docs/BACKLOG.md` marker says, in its own words, "do not decide
@@ -24,7 +25,8 @@ than a drift.
 
 The Typer app and the shared patchable builders live in `looplab/cli/__init__.py`, imported here
 like every other group. The reports themselves are pure modules under `looplab/events/`
-(`belief_key_split.py`, `card_ladder.py`, `asha_curve.py`) so a test can drive them from folded
+(`belief_key_split.py`, `card_ladder.py`, `asha_curve.py`, `fidelity_agreement.py`) so a test can
+drive them from folded
 state without a filesystem; this file owns only the corpus walk and the rendering.
 """
 from __future__ import annotations
@@ -269,3 +271,51 @@ def asha_rungs_cmd(
         typer.echo("\nNO CURVE — no run published two observations at distinct resource "
                    "coordinates, so ASHA still has nothing to halve on this corpus.")
     typer.echo(f"rule: {report['rule']}")
+
+
+@app.command(name="fidelity-agreement")
+def fidelity_agreement_cmd(
+    runs_root: Path = typer.Argument(Path("runs"), help="Runs root (or one run directory)."),
+    limit: int = typer.Option(20, "--limit", help="How many runs to list."),
+    as_json: bool = typer.Option(False, "--json", help="Emit the whole report as JSON."),
+):
+    """Does the CHEAP evaluation level rank candidates the way the FULL one does? (doc 68 68.5)
+
+    Over the nodes that carry BOTH levels — the search's number and the confirm phase's full-profile
+    mean (`confirm_top_k`) — the pairwise ordering agreement and Spearman's rho, per run and pooled
+    (each pair lies inside one run). A node searched at `full` already measures seed noise, not
+    fidelity, and is counted apart. The comparison also crosses seed sets (search at seed 0, confirm
+    from `confirm_seed_base`). It arms nothing: whether the cheap level may be trusted to prune is
+    the operator's call once this number exists (`events/fidelity_agreement.py`).
+    """
+    from looplab.events.fidelity_agreement import fidelity_agreement_report, fidelity_rank_agreement
+
+    rows = []
+    for label, state, _run_dir, _events in _folded(runs_root):
+        rows.append({"run": label, **fidelity_rank_agreement(state)})
+    if not rows:
+        typer.echo(f"no runs found under {runs_root}. {_RUNS_ROOT_HINT}")
+        raise typer.Exit(2)
+    report = fidelity_agreement_report(rows)
+    if as_json:
+        _emit_json({**report, "per_run": rows})
+        return
+    typer.echo(f"{report['runs']} run(s); {report['runs_with_pairs']} with an ordered cheap/full "
+               f"pair; {report['nodes_with_both']} node(s) carry both levels, "
+               f"{report['same_level']} more were searched at full already")
+    for row in sorted(rows, key=lambda r: (-r["pairs"], r["run"]))[:max(0, limit)]:
+        if not row["nodes"]:
+            continue
+        agreement = "n/a" if row["agreement"] is None else f"{100 * row['agreement']:.1f} %"
+        rho = "n/a" if row["spearman"] is None else f"{row['spearman']:+.3f}"
+        typer.echo(f"  {row['run']:<34} {len(row['nodes']):>3} node(s)  {row['pairs']:>4} pair(s)  "
+                   f"agreement {agreement}  spearman {rho}  ties {row['ties']}")
+    if report["agreement"] is None:
+        typer.echo("\nNO ORDERED PAIR — no run confirmed two nodes it had searched at a cheaper "
+                   "level, so nothing on this corpus says whether the cheap level ranks like the "
+                   "full one. Confirmation (`confirm_top_k` >= 2) is what records the pairs.")
+    else:
+        typer.echo(f"\npooled: {report['concordant']} of {report['pairs']} ordered pair(s) agree "
+                   f"({100 * report['agreement']:.1f} %), {report['ties']} tie(s) set apart — "
+                   "across seed sets as well as levels, so a disagreement is fidelity OR noise.")
+

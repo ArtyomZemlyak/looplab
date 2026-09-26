@@ -26,6 +26,7 @@ looplab parser-stats    How the structured-output parser actually behaved on thi
 looplab belief-key-split Concept-equal card groups the seed-TEXT belief key SPLITS, and what a concept key would merge (corpus instrument)
 looplab card-ladder     The direction -> experiment ladder over a corpus, and whether the undercut rule's trigger fired (corpus instrument)
 looplab asha-rungs      Did any run publish a rung CURVE the ASHA watchdog could have halved? (corpus instrument)
+looplab fidelity-agreement  Does the cheap eval level rank candidates the way the full one does? (corpus instrument, doc 68 68.5)
 looplab concept-coverage Concept-graph coverage + uncovered-region alarm (PART IV D5)
 looplab asset-brief     Prior-art & on-disk asset brief for a task repo (PART IV D1)
 looplab lock-in         Action-space lock-in detector (PART IV D7)
@@ -1501,6 +1502,36 @@ acts from. FIRED means the corpus can now reach that state — never that the ru
 a particular way, which stays the operator's decision.
 
 ---
+
+## `fidelity-agreement`
+
+Read-only, no model, **over a runs root**. Does the CHEAP evaluation level rank candidates the way
+the FULL one does? (doc 68 68.5, `events/fidelity_agreement.py`)
+
+```bash
+looplab fidelity-agreement RUNS_ROOT [--limit 20] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUNS_ROOT` | `runs` | The runs root, or a single run directory |
+| `--limit` | `20` | How many runs to list |
+| `--json` | off | Emit the whole report as JSON, with each run's nodes |
+
+The search scores on a cheap profile, and the cascade trusts that ordering to decide what survives.
+The only place a run records both levels for one node is the confirm phase, which re-evaluates the
+top-K at the `full` profile (`confirm_top_k` >= 2 records pairs). This reads each confirmed node's
+search number beside its full-profile mean. It reports pairwise ordering agreement per run and
+pooled across runs (each pair lies inside one run), and Spearman's rho over average ranks when a run
+has three or more such nodes. A tie on either side is no ordering: it is counted apart, never as a
+disagreement.
+
+A node already searched at `full` measures seed noise, not fidelity, and is counted apart. The
+comparison also crosses seed sets (the search at seed 0, confirm from `confirm_seed_base`), so a
+disagreement is fidelity OR noise, and the report says so. Only nodes whose number counts toward the
+best are read. With no ordered pair anywhere it says `NO ORDERED PAIR` rather than printing an
+agreement. It arms nothing: whether a cheap level may be trusted to prune is the operator's call,
+and doc 52's `smoke-full-rank-fidelity-unmeasured` is the box measurement it exists for.
 
 ## `asha-rungs`
 

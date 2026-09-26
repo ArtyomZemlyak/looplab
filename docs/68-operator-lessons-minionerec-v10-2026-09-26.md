@@ -235,7 +235,6 @@ seed). Движок складывает его в провенанс и при 
   этого дождаться: `looplab stop --wait
   [--timeout S]` ждёт освобождения замка (`engine/run_lifecycle.py::engine_liveness`), печатает, чего
   ждёт, и как закончился каждый узел, — вместо сторожа по журналу и kill по PID (§0 f).*
-- **68.5** OPEN[no-fidelity-rank-agreement] проверка ранговой согласованности дешёвого и полного
-  уровней до отсечения по дешёвому (§5). proof:absent:fidelity_rank_agreement@looplab
+- **68.5** *Закрыто 2026-09-26: здесь стоял `no-fidelity-rank-agreement`. `looplab fidelity-agreement RUNS_ROOT` — инструмент корпуса: на узлах, где есть оба уровня (число поиска и среднее confirm на профиле `full`), — попарная согласованность порядков и Спирмен по средним рангам, по прогону и суммарно (`events/fidelity_agreement.py::fidelity_rank_agreement`); узел, искавшийся уже на `full`, считается отдельно (это шум сидов, не верность уровня), ничьи — отдельно. Инструмент, не гейт: ничего не решает; доверять ли отсечению по дешёвому уровню — решение оператора, когда число есть (коробочное измерение — `smoke-full-rank-fidelity-unmeasured`, док 52).*
 - **68.6** OPEN[run-id-pinned-to-dir-name] resume отказывает, если имя каталога прогона не равно
   `run_started.run_id`; прогон нельзя переместить (§7). proof:present:self.run_dir.name@looplab/engine/reentry.py
