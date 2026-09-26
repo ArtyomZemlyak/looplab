@@ -34,7 +34,8 @@ otherwise absorb it with its own private backoff. The queue in front of that bud
 429 at once rather than held on a socket the client will abandon first (doc 56 §170).
 
 A streamed response is forwarded frame by frame and priced from its usage frame; a stream the
-GATEWAY cut without one is priced from the content deltas it forwarded plus a prompt side recovered
+GATEWAY cut without one is priced from the deltas it forwarded -- text and, since 2026-09-26,
+tool-call fragments (`generation_delta_kind`) -- plus a prompt side recovered
 from the request (`PromptTokens`), labelled `cost_basis: estimated_from_deltas`; a stream that
 produced neither is recorded `metered=false` -- never as $0.
 
@@ -72,19 +73,29 @@ spend: $1.0025` while this meter had it at $2.009.
     `meter_completion_tokens_basis`, `meter_forwarded_deltas` and the ratio, and its prose is
     conditional -- it used to say "completion_tokens is a FLOOR" whatever the basis said.*
 
-    OPEN[meter-delta-counter-is-blind-to-tool-calls] the other half of the item above, left open
-    rather than folded into its closure: `deltas += 1` fires only for `content` / `reasoning_content`
-    / `reasoning`, so a completion delivered as a TOOL CALL counts zero deltas -- an aborted
-    tool-call stream is priced at zero completion whatever the calibration says, and the delta
-    CEILING never trips on one either. Not fixed in the same change because the counter is also the
-    ceiling's input: counting more deltas moves when a stream is cut, which is a behaviour change
-    that belongs to its own measurement rather than riding in on a pricing fix.
-    proof:absent:delta_counts_tool_calls@benchmarks/meter/proxy.py
-    SIZED 2026-09-18 so nobody spends a day on it by accident: over the 2026-08 campaign's 43,582
-    streamed 200s, exactly FOUR carry `deltas_seen: 0` with completion tokens (13,552 tokens,
-    $0.00 of $140.67). The hole is real and it is worth nothing on this traffic; it becomes worth
-    something only if the shape changes -- a model that answers purely in tool calls, or a loop that
-    stops interleaving content. Fix it then, or when the ceiling is next touched for its own sake.
+    *Closed 2026-09-26, the PRICING half: `meter-delta-counter-is-blind-to-tool-calls` stood here.
+    `deltas += 1` fired only for `content` / `reasoning_content` / `reasoning`, so a completion
+    delivered as a TOOL CALL counted zero deltas and an aborted tool-call stream was recorded
+    `metered: false, cost: 0.0` whatever the calibration said. Sized 2026-09-18: of the 2026-08
+    campaign's 43,582 streamed 200s, FOUR were tool-call-only answers (`deltas_seen: 0` beside
+    completion tokens the gateway priced; $0.00 of $140.67) -- how often the shape occurs, and none
+    of those four was cut. Tool-call fragments now have their own counter (`generation_delta_kind`);
+    the price and the calibration read text + tool calls, every row writes `tool_call_deltas_seen`
+    beside an unchanged text-only `deltas_seen`, and the frame carries
+    `meter_forwarded_tool_call_deltas`. One `TokensPerDelta` serves both arms, so the in-process
+    ratios a cut stream is priced at move for both.*
+
+    OPEN[meter-ceiling-blind-to-tool-call-runaways] the other half, split out rather than folded in:
+    the armed delta ceiling still counts TEXT deltas only, so a tool-call runaway is never cut.
+    proof:missing:docs/audit/meter-ceiling-on-tool-call-deltas.md
+    Counting tool calls there is a change to the ruler, not a fix riding on one: 93.3 % of LoopLab's
+    own generation spans made a tool call (doc 56 §246), so it moves the LoopLab arm's cuts, while
+    whether the other arm streams tool calls at all is not recorded anywhere in this repo -- and
+    parity between the arms is the property `DELTA_CEILING_VALUE` was chosen for. It also makes a
+    cut inside a tool call's JSON arguments the COMMON shape rather than a corner one (it reaches the
+    client as malformed JSON rather than a shorter answer, doc 56 §245). Owed: the largest COMPLETE
+    answer per arm re-derived on `deltas_seen + tool_call_deltas_seen` from a campaign log that
+    carries the new column, and a ruling on the mid-argument cut.
 
 USAGE
 -----
@@ -367,8 +378,45 @@ def _prompt_chars(body: bytes) -> int:
     return sum(len(part) for part in parts) if parts else len(body)
 
 
+def forwarded_deltas_phrase(text: int, tool_calls: int, noun: str = "deltas") -> str:
+    """How a row note or a frame note names what this proxy forwarded, in the row's OWN terms.
+
+    `deltas_seen` is the TEXT count and `tool_call_deltas_seen` the tool-call one, so a note that
+    printed their sum as "N forwarded deltas" beside `deltas_seen: 0` would contradict the field
+    next to it (`test_meter_proxy_stream_rows.py` pins that a note must not). Byte-identical to the
+    historical wording whenever no tool-call fragment was forwarded."""
+    if tool_calls:
+        return f"{text} text + {tool_calls} tool-call forwarded {noun}"
+    return f"{text} forwarded {noun}"
+
+
+def generation_delta_kind(delta) -> str:
+    """What ONE streamed `choices[].delta` carries that the generation paid for: `"text"`,
+    `"tool_call"`, or `""` for a frame that carries neither (a role, a finish, an empty keep-alive).
+
+    `"text"` is `content`, `reasoning_content` or `reasoning` -- both reasoning spellings, because
+    `_reassemble` reads both and two halves of one file disagreeing about what a delta is was a
+    measured under-count once already. `"tool_call"` is a `tool_calls[]` fragment carrying a
+    function name or argument bytes -- exactly the two fields `_reassemble` concatenates, so a
+    fragment this counts is one the reassembled answer carries (and an id- or type-only fragment,
+    which adds nothing to the answer, counts nothing). A delta carrying both is ONE delta, as text.
+
+    The two kinds are counted APART on purpose (see `meter-ceiling-blind-to-tool-call-runaways` in
+    the module docstring): the price is read off both, the ceiling off the text kind alone.
+    """
+    if not isinstance(delta, dict):
+        return ""
+    if delta.get("content") or delta.get("reasoning_content") or delta.get("reasoning"):
+        return "text"
+    for tc in delta.get("tool_calls") or ():
+        fn = tc.get("function") if isinstance(tc, dict) else None
+        if isinstance(fn, dict) and (fn.get("arguments") or fn.get("name")):
+            return "tool_call"
+    return ""
+
+
 class TokensPerDelta:
-    """How many completion TOKENS one forwarded content delta is worth, by stream length.
+    """How many completion TOKENS one forwarded delta is worth, by stream length.
 
     WHY THIS EXISTS. A stream the gateway cuts carries no usage frame, so the proxy prices the
     completion side from the deltas it forwarded and charged ONE token each. This module's own log
@@ -393,6 +441,11 @@ class TokensPerDelta:
     AND IT NEVER GOES BELOW THE FLOOR. `max(1.0, ratio)` keeps the calibrated number at or above
     what this file charged before: a floor is the honest side to be wrong on for a budget, and a
     calibration that could undercut it would trade a known bias for an unknown one.
+
+    THE MEDIANS ABOVE, AND THE `EDGES` CUT FROM THEM, ARE THE TEXT-ONLY COUNTER'S. Since 2026-09-26
+    the calibrator observes and estimates on text + tool-call fragments (`generation_delta_kind`),
+    so the RATIOS each process learns are on the counter it prices with; what a tool-call-heavy
+    stream's ratio becomes on that counter is not measured, and the edges are not re-cut for it.
     """
 
     # Cut on the delta count, the only length available when the stream is cut. The edges are the
@@ -1261,7 +1314,15 @@ class Handler(BaseHTTPRequestHandler):
         # `usage.cost`, so a stream with no usage frame produced NO `llm_usage` event at all -- the
         # run's own accounting was short four calls on one task and never said so. A budget that
         # silently under-counts is worse than one that stops early: the arm looks cheap.
+        #
+        # TWO COUNTERS SINCE 2026-09-26. `deltas` stays the TEXT count (content + reasoning) it always
+        # was -- the ceiling's input and the row's `deltas_seen`, so every row stays comparable with
+        # the corpus the ceiling's value was measured on. `tool_call_deltas` counts what it never saw:
+        # `tool_calls[]` fragments. The PRICE reads both (a completion delivered as a tool call was
+        # recorded `metered: false, cost: 0.0` when cut); the ceiling reads text alone, because
+        # counting tool calls there moves arm B's cuts and is an open measurement of its own.
         deltas = 0
+        tool_call_deltas = 0
         # THE METER'S OWN CEILING, and the reason it exists is not the money it caps.
         #
         # Cutting at N deltas saves 26 % of those 62.9 h on its own (recomputed over the same log at
@@ -1301,7 +1362,7 @@ class Handler(BaseHTTPRequestHandler):
         done_seen = False
         swallow_blank = False
         # ...AND IT IS PUT BACK ON EVERY EXIT, which until 2026-09-08 it was not. The sentinel was
-        # re-emitted by exactly one of the three exits -- the `elif not basis and deltas:` estimate
+        # re-emitted by exactly one of the three exits -- the `elif not basis and <deltas>:` estimate
         # branch, whose `wire` ends on it. On the DOMINANT path (usage frame seen, stream ended
         # tidily: 8,830 of 9,235 recorded rows) and on the empty-stream path it was consumed and
         # the chunked body simply ended. Driven: 2 content frames -> finish -> usage -> `[DONE]`
@@ -1354,17 +1415,20 @@ class Handler(BaseHTTPRequestHandler):
                         if frame.get("model") and not row.get("model_reported"):
                             row["model_reported"] = str(frame["model"])
                         for ch in (frame.get("choices") or []):
-                            d = ch.get("delta") or {}
                             # `reasoning` too: `_reassemble` above reads BOTH spellings
                             # (`reasoning_content` here, `reasoning` on an OpenRouter-shaped
                             # gateway) and two halves of one file disagreeing about what a
                             # reasoning delta is means a cut reasoning stream in the second
                             # shape counts ZERO deltas, skips the estimate entirely, and is
                             # recorded `metered: false, cost: 0.0` -- the silent under-count
-                            # the estimator exists to close.
-                            if (d.get("content") or d.get("reasoning_content")
-                                    or d.get("reasoning")):
+                            # the estimator exists to close. The same reasoning, since
+                            # 2026-09-26, for a TOOL-CALL fragment -- on its own counter, because
+                            # the text one is also the ceiling's input (`generation_delta_kind`).
+                            kind = generation_delta_kind(ch.get("delta"))
+                            if kind == "text":
                                 deltas += 1
+                            elif kind == "tool_call":
+                                tool_call_deltas += 1
                     if _usage_frame_is_measurable(frame):
                         usage_frame_seen = True
                         usage = frame["usage"]
@@ -1401,7 +1465,7 @@ class Handler(BaseHTTPRequestHandler):
                         # ...and the completion side, from the same frame: this stream
                         # carried BOTH the deltas this proxy forwarded and the tokens the
                         # gateway charged, which is the only evidence the ratio has.
-                        self.server.tokens_per_delta.observe(deltas, pout)
+                        self.server.tokens_per_delta.observe(deltas + tool_call_deltas, pout)
                         prompt_basis = "reported_by_upstream"
                         out = b"data: " + json.dumps(frame).encode() + b"\n"
                 emit(out)
@@ -1411,11 +1475,16 @@ class Handler(BaseHTTPRequestHandler):
                 # tokens it swallowed. `usage_frame_seen` excludes the one case where cutting could
                 # destroy evidence -- the gateway has closed the books, so there is nothing left to
                 # protect the client from and the synthesis below would not run anyway.
+                #
+                # TEXT DELTAS ONLY, deliberately (`meter-ceiling-blind-to-tool-call-runaways`): the
+                # value was measured on this counter. It does NOT make a mid-call cut impossible -- a
+                # stream that interleaves text with an open tool call is cut after a text delta with
+                # the call half-written, exactly as it always could be.
                 if ceiling and deltas >= ceiling and not usage_frame_seen:
                     cut_by_meter = True
                     break
             if died.get("exc") is not None:
-                if usage_frame_seen or not deltas:
+                if usage_frame_seen or not (deltas + tool_call_deltas):
                     # Nothing to price that the gateway did not already price, or nothing was
                     # produced at all: the historical error path answers (a 502 on the adapted
                     # route when no frame arrived, the partial body otherwise).
@@ -1432,7 +1501,7 @@ class Handler(BaseHTTPRequestHandler):
                 resp.close()
             if usage_frame_seen:
                 pass                            # the gateway priced it; nothing to estimate
-            elif not basis and deltas:
+            elif not basis and (deltas + tool_call_deltas):
                 # THE STREAM PRODUCED TOKENS AND NOBODY PRICED THEM. Synthesise the usage frame the
                 # gateway did not send, from the deltas actually forwarded, and label it for what it
                 # is. Injected rather than merely logged because the arm's accountant reads the
@@ -1446,19 +1515,21 @@ class Handler(BaseHTTPRequestHandler):
                 # gateway's authoritative `completion_tokens`, and the ratio has a strong length
                 # dependence -- median 0.156 below 100 completion tokens, 0.384 at 100-1k, 0.803 at
                 # 1k-5k, 0.981 at 5k-20k and 0.996 above 20k (overall median 0.476, and deltas are
-                # BELOW completion_tokens on 99.88 % of rows). The short-stream gap is structural,
-                # not noise: this counter reads `delta.content` / `delta.reasoning_content` and a
+                # BELOW completion_tokens on 99.88 % of rows). The short-stream gap was structural,
+                # not noise: this counter read `delta.content` / `delta.reasoning_content` and a
                 # completion delivered as a TOOL CALL arrives on `delta.tool_calls[].function
-                # .arguments`, which it never sees. 505 complete streams of >500 completion tokens
-                # spent under 20 % of them on content deltas -- 1.17 M tokens this estimator would
-                # have valued at less than a fifth.
+                # .arguments`, which it never saw until 2026-09-26 (those medians are the text-only
+                # counter's). 505 complete streams of >500 completion tokens spent under 20 % of
+                # them on content deltas -- 1.17 M tokens this estimator would have valued at less
+                # than a fifth.
                 #
                 # It is still a FLOOR in every one of those directions, which is the honest side to
                 # be wrong on for a budget, and the 23 aborts actually on record are all long
                 # runaway generations (226k-238k deltas at 1817-1830 s) where the ratio is ~1.0. But
                 # a floor that is 5x low on a tool-call stream is a different instrument from the one
-                # the old comment described, so the number is not corrected here: the open item
-                # in this module's docstring holds the measurement and says why it is deferred.
+                # the old comment described. The ratio is calibrated below, and since 2026-09-26 the
+                # tool-call fragments are priced too (`deltas + tool_call_deltas`), so a tool-call
+                # stream is no longer estimated from a count that could not see it.
                 rate_in, rate_out, est_basis = self.server.pricing.rate(model or "")
                 rate_basis = est_basis
                 # THE PROMPT SIDE IS NOT ZERO AND MUST NOT SAY IT IS. `prompt_tokens: 0` used to
@@ -1474,7 +1545,7 @@ class Handler(BaseHTTPRequestHandler):
                 # ratio is learned in-process from streams the gateway priced, per length bucket,
                 # and falls back to that floor until a bucket has evidence of its own.
                 pout, completion_basis, tokens_per_delta, tpd_calls = \
-                    self.server.tokens_per_delta.estimate(deltas)
+                    self.server.tokens_per_delta.estimate(deltas + tool_call_deltas)
                 cost = pin * rate_in + pout * rate_out
                 basis = "estimated_from_deltas"
                 usage = {
@@ -1492,6 +1563,9 @@ class Handler(BaseHTTPRequestHandler):
                     # estimate did with them: the reader that has to audit the number needs the
                     # input as well as the output, and `completion_tokens` is no longer that input.
                     "meter_forwarded_deltas": deltas,
+                    # ...and the TOOL-CALL fragments beside them (2026-09-26): the estimate prices
+                    # the sum, and `meter_forwarded_deltas` keeps its text-only meaning.
+                    "meter_forwarded_tool_call_deltas": tool_call_deltas,
                     **({"meter_tokens_per_delta": tokens_per_delta,
                         "meter_tokens_per_delta_calls": tpd_calls}
                        if tokens_per_delta is not None else {}),
@@ -1507,7 +1581,8 @@ class Handler(BaseHTTPRequestHandler):
                     "meter_note": "upstream ended the stream without a usage frame; "
                                   + ("completion_tokens is a FLOOR counted from forwarded deltas"
                                      if completion_basis == "counted_from_forwarded_deltas" else
-                                     f"completion_tokens is {deltas} forwarded deltas priced at "
+                                     "completion_tokens is "
+                                     f"{forwarded_deltas_phrase(deltas, tool_call_deltas)} priced at "
                                      f"{tokens_per_delta} token(s) each, calibrated in-process on "
                                      f"{tpd_calls} stream(s) this gateway priced")
                                   + f" and prompt_tokens is {prompt_basis}",
@@ -1649,6 +1724,9 @@ class Handler(BaseHTTPRequestHandler):
                     "completion_tokens": pout, "cost": cost, "cost_basis": basis,
                     "metered": bool(basis)})
         row["deltas_seen"] = deltas
+        # ALWAYS WRITTEN, zero included: its PRESENCE marks a row counted by a proxy that saw
+        # tool-call fragments, while `deltas_seen` keeps the text-only meaning every older row has.
+        row["tool_call_deltas_seen"] = tool_call_deltas
         if prompt_basis:
             row["prompt_tokens_basis"] = prompt_basis
         # WHICH ROW OF THE PRICE TABLE PAID FOR THIS, kept apart from `cost_basis`. On this route
@@ -1679,7 +1757,8 @@ class Handler(BaseHTTPRequestHandler):
                    row["stream_cut_by"] = "meter_delta_ceiling"
                    row["meter_delta_ceiling"] = ceiling
                    row["note"] = (f"the meter cut this stream at its {ceiling}-delta ceiling after "
-                                  f"{latency_ms/1000:.0f}s; priced from {deltas} forwarded deltas "
+                                  f"{latency_ms/1000:.0f}s; priced from "
+                                  f"{forwarded_deltas_phrase(deltas, tool_call_deltas)} "
                                   f"(EXACT for what was forwarded, a floor for what upstream generated)"
                                   f" and a prompt of {pin} tokens ({prompt_basis})")
                elif priced_exception_cut is not None:
@@ -1693,13 +1772,16 @@ class Handler(BaseHTTPRequestHandler):
                    row["error_source"] = "upstream"
                    row["note"] = ("upstream died by exception with no usage frame after "
                                   f"{latency_ms/1000:.0f}s; what it had sent was served and priced "
-                                  f"from {deltas} forwarded deltas (a FLOOR) and a prompt of {pin} "
+                                  f"from {forwarded_deltas_phrase(deltas, tool_call_deltas)} "
+                                  "(a FLOOR) "
+                                  f"and a prompt of {pin} "
                                   f"tokens ({prompt_basis}) ({row['error']})")
                else:
                    if not done_seen:
                        row["stream_aborted"] = True
                    row["note"] = ("upstream ended the stream with no usage frame after "
-                                  f"{latency_ms/1000:.0f}s; priced from {deltas} forwarded deltas "
+                                  f"{latency_ms/1000:.0f}s; priced from "
+                                  f"{forwarded_deltas_phrase(deltas, tool_call_deltas)} "
                                   f"(a FLOOR) and a prompt of {pin} tokens ({prompt_basis})")
         elif not basis and row.get("error"):
             # THE ROW MUST NOT CONTRADICT ITSELF. The synthesis above lives inside the `try`, so any
@@ -1717,7 +1799,9 @@ class Handler(BaseHTTPRequestHandler):
             # priced at nothing. `_upstream_lines` now routes that one through the synthesis above
             # as a priced cut (`stream_cut_by: "upstream_exception"`); what reaches this line is a
             # failure on OUR side of the forwarding, or an upstream death that produced no delta.
-            row["note"] = (f"stream ended in an error after {deltas} forwarded delta(s) and no "
+            row["note"] = ("stream ended in an error after "
+                           f"{forwarded_deltas_phrase(deltas, tool_call_deltas, 'delta(s)')} "
+                           "and no "
                            f"usage frame; nothing was priced ({row['error']})")
         elif not basis:
             # No usage frame AND no deltas: nothing was produced to price. Unpriced, and recorded as

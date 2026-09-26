@@ -751,7 +751,8 @@ def salvaged_lengths(message: Optional[dict]) -> dict[str, int]:
     So all three carriers are counted, and separately, because they mean different things to a
     reader: `content` is the answer, `reasoning` is what the model spent the money thinking, and
     `tool_arguments` is an answer delivered as a call — a completion that never touches `content` at
-    all, which is also why `benchmarks/meter`'s delta counter under-reads a tool-call stream fivefold.
+    all, which is also why `benchmarks/meter`'s TEXT delta counter under-reads a tool-call stream
+    fivefold (it prices tool-call fragments on a second counter since 2026-09-26).
     """
     msg = message or {}
     calls = msg.get("tool_calls") or []

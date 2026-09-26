@@ -101,7 +101,8 @@ def test_zero_deltas_is_zero_tokens_and_says_so():
 
 def test_the_synthesised_frame_names_which_instrument_priced_it():
     """The client's accountant never sees this proxy's log, so the frame has to carry the basis, the
-    input (`meter_forwarded_deltas`) and the ratio. Source-pinned because the frame is assembled
+    input (`meter_forwarded_deltas`, text; since 2026-09-26 `meter_forwarded_tool_call_deltas`
+    beside it, and the estimate prices their sum) and the ratio. Source-pinned because the frame is assembled
     inside the streaming loop, where a test cannot reach it without a live upstream."""
     src = PROXY.read_text(encoding="utf-8")
     for field in ('"meter_completion_tokens_basis": completion_basis',
@@ -117,5 +118,7 @@ def test_the_calibrator_observes_where_both_numbers_exist():
     """The ratio's only evidence is a stream carrying BOTH the forwarded deltas and the gateway's
     own `completion_tokens`, which is the usage frame -- the same place `prompt_scale` learns."""
     src = PROXY.read_text(encoding="utf-8")
-    assert "self.server.tokens_per_delta.observe(deltas, pout)" in src
+    # Text AND tool-call fragments since 2026-09-26 -- the counter the estimate prices with; driven
+    # end to end by `tests/test_meter_counts_tool_call_deltas.py`.
+    assert "self.server.tokens_per_delta.observe(deltas + tool_call_deltas, pout)" in src
     assert "self.tokens_per_delta = TokensPerDelta()" in src
