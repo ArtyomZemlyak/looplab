@@ -29,9 +29,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
-from pydantic import BaseModel, model_validator, field_validator
+from pydantic import BaseModel, Field, model_validator, field_validator
 
-from looplab.adapters.repo_task import refuse_unknown_task_keys
+from looplab.adapters.repo_task import ReferenceScoreSpec, refuse_unknown_task_keys
 from looplab.core.comparison import ComparisonContract
 from looplab.core.models import Idea, Node, RunState, validate_direction
 from looplab.core.parse import LLMClient
@@ -103,6 +103,9 @@ class MLEBenchRealTask(BaseModel):
     def _direction_valid(cls, v):
         return validate_direction(v, extra=('auto',))
     comparison_contract: ComparisonContract | None = None
+    # doc 67 67.14: the declared baseline/target scores — reporting only, EXCLUDED from the dump so
+    # `run_started.config_hash` and every calibration receipt are unchanged (`ReferenceScoreSpec`).
+    reference_score: Optional[ReferenceScoreSpec] = Field(default=None, exclude=True)
     submission: str = "submission.csv"
     grade_timeout: float = 300.0
     # Public kernels downloaded for the competition (the official plagiarism extra's corpus);

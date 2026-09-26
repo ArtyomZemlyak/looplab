@@ -22,6 +22,7 @@ from typing import Iterable, Optional
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, finite_metric,
                                   is_usable_metric,
                                   verifier_evidence_digest)
+from looplab.core.headroom import normalized_reference
 from looplab.core.jsonutil import bounded_int, valid_digest_ref
 from looplab.core.models import (Event, Idea, Node, NodeStatus, RunState, Trial,
                      coerce_node_id as _coerce_node_id,
@@ -175,6 +176,9 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     _dir = str(d.get("direction", "min")).strip().lower()
     st.direction = _dir if _dir in ("min", "max") else "min"
     st.config_hash = d.get("config_hash", "")
+    # doc 67 67.14: the task's declared baseline/target, held to the one rule the writer used
+    # (`core/headroom.py::normalized_reference`); None on every log that pinned none. Reporting only.
+    st.reference_score = normalized_reference(d.get("reference_score"))
     st.workspace = d.get("workspace")
     st.env = d.get("env")   # P0-5 environment identity pinned at start (None on old logs)
     _di = d.get("dirty_inputs")

@@ -51,6 +51,7 @@ from pathlib import Path
 from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT
 from looplab.core.models import RunState
 from looplab.core.profile import profile_dataset
+from looplab.core.headroom import normalized_reference
 from looplab.core.setup_identity import setup_config_hash, setup_manifest_digest
 from looplab.engine.shared import engine_fold as fold
 from looplab.events.types import (EV_DATA_PROFILED, EV_DATA_PROVENANCE, EV_ENV_CHANGED,
@@ -83,6 +84,16 @@ def _task_declared_env(task) -> bool:
     """
     eval_spec = getattr(task, "eval", None)
     return bool(getattr(eval_spec, "env", None))
+
+
+def _declared_reference(task):
+    """The task's `reference_score` (doc 67 67.14) as `run_started` pins it, or None. A duck-typed
+    read through the registered `reference_score` hook (`adapters/tasks.py::TASK_OPTIONAL_HOOKS`):
+    every task model declares it EXCLUDED from its dump, so it is dumped here, then held to
+    `core/headroom.py::normalized_reference` — the same rule the fold applies to what it reads."""
+    spec = getattr(task, "reference_score", None)
+    dump = getattr(spec, "model_dump", None)
+    return normalized_reference(dump(mode="json", exclude_none=True)) if callable(dump) else None
 
 
 class SetupPhaseMixin:
@@ -231,6 +242,14 @@ class SetupPhaseMixin:
                             "speculation_depth_auto": bool(
                                 getattr(self, "_speculation_depth_auto", False)),
                             "select_verifier_contract": VERIFIER_SELECTION_CONTRACT,
+                            # doc 67 67.14: the task's declared baseline/target scores, WHEN it
+                            # declares them — absent otherwise, so the default payload and the
+                            # calibration lane's pinned key set stay byte-identical (its Toy task
+                            # declares none). Read through the `reference_score` task hook and
+                            # normalized by the fold's own rule; reporting only — the run row reads
+                            # it (`core/headroom.py::headroom`), nothing that decides does.
+                            **({"reference_score": _reference}
+                               if (_reference := _declared_reference(self.task)) else {}),
                         },
                     )
                 # AGENTS.md (I18): run-level task-contract provenance. Repo backends receive their

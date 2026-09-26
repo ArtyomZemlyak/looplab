@@ -1016,6 +1016,12 @@ def _print_result(state) -> None:
         m = best.robust_metric
         ms = f"{m:.6g}" if m is not None else "n/a"
         typer.echo(f"BEST node {best.id}: metric={ms} params={best.idea.params}")
+        # doc 67 67.14: only when the task declared a reference — a baseline to measure the gain
+        # from, and a target to read it as a share of (`core/headroom.py`).
+        from looplab.core.headroom import headroom, headroom_line
+        room = headroom(m, getattr(state, "reference_score", None), state.direction)
+        if room is not None:
+            typer.echo(headroom_line(room))
 
 
 def _exit_nonzero_if_the_run_produced_nothing(state, run_dir, *, wrap_up_only: bool) -> None:

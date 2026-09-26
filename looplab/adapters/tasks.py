@@ -106,7 +106,10 @@ TASK_OPTIONAL_HOOKS: tuple[str, ...] = (
     "gpu_capable",
     # RepoTask-specific field probed by the repo Developer's onboarding flow
     # (adapters/repo_developer.py) — registered so a one-sided rename goes red like any hook.
-    "onboard_command")
+    "onboard_command",
+    # doc 67 67.14: the declared baseline/target scores every task model carries EXCLUDED from its
+    # dump, read by `engine/setup_phase.py::_declared_reference` to pin them on `run_started`.
+    "reference_score")
 
 
 _KINDS = {"quadratic": ToyTask, "regression": RegressionTask,

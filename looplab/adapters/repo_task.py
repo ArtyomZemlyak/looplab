@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Mapping
 import json
+import math
 import os
 from pathlib import Path
 import random
@@ -105,6 +106,53 @@ def refuse_unknown_task_keys(cls, data, info: ValidationInfo):
             + f"; known keys are {known}. A key this model does not declare is dropped rather than "
             "applied, so it would have been recorded in task.snapshot.json as the default.")
     return data
+
+
+class ReferenceMark(BaseModel):
+    """One measured score and where it came from — half of a task's `reference_score` (doc 67
+    67.14, `ReferenceScoreSpec` below)."""
+
+    _refuse_unknown = model_validator(mode="before")(
+        classmethod(refuse_unknown_task_keys))
+
+    value: float
+    source: str = Field(min_length=1, max_length=500)
+
+    @field_validator("value")
+    @classmethod
+    def _finite(cls, v):
+        if not math.isfinite(v):
+            raise ValueError("a reference score must be a finite number")
+        return v
+
+    @field_validator("source")
+    @classmethod
+    def _sourced(cls, v):
+        if not v.strip():
+            raise ValueError("a reference score needs its source: where the number was measured")
+        return v
+
+
+class ReferenceScoreSpec(BaseModel):
+    """A task's declared `reference_score`: a BASELINE and optionally a TARGET (doc 67 67.14), one
+    model every task kind shares, so a run's best reads as a share of that gap
+    (`core/headroom.py::headroom`) and runs of DIFFERENT tasks can be compared at all. Both are
+    MEASURED numbers with where each came from — an unsourced mark is refused, because an
+    unsourced reference is the answer-in-the-goal CLAUDE.md warns against.
+
+    REPORTING ONLY, and deliberately OUTSIDE the task's identity: every task model declares the
+    field with `exclude=True`, so `model_dump` — and with it `run_started.config_hash`, which the
+    speculation calibration validator re-derives from the Toy writer's own dump — is byte-identical
+    whether or not a reference is declared, and every receipt already issued stays valid. The
+    declaration still reaches `task.snapshot.json` (the snapshot is the resolved task dict, not the
+    model dump), and the engine pins it on `run_started` itself (`engine/setup_phase.py`, through
+    the `reference_score` task hook)."""
+
+    _refuse_unknown = model_validator(mode="before")(
+        classmethod(refuse_unknown_task_keys))
+
+    baseline: ReferenceMark
+    target: Optional[ReferenceMark] = None
 
 
 class ReferenceSpec(BaseModel):
@@ -1767,6 +1815,9 @@ class RepoTask(BaseModel):
     goal: str = ""
     direction: str = "max"                    # "min" | "max"
     comparison_contract: ComparisonContract | None = None
+    # doc 67 67.14: the declared baseline/target scores — reporting only, EXCLUDED from the dump so
+    # `run_started.config_hash` and every calibration receipt are unchanged (`ReferenceScoreSpec`).
+    reference_score: Optional[ReferenceScoreSpec] = Field(default=None, exclude=True)
     seed: int = 0
 
     editable_path: str = ""                   # the repo the agent may modify (mounts at root)

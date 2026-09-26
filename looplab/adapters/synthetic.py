@@ -34,9 +34,9 @@ import random
 from dataclasses import dataclass
 from typing import Optional, Protocol
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-from looplab.adapters.repo_task import refuse_unknown_task_keys
+from looplab.adapters.repo_task import ReferenceScoreSpec, refuse_unknown_task_keys
 from looplab.core.comparison import ComparisonContract
 from looplab.core.models import Idea, Node, RunState, validate_direction
 
@@ -68,6 +68,9 @@ class SyntheticTaskBase(BaseModel):
     def _direction_valid(cls, v):
         return validate_direction(v)
     comparison_contract: ComparisonContract | None = None
+    # doc 67 67.14: the declared baseline/target scores — reporting only, EXCLUDED from the dump so
+    # `run_started.config_hash` and every calibration receipt are unchanged (`ReferenceScoreSpec`).
+    reference_score: Optional[ReferenceScoreSpec] = Field(default=None, exclude=True)
 
     def external_fallback_uses_llm(self) -> bool:
         return False  # the fallback fills a deterministic local template

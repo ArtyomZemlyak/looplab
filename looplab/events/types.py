@@ -2143,13 +2143,14 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         optional=(
             "card_driven_selection", "config_hash", "direction", "dirty_inputs", "env",
             "eval_env", "eval_env_absent_from_task", "eval_parallel", "explicit_settings", "goal",
-            "holdout_fraction", "holdout_select", "llm_parallel", "require_approval", "run_id",
+            "holdout_fraction", "holdout_select", "llm_parallel", "reference_score",
+            "require_approval", "run_id",
             "run_uid", "select_verifier", "select_verifier_contract", "select_verifier_samples",
             "speculation_calibration_gpu_inventory", "speculation_calibration_profile_digest",
             "speculation_calibration_seed", "speculation_depth", "speculation_depth_auto",
             "speculation_gate_receipt_digest", "speculation_implementation_digest",
-            "speculation_policy_scope", "speculation_runtime_scope_sha256", "task_id",
-            "trust_gate", "verifier_ci_tie", "workspace"
+            "speculation_policy_scope", "speculation_runtime_scope_sha256",
+            "task_id", "trust_gate", "verifier_ci_tie", "workspace"
         ),
     ),
     "run_width_settled": PayloadContract(

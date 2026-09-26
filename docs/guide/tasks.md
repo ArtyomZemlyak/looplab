@@ -72,6 +72,29 @@ Every task shares these:
 | `goal` | string | A natural-language objective; the agent reads this |
 | `direction` | `min` \| `max` | Whether lower or higher metric is better |
 | `seed` | int | Random seed for reproducible data generation. **Not universal** — the built-in synthetic kinds and `repo` carry it; `mlebench_real` has none (the competition owns the split) |
+| `reference_score` | object | Optional. The task's **baseline** and **target** scores, each a measured number with its source: `{"baseline": {"value": 9.0, "source": "x=0, the untuned start"}, "target": {"value": 0.0, "source": "the analytic optimum"}}` (`target` may be omitted). Reporting only — see below |
+
+### Where the scale starts: `reference_score` (doc 67 67.14)
+
+A run's best says nothing ACROSS tasks — 0.79 recall on one corpus and 8.5 squared error on
+another cannot be ranked. With a declared `reference_score`, the run row and the CLI's result line
+carry its **headroom** (`core/headroom.py::headroom`): the champion's gain over the baseline in the
+run's own direction, and — with a target — the share of the baseline-to-target gap it closed
+(`0` at the baseline, `1` at the target, above `1` past it, below `0` when the run did worse than
+the baseline). That is the number a portfolio can compare across tasks: the RSI survey's
+headroom-closed index, AIRS-Bench's normalized score, Agora's "share of the gap closed".
+
+Both marks are **measured numbers with where each came from** — the majority-class accuracy, a
+published leaderboard row, a prior run's champion. A mark without a `source` is refused, for the
+reason [the goal rule](#writing-a-goal-what-belongs-in-it-and-what-is-a-leak) gives: an unsourced
+number is a guess presented as a fact. A target that is not better than the baseline in the task's
+direction yields no share (the declaration contradicts the objective) and says so.
+
+It is **reporting, not identity**: every task model keeps the field out of its dump, so
+`run_started.config_hash` — and every speculation calibration receipt re-derived from it — is the same
+whether or not a reference is declared. The engine pins the declaration on `run_started` itself
+(where it is absent when none is declared), the fold keeps it on `RunState.reference_score`, and
+nothing that selects, prompts or gates reads it.
 
 ### A key the spec does not declare is REFUSED
 

@@ -19,6 +19,7 @@ import stat
 from fastapi import HTTPException
 
 from looplab.core.atomicio import file_identity
+from looplab.core.headroom import headroom
 from looplab.core.pathsafe import is_reparse
 from looplab.core.run_deletion import (RUN_DELETION_FENCE_PREFIX, RunDeletionStorageError,
                                        load_run_deletion_fence, run_deletion_fence_path,
@@ -83,6 +84,7 @@ def _unreadable_log_row(rd, stt) -> dict:
         "source_integrity": integrity_wire({"complete": False, "unreadable": True}),
         "best_metric": None, "best_confirmed": None, "best_metric_caveats": [],
         "mislead_gap": None, "trajectory": None, "best_metric_comparability": None,
+        "headroom": None,
         "stop_reason": None, "resume_pending": False, "seeded_from": [], "themes": {},
         "concepts": {}, "mtime": stt.st_mtime, "created": stt.st_ctime,
     }
@@ -251,6 +253,13 @@ def run_summaries(srv, only=None) -> list:
                 # statement this exists to stop. Read off the CHAMPION's own folded
                 # `metric_provenance`, because the number this row publishes is that node's.
                 "best_metric_comparability": record_of(best) if best is not None else None,
+                # HOW FAR THE CHAMPION CLOSED THE TASK'S DECLARED GAP (doc 67 67.14): its gain over
+                # the task's baseline and, with a target, the share of baseline -> target it covers
+                # (`core/headroom.py::headroom`) — the one number that reads the same across TASKS.
+                # `None` for every task that declared no `reference_score`, and it is never a zero.
+                # Additive; a legacy client ignores it.
+                "headroom": headroom(best.robust_metric if best is not None else None,
+                                     st.reference_score, st.direction),
                 "stop_reason": st.stop_reason,
                 # Cached with the fold so liveness polling can cheaply decide whether the
                 # durable-resume reconciler is needed. Without this bit every dashboard poll

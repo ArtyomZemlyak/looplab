@@ -2068,6 +2068,10 @@ class RunState(BaseModel):
     goal: str = ""
     direction: str = "min"  # "min" | "max"
     config_hash: str = ""
+    # doc 67 67.14: the task's declared baseline/target scores, pinned on `run_started` and folded
+    # through `core/headroom.py::normalized_reference` — None on every log that declared none. The
+    # run row turns it into `headroom`; nothing that decides reads it.
+    reference_score: Optional[dict] = None
     # Setup completion, folded from `setup_finished` (arch-review §3 P0-3). run_started is appended in
     # the MIDDLE of setup (before AGENTS.md/provenance/host-grading/profiling and the leakage
     # hard-stop), so gating the setup phase on run_id let a crash right after run_started PERMANENTLY

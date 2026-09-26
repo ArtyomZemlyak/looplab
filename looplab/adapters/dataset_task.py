@@ -28,7 +28,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from looplab.adapters.repo_task import refuse_unknown_task_keys
+from looplab.adapters.repo_task import ReferenceScoreSpec, refuse_unknown_task_keys
 from looplab.core.comparison import ComparisonContract
 from looplab.core.models import Idea, Node, RunState, validate_direction
 from looplab.core.parse import LLMClient
@@ -119,6 +119,9 @@ class DatasetTask(BaseModel):
     goal: str = ""
     direction: str = "max"                      # default: a higher-is-better metric
     comparison_contract: ComparisonContract | None = None
+    # doc 67 67.14: the declared baseline/target scores — reporting only, EXCLUDED from the dump so
+    # `run_started.config_hash` and every calibration receipt are unchanged (`ReferenceScoreSpec`).
+    reference_score: Optional[ReferenceScoreSpec] = Field(default=None, exclude=True)
     seed: int = 0
     data_path: str = ""                         # abs path to the data (file or dir) the agent reads
     data: dict[str, str] = Field(default_factory=dict)   # optional extra named paths (name -> path)
