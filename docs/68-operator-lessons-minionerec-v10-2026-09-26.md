@@ -198,10 +198,28 @@ seed). Движок складывает его в провенанс и при 
   proof:absent:run_split_by_key@looplab/agents+absent:champion_metric_caveats@looplab/agents
 - **68.2** OPEN[no-metric-retarget-command] смена ключа цели как операторское событие с пересчётом
   `node.metric` из записанных `extra_metrics` вместо правки журнала (§2). proof:absent:metric_retarget@looplab
-- **68.3** OPEN[no-node-rescore-command] повтор только стадии score на сохранённом артефакте узла (§2).
-  proof:absent:node_rescore@looplab
-- **68.4** OPEN[no-pause-after-node-command] freeze после терминала текущего узла без внешнего
-  сторожа (§2). proof:absent:pause_after_node@looplab
+- **68.3** *Пересмотрено 2026-09-26 проверкой критиком: здесь стоял `no-node-rescore-command`, а
+  механизм есть под другим именем — `node_reset {from_stage: "score"}` (клик по стадии в
+  `Inspector.jsx::StagePipeline`, или `POST /api/runs/{run}/commands`) повторяет узел с этой стадии в
+  его же workdir, переиспользуя пройденные стадии (`runtime/command_eval.py::reused_stage_count`);
+  с host-скорером повтор идёт ТЕКУЩЕЙ программой оператора. Два честных ограничения: score-стадия
+  внутри репозитория повторяет старую копию скорера из workdir (при переиспользовании workdir
+  материализация пропускается), а после раскрытия holdout сброс не переиспользует ни одной стадии и
+  заново ставит в очередь всех прочих лидеров (полное переобучение). Маркер снят: его `absent:` не
+  закрылся бы никогда.*
+- **68.3a** OPEN[rescore-resumes-the-search] пересчёт нельзя выполнить, не возобновив весь поиск:
+  `node_reset` — `EnginePolicy.ENSURE_RUNNING`, после пересчёта движок продолжает создавать узлы, а
+  на остановленном прогоне сброс не исполняется (проверка паузы в цикле идёт до диспатча); прежняя
+  метрика узла при этом уходит из свёртки (`_on_node_reset` обнуляет её) и видна только в журнале.
+  Нужен режим «доделать только ожидающие оценки и встать» (§2).
+  proof:`present:EV_NODE_RESET: (EnginePolicy.ENSURE_RUNNING, "engine_ack")@looplab/serve/control_validation.py`
+- **68.4** *Закрыто 2026-09-26: здесь стоял `no-pause-after-node-command`. Механизм был: пауза
+  исполняется на следующей итерации цикла, затем цикл ДОЖИДАЕТСЯ каждой уже идущей оценки
+  (`engine/speculation.py::_drain_adopted_evals`) и только потом процесс выходит и отпускает
+  `engine.lock` — остановка никогда не убивает оценку (упавшая под паузой не получает ремонта и
+  остаётся pending до `resume`). Не хватало способа этого дождаться: `looplab stop --wait
+  [--timeout S]` ждёт освобождения замка (`engine/run_lifecycle.py::engine_liveness`), печатает, чего
+  ждёт, и как закончился каждый узел, — вместо сторожа по журналу и kill по PID (§0 f).*
 - **68.5** OPEN[no-fidelity-rank-agreement] проверка ранговой согласованности дешёвого и полного
   уровней до отсечения по дешёвому (§5). proof:absent:fidelity_rank_agreement@looplab
 - **68.6** OPEN[run-id-pinned-to-dir-name] resume отказывает, если имя каталога прогона не равно

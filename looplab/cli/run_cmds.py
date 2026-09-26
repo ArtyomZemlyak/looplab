@@ -34,7 +34,7 @@ from looplab.core.run_proposal import proposal_for_run_dir
 from looplab.adapters.toytask import ToyTask
 from looplab.search.speculation_calibration import canonical_speculation_toy_task
 from looplab.core import appconfig
-from looplab.core.models import RUN_STOP_ERROR
+from looplab.core.models import RUN_STOP_ERROR, NodeStatus
 from looplab.serve.run_files import run_config_write_lock
 from looplab.cli import (_BACKENDS, _DEV_BACKENDS, _TASK_KINDS, _choice, _engine_singleton,
                          _apply_speculation_calibration_profile,
@@ -1258,11 +1258,112 @@ def resume(
     _exit_nonzero_if_the_run_produced_nothing(state, run_dir, wrap_up_only=is_wrap_up(prior_kind))
 
 
+# How often `stop --wait` looks at `engine.lock`, how often it says it is still waiting, and how
+# many CONSECUTIVE unreadable probes it tolerates before calling the lock unobservable (one transient
+# `None` — a probe racing the lock file's creation — must not abort an hours-long wait).
+_STOP_WAIT_POLL_S = 0.5
+_STOP_WAIT_ECHO_EVERY_S = 30.0
+_STOP_WAIT_UNOBSERVABLE_POLLS = 5
+
+
+def _in_flight_node_ids(state) -> list[int]:
+    """The nodes an engine owner admitted to the sandbox and has not closed — what a stop WAITS for,
+    and meaningful only while an engine is alive: `eval_activity_started` is cleared by the NEXT
+    owner (`events/replay.py::_on_node_eval_started`), so a crashed engine's receipts outlive it."""
+    return sorted(n.id for n in state.nodes.values()
+                  if n.status is NodeStatus.pending and n.eval_activity_started
+                  and not getattr(n, "tombstoned", False))
+
+
+def stop_lifted(state) -> str:
+    """Why the stop no longer stands, or `""` while it does. A pause that a later `resume` lifted, or
+    a resume request no engine has served yet (the server's post-exit waiter spawns `looplab resume`
+    for one, and that child LIFTS a pause), means the engine exiting is not the run stopping."""
+    if not state.paused:
+        return "the stop was lifted — a later resume/restart un-paused the run"
+    if state.resume_pending():
+        return ("a resume request is pending and unserved — an engine may start again and lift the "
+                "stop")
+    return ""
+
+
+def await_engine_exit(run_dir: Path, *, timeout_s: float = 0.0, liveness=None, standing=None,
+                      clock=time.monotonic, sleep=time.sleep, echo=typer.echo, describe=None,
+                      poll_s: float = _STOP_WAIT_POLL_S,
+                      echo_every_s: float = _STOP_WAIT_ECHO_EVERY_S,
+                      unobservable_polls: int = _STOP_WAIT_UNOBSERVABLE_POLLS) -> tuple[str, str]:
+    """Block until no engine holds `run_dir/engine.lock`, and say how the wait ended:
+    `("exited", "")`, `("timeout", "")`, `("unobservable", "")` or `("lifted", why)`.
+
+    THE LOCK, NOT THE LOG, is what says the engine is gone. A pause is honoured at the loop's next
+    iteration, but the loop then DRAINS every evaluation already running (`_drain_adopted_evals`)
+    and only then exits and lets the OS release the lock — so "the pause row is folded" is minutes or
+    hours earlier than "nothing is running any more", and the second is what an operator stopping
+    "after the current node" is waiting for (doc 68 §0 f: an external watcher over the log plus a kill
+    by PID, which itself hung on a D-state `ps`). `engine_liveness` probes with a NON-BLOCKING lock
+    attempt it releases at once. Its `None` (an unlockable filesystem) is not guessed at: after
+    `unobservable_polls` consecutive ones the wait gives up rather than report an exit it never saw.
+
+    AND THE STOP MUST STILL STAND (`standing()`, re-asked every poll and once more after the lock is
+    seen free): a free lock beside a lifted pause, or beside a pending resume request, is an engine
+    between two lives, not a stopped run.
+
+    `liveness`, `standing`, `clock`, `sleep` and `describe` are seams so the wait is testable without
+    a real engine or a real clock; `describe()` returns the line printed every `echo_every_s`.
+    """
+    if liveness is None:
+        from looplab.engine.run_lifecycle import engine_liveness as liveness
+    start = clock()
+    next_echo = start + echo_every_s
+    unreadable = 0
+    while True:
+        alive = liveness(run_dir)
+        why = standing() if standing is not None else ""
+        if why:
+            return "lifted", why
+        if alive is None:
+            unreadable += 1
+            if unreadable >= unobservable_polls:
+                return "unobservable", ""
+        else:
+            unreadable = 0
+            if alive is False:
+                return "exited", ""
+        now = clock()
+        if timeout_s and now - start >= timeout_s:
+            return "timeout", ""
+        if now >= next_echo:
+            next_echo = now + echo_every_s
+            echo(describe() if describe is not None
+                 else f"still waiting for the engine on {run_dir} to exit")
+        sleep(poll_s)
+
+
 @app.command()
-def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze, no finalize).")):
+def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze, no finalize)."),
+         wait: bool = typer.Option(
+             False, "--wait",
+             help="block until the engine has exited: every evaluation already running is left to "
+                  "finish (a stop never kills one), and then the process releases engine.lock"),
+         timeout: float = typer.Option(
+             0.0, "--timeout", help="with --wait: give up after this many seconds (0 = no limit)")):
     """STOP a run: freeze it WITHOUT finalizing — no end-of-run report/lessons/cost roll-up. A running
-    engine breaks on its next iteration; the run is resumable (`looplab resume`) or you can `finalize`
-    it later to wrap it up."""
+    engine stops STARTING work on its next iteration, lets every evaluation already running finish,
+    then exits; an attempt that fails in a way the repair loop would retry buys no repair while the
+    stop is pending and stays pending (`looplab resume` re-runs it). `--wait` blocks until the engine
+    has exited — "stop after the current node". The run is resumable (`looplab resume`) or you can
+    `finalize` it later."""
+    # A DIRECT PYTHON CALL (`looplab.cli.stop(rd)`, the compatibility surface `finalize` documents)
+    # leaves Typer's OptionInfo defaults in place, and an OptionInfo is truthy: only a real `True`
+    # waits, so an old caller keeps the old non-blocking behaviour.
+    waiting = wait is True
+    limit = float(timeout) if isinstance(timeout, (int, float)) else 0.0
+    # REFUSED BEFORE ANYTHING IS APPENDED: a flag the command would silently ignore, or read as its
+    # opposite (a negative "limit" is no limit), is a refusal, the way `--max-nodes` refuses one.
+    if limit < 0:
+        raise typer.BadParameter("--timeout must be >= 0 (0 = no limit)")
+    if limit and not waiting:
+        raise typer.BadParameter("--timeout only applies with --wait")
     # `healthy=True`: fail closed on a mid-file corruption before appending (P0-4).
     store = _require_run_dir(run_dir, healthy=True)
     # NAMED, like `finalize`'s `run_abort {reason: "finalized"}` below. The E2E sweep of 2026-09-23
@@ -1273,6 +1374,61 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
     store.append(EV_PAUSE, {"reason": "operator stop (`looplab stop`)"})
     typer.echo(f"stopped {run_dir} (frozen, not finalized) — `looplab resume` to continue, "
                "`looplab finalize` to wrap it up")
+    if not waiting:
+        return
+    from looplab.engine.run_lifecycle import engine_liveness
+    # RESOLVED: `engine_liveness` refuses (None) a run dir reached through a symlink, and `stop`
+    # itself accepts one, so an unresolved path read as "this filesystem cannot lock".
+    target = run_dir.resolve()
+    running = []
+    was_alive = engine_liveness(target) is True
+    if was_alive:
+        running = _in_flight_node_ids(fold(store.read_all()))
+        if running:
+            typer.echo(f"waiting for the engine to finish {len(running)} evaluation(s) already "
+                       f"running (node {', '.join(map(str, running))}) and exit — a stop never "
+                       "kills one")
+
+    def _describe() -> str:
+        still = _in_flight_node_ids(fold(store.read_all()))
+        return (f"still waiting: node {', '.join(map(str, still))} evaluating" if still
+                else "still waiting: no evaluation running, the engine is finishing its turn")
+
+    outcome, why = await_engine_exit(target, timeout_s=limit, liveness=engine_liveness,
+                                     standing=lambda: stop_lifted(fold(store.read_all())),
+                                     describe=_describe)
+    if outcome == "exited":
+        # ONE MORE LOOK after the lock is seen free: a respawn waiting on this very exit (a pending
+        # resume the server's post-exit waiter serves) is the gap `fresh_resume_launch_pending`
+        # exists for, and it would lift the stop a moment after this command reported it.
+        why = stop_lifted(fold(store.read_all()))
+        if why:
+            outcome = "lifted"
+    if outcome == "lifted":
+        typer.echo(f"the engine on {run_dir} did not stop: {why}")
+        raise typer.Exit(code=1)
+    if outcome == "unobservable":
+        typer.echo(f"cannot observe {target}/engine.lock (a filesystem without working file "
+                   "locks), so the engine's exit cannot be waited for; the stop is recorded and "
+                   "will be honoured")
+        raise typer.Exit(code=1)
+    if outcome == "timeout":
+        typer.echo(f"gave up after {limit:g}s: the engine on {run_dir} still holds its lock. The stop "
+                   "is recorded; the engine exits once its running evaluation(s) finish")
+        raise typer.Exit(code=1)
+    after = fold(store.read_all())
+    for node_id in running:
+        node = after.nodes.get(node_id)
+        if node is None:
+            continue
+        if node.status is NodeStatus.pending:
+            typer.echo(f"  node {node_id}: stopped before it settled — pending; `looplab resume` "
+                       "re-runs it")
+        else:
+            typer.echo(f"  node {node_id}: {node.status.value}"
+                       + (f" (metric {node.metric})" if node.metric is not None else ""))
+    typer.echo(f"the engine on {run_dir} has exited" if was_alive
+               else f"no engine was running on {run_dir}; the stop is recorded")
 
 
 @app.command()

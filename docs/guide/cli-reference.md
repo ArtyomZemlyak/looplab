@@ -368,13 +368,31 @@ in between, the command refuses and tells you which one to run instead.
 ## `stop`
 
 Freeze a run **without** finalizing it — no end-of-run report, lessons, or cost roll-up. A live
-engine breaks on its next loop iteration; the run stays resumable (`looplab resume`) or you can
-`finalize` it later. The `pause` it appends names itself as the reason (``operator stop (`looplab
-stop`)``), so the run's `stop:` line says who froze it.
+engine stops *starting* work on its next loop iteration, lets every evaluation already running
+finish, and then exits; the run stays resumable (`looplab resume`) or you can `finalize` it later.
+The `pause` it appends names itself as the reason (``operator stop (`looplab stop`)``), so the run's
+`stop:` line says who froze it.
+
+**A stop never kills a running evaluation.** An evaluation that scores writes its result as usual.
+One that fails in a way the inline repair loop would retry buys no repair and no triage while the stop
+is pending: it stays pending, and `looplab resume` re-runs its code in full where its repair chain
+stood; a failure the loop would not retry settles as it always does. So `stop` is already "stop after
+the current node": `--wait` is how you wait for it, instead of watching the log or the process table.
 
 ```bash
-looplab stop RUN_DIR
+looplab stop RUN_DIR [--wait [--timeout SECONDS]]
 ```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run directory to stop |
+| `--wait` | off | Block until the engine has exited (it releases `engine.lock` after its running evaluations land), printing which node(s) it is waiting on every 30 s and how each ended |
+| `--timeout SECONDS` | `0` (no limit) | With `--wait`: give up after this long, exit `1`; the stop itself stays recorded and is still honoured. Refused (exit `2`, nothing appended) without `--wait` or when negative |
+
+`--wait` exits `0` once the engine is gone (immediately if none was running), and `1` if it timed
+out, cannot observe the lock at all (a filesystem without working file locks), or the stop stopped
+standing while it waited — a later `resume` lifted it, or a resume request is pending that the
+server's post-exit waiter would serve by starting an engine again.
 
 ## `finalize`
 
