@@ -44,7 +44,8 @@ class EpisodeQuestion(NamedTuple):
     """One research question, and what the run did about it.
 
     `statement` is the seed text as registered. `card_id` is the board card it became, when the
-    fold made one. `evidence` is the node ids that answered it — non-empty means SETTLED. `memos`
+    fold made one. `evidence` is the node ids that answered it (a substituted build does not) —
+    non-empty means SETTLED. `memos`
     is how many memos raised it, which is the re-proposal signal the duplicate rules leave visible:
     a question raised three times and never carded is a question the run kept asking and never ran.
     """
@@ -168,7 +169,11 @@ def episode(state) -> ResearchEpisode:
     questions: list = []
     for key, (statement, memos, at_node) in raised.items():
         card_id, card = card_by_key.get(key, (None, None))
-        evidence = tuple(getattr(card, "evidence", None) or ()) if card is not None else ()
+        # A substituted build (`Card.substituted_nodes`) did not answer the question — its Developer
+        # built something else — so a card retired on two of them is still an OPEN question here.
+        substituted = set(getattr(card, "substituted_nodes", None) or ()) if card is not None else set()
+        evidence = tuple(i for i in (getattr(card, "evidence", None) or ()) if i not in substituted
+                         ) if card is not None else ()
         questions.append(EpisodeQuestion(statement=statement, card_id=card_id,
                                          evidence=evidence, memos=memos, at_node=at_node))
 

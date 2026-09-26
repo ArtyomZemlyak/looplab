@@ -66,11 +66,13 @@ def next_board_prompt_cards(
     used = 0
     for card in cards:
         seed = card.seed_statement or ""
+        # The row renders its substitution clause too ("" unless a build was substituted).
+        cost = len(seed) + len(state.card_substitution_brief(card))
         if (not seed or len(seed) > BOARD_SEED_CHARS_MAX
-                or used + len(seed) > BOARD_PROMPT_SEED_BUDGET_CHARS):
+                or used + cost > BOARD_PROMPT_SEED_BUDGET_CHARS):
             continue
         selected.append(card)
-        used += len(seed)
+        used += cost
         if len(selected) == BOARD_PROMPT_CARDS:
             break
     return selected
@@ -150,12 +152,17 @@ def attempted_board_prompt_cards(state: RunState, shown=(), *,
         rows.append(c)
     selected: list = []
     used = 0
+    # The most a row can render beside its seed is its belief group's substitution clause.
+    groups = (_attempted_belief_groups(state)
+              if any(c.substituted_nodes for c in state.research_cards()) else {})
     for card in reversed(rows):
         seed = card.seed_statement or ""
-        if len(seed) > BOARD_SEED_CHARS_MAX or used + len(seed) > 8_000:
+        cost = len(seed) + len(state.belief_substitution_brief(
+            groups.get(card.belief_id or hypothesis_statement_digest(seed), [card]), card))
+        if len(seed) > BOARD_SEED_CHARS_MAX or used + cost > 8_000:
             continue
         selected.append(card)
-        used += len(seed)
+        used += cost
         if len(selected) == limit:
             break
     return list(reversed(selected))
@@ -306,6 +313,7 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
                 nodes = sorted({node for member in group for node in member.evidence})
             else:
                 nodes = sorted(card.evidence)
+            substitution = state.belief_substitution_brief(group or [card], card)
             # …AND WHETHER THE EXPERIMENT THAT RAN IS STILL THE ONE THIS CARD PROPOSED. The arbiter
             # existed and nothing consumed it, which made this block quietly dangerous: a card's
             # `params` is the receipt-bound PROPOSAL, and under `params_style: "none"` the Developer
@@ -316,7 +324,7 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
             # applied record disagree with their own proposal, the run's CHAMPION among them —
             # card-132 says batch 4096 / lr 0.001 / 3 epochs and node 13 ran 2048 / 0.0005 / ONE
             # epoch. Silent when the two agree, so the loud case stays loud.
-            drift = f"{card_drift_brief(card)} {state.card_substitution_brief(card)}".strip()
+            drift = f"{card_drift_brief(card)} {substitution}".strip()
             # …AND WHAT A `supported` VERDICT RESTS ON (`Settings.card_verdict_support`, doc 67 67.1):
             # the verdict is one measurement beating its parent, and read bare it steered the next
             # proposals as a finding even inside the eval's noise. Over the card's OWN evidence, the

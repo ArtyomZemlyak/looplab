@@ -1212,7 +1212,7 @@ class LLMRepoDeveloper:
             "description": "When not as_proposed: one sentence on what you built instead and why."},
     }
 
-    def _record_activation(self, args, write) -> str:
+    def _record_activation(self, args, write, *, report: bool = True) -> str:
         """Persist the `activation_markers` a `done` declared, then return its summary.
 
         Written as `looplab_activation.json` into the node's files, beside `looplab_stages.json` and
@@ -1226,10 +1226,16 @@ class LLMRepoDeveloper:
                                                    normalize_markers)
             write.files[ACTIVATION_MANIFEST_NAME] = manifest_text(
                 normalize_markers(args.get("activation_markers")))
+        # `report=False` for a session that cannot answer for the whole build: an intermediate plan
+        # step (told "do the minimum for this step") honestly says `not_implemented`, and when the
+        # last step's `done` omits the optional field — or is cut and never calls `done` — that
+        # answer was the NODE's report, and its card was returned on a real test
+        # (`events/card_ledger.py::_apply_substituted_builds`). Same for the script-gap session.
         from looplab.core.idea_report import IDEA_REPORT_NAME, idea_report_text
-        report = idea_report_text(args)
-        if report is not None:
-            write.files[IDEA_REPORT_NAME] = report
+        text = (idea_report_text(args, idea=getattr(write, "idea_digest", None))
+                if report else None)
+        if text is not None:
+            write.files[IDEA_REPORT_NAME] = text
         return args.get("summary", "")
 
     def _emit_spec(self) -> dict:
@@ -1632,7 +1638,7 @@ class LLMRepoDeveloper:
 
     def _run_step(self, idea: Idea, step: dict, idx: int, total: int, write, system: str,
                   stage_note: str = "", baseline_note: str = "", feedback: str = "",
-                  validate=None, *, extra: str = "") -> str:
+                  validate=None, *, extra: str = "", report: bool = True) -> str:
         """Execute ONE atomic plan step in a FRESH bounded session, on top of the files accumulated so
         far (carried in `write.files`; syntax is validated per write by the write tool). A step's own
         error never aborts the plan — later steps + the eval still run on whatever got written.
@@ -1671,7 +1677,8 @@ class LLMRepoDeveloper:
             # so the ledger stays the 3 exploration briefs (propose/stages/plan), never K-step bloat.
             run_phase(self.client, CompositeTools([write, EnvInspectTools(self._grader_packages(), task_python=self._task_python())] + self._scout_tools(write)),
                       messages, self._emit_spec(), label=f"Developer·implement step {idx}/{total}",
-                      handoff=False, finalize=lambda a: self._record_activation(a, write),
+                      handoff=False,
+                      finalize=lambda a: self._record_activation(a, write, report=report),
                       validate=validate,
                       **(self._reject_kwargs() if validate is not None else {}),   # Q-1
                       fallback=lambda m: "", on_budget=self._note_session_budget,
@@ -2649,6 +2656,10 @@ class LLMRepoDeveloper:
                                data_mounts=getattr(self, "_data_mounts", None),
                                time_budget=self._eval_time_budget(),
                                prompt_truths=self._prompt_truths)   # Q-1: its `declare_stages` text
+        # The idea this call builds, stamped on the report its `done` writes (`core/idea_report.py::
+        # idea_report_text`). On the per-call `write`, not the shared instance.
+        from looplab.core.idea_report import idea_digest
+        write.idea_digest = idea_digest(idea)
         if base is not None or base_deleted is not None:
             # An EXPLICIT base is the node's OWN solution — the parent's (improve/refine via
             # implement_from) or the failing node's (repair via repair_from). Pre-load it so untouched
@@ -2659,9 +2670,21 @@ class LLMRepoDeveloper:
             # the node being repaired (the create-batch builds every node before any eval).
             write.files = dict(base or {})
             write.deleted = list(base_deleted or [])
+            if not error:
+                # The idea report is PER BUILD, not part of the solution: it says whether THIS
+                # Developer call built THIS node's idea. Carried verbatim from the parent, a child whose
+                # `done` answers nothing (it is optional, and a salvaged session never calls `done`)
+                # would inherit the parent's `different` and retire its OWN card as a substitution
+                # (`events/card_ledger.py::_apply_substituted_builds`). A repair keeps the node's own.
+                from looplab.core.idea_report import IDEA_REPORT_NAME
+                write.files.pop(IDEA_REPORT_NAME, None)
         elif error and (self.last_files or self.last_deleted):   # legacy repair (no explicit base):
             write.files = dict(self.last_files)                  # best-effort carry of the last build
             write.deleted = list(self.last_deleted)
+            # …of its CODE. The last build is "almost never the node being repaired" (above), so its
+            # idea report is another node's answer about another idea.
+            from looplab.core.idea_report import IDEA_REPORT_NAME
+            write.files.pop(IDEA_REPORT_NAME, None)
         params = ", ".join(f"{k}={v}" for k, v in (idea.params or {}).items()) or "(choose sensible values)"
         from looplab.core.hardware import operational_attention_points
         from looplab.core.prompts import render
@@ -3169,7 +3192,9 @@ class LLMRepoDeveloper:
                         # The manifest-vs-script bounce belongs to the LAST step, which is
                         # the one already told to make the entrypoint run end to end.
                         validate=validate_build if i == len(steps) else None,
-                        extra=self._plan_outline(steps, i) + step_extra)
+                        extra=self._plan_outline(steps, i) + step_extra,
+                        # Only the LAST step answers for the whole build (`_record_activation`).
+                        report=i == len(steps))
                 step_cutoff = str(getattr(self, "last_budget_exhausted", "") or "").strip()
                 # Compare CONTENT, not just presence: `edit_file` patches in place, and a
                 # step that rewrote a file byte-for-byte changed nothing and must not be
@@ -3283,8 +3308,9 @@ class LLMRepoDeveloper:
                            "missing file(s) so every declared stage can run end to end — or change "
                            "looplab_stages.json to call a script that exists — then call done.")}
         with tracing.operation("declared_script_gap", detail=str(refusal)[:300]):
+            # Writes the stage scripts only; it is not asked about the idea and must not answer.
             self._run_step(idea, step, 1, 1, write, system, stage_note=stage_note,
-                           baseline_note=base_note)
+                           baseline_note=base_note, report=False)
 
     def _record_result(self, write, idea: Idea) -> None:
         """Publish this call's working set on the shared developer instance (doc 25 RA-07).

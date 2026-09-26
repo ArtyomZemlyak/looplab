@@ -878,7 +878,11 @@ the pre-eval proxy kill (`proxy_kill_fraction`) **abstains** on a candidate whos
 neighbour is farther than any evaluated point is from its own nearest sibling — its prediction is
 an extrapolation, and killing what the surrogate understands least is backwards. The `proxy_scored`
 audit row carries `nearest` and `abstained` beside the score. All three stay pure functions of
-folded state, so all three stay replay-safe.
+folded state, so all three stay replay-safe. Since 2026-09-26 the kill does not predict from a node
+whose Developer reported building something else (`Card.substituted_nodes`): the one candidate
+sitting exactly on its params is its returned card's rebuild, and an exact match on a number that
+measured another idea would discard it. The surrogate keeps such a node — a sweep varies the code
+that ran, which is what its sample measured.
 
 **The plan and the endgame reserve (2026-09-06).** A run now writes a durable `plan` event at its
 first creation boundary (`engine/plan.py`): the node budget cut into `seed` / `search` /

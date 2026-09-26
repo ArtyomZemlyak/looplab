@@ -383,3 +383,15 @@ test('the model reads no card field the server never publishes', () => {
     `${unpublished.join(', ')} are read off a card here and never published by public_cards.py — ` +
     'each is permanently undefined in the browser')
 })
+
+test('a substituted build is not a measured experiment behind the question', () => {
+  // `events/card_ledger.py::_apply_substituted_builds`: nodes 1 and 2 ran something else; a card
+  // retired on them and then dropped has NOTHING measured behind it, so its closure is unsupported.
+  const card = q('q1', ['a'], { evidence: [1, 2, 3], substituted_nodes: [1, 2], status: 'dropped' })
+  const nodes = { 1: { id: 1, metric: 1 }, 2: { id: 2, metric: 2 }, 3: { id: 3, metric: 3 } }
+  const roll = latticeRollups({ nodes }, [card], latticeRows([card])).get('q1')
+  assert.equal(roll.measuredNodes, 1)
+  const retired = q('q2', ['b'], { evidence: [1, 2], substituted_nodes: [1, 2], status: 'dropped' })
+  const closure = questionClosure(retired, latticeRollups({ nodes }, [retired], latticeRows([retired])).get('q2'))
+  assert.equal(closure.supported, false)
+})

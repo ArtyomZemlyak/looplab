@@ -908,7 +908,7 @@ def sibling_digest(state: RunState, parent, *, fit: bool = False) -> str:
     for n in sibs[:5]:
         why = " ".join((n.idea.rationale or "").split())[:90]
         lines.append(_node_line(n, state, fit=fit) + (f" — {why}" if why else "")
-                     + idea_report_note(n))
+                     + idea_report_note(n, state.nodes))
     return "\n".join(lines)
 
 
@@ -935,6 +935,9 @@ def lineage_lessons(state: RunState, parent, k: int = 5) -> str:
         seen.add(nid)
         desc.append(nid)
         stack.extend(kids.get(nid, []))
+    # A node whose Developer built something else is labelled on its lesson line: its delta is real,
+    # but the rationale beside it describes an idea it did not build (`core/idea_report.py`).
+    from looplab.core.idea_report import idea_report_note
     lessons: list[tuple[float, str]] = []
     for nid in desc:
         n = state.nodes[nid]
@@ -942,7 +945,8 @@ def lineage_lessons(state: RunState, parent, k: int = 5) -> str:
             continue
         if n.status is NodeStatus.failed:
             lessons.append((0.5, f"  #{n.id} {n.operator} FAILED ({n.error_reason or 'error'}): "
-                                 f"{' '.join((n.idea.rationale or '').split())[:70]}"))
+                                 f"{' '.join((n.idea.rationale or '').split())[:70]}"
+                                 + idea_report_note(n, state.nodes)))
             continue
         if n.metric is None:
             continue
@@ -955,7 +959,8 @@ def lineage_lessons(state: RunState, parent, k: int = 5) -> str:
         sign = "improved" if delta > 0 else "regressed"
         lessons.append((abs(delta),
                         f"  #{n.id} {n.operator} {sign} {fmt_num(abs(delta))} vs parent: "
-                        f"{' '.join((n.idea.rationale or '').split())[:70]}"))
+                        f"{' '.join((n.idea.rationale or '').split())[:70]}"
+                        + idea_report_note(n, state.nodes)))
     if not lessons:
         return ""
     lessons.sort(key=lambda t: -t[0])

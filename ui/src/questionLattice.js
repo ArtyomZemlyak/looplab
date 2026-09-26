@@ -245,11 +245,16 @@ export function ownBest(card) {
 // `cardLineageIndex` is the shared inversion of that edge and carries two guards a local rebuild
 // keeps losing: it refuses a SELF edge, and it treats a card whose parent is off the 256-row wire
 // page as a root rather than as a child of an id this page cannot draw.
+// A SUBSTITUTED build (`card.substituted_nodes`) ran something else than its card's idea: it is not a
+// measured experiment BEHIND the question, so it neither supports a closure nor mixes comparability.
+function testedNodes(card) {
+  const substituted = new Set(Array.isArray(card.substituted_nodes) ? card.substituted_nodes : [])
+  return Array.isArray(card.evidence) ? card.evidence.filter(id => !substituted.has(id)) : []
+}
+
 function cardEvidenceNodes(card, childrenByParent) {
-  const out = Array.isArray(card.evidence) ? [...card.evidence] : []
-  for (const child of childrenByParent.get(card.id) || []) {
-    if (Array.isArray(child.evidence)) out.push(...child.evidence)
-  }
+  const out = testedNodes(card)
+  for (const child of childrenByParent.get(card.id) || []) out.push(...testedNodes(child))
   return out
 }
 

@@ -744,7 +744,11 @@ class AppState:
                 c.id: {
                     "id": c.id, "statement": dto.get("statement", ""),
                     "source": dto.get("source", "researcher"), "status": dto.get("verdict", "open"),
-                    "rationale": dto.get("rationale", ""), "evidence": list(dto.get("evidence") or []),
+                    # The old Hypothesis `evidence` meant "the nodes that TESTED it", so a build that
+                    # ran something else (`substituted_nodes`) is left out; the shape is unchanged.
+                    "rationale": dto.get("rationale", ""),
+                    "evidence": [i for i in (dto.get("evidence") or [])
+                                 if i not in set(dto.get("substituted_nodes") or [])],
                     "created_at_node": dto.get("created_at_node", 0),
                     "best_delta": dto.get("best_delta"), "priority": dto.get("priority"),
                 }

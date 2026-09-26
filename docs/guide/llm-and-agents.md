@@ -392,6 +392,17 @@ stays focused and the trace reads cleanly:
    only to **fix** a broken manifest (e.g. a repair whose root cause is a bad stage command/timeout) —
    authoring stays in the STAGES phase.
 
+**The build says whether it built the idea.** The Developer's `done` takes `idea_implemented`
+(`as_proposed` / `partly` / `different` / `not_implemented`) and `built_instead`, shipped with the
+node's files as `looplab_idea_report.json` (`core/idea_report.py`) and stamped with a digest of the
+idea it answers about. Only the build's LAST plan step answers (an intermediate step is told to do
+the minimum), and neither a parent's nor a previous build's report is carried into a new build. A
+`different` / `not_implemented` node keeps its metric but is not a test of its card: the card's
+verdict ignores it and the idea goes back on the board once (`Card.substituted_nodes`; the Cards bullet
+of [the UI guide](ui.md#what-it-does)), and every surface that shows the node's rationale labels it
+`NOT A TEST OF card-N's IDEA`. A repair whose only change is the report moved no code: it is not an
+edit, so it neither re-evaluates identical code nor invalidates a reusable stage checkpoint.
+
 A **repair** skips stages+plan and is one focused session. The first **two** phases are read-only: they
 get the repo scouts, the env inspector, the probe, and any operator-pinned preflight commands
 (`read_file`, `grep`, `find_files`, `list_dir`, `pkg_info`, `py_api`, `read_installed`,

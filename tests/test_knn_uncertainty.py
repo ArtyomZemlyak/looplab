@@ -146,3 +146,21 @@ def test_the_engine_records_the_distance_and_the_abstention(tmp_path):
         assert isinstance(row["nearest"], float) and isinstance(row["abstained"], bool)
         if row["abstained"]:
             assert row["skipped"] is False, "an abstention is never a skip"
+
+
+def test_a_substituted_node_is_no_neighbour_the_kill_predicts_from():
+    """Node 4 ran something ELSE at (1, 1) (`core/idea_report.py`) and scored terribly. The one
+    candidate sitting exactly there is its returned card's rebuild; predicted from node 4 it is an
+    exact match — a certainty to the kill — and would be discarded on a number from another idea."""
+    from looplab.core.idea_report import IDEA_REPORT_NAME, idea_report_text
+    st = _state([(0.0, 0.0, 5.0), (2.0, 0.0, 5.2), (0.0, 2.0, 4.8), (2.0, 2.0, 5.1), (1.0, 1.0, 0.1)])
+    st.nodes[4].files = {IDEA_REPORT_NAME: idea_report_text({"idea_implemented": "different"})}
+    rebuild = Node(id=9, operator="draft", idea=Idea(operator="draft", params={"x": 1.0, "y": 1.0}))
+    sc = ProxyScorer(kill_fraction=0.3, warmup=4)
+    predicted, nearest = sc.score_with_uncertainty(st, rebuild)
+    assert predicted > 4.0 and nearest > 0.0
+    assert sc.should_skip(st, rebuild, predicted, nearest) is False
+    # …and without the report the same geometry kills it, which is the defect.
+    st.nodes[4].files = {}
+    predicted, nearest = sc.score_with_uncertainty(st, rebuild)
+    assert (predicted, nearest) == (0.1, 0.0) and sc.should_skip(st, rebuild, predicted, nearest)

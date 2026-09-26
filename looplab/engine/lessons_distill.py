@@ -80,6 +80,14 @@ def _salvage_note(node) -> str:
     return _SALVAGED_ROW_NOTE if (node.metric_provenance or {}).get("salvaged") else ""
 
 
+def _idea_report_note(node, state: RunState) -> str:
+    """A ranked row's rationale is its PROPOSAL; a build whose Developer reported building something
+    else is labelled, or the lesson writer explains the metric by an idea that never ran — the
+    lessons outlive the run (`core/idea_report.py`)."""
+    from looplab.core.idea_report import idea_report_note
+    return idea_report_note(node, state.nodes)
+
+
 def _unmeasured_observation_rows(final: RunState, limit: int) -> list:
     """The salvaged-and-EXCLUDED nodes as `(node, line)` OBSERVATIONS — what each ran into, with no
     number attached.
@@ -587,8 +595,13 @@ class LessonDistillMixin:
                     "reason": local.reason, "classifier": SKILL_PREFILTER_VERSION,
                 })
                 continue
+            # A substituted build (`Card.substituted_nodes`) RAN, but its Developer said it built
+            # something else: its code is not this card's technique, and the rendered skill quotes the
+            # best evidence node's code under "Verified on task …". Out of the evidence, like an
+            # unreliable metric — the card's verdict already excludes it.
+            substituted = set(getattr(h, "substituted_nodes", None) or ())
             ev = [state.nodes[i] for i in h.evidence
-                  if i in state.nodes and i not in skill_unreliable]
+                  if i in state.nodes and i not in skill_unreliable and i not in substituted]
             evidence = [{
                 "node_id": n.id,
                 "operator": n.operator,
@@ -707,7 +720,7 @@ class LessonDistillMixin:
         bad = [n for n in final.nodes.values()
                if n.status is NodeStatus.failed and not n.tombstoned and n.id not in aborted][:3]
         rows = [f"#{n.id} {n.operator} metric={n.metric:.4g} params={n.idea.params}"
-                + _salvage_note(n) for n in ok]
+                + _salvage_note(n) + _idea_report_note(n, final) for n in ok]
         fails = [f"#{n.id} {n.operator} failed: {n.error_reason}" for n in bad]
         # The OBSERVATION half of the salvage boundary. These nodes are `evaluated`, so the failure
         # list above (which keys on `NodeStatus.failed`) cannot see them, and the rank correctly
@@ -892,6 +905,7 @@ class LessonDistillMixin:
         rows = [f"#{n.id} {n.operator} metric={n.metric:.4g} params={n.idea.params}"
                 + _salvage_note(n)
                 + (f" — {' '.join((n.idea.rationale or '').split())[:90]}" if n.idea.rationale else "")
+                + _idea_report_note(n, final)
                 for n in ev]
         prompt = (f"Task goal: {final.goal}\nObjective: {'maximize' if rev else 'minimize'} the metric.\n"
                   f"Experiments (best first):\n" + "\n".join(rows) +

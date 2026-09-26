@@ -74,3 +74,36 @@ def test_an_inert_node_reads_as_failed_inert_path(tmp_path):
     from looplab.engine.novelty import _prior_outcome
     node = types.SimpleNamespace(status=types.SimpleNamespace(value="failed"), error_reason="inert_path")
     assert _prior_outcome(node) == "failed:inert_path"
+
+
+def test_the_system_prompt_is_historical_unless_a_prior_row_carries_the_substitution_label(
+        tmp_path, monkeypatch):
+    """Prompt strings are contracts: a run whose nodes wrote no idea report keeps the judge's system
+    sentence byte for byte; only a brief that SHOWS a `NOT A TEST OF … IDEA` row explains it — and
+    the row itself is labelled with the run's nodes, so a parent's copied report is not a label."""
+    from looplab.core.idea_report import IDEA_REPORT_NAME, idea_report_text
+    from looplab.engine import novelty
+
+    gate, state = _gate(), _state(tmp_path)
+    sent = _llm_gate(monkeypatch, [False, False])
+    gate._llm_novelty_gate(state, _idea("anything"))
+    system = sent[0][0]["content"]
+    assert novelty._NEVER_RAN in system and "NOT A TEST OF" not in system
+
+    state.nodes[0].files = {IDEA_REPORT_NAME: idea_report_text(
+        {"idea_implemented": "different", "built_instead": "the grouped path"})}
+    gate._llm_novelty_gate(state, _idea("anything"))
+    system, user = sent[1][0]["content"], sent[1][1]["content"]
+    assert novelty._NEVER_RAN_WITH_REPORT in system
+    assert "NOT A TEST OF its IDEA (idea different)" in user
+
+    # A child carrying its parent's report BYTES (a log from before the preload dropped them) is
+    # not labelled: the gate hands the run's nodes to the note.
+    child = state.nodes[0].model_copy(deep=True)
+    child.id, child.parent_ids = 1, [0]
+    state.nodes[1] = child
+    sent = _llm_gate(monkeypatch, [False])
+    gate._llm_novelty_gate(state, _idea("anything"))
+    rows = {line.split()[0]: line for line in sent[0][1]["content"].splitlines()
+            if line.startswith("#")}
+    assert "NOT A TEST" in rows["#0"] and "NOT A TEST" not in rows["#1"]

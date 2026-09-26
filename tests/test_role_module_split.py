@@ -276,6 +276,13 @@ def test_roles_is_no_longer_a_god_module():
     demands. The block's TEXT went to `role_prompts.py::script_parent_block` instead — prompt bytes
     belong to the fragments — which is why that cap moves too. Both move to measured + 1.
 
+    `state_brief.py` 552 -> 560 on 2026-09-26 (review of 033ed1c6, the substituted-build return):
+    both board windows now CHARGE the NOT TESTED clause their rows render against their character
+    budgets (the claimable window's 20k and the attempted window's 8k were spent on seed length
+    alone), and the belief-grouped row states every member's substitutions. The clause's TEXT and
+    the group join live in `core/idea_report.py` / `RunState.belief_substitution_brief`; what is
+    left here is the budget arithmetic, which is this module's own job. The cap moves to measured + 1.
+
     `roles.py` 868 -> 873 and `state_brief.py` 552 -> 593 on 2026-09-26 (doc 67 67.1, what a
     supported card's verdict rests on: `Settings.card_verdict_support`). In `roles.py`: the switch's
     `RESEARCHER_HINT_ATTRS` row with its why-comment, the keyword `LLMResearcher.propose` hands the
@@ -290,8 +297,10 @@ def test_roles_is_no_longer_a_god_module():
     registry the two propose paths and every forwarding wrapper read, so it cannot live elsewhere.
     The note's TEXT is `engine/ablation.py::ablation_probe_note`, beside the numbers it states. The
     cap moves to measured + 1.
+    Merged 2026-09-26 with the substituted-build return above: `state_brief.py` carries both
+    (593 + its 8) — measured 601, cap 602.
     """
-    caps = {"agents/roles.py": 876, "agents/role_prompts.py": 344, "agents/state_brief.py": 594,
+    caps = {"agents/roles.py": 876, "agents/role_prompts.py": 344, "agents/state_brief.py": 602,
             "agents/role_wrappers.py": 467, "agents/toy_roles.py": 128}
     sizes = {rel: len((_PKG / rel).read_text(encoding="utf-8").splitlines()) for rel in caps}
     over = {rel: (n, caps[rel]) for rel, n in sizes.items() if n >= caps[rel]}

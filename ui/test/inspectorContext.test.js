@@ -117,6 +117,19 @@ test('a node links to its Card, and the link reports the OTHER attempts at the s
   assert.deepEqual(link.siblings.map(entry => entry.nodeId), [2, 5])
 })
 
+test('the link says whether THIS node is a substituted build of its card', () => {
+  const { nodeCardLink } = inspectorLinks
+  const state = {
+    cards: { 'card-2': { id: 'card-2', evidence: [], substituted_nodes: [7] } },
+    nodes: { 7: { id: 7, status: 'evaluated', idea: { card_id: 'card-2' } },
+      8: { id: 8, status: 'running', idea: { card_id: 'card-2' } } },
+  }
+  const self = nodeCardLink(state, state.nodes[7])
+  assert.equal(self.substituted, true)
+  assert.deepEqual([self.summary.substituted, self.summary.evidence, self.summary.ownedOnly], [1, 0, 1])
+  assert.equal(nodeCardLink(state, state.nodes[8]).substituted, false)
+})
+
 test('no card stamp and an unpublished card are DIFFERENT answers, and neither is an error', () => {
   const { nodeCardLink } = inspectorLinks
   assert.equal(nodeCardLink(STATE, STATE.nodes[7]).kind, 'none')

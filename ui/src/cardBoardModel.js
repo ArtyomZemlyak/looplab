@@ -322,11 +322,16 @@ export function cardAttempts(state, card) {
   const touch = id => {
     if (!byId.has(id)) {
       const node = isRecord(nodes[id]) ? nodes[id] : null
-      byId.set(id, { nodeId: id, evidence: false, owned: false, present: !!node, node })
+      byId.set(id, { nodeId: id, evidence: false, owned: false, substituted: false, present: !!node, node })
     }
     return byId.get(id)
   }
   for (const id of cardNodes(card.evidence)) touch(id).evidence = true
+  // `substituted_nodes` (`events/card_ledger.py::_apply_substituted_builds`): the node RAN, but its
+  // Developer reported building something else, so it is not a test of this card — whether it is
+  // still in `evidence` (a mixed set, or the second substitution that retired the card) or was
+  // taken out of it (the once-per-card return). Neither "fed the verdict" nor "reserved" is true.
+  for (const id of cardNodes(card.substituted_nodes)) touch(id).substituted = true
   if (cardId) {
     for (const [key, node] of Object.entries(nodes)) {
       if (nodeCardId(node) !== cardId) continue
@@ -354,8 +359,9 @@ export function cardAttemptSummary(attempts) {
   return {
     total: list.length,
     missing: list.length - present.length,
-    evidence: list.filter(entry => entry.evidence).length,
-    ownedOnly: list.filter(entry => entry.owned && !entry.evidence).length,
+    evidence: list.filter(entry => entry.evidence && !entry.substituted).length,
+    ownedOnly: list.filter(entry => entry.owned && !entry.evidence && !entry.substituted).length,
+    substituted: list.filter(entry => entry.substituted).length,
     statuses: counts,
   }
 }

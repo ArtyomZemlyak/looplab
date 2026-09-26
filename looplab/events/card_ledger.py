@@ -2300,8 +2300,9 @@ def _apply_unexecuted_discards(st: RunState, ledger: _CardLedger) -> None:
     compares candidates, and re-deciding merit here would be exactly the model-free-but-invented
     judgement docs/36 refuses.
 
-    ``gated`` STAYS UNREACHABLE FROM HERE, and that is why the filter requires the discards to be the
-    card's ONLY evidence. ``_apply_card_status``'s ``gated`` branch fires when EVERY evidence node is
+    ``gated`` STAYS UNREACHABLE FROM HERE, and that is why the return requires the discards to be the
+    card's ONLY evidence (or beside nothing but their own rebuild still PENDING, which `_apply_card_
+    returns` adds and which reads `running`, never `gated`). ``_apply_card_status``'s ``gated`` branch fires when EVERY evidence node is
     trust-gated/breed-excluded/infeasible; removing a discarded node from a MIXED evidence set could
     turn a set that was not all-excluded into one that is, minting a ``gated`` card — the one lane that
     feeds ``actionable=False`` and the ``card_terminal`` blocker. Requiring the discards to be the whole
@@ -2326,8 +2327,8 @@ def _apply_unexecuted_discards(st: RunState, ledger: _CardLedger) -> None:
             and is_unevaluated_speculative_discard(st, node)
         )
         c.discarded_nodes = discarded
-        if len(discarded) == 1 and set(discarded) == set(c.evidence):
-            c.evidence = []
+    # The RETURN itself (the evidence removal) is `_apply_card_returns`, shared with the substituted
+    # builds so the once-per-card bound counts both kinds of forgiven node together.
 
 
 def _apply_substituted_builds(st: RunState, ledger: _CardLedger) -> None:
@@ -2355,12 +2356,26 @@ def _apply_substituted_builds(st: RunState, ledger: _CardLedger) -> None:
     * Always: stamped in `substituted_nodes`, and never counted in the verdict (`untested` in
       `_evidence_verdict` / `_usable_evidence`), mixed evidence set or not — a real node beside it
       decides the verdict alone.
-    * Once per card: a single substitution that is the card's WHOLE evidence leaves `evidence`, so
-      the card is `proposed`/`open` and selection-ready again.
+    * Once per card (`_apply_card_returns`, counted with the discards): a single forgiven node that
+      is the card's whole evidence — or beside nothing but its own rebuild still in flight — leaves
+      `evidence`, so the card is `proposed`/`open` and selection-ready again.
     * At two it stays (both do): the card has twice been built as something else, which says the
       idea does not get built as proposed here, and the run stops paying for it — the card retires
       through the ordinary `work_terminal` path with its verdict still `open`, never `supported`.
     Worst case per card is two Developer builds, the discard bound's own arithmetic.
+
+    ``gated`` STAYS OUT OF REACH, by the discard phase's own argument plus one clause it did not
+    need. A discard never ran, so it carries no gate; a substitution RAN, and may be infeasible or
+    trust-excluded — exactly what `_apply_card_status` reads as `gated` (`actionable=False`, the
+    `card_terminal` blocker). Returning such a card would carry it OUT of the one lane that
+    excludes, and pay a second build to a node that broke a constraint or was flagged for hacking
+    and happened to say "different". So a gated substitution is stamped (the verdict still ignores
+    it) but never returned; `_apply_card_returns` says why its pending-rebuild clause mints none.
+
+    IT CHANGES VERDICTS ON A PRESERVED LOG, deliberately and without a switch, as
+    `_apply_unexecuted_discards` did: the verdict it removes (`supported` on a build that ran
+    something else) is false, and a flag would keep that false record on replay. A log carries a
+    report only since 85eaeae7 (2026-09-25); a log with none folds byte-identically.
     """
     from looplab.core.idea_report import idea_not_tested
 
@@ -2372,11 +2387,53 @@ def _apply_substituted_builds(st: RunState, ledger: _CardLedger) -> None:
             and (node := st.nodes.get(node_id)) is not None
             and not node.tombstoned
             and node.status is not NodeStatus.pending
-            and idea_not_tested(node)
+            and idea_not_tested(node, st.nodes)
         )
         c.substituted_nodes = substituted
-        if len(substituted) == 1 and set(substituted) == set(c.evidence):
-            c.evidence = []
+
+
+def _apply_card_returns(st: RunState, ledger: _CardLedger) -> None:
+    """The once-per-card RETURN of a forgiven node, for both kinds: a never-run discard
+    (`_apply_unexecuted_discards`) and a build that ran something else (`_apply_substituted_builds`).
+
+    ONE STEP, COUNTED OVER THE UNION. Each phase used to remove its own node when it was the card's
+    whole evidence, so a discard returned, rebuilt as a substitution, returned AGAIN — a third build,
+    past the bound both phases state. Here the count is `discarded_nodes ∪ substituted_nodes`: exactly
+    one forgiven node returns the card; at two, none is forgiven and the card retires on
+    `work_terminal`, whichever kinds they are.
+
+    THE RETURN SURVIVES ITS OWN REBUILD, and that is the half the per-phase rule missed. Evidence is
+    re-linked from `idea.card_id` on every fold, so the moment the returned card's rebuild n2 was
+    committed the forgiven n1 was back beside it: `[n1 terminal, n2 pending]` reads `owner_state=
+    "mixed"`, `search/card_selection.py`'s counterfactual (`card.evidence == [node_id]`) refuses it,
+    and the speculative lane superseded the rebuild it had just paid for — every return, under the
+    default speculation, retired its card unbuilt (measured through the real engine; the discard
+    tests only passed because they forced the rebuild stale too). So n1 also stays out while every
+    OTHER evidence node is NEWER than it (node ids are serial: its rebuild) and still PENDING.
+
+    WHY ONLY WHILE PENDING: `gated`. `_apply_card_status` evaluates pending before `gated`, so a set
+    of pending nodes can mint no gated card; once the rebuild lands, n1 rejoins and the card holds
+    exactly the mixed set it always did — the one `test_the_filter_never_moves_a_card_that_also_
+    holds_real_evidence` pins. A substitution that is itself trust-excluded or infeasible never
+    returns (see `_apply_substituted_builds`): that would carry its card OUT of `gated`.
+    """
+    for c in ledger.cards.values():
+        forgiven = sorted(set(c.discarded_nodes) | set(c.substituted_nodes))
+        if len(forgiven) != 1:
+            continue
+        only = forgiven[0]
+        node = st.nodes.get(only)
+        if node is None:
+            continue
+        if only in c.substituted_nodes and (only in st.breed_excluded or not node.feasible):
+            continue
+        rest = [i for i in c.evidence if i != only]
+        # "In flight" is `_apply_card_selection_readiness`' own spelling of it: pending, and neither
+        # tombstoned nor aborted — a struck rebuild is not work the return can wait on.
+        if all(i > only and (other := st.nodes.get(i)) is not None
+               and other.status is NodeStatus.pending and not other.tombstoned
+               and i not in st.aborted_nodes for i in rest):
+            c.evidence = rest
 
 
 def _apply_card_verdicts(
@@ -2597,6 +2654,7 @@ def _apply_card_status(st: RunState, ledger: _CardLedger, dropped: dict[str, dic
             c.status_nodes = []
             continue
         ev_nodes = [st.nodes[i] for i in c.evidence if i in st.nodes and not st.nodes[i].tombstoned]
+        substituted = set(c.substituted_nodes)
         # THE PENDING SPLIT, and it is the whole of the 2026-08-14 report. `card-2` on
         # `runs/rubertlite-dr-unified-v7` read `running` while node 2 had been BUILT and never
         # dispatched: `speculation_depth: 2` builds ahead ON PURPOSE, so admitted-but-not-started is a
@@ -2642,7 +2700,7 @@ def _apply_card_status(st: RunState, ledger: _CardLedger, dropped: dict[str, dic
         elif all((n.id in st.breed_excluded) or (not n.feasible) for n in ev_nodes):
             c.status = "gated"
             c.status_nodes = sorted(n.id for n in ev_nodes)
-        elif all(n.status is NodeStatus.failed for n in ev_nodes):
+        elif all(n.status is NodeStatus.failed or n.id in substituted for n in ev_nodes):
             # THE TERMINAL TWIN of the pending split. `evaluated` says "evidence has reached a
             # verdict"; for a card whose every experiment FAILED, nothing was measured and the card's
             # own `verdict` already says so ("open" — `_evidence_verdict`'s all-failed branch), so the
@@ -2657,6 +2715,12 @@ def _apply_card_status(st: RunState, ledger: _CardLedger, dropped: dict[str, dic
             # refund receipt already carry. It is placed AFTER `gated` so it can only ever take cards
             # that read `evaluated` today — `gated` is the lane that feeds `actionable=False` and the
             # `card_terminal` selection blocker, and no card may cross INTO or OUT of it here.
+            #
+            # A SUBSTITUTED node (`_apply_substituted_builds`) counts with the failures: it produced a
+            # result, but not for THIS card, whose verdict already reads `open` without it. A card
+            # retired on two substitutions, or on one beside a crash, read `evaluated` beside `open` —
+            # the contradiction this lane was added to end. A mixed set with a real result stays
+            # `evaluated`.
             c.status = "failed"
             c.status_nodes = sorted(n.id for n in ev_nodes)
         else:
@@ -2797,13 +2861,18 @@ def _apply_card_applied_params(st: RunState, ledger: _CardLedger) -> None:
     wrong for a field whose entire purpose is to be distinguishable from the declaration. A card
     whose nodes predate the applied record (or never bound a metric) publishes NOTHING and the empty
     map means "not recorded", never "the same as proposed".
+
+    A node in `substituted_nodes` is skipped: its Developer said it built something ELSE, so its
+    coordinates are not where THIS card's experiment ran — the board would print them as the card's
+    drift beside the clause saying the same node never tested it.
     """
     for card in ledger.cards.values():
         card.applied_params = {}
         card.applied_params_node = None
+        substituted = set(card.substituted_nodes)
         for node_id in sorted(card.evidence, reverse=True):
             node = st.nodes.get(node_id)
-            if node is None or node.status is not NodeStatus.evaluated:
+            if node is None or node.status is not NodeStatus.evaluated or node_id in substituted:
                 continue
             provenance = getattr(node, "metric_provenance", None)
             record = provenance.get("applied_params") if isinstance(provenance, dict) else None
@@ -3530,6 +3599,7 @@ def derive_cards(
     control_ids = _fold_merged_cards(st, identity, ledger, aliases, control_ids)
     _apply_unexecuted_discards(st, ledger)
     _apply_substituted_builds(st, ledger)
+    _apply_card_returns(st, ledger)
     _apply_card_verdicts(st, ledger, control_ids)
     dropped = _apply_card_drops(st, ledger, aliases)
     building_card_nodes = _card_building_ids(st, ledger, aliases)

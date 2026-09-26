@@ -991,3 +991,24 @@ def test_old_logs_fold_without_the_cross_run_field(tmp_path):
 def test_settings_flag_defaults_on():
     # Part IV/V ships ON by default (concept capsules + cross-run prior audit; never rejects).
     assert Settings().cross_run_concepts is True
+
+
+def test_a_substituted_nodes_number_is_not_its_concepts_outcome(tmp_path):
+    """Node 0 scored best, but its Developer reported building something ELSE (`core/idea_report.py`):
+    its concepts were tagged from the unbuilt idea, so its 0.95 is not that concept's outcome. The
+    honest node 1 decides it."""
+    from looplab.core.idea_report import IDEA_REPORT_NAME, idea_report_text
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    s = EventStore(tmp_path / "events.jsonl")
+    s.append("run_started", {"run_id": "r-now", "task_id": "t", "goal": "dense retrieval reviews",
+                             "direction": "max"})
+    report = idea_report_text({"idea_implemented": "different", "built_instead": "the old path"})
+    for nid, metric, files in ((0, 0.95, {IDEA_REPORT_NAME: report}), (1, 0.80, {})):
+        s.append("node_created", {"node_id": nid, "parent_ids": [], "operator": "draft", "files": files,
+                                  "idea": {"operator": "draft", "params": {"t": float(nid)}, "theme": "x"}})
+        s.append("node_evaluated", {"node_id": nid, "metric": metric})
+        s.append("node_concepts", {"node_id": nid, "concepts": ["data/hard-negative-mining"], "mode": "llm"})
+    LessonMemory(_fake_engine(mem)).store_concept_capsule(fold(s.read_all()))
+    [cap] = ConceptCapsuleStore(mem / "concept_capsules.jsonl").all()
+    assert cap["concept_outcomes"]["data/hard-negative-mining"] == 0.80

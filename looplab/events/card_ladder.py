@@ -62,8 +62,11 @@ def _depth(cid: str, cards: dict) -> int:
 
 
 def _evidence(card) -> list[int]:
+    """The card's own TESTS: a substituted build (`Card.substituted_nodes`) ran something else, so
+    a direction whose only own-level nodes are substitutions has no evidence of its own."""
+    substituted = set(getattr(card, "substituted_nodes", None) or ())
     return [int(n) for n in (getattr(card, "evidence", None) or [])
-            if isinstance(n, int) and not isinstance(n, bool)]
+            if isinstance(n, int) and not isinstance(n, bool) and n not in substituted]
 
 
 def _children(card) -> list[str]:

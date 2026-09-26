@@ -322,6 +322,8 @@ foresight's). Land or explicitly defer each.
 4. Old event semantics remain foldable and are covered by the golden replay gate. The core model is not
    byte-identical to the original public dump: `RunState.hypotheses` was removed. The server now derives a
    deprecated read-only `hypotheses` compatibility projection from Cards; new consumers use `cards`.
+   Its `evidence` keeps the old meaning — the nodes that TESTED the card — so since 2026-09-26 it
+   leaves out `substituted_nodes` (builds that ran something else), which `cards[].evidence` keeps.
 5. `FoldCursor.snapshot()` deep-copies before finalize — the `_derive_cards` post-pass must be
    destructive-safe on the copy and never leak into the next suffix.
 
@@ -362,9 +364,10 @@ Layer 3 must remain disabled until the native mint/link lifecycle removes that a
 | `cross_run_prior` (matched concepts, prior runs+outcomes) | `cross_run_prior` — **re-home** | new field |
 | `foresight_rank` + `confidence` (+ source) | `hypothesis_ranked` + `foresight_selected` | reuse |
 | `footprint` (`gpus`, `mem?`, `timeout`; `proposed_by`, `finalized_by`) | Researcher proposes → Developer finalizes | new field (value used only in Layer 4) |
-| `evidence` | nodes whose `idea.card_id == id` (or whose statement hash-joins) | derived |
+| `evidence` | nodes whose `idea.card_id == id` (or whose statement hash-joins), minus the ONE forgiven node of a returned card (`discarded_nodes` ∪ `substituted_nodes`, `events/card_ledger.py::_apply_card_returns`) while nothing but its rebuild is in flight beside it | derived |
 | `status_nodes` | the node ids the lifecycle `status` was derived from — for `building`, the reserved `node_building` node, which `evidence` deliberately never carries | derived (2026-08-14) |
 | `discarded_nodes` | the node ids `is_unevaluated_speculative_discard` PROVES never reached a sandbox (a prefetch the Card freshness gate superseded before dispatch). Disjoint from `evidence` by construction — see §3.1 | derived (2026-08-15) |
+| `substituted_nodes` | the terminal node ids whose Developer REPORTED building something else (`looplab_idea_report.json`: `different` / `not_implemented`, `core/idea_report.py::NOT_A_TEST`; a report byte-identical to a parent's is the parent's copy and does not count). They ran and keep their metric, but never count in the card's verdict. Counted with `discarded_nodes`: ONE forgiven node returns the card (a gated — infeasible or trust-excluded — substitution never does); at two the card retires, status `failed`, verdict `open` — `events/card_ledger.py::_apply_substituted_builds` / `_apply_card_returns` | derived (2026-09-26) |
 | `research_origin`, `lesson_refs`, `claim_refs` | `Node.research_origin`, memo, lessons/claims stores | link |
 | `steering_context` (why proposed: cues + strategist stance + memo id) | proposal-cue hints + `active_strategy` — **homeless today** | new field |
 | `status` (derived maturity/lifecycle) | `_derive_cards` from fields + `st.nodes` | derived |

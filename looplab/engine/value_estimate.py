@@ -170,8 +170,11 @@ class ValueEstimateMixin:
             better = "lower is better" if state.direction == "min" else "higher is better"
             children = [c for c in state.nodes.values() if node.id in c.parent_ids
                         and c.status is NodeStatus.evaluated and c.metric is not None]
+            from looplab.core.idea_report import idea_report_note
+            # A child whose Developer built something else did not try what its rationale says.
             tried = "; ".join(
-                f"#{c.id} tried {(c.idea.rationale or c.idea.operator or '')[:160]} -> "
+                f"#{c.id} tried {(c.idea.rationale or c.idea.operator or '')[:160]}"
+                f"{idea_report_note(c, state.nodes)} -> "
                 f"metric {c.metric}" for c in sorted(children, key=lambda c: c.id)[:6])
             msgs = [
                 {"role": "system", "content":
@@ -186,7 +189,8 @@ class ValueEstimateMixin:
                  f"Metric direction: {state.direction} ({better}).\n"
                  f"Branch root: experiment #{node.id}, operator {node.idea.operator!r}, "
                  f"metric {node.metric}.\n"
-                 f"What it tried: {(node.idea.rationale or '(unstated)')[:1200]}\n"
+                 f"What it tried: {(node.idea.rationale or '(unstated)')[:1200]}"
+                 f"{idea_report_note(node, state.nodes)}\n"
                  f"Its parameters: {dict(list((node.idea.params or {}).items())[:20])}\n"
                  + (f"Follow-ups already run from it: {tried}\n" if tried else
                     "Follow-ups already run from it: none — nobody has expanded this branch yet.\n")

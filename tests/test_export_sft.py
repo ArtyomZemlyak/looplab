@@ -65,7 +65,7 @@ def test_every_answered_turn_becomes_a_row_carrying_its_nodes_outcome(tmp_path):
     assert first["completion"] == "an answer" and first["op"] == "propose"
     # THE GROUNDING: the node's own outcome rides with the turn, both when it worked …
     assert first["outcome"] == {"node_id": 0, "metric": 0.25, "status": "evaluated",
-                                "feasible": True, "error_reason": ""}
+                                "feasible": True, "error_reason": "", "idea_implemented": None}
     # … and when it did not, which is what makes the corpus filterable rather than flattering
     assert second["outcome"]["metric"] is None and second["outcome"]["error_reason"] == "crash"
     assert first["run_id"] == "r" and first["task_id"] == "t" and first["direction"] == "min"
@@ -130,3 +130,28 @@ def test_a_truncated_input_chain_is_marked_on_the_row(tmp_path):
     result = CliRunner().invoke(app, ["export-sft", str(rd)])
     assert result.exit_code == 0
     assert _rows(rd / "sft.jsonl")[0].get("input_partial") is True
+
+
+def test_a_proposal_is_not_grounded_by_a_build_that_ran_something_else(tmp_path):
+    """The node's Developer reported `different` (`core/idea_report.py`): its metric measured another
+    idea, so the PROPOSAL turn is not a successful example — the build turn, whose code did run, is."""
+    from looplab.core.idea_report import IDEA_REPORT_NAME, idea_report_text
+    rd = tmp_path / "run"
+    rd.mkdir()
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}, "rationale": "single ragged pass"},
+        "files": {IDEA_REPORT_NAME: idea_report_text({"idea_implemented": "different",
+                                                      "built_instead": "the grouped path"})}})
+    store.append("node_evaluated", {"node_id": 0, "metric": 0.25})
+    msgs = [{"role": "user", "content": "x"}]
+    (rd / "spans.jsonl").write_text("".join(json.dumps(s) + "\n" for s in [
+        _span("s1", node_id=0, messages=msgs), _span("s2", op="implement", node_id=0, messages=msgs)]),
+        encoding="utf-8")
+    result = CliRunner().invoke(app, ["export-sft", str(rd), "--only-successful"])
+    assert result.exit_code == 0, result.output
+    rows = _rows(rd / "sft.jsonl")
+    assert [row["op"] for row in rows] == ["implement"]
+    assert rows[0]["outcome"]["idea_implemented"] == "different"

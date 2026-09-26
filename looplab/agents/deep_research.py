@@ -33,6 +33,7 @@ from looplab.core.advisory_payloads import MAX_RESEARCH_SOURCES, sanitize_resear
 from looplab.core.costs_text import budget_line
 from looplab.core.evidence import fence_kwargs
 from looplab.core.fitness import is_usable_metric
+from looplab.core.idea_report import idea_report_note
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import (
     NodeStatus,
@@ -741,8 +742,10 @@ def state_brief(state: RunState, max_nodes: int = 40, *,
         if eligibility:
             outcome += " [" + ", ".join(eligibility) + "]"
         why = brief_text(n.idea.rationale or "", _STATE_BRIEF_RATIONALE_CHARS)
+        # The rationale is the PROPOSAL; a build that reported building something else is labelled,
+        # or the memo reads its metric as that proposal's (`core/idea_report.py`).
         return (f"  #{n.id} {operator_text(n)}: {outcome}"
-                + (f" — {why}" if why else ""))
+                + (f" — {why}" if why else "") + idea_report_note(n, state.nodes))
 
     # Keep candidates in coverage-priority insertion order while spending the aggregate budget:
     # leader -> early -> eligible top -> failure classes -> recent. Sort only the retained rows for

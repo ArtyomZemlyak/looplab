@@ -499,6 +499,11 @@ class RunTools:
             out.append(f"research: {lineage}")
         if n.idea.rationale:
             out.append(f"rationale: {n.idea.rationale.strip()[:400]}")
+        # The rationale is the PROPOSAL; a node whose Developer built something else says so here,
+        # the tool the novelty judge is told to read (`core/idea_report.py`). "" otherwise.
+        from looplab.core.idea_report import idea_report_note
+        if (report_note := idea_report_note(n, st.nodes).strip()):
+            out.append(f"built: {report_note}")
         text = "\n".join(out)
         return text if len(text) <= self.max_chars else text[:self.max_chars].rstrip() + " …(truncated — ask for fewer trials)"
 

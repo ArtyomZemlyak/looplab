@@ -596,7 +596,13 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
             return
         lib = JsonlCaseLibrary(Path(self._e.memory_dir) / "cases.jsonl")
         from looplab.engine.comparability import group_token, record_of
+        from looplab.core.idea_report import idea_not_tested, idea_report_note
         from looplab.engine.concept_shelf import state_concepts
+        # A champion whose Developer reported building something ELSE (`core/idea_report.py`): its
+        # params and number are real, its proposal is not what earned them. The case says so beside
+        # the rationale, and carries no concepts — they are tagged from the idea's text, so they
+        # would tell the next run the UNBUILT idea won here. "" / unchanged for every other case.
+        substituted = idea_not_tested(best, final.nodes)
         case = {
             "task_id": final.task_id,
             "goal": final.goal,
@@ -604,7 +610,8 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
             "fingerprint": self.task_fingerprint(final, best),
             "params": best.idea.params,
             "metric": best.robust_metric,
-            "rationale": best.idea.rationale,
+            "rationale": (best.idea.rationale or "") + idea_report_note(best, final.nodes)
+            if substituted else best.idea.rationale,
             # Both fields are ADDITIVE and reader-defaulted (invariant 5): `valid_case_record` gates on
             # `v`/`record_kind`/task_id/metric/params and ignores anything else, so an OLD reader loads a
             # new case unchanged and a NEW reader treats an old case as untagged. No migration.
@@ -614,7 +621,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
             "run_uid": getattr(final, "run_uid", "") or "",
             # The WINNER's concepts, not the run's: a case IS the winning configuration, so recording
             # everything the run touched would over-claim exactly the way `state_concepts` refuses to.
-            "concepts": state_concepts(final, [best.id]),
+            "concepts": [] if substituted else state_concepts(final, [best.id]),
             # WHAT THIS CASE'S METRIC WAS MEASURED AGAINST (`engine/comparability.py`). A case is the
             # one memory tier whose whole purpose is to hand a PREVIOUS run's number to the NEXT one,
             # and until this field the cross-run champion election in `JsonlCaseLibrary._add_locked`
@@ -668,6 +675,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
             return
         try:
             node_concepts = getattr(final, "node_concepts", None) or {}
+            from looplab.core.idea_report import idea_not_tested
             from looplab.engine.memory import build_concept_capsule
             from looplab.events.replay import promotion_eligible_nodes
             direction = final.direction
@@ -703,7 +711,10 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
                 # the valid retained subset of a partial classifier result remains positive
                 # evidence, but the producer-level denominator below permanently forbids absence/frequency
                 # inference. Authored/heuristic labels and deleted/aborted attempts never cross this wall.
-                record = m is not None and nd.id in eligible_ids
+                # …and never for a node whose Developer built something else: its concepts are
+                # tagged from an idea it did not build, so its number is not that concept's outcome.
+                record = (m is not None and nd.id in eligible_ids
+                          and not idea_not_tested(nd, final.nodes))
                 # ONE spelling for add/get/set, and it must be the READER's spelling. The classifier's
                 # RAW casing is deliberately preserved by `bounded_raw_concept_values`, so a single
                 # technique arrives as `Data/Hard-Negative-Mining` on one node and

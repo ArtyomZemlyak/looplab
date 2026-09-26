@@ -107,8 +107,11 @@ def belief_key_split_report(runs: Iterable[tuple[str, object]]) -> dict:
                 "belief_id": belief, "statement": _statement(card), "cards": [],
                 "evidence": [], "verdicts": {}, "statuses": {}})
             slot["cards"].append(str(cid))
+            # A substituted build is not evidence for the belief (`Card.substituted_nodes`).
+            substituted = set(getattr(card, "substituted_nodes", None) or ())
             slot["evidence"].extend(int(n) for n in (getattr(card, "evidence", None) or [])
-                                    if isinstance(n, int) and not isinstance(n, bool))
+                                    if isinstance(n, int) and not isinstance(n, bool)
+                                    and n not in substituted)
             verdict = str(getattr(card, "verdict", "") or "unknown")
             slot["verdicts"][verdict] = slot["verdicts"].get(verdict, 0) + 1
             status = str(getattr(card, "status", "") or "unknown")

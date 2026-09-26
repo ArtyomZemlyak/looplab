@@ -402,3 +402,18 @@ def test_both_repair_call_sites_reach_the_one_ladder_and_neither_re_spells_it():
     assert salvage.count("_classify_repair_answer") == 1, salvage
     for rung in rungs:
         assert rung not in salvage, f"the salvage-cause fix re-grew its own `{rung}` call"
+
+
+def test_a_repair_that_rewrote_only_the_idea_report_moved_no_code():
+    """`looplab_idea_report.json` is the Developer's answer about the build, not an eval input: a
+    repair whose only delta is that file is not an edit (no re-evaluation of identical code, no
+    checkpoint invalidated), and the answer ladder reads it as a repair that changed nothing."""
+    from looplab.core.idea_report import IDEA_REPORT_NAME
+    prev = {"train.py": "same", IDEA_REPORT_NAME: '{"idea_implemented": "different"}'}
+    now = {"train.py": "same", IDEA_REPORT_NAME: '{"idea_implemented": "as_proposed"}'}
+    changed, _deleted = _repair_change_set(prev, set(), now, [])
+    assert changed == set()
+    answer = _classify_repair_answer("code", "code", prev, set(), now, [], 0)
+    assert answer.moved is False
+    changed, _deleted = _repair_change_set(prev, set(), {**now, "train.py": "fixed"}, [])
+    assert changed == {"train.py"}

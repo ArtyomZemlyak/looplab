@@ -336,8 +336,12 @@ def reexamine_failed_direction(state: RunState, node_id: int, graph: ConceptGrap
                else f"metric={n.metric}")
     subject = (f"The direction touching {concepts or 'this experiment'} was tried in experiment #{n.id} "
                f"and did not succeed. Should it be re-opened with a different implementation?")
+    from looplab.core.idea_report import idea_report_note
+    # "What it did" is the PROPOSAL: a build that ran something else never tried this direction, and
+    # says so (`core/idea_report.py`) — "" for every other node.
     evidence = (f"Experiment #{n.id} ({n.operator}) {outcome}. What it did: "
-                f"{' '.join((n.idea.rationale or '').split())[:200]}\n"
+                f"{' '.join((n.idea.rationale or '').split())[:200]}"
+                f"{idea_report_note(n, state.nodes)}\n"
                 f"Triage: {' '.join((n.triage_rationale or '').split())[:200] or '(none)'}")
     if asset_brief:
         evidence += f"\n\nPRIOR ART / AVAILABLE ASSETS:\n{asset_brief[:1500]}"

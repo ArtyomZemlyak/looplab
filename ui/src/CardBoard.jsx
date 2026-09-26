@@ -198,6 +198,7 @@ function _CardKanbanCard({
   const blockers = _cardRefs(card.selection_blockers)
   const evidenceKnown = Object.hasOwn(card, 'evidence')
   const evidence = _cardNodes(card.evidence).slice(0, 8)
+  const substituted = new Set(_cardNodes(card.substituted_nodes))
   const concepts = _cardRefs(card.concept_tags).slice(0, 5)
   const parents = _cardNodes(card.parent_ids)
   const parent = _cardInt(card.parent_id)
@@ -336,7 +337,8 @@ function _CardKanbanCard({
           {roll && <span className={'chip xs' + (roll.total === 0 ? ' warn' : '')}
             title={roll.total === 0
               ? 'no experiment has run for this work item yet'
-              : `${roll.total} experiment${roll.total === 1 ? '' : 's'} tested this work item`
+              : `${roll.total} experiment${roll.total === 1 ? '' : 's'} ${roll.substituted ? 'ran under' : 'tested'} this work item`
+                + (roll.substituted ? ` · ${roll.substituted} built something else — not a test of it` : '')
                 + (roll.missing ? ` · ${roll.missing} not in this snapshot` : '')}>
             {(attemptCoverage?.label ?? roll.total)} exp</span>}
           {/* NOT a status, and no longer painted like one. `selection_ready === false` says the Card
@@ -576,7 +578,10 @@ function _CardKanbanCard({
     </div>}
     <div className="card-kanban-evidence">
       {evidence.map(nid => <button key={nid} type="button" className="btn xs ghost"
-        aria-label={`Open evidence node #${nid}`} title={`evidence node #${nid}`}
+        aria-label={`Open evidence node #${nid}`}
+        title={substituted.has(nid)
+          ? `node #${nid} is in the evidence list but built something else — not a test of this Card`
+          : `evidence node #${nid}`}
         onClick={() => { onSelect?.(nid); onClose?.() }}>#{nid}</button>)}
       {bestDelta != null && <span className={'chip xs ' + (bestDelta > 0 ? 'ok' : '')}
         title="best improvement over parent among the evidence">Δ{fmt(bestDelta)}</span>}
@@ -708,7 +713,10 @@ function _CardAttempts({ attempts, selectedNodeId, onOpenNode, coverage = null, 
         // rejected proposal that never gets a Node owner. Say so, or the pane reads as "still loading".
         ? 'No experiment has run for this work item yet. A Card can also close with none — a proposal the engine minted and rejected before building anything.'
         : `This work item is not itself an experiment: it is the question ${roll.total === 1
-          ? 'one experiment tested' : `these ${roll.total} experiments tested`}.`}
+          ? 'one experiment' : `these ${roll.total} experiments`} ${roll.substituted ? 'ran under' : 'tested'}.`
+          // A substituted build ran under the card and did not test it; "tested" was false for it.
+          + (roll.substituted ? ` ${roll.substituted === 1 ? 'One of them' : `${roll.substituted} of them`}`
+            + ' built something else instead of its idea and is not a test of it.' : '')}
     </p>
     {attempts.length > 0 && <ul className="card-attempt-list">
       {attempts.map(entry => {
@@ -738,7 +746,9 @@ function _CardAttempts({ attempts, selectedNodeId, onOpenNode, coverage = null, 
         // the verdict" and "this node was reserved for the card" are different claims, and a node
         // that is still building has only the second. Flattening them would report an in-flight
         // build as settled evidence.
-        const lane = entry.evidence ? 'evidence' : 'reserved'
+        // A SUBSTITUTED build ran and has a metric, but its Developer built something else: it
+        // neither fed this card's verdict nor is a pending reservation, whichever list holds it.
+        const lane = entry.substituted ? 'not a test' : entry.evidence ? 'evidence' : 'reserved'
         return <li key={entry.nodeId}>
           <button type="button"
             className={'card-attempt' + (selectedNodeId === entry.nodeId ? ' on' : '')
@@ -756,8 +766,10 @@ function _CardAttempts({ attempts, selectedNodeId, onOpenNode, coverage = null, 
               {entry.present ? statusText : 'not in snapshot'}</span>
             {attempt != null && <span className="muted">attempt {attempt}</span>}
             {metric != null && <span className="card-attempt-metric">{fmt(metric)}</span>}
-            <span className={'chip xs' + (lane === 'reserved' ? ' warn' : '')}
-              title={lane === 'evidence'
+            <span className={'chip xs' + (lane === 'evidence' ? '' : ' warn')}
+              title={lane === 'not a test'
+                ? 'its Developer reported building something else — it ran, but it is not a test of this Card’s idea and does not count in its verdict'
+                : lane === 'evidence'
                 ? 'in the Card’s evidence list — this attempt reached a terminal and fed the verdict'
                 : 'reserved for this Card by its mint stamp, but not yet in the evidence list'}>{lane}</span>
           </button>

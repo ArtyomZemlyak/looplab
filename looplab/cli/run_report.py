@@ -499,6 +499,11 @@ def echo_card_and_build_tables(rows, *, state, ev_path: Path, ledger_total: Opti
             if is_unevaluated_speculative_discard(state, node):
                 owned["discarded"].append(node.id)
     by_card = token_spend_by_card(rows, card_nodes=card_nodes, ledger_total=ledger_total)
+    # Cards whose EVERY owned node is a substituted build (`Card.substituted_nodes`).
+    substituted_cards = {
+        cid for cid, card in ((state.cards or {}) if state is not None else {}).items()
+        if getattr(card, "substituted_nodes", None)
+        and set(card_nodes.get(cid, {}).get("nodes") or ()) <= set(card.substituted_nodes)}
     real = [r for r in by_card["rows"] if r["card"] != CARD_UNATTRIBUTED]
     if real:
         typer.echo("")
@@ -507,6 +512,10 @@ def echo_card_and_build_tables(rows, *, state, ev_path: Path, ledger_total: Opti
             nodes = ",".join(str(n) for n in row["nodes"]) or "-"
             if row["wholly_discarded"]:
                 nodes += " DISCARDED"
+            elif row["card"] in substituted_cards:
+                # Real spend, but on a build its Developer said was something else than the card's
+                # idea (`Card.substituted_nodes`) — so the row does not read as money spent on it.
+                nodes += " SUBSTITUTED"
             typer.echo(f"{row['tokens']:>14,}  {100 * row['share']:>5.1f}%  {row['calls']:>6,}  "
                        f"{nodes:<21} {row['card']}")
         # A build that minted NO node is invisible to the rule above, which needs the card to OWN
