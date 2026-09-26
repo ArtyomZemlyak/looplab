@@ -148,6 +148,7 @@ from pathlib import Path
 from typing import Optional
 
 from looplab.core.atomicio import file_identity
+from looplab.core.jsonutil import surrogate_safe
 
 # At most this many subjects per metric. A metric is a claim about a THING; a spec naming twenty
 # artifacts is either a mis-declaration or a request for something this record cannot express (which
@@ -291,6 +292,16 @@ def _dir_identity(path: Path) -> tuple:
     return entries, total
 
 
+def _storable_int(value) -> int:
+    """`value` clamped to the integers the event store's orjson encodes (signed 64-bit up to unsigned
+    64-bit). A file's mtime is the CANDIDATE's to set: `os.utime` to 2**40 s is accepted on tmpfs,
+    and its `st_mtime_ns` then overflowed the encoder at the terminal (critic 2026-09-26, driven on
+    /dev/shm; ext4 clamps it). Both sides of every identity comparison go through here
+    (`stage_identity.py::reuse_refusal` re-binds with `bind_one`), so a clamped value still compares
+    equal to itself and unequal to any real change below the bound."""
+    return max(-(2 ** 63), min(int(value), 2 ** 64 - 1))
+
+
 def bind_one(workdir, rel: str, *, since: Optional[float] = None,
              producer: Optional[str] = None, confine=None) -> dict:
     """The identity record for ONE declared subject, or `{"bound": False, "reason": …}`.
@@ -316,6 +327,13 @@ def bind_one(workdir, rel: str, *, since: Optional[float] = None,
     re-derive it: it cannot see the stage list, and a leaf that guessed at the caller's reuse
     decision is how the two came to disagree in the first place.
     """
+    # A NAME THE LOG CANNOT RECORD CANNOT BE BOUND (critic 2026-09-26, driven). A directory the
+    # candidate names with bytes that are not UTF-8 comes back from `Path.glob`/`rglob` as a string
+    # holding lone surrogates, and the event store's orjson refuses it — every row recording it
+    # (the settle row first) failed the node's terminal, `engine_error`, run paused. Refused, never
+    # skipped, for `bind_glob`'s reason: what the candidate controls may only ever refuse a binding.
+    if surrogate_safe(str(rel)) != str(rel):
+        return {"path": surrogate_safe(str(rel)), "bound": False, "reason": "unreadable"}
     p = confine(workdir, rel) if confine is not None else _fallback_confine(workdir, rel)
     if p is None:
         return {"path": rel, "bound": False, "reason": "escapes"}
@@ -324,8 +342,8 @@ def bind_one(workdir, rel: str, *, since: Optional[float] = None,
     except OSError:
         return {"path": rel, "bound": False, "reason": "missing"}
     row: dict = {"path": rel, "bound": True,
-                 "identity": list(file_identity(st)),
-                 "size": int(st.st_size), "mtime_ns": int(st.st_mtime_ns)}
+                 "identity": [_storable_int(n) for n in file_identity(st)],
+                 "size": int(st.st_size), "mtime_ns": _storable_int(st.st_mtime_ns)}
     if producer:
         row["producer"] = producer
     try:
@@ -413,8 +431,9 @@ def bind_glob(workdir, pattern: str, *, since: Optional[float] = None,
     if not matches:
         return {"glob": pattern, "path": "", "bound": False, "reason": "missing", "matched": []}
     if len(matches) > 1:
+        # `surrogate_safe`: these names are the CANDIDATE's, and the refusal row records them.
         return {"glob": pattern, "path": "", "bound": False, "reason": "ambiguous",
-                "matched": matches[:MAX_GLOB_MATCHES],
+                "matched": [surrogate_safe(m) for m in matches[:MAX_GLOB_MATCHES]],
                 "matched_truncated": len(matches) > MAX_GLOB_MATCHES}
     row = bind_one(workdir, matches[0], since=since, producer=(producers or {}).get(matches[0]),
                    confine=confine)

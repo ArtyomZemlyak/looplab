@@ -115,11 +115,20 @@ def _read_state(path) -> Optional[dict]:
     return obj if isinstance(obj, dict) else None
 
 
+# The largest count a reading may carry. `trainer_state.json` is written by the candidate's own
+# training, and an integer past 64 bits there rode onto the settle row (`settled_result_record`
+# carries `effective_train_batch`), whose append raised BEFORE the terminal: `node_failed
+# engine_error`, run paused (critic 2026-09-26, driven — the first account of it, "after the
+# terminal, the trust scan lost", named the wrong site). No batch size or step count is anywhere
+# near 2**53, so a larger one is refused as a reading, not clamped.
+_MAX_COUNT = 2 ** 53
+
+
 def _batch_value(state: dict) -> Optional[int]:
     """The state's own `train_batch_size`, or None. Positive int only — `bool` is an `int` subclass
     and `true` is not a batch size, the same rejection the fold applies to `at_vocab`."""
     value = state.get(TRAINER_STATE_FIELD)
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 < value <= _MAX_COUNT:
         return None
     return value
 
@@ -128,7 +137,7 @@ def _step(state: dict) -> Optional[int]:
     """`global_step` when the state carries a usable one — ordering context for the reader, never a
     tie-break: this module publishes a scalar only when the readings AGREE."""
     value = state.get("global_step")
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= _MAX_COUNT:
         return None
     return value
 

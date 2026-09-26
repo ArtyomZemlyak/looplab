@@ -74,6 +74,7 @@ from looplab.core.concepts import (
     valid_concept_id,
 )
 from looplab.core.fitness import is_better as _is_better, is_usable_metric
+from looplab.core.jsonutil import surrogate_safe
 
 # Compatibility/public import seam: card identity (the versioned digests, the ownership receipts, the
 # footprint/steering vocabularies they bind, and the Card provenance family) lives in core.cards, while
@@ -144,7 +145,9 @@ def normalize_extra_metrics(value, *, max_items: int = 256) -> dict[str, float]:
         except (TypeError, OverflowError, ValueError):
             continue
         if math.isfinite(number):
-            out[str(key)[:200]] = number
+            # Surrogate-safe KEY too: a name parsed off candidate stdout can hold a lone surrogate,
+            # which orjson refuses — a metric map the event store cannot encode fails the terminal.
+            out[surrogate_safe(str(key)[:200])] = number
     return out
 
 

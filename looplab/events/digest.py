@@ -356,7 +356,9 @@ def _last_json_object(text: str) -> Optional[dict]:
             continue
         try:
             obj = json.loads(line)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, RecursionError):
+            # RecursionError too: `json.loads` raises it past ~1,000 levels, and this reads a tail of
+            # the CANDIDATE's own stdout — one deep line must render nothing, not raise.
             continue
         if isinstance(obj, dict):
             return obj

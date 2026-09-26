@@ -159,7 +159,9 @@ class HoldoutGrader:
                     # _to_float: a non-finite (NaN/Inf) host score reads as None so an untrusted candidate
                     # can't self-elect champion via a crafted prediction (mirrors command_eval/sweep paths).
                     m = _to_float(host_score(g.get("scorer", "rmse"), preds, g.get("labels"), key=g.get("key")))
-            except (ValueError, OSError):
+            except (ValueError, OSError, RecursionError):
+                # RecursionError too: `json.loads` of CANDIDATE predictions nested past ~1,000 levels
+                # raised it out of the eval (critic 2026-09-26, driven: engine_error, run paused).
                 m = None
         res.metric = m
         return res
@@ -429,7 +431,7 @@ class HoldoutGrader:
             try:
                 _preds_text = read_candidate_file(p) if p is not None else None   # size-bounded
                 preds = _json.loads(_preds_text) if _preds_text is not None else None
-            except (OSError, ValueError):
+            except (OSError, ValueError, RecursionError):   # candidate bytes: see the search grade
                 preds = None
             m = self._e._host_score_split(preds, g, holdout=True) if preds is not None else None
             gap = None

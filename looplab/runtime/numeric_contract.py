@@ -105,13 +105,18 @@ def last_readings(text: str, keys) -> dict:
         if stripped.startswith("{") and stripped.endswith("}"):
             try:
                 doc = json.loads(stripped)
-            except ValueError:
+            except (ValueError, RecursionError):
+                # A line too deep (or with an integer too long) to parse is not a reading — and the
+                # candidate's own stdout must not raise out of the contract check (2026-09-26).
                 doc = None
             if isinstance(doc, dict):
                 for k, v in doc.items():
                     key = lowered.get(str(k).lower())
                     if key is not None and isinstance(v, (int, float)) and not isinstance(v, bool):
-                        out[key] = float(v)
+                        try:
+                            out[key] = float(v)
+                        except OverflowError:
+                            out[key] = float("inf") if v > 0 else float("-inf")
                 continue
         for key, rx in patterns.items():
             for m in rx.finditer(line):

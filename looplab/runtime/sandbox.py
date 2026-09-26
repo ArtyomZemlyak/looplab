@@ -17,6 +17,7 @@ Reads the metric from the last stdout line that is JSON containing a "metric" ke
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -29,6 +30,7 @@ from typing import Optional, Protocol
 
 from looplab.core.errors import BudgetExceeded, ConfigRefusal
 from looplab.core.numeric import parse_mem_bytes  # noqa: F401 (re-export; moved to core, CORE-05)
+from looplab.core.jsonutil import surrogate_safe
 from looplab.runtime.read_fence import (FENCE_DIR_ENV, WORKDIR_ENV, prepend_pythonpath,
                                         reassert as _reassert_fence)
 from looplab.runtime import landlock as _landlock
@@ -499,8 +501,9 @@ class RunResult:
     eval_protocol: Optional[dict] = None
     violations: Optional[list] = None
     # Intra-node sweep: when the solution ran a grid of configs in one process, it emits a final
-    # `{"trials": [...]}` line; this carries that raw list of trial dicts. The orchestrator picks
-    # the best feasible trial to set the node's scalar `metric`. None on the single-config path.
+    # `{"trials": [...]}` line; this carries one `trial_record` per printed entry (reduced to
+    # `Trial`'s fields — see `trial_record`). The orchestrator picks the best feasible trial to set
+    # the node's scalar `metric`. None on the single-config path.
     trials: Optional[list] = None
     # Staged eval (multi-stage pipeline: data_prep → train → eval): per-stage outcome dicts
     # {name, status "ok"|"fail"|"timeout", exit_code, seconds}, in run order. `failed_stage` is the
@@ -642,14 +645,21 @@ def _last_json_dict(text: str, pred) -> Optional[dict]:
     """The LAST stdout line that parses as a JSON object satisfying `pred` — the one bottom-up
     tolerant scanner behind json_line_metric / json_line_extras / json_line_trials (and the
     mlebench grader), so trailing chatter after a solution's summary line is tolerated the same
-    way everywhere. Returns the raw dict (callers extract what they need), or None."""
+    way everywhere. Returns the raw dict (callers extract what they need), or None.
+
+    A line `json.loads` cannot turn into a value is not a JSON line, whatever the reason: malformed
+    (`JSONDecodeError`), an integer literal past the interpreter's 4,300-digit conversion limit (a
+    plain `ValueError`), or nested past ~1,000 levels (`RecursionError`). The metric, the extras, the
+    trials, the fingerprint and the MLE-bench grader all read candidate stdout through this scan, so
+    either of the last two escaping turned one printed line into an exception out of the metric
+    read — `node_failed engine_error`, run paused (critic 2026-09-26, driven)."""
     for line in reversed(text.splitlines()):
         line = line.strip()
         if not line.startswith("{"):
             continue
         try:
             obj = json.loads(line)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):   # JSONDecodeError is a ValueError
             continue
         if isinstance(obj, dict) and pred(obj):
             return obj
@@ -695,7 +705,9 @@ def json_line_extras(text: str, primary_key: str = "metric") -> dict:
         if isinstance(v, (int, float)):
             f = _to_float(v)     # same finiteness rule as the primary metric: JSON parses
             if f is not None:    # NaN/Infinity literals, and a NaN extra breaks serializers
-                out[str(k)] = f
+                # Surrogate-safe NAME: every map keyed on these (the values, their channels, their
+                # directions) rides onto `node_evaluated`, and orjson refuses a lone surrogate.
+                out[surrogate_safe(str(k))] = f
     return out
 
 
@@ -741,12 +753,79 @@ def stdout_extra_metric_channels(extras) -> Optional[dict]:
 # layer is not entitled to make. A stale spelling must be an error.
 
 
+# What one printed trial entry is REDUCED to before it rides onto the node's payloads (the settle row
+# and `node_evaluated`). The list rode VERBATIM until 2026-09-26, and the event store's orjson refuses
+# what JSON happily parses: an entry nested ~254 deep, an integer past 64 bits, a lone surrogate. Each
+# failed the append — `node_failed engine_error`, run PAUSED — on one printed line (critic 2026-09-26,
+# all three driven).
+#
+# THE REDUCTION CHANGES WHAT CAN BE ENCODED, NEVER WHAT EITHER READER DECIDES. There are two:
+# `events/replay.py`'s fold, which keeps an entry only if `core/models.py::Trial(**entry)` validates
+# (pydantic, lax float) and ignores every other key; and `engine/eval_dispatch.py::_apply_sweep_best`,
+# which picks the node's metric off `_to_float(entry["metric"])` and merges the best entry's
+# `normalize_extra_metrics(extra_metrics)`. So an entry keeps exactly `Trial`'s five fields, each
+# mapped to a value BOTH readers read as they read the original: a scalar stays (a string made
+# surrogate-safe; `"adam"`, `"0.1"` and `"inf"` all still mean what they meant — the fold still
+# REFUSES a trial with a text param, as before, and so no prompt that renders trials changes); an int
+# past what orjson encodes becomes the float both readers make of it; a value neither reads — a
+# container, an int no float holds — becomes one both refuse again (`None` where the field is not
+# optional, `TRIAL_NOT_A_NUMBER` for the optional numbers). A non-object entry becomes its scalar, or
+# `None`, and is skipped by both, as before. Measured by the first critic pass over 32,000 random
+# lists for the engine's side; `tests/test_candidate_stdout_cannot_pause_the_run.py` drives both.
+# What is lost is only what neither reader ever read: keys outside `Trial`'s five.
+TRIAL_NOT_A_NUMBER = "not a number"
+_TRIAL_FIELDS = ("params", "metric", "seconds", "extra_metrics", "error")
+
+
+def _trial_scalar(value, refused):
+    """One trial value as something orjson encodes that `Trial` and `_to_float` read as the
+    original: see the block above. `refused` stands in for a value neither reads."""
+    if isinstance(value, str):
+        return surrogate_safe(value)
+    if value is None or isinstance(value, (bool, float)):
+        return value
+    if isinstance(value, int):
+        if -(2 ** 63) <= value < 2 ** 64:
+            return value
+        try:
+            return float(value)
+        except OverflowError:
+            return refused
+    return refused
+
+
+def trial_record(entry):
+    """One printed trial entry reduced to what the event store can encode — `Trial`'s five fields,
+    each read by the fold and by `_apply_sweep_best` exactly as the original (see the block above),
+    or a non-object entry's own scalar (`None` for a container). NEVER dropped: `[1]` must still mean
+    "no usable trial -> no metric", where `[]` means no sweep at all."""
+    from looplab.core.models import normalize_extra_metrics
+
+    if not isinstance(entry, dict):
+        return _trial_scalar(entry, None)
+    record: dict = {}
+    for field in _TRIAL_FIELDS:
+        if field not in entry:
+            continue
+        value = entry[field]
+        if field == "params":
+            record[field] = ({surrogate_safe(str(name)): _trial_scalar(v, None)
+                              for name, v in value.items()} if isinstance(value, dict) else None)
+        elif field == "extra_metrics":
+            record[field] = normalize_extra_metrics(value)
+        elif field == "error":
+            record[field] = surrogate_safe(value) if isinstance(value, str) else None
+        else:
+            record[field] = _trial_scalar(value, TRIAL_NOT_A_NUMBER)
+    return record
+
+
 def json_line_trials(text: str) -> Optional[list]:
     """Last stdout line that is a JSON object with a "trials" key holding a list (intra-node
     sweep). Scans bottom-up like `json_line_metric`, so trailing chatter after the sweep's
-    summary line is tolerated. Returns the raw list of trial dicts, or None if absent."""
+    summary line is tolerated. Returns one `trial_record` per printed entry, or None if absent."""
     obj = _last_json_dict(text, lambda o: isinstance(o.get("trials"), list))
-    return None if obj is None else obj["trials"]
+    return None if obj is None else [trial_record(entry) for entry in obj["trials"]]
 
 
 # Back-compat alias (pre-rename importers/tests use `_json_line_trials`).
@@ -779,11 +858,10 @@ def json_line_fingerprint(text: str) -> Optional[str]:
     It is read off the same stdout the metric is (the host scorer's own, when one runs), so it is
     exactly as trustworthy as the metric line beside it. It can only REFUSE a comparison: a matching
     fingerprint certifies nothing, so a forged or `null` later line can at worst add a caveat or
-    silence the facet — the same as printing none — and never make two rulers read as one."""
-    try:
-        obj = _last_json_dict(text, lambda o: EVAL_FINGERPRINT_KEY in o)
-    except RecursionError:
-        return None
+    silence the facet — and a silenced facet hides a difference exactly as printing none would. What
+    no line can do is certify: equal fingerprints never make two rulers one (critic 2026-09-26: the
+    first wording, "never make two rulers read as one", overstated what silence cannot do)."""
+    obj = _last_json_dict(text, lambda o: EVAL_FINGERPRINT_KEY in o)   # a line it cannot parse is skipped
     if obj is None:
         return None
     value = obj[EVAL_FINGERPRINT_KEY]

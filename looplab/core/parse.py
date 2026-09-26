@@ -50,7 +50,10 @@ def to_float(v, *, finite: bool = False):
     deliberately separate, because accepting `"3.5"` where a durable number is required is a bug)."""
     try:
         f = float(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: `float(10**400)` — a JSON integer literal too large for a double, which a
+        # candidate's stdout can print as its metric. Unparseable, per the contract above, the same
+        # rule `to_int` states for `int(float('1e400'))`; escaping, it failed the node's terminal.
         return None
     return None if (finite and not math.isfinite(f)) else f
 

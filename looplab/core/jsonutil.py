@@ -143,3 +143,17 @@ def valid_digest_ref(value: object, *, prefix: str = "") -> bool:
     if not isinstance(value, str) or len(value) != len(prefix) + 64:
         return False
     return value.startswith(prefix) and all(ch in _HEX for ch in value[len(prefix):])
+
+
+def surrogate_safe(text: str) -> str:
+    """`text` with every lone UTF-16 surrogate replaced by `?`.
+
+    A JSON parse of candidate output produces them (`json.loads('"\\ud800"')` is legal), and the
+    event store's orjson refuses to encode one ("str is not valid UTF-8: surrogates not allowed") — so
+    a string that rides from a candidate's stdout onto an event payload goes through here first.
+    Identity (and cheap) on every ordinary string."""
+    try:
+        text.encode("utf-8")
+        return text
+    except UnicodeEncodeError:
+        return text.encode("utf-8", "replace").decode("utf-8")

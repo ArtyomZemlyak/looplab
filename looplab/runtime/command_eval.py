@@ -498,7 +498,9 @@ def declared_failure_reason(stdout: str) -> Optional[str]:
             continue
         try:
             row = json.loads(line)
-        except (json.JSONDecodeError, ValueError):
+        except (ValueError, RecursionError):
+            # RecursionError too: this runs on EVERY command-eval result, outside any guard, and a
+            # line nested past ~1,000 levels raised it straight out of the eval (critic 2026-09-26).
             continue
         if isinstance(row, dict) and isinstance(row.get("looplab_failure_reason"), str):
             return row["looplab_failure_reason"][:64]
@@ -539,7 +541,11 @@ def _read_file(stdout, workdir, spec, wrap, since, env=None) -> Optional[float]:
         return _regex_metric(text, pat, spec.get("group", 1)) if pat else None
     try:
         return _to_float(_dig(json.loads(text), spec.get("key", "metric")))
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
+        # A file the CANDIDATE wrote: malformed (`JSONDecodeError` is a `ValueError`), an integer
+        # literal past 4,300 digits (a plain `ValueError`) or nested past ~1,000 levels
+        # (`RecursionError`) is no metric — and must not raise out of the eval (critic 2026-09-26,
+        # driven: `node_failed engine_error`, run paused, through the metric AND a constraint).
         return None
 
 
@@ -609,7 +615,7 @@ def _read_host_score(stdout, workdir, spec, wrap, since, env=None) -> Optional[f
     try:
         preds = json.loads(preds_text)
         labels = json.loads(labels_path.read_text(encoding="utf-8-sig", errors="replace"))
-    except (json.JSONDecodeError, OSError):
+    except (ValueError, RecursionError, OSError):   # candidate predictions: see `_read_file`
         return None
     return _to_float(host_score(spec.get("scorer", "rmse"), preds, labels, key=spec.get("key")))
 
@@ -1029,7 +1035,7 @@ def _label_eq(a, b) -> bool:
         return True
     try:
         return float(a) == float(b)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):   # a 401-digit int is no label a float can hold
         return False
 
 
@@ -1051,7 +1057,10 @@ def host_score(scorer: str, preds, labels, *, key: Optional[str] = None) -> Opti
             return sum(1 for a, b in zip(yp, yt) if _label_eq(a, b)) / len(yt)
         if scorer == "error_rate":
             return 1.0 - sum(1 for a, b in zip(yp, yt) if _label_eq(a, b)) / len(yt)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        # The predictions are the CANDIDATE's: `float()` of a 401-digit integer overflows, and two
+        # deeply nested values compared recurse. Unscorable is no metric, never an exception out of
+        # the eval (critic 2026-09-26, driven: `node_failed engine_error`, run paused).
         return None
     return None
 

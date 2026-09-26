@@ -288,8 +288,8 @@ def _json_objects_newest_first(log_tail: str):
             continue
         try:
             obj = json.loads(line)
-        except (json.JSONDecodeError, RecursionError):
-            continue
+        except (ValueError, RecursionError):   # JSONDecodeError is a ValueError; so is the
+            continue                            # 4,300-digit integer-literal limit (2026-09-26)
         if isinstance(obj, dict):
             yield obj
 
