@@ -177,6 +177,27 @@ def test_an_unchanged_log_costs_the_finalize_monitor_no_fold_and_at_most_one_cop
     assert engine.spawns == []
 
 
+def test_the_deadline_is_read_on_the_clock_that_stamped_it(tmp_path, monkeypatch):
+    """Critic 2026-09-26: the expiry gate read `serve/protocol.py`'s own `time.time()` while every
+    deadline was stamped through `run_commands.time` — the clock `_MonitorClock` drives — so a host
+    that spent the 0.8 s window before `_execute` (a loaded box, or one real second of sleep) saw
+    the record expire before the monitor's first tick, and the test above failed its premise. Here
+    the service's clock runs an hour BEHIND the real one, so a gate reading the wrong clock settles
+    the command at once and deterministically, while the right one watches it to its deadline."""
+    clock = _MonitorClock()
+    clock.now -= 3600.0
+    commands, _rd, engine, (run_dir, path, record) = _finalize_under_a_live_engine(
+        tmp_path, monkeypatch, observation=0.8, clock=clock)
+    meter = _Meter(monkeypatch, commands, clock=clock.monotonic)
+
+    commands._execute(run_dir, path, record, claimed=False)
+
+    assert meter.opened is not None, "the record expired on a clock that did not stamp it"
+    assert meter.ticks >= 10, meter.ticks
+    assert commands._load(path)["status"] == "timed_out"
+    assert engine.spawns == []
+
+
 def test_a_growing_log_is_re_read_at_most_once_per_recheck_interval(tmp_path, monkeypatch):
     """The finalization TAIL: the engine keeps appending, so the revision moves on every tick. The
     state-reading ask is rate-limited to the tail waiter's own interval instead of refolding the

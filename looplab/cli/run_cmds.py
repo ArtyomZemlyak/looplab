@@ -1325,21 +1325,6 @@ def stop_lifted(state) -> str:
 _COMMAND_WORKER_FRESH_S = 30.0
 
 
-def _command_acks(events) -> set:
-    """`{(command marker, intent seq)}` of every `command_ack` in `events` — the pair the server's
-    `engine_ack` postcondition asks for (`serve/command_observation.py::CommandObservation.has_ack`)."""
-    from looplab.events.types import EV_COMMAND_ACK
-
-    acks = set()
-    for event in events or ():
-        if getattr(event, "type", None) == EV_COMMAND_ACK:
-            data = event.data or {}
-            seq = data.get("event_seq")
-            if isinstance(seq, int) and not isinstance(seq, bool):
-                acks.add((str(data.get("command_id") or ""), seq))
-    return acks
-
-
 def _pulse_of(value) -> float:
     """A record's `updated_at` as a finite float, or 0.0. A hand-edited 400-digit integer raised
     `OverflowError` here AFTER the pause was appended, and `1e999` read as a worker alive forever
@@ -1354,11 +1339,12 @@ def _pulse_of(value) -> float:
 
 
 def server_commands_restarting(run_dir: Path, *, now: Optional[float] = None,
-                               acked: Optional[set] = None) -> dict:
+                               acked: Optional[dict] = None) -> dict:
     """`{"coming", "stale", "uncertain", "unreadable"}` — the server commands that will start an
     engine into `run_dir` now that the current one has exited, those no worker is driving any more,
     those that could not tell whether they started one, and the records no server can read — each as
-    printable names.
+    printable names. `acked` is the log's acknowledgement index
+    (`serve/protocol.py::command_ack_index`).
 
     THE PRECLAIM FAMILY of engine starter (`engine/run_lifecycle.py`, "the launch-in-flight
     handshake"). A command whose policy is `ENSURE_RUNNING` (`node_reset`, `budget_extend`, `fork`,
@@ -1370,26 +1356,37 @@ def server_commands_restarting(run_dir: Path, *, now: Optional[float] = None,
     `stop_lifted` reads (critic 2026-09-26, driven). `ENSURE_DRIVER_PRESERVE_STOP` (a finalize) is
     left out on purpose: its driver finishes the run and never lifts the pause.
 
-    WHAT CAN NO LONGER START ONE is left out too, each by the server's own rule (third critic pass):
-    a record whose `engine_ack` postcondition is already in the log (`acked`: the engine served it
-    before it exited, and a GET settles it `succeeded`), and one past its `absolute_deadline_at`
-    (`serve/protocol.py::deadline_passed`: re-driven, it is settled `timed_out`).
+    WHAT A RE-DRIVE OF AN UNSETTLED RECORD WOULD DO decides the rest, each by the server's own rule,
+    imported from `serve/protocol.py` rather than copied (critic 2026-09-26, driven: the copy of the
+    ack rule read a `3.0` ack as absent, and fell back to the file name for a marker). A record whose
+    `engine_ack` postcondition is already in the log (`engine_ack_observed` over `acked`) starts
+    nothing: the engine served it before it exited, and a GET settles it `succeeded`. One past its
+    `absolute_deadline_at` (`deadline_passed`) starts nothing either — the server settles it
+    (`run_commands.py::RunCommandService._settle_if_expired`) — UNLESS it already spawned a child it
+    has not seen take the lock (`spawned_by_command` set, `spawn_claim_released` not, the service's
+    own fields): unless the server can prove that child took the lock or died, which this check
+    cannot, it settles the record `ENGINE_START_UNCERTAIN` ("the detached engine has not exposed
+    engine.lock"), so it is counted exactly as that settled record is. Skipping it, as this once did,
+    reported the stop as standing until the first GET and "coming" after it.
 
     COMING vs STALE is the worker's pulse (`_COMMAND_WORKER_FRESH_S`): a server killed mid-command
     leaves its record `executing` for good, and reading that as an imminent restart failed every
     later `stop --wait`. A stale one is not harmless — nothing cancels it, and a server that reads it
-    again before its deadline re-drives it — so the wait names it. A record that settled
-    `ENGINE_START_UNCERTAIN` is terminal and never re-driven; a RECENT one counts as coming (the child
-    it may have launched can still be importing), an older one is named for the child it may have
-    left. A record the server's own reader rejects (not JSON, not an object, not UTF-8, a symlink) is
-    driven by nothing — it blocks later commands until quarantined — so it is a note; one this check
-    cannot read for its own reasons (a directory it cannot list, a file past its bound) is counted as
-    coming, because the wait cannot tell what it would start."""
+    again before its deadline re-drives it — so the wait names it. A record that SETTLED
+    `ENGINE_START_UNCERTAIN` is terminal and never re-driven, so neither an ack nor its deadline
+    (which every such record the deadline settle writes has passed —
+    `run_commands.py::RunCommandService._settle_expired`) says anything about it: the uncertainty is
+    its CHILD's, which may still be importing. A RECENT one counts as coming, an older one is named
+    for the child it may have left. A record the server's own reader rejects (not JSON,
+    not an object, not UTF-8, a symlink) is driven by nothing — it blocks later commands until
+    quarantined — so it is a note; one this check cannot read for its own reasons (a directory it
+    cannot list, a file past its bound) is counted as coming, because the wait cannot tell what it
+    would start."""
     from looplab.serve.protocol import (COMMAND_ACTIVE_STATUSES, ENGINE_START_UNCERTAIN,
-                                        EnginePolicy, deadline_passed)
+                                        EnginePolicy, deadline_passed, engine_ack_observed)
 
     now = time.time() if now is None else now
-    acked = acked or set()
+    acked = acked or {}
     starting = {EnginePolicy.ENSURE_RUNNING.value, EnginePolicy.RESTART_AFTER_EXIT.value}
     directory = run_dir / ".commands"
     found: dict = {"coming": [], "stale": [], "uncertain": [], "unreadable": []}
@@ -1414,17 +1411,20 @@ def server_commands_restarting(run_dir: Path, *, now: Optional[float] = None,
         if record.get("engine_policy") not in starting:
             continue
         status = record.get("status")
-        uncertain = (isinstance(record.get("error"), dict)
-                     and record["error"].get("code") == ENGINE_START_UNCERTAIN)
-        if status not in COMMAND_ACTIVE_STATUSES and not uncertain:
+        settled_uncertain = (isinstance(record.get("error"), dict)
+                             and record["error"].get("code") == ENGINE_START_UNCERTAIN)
+        if status not in COMMAND_ACTIVE_STATUSES and not settled_uncertain:
             continue
-        if not uncertain:
-            marker = record.get("intent_marker") or record.get("id") or path.stem
-            seq = record.get("event_seq")
-            if ((record.get("postcondition") == "engine_ack"
-                 and (str(marker), seq) in acked)
-                    or deadline_passed(record.get("absolute_deadline_at"), now)):
-                continue
+        uncertain = settled_uncertain
+        if not settled_uncertain:
+            if (record.get("postcondition") == "engine_ack"
+                    and engine_ack_observed(record, acked)):
+                continue                    # a GET settles it `succeeded`
+            if deadline_passed(record.get("absolute_deadline_at"), now):
+                if not (record.get("spawned_by_command")
+                        and not record.get("spawn_claim_released")):
+                    continue                # a GET settles it `timed_out`, starting nothing
+                uncertain = True            # ...or `ENGINE_START_UNCERTAIN`: its child may start
         pulse = _pulse_of(record.get("updated_at"))
         try:
             pulse = max(pulse, (directory / f".{path.stem}.executing").stat().st_mtime)
@@ -1603,7 +1603,8 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
         # ONE MORE LOOK once the lock has stayed free: the log's own starters (`stop_lifted`), and
         # the server's command workers, which record a planned engine start only in `.commands/`.
         why = stop_lifted(current())
-        commands = server_commands_restarting(target, acked=_command_acks(store.read_all()))
+        from looplab.serve.protocol import command_ack_index
+        commands = server_commands_restarting(target, acked=command_ack_index(store.read_all()))
         if not why and commands["coming"]:
             why = (f"server command(s) {', '.join(commands['coming'])} will start an engine now "
                    "that " + ("this one has exited" if seen["alive"] else "no engine holds the lock")

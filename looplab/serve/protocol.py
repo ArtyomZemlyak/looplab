@@ -37,17 +37,21 @@ Protocols named here:
 * Phase names — the coarse run lifecycle `server._phase` derives from folded state, rendered by
   the UI/TUI status badges (tui `_PHASE_META`). "running" is NOT a phase: clients infer it from
   ``engine_running`` on a non-finished run.
+
+* Durable command records — the lifecycle words, the engine policies and the settle codes a record
+  carries, and the three rules a reader OUTSIDE the server needs to say what re-driving a record
+  would do (`looplab stop --wait`, which must work without FastAPI): `deadline_passed`, and the
+  `engine_ack` postcondition as `command_intent_marker` + `file_command_ack` + `ack_observed`.
 """
 from __future__ import annotations
 
 import math
-import time
 from enum import Enum
 
 from looplab.events.types import (
     EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
     EV_CARD_DROPPED, EV_CARD_EDITED, EV_CARD_REOPENED, EV_CARD_REPRIORITIZED,
-    EV_CARD_RESOURCE_PINNED,
+    EV_CARD_RESOURCE_PINNED, EV_COMMAND_ACK,
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED, EV_CONCEPT_TAG_EDITED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
     EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_NODE_ABORT, EV_NODE_RESET, EV_PAUSE, EV_PROMOTE,
@@ -106,20 +110,101 @@ class EnginePolicy(str, Enum):
 # this constant; the React client keeps its own literal (`ui/src/commandModel.js`).
 ENGINE_START_UNCERTAIN = "engine_start_uncertain"
 
+# The `error.code` a durable command record settles `timed_out` with when its `absolute_deadline_at`
+# passed BEFORE its intent was recorded: the intent is not in the run's log, so nothing was appended
+# and nothing was driven (critic 2026-09-26, driven: a worker that died before admission left the
+# record `accepted`; forty minutes later a GET settled pause, budget_extend, approval_granted and
+# resume `timed_out` with nothing appended, under `postcondition_timeout`'s "command intent was
+# recorded but … was not observed in time" — a sentence that was false for every one of them).
+# RETRYABLE: `/retry` re-arms the record under a fresh deadline and drives it from admission, and a
+# record with no durable intent holds back no fresh submission of the same action
+# (`run_commands.py::RunCommandService._unresolved_equivalent`). Written by
+# `RunCommandService._settle_expired`; the React client stores it as itself
+# (`ui/src/commandModel.js::STORED_ERROR_CODES`, pinned by `tests/test_command_status_vocabulary.py`).
+DEADLINE_PASSED_BEFORE_INTENT = "deadline_passed_before_intent"
 
-def deadline_passed(deadline, now: float | None = None) -> bool:
-    """Has a durable command record's `absolute_deadline_at` passed? False for a value no server
-    writes (absent, a bool, a non-finite number), which keeps such a record on the old path. HERE and
-    not in `serve/run_commands.py` because `looplab stop --wait` asks the same question of the same
-    field without FastAPI installed; the command service's re-drive gate
-    (`RunCommandService._execute`) is the other caller."""
+
+def deadline_passed(deadline, now: float) -> bool:
+    """Has a durable command record's `absolute_deadline_at` passed at `now`? False for a value no
+    server writes (absent, a bool, a non-finite number), which keeps such a record on the old path.
+    HERE and not in `serve/run_commands.py` because `looplab stop --wait` asks the same question of
+    the same field without FastAPI installed; the command service's admission and spawn gates
+    (`RunCommandService._settle_if_expired`) are the other caller.
+
+    `now` is REQUIRED, and this module keeps no clock: a deadline is compared on the clock of the
+    module that STAMPED it. The re-drive gate once defaulted to this module's own `time.time()` while
+    `run_commands` stamps its deadlines through `run_commands.time` — the clock
+    `tests/test_command_monitor_cost.py::_MonitorClock` drives — so a test whose driven clock lagged
+    the real one by the length of its own setup saw its record expire before the first monitor tick
+    (critic 2026-09-26: that test flaked under load, and deterministically with one real second of
+    sleep before `_execute`)."""
     if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
         return False
     try:
         value = float(deadline)
     except OverflowError:
         return False
-    return math.isfinite(value) and (time.time() if now is None else now) >= value
+    return math.isfinite(value) and now >= value
+
+
+# THE `engine_ack` POSTCONDITION, stated once for its two readers (critic 2026-09-26, driven). The
+# command service asks it of its incremental log index (`serve/command_observation.py`); `looplab
+# stop --wait` asks it of the log it just read, to leave out a command the engine already served —
+# a GET settles that one `succeeded` and starts nothing. The CLI kept a copy that was not the rule:
+# integer seqs only, and the marker `intent_marker or id or <file name>`. An ack row carrying
+# `event_seq: 3.0` satisfied the server (`3 == 3.0`) and not the copy, so the wait reported an engine
+# start the server would never make (exit 1); a hand-edited list `event_seq` raised `TypeError` from
+# a set lookup, after the pause was already appended. Three pieces, each the server's own:
+def command_intent_marker(record, command_id: str = "") -> str:
+    """The `_command_id` a durable command record's intent is stamped with, and so the key its
+    `command_ack` is filed under: the record's `intent_marker` when that is a non-empty string (a
+    superseded intent re-issued under a fresh marker — `run_commands.py::RunCommandService.
+    _intent_marker` has why the two cannot share one), else `command_id`, else the record's `id`.
+    Never the record's FILE name, which the CLI's copy fell back to."""
+    marker = (record or {}).get("intent_marker")
+    if isinstance(marker, str) and marker:
+        return marker
+    return command_id or str((record or {}).get("id") or "")
+
+
+def file_command_ack(acknowledgements: dict, data) -> None:
+    """File one `command_ack` payload into `{marker: (event_seq, …)}` IN PLACE: keyed by
+    `str(command_id or "")` and carrying `event_seq` exactly as written — never narrowed to an
+    integer, because `ack_observed` compares with Python equality and old logs rely on it."""
+    data = data if isinstance(data, dict) else {}
+    marker = str(data.get("command_id") or "")
+    acknowledgements[marker] = acknowledgements.get(marker, ()) + (data.get("event_seq"),)
+
+
+def command_ack_index(events) -> dict:
+    """`{marker: (event_seq, …)}` over every `command_ack` in `events` — the index
+    `serve/command_observation.py` builds incrementally, built here in one pass for a reader that
+    holds the whole log (`looplab stop --wait`)."""
+    acknowledgements: dict = {}
+    for event in events or ():
+        if getattr(event, "type", None) == EV_COMMAND_ACK:
+            file_command_ack(acknowledgements, getattr(event, "data", None))
+    return acknowledgements
+
+
+def ack_observed(acknowledgements, marker: str, event_seq) -> bool:
+    """Is `(marker, event_seq)` among the filed acknowledgements? TUPLE MEMBERSHIP on purpose: it
+    keeps Python's exact historical equality (`3 == 3.0`, and legacy oddities such as `True == 1`)
+    instead of narrowing old logs to a new integer schema, and it never hashes `event_seq`, so an
+    unhashable value on a hand-edited record answers False rather than raising."""
+    return event_seq in acknowledgements.get(marker, ())
+
+
+def engine_ack_observed(record, acknowledgements) -> bool:
+    """Does `record`'s `engine_ack` postcondition hold against `acknowledgements`? The whole rule —
+    `RunCommandService._postcondition` answers its `engine_ack` kind through this, over the
+    observation's index (`CommandObservation.engine_ack_observed`), and `looplab stop --wait` over
+    `command_ack_index` of the log it read."""
+    record = record or {}
+    return ack_observed(acknowledgements,
+                        command_intent_marker(record, str(record.get("id") or "")),
+                        record.get("event_seq"))
+
 
 CONTROL_EVENTS = frozenset({
     EV_RUN_ABORT, EV_PAUSE, EV_RESTART, EV_RESUME, EV_NODE_ABORT, EV_NODE_RESET, EV_BUDGET_EXTEND, EV_HINT,

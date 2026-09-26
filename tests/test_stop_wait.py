@@ -13,8 +13,13 @@ wrong question: "the pause is folded" is minutes or hours earlier than "nothing 
 """
 from __future__ import annotations
 
+import errno
 import itertools
 import json
+import os
+import subprocess
+import sys
+import textwrap
 import threading
 import time
 from pathlib import Path
@@ -305,9 +310,10 @@ def test_without_wait_it_does_not_block_even_on_a_held_lock(tmp_path):
 
 # ------------------------------------------------ the server's other family of engine starter
 def _command_record(rd: Path, *, event_type: str, policy: str, status: str = "executing",
-                    name: str = "0" * 32, age_s: float = 0.0, error=None) -> Path:
+                    name: str = "0" * 32, age_s: float = 0.0, error=None, **fields) -> Path:
     """A durable command record the way `serve/run_commands.py` writes one (the keys this reads),
-    last touched `age_s` ago."""
+    last touched `age_s` ago; `fields` add or override keys (`absolute_deadline_at`, `event_seq`,
+    `spawned_by_command`, …)."""
     directory = rd / ".commands"
     directory.mkdir(exist_ok=True)
     path = directory / f"cmd_{name}.json"
@@ -316,6 +322,7 @@ def _command_record(rd: Path, *, event_type: str, policy: str, status: str = "ex
               "updated_at": time.time() - age_s}
     if error is not None:
         record["error"] = error
+    record.update(fields)
     path.write_text(json.dumps(record), encoding="utf-8")
     return path
 
@@ -414,7 +421,8 @@ def test_a_command_the_engine_already_acknowledged_or_let_expire_starts_nothing(
     """A server killed after the engine ACKED its command leaves the record `executing`; a GET
     settles it `succeeded` and spawns nothing, so it is no note at all. Nor is one past its
     deadline, which a re-drive now settles `timed_out` (fourth critic pass)."""
-    from looplab.cli.run_cmds import _command_acks, server_commands_restarting
+    from looplab.cli.run_cmds import server_commands_restarting
+    from looplab.serve.protocol import command_ack_index
 
     rd = _run_dir(tmp_path, in_flight=False)
     store = EventStore(rd / "events.jsonl")
@@ -425,8 +433,8 @@ def test_a_command_the_engine_already_acknowledged_or_let_expire_starts_nothing(
     path.write_text(json.dumps(record), encoding="utf-8")
     assert server_commands_restarting(rd)["stale"], "unacked, it is a stale note"
     store.append("command_ack", {"command_id": f"cmd_{'a' * 32}", "event_seq": 7})
-    acks = _command_acks(store.read_all())
-    assert (f"cmd_{'a' * 32}", 7) in acks
+    acks = command_ack_index(store.read_all())
+    assert acks == {f"cmd_{'a' * 32}": (7,)}
     assert server_commands_restarting(rd, acked=acks)["stale"] == []
     expired = _command_record(rd, event_type="fork", policy="ensure_running", name="b" * 32)
     record = json.loads(expired.read_text(encoding="utf-8"))
@@ -462,6 +470,287 @@ def test_a_recent_uncertain_engine_start_counts_as_coming(tmp_path):
     assert server_commands_restarting(rd) == {
         "coming": [f"`fork` (cmd_{'0' * 32}, engine start uncertain — its child may still be "
                    "starting)"], "stale": [], "uncertain": [], "unreadable": []}
+
+
+_UNCERTAIN = f"`fork` (cmd_{'0' * 32}, engine start uncertain — its child may still be starting)"
+_NOTHING = {"coming": [], "stale": [], "uncertain": [], "unreadable": []}
+
+
+@pytest.mark.parametrize("acked", [False, True], ids=["unacked", "acked"])
+def test_a_settled_uncertain_start_is_counted_whatever_its_deadline_or_ack_says(tmp_path, acked):
+    """A record that SETTLED `ENGINE_START_UNCERTAIN` is terminal and never re-driven, so neither
+    rule for what a re-drive would do — its ack, its deadline — says anything about it: the
+    uncertainty is its CHILD's, which may still be importing. `_spawn_under_claim` settles one on a
+    spawn it could not confirm, before `spawned_by_command` is ever set, and by the time a wait reads
+    it its deadline has usually passed. `_command_record` never set a deadline, so no test saw the two
+    rules reach such a record (critic 2026-09-26: deleting the guard survived the suite)."""
+    from looplab.cli.run_cmds import server_commands_restarting
+    from looplab.serve.protocol import command_ack_index
+
+    rd = _run_dir(tmp_path, in_flight=False)
+    store = EventStore(rd / "events.jsonl")
+    _command_record(rd, event_type="fork", policy="ensure_running", status="failed",
+                    error={"code": "engine_start_uncertain"}, event_seq=2,
+                    absolute_deadline_at=time.time() - 60)
+    if acked:
+        store.append("command_ack", {"command_id": f"cmd_{'0' * 32}", "event_seq": 2})
+    found = server_commands_restarting(rd, acked=command_ack_index(store.read_all()))
+    assert found == {**_NOTHING, "coming": [_UNCERTAIN]}, found
+
+
+def test_an_expired_command_that_started_a_child_is_counted_as_the_server_settles_it(tmp_path):
+    """Critic 2026-09-26, driven: a record past its deadline whose worker had ALREADY spawned a
+    child (`spawned_by_command` set, `spawn_claim_released` not) was skipped as "past its deadline",
+    so before any GET the stop read as standing (exit 0) — while the server's own GET of that record
+    settles it `ENGINE_START_UNCERTAIN` ("the detached engine has not exposed engine.lock"), and
+    after that GET this check counted it as coming. It is counted as that settled record is: coming
+    while fresh, the uncertain note once old. A child the worker SAW take the lock is settled
+    `timed_out` with nothing left to start, and stays out."""
+    from looplab.cli.run_cmds import server_commands_restarting
+
+    rd = _run_dir(tmp_path, in_flight=False)
+    past = time.time() - 60
+    _command_record(rd, event_type="fork", policy="ensure_running", event_seq=2,
+                    spawned_by_command=True, engine_pid=4242, absolute_deadline_at=past)
+    assert server_commands_restarting(rd) == {**_NOTHING, "coming": [_UNCERTAIN]}
+    assert (server_commands_restarting(rd, now=time.time() + 3600)
+            == {**_NOTHING, "uncertain": [_UNCERTAIN]})
+    out = CliRunner().invoke(app, ["stop", str(rd), "--wait"])
+    assert out.exit_code == 1 and "engine start uncertain" in out.output, out.output
+
+    _command_record(rd, event_type="fork", policy="ensure_running", event_seq=2,
+                    spawned_by_command=True, spawn_claim_released=True, absolute_deadline_at=past)
+    assert server_commands_restarting(rd) == _NOTHING
+
+
+def test_the_server_settles_that_record_the_way_the_wait_counted_it(tmp_path):
+    """The same record through the REAL service, so the rule above is pinned against the writer:
+    a worker that appended its intent and spawned a child dies; past the deadline a GET settles the
+    record `timed_out` / `engine_start_uncertain` and starts nothing — and the wait counts it as
+    coming before that GET and after it alike."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from looplab.cli.run_cmds import server_commands_restarting
+    from looplab.serve.run_commands import RunCommandService
+    from looplab.serve.server import make_app
+    from tests.factories import post_command
+
+    rd = _run_dir(tmp_path, in_flight=False)
+    (rd / "task.snapshot.json").write_text('{"kind":"quadratic","goal":"g","direction":"min"}',
+                                          encoding="utf-8")
+    application = make_app(tmp_path)
+    srv = application.state.looplab
+    spawned = []
+    commands = srv.commands = RunCommandService(
+        srv, engine_alive=lambda _rd: False, spawn_engine=lambda *a, **k: spawned.append(a) or 4242,
+        process_alive=lambda _pid: True, process_identity=lambda _pid: "child",
+        startup_timeout=0.05, command_timeout=5.0, poll_interval=0.01,
+        max_observation_timeout=10.0)
+    client = TestClient(application)
+    commands._start_worker = lambda *_args, **_kwargs: None
+    record = post_command(client, "budget_extend", {"add_nodes": 2}, run_id="run").json()
+    path = commands._path(rd, record["id"])
+    # What the dead worker left: the marked intent appended, a child spawned under its lease.
+    row = commands._load(path)
+    intent = EventStore(rd / "events.jsonl").append(
+        "budget_extend", {**row["data"], "_command_id": row["id"]})
+    commands._record_spawn_claim(rd, row["id"], 4242)
+    row.update(status="executing", event_seq=intent.seq, spawned_by_command=True, engine_pid=4242,
+               absolute_deadline_at=time.time() - 60, updated_at=time.time())
+    commands._save(path, row)
+    label = f"`budget_extend` ({row['id']}, engine start uncertain — its child may still be starting)"
+    assert server_commands_restarting(rd)["coming"] == [label], "before the GET"
+
+    commands._start_worker = lambda rd_, path_, record_: commands._execute(
+        rd_, path_, record_, claimed=False)                     # the GET's re-drive, inline
+    settled = client.get(f"/api/runs/run/commands/{row['id']}").json()
+    assert settled["status"] == "timed_out", settled
+    assert settled["error"]["code"] == "engine_start_uncertain", settled
+    assert spawned == [], "an expired record starts no second engine"
+    assert server_commands_restarting(rd)["coming"] == [label], "after the GET"
+
+
+def test_only_an_engine_ack_postcondition_is_settled_by_an_ack(tmp_path):
+    """The ack skip is the server's `engine_ack` postcondition, not a rule for every record: a
+    `restart` waits for `restart_served`, and an acknowledgement filed under its marker and seq —
+    however it got there — settles nothing, so its worker still starts the replacement engine."""
+    from looplab.cli.run_cmds import server_commands_restarting
+    from looplab.serve.protocol import command_ack_index
+
+    rd = _run_dir(tmp_path, in_flight=False)
+    store = EventStore(rd / "events.jsonl")
+    _command_record(rd, event_type="restart", policy="restart_after_exit", name="4" * 32,
+                    postcondition="restart_served", event_seq=2)
+    _command_record(rd, event_type="fork", policy="ensure_running", name="6" * 32, event_seq=3)
+    store.append("command_ack", {"command_id": f"cmd_{'4' * 32}", "event_seq": 2})
+    store.append("command_ack", {"command_id": f"cmd_{'6' * 32}", "event_seq": 3})
+    found = server_commands_restarting(rd, acked=command_ack_index(store.read_all()))
+    assert found == {**_NOTHING, "coming": [f"`restart` (cmd_{'4' * 32}, executing)"]}, found
+
+
+# Every row: (what differs on the record, the marker the intent is stamped with, the ack rows'
+# `(command_id, event_seq)` — `...` leaves `event_seq` out — and whether the engine_ack holds). The
+# intent is always seq 1, so `True == 1` and `1.0 == 1` are the equalities the server keeps.
+_ID = "cmd_" + "d" * 32
+_ACK_ROWS = [
+    ("an int ack", {}, _ID, [(_ID, 1)], True),
+    ("a float ack (the critic's case)", {}, _ID, [(_ID, 1.0)], True),
+    ("a bool ack (legacy equality)", {}, _ID, [(_ID, True)], True),
+    ("a float seq on the record", {"event_seq": 1.0}, _ID, [(_ID, 1)], True),
+    ("a string ack", {}, _ID, [(_ID, "1")], False),
+    ("an ack of another intent", {}, _ID, [(_ID, 2)], False),
+    ("an ack with no seq", {}, _ID, [(_ID, ...)], False),
+    ("a re-issued marker", {"intent_marker": f"{_ID}.r1"}, f"{_ID}.r1", [(f"{_ID}.r1", 1)], True),
+    ("a re-issued marker acked under the id", {"intent_marker": f"{_ID}.r1"}, f"{_ID}.r1",
+     [(_ID, 1)], False),
+    ("an empty marker", {"intent_marker": ""}, _ID, [(_ID, 1)], True),
+    ("a non-string marker", {"intent_marker": 5}, _ID, [(_ID, 1)], True),
+    ("a non-string marker acked under it", {"intent_marker": 5}, _ID, [("5", 1)], False),
+    ("a record with no id", {"id": None}, "", [("", 1)], True),
+    ("a record with no id, acked under its file name", {"id": None}, "", [(_ID, 1)], False),
+    ("an unhashable seq on the record", {"event_seq": [1]}, _ID, [(_ID, 1)], False),
+]
+
+
+@pytest.mark.parametrize("fields,marker,acks,expected", [row[1:] for row in _ACK_ROWS],
+                         ids=[row[0] for row in _ACK_ROWS])
+def test_the_wait_reads_an_acknowledgement_by_the_servers_own_rule(tmp_path, fields, marker, acks,
+                                                                   expected):
+    """ONE RULE, driven through both readers over the same rows (critic 2026-09-26, driven): the
+    server's `_postcondition` over its incremental index, and `server_commands_restarting` over the
+    log it read. The wait kept a copy — integer seqs only, the marker `intent_marker or id or <file
+    name>` — so an ack row carrying `event_seq: 3.0` settled the command `succeeded` on a GET while
+    the wait said "will start an engine" (exit 1), and a hand-edited list seq raised `TypeError` after
+    the pause was appended. Both now ask `serve/protocol.py::engine_ack_observed`; the rows pin what
+    it answers, so a change to the shared rule is red here too."""
+    pytest.importorskip("fastapi")
+    from looplab.cli.run_cmds import server_commands_restarting
+    from looplab.serve.protocol import command_ack_index
+    from looplab.serve.run_commands import RunCommandService
+    from looplab.serve.server import make_app
+
+    rd = tmp_path / "run"
+    rd.mkdir()
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_started", {"run_id": "run", "task_id": "t", "goal": "g", "direction": "max"})
+    intent = store.append("budget_extend", {"add_nodes": 1, "_command_id": marker})
+    assert intent.seq == 1
+    for command_id, seq in acks:
+        store.append("command_ack", ({"command_id": command_id} if seq is ... else
+                                     {"command_id": command_id, "event_seq": seq}))
+    record = {"id": _ID, "status": "executing", "event_type": "budget_extend",
+              "engine_policy": "ensure_running", "postcondition": "engine_ack",
+              "data": {"add_nodes": 1}, "event_seq": 1, "updated_at": time.time(), **fields}
+    record = {key: value for key, value in record.items() if value is not None}
+    (rd / ".commands").mkdir()
+    (rd / ".commands" / f"{_ID}.json").write_text(json.dumps(record), encoding="utf-8")
+
+    srv = make_app(tmp_path).state.looplab
+    service = RunCommandService(srv, engine_alive=lambda _rd: False)
+    server_says = service._postcondition(rd, dict(record), service._observe(rd))
+    found = server_commands_restarting(rd, acked=command_ack_index(store.read_all()))
+    wait_says = found["coming"] == []
+    assert (server_says, wait_says) == (expected, expected), found
+
+
+def test_a_record_past_the_bound_is_counted_as_coming_not_as_unreadable(tmp_path, monkeypatch):
+    """A file past `_COMMAND_RECORD_MAX_BYTES` is one THIS check declined to read, not one the
+    server's reader rejects: the wait cannot tell what it would start, so it is coming (exit 1),
+    never an "unreadable" note that keeps the exit at 0."""
+    from looplab.cli import run_cmds
+
+    rd = _run_dir(tmp_path, in_flight=False)
+    path = _command_record(rd, event_type="fork", policy="ensure_running")
+    monkeypatch.setattr(run_cmds, "_COMMAND_RECORD_MAX_BYTES", path.stat().st_size - 1)
+    assert run_cmds.server_commands_restarting(rd) == {
+        **_NOTHING, "coming": [f"cmd_{'0' * 32} (too large for this check to read)"]}
+    out = CliRunner().invoke(app, ["stop", str(rd), "--wait"])
+    assert out.exit_code == 1 and "too large for this check to read" in out.output, out.output
+
+
+def test_a_commands_directory_that_cannot_be_listed_is_counted_as_coming(tmp_path, monkeypatch):
+    """Nothing in `.commands/` could be read, so nothing in it can be ruled out: coming, never an
+    "unreadable" note (those are records the SERVER's reader rejects, which start nothing)."""
+    from looplab.cli import run_cmds
+
+    rd = _run_dir(tmp_path, in_flight=False)
+    _command_record(rd, event_type="hint", policy="no_spawn")
+    real_glob = Path.glob
+
+    def unlistable(self, pattern):
+        if self.name == ".commands":
+            raise OSError(errno.EIO, "Input/output error", str(self))
+        return real_glob(self, pattern)
+
+    monkeypatch.setattr(Path, "glob", unlistable)
+    assert run_cmds.server_commands_restarting(rd) == {
+        **_NOTHING, "coming": [f"{rd / '.commands'} (cannot be listed)"]}
+
+
+def test_a_symlinked_record_is_a_note_not_an_engine_start(tmp_path):
+    """The server's own reader refuses a symlinked record (a GET of it answers 409/503 and no recovery
+    follows it), so it starts nothing even when the file it points at reads as a live command: it is
+    an "unreadable" note with its quarantine remedy, and the stop stands (exit 0)."""
+    from looplab.cli.run_cmds import server_commands_restarting
+
+    rd = _run_dir(tmp_path, in_flight=False)
+    elsewhere = tmp_path / "elsewhere.json"
+    elsewhere.write_text(json.dumps({
+        "id": f"cmd_{'9' * 32}", "status": "executing", "event_type": "fork",
+        "engine_policy": "ensure_running", "postcondition": "engine_ack",
+        "updated_at": time.time()}), encoding="utf-8")
+    (rd / ".commands").mkdir()
+    try:
+        (rd / ".commands" / f"cmd_{'9' * 32}.json").symlink_to(elsewhere)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+    assert server_commands_restarting(rd) == {**_NOTHING, "unreadable": [f"cmd_{'9' * 32}"]}
+    out = CliRunner().invoke(app, ["stop", str(rd), "--wait"])
+    assert out.exit_code == 0 and "resolve-activity-claims" in out.output, out.output
+
+
+def test_the_command_reader_needs_no_fastapi(tmp_path):
+    """`looplab stop --wait` reads `.commands/` on a box without the `[ui]` extra, so every rule it
+    asks of a record — `deadline_passed`, `engine_ack_observed`, the policy and status words — comes
+    from `serve/protocol.py`, which must never reach FastAPI. Driven in a child whose `fastapi` and
+    `starlette` imports are blocked, over the records whose rules moved: an acknowledged one, an
+    expired one, and an expired one that spawned a child."""
+    rd = _run_dir(tmp_path, in_flight=False)
+    past = time.time() - 60
+    _command_record(rd, event_type="fork", policy="ensure_running", name="1" * 32, event_seq=2)
+    EventStore(rd / "events.jsonl").append("command_ack",
+                                           {"command_id": f"cmd_{'1' * 32}", "event_seq": 2.0})
+    _command_record(rd, event_type="fork", policy="ensure_running", name="2" * 32,
+                    absolute_deadline_at=past)
+    _command_record(rd, event_type="fork", policy="ensure_running", name="3" * 32, event_seq=2,
+                    spawned_by_command=True, absolute_deadline_at=past)
+    child = textwrap.dedent("""
+        import json, sys
+        sys.modules["fastapi"] = None
+        sys.modules["starlette"] = None
+        from pathlib import Path
+        from typer.testing import CliRunner
+        from looplab.cli import app
+        from looplab.cli.run_cmds import server_commands_restarting
+        from looplab.events.eventstore import EventStore
+        from looplab.serve.protocol import command_ack_index
+        rd = Path(sys.argv[1])
+        acked = command_ack_index(EventStore(rd / "events.jsonl").read_all())
+        found = server_commands_restarting(rd, acked=acked)
+        out = CliRunner().invoke(app, ["stop", str(rd), "--wait"])
+        print(json.dumps({"found": found, "exit": out.exit_code, "output": out.output}))
+    """)
+    root = Path(__file__).resolve().parents[1]
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(
+        [str(root)] + [p for p in [os.environ.get("PYTHONPATH")] if p])}
+    ran = subprocess.run([sys.executable, "-c", child, str(rd)], cwd=root, env=env,
+                         capture_output=True, text=True, timeout=180)
+    assert ran.returncode == 0, ran.stderr
+    result = json.loads(ran.stdout.strip().splitlines()[-1])
+    label = f"`fork` (cmd_{'3' * 32}, engine start uncertain — its child may still be starting)"
+    assert result["found"] == {**_NOTHING, "coming": [label]}, result
+    assert result["exit"] == 1 and "does not stand" in result["output"], result
 
 
 def test_only_an_unsettled_engine_starting_record_counts(tmp_path):

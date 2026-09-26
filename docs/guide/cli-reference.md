@@ -413,13 +413,17 @@ Such a command (`node_reset`, `budget_extend`, `fork`, `inject_node`, …) is on
 acknowledge, because its loop had already left for the drain when the command landed. Its worker
 waits for the exit, then runs `looplab resume` if the exit comes inside the command's own observation
 deadline (20 min from submission by default). A command whose acknowledgement is already in the log
-starts nothing and is not counted; neither is one past its deadline, which the server settles
-`timed_out` without starting anything.
+starts nothing and is not counted; this check reads the acknowledgement by the server's own rule, so
+it can never count a command the server would settle `succeeded`. Nor is one past its deadline
+counted: the server settles it `timed_out` without starting anything, never driving it again.
 
 A command that settled "engine start uncertain" in the last 30 s counts too, since its child may
-still be starting. So does anything this check cannot read for its own reasons: a `.commands/` it
-cannot list, or a record past its 32 MiB bound. The server's own records stay far below that bound,
-even with every non-ASCII character escaped.
+still be starting. So does an unsettled command past its deadline that already started a child which
+has not taken the lock: unless the server can tell that the child died, it settles such a command
+"engine start uncertain" when it next reads it, and this check cannot tell either.
+So does anything this check cannot read for its own reasons: a `.commands/` it cannot list, or a
+record past its 32 MiB bound. The server's own records stay far below that bound, even with every
+non-ASCII character escaped.
 
 Three `note:` lines keep the exit at `0`:
 
@@ -429,7 +433,8 @@ Three `note:` lines keep the exit at `0`:
   command, which the UI makes when the same action is submitted again. For a `restart`, it also
   happens when the next server starts on the run's parent directory.
 - **An older "engine start uncertain".** It is named for the detached child it may have left, which
-  lifts the stop if it takes the lock.
+  lifts the stop if it takes the lock. The same goes for an expired command that started a child
+  and has had no worker for 30 s.
 - **A record no server can read.** This means one that is not JSON, not an object, not UTF-8, or is a
   symlink. It starts nothing, but it blocks every later command on the run until
   `POST /api/runs/<run>/resolve-activity-claims` quarantines it.

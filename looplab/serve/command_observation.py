@@ -34,7 +34,8 @@ from looplab.events.eventstore import decode_event_record, event_sequence_contin
 from looplab.events.replay import fold
 from looplab.events.types import EV_CARD_DROPPED, EV_COMMAND_ACK, EV_RUN_ABORT, EV_RUN_FINISHED
 from looplab.serve._log_index import LogIndexCursor, PathLocks, validated_index_bound
-from looplab.serve.protocol import CONTROL_EVENTS
+from looplab.serve.protocol import (CONTROL_EVENTS, ack_observed, engine_ack_observed,
+                                    file_command_ack)
 
 
 MAX_INDEXED_RUNS = 8
@@ -183,11 +184,10 @@ def _apply_delta(index: _Index, events: list[Event]) -> None:
             prior = intents.get(marker)
             intents[marker] = event if prior is None else _DUPLICATE_INTENT
         if event.type == EV_COMMAND_ACK:
-            command_id = str(data.get("command_id") or "")
             if acknowledgements is None:
                 acknowledgements = dict(index.acknowledgements)
-            acknowledgements[command_id] = acknowledgements.get(command_id, ()) + (
-                data.get("event_seq"),)
+            # Filed by the ONE rule `looplab stop --wait` files by too (`serve/protocol.py`).
+            file_command_ack(acknowledgements, data)
         if event.type == EV_RUN_FINISHED:
             if finishes is None:
                 finishes = list(index.run_finishes)
@@ -278,7 +278,12 @@ class CommandObservation:
     def has_ack(self, command_id: str, event_seq: object) -> bool:
         # Tuple membership retains Python's exact historical equality semantics (including legacy
         # oddities such as ``True == 1``) instead of narrowing old logs to a new integer schema.
-        return event_seq in self._acknowledgements.get(command_id, ())
+        return ack_observed(self._acknowledgements, command_id, event_seq)
+
+    def engine_ack_observed(self, record: dict) -> bool:
+        """`record`'s `engine_ack` postcondition against this revision's acknowledgements — the
+        rule `looplab stop --wait` asks too (`serve/protocol.py::engine_ack_observed`)."""
+        return engine_ack_observed(record, self._acknowledgements)
 
     def has_domain_progress(self, after_seq: int) -> bool:
         """Did ENGINE work land after `after_seq`? Excludes CONTROL_EVENTS, so an operator appending

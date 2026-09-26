@@ -878,6 +878,42 @@ test('a config-snapshot refusal survives a reload as its own code, with its own 
   }
 })
 
+// The server settles a command whose deadline passed BEFORE its intent was recorded `timed_out` with
+// `deadline_passed_before_intent` (`serve/protocol.py::DEADLINE_PASSED_BEFORE_INTENT`): nothing was
+// appended, and it is retryable. Stored as `command_failed` it would read back after a reload as
+// "Refresh state before acting again", which says nothing about the one fact that makes a retry safe.
+test('a deadline settle before the intent survives a reload as its own code, still retryable', () => {
+  const values = new Map()
+  const storage = {
+    getItem: key => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: key => values.delete(key),
+  }
+  const live = {
+    id: CMD_A, status: 'timed_out', event_type: 'resume',
+    error: {
+      code: 'deadline_passed_before_intent', retryable: true,
+      message: "the command's deadline passed before its intent was recorded: its intent is not in "
+        + "the run's log, so nothing was appended for it",
+      remediation: "POST this command id's /retry endpoint to re-drive it under a fresh deadline, "
+        + 'or submit the action again',
+    },
+  }
+  for (const [save, load] of [[saveRunTransport, loadRunTransport],
+    [saveAssistantRunTransport, loadAssistantRunTransport]]) {
+    values.clear()
+    assert.equal(save('demo', {
+      action: 'resume', idempotencyKey: 'deadline-key', commandId: CMD_A, record: live,
+    }, storage), true)
+    const restored = load('demo', storage).record
+    assert.deepEqual(restored.error, { code: 'deadline_passed_before_intent', retryable: true })
+    assert.equal(commandCanRetry(restored), true, 'nothing was appended, so the retry is safe')
+    assert.equal(commandFeedback(restored).message,
+      "Command failed: The command's deadline passed before it was recorded — Nothing was "
+        + 'appended. Retry this command, or submit the action again.')
+  }
+})
+
 test('malformed, unknown, extra-field, cross-wired, and mismatched stored envelopes fail closed', () => {
   const values = new Map()
   const storage = {

@@ -42,7 +42,7 @@ export const STORED_ERROR_CODES = new Set([
   'command_storage_unavailable', 'command_timeout', 'postcondition_timeout',
   'invalid_command', 'command_target_not_found', 'command_intent_missing',
   'command_not_retryable', 'command_in_progress', 'retry_existing_command',
-  'command_intent_spent',
+  'command_intent_spent', 'deadline_passed_before_intent',
   'finalize_payload_conflict', 'finalize_in_progress', 'engine_finishing',
   'engine_start_uncertain', 'spawn_claim_confirmation_required', 'engine_failed',
   'spawn_failed', 'command_worker_failed', 'approval_not_requested',
@@ -66,10 +66,21 @@ const CONFIG_SNAPSHOT_REFUSAL_COPY = Object.freeze({
       + '(`looplab resume <run dir>` prints the exact error), then submit a new command.',
   ]),
 })
+// The server's deadline settle for a command whose intent never reached the run's log
+// (`serve/protocol.py::DEADLINE_PASSED_BEFORE_INTENT`, critic 2026-09-26): nothing was appended, so
+// retrying it — or submitting the action again — is safe, which the generated "Refresh state…" copy
+// below would not say.
+const DEADLINE_SETTLE_COPY = Object.freeze({
+  deadline_passed_before_intent: Object.freeze([
+    "The command's deadline passed before it was recorded",
+    'Nothing was appended. Retry this command, or submit the action again.',
+  ]),
+})
 // Restored command records intentionally contain only a stable code, never server-authored text.
 // Generate their copy from that code instead of eagerly shipping a large near-duplicate dictionary.
 const storedErrorCopy = code => {
   if (Object.hasOwn(CONFIG_SNAPSHOT_REFUSAL_COPY, code)) return CONFIG_SNAPSHOT_REFUSAL_COPY[code]
+  if (Object.hasOwn(DEADLINE_SETTLE_COPY, code)) return DEADLINE_SETTLE_COPY[code]
   const title = code === 'engine_failed' ? 'The run engine reported a failure'
     : code.replaceAll('_', ' ')
   let remediation = 'Refresh state before acting again.'

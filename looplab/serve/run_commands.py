@@ -63,7 +63,8 @@ from looplab.serve.engine_proc import (
 from looplab.serve.http import generation_conflict, refusal
 from looplab.serve.protocol import COLLABORATION_EVENTS, CONTROL_EVENTS
 from looplab.serve.protocol import (COMMAND_ACTIVE_STATUSES, COMMAND_TERMINAL_STATUSES,
-                                    ENGINE_START_UNCERTAIN, deadline_passed)
+                                    DEADLINE_PASSED_BEFORE_INTENT, ENGINE_START_UNCERTAIN,
+                                    command_intent_marker, deadline_passed)
 
 
 # Kept under this name — its call sites read well — but DERIVED from `serve/protocol.py`, the
@@ -2000,11 +2001,11 @@ class RunCommandService:
         share the marker: `command_observation._apply_delta` maps a second event carrying an
         already-seen `_command_id` to `_DUPLICATE_INTENT`, so re-using it would make BOTH intents
         unfindable and turn the retry into `command_intent_missing`.
+
+        The rule itself is `serve/protocol.py::command_intent_marker`, so `looplab stop --wait` —
+        which must run without FastAPI — reads an acknowledgement under the same key.
         """
-        marker = (record or {}).get("intent_marker")
-        if isinstance(marker, str) and marker:
-            return marker
-        return command_id or str((record or {}).get("id") or "")
+        return command_intent_marker(record, command_id)
 
     def _intent_superseded(self, rd: Path, record: dict,
                            observation: Optional[CommandObservation] = None) -> bool:
@@ -2970,8 +2971,10 @@ class RunCommandService:
     # restarted, and that worker DOES append the marked intent and may Popen an engine. This is the
     # deliberate crash-recovery path — an accepted record whose worker died must become drivable
     # again by polling — and it is safe because the intent is marked (so the append cannot
-    # double-apply) and the spawn claim serializes the Popen. Only TERMINAL-record reconciliation
-    # (`_reconcile_observation`) is genuinely observation-only.
+    # double-apply) and the spawn claim serializes the Popen. It is bounded by the record's own
+    # `absolute_deadline_at`: past it the restarted worker settles the record and drives nothing
+    # (`_settle_if_expired`). Only TERMINAL-record reconciliation (`_reconcile_observation`) is
+    # genuinely observation-only.
     def get(self, rd: Path, command_id: str) -> dict:
         path = self._path(rd, command_id)
         with self.sequence(rd):
@@ -3002,6 +3005,14 @@ class RunCommandService:
         this compound lifecycle command closes that reserve->append crash window; once the intent is
         present, the independent resume reconciler is the second recovery path. Cross-process worker
         claims keep multiple uvicorn startup hooks idempotent.
+
+        It closes that window only WITHIN the record's `absolute_deadline_at` (20 min by default):
+        the worker it restarts settles an expired record rather than driving it
+        (`_settle_if_expired`), because a replacement engine started hours after the operator asked
+        is what that gate exists to refuse. A restart that never reached the log settles
+        `DEADLINE_PASSED_BEFORE_INTENT` — nothing appended, retryable — and its `/retry` re-arms it
+        under a fresh deadline (critic 2026-09-26: it used to settle under `postcondition_timeout`'s
+        "command intent was recorded", which was false).
         """
         try:
             candidates = list(self.srv.root.iterdir()) if self.srv.root.exists() else []
@@ -3372,10 +3383,10 @@ class RunCommandService:
                     and observation.has_non_error_finish_after(baseline))
         if kind == "engine_ack":
             # The ack is keyed by the marker the engine READ off the intent, not by the record id —
-            # they differ once a superseded intent has been re-issued under a fresh marker.
-            marker = self._intent_marker(record, str(record.get("id") or ""))
-            event_seq = record.get("event_seq")
-            return observation.has_ack(marker, event_seq)
+            # they differ once a superseded intent has been re-issued under a fresh marker. ONE rule
+            # with `looplab stop --wait` (`serve/protocol.py::engine_ack_observed`): its copy read
+            # a `3.0` ack as absent and reported an engine start this verdict never makes.
+            return observation.engine_ack_observed(record)
         return False
 
     def _monitor_postcondition(self, rd: Path, record: dict, observation: CommandObservation,
@@ -3393,7 +3404,13 @@ class RunCommandService:
         `_execute` performed this identically at admission and again in the monitor loop after a
         pre-existing engine died, so a change to the uncertain-boundary wording or the
         `replacement_launch_claimed` bookkeeping reached only one of them (doc 25 SC-07).
+
+        Past the record's deadline it launches nothing and settles the record instead — the gate
+        `_spawn_under_claim` asks immediately before its Popen, for the same reason
+        (`_settle_if_expired`).
         """
+        if self._settle_if_expired(rd, path, record, str(record.get("id") or "")):
+            return False
         try:
             launched = self._claim_restart_spawn(rd)
         except Exception as exc:  # noqa: BLE001 - durable intent remains startup-recoverable
@@ -3431,7 +3448,17 @@ class RunCommandService:
         "restart" rather than "start". The record bookkeeping that legitimately differs between the
         two sites (`waiting_for_spawn`, whether a `None` pid may overwrite a known one) stays at the
         call sites where a reader can see the divergence.
+
+        NO POPEN PAST THE RECORD'S DEADLINE, asked HERE — immediately before the lease and the Popen,
+        under the sequencer both callers hold (critic 2026-09-26, driven: with the one check made
+        before `_admit` waited for the sequencer, a record whose deadline passed during that wait had
+        its intent appended and an engine spawned 1.01 s past `absolute_deadline_at`). `_admit` asks
+        once it holds the sequencer, but its append and observations still run between that check
+        and this line, and the monitor's re-spawn waits for the sequencer after its own loop check;
+        asked here, the answer cannot go stale before the Popen.
         """
+        if self._settle_if_expired(rd, path, record, command_id):
+            return True, None
         verb = "restart" if restarting else "start"
         self._record_spawn_claim(rd, command_id, None)
         # THE HANDSHAKE'S READ (review 2026-09-22, SRV1-09): only NOW, with this lease published,
@@ -3486,45 +3513,115 @@ class RunCommandService:
         overwritten by this worker's stale timed_out write.
         """
         with self.sequence(rd):
-            current = self._load(path)
-            if current is not None:
-                record = current
-            if record.get("status") in TERMINAL_STATUSES:
-                return
-            final_observation = self._observe(rd)
-            if self._postcondition(rd, record, final_observation):
-                self._succeeded(rd, path, record)
-                return
-            domain_error = (self._domain_failure(rd, record, final_observation)
-                            if spec.engine_policy is not EnginePolicy.NO_SPAWN else None)
-            if domain_error is not None:
-                self._clear_spawn_claim(rd, command_id)
-                self._terminal(path, record, "failed", error=domain_error)
-                return
+            self._settle_expired(rd, path, record, command_id, spec)
 
-            uncertain_start = False
-            if (record.get("spawned_by_command")
-                    and not record.get("spawn_claim_released")):
-                if self._engine_state(rd) is True:
-                    self._clear_spawn_claim(rd, command_id)
-                    record["spawn_claim_released"] = True
-                else:
-                    uncertain_start = self._quarantine_spawn_claim(
-                        rd, command_id, record.get("engine_pid"))
-            else:
+    def _settle_if_expired(self, rd: Path, path: Path, record: dict, command_id: str,
+                           spec=None) -> bool:
+        """Settle `record` if its `absolute_deadline_at` has passed; True when it did, and the caller
+        returns. The CALLER HOLDS THE SEQUENCER — that is what keeps the verdict from going stale.
+
+        AN EXPIRED RECORD IS SETTLED, NEVER DRIVEN (critic 2026-09-26, driven). A GET of a record
+        whose worker died re-enters `_execute`, and `_admit`'s spawn ladder ran before anything
+        looked at the record's own deadline: it started `looplab resume` forty minutes past it — and,
+        after a finalize, reopened the finished run. The gate is asked where the action is decided:
+        by `_admit` once it holds the sequencer (a first check made BEFORE that wait, which can last
+        `lock_acquire_timeout`, let an intent be appended past its deadline), and again by the two
+        spawn helpers immediately before a Popen.
+
+        FOR EVERY POLICY, not only one that would start a driver — the reading the rest of the
+        service supports: the monitor's deadline exit is policy-blind; the UI tells the operator
+        `absolute_deadline_at` is when every command stops waiting
+        (`ui/src/runCommandMachine.js::pendingCommandRemedy`), and its poll gave up long before; and
+        `_safe_retry` re-arms the deadline, which makes `/retry` the operator's explicit way past it.
+        A pause, hint or approval appended forty minutes after the operator asked is an action no one
+        is watching for any more. Nothing is lost by settling instead: a record whose intent never
+        reached the log says so (`DEADLINE_PASSED_BEFORE_INTENT`), is retryable, and holds back no
+        fresh submission of the same action.
+
+        On the command service's own clock (`time`, this module's): the deadline was stamped on it."""
+        if not deadline_passed(record.get("absolute_deadline_at"), time.time()):
+            return False
+        if spec is None:
+            spec = CONTROL_SPECS.get(str(record.get("event_type") or ""))
+        self._settle_expired(rd, path, record, command_id, spec)
+        return True
+
+    def _settle_expired(self, rd: Path, path: Path, record: dict, command_id: str, spec) -> None:
+        """The deadline's serialized last look, then a terminal write — for a caller that already
+        holds the sequencer (`_terminalize_expired` takes it; `_settle_if_expired`'s callers hold it).
+
+        Reads the record fresh, so the caller's `record` is deliberately NOT the one written. In
+        order: a late postcondition still settles the command `succeeded`; an engine failure after
+        its intent settles it `failed`; an unresolved spawn of its own settles it
+        `ENGINE_START_UNCERTAIN` (fail-closed, and so ahead of the next rung); an intent that never
+        reached the log settles it `DEADLINE_PASSED_BEFORE_INTENT`; anything else
+        `postcondition_timeout`.
+
+        WHETHER THE INTENT WAS RECORDED decides the words, because `postcondition_timeout` says
+        "command intent was recorded but … was not observed in time" (critic 2026-09-26, driven: a
+        worker dead before admission, a deadline forty minutes gone, and a GET settled pause,
+        budget_extend, approval_granted and resume under that sentence with nothing appended). A
+        record's `event_seq` is not the whole answer: a worker killed between its append and saving
+        the record left the marked intent in the log and no seq on the record, so the intent is
+        looked up and BOUND exactly as `_admit`'s `already_appended` rung does — a late
+        acknowledgement of it still settles the command `succeeded`. An attached finalize observes
+        an external intent that is in the log by construction. With no intent there is also no
+        engine failure to attribute: the domain-failure rung reads "after this command's intent",
+        and with none it would blame the command for any guarded finish in the run's history."""
+        current = self._load(path)
+        if current is not None:
+            record = current
+        if record.get("status") in TERMINAL_STATUSES:
+            return
+        final_observation = self._observe(rd)
+        intent_recorded = bool(record.get("attached")) or record.get("event_seq") is not None
+        if not intent_recorded:
+            intent = self._find_intent(rd, command_id, record, final_observation)
+            if intent is not None:
+                record["event_seq"] = intent.seq
+                intent_recorded = True
+        if self._postcondition(rd, record, final_observation):
+            self._succeeded(rd, path, record)
+            return
+        domain_error = (self._domain_failure(rd, record, final_observation)
+                        if intent_recorded and spec is not None
+                        and spec.engine_policy is not EnginePolicy.NO_SPAWN else None)
+        if domain_error is not None:
+            self._clear_spawn_claim(rd, command_id)
+            self._terminal(path, record, "failed", error=domain_error)
+            return
+
+        uncertain_start = False
+        if (record.get("spawned_by_command")
+                and not record.get("spawn_claim_released")):
+            if self._engine_state(rd) is True:
                 self._clear_spawn_claim(rd, command_id)
-            if uncertain_start:
-                self._terminal(path, record, "timed_out", error=_error(
-                    ENGINE_START_UNCERTAIN,
-                    "the detached engine has not exposed engine.lock and is not known to have exited",
-                    "wait and GET this command; do not retry or launch another driver while quarantined",
-                    retryable=False))
+                record["spawn_claim_released"] = True
             else:
-                self._terminal(path, record, "timed_out", error=_error(
-                    "postcondition_timeout",
-                    f"command intent was recorded but {record.get('postcondition')} was not observed in time",
-                    "GET may reconcile late completion; otherwise POST this command id's /retry endpoint",
-                    retryable=True))
+                uncertain_start = self._quarantine_spawn_claim(
+                    rd, command_id, record.get("engine_pid"))
+        else:
+            self._clear_spawn_claim(rd, command_id)
+        if uncertain_start:
+            self._terminal(path, record, "timed_out", error=_error(
+                ENGINE_START_UNCERTAIN,
+                "the detached engine has not exposed engine.lock and is not known to have exited",
+                "wait and GET this command; do not retry or launch another driver while quarantined",
+                retryable=False))
+        elif not intent_recorded:
+            self._terminal(path, record, "timed_out", error=_error(
+                DEADLINE_PASSED_BEFORE_INTENT,
+                "the command's deadline passed before its intent was recorded: its intent is not in "
+                "the run's log, so nothing was appended for it",
+                "POST this command id's /retry endpoint to re-drive it under a fresh deadline, or "
+                "submit the action again",
+                retryable=True))
+        else:
+            self._terminal(path, record, "timed_out", error=_error(
+                "postcondition_timeout",
+                f"command intent was recorded but {record.get('postcondition')} was not observed in time",
+                "GET may reconcile late completion; otherwise POST this command id's /retry endpoint",
+                retryable=True))
 
     def _admit(self, rd: Path, path: Path, record: dict, command_id: str):
         """Everything that runs under the per-run SEQUENCER, up to where the monitor loop begins.
@@ -3559,6 +3656,10 @@ class RunCommandService:
                     str(detail.get("remediation") or (
                         "Observe the saved Replay operation before retrying this command.")),
                     retryable=exc.status_code >= 500))
+                return None, record
+            # Past its deadline: settled, never driven — asked HERE, under the sequencer, so no wait
+            # for the sequencer can outlive the check (`_settle_if_expired`).
+            if self._settle_if_expired(rd, path, record, command_id, spec):
                 return None, record
 
             observation = self._observe(rd)
@@ -3982,17 +4083,8 @@ class RunCommandService:
         try:
             if record.get("status") in TERMINAL_STATUSES:
                 return
-            # AN EXPIRED RECORD IS NEVER RE-DRIVEN INTO A SPAWN (critic 2026-09-26, driven). A GET of
-            # a record whose worker died re-enters here, and the spawn ladder in `_admit` ran before
-            # anything looked at the record's own deadline: it started `looplab resume` forty minutes
-            # past it — and, after a finalize, reopened the finished run. The monitor loop already
-            # refuses a second Popen past this bound; the first one now honours it too. What is left
-            # is `_terminalize_expired`'s serialized last look, so a late acknowledgement still
-            # settles the command `succeeded`.
-            spec = CONTROL_SPECS.get(str(record.get("event_type") or ""))
-            if spec is not None and deadline_passed(record.get("absolute_deadline_at")):
-                self._terminalize_expired(rd, path, record, command_id, spec)
-                return
+            # An expired record is settled, never driven — by `_admit`, under the sequencer, and not
+            # here: a check made before that wait can go stale inside it (`_settle_if_expired`).
             spec, record = self._admit(rd, path, record, command_id)
             if spec is not None:
                 self._monitor(rd, path, record, command_id, spec)

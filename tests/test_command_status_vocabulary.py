@@ -118,3 +118,25 @@ def test_every_admission_refusal_code_survives_a_reload_as_itself():
     assert not missing, (
         f"server admission refusal codes the browser does not store: {missing} — add them to "
         "`ui/src/commandModel.js::STORED_ERROR_CODES` with client-owned copy")
+
+
+def test_every_deadline_settle_code_survives_a_reload_as_itself():
+    """The codes the command service's DEADLINE settle writes on a `timed_out` record that are not
+    `postcondition_timeout` (`serve/run_commands.py::RunCommandService._settle_expired`): an
+    unresolved spawn of the command's own, and — critic 2026-09-26 — a deadline that passed before
+    the intent was recorded. The second exists because the first message a deadline settle wrote,
+    "command intent was recorded but … was not observed in time", was false for a record whose
+    intent never reached the log; stored as the generic `command_failed`, a reload would lose the
+    one fact that makes its retry safe (nothing was appended).
+
+    MUTATION: drop `deadline_passed_before_intent` from the browser's list -> red, naming it.
+    """
+    if not _JS.exists():
+        pytest.skip("the UI command model is not present in this checkout")
+    from looplab.serve.protocol import DEADLINE_PASSED_BEFORE_INTENT, ENGINE_START_UNCERTAIN
+
+    missing = sorted({DEADLINE_PASSED_BEFORE_INTENT, ENGINE_START_UNCERTAIN}
+                     - _js_set("STORED_ERROR_CODES"))
+    assert not missing, (
+        f"deadline settle codes the browser does not store: {missing} — add them to "
+        "`ui/src/commandModel.js::STORED_ERROR_CODES` with client-owned copy")

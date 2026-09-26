@@ -405,6 +405,16 @@ is retried through its same command ID, without appending the marked event again
 reconcile the record if the requested postcondition arrived after the original observation deadline.
 The persisted record stores the key's digest, not the key.
 
+That deadline (`absolute_deadline_at`, 20 minutes from submission by default) bounds every command,
+whatever its engine policy: past it a command is settled, never driven. A GET normally re-drives a
+record whose worker died; past the deadline the re-drive appends nothing and starts no engine. It
+takes one last look instead, so a late postcondition still settles the command `succeeded`, and
+otherwise the command settles `timed_out` (or `failed`, if the engine failed after the intent). The
+error code says which case applies. `postcondition_timeout` means the intent is in the log.
+`deadline_passed_before_intent` means the deadline passed before the intent was recorded, so nothing
+was appended for it; `/retry` re-drives it under a fresh deadline, and a new submission of the same
+action is admitted as well.
+
 The command's central `ControlSpec` decides whether it is fold-only, must ensure an engine is running,
 or must preserve a pending stop while a driver finishes wrap-up. The service then observes the
 matching postcondition — for example, **stop** requires paused state with no live driver and

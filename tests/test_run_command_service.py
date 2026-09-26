@@ -3378,6 +3378,10 @@ def test_a_record_past_its_deadline_is_never_re_driven_into_a_spawn(tmp_path):
     assert seen["status"] == "timed_out", seen
     assert driver.calls == [], "no engine may be started for an expired command"
     assert "resume" not in _types(rd)
+    # …and it says what happened: its worker died before admission, so its intent was never
+    # appended — not "command intent was recorded but …", which is what it said (critic 2026-09-26).
+    assert seen["error"]["code"] == "deadline_passed_before_intent", seen
+    assert "budget_extend" not in _types(rd)
     # …and one inside its deadline is still re-driven: the bound is the deadline, not the re-drive.
     srv.commands._start_worker = lambda *_args, **_kwargs: None
     fresh = _post(client, "budget_extend", {"add_nodes": 2}, key="fresh-redrive").json()
@@ -3387,3 +3391,300 @@ def test_a_record_past_its_deadline_is_never_re_driven_into_a_spawn(tmp_path):
         assert time.time() < deadline, "a record inside its deadline was not re-driven"
         client.get(f"/api/runs/demo/commands/{fresh['id']}")
         time.sleep(0.02)
+
+
+class _ServiceClock:
+    """`run_commands`' clock, DRIVEN by the test and by the service's own sleeps: every deadline the
+    service stamps and every one it compares is read here, so no verdict below races a real timer
+    (the `tests/test_command_monitor_cost.py::_MonitorClock` pattern). Blocking waits — a thread
+    parked on the sequencer — still block in real time; only what the service READS moves."""
+
+    def __init__(self):
+        self.now = time.time()
+
+    def time(self) -> float:
+        return self.now
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += max(0.0, float(seconds))
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+def _expire(commands, path, *, by: float = 2400.0) -> dict:
+    """Move a durable record's `absolute_deadline_at` `by` seconds into the past, as the operator's
+    forty minutes did in the driven case."""
+    row = commands._load(path)
+    row["absolute_deadline_at"] = time.time() - by
+    commands._save(path, row)
+    return row
+
+
+@pytest.mark.parametrize("event_type,data,paused", [
+    ("pause", {}, False),                              # NO_SPAWN, a worker of its own
+    ("hint", {"text": "late"}, False),                 # NO_SPAWN, executed inline by submit
+    ("budget_extend", {"add_nodes": 1}, True),         # ENSURE_RUNNING
+    ("resume", {}, True),                              # ENSURE_RUNNING
+    ("approval_granted", {"node_id": 0, "generation": 0}, False),
+])
+def test_an_expired_record_whose_intent_never_reached_the_log_says_so(
+        tmp_path, monkeypatch, event_type, data, paused):
+    """Critic 2026-09-26, driven: a worker that died before admission, a deadline moved forty
+    minutes into the past, then a GET — and pause, budget_extend, approval_granted and resume all
+    settled `timed_out` under `postcondition_timeout`: "command intent was recorded but … was not
+    observed in time", with nothing appended. The words are now what happened.
+
+    FOR EVERY POLICY, NO_SPAWN included: past its deadline a record is settled, never driven — the
+    reading the rest of the service supports (`RunCommandService._settle_if_expired` has it). A
+    pause or hint appended forty minutes late is an action nobody is watching for; the settle loses
+    nothing, because it is retryable and `/retry` re-drives it under a fresh deadline."""
+    rd = _seed(tmp_path, paused=paused)
+    if event_type == "approval_granted":
+        store = EventStore(rd / "events.jsonl")
+        store.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": 1.0})
+        store.append("approval_requested", {"node_id": 0, "generation": 0})
+    driver = _Driver(on_spawn=lambda: _ack_marked(rd))
+    client, srv = _client(tmp_path, driver, observation=30.0)
+    commands = srv.commands
+    # The worker "dies" before admission — and `submit` runs a hint inline unless it cannot claim.
+    monkeypatch.setattr(commands, "_start_worker", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(commands, "_claim_execution", lambda *_args, **_kwargs: False)
+    pending = _post(client, event_type, data, key=f"expired-{event_type}").json()
+    assert pending["status"] == "accepted", pending
+    before = _types(rd)
+    path = commands._path(rd, pending["id"])
+    _expire(commands, path)
+
+    commands._execute(rd, path, commands._load(path), claimed=False)   # what a GET re-drives
+
+    final = commands._load(path)
+    assert final["status"] == "timed_out", final
+    assert final["error"]["code"] == "deadline_passed_before_intent", final
+    assert final["error"]["retryable"] is True
+    assert "not in the run's log" in final["error"]["message"], final
+    assert "recorded but" not in final["error"]["message"], final
+    assert _types(rd) == before, "nothing may be appended past the deadline"
+    assert driver.calls == [], "no engine may be started past the deadline"
+
+    # …and the retry it names works: re-armed under a fresh deadline, then driven.
+    retried = client.post(f"/api/runs/demo/commands/{pending['id']}/retry").json()
+    assert retried["status"] == "accepted", retried
+    commands._execute(rd, path, commands._load(path), claimed=False)
+    assert commands._load(path)["status"] == "succeeded", commands._load(path)
+    assert _types(rd).count(event_type) == before.count(event_type) + 1
+
+
+@pytest.mark.parametrize("acked", [False, True], ids=["unacked", "acked"])
+def test_an_intent_appended_before_the_worker_died_is_bound_at_the_deadline(tmp_path, acked):
+    """A record's `event_seq` is not the whole answer to "was the intent recorded?": a worker killed
+    between its append and saving the record leaves the marked intent in the log and no seq on the
+    record. The deadline's last look binds it, exactly as `_admit`'s `already_appended` rung does —
+    so a late acknowledgement still settles the command `succeeded`, and without one the settle
+    says, truthfully, that the intent WAS recorded."""
+    rd = _seed(tmp_path, paused=True)
+    driver = _Driver()
+    client, srv = _client(tmp_path, driver, observation=30.0)
+    commands = srv.commands
+    commands._start_worker = lambda *_args, **_kwargs: None
+    pending = _post(client, "budget_extend", {"add_nodes": 1}, key="bound-at-deadline").json()
+    path = commands._path(rd, pending["id"])
+    row = _expire(commands, path)
+    store = EventStore(rd / "events.jsonl")
+    intent = store.append("budget_extend", {**row["data"], "_command_id": pending["id"]})
+    if acked:
+        store.append("command_ack", {"command_id": pending["id"], "event_seq": intent.seq})
+
+    commands._execute(rd, path, commands._load(path), claimed=False)
+
+    final = commands._load(path)
+    assert final.get("event_seq") == intent.seq, final
+    if acked:
+        assert final["status"] == "succeeded", final
+    else:
+        assert final["status"] == "timed_out", final
+        assert final["error"]["code"] == "postcondition_timeout", final
+    assert _types(rd).count("budget_extend") == 1 and driver.calls == []
+
+
+def test_an_intent_that_never_reached_the_log_is_not_blamed_for_an_old_engine_failure(tmp_path):
+    """The domain-failure rung asks for a guarded finish AFTER this command's intent; with no intent
+    in the log its cursor falls back to the start of the log, so a run that once ended in error
+    would pin that old failure on a command that appended nothing (`engine_failed`, "correct the
+    run error"). The deadline's last look skips the rung for an intent that never reached the log."""
+    rd = _seed(tmp_path, paused=True)
+    EventStore(rd / "events.jsonl").append("run_finished", {"reason": "error", "error": "old crash"})
+    driver = _Driver()
+    _client_unused, srv = _client(tmp_path, driver, observation=30.0)
+    commands = srv.commands
+    command_id = "cmd_" + "e" * 32
+    path = commands._path(rd, command_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    past = time.time() - 60.0
+    commands._save(path, {"id": command_id, "status": "accepted", "event_type": "budget_extend",
+                          "data": {"add_nodes": 1}, "postcondition": "engine_ack",
+                          "engine_policy": "ensure_running", "deadline_at": past,
+                          "absolute_deadline_at": past, "updated_at": time.time()})
+
+    commands._execute(rd, path, commands._load(path), claimed=False)
+
+    final = commands._load(path)
+    assert final["status"] == "timed_out", final
+    assert final["error"]["code"] == "deadline_passed_before_intent", final
+    assert "budget_extend" not in _types(rd) and driver.calls == []
+
+
+def test_a_deadline_that_passes_while_admission_waits_for_the_sequencer_drives_nothing(
+        tmp_path, monkeypatch):
+    """Critic 2026-09-26, driven: the expiry check ran BEFORE `_admit` waited for the run's
+    sequencer — a wait that can last `lock_acquire_timeout` (60 s) — so a deadline that passed during
+    that wait was never seen: the intent was appended and an engine spawned 1.01 s past
+    `absolute_deadline_at`. The check is made under the sequencer. Driven on the service's own clock:
+    another thread holds the sequencer while the clock crosses the deadline, and the worker is known
+    to be waiting before it does."""
+    clock = _ServiceClock()
+    monkeypatch.setattr(run_commands_module, "time", clock)
+    rd = _seed(tmp_path, paused=True)
+    driver = _Driver()
+    client, srv = _client(tmp_path, driver, observation=0.5)
+    commands = srv.commands
+    monkeypatch.setattr(commands, "_start_worker", lambda *_args, **_kwargs: None)
+    pending = _post(client, "budget_extend", {"add_nodes": 1}, key="expires-in-the-wait").json()
+    path = commands._path(rd, pending["id"])
+    record = commands._load(path)
+    assert record["absolute_deadline_at"] == pytest.approx(clock.now + 0.5)
+
+    worker: list = []
+    waiting = threading.Event()
+    real_sequence = commands.sequence
+
+    def watched_sequence(run_dir, **kwargs):
+        if worker and threading.current_thread() is worker[0]:
+            waiting.set()
+        return real_sequence(run_dir, **kwargs)
+
+    monkeypatch.setattr(commands, "sequence", watched_sequence)
+    worker.append(threading.Thread(target=commands._execute, args=(rd, path, record),
+                                   kwargs={"claimed": False}, daemon=True))
+    with real_sequence(rd):                          # another thread holds the run's sequencer…
+        worker[0].start()
+        assert waiting.wait(10), "the worker never asked for the sequencer"
+        clock.now += 1.5                             # …while the deadline (t + 0.5) passes
+    worker[0].join(30)
+    assert not worker[0].is_alive()
+
+    final = commands._load(path)
+    assert final["status"] == "timed_out", final
+    assert final["error"]["code"] == "deadline_passed_before_intent", final
+    assert "budget_extend" not in _types(rd), "an intent was appended past its deadline"
+    assert driver.calls == [], "an engine was started past the deadline"
+
+
+def test_a_deadline_that_passes_during_admission_starts_no_engine(tmp_path, monkeypatch):
+    """The second half of the same race: a deadline that passes AFTER admission's check — while it
+    appends and observes — must still stop the Popen, so the spawn helper asks again immediately
+    before it. The clock crosses the deadline between the append and the spawn ladder; the intent is
+    in the log (appended inside its deadline) and no engine is started (outside it)."""
+    clock = _ServiceClock()
+    monkeypatch.setattr(run_commands_module, "time", clock)
+    rd = _seed(tmp_path, paused=True)
+    driver = _Driver()
+    client, srv = _client(tmp_path, driver, observation=0.5)
+    commands = srv.commands
+    monkeypatch.setattr(commands, "_start_worker", lambda *_args, **_kwargs: None)
+    pending = _post(client, "budget_extend", {"add_nodes": 1}, key="expires-mid-admission").json()
+    path = commands._path(rd, pending["id"])
+    real_recent = commands._recent_spawn_claim
+    crossed = []
+
+    def the_deadline_passes_here(run_dir):
+        if not crossed:
+            crossed.append(_types(rd).count("budget_extend"))
+            clock.now += 1.5
+        return real_recent(run_dir)
+
+    monkeypatch.setattr(commands, "_recent_spawn_claim", the_deadline_passes_here)
+    commands._execute(rd, path, commands._load(path), claimed=False)
+
+    assert crossed == [1], "the clock was meant to cross the deadline after the append"
+    final = commands._load(path)
+    assert driver.calls == [], "an engine was started past the deadline"
+    assert final["status"] == "timed_out", final
+    assert final["error"]["code"] == "postcondition_timeout", final   # the intent WAS recorded
+    assert final.get("event_seq") is not None, final
+
+
+@pytest.mark.parametrize("helper", ["_spawn_under_claim", "_try_restart_claim"])
+def test_neither_spawn_helper_launches_past_the_records_deadline(tmp_path, monkeypatch, helper):
+    """The rule where the Popen is decided, for both helpers and so for all four spawn sites
+    (admission and the monitor's re-spawn each call both): past the record's deadline the helper
+    settles the record and launches nothing. Inside it, the same call launches — the gate is the
+    deadline, not the helper."""
+    clock = _ServiceClock()
+    monkeypatch.setattr(run_commands_module, "time", clock)
+    rd = _seed(tmp_path, paused=True)
+    driver = _Driver()
+    _client_unused, srv = _client(tmp_path, driver, observation=30.0)
+    commands = srv.commands
+    restarts = []
+    monkeypatch.setattr(commands, "_claim_restart_spawn",
+                        lambda run_dir: restarts.append(run_dir) or True)
+    restarting = helper == "_try_restart_claim"
+    command_id = "cmd_" + "c" * 32
+    path = commands._path(rd, command_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    def launch(deadline):
+        record = {"id": command_id, "status": "executing",
+                  "event_type": "restart" if restarting else "budget_extend",
+                  "postcondition": "restart_served" if restarting else "engine_ack",
+                  "engine_policy": "restart_after_exit" if restarting else "ensure_running",
+                  "data": {} if restarting else {"add_nodes": 1},
+                  "deadline_at": deadline, "absolute_deadline_at": deadline,
+                  "updated_at": clock.now}
+        commands._save(path, record)
+        with commands.sequence(rd):
+            if restarting:
+                return commands._try_restart_claim(rd, path, record)
+            return commands._spawn_under_claim(rd, path, record, command_id, restarting=False)
+
+    outcome = launch(clock.now - 1.0)
+    assert outcome == (False if restarting else (True, None)), outcome
+    assert driver.calls == [] and restarts == [], "a launch past the record's deadline"
+    final = commands._load(path)
+    assert final["status"] == "timed_out", final
+    assert final["error"]["code"] == "deadline_passed_before_intent", final
+
+    launch(clock.now + 30.0)
+    assert len(driver.calls) + len(restarts) == 1, "inside its deadline the helper launches"
+
+
+def test_startup_recovery_of_an_expired_restart_appends_nothing_and_says_so(tmp_path):
+    """`recover_pending_restarts` closes a restart's reserve->append window — within the record's
+    deadline. Past it the worker it restarts settles the record instead of starting a replacement
+    engine hours after the operator asked, and says so: nothing was appended, and `/retry` re-arms it
+    (critic 2026-09-26: the settle used to claim "command intent was recorded")."""
+    rd = _seed(tmp_path)
+    driver = _Driver(alive=True)
+    client, srv = _client(tmp_path, driver, observation=30.0)
+    commands = srv.commands
+    commands._start_worker = lambda *_args, **_kwargs: None      # the server dies in the window
+    pending = _post(client, "restart", key="restart-in-the-window").json()
+    assert pending["status"] == "accepted", pending
+    assert "restart" not in _types(rd)
+    path = commands._path(rd, pending["id"])
+    _expire(commands, path)
+    driver.alive = False
+    commands._start_worker = lambda rd_, path_, record_: commands._execute(
+        rd_, path_, record_, claimed=False)
+
+    commands.recover_pending_restarts()
+
+    final = commands._load(path)
+    assert final["status"] == "timed_out", final
+    assert final["error"]["code"] == "deadline_passed_before_intent", final
+    assert final["error"]["retryable"] is True
+    assert "restart" not in _types(rd) and driver.calls == []
