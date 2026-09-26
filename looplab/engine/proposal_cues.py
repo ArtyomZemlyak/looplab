@@ -83,6 +83,7 @@ class ProposalCuesMixin:
         "_cue_concept_authoring",
         "_cue_concept_slug_reuse",
         "_cue_mixed_comparability",
+        "_cue_node_frontier",
     )
 
     def _cue_complexity(self, state: RunState, parent, _r):
@@ -605,6 +606,36 @@ class ProposalCuesMixin:
                 "so neither is a target for the other: compare an idea only with the leaders "
                 "measured the way it will be.",
                 [{"kind": "mixed_comparability", "node_ids": [node_id for node_id, _t in named]}])
+
+    def _cue_node_frontier(self, state: RunState, parent, _r):
+        """THE NODE FRONTIER (doc 67 67.9), under `Settings.brief_node_frontier`, OFF by default.
+
+        The leaders are in the brief and the hypotheses on the card board, but "promising and little
+        explored" — a leader with at most two children — and the dead ends — a leaf that did not
+        beat its parent and was never extended — were nowhere a proposer reads. OFF by default: the
+        item itself says it pays on LONG runs, not on the ~3 nodes of a GPU run, and a new prompt
+        mechanism is measured before it is enabled. The computation is `events/digest.py::
+        node_frontier`, over the same leader rows the brief shows."""
+        if not getattr(self, "_brief_node_frontier", False):
+            return "", []
+        from looplab.events.digest import fmt_num, node_frontier, node_metric
+
+        frontier = node_frontier(state)
+        promising, ends = frontier.get("promising") or [], frontier.get("dead_ends") or []
+        if not promising and not ends:
+            return "", []
+        text = "\nNODE FRONTIER"
+        if promising:
+            text += (" — promising but little explored (a leader with at most 2 children): "
+                     + "; ".join(f"node {n.id} (metric={fmt_num(node_metric(n))}, {count} "
+                                 f"child{'' if count == 1 else 'ren'})" for n, count in promising))
+        if ends:
+            text += (("." if promising else "") + " Dead ends (a leaf that did not beat its parent "
+                     "and was never extended): "
+                     + "; ".join(f"node {n.id} ({fmt_num(node_metric(n))} vs parent {p.id}'s "
+                                 f"{fmt_num(node_metric(p))})" for n, p in ends))
+        return (text + ".", [{"kind": "node_frontier",
+                              "node_ids": [n.id for n, _count in promising]}])
 
     def _set_complexity_hint(self, state: RunState, parent, researcher=None) -> None:
         """Inject the engine-computed proposal cues into the next prompt: A0d (breadth-keyed

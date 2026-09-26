@@ -61,6 +61,9 @@ EXPECTED_ORDER = (
     # warning about how to READ the leaders the brief lists above, and it is empty unless
     # `Settings.brief_mixed_comparability` is on AND a leader is provably on another ruler.
     "_cue_mixed_comparability",
+    # PINNED 2026-09-26 (doc 67 67.9): after the ruler warning, which says how to read the leaders
+    # this names; empty unless `Settings.brief_node_frontier` is on and the run is past its leaders.
+    "_cue_node_frontier",
 )
 
 
@@ -95,6 +98,7 @@ class _Host(ProposalCuesMixin):
         self._novelty_stance = "off"
         self._strategy_fidelity = None
         self._brief_mixed_comparability = False
+        self._brief_node_frontier = False
 
     # Stubbed so this file tests the REGISTRY, not the two text builders (which have their own
     # tests); both are empty in the default, advisory-off configuration anyway.

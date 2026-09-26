@@ -999,6 +999,17 @@ class Settings(BaseSettings):
     # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row). Read through ONE reader, the engine knob
     # `_brief_mixed_comparability`. It moves no metric, champion, selection or violation.
     brief_mixed_comparability: bool = False
+    # THE NODE FRONTIER (doc 67 67.9, 2026-09-26). The leaders are in the brief and the hypotheses on
+    # the card board, but "promising and little explored" (a leader with at most two children) and
+    # the dead ends (a leaf that did not beat its parent and was never extended) were nowhere a
+    # proposer reads. ON: the proposal cue names both (`engine/proposal_cues.py::_cue_node_frontier`
+    # over `events/digest.py::node_frontier`), silent until the run has more feasible nodes than its
+    # five leaders. OFF by default: it pays on LONG runs, not on the ~3 nodes of a GPU run, and a new
+    # prompt mechanism is measured before it is enabled. It changes a PROMPT and buys no call, so
+    # `false` is the historical prompt byte for byte, every constructor defaults it OFF, and a
+    # pre-field snapshot resumes OFF (its `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row). Read through ONE
+    # reader, the engine knob `_brief_node_frontier`. It moves no metric, champion or selection.
+    brief_node_frontier: bool = False
     # A4 (LATS-style): feed a summary of the most recent FAILED branches (operator + error reason)
     # back into the proposal prompt so the proposer reflects on and avoids repeating them. ON by
     # default: it is SELECTIVE by construction (injects only when recent failures exist — the
@@ -3651,6 +3662,10 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # is `False`, pointable at every commit before this one; the field's comment and
     # `tests/test_brief_mixed_comparability.py` hold that `false` is the historical prompt.
     "brief_mixed_comparability": False,
+    # THE BRIEF'S NODE FRONTIER, added 2026-09-26 defaulting OFF (doc 67 67.9), on the row above's
+    # ground: (a) holds, (b) is a prompt an operator may turn on for a resumed run, (c) is `False`;
+    # `tests/test_brief_node_frontier.py` holds that `false` is the historical prompt.
+    "brief_node_frontier": False,
     # THE JUDGES' PROMPT TRUTHS, added 2026-09-23 defaulting ON (review 2026-09-22, Q-1). (a) holds.
     # (b) is the two rows above's DIFFERENT-PROMPT ground: ON, the pilot, the triage judge and the
     # repair critic are handed different bytes (the triage opening, its watchdog sentence and scout

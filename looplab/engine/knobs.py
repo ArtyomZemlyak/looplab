@@ -167,6 +167,8 @@ class EngineKnobs:
     _ablation_probe_hint = Knob("ablation_probe_hint", bool)
     # doc 68 68.1a: the brief's mixed-ruler line (`proposal_cues._cue_mixed_comparability`).
     _brief_mixed_comparability = Knob("brief_mixed_comparability", bool)
+    # doc 67 67.9: the brief's node frontier (`proposal_cues._cue_node_frontier`).
+    _brief_node_frontier = Knob("brief_node_frontier", bool)
     _failure_reflection = Knob("failure_reflection")
     _watchdog_reflection = Knob("watchdog_reflection")
     _deep_repair = Knob("deep_repair")

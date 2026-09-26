@@ -241,6 +241,43 @@ def top_nodes(state: RunState, k: int, *, worst: bool = False) -> list:
     return feasible[:k]
 
 
+def node_frontier(state: RunState, k: int = 5, *, max_children: int = 2,
+                  dead_ends: int = 5) -> dict:
+    """The NODE FRONTIER (doc 67 67.9): `{"promising": [(node, children)], "dead_ends": [(node,
+    parent)]}` — `{}` while the run has no more feasible nodes than its `k` leaders, where "little
+    explored" is true of every node and says nothing.
+
+    PROMISING: a leader (`top_nodes(state, k)`, the rows the brief already lists) with at most
+    `max_children` children. DEAD END: a feasible evaluated LEAF that did not beat its best feasible
+    parent, most recent first — a direction tried once and dropped. A child is any node naming it
+    as a parent that is not tombstoned; `research_targets` answers a different question (axis
+    coverage, for deep research) and is not read."""
+    feasible = [n for n in state.feasible_nodes() if node_metric(n) is not None]
+    if len(feasible) <= k:
+        return {}
+    children: dict[int, int] = {}
+    for node in state.nodes.values():
+        if node.tombstoned:
+            continue
+        for parent_id in dict.fromkeys(node.parent_ids):
+            children[parent_id] = children.get(parent_id, 0) + 1
+    better = (lambda a, b: a > b) if state.direction == "max" else (lambda a, b: a < b)
+    promising = [(n, children.get(n.id, 0)) for n in top_nodes(state, k)
+                 if children.get(n.id, 0) <= max_children]
+    by_id = {n.id: n for n in feasible}
+    ends = []
+    for node in sorted(feasible, key=lambda n: -n.id):
+        parents = [by_id[p] for p in node.parent_ids if p in by_id]
+        if children.get(node.id, 0) or not parents:
+            continue
+        best = (max if state.direction == "max" else min)(parents, key=node_metric)
+        if not better(node_metric(node), node_metric(best)):
+            ends.append((node, best))
+        if len(ends) >= dead_ends:
+            break
+    return {"promising": promising, "dead_ends": ends}
+
+
 def fmt_num(v: Optional[float]) -> str:
     """The digest's spelling of `core.fitness.format_metric` (doc 25 XP-09).
 

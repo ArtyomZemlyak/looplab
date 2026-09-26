@@ -100,7 +100,10 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 226
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 227
+    # 226 -> 227 on 2026-09-26: `brief_node_frontier` (doc 67 67.9) -- the proposal brief names the
+    # node frontier. A ROW on the PROMPT ground, OFF by default. Verified by INTERSECTION: 226 keys
+    # common to the previous keyset plus exactly that one, none removed.
     # 225 -> 226 on 2026-09-26: `brief_mixed_comparability` (doc 68 68.1a) -- the proposal brief
     # names the leaders measured on another ruler than the champion. A ROW on the PROMPT ground, OFF
     # by default. Verified by INTERSECTION: 225 keys common to the previous keyset plus exactly that
@@ -456,7 +459,8 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # 258 -> 259 on 2026-09-26: `card_verdict_support` (a curated row, so both counts move).
     # 259 -> 260 on 2026-09-26: `ablation_probe_hint` (a curated row, so both counts move).
     # 260 -> 261 on 2026-09-26: `brief_mixed_comparability` (a curated row, so both counts move).
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 261
+    # 261 -> 262 on 2026-09-26: `brief_node_frontier` (a curated row, so both counts move).
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 262
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

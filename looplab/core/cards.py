@@ -208,6 +208,8 @@ CARD_STEERING_CONTEXT_FIELDS = {
     "research_memo": {"ref"},
     # doc 68 68.1a: the leaders the brief named as measured on another ruler than the champion.
     "mixed_comparability": {"node_ids"},
+    # doc 67 67.9: the promising, little-explored leaders the brief's node frontier named.
+    "node_frontier": {"node_ids"},
     "strategy": {"novelty_stance", "fidelity"},
     "sweep": set(),
 }

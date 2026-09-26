@@ -280,6 +280,13 @@
           "help": "The proposal brief names each leader whose number was measured on a different ruler than the champion's (another eval profile, scorer, printed fingerprint, source tree or evaluation inputs), and on what. Off = the historical prompt, byte for byte."
         },
         {
+          "key": "brief_node_frontier",
+          "label": "Brief names the node frontier",
+          "type": "bool",
+          "default": false,
+          "help": "The proposal brief names the leaders with at most two children (promising but little explored) and the leaves that did not beat their parent and were never extended. Silent until the run has more feasible nodes than its five leaders. Off = the historical prompt, byte for byte."
+        },
+        {
           "key": "feature_engineering",
           "label": "Feature engineering",
           "type": "bool",
