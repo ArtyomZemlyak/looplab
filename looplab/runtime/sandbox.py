@@ -1092,7 +1092,7 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
                 _landlock.format_env([(str(wd), "readwrite")] + _landlock.parse_env(_ll)),
                 argv)
         # THE SYSCALL FENCE (runtime/seccomp.py, doc 52 row 28), outermost so its filter is in force
-        # for the allow-list launcher too: the engine stamps the policy name in `LOOPLAB_SYSCALL_FENCE`
+        # for the allow-list launcher too: the engine stamps the policy name in `seccomp.SECCOMP_ENV`
         # (`engine/resources.py::_fenced_env`); absent — the default, `Settings.syscall_fence="off"` —
         # nothing here changes. A launcher, not a `preexec_fn`, for the reason recorded above; the
         # kernel inherits the filter across `exec`, so one application covers the process tree.

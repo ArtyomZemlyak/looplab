@@ -3050,6 +3050,16 @@ class Settings(BaseSettings):
                 + ", ".join(invalid_values))
         return dict(value)
 
+    @field_validator("seed_from_run", mode="before")
+    @classmethod
+    def _seed_spec_is_stripped(cls, value):
+        """ONE spelling of "no seed": surrounding whitespace is not part of a spec
+        (`engine/seed_from_run.py`), so a blank one is off here, where every surface reads it. The
+        web preflight read `"   "` as off and passed it through, and the spawned `looplab run` read
+        the same text as a spec and refused it as empty — after the launch was accepted (critic
+        2026-09-26)."""
+        return value.strip() if isinstance(value, str) else value
+
     @field_validator("eval_env", mode="before")
     @classmethod
     def _eval_env_map(cls, value):

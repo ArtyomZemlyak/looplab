@@ -395,14 +395,46 @@ def _prepare_receipt(
         # So a legacy run carrying a spec a later rule refuses can `resume` but cannot Replay, by
         # design. Making Replay work for those runs means changing what it SPAWNS (a re-entry rather
         # than a submit), not what it validates. `tests/test_eval_reader_paths.py` pins both halves.
-        load_task(task_stage)
+        replay_task = load_task(task_stage)
     except Exception as exc:  # noqa: BLE001
         _discard_unpublished_task_stage(task_stage)
         raise HTTPException(409, {
             "code": "replay_task_invalid",
             "message": "Replay task is invalid; Replay did not archive or restart the run.",
         }) from exc
+    record["effective_config"] = _replay_seed(srv, rd, replay_task, effective_config, task_stage)
     return record
+
+
+def _replay_seed(srv, rd: Path, task, effective_config: dict, task_stage: Path) -> dict:
+    """The frozen `seed_from_run`, resolved as the start route resolves it — BEFORE any authority is
+    published, so a refusal leaves the run exactly as it was (critic 2026-09-26, HIGH, driven).
+
+    The spawned `looplab run` re-seeds a fresh log, and it used to find out only after the archive:
+    a source deleted since the launch stranded the run archived with no replacement (its receipt
+    `reset_pending`, `/api/runs` empty, `/state` 404), and a seed a config PUT had pointed anywhere
+    was read unconfined. Refused here, a 409 names the seed's own refusal while the run is intact —
+    and still editable, since no reset marker is published yet: clearing the seed in its config is
+    the way to Replay it unseeded (`routers/runs.py::_put_run_config_locked` allows exactly that)."""
+    spec = str(effective_config.get("seed_from_run") or "").strip()
+    if not spec:
+        return effective_config
+    from looplab.core.errors import ConfigRefusal
+    from looplab.engine.seed_from_run import resolve_seed
+    from looplab.serve.launch import server_seed_locator
+    try:
+        seed = resolve_seed(spec, rd, direction=getattr(task, "direction", None),
+                            locate=server_seed_locator(srv))
+    except ConfigRefusal as exc:
+        _discard_unpublished_task_stage(task_stage)
+        raise HTTPException(409, {
+            "code": "replay_seed_invalid",
+            "message": f"Replay would seed this run again and the seed is refused — {exc}. Replay "
+                       "did not archive or restart the run.",
+            "remediation": "Clear seed_from_run in this run's settings to Replay it unseeded, or "
+                           "start a new run.",
+        }) from exc
+    return {**effective_config, "seed_from_run": seed.canonical_spec}
 
 
 def _flush_reset_cost_evidence(srv, rd: Path) -> None:

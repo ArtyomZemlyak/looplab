@@ -24,6 +24,11 @@ from looplab.core.run_proposal import LAUNCH_SECRET_FIELDS, LAUNCH_SETTING_FIELD
 _SECRET_FIELDS = set(LAUNCH_SECRET_FIELDS)
 _SECRET_API_FIELDS = {"llm_api_key"}
 _ALLOWED_FIELDS = set(LAUNCH_SETTING_FIELDS)
+# LAUNCH FACTS: settings that describe ONE launch and are never a default for all of them. A saved
+# `seed_from_run` seeded every web launch of this server from the same run (critic 2026-09-26), so
+# the UI store neither loads nor saves one and `PUT /api/settings` refuses a value; a launch names it
+# in its own body, a task file's `settings:` or the assistant's launch card.
+LAUNCH_ONLY_FIELDS = frozenset({"seed_from_run"})
 
 _REVISION_KEY = "__looplab_revision__"
 _INITIAL_UI_REVISION = "gUoF2YQlVSLWCEg3hWJOCxJ2YFDKfZ2D"
@@ -124,7 +129,8 @@ class SettingsStore:
         if not isinstance(payload, dict):
             return {}
         return {key: value for key, value in payload.items()
-                if key in _ALLOWED_FIELDS and key not in _SECRET_FIELDS}
+                if key in _ALLOWED_FIELDS and key not in _SECRET_FIELDS
+                and key not in LAUNCH_ONLY_FIELDS}
 
     def load_secrets(self) -> dict:
         """Read one atomically-published pair. A legacy key has no binding and stays unusable."""

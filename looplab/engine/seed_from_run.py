@@ -28,8 +28,9 @@ serves it on the next resume and never twice. The web start record accepts that 
 engine's identity anchor (`serve/start_record.py::has_first_run_started`).
 
 REFUSED BEFORE ANYTHING IS CREATED — a `ConfigRefusal` (the operator's own input: one line at exit 2),
-and on the web start route the same refusal as a 422 from `/api/validate` (`serve/launch.py::
-preflight_start`): a source that is not a run, or is this run; a source log with a mid-file
+and on the web start route the same refusal as an `invalid_seed` 422 from `/api/start` — which
+`/api/validate` answers as `{ready: false, status: 422}` (`serve/launch.py::preflight_start`): a
+source that is not a run, or is this run; a source log with a mid-file
 corruption, whose fold would silently read a prefix — and so rank a different champion — where
 `looplab resume` refuses it; no champion, or a champion taken across the scale (the source ranks the
 other direction: name the node); a missing, tombstoned or aborted node; a node with nothing to
@@ -39,36 +40,60 @@ portable_relative_name`, the server's own rule); and whatever the engine's injec
 is not reported as seeded and then dropped by an `inject_failed` row). Critic 2026-09-26, each
 driven.
 
-THE VERDICT. The evaluation contract (`engine/eval_contract.py`) compares what the two TASKS declare
-and leaves the run-level facts out on purpose — its other readers gate on them. The seed has no such
-gate, so `seed_verdict` compares three of them itself: the DIRECTION (a different one is `different`,
-provably: the seed's standing there is the reverse of its standing here), the declared `eval_env` and
-the `holdout_fraction` (a difference turns `same` into `unknown` and is named — it may, not must,
-change the scale).
+THE VERDICT. `same` is a claim, so it is earned, never defaulted. Both TASKS are read as their
+adapters dump them — the CLI records a task as written and the web route as dumped, so a raw
+comparison read one evaluation as two. The evaluation contract (`engine/eval_contract.py`) decides
+`different`, naming the facet; it is a PARTIAL key (reader, command, declared paths), so `same`
+also needs the two declarations to agree on every field but the goal, the task id and the direction
+— stages, the eval `env`, a timeout — or the verdict is `unknown` and names them (critic
+2026-09-26). The contract leaves run-level facts out on purpose — its other readers gate on them.
+The seed has no such gate, so `seed_verdict` compares three of them itself: the DIRECTION (a
+different one is `different`, provably: the seed's standing there is the reverse of its standing
+here), the declared `eval_env` and the `holdout_fraction` (a difference, or a source that never
+recorded one, turns `same` into `unknown` and is named — it may, not must, change the scale).
 
 SPEC GRAMMAR. `PATH` or `PATH#NODE`. PATH is a run directory — absolute, relative to the working
-directory, or a sibling run's id under the new run's own runs root; the web start route admits only a
-run of ITS runs root (`confine_to`). A trailing `#<integer>` names the node when the text before it
-names a run, else the whole text is the path, so a run whose name holds a `#` stays addressable.
-Without `#NODE` the source's CHAMPION (`RunState.best()`) is taken.
+directory, or a sibling run's id under the new run's own runs root. A server admits only a run of
+ITS runs root, by its own run-directory rule (`locate`, `serve/launch.py::server_seed_locator`),
+both at launch and when a Replay re-seeds a run. A trailing `#<integer>` names the node when the
+text before it names a run, else the whole text is the path, so a run whose name holds a `#` stays
+addressable. Without `#NODE` the source's CHAMPION (`RunState.best()`) is taken. Surrounding
+whitespace is not part of a spec, and a blank one is off (`core/config.py::Settings`).
+
+A SEED IS A FACT OF BIRTH. `recorded_seed_spec` reads it off the run's own first row, and a later
+`looplab run` of the directory records that and nothing else, so what a Replay re-seeds is what the
+run was born from. A Replay resolves it again — under the server's rule, before anything is archived
+(`serve/reset_route.py::_prepare_receipt`) — and a per-run config edit may clear it, never change it
+(`serve/routers/runs.py::_put_run_config_locked`).
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from looplab.core.errors import ConfigRefusal
-from looplab.core.pathsafe import validate_run_child
-from looplab.engine.eval_contract import (comparable, contract_for_run_dir, contract_from_task,
+from looplab.engine.eval_contract import (TASK_SNAPSHOT, comparable, contract_from_task,
                                           contract_notice)
 from looplab.engine.shared import engine_fold as fold
 from looplab.events.eventstore import EventStore
-from looplab.events.node_import import node_import_payload, portable_relative_name
+from looplab.events.node_import import (NAME_ESCAPES, NAME_NOT_TEXT, node_import_payload,
+                                         portable_relative_name)
+from looplab.events.types import EV_INJECT_NODE
 
 _NODE_SUFFIX = re.compile(r"\s*(-?\d+)\s*")
 _RANKS = {"max": "maximizes", "min": "minimizes"}
+# The task fields that cannot change what a number MEANS, so two declarations differing only there
+# still earn `same`: the goal prose, the operational task id (`engine/eval_contract.py::EvalContract`
+# argues both) and the direction, which `seed_verdict` judges in its own clause. Everything else a
+# task declares is compared — a field added later is compared by default, so a new field can only
+# ever turn `same` into `unknown`, never the reverse.
+_NOT_EVALUATION = frozenset({"goal", "id", "direction"})
+_NAME_DEFECTS = {NAME_ESCAPES: "outside a node workspace",
+                 NAME_NOT_TEXT: "that are not a plain file name (empty, over 512 characters or "
+                                "holding a control character)"}
 
 
 @dataclass(frozen=True)
@@ -80,7 +105,9 @@ class SeedSource:
     payload: dict
     named: bool = False                 # `#<node>` was given; else the source's champion was taken
     direction: str = ""
-    eval_env: dict = field(default_factory=dict)
+    # None = the source never RECORDED one (a log older than the fact), which `seed_verdict` reads
+    # as unknown — never as agreement with this run's value.
+    eval_env: Optional[dict] = field(default_factory=dict)
     holdout_fraction: Optional[float] = None
 
     @property
@@ -89,33 +116,48 @@ class SeedSource:
         return f"{self.run_dir}#{self.node_id}"
 
 
-def _locate(path_part: str, out: Path, confine_to: Optional[Path]) -> Optional[Path]:
-    """The resolved run directory `path_part` names, or None."""
+# A server's own run-directory rule (`serve/launch.py::server_seed_locator`): the resolved run a
+# path part names under ITS runs root, or None. The engine never imports `serve`, so it is handed in.
+SeedLocator = Callable[[str], Optional[Path]]
+
+
+def _candidates(path_part: str, out: Path) -> list[Path]:
+    raw = Path(path_part).expanduser()
+    return [raw] if raw.is_absolute() else [raw, Path(out).parent / raw]
+
+
+def _locate(path_part: str, out: Path, locate: Optional[SeedLocator]) -> Optional[Path]:
+    """The resolved run directory `path_part` names, or None — also for a name the filesystem
+    cannot take (a NUL, an over-long component, a `~user` with no home), which is not a run rather
+    than a crash (critic 2026-09-26: a NUL answered the web route with a 500, a long component the
+    CLI with a trace)."""
     if not path_part:
         return None
-    if confine_to is not None:
-        raw = Path(path_part)
-        child = validate_run_child(confine_to, raw if raw.is_absolute() else path_part,
-                                   must_exist=True)
-        if child.defect is None and child.path is not None and (
-                child.path / "events.jsonl").is_file():
-            return child.path
+    try:
+        if locate is not None:
+            return locate(path_part)
+        for candidate in _candidates(path_part, out):
+            if (candidate / "events.jsonl").is_file():
+                return candidate.resolve()
+    except (OSError, ValueError, RuntimeError):
         return None
-    raw = Path(path_part).expanduser()
-    for candidate in [raw] if raw.is_absolute() else [raw, Path(out).parent / raw]:
-        if (candidate / "events.jsonl").is_file():
-            return candidate.resolve()
     return None
 
 
-def _not_a_run(text: str, out: Path, confine_to: Optional[Path]) -> str:
-    if confine_to is not None:
+def _not_a_run(text: str, head: Optional[str], out: Path, locate: Optional[SeedLocator]) -> str:
+    """Refusal for a spec that names no run. `head` is the path part of a `PATH#<node>` spec, which
+    was looked up first — named too, so the operator sees every spelling that was tried."""
+    if locate is not None:
         # No host path is echoed on the web route: the refusal says what was asked, not what exists.
         return f"seed_from_run: {text!r} is not a run under this server's runs root"
-    raw = Path(text).expanduser()
-    looked = [raw] if raw.is_absolute() else [raw, Path(out).parent / raw]
-    return (f"seed_from_run: no run directory at {text!r} (looked for an events.jsonl at "
-            + " and ".join(repr(str(c)) for c in looked) + ")")
+    try:
+        looked = [c for part in ([head] if head else []) + [text] for c in _candidates(part, out)]
+    except (OSError, ValueError, RuntimeError):
+        looked = []
+    return (f"seed_from_run: no run directory at {text!r}"
+            + (f" nor at {head!r}" if head else "")
+            + (" (looked for an events.jsonl at " + " and ".join(repr(str(c)) for c in looked) + ")"
+               if looked else ""))
 
 
 def _engine_refusal(payload: dict) -> Optional[str]:
@@ -153,24 +195,26 @@ def check_seed_direction(seed: SeedSource, direction: Optional[str]) -> None:
 
 
 def resolve_seed(spec: str, out: Path, *, direction: Optional[str] = None,
-                 confine_to: Optional[Path] = None) -> SeedSource:
+                 locate: Optional[SeedLocator] = None) -> SeedSource:
     """Resolve and validate `spec` against the new run directory `out`, reading the source's own log.
-    `direction` is the NEW run's (the champion pick refuses across it); `confine_to` admits only a
-    run of that runs root (the web start route). Raises `ConfigRefusal`; never touches `out`."""
+    `direction` is the NEW run's (the champion pick refuses across it); `locate` is a server's own
+    run-directory rule, admitting only a run of ITS runs root (`serve/launch.py::
+    server_seed_locator`) — None is the CLI's filesystem lookup. Raises `ConfigRefusal`; never
+    touches `out`."""
     text = str(spec or "").strip()
     head, sep, tail = text.rpartition("#")
     head = head.strip()
     node_match = _NODE_SUFFIX.fullmatch(tail) if sep else None
     if not text or (node_match and not head):
         raise ConfigRefusal("seed_from_run: empty — name a run directory, optionally `#<node>`")
-    source = _locate(head, out, confine_to) if node_match else None
+    source = _locate(head, out, locate) if node_match else None
     named = int(node_match.group(1)) if source is not None else None
     if source is None:
-        source = _locate(text, out, confine_to)
+        source = _locate(text, out, locate)
     if source is None:
-        if sep and not node_match and _locate(head, out, confine_to) is not None:
+        if sep and not node_match and _locate(head, out, locate) is not None:
             raise ConfigRefusal(f"seed_from_run: node {tail.strip()!r} is not an integer id")
-        raise ConfigRefusal(_not_a_run(text, out, confine_to))
+        raise ConfigRefusal(_not_a_run(text, head if node_match else None, out, locate))
     if source == Path(out).resolve():
         raise ConfigRefusal(f"seed_from_run: {text!r} is this run's own directory")
     name = source.name
@@ -204,22 +248,26 @@ def resolve_seed(spec: str, out: Path, *, direction: Optional[str] = None,
                             "files and no deletions — there is nothing to import")
     files: dict = {}
     deleted: list = []
-    unsafe: list = []
+    defects: dict = {}
     for fname, content in payload["files"].items():
-        portable, _defect = portable_relative_name(fname)
+        portable, defect = portable_relative_name(fname)
         if portable is None:
-            unsafe.append(str(fname))
+            defects.setdefault(defect, []).append(repr(fname))
         else:
             files[portable] = content
     for fname in payload["deleted"]:
-        portable, _defect = portable_relative_name(fname)
+        portable, defect = portable_relative_name(fname)
         if portable is None:
-            unsafe.append(str(fname))
+            defects.setdefault(defect, []).append(repr(fname))
         else:
             deleted.append(portable)
-    if unsafe:
+    if defects:
+        # Named by the defect the server's own rule found (critic 2026-09-26: an over-long or
+        # control-character name was reported as "outside a node workspace").
+        found = [f"{_NAME_DEFECTS.get(defect, defect)}: {', '.join(sorted(names)[:3])}"
+                 for defect, names in sorted(defects.items())]
         raise ConfigRefusal(f"seed_from_run: node #{node_id} of run {name} names file(s) "
-                            f"outside a node workspace: {', '.join(sorted(unsafe)[:3])}")
+                            + "; ".join(found))
     payload = {**payload, "files": files, "deleted": deleted}
     refusal = _engine_refusal(payload)
     if refusal:
@@ -227,38 +275,111 @@ def resolve_seed(spec: str, out: Path, *, direction: Optional[str] = None,
             f"seed_from_run: node #{node_id} of run {name} cannot be injected: {refusal}")
     return SeedSource(run_dir=source, node_id=node_id, payload=payload, named=named is not None,
                       direction=str(state.direction or ""),
-                      eval_env=dict(getattr(state, "eval_env", None) or {}),
+                      eval_env=_recorded_eval_env(source, state),
                       holdout_fraction=getattr(state, "holdout_fraction", None))
+
+
+def _recorded_eval_env(source: Path, state) -> Optional[dict]:
+    """The declared environment the source's evals ran under, or None when it never recorded one.
+
+    `run_started` carries `eval_env` only when one was declared (so the default payload stayed
+    byte-identical), which leaves `{}` meaning either "declared none" or "a log older than the
+    field" (critic 2026-09-26: the second read as agreement). The run's own `config.snapshot.json`
+    decides: a build that knew the field wrote the key, whatever its value."""
+    recorded = dict(getattr(state, "eval_env", None) or {})
+    if recorded:
+        return recorded
+    try:
+        snapshot = json.loads((source / "config.snapshot.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return {} if isinstance(snapshot, dict) and "eval_env" in snapshot else None
+
+
+def _canonical_task(task) -> Optional[dict]:
+    """`task` as its adapter dumps it — the one form two declarations compare in (critic
+    2026-09-26: the CLI records the task as written, `cmd:` spellings and all, and the web start
+    route as the adapter dumps it, so the same evaluation read as a different one) — or None for a
+    declaration no adapter accepts. `existing_run=True`: the source's is a recorded snapshot."""
+    if not isinstance(task, dict):
+        return None
+    from looplab.adapters.tasks import validate_task
+    try:
+        return validate_task(dict(task), existing_run=True).model_dump(mode="json")
+    except Exception:  # noqa: BLE001 — a declaration no adapter reads is UNKNOWN, never a difference
+        return None
+
+
+def _task_snapshot(run_dir: Path) -> Optional[dict]:
+    try:
+        return json.loads((Path(run_dir) / TASK_SNAPSHOT).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _declaration_differences(mine: dict, theirs: dict) -> list[str]:
+    """The task fields the two canonical declarations disagree on, `eval.<key>` inside the eval."""
+    out = []
+    for key in sorted((set(mine) | set(theirs)) - _NOT_EVALUATION):
+        a, b = mine.get(key), theirs.get(key)
+        if a == b:
+            continue
+        if key == "eval" and isinstance(a, dict) and isinstance(b, dict):
+            out.extend(f"eval.{sub}" for sub in sorted(set(a) | set(b)) if a.get(sub) != b.get(sub))
+        else:
+            out.append(key)
+    return out
 
 
 def seed_verdict(seed: SeedSource, task: dict, *, direction: Optional[str], eval_env,
                  holdout_fraction) -> tuple[str, str]:
-    """`(verdict, sentence)` for seeding a run whose task is `task` (its canonical dict — what
-    `task.snapshot.json` records) and whose run-level facts are the keywords. See the module
-    docstring: the task contract first, then the three run-level facts outside it."""
-    this, other = contract_from_task(task), contract_for_run_dir(seed.run_dir)
-    verdict = {True: "same", False: "different", None: "unknown"}[comparable(this, other)]
-    notes = [contract_notice(this, other, other_run_id=seed.run_dir.name)]
+    """`(verdict, sentence)` for seeding a run whose task is `task` and whose run-level facts are the
+    keywords. Both tasks are compared as their adapters dump them: the evaluation contract decides
+    `different` (`engine/eval_contract.py`, naming the facet), and `same` is earned only when the two
+    declarations agree on every field but `_NOT_EVALUATION` — a contract key is a partial key, and
+    two tasks it calls equal may still declare different stages or an eval `env` (critic
+    2026-09-26). Anything that differs, or that either side cannot state, is `unknown`, named."""
+    name = seed.run_dir.name
+    mine, theirs = _canonical_task(task), _canonical_task(_task_snapshot(seed.run_dir))
+    notes, facets = [], []
+    if mine is None or theirs is None:
+        verdict = "unknown"
+        notes.append(("This run's task" if mine is None else f"Run {name}'s task snapshot")
+                     + " could not be read as a task, so the two evaluations cannot be compared.")
+    else:
+        this, other = contract_from_task(mine), contract_from_task(theirs)
+        if comparable(this, other) is False:
+            verdict = "different"
+            notes.append(contract_notice(this, other, other_run_id=name))
+        else:
+            verdict = "same"
+            differs = _declaration_differences(mine, theirs)
+            if differs:
+                facets.append("their task declarations (" + ", ".join(differs[:6])
+                              + (", …" if len(differs) > 6 else "") + ")")
     if direction and seed.direction and direction != seed.direction:
         verdict = "different"
-        notes.append(f"DIFFERENT DIRECTION: run {seed.run_dir.name} "
+        notes.append(f"DIFFERENT DIRECTION: run {name} "
                      f"{_RANKS.get(seed.direction, seed.direction)} its metric and this run "
                      f"{_RANKS.get(direction, direction)} it, so the seed's standing there is the "
                      "reverse of its standing here.")
-    facets = []
-    mine, theirs = dict(eval_env or {}), dict(seed.eval_env or {})
-    if mine != theirs:
-        keys = sorted(str(k) for k in set(mine) | set(theirs) if mine.get(k) != theirs.get(k))
+    ours = dict(eval_env or {})
+    if seed.eval_env is None:
+        facets.append("eval_env (not recorded there)")
+    elif ours != seed.eval_env:
+        keys = sorted(str(k) for k in set(ours) | set(seed.eval_env)
+                      if ours.get(k) != seed.eval_env.get(k))
         facets.append("eval_env (" + ", ".join(keys[:5]) + ")")
-    if (seed.holdout_fraction is not None and holdout_fraction is not None
-            and float(seed.holdout_fraction) != float(holdout_fraction)):
+    if seed.holdout_fraction is None:
+        facets.append("holdout_fraction (not recorded there)")
+    elif holdout_fraction is not None and float(seed.holdout_fraction) != float(holdout_fraction):
         facets.append(f"holdout_fraction ({float(seed.holdout_fraction):g} there, "
                       f"{float(holdout_fraction):g} here)")
     if facets:
         if verdict == "same":
             verdict = "unknown"
-        notes.append("The runs also differ in " + "; ".join(facets) + " — outside the evaluation "
-                     "contract, so the two numbers may not share a scale.")
+        notes.append("The runs also differ in " + "; ".join(facets) + " — so the two numbers may "
+                     "not share a scale.")
     return verdict, " ".join(note for note in notes if note)
 
 
@@ -285,10 +406,32 @@ def seed_intent(seed: SeedSource, out: Path, task: dict, *, direction: Optional[
 def seed_summary(seed: SeedSource, verdict: str, note: str) -> str:
     """The one line `looplab run` prints when it seeds (and the web preflight shows)."""
     metric = seed.payload["origin"].get("metric")
+    note = str(note or "").strip()
     return (f"seeded from run {seed.run_dir.name} #{seed.node_id}"
             + (f" (its metric there: {metric})" if metric is not None else "")
-            + f" — evaluation contract: {verdict}" + (f". {note}" if note else "")
-            + ". It is evaluated here under this run's own protocol.")
+            + f" — evaluation contract: {verdict}. "
+            + (note + ("" if note.endswith(".") else ".") + " " if note else "")
+            + "It is evaluated here under this run's own protocol.")
+
+
+def recorded_seed_spec(events) -> str:
+    """The canonical spec a run was BORN seeded from, read off its own log, or "".
+
+    The seed is a fact of the run's first row (`serve/start_record.py::_launch_seed_intent` admits
+    it only at seq 0), so a later `looplab run` of the same directory — whatever it passes — records
+    this and nothing else in `config.snapshot.json`, which a Replay reads (critic 2026-09-26: the
+    snapshot was overwritten with the new invocation's value, dropping or inventing a seed)."""
+    first = next(iter(events or ()), None)
+    data = getattr(first, "data", None)
+    origin = data.get("origin") if isinstance(data, dict) else None
+    if (getattr(first, "type", None) != EV_INJECT_NODE or getattr(first, "seq", None) != 0
+            or not isinstance(origin, dict) or origin.get("seed_from_run") is not True):
+        return ""
+    run_dir, node_id = origin.get("run_dir"), origin.get("node_id")
+    if (not isinstance(run_dir, str) or not run_dir or isinstance(node_id, bool)
+            or not isinstance(node_id, int)):
+        return ""
+    return f"{run_dir}#{node_id}"
 
 
 def seed_ignored_note(spec: Optional[str]) -> str:

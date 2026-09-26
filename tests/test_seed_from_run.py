@@ -83,7 +83,9 @@ def test_the_prior_champion_is_the_new_runs_first_experiment(isolated):
     state = fold(events)
     seed = state.nodes[0]
     assert seed.origin["run_id"] == "prior" and seed.origin["node_id"] == champion.id
-    assert seed.origin["seed_from_run"] is True and seed.origin["eval_contract"] == "unknown"
+    # Two runs of one declaration: `same` is EARNED by the two canonical tasks agreeing, not by a
+    # contract key — the quadratic toy declares none, and read `unknown` before (critic 2026-09-26).
+    assert seed.origin["seed_from_run"] is True and seed.origin["eval_contract"] == "same"
     assert seed.origin["source_attempt"] == champion.attempt
     assert seed.origin["run_dir"] == str(src.resolve())
     assert seed.idea.params == champion.idea.params and seed.code == champion.code
@@ -293,26 +295,120 @@ def test_the_receipt_is_the_sources_resolved_identity(isolated):
     assert payload["origin"]["run_dir"] == str(elsewhere.resolve())
 
 
+def _repo_task(repo, command=("python", "score.py"), **eval_extra):
+    """A real repo declaration — what an adapter accepts, so both sides compare as they dump."""
+    return {"kind": "repo", "direction": "min", "editable_path": str(repo),
+            "eval": {"command": list(command), "metric": {"kind": "stdout_json", "key": "loss"},
+                     **eval_extra}}
+
+
+def _declared_source(root, name, task, *, holdout_fraction=0.25, eval_env=None, config=True):
+    """A crafted source whose TASK is `task`, with its run-level facts recorded — `eval_env` by the
+    config snapshot a build that knew the field writes, `holdout_fraction` by `run_started`."""
+    src = _crafted(root, name, {"id": 0, "metric": 1.0}, eval_env=eval_env,
+                   holdout_fraction=holdout_fraction)
+    (src / "task.snapshot.json").write_text(json.dumps(task))
+    if config:
+        (src / "config.snapshot.json").write_text(json.dumps({"eval_env": eval_env or {}}))
+    return src
+
+
 def test_the_receipt_names_a_different_evaluation_contract(isolated):
     """Two runs whose tasks declare different eval commands: the receipt says `different` and names
     the facet, the SOURCE's side first (`engine/eval_contract.py::contract_notice`)."""
-    src, _prior = _source(isolated)
-    snap = json.loads((src / "task.snapshot.json").read_text())
-    (src / "task.snapshot.json").write_text(json.dumps(
-        {**snap, "eval": {"command": ["python", "score_v1.py"],
-                          "metric": {"kind": "stdout_json", "key": "loss"}}}))
-    new = isolated / "runs" / "new"
-    task = {**snap, "eval": {"command": ["python", "score_v2.py"],
-                             "metric": {"kind": "stdout_json", "key": "loss"}}}
+    runs, repo = isolated / "runs", isolated / "repo"
+    repo.mkdir()
+    src = _declared_source(runs, "prior", _repo_task(repo, ("python", "score_v1.py")))
+    new = runs / "new"
     facts = dict(direction="min", eval_env={}, holdout_fraction=0.25)
     seed = resolve_seed(str(src), new)
-    payload, verdict, note = seed_intent(seed, new, task, **facts)
+    payload, verdict, note = seed_intent(seed, new, _repo_task(repo, ("python", "score_v2.py")),
+                                         **facts)
     assert verdict == "different" and "eval command" in note
     assert note.index("score_v1.py") < note.index("score_v2.py"), "the source's command first"
     assert payload["origin"]["eval_contract"] == "different"
     assert payload["origin"]["eval_contract_note"] == note
-    same = seed_intent(seed, new, json.loads((src / "task.snapshot.json").read_text()), **facts)
+    same = seed_intent(seed, new, _repo_task(repo, ("python", "score_v1.py")), **facts)
     assert same[1] == "same" and "eval_contract_note" not in same[0]["origin"]
+
+
+def test_one_task_in_the_cli_and_the_web_spelling_is_one_evaluation(isolated):
+    """MEDIUM (critic 2026-09-26, driven): the CLI records a task as written and the web route as the
+    adapter dumps it. Compared raw, a `cmd:` spec object read as NO command, so the same evaluation
+    was certified `different`. Both sides are compared as their adapters dump them."""
+    from looplab.adapters.tasks import validate_task
+
+    runs, repo = isolated / "runs", isolated / "repo"
+    repo.mkdir()
+    as_written = {"kind": "repo", "direction": "min", "editable_path": str(repo),
+                  "cmd": {"command": ["python", "score.py"],
+                          "metric": {"kind": "stdout_json", "key": "loss"}}}
+    src = _declared_source(runs, "prior", as_written)
+    as_dumped = validate_task(dict(as_written)).model_dump(mode="json")
+    seed = resolve_seed(str(src), runs / "new")
+    assert seed_verdict(seed, as_dumped, direction="min", eval_env={},
+                        holdout_fraction=0.25) == ("same", "")
+
+
+@pytest.mark.parametrize("change, named", [
+    ({"env": {"CORPUS": "/data/b"}}, "eval.env"),
+    ({"stages": [{"name": "train", "command": ["python", "train.py"]}]}, "eval.stages"),
+    ({"timeout": 60.0}, "eval.timeout"),
+])
+def test_same_is_earned_by_the_whole_declaration_not_the_contract_key(isolated, change, named):
+    """MEDIUM (critic 2026-09-26, driven): the contract key is the reader, the command and the
+    declared paths, so two tasks it called equal were certified `same` while one trained through an
+    extra stage or read another corpus through the eval's own `env`. Any other difference is
+    `unknown`, and named."""
+    runs, repo = isolated / "runs", isolated / "repo"
+    repo.mkdir()
+    src = _declared_source(runs, "prior", _repo_task(repo))
+    seed = resolve_seed(str(src), runs / "new")
+    verdict, note = seed_verdict(seed, _repo_task(repo, **change), direction="min", eval_env={},
+                                 holdout_fraction=0.25)
+    assert verdict == "unknown" and named in note, note
+
+
+def test_a_fact_the_source_never_recorded_is_unknown_never_agreement(isolated):
+    """LOW (critic 2026-09-26): `run_started` writes `eval_env` only when one was declared, and a
+    log older than `holdout_fraction` has none — both read as agreeing with this run's value."""
+    runs, repo = isolated / "runs", isolated / "repo"
+    repo.mkdir()
+    src = _declared_source(runs, "old", _repo_task(repo), holdout_fraction=None, config=False)
+    seed = resolve_seed(str(src), runs / "new")
+    assert seed.eval_env is None and seed.holdout_fraction is None
+    verdict, note = seed_verdict(seed, _repo_task(repo), direction="min", eval_env={},
+                                 holdout_fraction=0.25)
+    assert verdict == "unknown"
+    assert "eval_env (not recorded there)" in note and "holdout_fraction (not recorded there)" in note
+
+
+def test_a_declaration_no_adapter_reads_is_unknown(isolated):
+    runs, repo = isolated / "runs", isolated / "repo"
+    repo.mkdir()
+    src = _declared_source(runs, "prior", {"kind": "no-such-kind"})
+    seed = resolve_seed(str(src), runs / "new")
+    verdict, note = seed_verdict(seed, _repo_task(repo), direction="min", eval_env={},
+                                 holdout_fraction=0.25)
+    assert verdict == "unknown" and "could not be read as a task" in note
+
+
+def test_the_summary_reads_as_sentences(isolated):
+    """NIT (critic 2026-09-26): a note ending in a period printed `it.. It is evaluated`."""
+    from looplab.engine.seed_from_run import seed_summary
+
+    runs, repo = isolated / "runs", isolated / "repo"
+    repo.mkdir()
+    src = _declared_source(runs, "prior", _repo_task(repo, ("python", "score_v1.py")))
+    seed = resolve_seed(str(src), runs / "new")
+    verdict, note = seed_verdict(seed, _repo_task(repo, ("python", "score_v2.py")),
+                                 direction="min", eval_env={}, holdout_fraction=0.25)
+    summary = seed_summary(seed, verdict, note)
+    assert note.endswith(".") and ".." not in summary, summary
+    assert summary.endswith(". It is evaluated here under this run's own protocol.")
+    assert seed_summary(seed, "same", "") == (
+        "seeded from run prior #0 (its metric there: 1.0) — evaluation contract: same. "
+        "It is evaluated here under this run's own protocol.")
 
 
 def test_the_champion_is_never_taken_across_the_scale(isolated):
@@ -333,11 +429,10 @@ def test_the_champion_is_never_taken_across_the_scale(isolated):
 def test_run_level_facts_outside_the_contract_make_same_unknown(isolated):
     """MEDIUM (critic 2026-09-26): `eval_env` — the corpus root `NEXT_RUN.md` sets — and the holdout
     split are outside the task contract; a difference is named and `same` is no longer claimed."""
-    runs = isolated / "runs"
-    src = _crafted(runs, "envrun", {"id": 0, "metric": 1.0},
-                   eval_env={"VS_LOCAL_DATA_ROOT": "/data/a"}, holdout_fraction=0.25)
-    task = {"kind": "repo", "cmd": ["python", "score.py"]}
-    (src / "task.snapshot.json").write_text(json.dumps(task))
+    runs, repo = isolated / "runs", isolated / "repo"
+    repo.mkdir()
+    task = _repo_task(repo)
+    src = _declared_source(runs, "envrun", task, eval_env={"VS_LOCAL_DATA_ROOT": "/data/a"})
     seed = resolve_seed(str(src), runs / "x")
     facts = dict(direction="min", eval_env={"VS_LOCAL_DATA_ROOT": "/data/a"},
                  holdout_fraction=0.25)
@@ -346,6 +441,27 @@ def test_run_level_facts_outside_the_contract_make_same_unknown(isolated):
     assert verdict == "unknown" and "eval_env (VS_LOCAL_DATA_ROOT)" in note
     verdict, note = seed_verdict(seed, task, **{**facts, "holdout_fraction": 0.1})
     assert verdict == "unknown" and "holdout_fraction (0.25 there, 0.1 here)" in note
+
+
+def test_a_refusal_names_every_spelling_it_tried_and_every_defect_by_its_name(isolated):
+    """NITs (critic 2026-09-26): `PATH#N` naming no run printed only the literal spec, though PATH
+    was looked up first; and a name that is not text was reported as leaving the workspace. A name
+    the filesystem cannot take is not a run rather than a traceback (LOW)."""
+    runs = isolated / "runs"
+    runs.mkdir()
+    with pytest.raises(ConfigRefusal) as refused:
+        resolve_seed(f"{runs / 'nope'}#3", runs / "x")
+    assert f"nor at {str(runs / 'nope')!r}" in str(refused.value)
+    for spec in ("x" * 300, "a\x00b"):
+        with pytest.raises(ConfigRefusal, match="no run directory"):
+            resolve_seed(spec, runs / "x")
+    escapes = _crafted(runs, "escapes", {"id": 0, "metric": 1.0, "files": {"../up.py": "x"}})
+    with pytest.raises(ConfigRefusal, match="outside a node workspace: '../up.py'"):
+        resolve_seed(str(escapes), runs / "x")
+    control = _crafted(runs, "control", {"id": 0, "metric": 1.0, "files": {"a\x01b.py": "x"}})
+    with pytest.raises(ConfigRefusal, match="not a plain file name") as refused:
+        resolve_seed(str(control), runs / "x")
+    assert "outside a node workspace" not in str(refused.value)
 
 
 def test_the_server_import_and_the_launch_form_import_the_same_snapshot(isolated):

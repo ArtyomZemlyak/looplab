@@ -73,7 +73,15 @@ POLICIES = ("off", "mutators", "egress")
 
 # The env variable the engine stamps onto an eval launch (`engine/resources.py::_fenced_env`); its
 # value is the policy name and `sandbox.run_argv` wraps the launch when it is present.
-SECCOMP_ENV = "LOOPLAB_SYSCALL_FENCE"
+#
+# NOT `LOOPLAB_SYSCALL_FENCE`, which it was until 2026-09-26: that is `Settings.syscall_fence`'s own
+# env name (`LOOPLAB_<FIELD>` maps 1:1), and `run_argv` builds a child's env ON TOP of the engine's
+# process environment. So an engine launched with the SETTING in its environment — which Replay does
+# for every frozen setting, `off` included, and so does an operator's `LOOPLAB_SYSCALL_FENCE=off` —
+# wrapped every eval in the launcher with the policy `off`, which the launcher refuses: every eval of
+# the run failed before it started (critic 2026-09-26, driven through a Replay). A runtime wire name
+# stays out of the Settings namespace (`tests/test_runtime_env_names.py`).
+SECCOMP_ENV = "LOOPLAB_SYSCALL_FENCE_POLICY"
 
 # AUDIT_ARCH_* and the syscall numbers this rung polices, per machine. `mknod` does not exist on
 # aarch64 (glibc's `mknod(3)` is `mknodat(2)` there), which is why the table is per architecture and

@@ -241,16 +241,23 @@ looplab run examples/repo_task.json --backend llm --developer-backend opencode
 run's node — its champion by default — the new run's first experiment: `looplab run` imports its
 code, files and idea as an operator inject before the engine starts, the engine evaluates it under
 THIS run's own protocol, and its `origin` receipt carries a verdict (`engine/seed_from_run.py::
-seed_verdict`): `same`, `different` (the tasks' evaluation contracts — command, reader or paths —
-or the direction differ, named) or `unknown` (either side undecidable, or the runs' `eval_env` or
-`holdout_fraction` differ, named). PATH is a run directory, or a sibling run's id under the new
-run's runs root; a trailing `#<integer>` names the node when the text before it is a run. A bad
-source is refused (exit `2`) before the run directory is created and before Genesis runs: no run
-there, a corrupt log, no champion or one ranked in the other direction, a withdrawn node, nothing to
-import, or what the engine's own inject validation refuses. The setting is recorded in
-`config.snapshot.json` as the `<run dir>#<node>` it resolved to; on a directory that already has
-events it is ignored and not resolved at all, so a resume never re-seeds. The web start route admits
-only a run of its own runs root and answers a bad seed at `/api/validate` (422 `invalid_seed`).
+seed_verdict`), comparing the two tasks as their adapters dump them: `same` only when they declare
+the same evaluation in every field but the goal, the task id and the direction; `different` when
+the evaluation contract (command, reader or paths) or the direction differs, named; `unknown`
+otherwise — any other declared difference (stages, the eval `env`, a timeout), a differing or
+unrecorded `eval_env` or `holdout_fraction`, or a task no adapter reads, each named. PATH is a run
+directory, or a sibling run's id under the new run's runs root; a trailing `#<integer>` names the
+node when the text before it is a run; a blank value is off. A bad source is refused (exit `2`)
+before the run directory is created and before Genesis runs: no run there, a corrupt log, no
+champion or one ranked in the other direction, a withdrawn node, nothing to import, or what the
+engine's own inject validation refuses. The setting is recorded in `config.snapshot.json` as the
+`<run dir>#<node>` it resolved to. On a directory that already has events it is ignored — a resume
+never re-seeds — and the snapshot keeps what the run was born from. The web start route admits only
+a run of its own runs root (by the server's own run rule), takes the seed from the launch alone —
+never a saved default — and answers a bad one at `/api/validate` (`ready: false`, `status: 422`,
+`invalid_seed`). A Replay re-seeds the node the run was born from, and refuses (409
+`replay_seed_invalid`) before anything is archived when that no longer resolves; a per-run config
+edit may clear the seed, never change it.
 
 **Exit codes.** `run` and `resume` share them, because a wrapper, a CI step or an `&&` chain reads
 the status and nothing else:

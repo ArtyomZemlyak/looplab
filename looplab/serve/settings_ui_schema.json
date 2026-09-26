@@ -40,7 +40,7 @@
           "type": "text",
           "default": "",
           "placeholder": "off",
-          "help": "A prior run of this server to start from: its run id, optionally #<node> (default: its champion; a champion ranked in the other direction is refused). On a NEW run only, that node's code and files become the first experiment, evaluated under this run's own protocol; validation shows the node it resolved to and whether the source's number was measured on the same scale (same / different / unknown). Empty = off."
+          "help": "A prior run of this server to start from: its run id, optionally #<node> (default: its champion; a champion ranked in the other direction is refused). On a NEW run only, that node's code and files become the first experiment, evaluated under this run's own protocol; validation shows the node it resolved to and whether the source's number was measured on the same scale (same / different / unknown). Set it on the launch itself: it is never saved as a default. On an existing run it records what the run was seeded from, which a Replay seeds again; it can be cleared there (the Replay then starts unseeded), never changed. Empty = off."
         },
         {
           "key": "card_driven_selection",

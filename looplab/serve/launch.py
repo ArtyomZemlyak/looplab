@@ -31,7 +31,7 @@ from looplab.core.run_proposal import RunProposal
 from looplab.serve.appstate import (
     _DELETE_SERVICE_PREFIXES, _LIFECYCLE_LOCK_PREFIX, _RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX,
     _TRACE_CLEAR_RECEIPT_PREFIX)
-from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
+from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS, LAUNCH_ONLY_FIELDS
 
 
 _START_FIELDS = {
@@ -632,24 +632,49 @@ def _launch_token(run_id: str, task: dict, settings: dict, source: dict | None,
     })
 
 
+def server_seed_locator(srv):
+    """This server's rule for "a run of my runs root", as `engine/seed_from_run.py::resolve_seed`
+    asks it: a sibling run's id, or an absolute path whose PARENT is the root, judged by the rules
+    every route that opens a run by name goes through — `AppState.run_dir` (reserved and service
+    names, the deletion fence, a direct child, a regular in-run `events.jsonl`) and
+    `RunCommandService.validate_paths` (no linked `.commands`). A bare containment check admitted a
+    linked `events.jsonl` and the deletion quarantine (critic 2026-09-26, driven)."""
+    root = Path(srv.root).resolve()
+
+    def locate(path_part: str) -> Optional[Path]:
+        raw = Path(path_part)
+        if raw.is_absolute():
+            if raw.parent.resolve() != root:
+                return None
+            path_part = raw.name
+        try:
+            return srv.commands.validate_paths(srv.run_dir(path_part))
+        except HTTPException:
+            return None
+    return locate
+
+
 def _resolve_launch_seed(srv, run_dir: Path, task: dict, effective: dict) -> tuple[dict, tuple]:
     """`Settings.seed_from_run` (doc 67 67.2), answered in the funnel `/api/validate` and
     `/api/start` share (critic 2026-09-26, driven: the route accepted `nowhere`, `/etc` and
     `../runs/src1#999`, and the refusal surfaced only in the spawned engine's stderr — after the run
     name was taken and the keyed start recorded a failure with its spend unknown).
 
-    CONFINED to this server's runs root: a web operator names a run, never a host path (the server's
-    own `import` action and task-file loading are confined the same way). REWRITTEN to the canonical
-    `<run dir>#<node>` it resolved to, so the spawned `looplab run` seeds exactly the node the preview
-    showed, from this directory whatever its working directory. The verdict rides the preview as a
-    warning line — the one place a web operator sees it before the run exists."""
+    CONFINED to this server's runs root (`server_seed_locator`): a web operator names a run, never
+    a host path (the server's own `import` action and task-file loading are confined the same way).
+    REWRITTEN to the canonical `<run dir>#<node>` it resolved to, so the spawned `looplab run` seeds
+    exactly the node the preview showed, from this directory whatever its working directory. The
+    verdict rides the preview as a warning line — the one place a web operator sees it before the
+    run exists. A SAVED default never reaches here: the seed is a launch fact
+    (`serve/settings_store.py::LAUNCH_ONLY_FIELDS`)."""
     spec = str(effective.get("seed_from_run") or "").strip()
     if not spec:
         return effective, ()
     from looplab.core.errors import ConfigRefusal
     from looplab.engine.seed_from_run import resolve_seed, seed_summary, seed_verdict
     try:
-        seed = resolve_seed(spec, run_dir, direction=task.get("direction"), confine_to=srv.root)
+        seed = resolve_seed(spec, run_dir, direction=task.get("direction"),
+                            locate=server_seed_locator(srv))
     except ConfigRefusal as exc:
         _reject(422, "invalid_seed", str(exc), "settings.seed_from_run")
     verdict, note = seed_verdict(seed, task, direction=task.get("direction"),
@@ -755,6 +780,12 @@ def preflight_start(srv, body: Any) -> LaunchPreflight:
     # inline calls here and a hand-written copy of them in `cli/run_cmds.py`, so a third warning
     # would have landed on whichever surface its author happened to be editing.
     warnings += task_adapters.submit_warnings(adapter)
+    # A LAUNCH FACT (`serve/settings_store.py::LAUNCH_ONLY_FIELDS`) comes from this launch's own
+    # layers only — never the saved defaults, nor this server's own environment, which `Settings()`
+    # reads under every launch: either made one seed the start of every run (critic 2026-09-26).
+    for key in LAUNCH_ONLY_FIELDS:
+        if key not in launch_settings and key not in file_settings:
+            effective[key] = Settings.model_fields[key].default
     effective, seed_notes = _resolve_launch_seed(srv, run_dir, canonical_task, effective)
     warnings += seed_notes
     explicit = tuple(sorted(str(k) for k in launch_settings))

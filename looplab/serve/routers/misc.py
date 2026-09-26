@@ -40,7 +40,7 @@ from looplab.serve.launch import task_file_roots
 from looplab.serve.llm_probe import LLMHealthRegistry, LLMHealthRequest, llm_health_operation
 from looplab.serve.memory_projection import memory_view
 from looplab.serve.settings_store import (
-    _ALLOWED_FIELDS, _SECRET_API_FIELDS, _SECRET_FIELDS,
+    _ALLOWED_FIELDS, _SECRET_API_FIELDS, _SECRET_FIELDS, LAUNCH_ONLY_FIELDS,
 )
 from looplab.serve.settings_ui_schema import (
     SETTINGS_UI_SCHEMA, SETTINGS_UI_SCHEMA_ETAG, SETTINGS_UI_SCHEMA_VERSION,
@@ -349,6 +349,18 @@ def build_router(srv) -> APIRouter:
         incoming = body.get("settings", body)
         if not isinstance(incoming, dict):
             raise HTTPException(400, "settings must be a JSON object")
+        # A LAUNCH FACT is never a default (`serve/settings_store.py::LAUNCH_ONLY_FIELDS`): refused
+        # rather than dropped, so a form that shows it saved is never a form that ignored it. The
+        # blank value the form echoes back is not a value.
+        launch_only = sorted(key for key in LAUNCH_ONLY_FIELDS
+                             if key in incoming and str(incoming[key] or "").strip())
+        if launch_only:
+            raise HTTPException(422, {
+                "code": "launch_only_setting",
+                "message": (", ".join(launch_only) + " describes one launch and is not saved as a "
+                            "default for every run; set it on the launch itself"),
+                "field_errors": {key: "set per launch, not saved" for key in launch_only},
+            })
         # Keep only known, non-secret fields whose value differs from the engine default — the file
         # stays a small, readable diff rather than a full mirror of every Settings field. Diff
         # against the PROFILE-expanded defaults: the form echoes the expanded snapshot back, and
@@ -374,7 +386,7 @@ def build_router(srv) -> APIRouter:
                 prev = store.resolved_settings()
                 candidate = dict(current)
                 for k, v in incoming.items():
-                    if k not in _ALLOWED_FIELDS or k in _SECRET_FIELDS:
+                    if k not in _ALLOWED_FIELDS or k in _SECRET_FIELDS or k in LAUNCH_ONLY_FIELDS:
                         continue
                     if k == "agent_control" and isinstance(v, dict):
                         # Governance is a nested sparse PATCH too. Start from the resolved map so

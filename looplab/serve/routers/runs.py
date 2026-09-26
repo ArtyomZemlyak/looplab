@@ -2949,6 +2949,19 @@ def build_router(srv) -> APIRouter:
                                      "here would be saved and then ignored. Start a NEW run to "
                                      "evaluate under a different environment")
 
+        # The seed is a fact of the run's BIRTH (`engine/seed_from_run.py::recorded_seed_spec`), and
+        # this snapshot is what a Replay re-seeds from — so the one per-run edit is CLEARING it (a
+        # Replay then relaunches unseeded). A different value would re-seed the replacement from a run
+        # this one was never launched from, and was a way past the launch route's confinement: a PUT of
+        # any string, then Replay (critic 2026-09-26, HIGH, driven).
+        if "seed_from_run" in incoming:
+            wanted = str(incoming["seed_from_run"] or "").strip()
+            if wanted and wanted != str(updated.get("seed_from_run") or "").strip():
+                raise HTTPException(422, "seed_from_run can't be changed per-run after launch — it "
+                                         "records the run this one was seeded from, which a Replay "
+                                         "seeds again. Clear it to Replay this run unseeded, or start "
+                                         "a NEW run to seed from a different one")
+
         changed = {}
         for key, value in incoming.items():
             if (key in allowed and key not in secret and key not in RUN_START_PINNED_FIELDS

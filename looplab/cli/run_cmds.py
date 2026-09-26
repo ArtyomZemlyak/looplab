@@ -42,8 +42,8 @@ from looplab.engine.run_boundary import (  # noqa: F401 - re-exported under the 
     terminal_projection_incomplete,
 )
 from looplab.engine.finalize import finalize_run, incomplete_finalize_scope
-from looplab.engine.seed_from_run import (check_seed_direction, resolve_seed, seed_ignored_note,
-                                          seed_intent, seed_summary)
+from looplab.engine.seed_from_run import (check_seed_direction, recorded_seed_spec, resolve_seed,
+                                          seed_ignored_note, seed_intent, seed_summary)
 from looplab.events.replay import fold
 from looplab.adapters.repo_task import eval_reader_path_errors, eval_workspace_conflicts
 from looplab.adapters.tasks import kinds_for, submit_warnings, validate_task
@@ -791,13 +791,19 @@ def _open_and_drive(task, task_dict: dict, settings, out: Path, *, crash_after=N
             # refuse a stale receipt, or a width this log never pinned, BEFORE the publish below.
             _preflight_speculation_authority(eng, prior_events)
             _preflight_settled_widths(eng, prior_events, surface="run")
+            if prior_events:
+                # A SEED IS A FACT OF BIRTH (`engine/seed_from_run.py::recorded_seed_spec`): the
+                # snapshot a Replay re-seeds from records what this log's first row was seeded from,
+                # never this invocation's value — ignored for an existing run, it used to overwrite
+                # the record (critic 2026-09-26: dropping the seed, or inventing one).
+                settings.seed_from_run = recorded_seed_spec(prior_events)
             _publish_run_snapshots(out, task_dict, settings)
             # `Settings.seed_from_run` (doc 67 67.2): a FRESH run's first experiment is the prior
             # run's node, as an operator inject the engine serves before its first creation turn —
             # appended only now, after the snapshots that record the task it is judged against.
             if seed is not None:
                 if prior_events:
-                    typer.echo(seed_ignored_note(settings.seed_from_run), err=True)
+                    typer.echo(seed_ignored_note(seed.canonical_spec), err=True)
                 else:
                     payload, verdict, note = seed_intent(
                         seed, out, task_dict, direction=getattr(task, "direction", None),
@@ -1028,7 +1034,11 @@ def run(
         if _log_has_events(run_out):
             typer.echo(seed_ignored_note(settings.seed_from_run), err=True)
         else:
-            seed = resolve_seed(settings.seed_from_run, run_out)
+            # The champion pick is refused across the scale HERE when the direction is already
+            # settled — an explicit `--direction`, or a task no Genesis will re-author — so that
+            # refusal costs no paid call either (critic 2026-09-26); the check after Genesis stays.
+            settled = direction if (genesis and goal is not None) else task_dict.get("direction")
+            seed = resolve_seed(settings.seed_from_run, run_out, direction=settled or None)
     if genesis and goal is not None:
         from looplab.engine import genesis as _genesis
         try:
