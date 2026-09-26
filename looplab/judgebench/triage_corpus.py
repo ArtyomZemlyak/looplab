@@ -849,6 +849,14 @@ def extract_run(run_dir) -> list:
                 "reason_from": ("event" if data.get("reason") not in (None, *VERDICT_OVERWRITES_REASON)
                                 else ("triage_span" if span_attrs.get("reason") else "unrecoverable")),
                 "triage_action": data.get("triage_action"),
+                # WHAT THE JUDGE ACTUALLY ANSWERED, beside what the engine did. On a deferred row
+                # (`node_repaired.judge_deferred`, `eval_attempt_rules.deferred_triage_verdict`)
+                # `triage_action` is the engine's `repair` while the judge said `reject_idea`; a
+                # corpus that kept only the former would score the judge on an answer it never gave.
+                # Absent on every other row, so existing records are unchanged.
+                **({"judge_action": data["judge_deferred"].get("action")}
+                   if isinstance(data.get("judge_deferred"), dict)
+                   and data["judge_deferred"].get("action") else {}),
                 "rationale": facts["rationale"][:1200],
                 "node_terminal_reason": data.get("reason") if failure["terminal"] else None,
             },

@@ -562,6 +562,14 @@ class EvalStagesMixin:
             stage["env"] = dict(hs["env"])
         if isinstance(hs.get("expect"), dict) and hs["expect"].get("numeric"):
             stage["expect"] = {"numeric": list(hs["expect"]["numeric"])}
+        # The two result-row keys a REFUSAL is read with (`HostScorerSpec.would_be_key` /
+        # `diagnosis_key`), stamped under engine-owned names like `HOST_STAGE_KEY`: this dict is built
+        # here and never validated as a declaration, and `stage_identity.stage_entry` keys reuse on
+        # name/command/expect/needs/env only, so neither stamp moves a stage key.
+        for field, stamp in (("would_be_key", command_eval.HOST_WOULD_BE_KEY),
+                             ("diagnosis_key", command_eval.HOST_DIAGNOSIS_KEY)):
+            if isinstance(hs.get(field), str) and hs[field]:
+                stage[stamp] = hs[field]
         return stage
 
     @staticmethod

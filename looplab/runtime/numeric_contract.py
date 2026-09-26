@@ -92,6 +92,40 @@ def last_values(text: str, keys) -> dict:
     return {k: v for k, v in last_readings(text, keys).items() if math.isfinite(v)}
 
 
+def is_row_key(key) -> bool:
+    """Is `key` a name a stage's printed row can carry — the rule `expect.numeric[i].key` is held to
+    (`validate_numeric` below), public so a task field naming a row key is held to the SAME one."""
+    return (isinstance(key, str) and bool(key.strip()) and len(key) <= MAX_NUMERIC_KEY_CHARS
+            and bool(_KEY_RE.match(key.strip())))
+
+
+def last_json_string(text: str, key: str) -> Optional[str]:
+    """The STRING value the LAST JSON row in `text` carrying `key` gives it, or None.
+
+    The same last-occurrence rule as `last_readings` below, restricted to JSON rows: a free-form
+    string has no `key: value` spelling that can be told apart from the text around it. A later row
+    that carries the key with a non-string value (a `null` on an accepted candidate) answers None —
+    the LAST row decides, as it does for the numbers. Keys match case-insensitively, as there."""
+    if not text or not key:
+        return None
+    wanted = str(key).lower()
+    found: Optional[str] = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not (stripped.startswith("{") and stripped.endswith("}")):
+            continue
+        try:
+            doc = json.loads(stripped)
+        except ValueError:
+            continue
+        if not isinstance(doc, dict):
+            continue
+        for k, v in doc.items():
+            if str(k).lower() == wanted:
+                found = v if isinstance(v, str) else None
+    return found
+
+
 def last_readings(text: str, keys) -> dict:
     """`{key: the last value the text reports for it}`, non-finite readings INCLUDED."""
     out: dict = {}

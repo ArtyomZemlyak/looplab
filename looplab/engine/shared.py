@@ -244,6 +244,26 @@ def repair_context_record(engine) -> bool:
     return bool(getattr(engine, "_repair_context_record", False))
 
 
+def host_refusal_deferral(engine) -> bool:
+    """`Settings.host_refusal_deferral` as the repair path reads it — the ONE reading.
+
+    Asked by `evaluate._eval_decide_repair` only, when the operator's host scorer refused through its
+    declared contract and the judge answered `reject_idea` (`eval_attempt_rules.
+    deferred_triage_verdict` is the rule). A module function with a `getattr` default of OFF on
+    `repair_context_record`'s ground above: stubs that never ran `Engine.__init__` read the
+    historical behaviour, and `Engine.__init__` lands the attribute from `EngineOptions`
+    (`engine/knobs.py`)."""
+    return bool(getattr(engine, "_host_refusal_deferral", False))
+
+
+def host_refusal_repair_lead(engine) -> bool:
+    """`Settings.host_refusal_repair_lead` as the repair path reads it — the ONE reading.
+
+    Asked by `evaluate._eval_apply_repair` for `failure_diagnosis.diagnosis_repair_lead`'s
+    `host_refusal` argument, on `repair_context_record`'s ground (OFF when absent)."""
+    return bool(getattr(engine, "_host_refusal_repair_lead", False))
+
+
 class SharedEngineMixin:
     """Cross-cluster members, mixed into `Engine` like every other mixin. In here `self` IS the
     Engine, exactly as in the concern mixins."""

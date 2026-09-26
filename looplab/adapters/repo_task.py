@@ -990,6 +990,33 @@ class HostScorerSpec(BaseModel):
     # lost 385 of 2,000 users' hits to an indexing bug; scored 0.0 it was never handed back.
     # Only `numeric`: `files` and `assert` describe a stage's OWN work, and this stage is the host's.
     expect: Optional[dict] = None
+    # TWO KEYS OF THE SCORER'S OWN RESULT ROW the engine reads on a refusal (2026-09-26, inf13), each
+    # optional and each its own switch. Read off the scorer's stdout with the LAST-occurrence rule the
+    # numeric contract uses, so a candidate printing inside the scorer's process can forge them no
+    # more easily than the gate itself.
+    #   * `would_be_key` — the metric the refused candidate WOULD have scored (e.g. the speedup
+    #     before the quality gate zeroed it). `Settings.host_refusal_deferral` holds a judge's
+    #     `reject_idea` for one repair only when this beats the champion: a refusal of a candidate
+    #     that would not have won is not worth a repair (inf13 node 9: 2.11x under a 4.17x champion).
+    #   * `diagnosis_key` — a string: the scorer's own account of WHY it refused. Carried whole
+    #     (capped) to the triage judge and the repair instead of the stderr tail they are otherwise
+    #     given (`evaluate._eval_failure_text`), which cut the account and the protected-scorer
+    #     warning in 5 of 5 refusals measured.
+    would_be_key: Optional[str] = None
+    diagnosis_key: Optional[str] = None
+
+    @field_validator("would_be_key", "diagnosis_key")
+    @classmethod
+    def _row_key(cls, v, info):
+        if v is None:
+            return None
+        from looplab.runtime.numeric_contract import MAX_NUMERIC_KEY_CHARS, is_row_key
+        key = v.strip() if isinstance(v, str) else ""
+        if not is_row_key(key):
+            raise ValueError(f"host_scorer.{info.field_name} must be the name of a key on the "
+                             f"scorer's result row (letters, digits, `_ . @ / -`; at most "
+                             f"{MAX_NUMERIC_KEY_CHARS} chars)")
+        return key
 
     @field_validator("expect")
     @classmethod

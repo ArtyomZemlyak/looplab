@@ -39,6 +39,7 @@ engine state, no events, no model.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -373,36 +374,78 @@ class DeferredVerdict:
         return {"action": self.action, "rule": self.rule}
 
 
-def deferred_triage_verdict(action, *, engine_reason, host_contract_refused: bool,
-                            repairs_done: int) -> Optional[DeferredVerdict]:
-    """MAY THE JUDGE END A NODE WITH `reject_idea` ON ITS FIRST HOST REFUSAL? Not yet.
+def _beats(value: float, champion: float, direction: str) -> bool:
+    """Is `value` strictly better than `champion` in the task's `direction` ("min" or not)?"""
+    return value < champion if str(direction).lower() == "min" else value > champion
+
+
+def deferred_triage_verdict(action, *, enabled: bool, engine_reason, host_contract_refused: bool,
+                            first_host_refusal: bool, cap_headroom: bool, would_be=None,
+                            champion=None, direction: str = "max") -> Optional[DeferredVerdict]:
+    """MAY THE JUDGE END A NODE WITH `reject_idea` ON ITS FIRST HOST REFUSAL? Not yet — sometimes.
 
     A refusal by the operator's host scorer (`host_scorer.expect.numeric`, e.g. `refused == 0`)
     measures THIS BUILD'S OUTPUT against the operator's own gate. Whether the IDEA is wrong is a
     different question, and one build is not enough evidence to answer it: the build may carry a
     defect a repair removes. MEASURED 2026-09-26 on MiniOneRec inf13: node 5 (a ragged single pass,
     4.4x) and node 6 (the same pass under a CUDA graph, 3.9x, full-width users byte-identical) were
-    both refused on quality, and the judge answered `reject_idea` at zero repairs both times — node
-    6's rationale resting on a premise the task states the opposite of ("the recall gate demands
-    byte-exact answers"; it is a paired recall test). The idea was never given the one repair the
-    refusal's own diagnosis was written for.
+    refused on quality and the judge answered `reject_idea` at their first refusal — node 6's
+    rationale resting on a premise the task states the opposite of ("the recall gate demands
+    byte-exact answers"). Reset with the diagnosis in hand, node 5 reached 4.17x inside the gate in
+    two repairs. And node 9 (would-be 2.11x under a 4.17x champion) was rejected, rightly.
 
-    FOUR conjuncts, every one required: the verdict is `reject_idea`; the ENGINE's own reason is
-    `expect_failed`; the failing stage is the engine-built HOST stage and what failed there is its
-    declared numeric contract; and this lifecycle has made no repair. Then the verdict waits — the
-    attempt goes on to a repair with the refusal in hand — and the NEXT refusal is the judge's to
-    rule on, `reject_idea` included. So the deferral buys at most one repair per lifecycle, and only
-    after `repair_gate` has already admitted one (the operator's caps and floors are asked first).
+    EVERY CONJUNCT IS REQUIRED, each answering a measured case or a critic's finding:
 
-    What it deliberately does NOT hold: `abandon` (the judge saying no repair can help is a
-    statement about repairs, and one forced over it would be a blind repair), the two non-answers (a
-    provider failure must still reach the breaker), any failure other than a host contract refusal,
-    and any verdict after the first repair. Reachable only by a task that declares
-    `host_scorer.expect`, so no run that predates that field can meet it.
+    * `enabled` — `Settings.host_refusal_deferral`, OFF by default: this holds a judge's stop.
+    * the verdict is `reject_idea` and the ENGINE's own reason is `expect_failed`;
+    * `host_contract_refused` — the failing stage is the engine-built HOST stage and what failed
+      there is its declared numeric contract (`evaluate._host_contract_refused`, never a name);
+    * `first_host_refusal` — no EARLIER host refusal in this lifecycle (the durable `stage_finished`
+      rows before this attempt's claim), NOT "no repair yet": node 6's first refusal came after a
+      crash repair, and "zero repairs" would have missed exactly the case that motivated this;
+    * `cap_headroom` — the repair this buys must leave an attempt the judge can rule on
+      (`attempt + 1 < effective cap`): with `inline_repair_attempts=1` a deferral would spend the
+      only repair and the floor would end the node without the judge ever answering again;
+    * a VALUE GATE — `would_be`, the metric the refused candidate would have scored under the
+      task's declared `host_scorer.would_be_key`, must be finite and must beat the `champion` in
+      the task `direction` (no champion yet: nothing to beat). No declared number, no deferral:
+      holding a judge's stop needs evidence the candidate is worth a repair, and node 9 is what
+      buying one without it costs (~40 minutes for a candidate that could not have won).
+
+    Then the verdict waits — the attempt goes on to ONE repair with the refusal in hand — and it is
+    HELD, not discarded: the next judged attempt decides (`reject_idea` included), and if the chain
+    ends first (the Developer stuck, a dead provider, a floor, the budget, a stop) the held
+    `reject_idea` is the terminal (`evaluate._settle_held_reject`). What it never holds: `abandon`
+    (a statement that no repair can help), the two non-answers (a provider failure must still reach
+    the breaker), any failure other than a host contract refusal, and any refusal after the first.
     """
-    if (action == "reject_idea" and engine_reason == "expect_failed" and host_contract_refused
-            and repairs_done == 0):
-        return DeferredVerdict(str(action), FIRST_HOST_REFUSAL_DEFERRAL)
+    if not (enabled and action == "reject_idea" and engine_reason == "expect_failed"
+            and host_contract_refused and first_host_refusal and cap_headroom):
+        return None
+    try:
+        value = float(would_be)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(would_be, bool) or not math.isfinite(value):
+        return None
+    try:
+        best = float(champion) if champion is not None else None
+    except (TypeError, ValueError):
+        best = None
+    if best is not None and math.isfinite(best) and not _beats(value, best, direction):
+        return None
+    return DeferredVerdict(str(action), FIRST_HOST_REFUSAL_DEFERRAL)
+
+
+def coerce_judge_deferred(value) -> Optional[dict]:
+    """A `judge_deferred` column in the CLOSED vocabulary its one writer spells, or None.
+
+    Durable rows are read back by the judge history, the renderers and the corpus; a hand-edited or
+    foreign row must not put an arbitrary action or rule word in front of a judge. The only
+    deferral that exists holds `reject_idea` under `FIRST_HOST_REFUSAL_DEFERRAL`."""
+    if (isinstance(value, dict) and value.get("action") == "reject_idea"
+            and value.get("rule") == FIRST_HOST_REFUSAL_DEFERRAL):
+        return {"action": "reject_idea", "rule": FIRST_HOST_REFUSAL_DEFERRAL}
     return None
 
 

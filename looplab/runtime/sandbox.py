@@ -634,6 +634,12 @@ class RunResult:
     # scorer was held constant across every node of the run. None on every other path.
     self_metric: Optional[float] = None
     host_scorer: Optional[dict] = None
+    # WHAT THE HOST SCORER SAID WHEN IT REFUSED, read off its own result row under the keys the task
+    # declared (`HostScorerSpec.would_be_key` / `diagnosis_key`; `command_eval.
+    # _host_refusal_readings`): the metric the refused candidate WOULD have scored, and the scorer's
+    # account of why. None on every other path, including a host stage that passed.
+    host_would_be: Optional[float] = None
+    host_diagnosis: Optional[str] = None
 
     # SETUP: True when the run's SETUP command — the one the engine itself ran, before the eval —
     # exited non-zero or timed out. The out-of-band twin of `timed_out`/`stalled`/`diverged`, and it

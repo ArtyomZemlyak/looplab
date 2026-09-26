@@ -84,7 +84,11 @@ export const NARR = {
   },
   node_repaired: {
     validate: d => ownValue(d, 'node_id') && ownValue(d, 'attempt'),
-    render: (d) => `node #${d.node_id} repaired (attempt ${d.attempt})${note(d.rationale)}`,
+    // A deferred row (`judge_deferred`): the rationale is the judge's HELD reject_idea, and the
+    // engine bought this repair over it — said, rather than narrated as if the judge asked for it.
+    render: (d) => (d.judge_deferred && d.judge_deferred.action
+      ? `node #${d.node_id} repaired (attempt ${d.attempt}) over a held ${d.judge_deferred.action}${note(d.rationale)}`
+      : `node #${d.node_id} repaired (attempt ${d.attempt})${note(d.rationale)}`),
   },
   node_confirmed: {
     validate: d => ['node_id', 'mean', 'std', 'seeds'].every(key => ownValue(d, key)),

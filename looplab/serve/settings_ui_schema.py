@@ -29,7 +29,7 @@ SETTINGS_UI_SCHEMA_VERSION = 2
 # here reading as if 207 were derived while it is typed, which is the drift it warns about. The
 # unforgeable gate is `SETTINGS_UI_SCHEMA_KEYSET_REVISION` further down; this integer is the
 # human-readable half the docs sentence quotes, and `_load_schema` refuses when the two disagree.
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 229
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 231
 # On the KEYSET REVISION below: DERIVED, and deliberately no longer a hand-pinned review gate: a
 # bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
@@ -319,7 +319,14 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # `sandbox.MAX_TIMEOUT_S`. A row, not an omission: it decides whether a multi-day training is killed
 # at 24 h, and it is the per-run lever that unlocks a `budget_extend{eval_timeout}` above a day.
 # Re-derived by INTERSECTION: the 228 previous keys (digest `178cfb7b…`) plus exactly that one.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "e7ec438bb27621f17ea6d12d4802de40845b39ae56b4295ca151786bc4605101"
+# 229 -> 231 on 2026-09-26: `host_refusal_deferral` and `host_refusal_repair_lead`, beside
+# `repair_context_record` — whether a first host-contract refusal holds the judge's `reject_idea` for
+# one repair, and whether the triage diagnosis of such a refusal leads the repair. Rows on the
+# curation rule's own ground (the first changes whether a judge's verdict ends an experiment) and on
+# the different-prompt ground (the second). The branch pinned 223 -> 225 against a tree without the
+# six rows above, so neither side's digest is carried: RE-DERIVED over the merged keyset by
+# INTERSECTION — the 229 previous keys plus exactly those two, none removed.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "5bcbc624ffb9c44df77a3f0644bfa7c00ffd4bf52336ea88aa34a5b9e57c8ef1"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

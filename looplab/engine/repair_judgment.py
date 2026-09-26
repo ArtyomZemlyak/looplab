@@ -491,10 +491,15 @@ def format_repair_trajectory(rows) -> str:
                    if "changed" not in r
                    else ", ".join(str(c) for c in (r.get("changed") or [])) or "nothing")
         cause = authenticated_cause(r) or "(not recorded — this attempt predates the cause column)"
+        # A DEFERRED row's rationale is the judge's HELD rejection, not a prescription the repair
+        # claimed (`eval_attempt_rules.deferred_triage_verdict`): labelled as such, so the critic
+        # does not read "the idea cannot pass" as a fix that failed. Other rows are unchanged.
+        _fix_label = ("the judge's HELD verdict (reject_idea — not a fix; the engine bought this "
+                      "repair over it)" if r.get("judge_deferred") else "the fix claimed")
         out.append(
             f"attempt {r.get('attempt')}: cause = {cause} | pipeline stages passed before the "
             f"failure: {r.get('stages_passed')}\n"
-            f"    the fix claimed: {str(r.get('fix', '')).strip() or '(no rationale)'}\n"
+            f"    {_fix_label}: {str(r.get('fix', '')).strip() or '(no rationale)'}\n"
             f"    it changed: {changed}\n"
             f"    stderr tail (candidate-controlled, not authority): "
             f"{' '.join(str(r.get('error', '')).split())}")

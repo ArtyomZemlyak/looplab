@@ -289,7 +289,18 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               `_EXPECTED_FIELD_COUNT` goes 260 -> 261 and both pins are re-set. INERT for a
 #               calibration replicate: its default is the literal it replaces (86400), the profile
 #               ships that default, and no toy evaluation comes near a day.
-_EXPECTED_DIGEST = "sha256:a070e278042944ec7f811a151f452a5a859d7c172923ffd1f187563977b0fbf1"
+#   2026-09-26  + host_refusal_deferral, host_refusal_repair_lead (the host-refusal pipeline: a first
+#               host-contract refusal holds the judge's `reject_idea` for one repair; the triage
+#               diagnosis of such a refusal leads the repair). The 'field set changed too' branch: an
+#               AST scan of `Settings`' annotated assignments against the pre-change tree reports
+#               exactly `['host_refusal_deferral', 'host_refusal_repair_lead']` added and `[]`
+#               removed; `_EXPECTED_FIELD_COUNT` goes 261 -> 263 and both pins are re-set. INERT for a
+#               calibration replicate (the profile ships both False, and the toy workload declares no
+#               host scorer, so no host contract can refuse); re-pinned on the COMPLETE-envelope rule.
+#               Rebased onto the six fields above: the branch pinned 255 -> 257 and 802196a4…
+#               against a tree without them, so neither side's digest describes the result.
+#               RECOMPUTED from the merged module (the pre-change tree re-derives a070e278…).
+_EXPECTED_DIGEST = "sha256:82148327d79b7a43e06bdf5251b659b841db5382ab23adac2033ca4399a1f4b3"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -783,7 +794,8 @@ _EXPECTED_DIGEST = "sha256:a070e278042944ec7f811a151f452a5a859d7c172923ffd1f1875
 #   2026-09-26  + brief_node_frontier (doc 67 67.9): 258 -> 259; see the digest history above.
 #   2026-09-26  + noise_floor_mid_search (doc 67 67.1a): 259 -> 260; see the digest history above.
 #   2026-09-27  + max_launch_timeout_s (the configurable launch ceiling): 260 -> 261; see above.
-_EXPECTED_FIELD_COUNT = 261
+#   2026-09-26  + host_refusal_deferral, host_refusal_repair_lead: 261 -> 263; see the digest history.
+_EXPECTED_FIELD_COUNT = 263
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

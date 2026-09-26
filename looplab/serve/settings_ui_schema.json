@@ -482,6 +482,20 @@
           "help": "The repair Developer is told what the engine recorded: whether a watchdog really stopped the stage or the diagnostician named the failure afterwards, how a silent process ended (a signal, a deadline), the metric key a run that printed none must print, and this node's earlier repairs. Off = the pre-2026-09-23 repair text, byte for byte."
         },
         {
+          "key": "host_refusal_deferral",
+          "label": "First host refusal buys one repair",
+          "type": "bool",
+          "default": false,
+          "help": "When the operator's host scorer refuses a candidate through its declared contract (host_scorer.expect) for the first time, and its would-be number (host_scorer.would_be_key) beats the champion, the triage judge's reject_idea is HELD for one repair instead of ending the node; if the chain ends before the judge rules again, the held reject_idea is the terminal. Off = reject_idea always ends the node."
+        },
+        {
+          "key": "host_refusal_repair_lead",
+          "label": "Host refusal: diagnosis leads the repair",
+          "type": "bool",
+          "default": false,
+          "help": "The triage diagnostician's account of WHY the operator's host scorer refused leads the repair Developer's text (it is withheld on other engine-final reasons). Off = the historical repair text, byte for byte."
+        },
+        {
           "key": "inline_repair",
           "label": "Inline crash repair",
           "type": "bool",

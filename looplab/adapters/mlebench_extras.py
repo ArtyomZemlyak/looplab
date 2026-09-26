@@ -156,8 +156,13 @@ def node_record(events, state, node_id: int) -> Optional[dict]:
             idea = d.get("idea") if isinstance(d.get("idea"), dict) else {}
             lines.append(f"[build] operator={d.get('operator')} rationale: {str(idea.get('rationale', ''))[:600]}")
         elif e.type == "node_repaired":
+            # A deferred row's rationale is the judge's HELD `reject_idea`, not the fix
+            # (`eval_attempt_rules.deferred_triage_verdict`); every other row reads as before.
+            _held = isinstance(d.get("judge_deferred"), dict) and d["judge_deferred"].get("action")
             lines.append(f"[repair {d.get('attempt')}] error: {str(d.get('error_in', ''))[-400:]}\n"
-                         f"  fix: {str(d.get('rationale', ''))[:300]} changed={d.get('changed')}")
+                         + (f"  held verdict ({d['judge_deferred'].get('action')}, repaired over): "
+                            if _held else "  fix: ")
+                         + f"{str(d.get('rationale', ''))[:300]} changed={d.get('changed')}")
         elif e.type == "deps_installed":
             lines.append(f"[deps] installed {d.get('packages')} (source={d.get('source', 'traceback')})")
         elif e.type in ("node_evaluated", "node_failed"):
