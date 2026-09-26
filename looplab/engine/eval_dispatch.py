@@ -1278,7 +1278,7 @@ class EvalDispatchMixin:
         return tail, fold(events)
 
     async def _dispatch_evals(self, evals: list, state: RunState,
-                              max_es: Optional[float]) -> None:
+                              max_es: Optional[float], *, research: bool = True) -> None:
         # Single experiment at a time is the base mode: run evals sequentially and
         # deterministically. Concurrent fan-out (the task-group below) is a backlog
         # seam — opt in with max_parallel > 1. Deep research overlaps + records immediately
@@ -1303,7 +1303,10 @@ class EvalDispatchMixin:
         from looplab.core.errors import deferrable_run_stop
         budget_stop: list[BaseException] = []
         async with anyio.create_task_group() as bg_tg:
-            self._spawn_research(_DeferredBudgetStop(bg_tg, budget_stop), state)
+            # `research=False` is `looplab resume --drain-only`'s (doc 68 68.3a): evaluation only,
+            # no paid think overlapping it.
+            if research:
+                self._spawn_research(_DeferredBudgetStop(bg_tg, budget_stop), state)
             try:
                 if self._eval_parallel <= 1:
                     limiter = anyio.CapacityLimiter(1)

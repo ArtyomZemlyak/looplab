@@ -283,6 +283,24 @@ looplab resume RUN_DIR [OPTIONS]
 | `RUN_DIR` | *(required)* | Existing run directory to resume |
 | `--task-file PATH` | the run's `task.snapshot.json` | The task file the run was started with |
 | `--max-nodes N` | from the snapshot | Override the node budget on resume |
+| `--drain-only` | off | Evaluate only what a reset or an interruption left owed, then pause (see below) |
+
+**`--drain-only` finishes the owed evaluations and stops** (doc 68 68.3a). It is how a rescore runs
+without resuming the search: reset a node to be re-scored (a click on its `score` stage in the
+Inspector, `node_reset {from_stage: "score"}`, or `from_stage: "eval"`), then
+`looplab resume RUN_DIR --drain-only`. It evaluates every pending node a reset re-opened or whose
+evaluation started and never finished (`engine/orchestrator.py::drain_owed`) through the ordinary
+dispatch — its own repairs included — with no deep research overlapping it. A node the search built
+and has not dispatched yet (a Card's speculative build) stays pending for the next resume: whether it
+runs at all is a search decision. No node is created, no queued fork, inject, confirm or ablation is
+served (they stay queued for the next resume), no Strategist or research cadence runs, and the
+end-of-search ladder (confirmation, the noise floor, finalization) is never reached. A reset from
+`implement` or `propose` is still rebuilt: the operator asked for that node. When nothing owed is left
+the run PAUSES with the reason `drain-only resume: every reset or interrupted evaluation finished`,
+and when the dispatch could admit none of what is owed (the eval budget refused it) it pauses naming
+those nodes instead of asking again. A pause or stop already recorded, or a spend ceiling, still wins;
+a later plain `resume` continues the search. The mode belongs to that one invocation and is not
+recorded as the run's.
 
 The original launch settings are restored from `config.snapshot.json`, so run-only flags are not silently
 dropped. Seven comparison/selection fields (`card_driven_selection`, `speculation_depth`, `holdout_fraction`,

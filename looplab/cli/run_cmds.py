@@ -1108,8 +1108,20 @@ def resume(
     task_file: Optional[Path] = typer.Option(
         None, help="The task file used to start the run. Defaults to the run's task.snapshot.json."),
     max_nodes: Optional[int] = typer.Option(None),
+    drain_only: bool = typer.Option(
+        False, "--drain-only",
+        help="Evaluate only what a reset or an interruption left owed — a reset node's rescore, an "
+             "evaluation that never finished — then pause. Creates no node, dispatches no build the "
+             "search made, serves no queued request, runs no cadence."),
 ):
-    """Resume a crashed/incomplete run by re-entering the loop (replay-based)."""
+    """Resume a crashed/incomplete run by re-entering the loop (replay-based).
+
+    `--drain-only` (doc 68 68.3a) finishes the OWED evaluations (`orchestrator.py::drain_owed`) and
+    pauses the run again, so a `node_reset {from_stage: "score"}` can be rescored without resuming
+    the search; a later plain `resume` continues it."""
+    # Called as a plain function too (see the `max_nodes` note below): an omitted option is Typer's
+    # `OptionInfo` sentinel there, which must read as "off", never as a truthy object.
+    drain_only = drain_only is True
     # `healthy=True` fails closed on a MID-FILE log corruption before re-entering the loop: iter_jsonl
     # stops at the first bad line, so a byte flipped mid-log (FUSE/NFS/S3 only) would replay just the
     # prefix, drop a valid tail, and — worse — resume would append MORE records behind the boundary (an
@@ -1210,7 +1222,7 @@ def resume(
                 # runs while this process owns the singleton. That is the same window the run
                 # itself owns it for, and a losing CLI already no-ops with a message.
                 eng = _engine(run_dir, task, settings, crash_after=None,
-                              wrap_up_only=is_wrap_up(prior_kind))
+                              wrap_up_only=is_wrap_up(prior_kind), drain_only=drain_only)
                 # A control may have landed while this command waited for singleton ownership.
                 # Re-authorize the exact prefix immediately before resume/resume_served can append.
                 _preflight_speculation_authority(eng, prior_events)

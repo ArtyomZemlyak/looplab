@@ -164,6 +164,30 @@ SPECULATION_CALIBRATION_VARIANT_FIELDS = SPECULATION_CALIBRATION_PROFILE_VARIANT
 # the engine, the CLI and the tests all spell them on this module.
 
 
+# The reasons `looplab resume --drain-only` pauses with (doc 68 68.3a, `Engine._drain_only_turn`):
+# nothing it owes is left, or a dispatch admitted none of what it owes. Module constants so the
+# tests read the one spelling.
+DRAIN_ONLY_PAUSE_REASON = ("drain-only resume: every reset or interrupted evaluation finished; "
+                           "`looplab resume` (without --drain-only) continues the search")
+DRAIN_ONLY_STUCK_REASON = ("drain-only resume: no evaluation could be admitted for node(s) {ids}; "
+                           "`looplab resume` (without --drain-only) continues the search")
+
+
+def drain_owed(state: RunState, node) -> bool:
+    """Whether `looplab resume --drain-only` owes `node` an evaluation (doc 68 68.3a).
+
+    Pending, not withdrawn (tombstoned, aborted), not waiting on the loop head's rebuild (a reset
+    from `implement`/`propose`), and its CURRENT lifecycle either opened by a reset —
+    `Node.attempt > 0`: a `node_reset`, or the epoch requeue a reset after holdout disclosure
+    causes — or started an evaluation that never landed a terminal (`Node.eval_started`). A node
+    the SEARCH built and has not dispatched is not owed: whether it runs at all is a search
+    decision (a Card's freshness gate may yet discard it), so it waits for the next plain resume."""
+    return bool(node.status is NodeStatus.pending and not node.tombstoned
+                and node.id not in state.aborted_nodes
+                and node.rerun_from not in ("implement", "propose")
+                and (node.attempt > 0 or node.eval_started))
+
+
 # ------------------------------------------------------------------ THE CADENCE OFFLOAD (F1i / EM-01)
 #
 # `_run_cadences` is the run's paid periodic block — the Strategist consult, the concept
@@ -605,6 +629,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # the Strategist cannot override (`engine/widths.py::operator_width_axes`). A launch-surface
         # fact, not a Settings value, which is why it is a caller kwarg like `crash_after`.
         explicit_settings=(),
+        # `looplab resume --drain-only` (doc 68 68.3a): evaluate what is pending, then pause — no
+        # node is created, no forced request served, no cadence run (`_drain_only_turn`). A fact
+        # about THIS invocation, never the run's, which is why it is a caller kwarg like
+        # `crash_after` and is not recorded: the next plain `resume` searches as before.
+        drain_only: bool = False,
         onboarder=None,
         # --- A7 Strategist + richer-operator knobs (config-first; defaults == today's behavior) ---
         strategist=None,            # Optional[Strategist]; None => static config policy (default)
@@ -1007,6 +1036,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         self._eval_time_reservations: dict[tuple[int, object], float] = {}
         self.timeout = _opt("timeout")
         self.crash_after = crash_after
+        self._drain_only = bool(drain_only)
         self._explicit_settings = tuple(sorted({str(k) for k in (explicit_settings or ())}))
         # The width axes an OPERATOR owns (`engine/widths.py::operator_width_axes`), refreshed from the
         # fold before any Strategist width can be applied (`_apply_control_overrides`,
@@ -1896,6 +1926,14 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                     break
                 continue
 
+            # DRAIN ONLY (doc 68 68.3a): after every terminal and budget gate above — a pause, a stop
+            # or a ceiling still wins — and BEFORE anything that builds, serves a forced request,
+            # consults, researches or proposes.
+            if self._drain_only:
+                if await self._drain_only_turn(state, max_es) == "break":
+                    break
+                continue
+
             # docs/29 F1 — the run's WIDTH re-pins HERE, from what the research proposed, for the same
             # reason the AUTO depth re-resolves below: a stable decision prefix, no PRODUCER in flight
             # (an evaluation may be — review 2026-09-22, ES1-03; `_settle_proposal_width` says why),
@@ -2213,6 +2251,55 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                               "independent corroboration. Add eval.cross_check (a built-in "
                               "reader) to enable the drift guard."})
         return None
+
+    async def _drain_only_turn(self, state, max_es) -> str:
+        """One turn of `looplab resume --drain-only` (doc 68 68.3a): evaluate what is OWED, and
+        when nothing is, pause and hand back — "finish only the pending evaluations and stop".
+
+        WHY. A rescore — `node_reset {from_stage: "score"}` — could not run without resuming the
+        whole search: a resumed run evaluates the reset node and then goes on creating nodes,
+        consulting the Strategist and researching, spending the budget the operator meant to keep.
+        Here nothing but evaluation runs. Owed nodes are evaluated through the ordinary dispatch
+        (`_dispatch_evals`: the admission rules, the `node_eval_started` boundary, the repair loop
+        — an evaluation's own repairs are part of finishing it) with NO research overlap; nothing
+        is created, no forced request is served (they stay queued, durably, for the next resume),
+        no cadence runs, and the end-of-search ladder (confirm, noise floor, finalize) is never
+        reached. A reset from `implement`/`propose` is still rebuilt at the loop head: the operator
+        asked for exactly that node.
+
+        WHAT IT OWES is `drain_owed`: a lifecycle a reset opened, or an evaluation that started and
+        never landed a terminal. A build the search made and has not dispatched stays pending.
+
+        When nothing owed is left the run PAUSES with a stated reason, through the same control
+        event an operator's pause is — the engine's own precedent is the confirm phase's auto-pause
+        — so it ends as it began (a rescore starts from a paused run), and the next plain `resume`
+        lifts it and searches on.
+
+        NEVER A SPIN. A dispatch can admit none of what it was handed — the eval budget's
+        reservation rule refuses a lane before the spent seconds reach the ceiling the loop head
+        tests — and the same nodes would then be handed to it again on every turn, forever. So a
+        turn in which no owed lifecycle moved pauses instead, naming the nodes it could not admit."""
+        await self._drain_adopted_evals()
+        await self._raise_deferred_eval_budget_stop()
+        owed = {node.id: node.attempt for node in state.nodes.values() if drain_owed(state, node)}
+        reason = DRAIN_ONLY_PAUSE_REASON
+        if owed:
+            await self._dispatch_evals([{"kind": "evaluate", "node_id": node_id}
+                                        for node_id in sorted(owed)], state, max_es, research=False)
+            after = fold(self.store.read_all())
+            # Still owed, on the lifecycle it was handed on: nothing moved it. An abort or a reset
+            # landing meanwhile is a move — the next turn re-derives what is owed.
+            stuck = sorted(node_id for node_id, generation in owed.items()
+                           if (node := after.nodes.get(node_id)) is not None
+                           and node.attempt == generation and drain_owed(after, node))
+            if len(stuck) < len(owed):
+                return "continue"
+            reason = DRAIN_ONLY_STUCK_REASON.format(ids=", ".join(map(str, stuck)))
+        async with self._write_lock:
+            if self._run_halt_intent():
+                return "break"
+            self.store.append(EV_PAUSE, {"reason": reason})
+        return "break"
 
     async def _handle_no_actions(self, state, *, decision_seq) -> str:
         """The empty-action ladder: noise floor -> confirm -> holdout -> HITL approval -> finish
