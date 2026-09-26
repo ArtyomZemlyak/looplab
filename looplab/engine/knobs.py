@@ -162,6 +162,9 @@ class EngineKnobs:
     # doc 67 67.1: the board's verdict support, stamped per proposal onto the Researcher as
     # `_verdict_support` (`proposal_cues._stamp_brief_switches`) for `roles._state_brief`.
     _card_verdict_support = Knob("card_verdict_support", bool)
+    # doc 67 67.4: the ablation refiner's probes, stamped onto the Researcher as
+    # `_ablation_probe_hint` for the ONE refine proposal (`engine/ablation.py::_ablate`).
+    _ablation_probe_hint = Knob("ablation_probe_hint", bool)
     _failure_reflection = Knob("failure_reflection")
     _watchdog_reflection = Knob("watchdog_reflection")
     _deep_repair = Knob("deep_repair")

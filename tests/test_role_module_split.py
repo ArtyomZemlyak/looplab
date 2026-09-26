@@ -283,8 +283,15 @@ def test_roles_is_no_longer_a_god_module():
     In `state_brief.py`, which IS the board's builder: the per-row `SUPPORT=` lookup, the level text,
     and the one legend line under the rows that defines only the levels the board shows. What a board
     row says is this module's whole job, so nothing moves out; both caps move to measured + 1.
+
+    `roles.py` 873 -> 875 on 2026-09-26 (doc 67 67.4, the ablation refiner sees its probes:
+    `Settings.ablation_probe_hint`). The `_ablation_probe_hint` cue joins `RESEARCHER_PROMPT_CUES`
+    on the line it already had, and `RESEARCHER_HINT_ATTRS` gains its row and one why-comment — the
+    registry the two propose paths and every forwarding wrapper read, so it cannot live elsewhere.
+    The note's TEXT is `engine/ablation.py::ablation_probe_note`, beside the numbers it states. The
+    cap moves to measured + 1.
     """
-    caps = {"agents/roles.py": 874, "agents/role_prompts.py": 344, "agents/state_brief.py": 594,
+    caps = {"agents/roles.py": 876, "agents/role_prompts.py": 344, "agents/state_brief.py": 594,
             "agents/role_wrappers.py": 467, "agents/toy_roles.py": 128}
     sizes = {rel: len((_PKG / rel).read_text(encoding="utf-8").splitlines()) for rel in caps}
     over = {rel: (n, caps[rel]) for rel, n in sizes.items() if n >= caps[rel]}

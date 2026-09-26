@@ -262,7 +262,13 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               255 -> 256 and both pins are re-set. INERT for a calibration replicate on
 #               `node_budget_cue`'s ground (`ToyResearcher` renders no board prompt); re-pinned on the
 #               COMPLETE-envelope rule.
-_EXPECTED_DIGEST = "sha256:5595326bcb4181c5301d07ba15232d7e5b054ad5979ce42595e454f6bfdbdf1a"
+#   2026-09-26  + ablation_probe_hint (doc 67 67.4: the ablation refiner is told its probes' signed
+#               results). The 'field set changed too' branch: exactly `['ablation_probe_hint']` added
+#               and `[]` removed; `_EXPECTED_FIELD_COUNT` goes 256 -> 257 and both pins are re-set.
+#               INERT for a calibration replicate on `node_budget_cue`'s ground (the replicate never
+#               ablates, and `ToyResearcher` renders no prompt); re-pinned on the COMPLETE-envelope
+#               rule.
+_EXPECTED_DIGEST = "sha256:f6fc8403fefe9189bbee260a34289bb0548f2ff060bc8229469e89ce3f5cf079"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -751,7 +757,8 @@ _EXPECTED_DIGEST = "sha256:5595326bcb4181c5301d07ba15232d7e5b054ad5979ce42595e45
 #   2026-09-24  + inline_repair_same_failure_limit (the repeated-failure floor): 253 -> 254.
 #   2026-09-24  + eval_canary (the eval canary preflight): 254 -> 255.
 #   2026-09-26  + card_verdict_support (doc 67 67.1): 255 -> 256; see the digest history above.
-_EXPECTED_FIELD_COUNT = 256
+#   2026-09-26  + ablation_probe_hint (doc 67 67.4): 256 -> 257; see the digest history above.
+_EXPECTED_FIELD_COUNT = 257
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

@@ -885,6 +885,20 @@ class Settings(BaseSettings):
     # numeric param) as an ablation unit — neutralize a block, measure the metric delta, refine
     # the highest-impact block. Off => the classic numeric-param ablation. Config-first knob.
     ablate_code_blocks: bool = False
+    # THE ABLATION REFINER SEES ITS PROBES (doc 67 67.4, 2026-09-26). A parameter ablation re-runs the
+    # champion once per parameter with that one set to 0.0 and records each probe's SIGNED gain
+    # (`ablate.signed_impacts`, positive = the run did BETTER without it), then asks the Researcher to
+    # refine the highest-impact one — through the SAME `propose` call a normal proposal makes, blind
+    # to every number it just paid for, so it could not tell a parameter the run is better without
+    # from one it cannot do without, and a probe that beat the node was simply thrown away. ON: that
+    # one call's prompt carries the probes, signed (`engine/ablation.py::ablation_probe_note`, the
+    # `_ablation_probe_hint` cue), and nothing else changes. Param ablation only (`ablate_every` > 0
+    # without `ablate_code_blocks`: the code-block refine makes no Researcher call). It changes a
+    # PROMPT and buys no call, so `false` reproduces the historical prompt BYTE FOR BYTE, every
+    # constructor defaults it OFF, and a pre-field snapshot resumes OFF (its
+    # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row). Read through ONE reader, the engine knob
+    # `_ablation_probe_hint`. It moves no metric, champion, selection or violation.
+    ablation_probe_hint: bool = True
     # A0b: real merge/ensembling. "mean" = legacy mean-param merge; "ensemble" = the Developer
     # writes a code-recombination ensemble over the two parents' solutions (verified: agent-proposed
     # ensembling 37.9%->43.9%). "auto" (default) = ensemble whenever the Developer actually
@@ -3614,6 +3628,12 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # (c) is `False`, pointable at every commit before this one; the field's comment and
     # `tests/test_card_verdict_support.py` hold that `false` is the historical prompt, byte for byte.
     "card_verdict_support": False,
+    # THE ABLATION REFINER'S PROBES, added 2026-09-26 defaulting ON (doc 67 67.4). (a) holds. (b) is
+    # the rows above's DIFFERENT-PROMPT ground: ON, the refine proposal after a parameter ablation is
+    # handed the probes' signed results, so a resumed run would change what its Researcher is told
+    # mid-log. (c) is `False`, pointable at every commit before this one; the field's comment and
+    # `tests/test_ablation.py` hold that `false` is the historical prompt, byte for byte.
+    "ablation_probe_hint": False,
     # THE JUDGES' PROMPT TRUTHS, added 2026-09-23 defaulting ON (review 2026-09-22, Q-1). (a) holds.
     # (b) is the two rows above's DIFFERENT-PROMPT ground: ON, the pilot, the triage judge and the
     # repair critic are handed different bytes (the triage opening, its watchdog sentence and scout

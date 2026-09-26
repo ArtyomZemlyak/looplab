@@ -220,7 +220,9 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   its full evaluation. A row because it spends eval seconds; the Python half moved too.
   //   223 -> 224 (2026-09-26): `card_verdict_support` — a supported card's board row says what its
   //   verdict rests on. A row because it changes a prompt; the Python half moved too.
-  assert.equal(Object.keys(schema.fieldByKey).length, 224)
+  //   224 -> 225 (2026-09-26): `ablation_probe_hint` — the ablation refiner is told its probes'
+  //   signed results. A row because it changes a prompt; the Python half moved too.
+  assert.equal(Object.keys(schema.fieldByKey).length, 225)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

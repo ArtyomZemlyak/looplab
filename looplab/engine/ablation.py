@@ -45,6 +45,37 @@ def _signed_gain(probe_metric: float, base: float, direction: str) -> float:
     return (probe_metric - base) if direction == "max" else (base - probe_metric)
 
 
+# How many probes the refiner's note names, largest effect first. A `params` dict is small in every
+# task this engine has run; the bound is there so a wide one cannot turn one cue into a page.
+_PROBE_NOTE_MAX = 12
+
+
+def ablation_probe_note(parent_id: int, top, signed: dict, direction: str) -> str:
+    """The probes' results, SIGNED, for the ONE proposal that refines `top` (doc 67 67.4) — the
+    `_ablation_probe_hint` cue under `Settings.ablation_probe_hint`; "" when nothing was measured.
+
+    Each probe re-ran the node with one parameter set to 0.0, and `signed` is `_signed_gain` per
+    parameter: positive when the run did BETTER without it. The sensitivity `|Δ|` that picks `top`
+    cannot say which way a parameter pulls, and the refiner used to be asked for a value blind to
+    every one of these numbers — including a probe that beat the node, which is kept nowhere."""
+    if not signed:
+        return ""
+    order = sorted(signed, key=lambda name: (-abs(signed[name]), str(name)))
+    parts = []
+    for name in order[:_PROBE_NOTE_MAX]:
+        gain = signed[name]
+        parts.append(f"{name}: BETTER without it ({gain:+.6g})" if gain > 0 else
+                     f"{name}: needed ({gain:+.6g} without it)" if gain < 0 else
+                     f"{name}: no measured effect")
+    rest = len(order) - _PROBE_NOTE_MAX
+    return (f"\nABLATION PROBES ON NODE {parent_id}: each re-ran it with ONE parameter set to 0.0; "
+            f"the objective is {direction}imized, and each number is how much better the run did "
+            f"without that parameter (negative: worse). " + "; ".join(parts)
+            + (f"; and {rest} more" if rest > 0 else "")
+            + f". You are refining '{top}' now: choose its value in light of these. A probe that did "
+            "better than the node is not kept as a node.")
+
+
 class AblationMixin:
     """The engine's ablation cluster. See the module docstring for the mixin convention
     (`self` is the Engine)."""
@@ -232,7 +263,18 @@ class AblationMixin:
 
         top = max(impacts, key=impacts.get) if impacts else (
             sorted(parent.idea.params)[0] if parent.idea.params else None)
-        proposal = self.researcher.propose(state, parent)  # refine only `top`
+        # The refiner SEES ITS PROBES under `Settings.ablation_probe_hint` (doc 67 67.4): stamped
+        # for this one call and cleared after it, so no later proposal inherits a stale note. OFF,
+        # nothing is written and the prompt is the historical one, byte for byte.
+        note = (ablation_probe_note(parent_id, top, signed_impacts, state.direction)
+                if self._ablation_probe_hint else "")
+        if note:
+            self._stamp_ablation_probe_hint(note)
+        try:
+            proposal = self.researcher.propose(state, parent)  # refine only `top`
+        finally:
+            if note:
+                self._stamp_ablation_probe_hint("")
         if not self._ablation_parent_current(parent_id, generation):
             self._discard_node_build_telemetry()
             return
@@ -244,6 +286,16 @@ class AblationMixin:
                     footprint=proposal.footprint,
                     concept_mode="delta", concepts_added=[], concepts_removed=[])
         self._build_refine_block_child(parent, parent_id, generation, idea, state)
+
+    def _stamp_ablation_probe_hint(self, note: str) -> None:
+        """Set `_ablation_probe_hint` (RESEARCHER_HINT_ATTRS) on the active Researcher. Contained like
+        every cue stamp (`proposal_cues.py::_stamp_gpu_budget_hint`) — a role that rejects attribute
+        writes must not fail an ablation over a prompt cue — but by NAME: rejecting a write raises
+        one of these two, and nothing else here can raise at all."""
+        try:
+            setattr(self.researcher, "_ablation_probe_hint", note)
+        except (AttributeError, TypeError):
+            pass
 
     async def _timed_ablation_probe(self, source: str, workdir, parent_id: int, generation: int):
         """Run ONE off-tree ablation probe and report `(result, seconds, parent_still_current)`.

@@ -90,8 +90,8 @@ and read leniently by read-only commands.
 ## Web editors, schema and concurrent saves
 
 The owner Web UI does not build forms by reflecting arbitrary Python fields in the browser. It fetches a
-server-owned curated catalogue with **224 of the 259 direct `Settings` fields in 10 groups**. The default
-**Essential** disclosure mode contains 18 high-frequency keys; search spans all 224 catalogued keys.
+server-owned curated catalogue with **225 of the 260 direct `Settings` fields in 10 groups**. The default
+**Essential** disclosure mode contains 18 high-frequency keys; search spans all 225 catalogued keys.
 Uncatalogued fields remain valid through environment/config/CLI inputs and are preserved by sparse Web
 writes. Which fields are catalogued is not a matter of taste: every `Settings` field is either a row or
 listed in `settings_ui_schema.py::SETTINGS_UI_SCHEMA_UNCURATED_FIELDS` with the reason the form omits it,
@@ -885,6 +885,7 @@ never touches.
 |---|---|---|---|
 | `ablate_every` | `LOOPLAB_ABLATE_EVERY` | `0` | Ablation-driven refinement every N improves (0 = off; greedy only) |
 | `ablate_code_blocks` | `LOOPLAB_ABLATE_CODE_BLOCKS` | `false` | Treat each pipeline code block as an ablation unit (MLE-STAR) |
+| `ablation_probe_hint` | `LOOPLAB_ABLATION_PROBE_HINT` | `true` | THE ABLATION REFINER SEES ITS PROBES (doc 67 67.4, 2026-09-26): a parameter ablation re-runs the champion once per parameter with that one set to 0.0, records each probe's SIGNED gain (`ablate.signed_impacts`, positive = better without it), then asks the Researcher to refine the highest-impact parameter through the same `propose` call a normal proposal makes. ON: that one call's prompt carries the probes, signed (`engine/ablation.py::ablation_probe_note`, the `_ablation_probe_hint` cue, cleared after the call). Param ablation only — the code-block refine makes no Researcher call. No extra call and nothing moves a metric or a champion, but it changes a prompt, so `false` is the historical prompt byte for byte and a run launched before the field resumes with it OFF (`LEGACY_CONFIG_SNAPSHOT_DEFAULTS`) |
 | `merge_mode` | `LOOPLAB_MERGE_MODE` | `auto` | `auto` (ensemble when the Developer writes code, else mean) · `mean` (param mean) · `ensemble` (code recombination) |
 | `endgame_reserve_frac` | `LOOPLAB_ENDGAME_RESERVE_FRAC` | `0.2` | The plan's endgame reserve: this fraction of `max_nodes` is kept for the top-2 ensemble (once) and champion sweeps proposed by the k-NN surrogate, and the dispatcher honours it — no new breadth inside the reserve. `0` = no plan (the historical dispatch); a resumed pre-plan run keeps `0` |
 | `complexity_cue` | `LOOPLAB_COMPLEXITY_CUE` | `false` | Inject a complexity hint keyed on the node's child count |

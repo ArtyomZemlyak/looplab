@@ -375,3 +375,105 @@ def test_every_measured_probe_records_its_signed_gain_beside_the_sensitivity(tmp
             assert abs(value) == pytest.approx(data["impacts"][name])
             signs.add(value > 0)
     assert False in signs, "a parameter the toy optimum needs must read as NEEDED (negative)"
+
+
+# ------------------------------------------------ the refiner sees its probes (doc 67 67.4, part c)
+def test_the_probe_note_states_each_probe_signed_largest_first():
+    from looplab.engine.ablation import ablation_probe_note
+
+    note = ablation_probe_note(3, "lr", {"lr": -0.2, "wd": 0.05, "drop": 0.0}, "max")
+    assert note.startswith("\nABLATION PROBES ON NODE 3: ") and "maximized" in note
+    assert note.index("lr: needed (-0.2 without it)") < note.index("wd: BETTER without it (+0.05)")
+    assert "drop: no measured effect" in note and "You are refining 'lr' now" in note
+    assert "minimized" in ablation_probe_note(3, "lr", {"lr": 0.1}, "min")
+    assert ablation_probe_note(3, "lr", {}, "max") == ""
+    wide = ablation_probe_note(0, "p0", {f"p{i}": float(i + 1) for i in range(15)}, "max")
+    assert wide.count("BETTER without it") == 12 and "; and 3 more." in wide
+
+
+def _recording_run(tmp_path, *, hint: bool):
+    engine = make_engine(tmp_path, policy=GreedyTree(n_seeds=3, max_nodes=12, ablate_every=1,
+                                                     enable_merge=False),
+                         ablation_probe_hint=hint)
+    seen: list = []
+    real = engine.researcher.propose
+
+    def _propose(state, parent):
+        seen.append(getattr(engine.researcher, "_ablation_probe_hint", None))
+        return real(state, parent)
+
+    engine.researcher.propose = _propose
+    anyio.run(engine.run)
+    return engine, seen
+
+
+def test_on_the_refine_proposal_alone_is_told_its_probes_and_the_note_is_cleared(tmp_path):
+    from looplab.engine.ablation import ablation_probe_note
+
+    engine, seen = _recording_run(tmp_path / "on", hint=True)
+    ablations = [e.data for e in engine.store.read_all()
+                 if e.type == "ablate" and e.data.get("signed_impacts")]
+    assert ablations, "expected at least one measured ablation pass"
+    notes = [value for value in seen if value]
+    first = ablations[0]
+    top = max(first["impacts"], key=first["impacts"].get)
+    assert notes[0] == ablation_probe_note(first["parent_id"], top, first["signed_impacts"], "min")
+    assert len(notes) <= len(ablations), "only an ablation's refine proposal carries a note"
+    assert getattr(engine.researcher, "_ablation_probe_hint", "") == "", "cleared after the call"
+
+
+def test_off_no_proposal_is_ever_handed_a_note(tmp_path):
+    engine, seen = _recording_run(tmp_path / "off", hint=False)
+    assert any(e.type == "ablate" for e in engine.store.read_all())
+    assert not any(seen), seen
+
+
+def test_the_note_reaches_both_propose_paths_through_the_cue_registry(monkeypatch):
+    """`_ablation_probe_hint` is a `RESEARCHER_PROMPT_CUES` member, so both researchers fold it into
+    their prompt through `collect_hint_cues` — and every forwarding wrapper mirrors it."""
+    from looplab.agents import agent as agent_mod
+    from looplab.agents.agent import ToolUsingResearcher
+    from looplab.agents.roles import (RESEARCHER_HINT_ATTRS, RESEARCHER_PROMPT_CUES,
+                                      LLMResearcher)
+    from looplab.core.models import Idea, RunState
+
+    assert "_ablation_probe_hint" in RESEARCHER_PROMPT_CUES
+    assert "_ablation_probe_hint" in RESEARCHER_HINT_ATTRS
+    note = "\nABLATION PROBES ON NODE 0: lr: BETTER without it (+0.1)."
+
+    class _Client:
+        messages = None
+
+        def complete_tool(self, messages, json_schema=None, **_kw):
+            _Client.messages = [dict(m) for m in messages]
+            return {"operator": "draft", "params": {"x": 1.0}, "rationale": "r"}
+
+    state = RunState(run_id="r", task_id="t", goal="g", direction="min")
+    plain = LLMResearcher(_Client())
+    plain._ablation_probe_hint = note
+    plain.propose(state, None)
+    assert note in next(m["content"] for m in _Client.messages if m["role"] == "user")
+    seen = {}
+
+    def _fake(client, tools, messages, emit_spec, **kw):
+        seen["m"] = [dict(m) for m in messages]
+        return Idea(operator="draft", params={}, rationale="ok")
+
+    monkeypatch.setattr(agent_mod, "run_phase", _fake)
+    agentic = ToolUsingResearcher(client=object(), tools=None)
+    agentic._ablation_probe_hint = note
+    agentic.propose(state, None)
+    assert note in next(m["content"] for m in seen["m"] if m["role"] == "user")
+
+
+def test_the_flag_ships_on_resumes_off_and_is_off_at_every_constructor():
+    from looplab.core.config import (LEGACY_CONFIG_SNAPSHOT_DEFAULTS, Settings,
+                                     settings_from_snapshot)
+    from looplab.engine.options import EngineOptions
+
+    assert Settings().ablation_probe_hint is True
+    assert LEGACY_CONFIG_SNAPSHOT_DEFAULTS["ablation_probe_hint"] is False
+    legacy = {k: v for k, v in Settings().masked_snapshot().items() if k != "ablation_probe_hint"}
+    assert settings_from_snapshot(legacy).ablation_probe_hint is False
+    assert EngineOptions().ablation_probe_hint is False
+    assert EngineOptions.from_settings(Settings()).ablation_probe_hint is True

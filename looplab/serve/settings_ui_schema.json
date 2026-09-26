@@ -238,6 +238,13 @@
           "help": "A0a: ablate generated pipeline code blocks (MLE-STAR), not just numeric params."
         },
         {
+          "key": "ablation_probe_hint",
+          "label": "Ablation refiner sees its probes",
+          "type": "bool",
+          "default": true,
+          "help": "After a parameter ablation, the refine proposal is told each probe's signed result: how much better or worse the run did with that parameter set to 0.0. Off = the pre-2026-09-26 prompt, byte for byte."
+        },
+        {
           "key": "budget_aware",
           "label": "Budget-aware proposals",
           "type": "bool",

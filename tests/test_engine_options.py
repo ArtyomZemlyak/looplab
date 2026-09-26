@@ -407,6 +407,8 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         propose_brief_fit=settings.propose_brief_fit,
         # …and the board's verdict support (doc 67 67.1, 2026-09-26), a prompt flag on the same ground.
         card_verdict_support=settings.card_verdict_support,
+        # …and the ablation refiner's probes (doc 67 67.4, 2026-09-26), on the same prompt ground.
+        ablation_probe_hint=settings.ablation_probe_hint,
         # …and the seven above, so the differential compares a NON-DEFAULT value on both sides.
         stage_check_tools=settings.stage_check_tools,
         llm_cost_limit=settings.llm_cost_limit,

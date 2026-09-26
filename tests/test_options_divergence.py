@@ -103,6 +103,8 @@ EXPECTED = {
     # verdict rests on. ON in the product surface, OFF in the bare library on the rows above' ground
     # — a PROMPT flag, so a direct `Engine(...)` keeps the historical proposal bytes.
     "card_verdict_support": (True, False),
+    # The ablation refiner's probes (doc 67 67.4, 2026-09-26), on the row above's PROMPT ground.
+    "ablation_probe_hint": (True, False),
     "unified_agent": (True, False),
     # Layer 3 Card queue owns macro-action selection in the product surface (2026-08-04): the Card lane
     # is the intended selector, and it wins over `agent_drives_actions` when both are on. The bare

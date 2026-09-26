@@ -388,8 +388,8 @@ WRAPPED_ROLE_ATTRS: tuple[str, ...] = ("base", "fallback", "inner")
 # `_time_budget_hint` goes last because the wall clock is the axis a proposal gets wrong LATEST — the
 # schedule is chosen after the hardware is (docs/29 F1h).
 RESEARCHER_PROMPT_CUES: tuple[str, ...] = (
-    "_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint", "_gpu_budget_hint",
-    "_time_budget_hint")
+    "_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint", "_ablation_probe_hint",
+    "_gpu_budget_hint", "_time_budget_hint")
 
 RESEARCHER_HINT_ATTRS: tuple[str, ...] = (
     "_digest_cap", "_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint",
@@ -400,7 +400,9 @@ RESEARCHER_HINT_ATTRS: tuple[str, ...] = (
     # `engine/proposal_cues.py::ProposalCuesMixin._stamp_brief_switches`.
     "_brief_fit",
     # doc 67 67.1 (2026-09-26): `Settings.card_verdict_support`, the same shape and the same stamp.
-    "_verdict_support")
+    "_verdict_support",
+    # doc 67 67.4 (2026-09-26): `Settings.ablation_probe_hint`, the probes as prose (`ablation.py`).
+    "_ablation_probe_hint")
 """Ephemeral hint attributes communicated to the ACTIVE Researcher via `setattr` and consumed
 with `getattr(obj, name, default)`. Writers: the engine (`_digest_cap` in orchestrator.py
 `__init__`; `_complexity_hint`/`_sweep_hint` in engine/proposal_cues.py `_set_complexity_hint`;
