@@ -671,6 +671,17 @@ class EvalStagesMixin:
         # has recorded the manifest's raw over-budget facts — so the dispatcher and every planner
         # (the repair floor's `declared_pipeline_seconds`, the watchdogs' log plan) see the leash that
         # will actually kill the stage. Idempotent over the operator stages already leashed above.
+        protocol = self._profile_protocol(es, prof, operator)
+        return cmd, timeout, self._leash_stages(stages), protocol
+
+    @staticmethod
+    def _profile_protocol(es, prof, operator):
+        """`command_eval.eval_protocol` as it REACHES the executed chain: the protocol an eval at
+        profile `prof` records, given the operator's validated stage list (`_operator_stages`).
+        `_eval_pipeline`'s rule, spelled once so the noise probe can ask which declared profile a
+        recorded ruler came from (`engine/noise_floor.py::_noise_probe_profile`)."""
+        from looplab.runtime import command_eval
+
         protocol = command_eval.eval_protocol(es, prof)
         # THE OVERRIDES COUNT ONLY WHERE THEY RUN (critic 2026-09-26). `build_command` appends them
         # to `cmd`, and `cmd` runs as the single command, as the protected `score` stage after a
@@ -683,7 +694,7 @@ class EvalStagesMixin:
         # would have matched by coincidence (second critic pass, 2026-09-26).
         if operator is not None:
             protocol = {**protocol, "overrides": []}
-        return cmd, timeout, self._leash_stages(stages), protocol
+        return protocol
 
     def _leash_stages(self, stages):
         """A resolved stage chain under the operator's live `budget_extend{eval_timeout}` — `stages`

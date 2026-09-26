@@ -292,3 +292,52 @@ def test_a_solution_tier_floor_names_no_ruler(tmp_path):
     assert all("protocol_profile" not in row for row in _rows(engine, EV_EVAL_NOISE_SEED))
     floor = _rows(engine, EV_EVAL_NOISE_FLOOR)[0]
     assert "protocol_profile" not in floor and "protocol_mixed" not in floor
+
+
+def _node_with_ruler(tmp_path, ruler, *, profile=None):
+    """One evaluated node whose terminal recorded `ruler` (or no record at all)."""
+    from looplab.core.models import Idea, durable_idea_payload
+
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "max"})
+    idea = Idea(operator="draft", params={"x": 1.0}, rationale="n0", eval_profile=profile)
+    store.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                  "idea": durable_idea_payload(idea), "code": "pass\n"})
+    provenance = ({"metric_provenance": {"comparability": {
+        "version": 1, "authority": "declared", "keys": {"declared": "d" * 16},
+        "protocol": {"profile": ruler}}}} if ruler else {})
+    store.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": 0.5,
+                                    "violations": [], **provenance})
+    return fold(store.read_all()).nodes[0]
+
+
+def test_the_probe_runs_at_the_declared_profile_the_champion_was_measured_on(tmp_path):
+    """The endgame rule sets the Strategist's fidelity to `full`; a champion scored on `smoke`
+    (null `eval_profile`, the fidelity of its day) is re-measured on SMOKE, the ruler its own
+    terminal recorded — the configuration the search scored — not on the fidelity at the end."""
+    from looplab.engine.comparability import protocol_record
+
+    spec = {"command": ["python", "score.py"],
+            "profiles": {"smoke": {"overrides": ["steps=1"]}, "full": {"overrides": ["steps=100"]},
+                         "tiny": {"overrides": ["steps=0"]}}}
+
+    def digest(overrides):
+        return protocol_record(eval_protocol={"overrides": overrides})["profile"]
+
+    engine = make_engine(tmp_path / "e")
+    engine._eval_spec = spec
+    engine._strategy_fidelity = "full"
+    smoke_node = _node_with_ruler(tmp_path / "a", digest(["steps=1"]))
+    assert engine._noise_probe_profile(smoke_node) == "smoke"
+    # The historical resolution already lands on the champion's ruler: nothing changes.
+    assert engine._noise_probe_profile(_node_with_ruler(tmp_path / "b", digest(["steps=100"]))) is None
+    engine._strategy_fidelity = None
+    assert engine._noise_probe_profile(smoke_node) is None, "None resolves to `smoke` itself"
+    assert engine._noise_probe_profile(_node_with_ruler(tmp_path / "c", digest(["steps=0"]))) == (
+        "tiny"), "any declared profile, not only the two conventional names"
+    # No record, or a ruler no declared profile resolves to: the historical resolution, never a guess.
+    assert engine._noise_probe_profile(_node_with_ruler(tmp_path / "d", None)) is None
+    assert engine._noise_probe_profile(_node_with_ruler(tmp_path / "e2", "f" * 16)) is None
+    # Operator-declared stages run verbatim: every profile records no overrides, so one ruler.
+    engine._eval_spec = {**spec, "stages": [{"name": "score", "command": ["python", "score.py"]}]}
+    assert engine._noise_probe_profile(_node_with_ruler(tmp_path / "f", digest([]))) is None

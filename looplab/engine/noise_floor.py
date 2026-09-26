@@ -29,10 +29,10 @@ WHAT IT IS NOT. It is not confirmation, even though both run seeds:
   the digest `engine/comparability.py::protocol_record` writes beside every node's metric — and the
   summary records it when every counted repeat agrees (`comparability.py::agreed_ruler`). The one
   reader, `events/card_ledger.py::_floor_std`, holds a gain to the floor only when both numbers
-  were measured on that same ruler. Making the probe MEASURE the ruler the champion was scored on
-  instead, so the floor is not merely withheld, is still owed:
-  OPEN[noise-probe-measures-the-fidelity-at-the-end]
-  proof:absent:_noise_probe_profile@looplab/engine/noise_floor.py
+  were measured on that same ruler. And the probe now MEASURES that ruler, so the floor is used
+  rather than withheld: `_noise_probe_profile` finds the declared profile whose protocol is the one
+  the champion's own terminal recorded and runs the repeats at it. It keeps the historical
+  resolution whenever that already resolves to the champion's ruler, or nothing recorded one.
 
   It is also not a node TERMINAL. Every repeat writes `eval_noise_seed`, never
   `node_evaluated`/`node_failed` — invariant #2 is one terminal per node, and a candidate that
@@ -113,7 +113,42 @@ class NoiseFloorMixin:
         did not ask for the probe is byte-identical to one built before it existed."""
         return self.eval_noise_seeds > 0 and state.eval_noise_floor is None
 
-    async def _run_noise_seed(self, nd, s: int):
+    def _noise_probe_profile(self, nd) -> "str | None":
+        """The declared eval profile whose protocol is the RULER `nd`'s search number was measured
+        on — so the repeats re-measure the configuration the search scored, which is the probe's
+        whole claim — or None, the historical resolution (the node's own `idea.eval_profile`, else
+        the Strategist's fidelity).
+
+        None whenever that resolution already lands on the recorded ruler, the node recorded none
+        (the solution tier; a log older than the record), or no declared profile resolves to it —
+        never a guess. Asked through `_eval_pipeline`'s own protocol rule
+        (`eval_stages.py::_profile_protocol`), with the operator's stage list validated once."""
+        from looplab.engine.comparability import protocol_record, record_of
+        from looplab.engine.shared import effective_eval_spec
+
+        record = record_of(nd)
+        protocol = record.get("protocol") if isinstance(record, dict) else None
+        target = protocol.get("profile") if isinstance(protocol, dict) else None
+        if not isinstance(target, str) or not target:
+            return None
+        es = effective_eval_spec(self)
+        operator = self._operator_stages(es)
+
+        def ruler(name):
+            return (protocol_record(eval_protocol=self._profile_protocol(es, name, operator))
+                    or {}).get("profile")
+
+        historical = getattr(nd.idea, "eval_profile", None) or (
+            self._strategy_fidelity if self._strategy_fidelity in ("smoke", "full") else None)
+        if ruler(historical) == target:
+            return None
+        declared = es.get("profiles") if isinstance(es.get("profiles"), dict) else {}
+        for name in sorted({"smoke", "full", *(n for n in declared if isinstance(n, str))}):
+            if ruler(name) == target:
+                return name
+        return None
+
+    async def _run_noise_seed(self, nd, s: int, profile: "str | None" = None):
         """One repeat of node `nd`'s evaluation under seed `s`, recorded as `eval_noise_seed`.
 
         A deliberately smaller sibling of `_run_confirm_seed`: no per-seed GPU-refusal ladder and no
@@ -162,11 +197,12 @@ class NoiseFloorMixin:
                 self._release_gpus(reservation.get("gpu_ids"))
                 return None
             try:
-                # `profile=None` on purpose: `_run_eval` then derives the node's OWN
-                # `idea.eval_profile`, which is what makes this a re-measurement of the search's
-                # protocol rather than a second confirm at the full profile.
+                # `profile` is `_noise_probe_profile`'s answer: the declared profile the champion's
+                # own number was measured on, or None — `_run_eval` then derives the node's OWN
+                # `idea.eval_profile` as it always did. Either way a re-measurement of the search's
+                # protocol, never a second confirm at the full profile.
                 res = await anyio.to_thread.run_sync(
-                    lambda: self._run_eval(nd, str(workdir), env, None, None))
+                    lambda: self._run_eval(nd, str(workdir), env, profile, None))
             finally:
                 self._release_gpus(reservation.get("gpu_ids"))
             current = self._confirmation_node_current(nd.id, generation)
@@ -204,13 +240,14 @@ class NoiseFloorMixin:
             return
         generation = nd.attempt
         done = dict(state.eval_noise_seed_results.get(nd.id, {}))
+        profile = self._noise_probe_profile(nd)
         for s in seeds:
             if s in done:
                 continue
             if self._run_halt_intent():
                 return                     # the loop breaks on the intent; no gate is owed
             try:
-                await self._run_noise_seed(nd, s)
+                await self._run_noise_seed(nd, s, profile)
             except Exception as exc:  # noqa: BLE001 — an INSTRUMENT may not end the run it measures.
                 # This is the run SPINE: `_handle_no_actions` has no surrounding try, so anything
                 # raised here (a materialize failure, a resource pin the runtime cannot enforce,

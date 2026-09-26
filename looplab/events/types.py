@@ -106,9 +106,10 @@ EV_NODE_TOMBSTONED = "node_tombstoned"
 EV_CONFIRM_EVAL = "confirm_eval"
 EV_NODE_CONFIRMED = "node_confirmed"
 # THE EVAL NOISE FLOOR (doc 52 row 11), under `Settings.eval_noise_seeds` (0 = off, the default).
-# `eval_noise_seed` is ONE repeat of one candidate's evaluation, seeds 0..N-1, under its own
-# `idea.eval_profile` or else the Strategist's fidelity AT THE PROBE — which need not be the ruler
-# the search scored it on, so each row records the one that ran (`protocol_profile`). The summary,
+# `eval_noise_seed` is ONE repeat of one candidate's evaluation, seeds 0..N-1, at the declared
+# profile whose protocol its own number was recorded on (`noise_floor.py::_noise_probe_profile`),
+# else its `idea.eval_profile` or the Strategist's fidelity AT THE PROBE — which need not be that
+# ruler, so each row records the one that ran (`protocol_profile`). The summary,
 # `eval_noise_floor`, carries the metrics, their mean, the sample std and `sem`, the exact quantity
 # `trust/gate.py::one_se_better` compares a margin against. Both are FOLDED, and each carries what
 # the other cannot: the per-seed rows are the resume memo (a crashed pass re-runs only the seeds it
