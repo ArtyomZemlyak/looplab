@@ -920,7 +920,13 @@ def _open_and_drive(task, task_dict: dict, settings, out: Path, *, crash_after=N
                     typer.echo(seed_ignored_note(settings.seed_from_run), err=True)
                 else:
                     payload, verdict, note = seed_intent(seed, out)
-                    eng.store.append(EV_INJECT_NODE, payload)
+                    # Spelled key by key so the payload-writer scan can read which keys this row
+                    # carries (`tests/test_event_payload_contract.py`); an opaque dict is a row
+                    # whose declared contract nothing checks.
+                    eng.store.append(EV_INJECT_NODE, {
+                        "idea": payload["idea"], "code": payload["code"],
+                        "files": payload["files"], "deleted": payload["deleted"],
+                        "origin": payload["origin"], "parent_id": payload["parent_id"]})
                     typer.echo(seed_summary(seed, verdict, note))
         # Continue a run dir that ALREADY FINISHED. Without this, re-entering the loop folds the log,
         # sees finished=True and breaks at once — printing the OLD best and doing no work. That silently
