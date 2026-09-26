@@ -1,6 +1,6 @@
 // The ranking rungs live in `runIndex.js` and are asked from there, never restated here —
 // see `comparableRunRanking` for what restating them cost.
-import { metricComparable, sourceIncomplete } from './runIndex.js'
+import { metricComparable, metricIncomparability, sourceIncomplete } from './runIndex.js'
 
 const CONTROL = /[\u0000-\u001f\u007f]/
 const CONTROL_GLOBAL = /[\u0000-\u001f\u007f]/g
@@ -232,7 +232,9 @@ export function comparableRunRanking(runs = []) {
     ...extra,
   })
   if (runs.length < 2) return result('insufficient-population')
-  if (!metricComparable(runs)) return result('incompatible')
+  // `reason` says WHICH refusal (`runIndex.js::metricIncomparability`): two runs of one task split
+  // only by protocol were told they "use different tasks or objectives" (critic 2026-09-26).
+  if (!metricComparable(runs)) return result('incompatible', { reason: metricIncomparability(runs) })
   if (observations.some(item => item.phase === 'missing' || item.phase === 'invalid')) {
     return result('missing-metric')
   }

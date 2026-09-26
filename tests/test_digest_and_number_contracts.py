@@ -17,6 +17,7 @@ import hashlib
 import inspect
 import json
 import math
+import re
 
 import pytest
 
@@ -259,6 +260,27 @@ def test_what_the_minter_produces_is_what_the_reader_accepts(prefix):
     assert valid_digest_ref(minted, prefix=prefix) is True
 
 
+def _truncated_key_check(window: str, text: str) -> bool:
+    """A 16-hex TRUNCATED comparability key (`engine/comparability.py::_KEY_CHARS`, the settle row's
+    pre-digested `profile` facet): a digest, but not the 64-hex shape `valid_digest_ref` reads.
+
+    Scoped by VALUE, not by name (critic 2026-09-26, driven): a module declaring its own
+    `_KEY_CHARS = 64` beside a hand-rolled check is exactly the re-derivation this guard exists to
+    refuse, and the name alone let it through."""
+    if "== _KEY_CHARS" not in window:
+        return False
+    declared = re.search(r"^_KEY_CHARS\s*=\s*(\d+)\s*(?:#.*)?$", text, re.M)
+    return declared is not None and int(declared.group(1)) != 64
+
+
+def test_the_truncated_key_exemption_is_scoped_by_value():
+    window = 'if len(d) == _KEY_CHARS and all(c in "0123456789abcdef" for c in d):'
+    assert _truncated_key_check(window, "_KEY_CHARS = 16\n") is True
+    assert _truncated_key_check(window, "_KEY_CHARS = 64\n") is False, "a 64-hex re-derivation"
+    assert _truncated_key_check(window, "no declaration here\n") is False
+    assert _truncated_key_check("len(d) == 16", "_KEY_CHARS = 16\n") is False
+
+
 def test_every_prefixed_call_site_reads_through_the_shared_predicate():
     """The regression that matters is a re-derived copy, not a wrong answer here. Two spellings are
     deliberately EXEMPT and must stay that way, so they are named rather than merely absent."""
@@ -267,11 +289,7 @@ def test_every_prefixed_call_site_reads_through_the_shared_predicate():
     # Exemptions are matched on the REASON, not the filename. Exempting whole files would let a
     # genuinely re-derived 64-hex predicate slip in beside an unrelated random-id check — which is
     # exactly what happened to the first draft of this test.
-    non_digest_lengths = ("== 32", "!= 32", "{12, 32}",
-                          # 16-hex TRUNCATED comparability keys (`engine/comparability.py::
-                          # _KEY_CHARS`, the settle row's pre-digested `profile` facet): a digest,
-                          # but not the 64-hex shape `valid_digest_ref` reads.
-                          "== _KEY_CHARS")
+    non_digest_lengths = ("== 32", "!= 32", "{12, 32}")
 
     offenders = []
     for path, text in iter_sources():
@@ -287,6 +305,8 @@ def test_every_prefixed_call_site_reads_through_the_shared_predicate():
                 continue        # HTTP input normalizer: accepts either case, then lowercases
             if any(marker in window for marker in non_digest_lengths):
                 continue        # 12/32-hex RANDOM ids (review link ids, uuid4().hex) — not digests
+            if _truncated_key_check(window, text):
+                continue        # a TRUNCATED digest, by its module's own declared length
             offenders.append(f"{path.as_posix()}:{index}")
     assert not offenders, (
         "these re-derive the digest predicate instead of calling `valid_digest_ref`; if the site is "

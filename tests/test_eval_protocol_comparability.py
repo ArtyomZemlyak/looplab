@@ -260,6 +260,61 @@ def test_an_operator_declared_pipeline_records_no_overrides_it_never_ran(tmp_pat
     assert protocol_record(eval_protocol=smoke) == protocol_record(eval_protocol=full)
 
 
+def _staged_engine(tmp_path, stages):
+    engine = make_engine(tmp_path / "run", task=_task(), researcher=RepoParamResearcher({}),
+                         developer=NoOpRepoDeveloper(), n_seeds=1, max_nodes=1)
+    # A hand-edited or pre-validation snapshot: `EvalSpec` refuses these at submit, the engine's own
+    # re-read (`_operator_stages`) is what decides a recorded one.
+    engine._eval_spec = {**engine._eval_spec, "stages": stages}
+    node = Node(id=0, operator="draft", idea=Idea(operator="draft", params={}, rationale="r"),
+                code="")
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    return engine, node, wd
+
+
+def test_an_invalid_operator_list_falls_back_and_records_the_overrides_that_ran(tmp_path):
+    """THE HALF `_operator_stages` EXISTS FOR (critic 2026-09-26, M1: the unvalidated
+    `es.get("stages")` check survived every test). A recorded list `validate_stages` refuses falls
+    back to the single command, which IS the profile-built `cmd` — so its overrides ran and must be
+    recorded, or a smoke node and a full node read as one ruler."""
+    engine, node, wd = _staged_engine(tmp_path, [{"name": "score", "command": "not-a-list"}])
+    cmd_s, _t, chain_s, smoke = engine._eval_pipeline(node, str(wd), None)
+    cmd_f, _t, chain_f, full = engine._eval_pipeline(node, str(wd), "full")
+    assert chain_s is None and chain_f is None, "the single command runs"
+    assert cmd_s[-1] == "steps=1" and cmd_f[-1] == "steps=100"
+    assert smoke["overrides"] == ["steps=1"] and full["overrides"] == ["steps=100"]
+    assert protocol_record(eval_protocol=smoke) != protocol_record(eval_protocol=full)
+
+
+def test_the_operator_list_is_validated_once_per_resolution(tmp_path, caplog):
+    """NIT 6 of the same pass, driven: the branch `_resolve_stages` takes and the protocol recorded
+    beside it are decided off ONE `_operator_stages` answer, so a recorded stage's unknown key warns
+    once per resolution, not twice."""
+    stage = {"name": "score", "command": [sys.executable, "ttrain_cli.py"], "legacy_hint": 1}
+    engine, node, wd = _staged_engine(tmp_path, [stage])
+    with caplog.at_level("WARNING", logger="looplab.runtime.command_eval"):
+        _cmd, _t, chain, protocol = engine._eval_pipeline(node, str(wd), None)
+    warned = [r for r in caplog.records if "legacy_hint" in r.getMessage()]
+    assert len(warned) == 1, [r.getMessage() for r in warned]
+    assert chain and chain[0]["name"] == "score" and protocol["overrides"] == []
+
+
+def test_a_pre_digested_profile_facet_needs_the_exact_shape_and_never_outranks_the_tokens():
+    """M2 and M3 of the same pass: a settle row's pre-digested `profile_digest` counts only at the
+    truncated key's exact length, and the override TOKENS, when a record carries them, are what the
+    facet digests — a pre-digested value beside them is never preferred."""
+    from looplab.engine.comparability import PROFILE_DIGEST_KEY, _profile_facet
+
+    good = "0123456789abcdef"
+    assert _profile_facet({PROFILE_DIGEST_KEY: good}) == good
+    for bad in (good[:-1], good + "0", "0" * 64, good.upper()):
+        assert _profile_facet({PROFILE_DIGEST_KEY: bad}) == "", bad
+    from_tokens = _profile_facet({"overrides": ["steps=1"]})
+    assert from_tokens and from_tokens != good
+    assert _profile_facet({"overrides": ["steps=1"], PROFILE_DIGEST_KEY: good}) == from_tokens
+
+
 def test_the_settle_record_keeps_both_facets(tmp_path):
     """A node finalized from its settle record (`engine/settled_recovery.py`) must carry the facets a
     live terminal records — silence there would be a hole, not a lie, but it is the incident path."""
@@ -270,7 +325,7 @@ def test_the_settle_record_keeps_both_facets(tmp_path):
                      eval_protocol={"profile": "full", "overrides": ["steps=100", "--key=s3cret"]},
                      eval_fingerprint=_fp({"repetition_penalty": 1.0}))
     record = settled_result_record(live, stdout_tail="", stderr_tail="")
-    # DIGESTS ONLY (second critic pass): the settle row was the one event carrying raw override argv.
+    # DIGESTS ONLY (second critic pass): the facet needs only the digest of the override argv.
     assert "steps=100" not in json.dumps(record) and "s3cret" not in json.dumps(record)
     back, reason = result_from_record(json.loads(json.dumps(record)))
     assert reason == "" and back is not None

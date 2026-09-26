@@ -241,6 +241,11 @@ def parse_deadline_reply(text: str) -> bool:
     return m is not None and m.group(1).upper() == _DEADLINE_FINISHING
 
 
+# `_resolve_stages`' "the caller did not ask `_operator_stages` yet" — distinct from its `None`
+# answer ("no valid operator list"), which a caller may already hold.
+_ASK = object()
+
+
 class EvalStagesMixin:
     """The engine's staged-eval cluster. See the module docstring for the mixin convention
     (`self` is the Engine)."""
@@ -259,7 +264,8 @@ class EvalStagesMixin:
         clean, err = command_eval.validate_stages(task_stages, allow_env=True, existing_run=True)
         return clean if err is None else None
 
-    def _resolve_stages(self, workdir, es, params=None, score_cmd=None, score_timeout=None):
+    def _resolve_stages(self, workdir, es, params=None, score_cmd=None, score_timeout=None,
+                        operator_stages=_ASK):
         """Resolve the ordered eval pipeline, with the operator's `cmd` (es) AUTHORITATIVE and
         non-overridable (redesign: the agent can't rewrite how it's scored):
 
@@ -274,7 +280,11 @@ class EvalStagesMixin:
         `build_command`) drive the appended score stage, so the smoke/full eval PROFILE and its
         timeout still apply in pipeline mode — not just the base command at the default timeout.
         `%params%` tokens in any preceding stage command expand to the node's params. Returns None
-        (classic single-command eval) when there are no stages."""
+        (classic single-command eval) when there are no stages.
+
+        `operator_stages` is `_operator_stages(es)` when the caller already asked it — `_eval_pipeline`
+        does, to record the protocol off the same branch — so the list is validated ONCE per
+        resolution (critic 2026-09-26: twice, and `validate_stages` warned twice per bad key)."""
         import json
         from looplab.runtime import command_eval
 
@@ -303,7 +313,7 @@ class EvalStagesMixin:
             # submission. A refusal here does not reach the operator — it lands on the fallback
             # below — so a retroactive clause (the closed stage-key set) would silently discard
             # the declared pipeline and score later nodes of this run by a different one.
-            clean = self._operator_stages(es)
+            clean = (self._operator_stages(es) if operator_stages is _ASK else operator_stages)
             if clean is not None:
                 if host:
                     # THE HOST'S IS THE ONLY `score`. `validate_stages` reserves nothing for the
@@ -637,8 +647,12 @@ class EvalStagesMixin:
             prof = self._strategy_fidelity
         params = node.idea.params if node is not None else {}
         cmd, timeout = command_eval.build_command(es, params, prof)
+        # The operator's pipeline, validated ONCE: the branch `_resolve_stages` takes and the protocol
+        # recorded below are decided off this same answer.
+        operator = self._operator_stages(es)
         stages = self._resolve_stages(str(Path(workdir).resolve()), es, params,  # cmd-authoritative pipeline (+ %params% per stage)
-                                      score_cmd=cmd, score_timeout=timeout)      # profile/timeout survive pipeline mode
+                                      score_cmd=cmd, score_timeout=timeout,      # profile/timeout survive pipeline mode
+                                      operator_stages=operator)
         # …and the DEVELOPER's declared leashes, which the spec rewrite cannot reach: a
         # `looplab_stages.json` `train` declared AT the old budget was bounded by it and moves with it
         # (`command_eval.leashed_timeout`). Applied to the RESOLVED chain here — after `_resolve_stages`
@@ -655,7 +669,7 @@ class EvalStagesMixin:
         # Decided by the BRANCH `_resolve_stages` took, through the one test it takes it on — not
         # by comparing argv, which an operator stage spelled like `cmd` plus its smoke overrides
         # would have matched by coincidence (second critic pass, 2026-09-26).
-        if self._operator_stages(es) is not None:
+        if operator is not None:
             protocol = {**protocol, "overrides": []}
         return cmd, timeout, self._leash_stages(stages), protocol
 

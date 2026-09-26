@@ -207,7 +207,10 @@ test('portfolio UI exposes saved views, bounded selection, fenced detail, and co
   assert.match(compare, /hashWithRunRouteState/)
   assert.match(compare, /aria-label="Selected run comparison"[\s\S]*aria-describedby=\{`run-compare-receipt/)
   assert.match(compare, /id="run-compare-ranking-warning"/)
-  assert.match(compare, /selected runs use different tasks or objectives/)
+  // The refusal names WHICH one (`runIndex.js::metricIncomparabilityText`, driven in
+  // `comparabilityRefusalReason.test.js`): two runs of one task split only by protocol were told
+  // they "use different tasks or objectives" (critic 2026-09-26).
+  assert.match(compare, /metricIncomparabilityText\(ranking\.reason\)/)
   assert.match(density, /data-comfortable/)
   assert.match(app, /initDensity\(\)/)
   assert.match(css, /data-comfortable[\s\S]*font-size: 12px/)

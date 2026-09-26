@@ -14,7 +14,7 @@
 
 import { cardIsDirection, cardLineageIndex, cardParentId } from './cardLineageModel.js'
 import { isRecord } from './panelPrimitives.js'
-import { nodesSplitByComparability } from './runIndex.js'
+import { nodesComparabilitySplit, nodesSplitByComparability } from './runIndex.js'
 
 export const UNGROUPED_ID = '__no_concepts__'
 // The experiments no question owns. A concept lattice has no position for a card with no parent —
@@ -302,6 +302,9 @@ export function latticeRollups(state, cards, rows) {
       bestCardId,
       measuredNodes: measured.length,
       mixedComparability: nodesSplitByComparability(measured),
+      // WHAT refused the pair (`runIndex.js::nodesComparabilitySplit`), so the chip names the cause
+      // rather than listing every one it could have been.
+      comparabilitySplit: nodesComparabilitySplit(measured),
     })
   }
   return out

@@ -14,6 +14,7 @@ import { cardIsDirection, childrenByParent, descendantsOf } from './cardLineageM
 import { isRecord } from './panelPrimitives.js'
 import { UNGROUPED_ID, latticeRollups, latticeRows, questionClosure,
   offPageParentExperiments, unfiledExperiments } from './questionLattice.js'
+import { COMPARABILITY_REFUSAL_TEXT } from './runIndex.js'
 
 const _text = value => (typeof value === 'string' ? value.trim() : '')
 const _delta = value => `${value > 0 ? '+' : ''}${Number(value.toFixed(4))}`
@@ -199,8 +200,9 @@ export default function ResearchView({ cards, state, renderCard }) {
               ? <span className={'chip' + (roll.mixedComparability ? ' warn'
                 : (roll.best > 0 ? ' ok' : ''))}
                 title={roll.mixedComparability
-                  ? 'the experiments behind these numbers recorded provably different comparability'
-                    + ' keys or evaluation protocols, so this best won a mixed field'
+                  ? `two of the experiments behind these numbers ${COMPARABILITY_REFUSAL_TEXT[
+                    roll.comparabilitySplit] || 'were measured under provably different evaluations'}`
+                    + ', so this best won a mixed field'
                   : `best improvement measured under this question, by ${roll.bestCardId}`}>
                 best {_delta(roll.best)}
                 {roll.bestCardId && roll.bestCardId !== row.id ? ` by ${roll.bestCardId}` : ''}

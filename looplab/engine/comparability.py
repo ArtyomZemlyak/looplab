@@ -259,10 +259,16 @@ PROTOCOL_FACETS = ("profile", "scorer", "fingerprint")
 
 
 # The key a settle record carries the `profile` facet under, ALREADY DIGESTED — never the override
-# tokens themselves (second critic pass, 2026-09-26: the settle row had become the one event carrying
-# raw operator argv past the redaction funnel). `engine/settled_recovery.py` writes it through
-# `digested_protocol`; `_profile_facet` passes it through, so a node finalized from its settle record
-# records the digest a live terminal would.
+# tokens themselves (second critic pass, 2026-09-26): the facet needs only their digest, and copying
+# the tokens put one more copy of operator argv on the log for nothing. NOT the only such copy, and
+# this comment said it was (third pass, driven): the host scorer's receipt
+# (`runtime/command_eval.py::host_scorer_receipt`) records its `argv` verbatim on both the settle row
+# and `node_evaluated.metric_provenance.host_scorer`, as the task snapshot records the whole eval
+# spec — the operator's own declaration, read back as they wrote it. Known secret shapes and this
+# box's env values are masked at the write boundary (`core/redact.py`); a secret typed literally into
+# a command line is not, which is why it belongs in the environment. `engine/settled_recovery.py`
+# writes this key through `digested_protocol`; `_profile_facet` passes it through, so a node
+# finalized from its settle record records the digest a live terminal would.
 PROFILE_DIGEST_KEY = "profile_digest"
 
 
@@ -578,17 +584,20 @@ def group_token(record: Optional[dict]) -> str:
 def run_split_by_key(nodes) -> bool:
     """Do this run's own evaluated nodes carry a PROVABLY DIFFERENT pair of comparability records?
 
-    True is the within-run refusal: the run compared its own candidates against different data, or
-    under different evaluation protocols (a `protocol` facet both sides recorded and that differs —
-    a `smoke` profile beside a `full` one, an edited scorer), so its champion is the winner of a
-    mixed field. The NAME predates the protocol facets; it asks `comparability_status`, which
-    checks both. Cheap by construction — inside one run the key is
+    True is the within-run refusal: the run compared its own candidates against different data, on
+    different source trees (a fix promoted into the editable repo mid-run), or under different
+    evaluation protocols (a `protocol` facet both sides recorded and that differs — a `smoke`
+    profile beside a `full` one, an edited scorer), so its champion is the winner of a mixed field.
+    The NAME predates the substrate and the protocol facets; it asks `comparability_status`, which
+    checks all three. Cheap by construction — inside one run the key is
     normally constant, so this walks the nodes and finds one pair.
 
     Asked PAIRWISE through `comparability_status` rather than by counting distinct keys, because two
     records may differ in their `keys` maps (one node bound its inputs, a later one did not) without
-    either being evidence that the DATA changed. Only a genuine `DIFFERENT` at a shared authority
-    counts, which is the same asymmetry the module docstring states.
+    either being evidence that the DATA changed. Only a genuine `DIFFERENT` counts — a shared
+    authority whose keys differ, or a refuse-only discriminator (the substrate, a protocol facet)
+    both records carry and that differs — and never an `UNKNOWN`, which is the same asymmetry the
+    module docstring states.
     """
     records = [record for record in (record_of(node) for node in (nodes or [])) if record]
     for index, record in enumerate(records):

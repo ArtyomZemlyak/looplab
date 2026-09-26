@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { distinctMetricFormatter, get, fmt, fmtAgo, fmtCost, fmtElapsedSeconds, normalizeRunGeneration, runApiPath } from './util.js'
-import { effectiveRunStatus } from './runIndex.js'
+import { effectiveRunStatus, metricIncomparabilityText } from './runIndex.js'
 import { comparableRunRanking, COMPARE_COLUMNS, configDifferences } from './portfolioModel.js'
 import { deadlineRequest } from './requestDeadline.js'
 import { hashWithRunRouteState } from './runRouteState.js'
@@ -245,7 +245,8 @@ export default function RunCompare({
       : ` Best ${ranking.phase === 'confirmed' ? 'confirmed mean' : 'raw metric'} in this capture: ${formatMetric(ranking.bestValue)}.`
     : ''
   const rankingWarning = ranking.status === 'incompatible'
-    ? 'Metrics are shown but not ranked; selected runs use different tasks or objectives.'
+    ? `Metrics are shown but not ranked; ${metricIncomparabilityText(ranking.reason)
+      || 'these runs use different tasks or objectives'}.`
     : ranking.status === 'mixed-phase'
       ? 'Metrics are shown but not ranked because confirmed means and raw metrics are mixed.'
       : ranking.status === 'missing-metric'

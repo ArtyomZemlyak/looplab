@@ -84,8 +84,9 @@ export function sourceIntegrityNotice(run = {}) {
 // `nodeAppliedParams` below, on the node's own Metrics tab.
 //
 // The FOURTH member, `mixed_comparability`, is of the third's kind and not the first pair's: it says
-// the run's own evaluated nodes were not all measured against the same data, or not all with the same
-// evaluation protocol (`looplab/engine/comparability.py`), so the champion won a mixed field. Like `params_overridden`
+// the run's own evaluated nodes were not all measured against the same data, on the same source tree,
+// or with the same evaluation protocol (`looplab/engine/comparability.py`), so the champion won a
+// mixed field. Like `params_overridden`
 // it does not doubt the measurement — it doubts what the measurement is OF.
 export const CHAMPION_CAVEAT_SALVAGED = 'salvaged'
 export const CHAMPION_CAVEAT_TRUST_FLAGGED = 'trust_flagged'
@@ -144,11 +145,13 @@ export function bestMetricCaveatNotice(run = {}) {
             + 'the one this result was produced under. The run selected on it anyway — the metric '
             + 'itself was measured normally; what is in question is what it is a measurement of.'
           : slug === CHAMPION_CAVEAT_MIXED_COMPARABILITY
+            // The row carries the slug and not the refusing facet, so all three causes are named;
+            // the run's own Pareto view names the one that refused (`nodesComparabilitySplit`).
             ? 'This run’s own nodes were not all measured against the same evaluation — their '
-              + 'recorded comparability keys, or the evaluation protocols they ran under (profile, '
-              + 'scorer, fingerprint), provably differ — so this number won a mixed field. '
-              + 'The values are each true of their own measurement; the ordering between them is '
-              + 'not.'
+              + 'recorded comparability keys, the source trees they ran on, or the evaluation '
+              + 'protocols they ran under (profile, scorer, fingerprint) provably differ — so this '
+              + 'number won a mixed field. The values are each true of their own measurement; the '
+              + 'ordering between them is not.'
             : slug === CHAMPION_CAVEAT_MERGED_COORDINATES
               ? 'This number comes from a MEAN-MERGE node: its parameters are the arithmetic '
                 + 'average of its two parents’ declarations, and it trained nothing of its own — it '
@@ -781,13 +784,15 @@ const substrateMismatch = (left, right) => {
 // and the `eval_fingerprint` the eval printed. Each facet refuses only when BOTH records carry it and
 // they differ — a facet one side never recorded is silence — and agreement certifies nothing.
 const PROTOCOL_FACETS = ['profile', 'scorer', 'fingerprint']
+// The FIRST facet both records carry and disagree on, in `PROTOCOL_FACETS` order (the engine's own
+// order, so both name the same facet for one pair), or '' when none does.
 const protocolMismatch = (left, right) => {
   const mine = left?.protocol
   const theirs = right?.protocol
-  if (!mine || typeof mine !== 'object' || !theirs || typeof theirs !== 'object') return false
-  return PROTOCOL_FACETS.some(facet => typeof mine[facet] === 'string'
+  if (!mine || typeof mine !== 'object' || !theirs || typeof theirs !== 'object') return ''
+  return PROTOCOL_FACETS.find(facet => typeof mine[facet] === 'string'
     && typeof theirs[facet] === 'string' && !!mine[facet] && !!theirs[facet]
-    && mine[facet] !== theirs[facet])
+    && mine[facet] !== theirs[facet]) || ''
 }
 
 // THE PAIR DECISION, over already-extracted records. Split out so there is ONE of it: the tri-state
@@ -797,30 +802,78 @@ const protocolMismatch = (left, right) => {
 // (`tests/fixtures/comparability_status_cases.json`) could only ever reach one of them. Now a rule
 // added here reaches the run list's metric sort, RegistryPanel, ParetoPanel, crossRunRank AND the
 // per-node Pareto split on the same commit, and the fixture drives all of them.
-function statusOfRecords(left, right) {
-  if (!left || !right) return COMPARABILITY_UNKNOWN
+// WHAT REFUSED A PAIR, when something did: 'substrate' | 'profile' | 'scorer' | 'fingerprint' |
+// 'keys', or '' — the refusing half of the pair decision, named, so a surface can say WHY two numbers
+// may not be ordered instead of guessing (critic 2026-09-26: a split caused only by the source tree
+// was blamed on "keys or protocols", and two runs of ONE task split only by protocol were told they
+// "use different tasks or objectives" by three screens).
+function pairRefusal(left, right) {
+  if (!left || !right) return ''
   // FIRST, and it can only refuse — see `substrateMismatch`. The engine grew this discriminator and
   // this mirror did not follow for three days, so the browser answered SAME for exactly the pair the
   // engine had just refused: an operator promoting a repair into the editable repo mid-run (which
   // `looplab repair-candidates` explicitly urges) splits two nodes with identical input keys, and
   // the run list, RegistryPanel, ParetoPanel and crossRunRank went on ordering them.
-  if (substrateMismatch(left, right)) return COMPARABILITY_DIFFERENT
+  if (substrateMismatch(left, right)) return 'substrate'
   // …and the protocol, on the same ground and in the same place as the engine asks it.
-  if (protocolMismatch(left, right)) return COMPARABILITY_DIFFERENT
+  const facet = protocolMismatch(left, right)
+  if (facet) return facet
+  const authority = commonAuthority(left, right)
+  return authority && left.keys[authority] !== right.keys[authority] ? 'keys' : ''
+}
+
+function statusOfRecords(left, right) {
+  if (!left || !right) return COMPARABILITY_UNKNOWN
+  if (pairRefusal(left, right)) return COMPARABILITY_DIFFERENT
   const authority = commonAuthority(left, right)
   if (!authority) return COMPARABILITY_UNKNOWN
-  if (left.keys[authority] !== right.keys[authority]) return COMPARABILITY_DIFFERENT
   return COMPARABILITY_CERTIFYING.has(authority) ? COMPARABILITY_SAME : COMPARABILITY_UNKNOWN
 }
 
-// A conflict is exactly a PROVEN difference — `unknown` fails open, as everywhere else in this file.
-const anyKeyConflict = records => records.some((record, i) => records.slice(i + 1).some(
-  other => statusOfRecords(record, other) === COMPARABILITY_DIFFERENT))
+// The refusal of the FIRST provably-different pair in `records`, or ''. A conflict is exactly a
+// PROVEN difference — `unknown` fails open, as everywhere else in this file.
+const firstRefusal = (records) => {
+  for (let i = 0; i < records.length; i += 1) {
+    for (let j = i + 1; j < records.length; j += 1) {
+      const refusal = pairRefusal(records[i], records[j])
+      if (refusal) return refusal
+    }
+  }
+  return ''
+}
+const anyKeyConflict = records => firstRefusal(records) !== ''
 
-// Do these NODES carry provably different keys (or protocols — `statusOfRecords` asks both)? The
-// within-run refusal, for a panel that orders or dominates one run's own nodes against each other.
-export const nodesSplitByComparability = (nodes = []) => anyKeyConflict(
+// WHY a pair was refused, in words — one clause per refusing discriminator, the browser twin of
+// `engine/comparability.py::_PROTOCOL_CLAUSES` plus the source tree and the keys. Completes the
+// subject "two of them …".
+export const COMPARABILITY_REFUSAL_TEXT = {
+  substrate: 'ran on different source trees (a fix promoted into the editable repo moves the ground '
+    + 'every later experiment is measured on)',
+  profile: 'were scored under different eval profiles (a different set of profile overrides — e.g. '
+    + 'a smoke pass against a full one)',
+  scorer: 'were scored by different host scorer programs (their bytes changed between the two)',
+  fingerprint: 'printed different eval fingerprints (the eval itself says it measured under '
+    + 'different conditions)',
+  keys: 'were measured against different evaluation inputs (their recorded comparability keys differ)',
+}
+
+// The SHORT form, for a control too narrow for a sentence (the run list's metric-sort option).
+export const COMPARABILITY_REFUSAL_SHORT = {
+  objective: 'tasks or directions differ',
+  substrate: 'source trees differ',
+  profile: 'eval profiles differ',
+  scorer: 'scorers differ',
+  fingerprint: 'eval fingerprints differ',
+  keys: 'evaluation inputs differ',
+}
+
+// The refusal of the first provably-different pair of NODES, or '' — the within-run refusal, for a
+// panel that orders or dominates one run's own nodes against each other.
+export const nodesComparabilitySplit = (nodes = []) => firstRefusal(
   (Array.isArray(nodes) ? nodes : []).map(nodeComparabilityRecord).filter(Boolean))
+
+// Do these NODES carry provably different keys (or protocols, or source trees)?
+export const nodesSplitByComparability = (nodes = []) => nodesComparabilitySplit(nodes) !== ''
 
 // The tri-state, mirroring `engine/comparability.py::comparability_status` so the browser and the
 // engine can never disagree about whether two numbers may be ordered. Reflexivity is NOT assumed:
@@ -845,11 +898,30 @@ export const comparabilityConflict = (runs = []) => anyKeyConflict(
 // numbers are not on one scale and an ordering over them was never a fact. Unknown is instead made
 // VISIBLE — `crossRunRank.js` labels every row's state, so silence is never read as assent.
 export function metricComparable(runs = []) {
-  const tasks = new Set(runs.map(run => run.task_id))
-  const directions = new Set(runs.map(run => run.direction))
-  return runs.length > 0 && tasks.size === 1 && !!runs[0].task_id
-    && directions.size === 1 && ['min', 'max'].includes(runs[0].direction)
-    && !comparabilityConflict(runs)
+  return runs.length > 0 && metricIncomparability(runs) === ''
+}
+
+// WHY `metricComparable` refuses a set, or '' when it does not (or the set is empty): 'objective'
+// when the task id or the direction differs or is missing — the only case the old sentence "different
+// tasks or objectives" was true of — else the refusal of the first provably-different pair
+// (`pairRefusal`). The ONE reading every refusing surface words its sentence from.
+export function metricIncomparability(runs = []) {
+  const rows = Array.isArray(runs) ? runs : []
+  if (!rows.length) return ''
+  const tasks = new Set(rows.map(run => run.task_id))
+  const directions = new Set(rows.map(run => run.direction))
+  if (tasks.size !== 1 || !rows[0].task_id || directions.size !== 1
+      || !['min', 'max'].includes(rows[0].direction)) return 'objective'
+  return firstRefusal(rows.map(comparabilityRecord).filter(Boolean))
+}
+
+// The sentence a surface prints when it lists a set it may not rank, from `metricIncomparability`.
+export function metricIncomparabilityText(reason) {
+  if (!reason) return ''
+  if (reason === 'objective') return 'these runs use different tasks or objectives'
+  const clause = COMPARABILITY_REFUSAL_TEXT[reason]
+  return clause ? `these runs share one task and objective, but two of them ${clause}`
+    : `these runs were refused a ranking for a reason this view has no sentence for: “${reason}”`
 }
 
 export function sortRuns(runs = [], key = 'time', order = 'desc') {

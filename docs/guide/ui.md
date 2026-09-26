@@ -346,7 +346,7 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   anywhere in its subtree *including its own experiments* — never a sum, since two experiments testing
   one sharpening would add their gains into a total nobody measured — with `own` shown separately
   when the row's own experiments did worse than a sharper child. And a row whose evidence nodes
-  recorded **provably different comparability keys** (or evaluation protocols) says `mixed comparability` beside the number
+  recorded **provably different comparability keys** (or source trees, or evaluation protocols — the chip's tooltip names which) says `mixed comparability` beside the number
   rather than hiding it, exactly as a champion that won a mixed field does: blanking it would leave
   the questions that got the most work showing nothing. Absent keys are silence, not disagreement.
   A question with no experiment yet keeps its row and says so — it is the most actionable row on the
@@ -733,7 +733,12 @@ name/unit, dataset and evaluation identity or a comparison protocol (the run row
 nothing on the row says which artifact a number is about — the metric **subject** is still not published there
 (docs 31/35). No normalized cross-group score, no relative bars, no single axis. If the displayed run has no
 non-blank `task_id`, the panel fails closed with no observations: multiple legacy rows with a missing identity
-are not members of one task.
+are not members of one task. A group is also partitioned by comparability key, and a partition whose members
+still provably disagree — a source tree promoted mid-way, a smoke-scored champion beside a full-scored one —
+is **split** by exactly what differs (source tree, eval profile, scorer, fingerprint; "none recorded" is a
+value of its own). Each part is ranked on its own, and its header names what split it off. A part that still
+disagrees after that is shown with every row and no rank. Before 2026-09-26 such a partition was dropped
+whole: its rows were never drawn, and the panel said it had no observations for the task.
 
 Under the table, **one running-best overlay per comparable group** (since 2026-09-06, doc 52 row 26):
 each run's running best per evaluated experiment as a **step** line — it holds its value until the
@@ -1069,7 +1074,8 @@ selected on a number its own record carries a caveat about, and the caveat trave
 portfolio cannot read it as a plain measurement. There are FOUR in
 `engine/champion_caveats.py::CHAMPION_CAVEATS` — this page said "exactly three" and omitted
 `mixed_comparability`, which says the run's own evaluated nodes were not all measured against the same
-data, so the champion won a mixed field. They come from the server
+data, on the same source tree, or with the same evaluation protocol, so the champion won a mixed
+field. They come from the server
 (`best_metric_caveats` on each `/api/runs` row, `engine/champion_caveats.py`), and each names a rung the
 operator set or a fact the engine derived — none of them a bug report. The first two qualify **how** the
 number was measured; the third qualifies **what it is a number for**:

@@ -692,8 +692,9 @@ it exists for. The declaration names a path; the key is the digest.
 *orderings*:
 
 * **within a run** — `champion_metric_caveats` adds `mixed_comparability` when the run's own evaluated
-  nodes carry provably different keys (or, see *The protocol* below, provably different rulers), so
-  the portfolio row says the champion won a mixed field. It
+  nodes carry provably different keys, ran on different source trees (a fix promoted into the
+  editable repo mid-run), or were measured with provably different rulers (see *The protocol*
+  below), so the portfolio row says the champion won a mixed field. It
   fires on `different` and never on `unknown`: inside one run the key is constant by construction, so a
   member that caveated silence would fire on every run and mean nothing;
 * **across runs** — `/api/runs` publishes `best_metric_comparability`, and `ui/src/runIndex.js::

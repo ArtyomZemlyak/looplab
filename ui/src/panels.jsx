@@ -19,9 +19,11 @@ import CodeViewer from './CodeViewer.jsx'
 import { diffLines } from './lineDiff.js'
 import { driftStatus, leakageStatus, rewardHackStatus, OBJECTIVE_SOURCE_LABEL,
   objectiveMetricSource, objectiveSourceCaveated, objectiveSourceHelp } from './trustSemantics.js'
-import { bestMetricCaveatLabel, metricComparable, nodesSplitByComparability, sortRuns } from './runIndex.js'
+import { COMPARABILITY_REFUSAL_TEXT, bestMetricCaveatLabel, metricComparable,
+  metricIncomparability, metricIncomparabilityText, nodesComparabilitySplit, sortRuns,
+} from './runIndex.js'
 import {
-  crossRunGroups, groupClaim, rankCoverage, trajectoryClaim, trajectoryOverlay,
+  crossRunGroups, groupClaim, rankCoverage, splitLabel, trajectoryClaim, trajectoryOverlay,
 } from './crossRunRank.js'
 import VirtualTimeline from './VirtualTimeline.jsx'
 import { timelineEventKey } from './timelineModel.js'
@@ -804,6 +806,8 @@ export function paretoFront(nodes, direction) {
 // names the front restricted to measured objectives whenever a caveated node is on this one.
 export function ParetoPanel({ state, onClose, onSelect }) {
   const nodes = Object.values(state.nodes).filter(n => paretoMetric(n) != null && n.feasible !== false)
+  // WHAT refused a pair of these nodes, named (`runIndex.js::nodesComparabilitySplit`), or ''.
+  const splitBy = nodesComparabilitySplit(nodes)
   // first constraint dimension, if any
   const withV = nodes.filter(n => (n.violations || []).length || Object.keys(n.extra_metrics || {}).length)
   let scatter = null
@@ -887,12 +891,11 @@ export function ParetoPanel({ state, onClose, onSelect }) {
               #3 does not dominate #5 if #5 was scored on a harder corpus. Fires only on a PROVEN
               difference (`looplab/engine/comparability.py`): every node on this box records no key,
               and a banner over silence would show on every run and mean nothing. */}
-          {nodesSplitByComparability(nodes) && <div className="warn" style={{ marginTop: 8 }}>
-            ⚠ This run&rsquo;s nodes were <b>not all measured against the same evaluation</b> — their
-            recorded comparability keys, or the evaluation protocols they ran under (profile, scorer,
-            fingerprint), provably differ. Dominance between two such nodes is not a
-            fact, so this front orders points that do not share an axis. Each value is still true of
-            its own measurement; the front is not.
+          {splitBy && <div className="warn" style={{ marginTop: 8 }}>
+            ⚠ This run&rsquo;s nodes were <b>not all measured against the same evaluation</b> — two
+            of them {COMPARABILITY_REFUSAL_TEXT[splitBy] || 'were measured under provably different evaluations'}.
+            Dominance between two such nodes is not a fact, so this front orders points that do not
+            share an axis. Each value is still true of its own measurement; the front is not.
           </div>}
           {sortedFront.length > 0 && unverified.size > 0 && <div className="muted" style={{ marginTop: 8 }}>
             ⚠ {[...unverified].join(', ')} {unverified.size === 1 ? 'is' : 'are'} not a declared
@@ -2411,7 +2414,9 @@ export function RegistryPanel({ state, onClose }) {
       <div className="section-h">{rankable ? 'Cross-run leaderboard' : 'Cross-run solutions'}</div>
       <PanelResourceNotice resource={resource} label="Cross-run leaderboard" onRetry={retry} />
       {runs.length > 0 && !rankable && <div className="muted" style={{ fontSize: 11, marginBottom: 4 }}>
-        Mixed tasks or objectives — listed, not ranked.</div>}
+        {/* The REASON, not a guess at it: two runs of one task split only by their protocol or
+            source tree were told "mixed tasks or objectives" (critic 2026-09-26). */}
+        Listed, not ranked: {metricIncomparabilityText(metricIncomparability(runs))}.</div>}
       {/* The caption stays a static literal: dataTableMigration.test.js checks every table region's
           accessible name for uniqueness and meaning, which it can only do statically. So it says what
           the rows ARE, true whether or not they are ranked; the heading and the note above carry the
@@ -2533,8 +2538,10 @@ export function CrossRunPanel({ state, onClose }) {
   const elsewhere = index.comparable.filter(group => group.taskId !== task).length
   const observations = groups.reduce((sum, group) => sum + group.size, 0)
   const omitted = groups.reduce((sum, group) => sum + group.omitted, 0)
-  const rankCell = row => (row.rank == null
-    ? <span className="muted" title="no rank: this run's event log stops being readable, so the value beside it is the best of a PREFIX">—</span>
+  const rankCell = (row, group) => (row.rank == null
+    ? <span className="muted" title={group.outcome === 'refused'
+      ? 'no rank: the runs of this group provably disagree on their evaluation, so no ordering between them is a fact'
+      : "no rank: this run's event log stops being readable, so the value beside it is the best of a PREFIX"}>—</span>
     : <span title={row.tied ? `tied with ${row.tied} other run(s) at this value` : 'rank within this comparable group'}>
         #{row.rank}{row.tied ? ' (tie)' : ''}</span>)
   // The caveat rides in the OBJECTIVE cell, beside the number it qualifies, and not in the status
@@ -2571,7 +2578,9 @@ export function CrossRunPanel({ state, onClose }) {
           <b>{group.taskId} · {group.direction === 'min' ? 'minimize' : 'maximize'} · {group.size} run{group.size === 1 ? '' : 's'}
             {' · '}{group.partition
               ? <span title="these runs recorded the same comparability key, so their numbers were measured against the same declared evaluation inputs">evaluation {group.partition}</span>
-              : <span className="warn" title="no run in this group records what its number was measured against; unknown is not the same as comparable">evaluation unrecorded</span>}.</b>
+              : <span className="warn" title="no run in this group records what its number was measured against; unknown is not the same as comparable">evaluation unrecorded</span>}
+            {group.split && <>{' · '}<span className="warn" title="other runs of this task share this comparability key but provably differ from these on what is named here, so the two parts are ranked apart">{splitLabel(group.split)}</span></>}
+            {group.outcome === 'refused' && <>{' · '}<span className="warn">not ranked</span></>}.</b>
           <span> {claim.claim}</span>
           <ul style={{ margin: '4px 0 0 16px', padding: 0 }}>
             {claim.refusals.map((line, i) => <li key={i} className="muted">{line}</li>)}
@@ -2590,7 +2599,7 @@ export function CrossRunPanel({ state, onClose }) {
                 {' · '}{group.ranked} of {group.size} ranked
               </th></tr>
               {[...group.rows, ...group.unranked].map(row => <tr key={row.runId}>
-                <td>{rankCell(row)}</td>
+                <td>{rankCell(row, group)}</td>
                 <td><a href={`#/run/${encodeURIComponent(row.runId)}`}>{row.label}</a></td>
                 <td>{metricCell(row)}</td>
                 <td className="muted">{row.nodes}</td>
@@ -2630,7 +2639,12 @@ export function CrossRunPanel({ state, onClose }) {
         {/* UNIDENTIFIED is counted too (critic 2026-09-26): without it a box of 3 runs whose one
             partition was refused WHOLE — a smoke-scored champion beside a full-scored one — read
             "0 comparable … 0 no metric, 0 singletons", three runs accounted for by nothing. */}
-        {coverage.unidentified > 0 && ` ${coverage.unidentified} could not be placed in a group: no task id or direction to read the metric with, or a group whose members provably disagree on their evaluation (data or protocol), which is refused whole rather than ranked.`}
+        {coverage.unidentified > 0 && ` ${coverage.unidentified} could not be placed in a group: no task id or direction to read the metric with.`}
+        {/* A partition whose members provably disagree is SPLIT by what differs (source tree, eval
+            profile, scorer, fingerprint) and each part ranked on its own; its rows used to vanish
+            into the count above (critic 2026-09-26). */}
+        {coverage.splitRuns > 0 && ` ${coverage.splitRuns} run${coverage.splitRuns === 1 ? '' : 's'} share a task and comparability key with others but provably differ from them in source tree or evaluation protocol, so ${coverage.splitRuns === 1 ? 'it is' : 'they are'} grouped by that as well.`}
+        {coverage.refusedRuns > 0 && ` ${coverage.refusedRuns} of them still disagree after that split and are shown without a rank.`}
         {elsewhere > 0 && ` ${elsewhere} comparable group(s) belong to other task IDs and are deliberately not shown here — their objectives are unrelated to this run.`}
       </div>}
     </Panel>

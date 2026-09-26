@@ -1006,8 +1006,10 @@ def comparability(
       SAME      — the runs recorded the same comparability key at an authority that may certify it
                   (`measured`: the eval's declared inputs bound to their content digests; or
                   `declared`: an operator-written `ComparisonContract`). Ranking them is a fact.
-      DIFFERENT — they recorded provably different keys. **REFUSED**, exit 3. The values are each
-                  true of their own measurement; the ordering between them never was.
+      DIFFERENT — they recorded provably different keys, ran on different source trees, or were
+                  measured under different evaluation protocols (profile, scorer, fingerprint) —
+                  the pair line names which. **REFUSED**, exit 3. The values are each true of their
+                  own measurement; the ordering between them never was.
       UNKNOWN   — at least one recorded no key, or they agree only at the `inferred` authority
                   (two task files that merely look alike, which is exactly what the four values
                   above are). NOT an assent. Exit 4, because a caller that wanted a ranking did not
