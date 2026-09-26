@@ -45,7 +45,7 @@ style: `[tool.ruff]` selects `BLE` only (doc 52 row 14), so `python -m ruff chec
 blind `except Exception`/`BaseException`/bare `except` that carries no `# noqa: BLE001 — <why this is
 safe to contain>`. Containment is the house posture (743 such handlers), so the rule is not "do not
 write one" but "say why"; `tests/test_containment_census.py` re-derives the same census by AST with no
-`ruff` installed, refuses a NEW blind handler that states no reason, and keeps the 98 pre-existing
+`ruff` installed, refuses a NEW blind handler that states no reason, and keeps the 86 pre-existing
 reason-less sites as a shrink-only backlog in `tests/data/containment_unreviewed.txt` (review one =
 write its reason, delete its row). Match the style of surrounding code (~100-col lines, heavy
 why-comments) and do not reformat.

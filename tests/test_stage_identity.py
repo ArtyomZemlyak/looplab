@@ -30,6 +30,7 @@ from looplab.runtime.command_eval import (STAGE_INPUT_KEY, STAGE_KEY_REASON, STA
                                           run_command_eval)
 from looplab.runtime.stage_identity import (KEY_REASONS, REUSE_REFUSALS, declared_outputs,
                                             reuse_refusal, stage_input_key, workdir_content)
+from tests._posix_gates import POSIX_ONLY_OS_CALLS
 
 _M = {"kind": "stdout_json", "key": "metric"}
 
@@ -253,6 +254,37 @@ def test_a_file_that_will_not_read_yields_no_key_rather_than_a_key_over_a_smalle
         assert key is None and reason == "unreadable_workdir"
     finally:
         os.chmod(locked, 0o600)
+
+
+@pytest.mark.parametrize("plant", [pytest.param("fifo", marks=POSIX_ONLY_OS_CALLS),
+                                   "directory", "oversize"])
+def test_a_closure_module_that_will_not_read_is_unreadable_not_an_opaque_entry(tmp_path, monkeypatch,
+                                                                                plant):
+    """Review 2026-09-26. The closure now refuses a module it cannot read — a FIFO, a directory
+    wearing the module's name, a file past its read bound — instead of skipping it, and the key
+    function recorded that None as `opaque_entry`: a MODELLING limit, for a stage whose entry point
+    it found. It is a file that would not read, the runtime's own `unreadable_workdir`, and
+    `looplab stage-dups` counts the two apart. Driven through the engine's own key function, since
+    the relabel lives there; the key's earlier clause and a truly opaque entry keep their slugs."""
+    from looplab.engine import eval_stages
+
+    wd = _make_workdir(tmp_path, "a", miner="import helper\n" + _MINER)
+    helper = wd / "helper.py"
+    if plant == "fifo":
+        os.mkfifo(helper)
+    elif plant == "directory":
+        helper.mkdir()
+    else:
+        monkeypatch.setattr(eval_stages, "_REACHABLE_SOURCE_MAX_BYTES", 4096)
+        assert len((wd / "mine.py").read_bytes()) < 4096, "the entry script itself is under it"
+        helper.write_text("X = 1\n" * 1000, encoding="utf-8")
+    key_fn = _KeyOwner(str(wd))._stage_key_fn(str(wd))
+    key, reason = key_fn(_stages(), 0)
+    assert key is None and reason == "unreadable_workdir" and reason in KEY_REASONS
+    assert _KeyOwner(str(wd))._stage_key_fn(str(wd), cwd="sub")(_stages(), 0) == (
+        None, "non_default_cwd"), "the key's own earlier clause still decides first"
+    opaque = [{"name": "mine", "command": ["python", "-m", "pip"], "timeout": 60.0}]
+    assert key_fn(opaque, 0) == (None, "opaque_entry")
 
 
 def test_the_stages_own_output_is_out_of_its_own_key_but_an_earlier_stages_output_is_in(tmp_path):

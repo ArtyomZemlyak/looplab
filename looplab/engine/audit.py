@@ -19,7 +19,8 @@ from pathlib import Path
 
 from looplab.agents.role_wrappers import audit_extra_of
 from looplab.core.containment import contain
-from looplab.core.node_evidence import read_bounded_regular_file
+from looplab.core.node_evidence import (normalized_newlines, open_untrusted_regular,
+                                        read_bounded_regular_file)
 from looplab.core.pathsafe import is_reparse
 from looplab.events.types import (EV_AGENT_VALIDATED, EV_CARD_RANKED, EV_DATA_LEAKAGE,
                                   EV_DATA_SHIFT, EV_FORESIGHT_SELECTED, EV_HYPOTHESIS_RANKED,
@@ -27,10 +28,41 @@ from looplab.events.types import (EV_AGENT_VALIDATED, EV_CARD_RANKED, EV_DATA_LE
 from looplab.trust.drift import distribution_shift, rows_to_columns
 from looplab.trust.leakage import target_leakage, temporal_leakage, train_test_contamination
 
+# The span `_holds_exactly` compares at a time: characters of a str asset, bytes of a bytes one.
+_AUDIT_CHUNK = 1024 * 1024
 
-def _normalized_newlines(text: str) -> str:
-    """`text` with CRLF and lone CR read as LF — what a text-mode reader would have handed back."""
-    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+def _holds_exactly(path, original) -> bool | None:
+    """Whether the regular file at `path` holds EXACTLY the bytes `write_assets` wrote for
+    `original` — a str asset's UTF-8, a bytes asset's bytes — or None when it will not open by the
+    untrusted rule (`core/node_evidence.py::open_untrusted_regular`: no link followed, nothing that
+    blocks).
+
+    STREAMED, and that is the reason it exists (review 2026-09-26). The audit runs synchronously on
+    the event loop inside the terminal section, for every eval. Measured on an honest 300 MiB CSV
+    asset, wall time and peak RSS over the call: 0.47 s / +600 MiB with `read_text`, 1.15 s /
+    +901 MiB once it read bounded bytes and decoded and normalized them on every eval, and still
+    0.70 s / +900 MiB with a whole-file `raw == expected` asked first — the encoded baseline, the
+    bounded read's chunks and their join are all alive at once. Streamed: 0.11 s / +3 MiB. One
+    chunk of each side is alive: a str asset is encoded a slice at a time, which is exact because
+    UTF-8 encodes each character on its own, and the file must END where the baseline does — an
+    appended tail is a mismatch, never a match on the prefix."""
+    try:
+        with open_untrusted_regular(path) as fh:
+            if isinstance(original, str):
+                for at in range(0, len(original), _AUDIT_CHUNK):
+                    piece = original[at:at + _AUDIT_CHUNK].encode("utf-8")
+                    if fh.read(len(piece)) != piece:
+                        return False
+            else:
+                view = memoryview(bytes(original))
+                for at in range(0, len(view), _AUDIT_CHUNK):
+                    piece = view[at:at + _AUDIT_CHUNK]
+                    if fh.read(len(piece)) != piece:
+                        return False
+            return fh.read(1) == b""
+    except OSError:
+        return None
 
 
 class AuditMixin:
@@ -320,20 +352,31 @@ class AuditMixin:
                                      "detail": f"protected file '{name}' was replaced at runtime by a "
                                                "link or a non-regular file"})
                         continue
-                    expected = (original.encode("utf-8") if isinstance(original, str)
-                                else bytes(original))
-                    # BOUNDED: an untampered file is at most every '\n' widened to '\r\n', so a read
-                    # of twice the baseline plus one byte tells a match from a larger file.
-                    raw = read_bounded_regular_file(p, 2 * len(expected) + 2)
-                    if raw is None:
+                    # BYTES FIRST, and for the honest case that is the whole audit: the engine's own
+                    # asset writes are byte-exact renames now, so an untampered file holds exactly
+                    # what `write_assets` wrote, and a streamed compare answers it without holding
+                    # either side whole (`_holds_exactly`). A match is exactly as strong as the text
+                    # compare below — those bytes decode to `original` itself — so nothing is weakened
+                    # by asking it first; only a MISMATCH pays for the text reading.
+                    same = _holds_exactly(p, original)
+                    if same is None:
                         sigs.append({"signal": "protected_unreadable",
                                      "detail": f"protected file '{name}' is unreadable after the eval"})
+                        continue
+                    if same:
                         continue
                     # Compare as TEXT for str assets, newlines normalized on BOTH sides: a text-mode
                     # writer (the engine's own, before its writes became byte-exact renames) widened
                     # '\n' to os.linesep, and a raw-BYTES compare would flag every such honest eval as
-                    # a tamper. Bytes assets compare byte-exact.
+                    # a tamper. Bytes assets compare byte-exact, which `_holds_exactly` already did.
                     if isinstance(original, str):
+                        # BOUNDED: an untampered file is at most every '\n' widened to '\r\n', so a
+                        # read of twice the baseline plus one byte tells a match from a larger file.
+                        raw = read_bounded_regular_file(p, 2 * len(original.encode("utf-8")) + 2)
+                        if raw is None:
+                            sigs.append({"signal": "protected_unreadable",
+                                         "detail": f"protected file '{name}' is unreadable after the eval"})
+                            continue
                         try:
                             got = raw.decode("utf-8")
                         except UnicodeDecodeError:
@@ -343,9 +386,9 @@ class AuditMixin:
                             sigs.append({"signal": "protected_unreadable",
                                          "detail": f"protected file '{name}' is unreadable after the eval"})
                             continue
-                        tampered = _normalized_newlines(got) != _normalized_newlines(original)
+                        tampered = normalized_newlines(got) != normalized_newlines(original)
                     else:
-                        tampered = raw != expected
+                        tampered = True
                     if tampered:
                         sigs.append({"signal": "protected_write",
                                      "detail": f"protected file '{name}' was modified at runtime"})

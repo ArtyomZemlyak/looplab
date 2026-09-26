@@ -142,6 +142,20 @@ def read_bounded_regular_target(path: str | os.PathLike, limit: int, *,
         return None
 
 
+def normalized_newlines(text: str) -> str:
+    """`text` with CRLF and lone CR read as LF — what a text-mode reader would have handed back.
+
+    The half of `Path.read_text` that the two byte readers above do not do, for a caller that
+    swapped one for the other and still reads the result as TEXT. Both of its callers made that
+    swap in one commit, and the reuse closure lost the newline translation with it (critic
+    2026-09-26, driven): its import scan (`engine/eval_stages.py::_stage_reachable_files`) is
+    line-anchored `re.M`, which ends a line at LF only, so a module with lone-CR line ends — valid
+    Python, `compile` runs it — read as ONE line and credited none of its imports, the
+    missed-dependency direction. The tamper audit (`engine/audit.py::_audit_workdir_writes`)
+    compares a text asset with this applied to BOTH sides. ONE spelling, so the two cannot drift."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 # THE FLAG SET for APPENDING to a log inside a directory a candidate can write — the stage logs the
 # eval tee mirrors a child's output into (`runtime/sandbox.py::_tee_drain`). `O_NOFOLLOW` refuses a
 # planted symlink and `O_NONBLOCK` makes a planted FIFO answer at once (ENXIO with no reader) instead

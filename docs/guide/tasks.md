@@ -146,7 +146,9 @@ Put `%params%` in any command to inject the node's hyperparameters as `--key val
 validated by ONE shared rule set (`runtime/command_eval.py::validate_stages`) at authoring (the STAGES
 phase's `declare_stages` emit), submit (`cmd.stages`) and consume time (the engine re-validates even a
 hand-written `looplab_stages.json`; `score` is reserved in a Developer manifest, and an invalid manifest
-falls back to the single command instead of half-running).
+falls back to the single command instead of half-running). A manifest the engine will not read at
+all (a link, a FIFO, a directory, or a file over 1 MiB) takes the same fallback, and the engine
+logs a WARNING naming the file and why, once per refused file.
 
 ### Host-side scoring (`cmd.host_scorer`)
 

@@ -333,3 +333,240 @@ def test_the_server_and_the_engine_bound_the_stage_manifest_alike():
     from looplab.serve.routers import runs
 
     assert runs._STAGE_MANIFEST_MAX_BYTES == STAGE_MANIFEST_MAX_BYTES
+
+
+# --------------------------------------------------------------------- review of the 5th pass
+# Six of the twelve mutants the review drove against the pass above survived its tests; each test
+# below names the one it kills. Every mutant was re-applied to a throwaway copy of the tree and the
+# named test went red there.
+_MANIFEST = {"stages": [{"name": "prep", "command": [sys.executable, "prep.py"]}]}
+_EVAL_STAGES_LOG = "looplab.engine.eval_stages"
+
+
+def _refusals(caplog) -> list:
+    return [r.getMessage() for r in caplog.records
+            if r.name == _EVAL_STAGES_LOG and r.levelname == "WARNING"]
+
+
+def test_a_module_with_lone_cr_line_ends_keeps_its_imports_in_the_reuse_closure(tmp_path):
+    """Review 2026-09-26, driven through the LIVE reuse decision. `read_text` read universal
+    newlines; the bounded byte read that replaced it did not, and both import scans are `re.M`, which
+    ends a line at LF only — so a module written with lone-CR line ends (valid Python) read as ONE
+    line and credited none of its imports, and the comment strip ran from its first `#` to the end
+    of the file. A repair that changed only `loss.py` then REUSED `prep`'s stale output: the
+    missed-dependency direction the closure exists to refuse. CRLF was never affected — the scan's
+    own `strip()` eats the CR — so the case has to be a LONE one."""
+    from looplab.engine.eval_stages import EvalStagesMixin
+
+    wd = _workdir(tmp_path)
+    prep = b"import json  # the config (see below)\rimport loss\rprint(json.dumps(loss.X))\r"
+    compile(prep, "prep.py", "exec")                  # the premise: Python runs this module
+    (wd / "prep.py").write_bytes(prep)
+    (wd / "loss.py").write_text("import helper\nX = helper.Y\n", encoding="utf-8")
+    (wd / "helper.py").write_text("Y = 1\n", encoding="utf-8")
+    (wd / "score.py").write_text("print(1)\n", encoding="utf-8")
+    stages = [{"name": "prep", "command": [sys.executable, "prep.py"]},
+              {"name": "score", "command": [sys.executable, "score.py"]}]
+    assert EvalStagesMixin._stage_reachable_files(stages[:1], wd) == {
+        "prep.py", "loss.py", "helper.py"}, "the closure `import` would load, transitively"
+    assert EvalStagesMixin()._safe_reuse_start(stages, "score", {"loss.py"}, wd) is None, (
+        "a repair to a module `prep` imports must re-run `prep`, never reuse its output")
+    assert EvalStagesMixin()._safe_reuse_start(stages, "score", {"score.py"}, wd) == "score"
+
+
+@POSIX_ONLY_OS_CALLS
+def test_a_link_to_a_valid_manifest_is_refused_and_said(tmp_path, caplog):
+    """KILLS: the manifest read through the link-FOLLOWING reader. The pass's own link case targets
+    `/dev/zero`, which any regular-only reader refuses, so it could not tell the two readers apart;
+    a link to a manifest that WOULD resolve can. And the refusal is SAID (review 2026-09-26): a
+    refused manifest lands on the same single-command fallback as no manifest at all, which ran the
+    operator's command alone with nothing anywhere saying why."""
+    import json
+    import logging
+
+    engine = _repo_engine(tmp_path)
+    es, wd = dict(engine._eval_spec), _workdir(tmp_path)
+    score = ([sys.executable, "ttrain_cli.py"], 60.0)
+    real = wd / "declared_stages.json"
+    real.write_text(json.dumps(_MANIFEST), encoding="utf-8")
+    (wd / "looplab_stages.json").write_text(real.read_text(encoding="utf-8"), encoding="utf-8")
+    assert [s["name"] for s in engine._resolve_stages(str(wd), es, None, *score)] == [
+        "prep", "score"], "the premise: these bytes, as a regular file, ARE a pipeline"
+    os.unlink(wd / "looplab_stages.json")
+    (wd / "looplab_stages.json").symlink_to(real)
+    with caplog.at_level(logging.WARNING, logger=_EVAL_STAGES_LOG):
+        assert engine._resolve_stages(str(wd), es, None, *score) is None
+        assert engine._resolve_stages(str(wd), es, None, *score) is None
+    said = _refusals(caplog)
+    assert len(said) == 1, f"one refused manifest, one sentence — not one per resolution: {said}"
+    assert "looplab_stages.json" in said[0] and "a link" in said[0]
+    assert "no stage the manifest declares will run" in said[0]
+
+
+def test_a_valid_manifest_padded_past_the_bound_is_refused_not_truncated(tmp_path, caplog):
+    """KILLS: removing `len(raw) <= STAGE_MANIFEST_MAX_BYTES`. The pass's test shrank the bound to 10
+    bytes, so the truncated read failed to PARSE and the size check was never what refused it. Here
+    the first bound-plus-one bytes are a complete, valid manifest (JSON allows trailing whitespace),
+    so only the size check stands between the read and a pipeline."""
+    import json
+    import logging
+
+    from looplab.runtime.command_eval import STAGE_MANIFEST_MAX_BYTES
+
+    engine = _repo_engine(tmp_path)
+    es, wd = dict(engine._eval_spec), _workdir(tmp_path)
+    score = ([sys.executable, "ttrain_cli.py"], 60.0)
+    body = json.dumps(_MANIFEST).encode("utf-8")
+    padding = b" " * (STAGE_MANIFEST_MAX_BYTES + 16 - len(body))
+    (wd / "looplab_stages.json").write_bytes(body + padding)
+    assert json.loads((wd / "looplab_stages.json").read_bytes()[:STAGE_MANIFEST_MAX_BYTES + 1]) == \
+        _MANIFEST, "the premise: the bounded read alone would parse"
+    with caplog.at_level(logging.WARNING, logger=_EVAL_STAGES_LOG):
+        assert engine._resolve_stages(str(wd), es, None, *score) is None
+    said = _refusals(caplog)
+    assert len(said) == 1 and "larger than" in said[0], said
+
+
+@POSIX_ONLY_OS_CALLS
+def test_a_fifo_manifest_is_said_once_and_an_absent_one_says_nothing(tmp_path, caplog):
+    """The resolution runs several times per eval attempt (the dispatcher, the watchdogs' log plan,
+    the repair and salvage planners), so the sentence is keyed on the refused file's STATE: said once
+    for it, said again when the state changes, and never for the ordinary no-manifest eval."""
+    import logging
+
+    engine = _repo_engine(tmp_path)
+    es, wd = dict(engine._eval_spec), _workdir(tmp_path)
+    score = ([sys.executable, "ttrain_cli.py"], 60.0)
+    with caplog.at_level(logging.WARNING, logger=_EVAL_STAGES_LOG):
+        assert engine._resolve_stages(str(wd), es, None, *score) is None
+        assert _refusals(caplog) == [], "no manifest is not a refused one"
+        os.mkfifo(wd / "looplab_stages.json")
+        for _ in range(3):
+            assert _returns_promptly(engine._resolve_stages, str(wd), es, None, *score) is None
+        said = _refusals(caplog)
+        assert len(said) == 1 and "a FIFO" in said[0], said
+        os.unlink(wd / "looplab_stages.json")
+        (wd / "looplab_stages.json").mkdir()                  # a new state: said again
+        assert engine._resolve_stages(str(wd), es, None, *score) is None
+    said = _refusals(caplog)
+    assert len(said) == 2 and "a directory" in said[1], said
+
+
+@POSIX_ONLY_OS_CALLS
+def test_a_module_that_is_a_link_is_read_through_it_not_made_opaque(tmp_path):
+    """KILLS: the closure read through the NO-follow reader. `_stage_reachable_files` answers what
+    the stage's imports REACH, and `import loss` follows `loss.py -> <a reference checkout>` — so
+    must the closure: the linked module's own imports are in it. A no-follow read refused the link
+    and made every stage importing a symlinked reference module silently opaque, i.e. never reused."""
+    from looplab.engine.eval_stages import EvalStagesMixin
+
+    wd = _workdir(tmp_path)
+    reference = tmp_path / "reference"
+    reference.mkdir()
+    (reference / "losses.py").write_text("import helper\nX = helper.Y\n", encoding="utf-8")
+    (wd / "loss.py").symlink_to(reference / "losses.py")
+    (wd / "helper.py").write_text("Y = 1\n", encoding="utf-8")
+    (wd / "train.py").write_text("import loss\nprint(loss.X)\n", encoding="utf-8")
+    stages = [{"name": "train", "command": [sys.executable, "train.py"]},
+              {"name": "score", "command": [sys.executable, "score.py"]}]
+    assert EvalStagesMixin._stage_reachable_files(stages[:1], wd) == {
+        "train.py", "loss.py", "helper.py"}
+    assert EvalStagesMixin()._safe_reuse_start(stages, "score", {"helper.py"}, wd) is None
+    assert EvalStagesMixin()._safe_reuse_start(stages, "score", {"score.py"}, wd) == "score"
+
+
+def test_a_module_past_the_read_bound_makes_the_stage_opaque(tmp_path):
+    """KILLS: removing the closure's size bound. A module over `_REACHABLE_SOURCE_MAX_BYTES` is
+    OPAQUE — the bounded read holds only its head, and a closure traced from a head is the
+    missed-dependency direction for every import below it — so a repair anywhere re-runs the stage.
+    The real bound, not a patched one: the mutant must lose on the tree as it ships."""
+    from looplab.engine import eval_stages
+    from looplab.engine.eval_stages import EvalStagesMixin
+
+    wd = _workdir(tmp_path)
+    (wd / "train.py").write_text("import model\nprint(model.W)\n", encoding="utf-8")
+    body = b"import layers\nW = 1\n"
+    padding = b"#" * (eval_stages._REACHABLE_SOURCE_MAX_BYTES + 1 - len(body))
+    (wd / "model.py").write_bytes(body + padding)
+    (wd / "layers.py").write_text("K = 3\n", encoding="utf-8")
+    stages = [{"name": "train", "command": [sys.executable, "train.py"]},
+              {"name": "score", "command": [sys.executable, "score.py"]}]
+    why: list = []
+    assert EvalStagesMixin._stage_reachable_files(stages[:1], wd, refusal=why) is None
+    assert why == ["unreadable_workdir"], "a module that would not read, not an opaque entry point"
+    assert EvalStagesMixin()._safe_reuse_start(stages, "score", {"score.py"}, wd) is None
+    (wd / "model.py").write_bytes(body)                    # the same module, under the bound
+    assert EvalStagesMixin._stage_reachable_files(stages[:1], wd) == {
+        "train.py", "model.py", "layers.py"}
+
+
+def _audit(assets: dict, wd) -> list:
+    from looplab.engine.audit import AuditMixin
+
+    return AuditMixin._audit_workdir_writes(SimpleNamespace(_assets=assets), wd, set(assets))
+
+
+def test_a_crlf_asset_is_judged_with_newlines_normalized_on_both_sides(tmp_path):
+    """KILLS: one-sided newline normalization — the defect the pass's own commit message names. Its
+    test put the CRLF on the FILE side, where normalizing only the file already worked; the ORIGINAL
+    has to carry it. An asset whose text has CRLF is clean byte-exact AND read back with LF (the
+    tolerance is symmetric), and still a tamper when a value moves."""
+    wd = _workdir(tmp_path)
+    key = "id,label\r\n1,cat\r\n2,dog\r\n"
+    (wd / "answers.csv").write_bytes(key.encode("utf-8"))
+    assert _audit({"answers.csv": key}, wd) == [], "byte-exact, as `write_assets` writes it"
+    (wd / "answers.csv").write_bytes(key.replace("\r\n", "\n").encode("utf-8"))
+    assert _audit({"answers.csv": key}, wd) == [], "newline-only: both sides normalize alike"
+    (wd / "answers.csv").write_bytes(key.replace("cat", "dog").encode("utf-8"))
+    assert [s["signal"] for s in _audit({"answers.csv": key}, wd)] == ["protected_write"]
+
+
+def test_an_appended_or_rewritten_asset_is_flagged_and_the_read_stays_bounded(tmp_path, monkeypatch):
+    """KILLS: a read limit of `len(expected)`. A prefix-bounded read of `original + appended` IS the
+    original, so it compared clean; the file must END where the baseline does. Value and appended
+    tampers, text and bytes assets — and however large the tail, the audit reads at most the
+    baseline plus one byte to see it, and the text fallback at most twice the baseline plus two."""
+    from looplab.core import node_evidence
+    from looplab.engine import audit as audit_module
+
+    wd = _workdir(tmp_path)
+    assets = {"grader.py": "ANSWERS = [1, 2]\n", "key.bin": b"\x00\x01\x02"}
+    streamed = []
+    real_open = node_evidence.open_untrusted_regular
+
+    class _Counting:
+        def __init__(self, fh):
+            self._fh = fh
+
+        def read(self, n=-1):
+            data = self._fh.read(n)
+            streamed.append(len(data))
+            return data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._fh.close()
+
+    monkeypatch.setattr(audit_module, "open_untrusted_regular", lambda p: _Counting(real_open(p)))
+    limits = []
+    real_read = node_evidence.read_bounded_regular_file
+    monkeypatch.setattr(audit_module, "read_bounded_regular_file",
+                        lambda p, limit, **kw: limits.append(limit) or real_read(p, limit, **kw))
+    honest = {"grader.py": b"ANSWERS = [1, 2]\n", "key.bin": b"\x00\x01\x02"}
+    for name, data in honest.items():
+        (wd / name).write_bytes(data)
+    assert _audit(assets, wd) == []
+    assert limits == [], "the honest file is answered by the streamed bytes, never the text read"
+    tail = b"ANSWERS = [2, 2]\n" + b"#" * (4 << 20)
+    tampers = {"appended": {n: d + tail for n, d in honest.items()},
+               "rewritten": {"grader.py": b"ANSWERS = [2, 1]\n", "key.bin": b"\x00\x01\x03"}}
+    for kind, files in tampers.items():
+        streamed.clear()
+        for name, data in files.items():
+            (wd / name).write_bytes(data)
+        sigs = _audit(assets, wd)
+        assert sorted(s["signal"] for s in sigs) == ["protected_write"] * 2, (kind, sigs)
+        assert sum(streamed) <= sum(len(d) + 1 for d in honest.values()), (kind, streamed)
+    assert limits and all(limit <= 2 * len(honest["grader.py"]) + 2 for limit in limits), limits

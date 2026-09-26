@@ -17,13 +17,19 @@ Layering: no runtime import of the orchestrator and never serve — only core/st
 level (runtime/agents deps are lazy, method-local imports)."""
 from __future__ import annotations
 
+import logging
 import os
 import re
+import stat
 from pathlib import Path
 
 from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
-from looplab.core.node_evidence import read_bounded_regular_file, read_bounded_regular_target
+from looplab.core.node_evidence import (normalized_newlines, read_bounded_regular_file,
+                                        read_bounded_regular_target)
+from looplab.core.pathsafe import is_reparse
+
+_LOG = logging.getLogger(__name__)
 
 # The reply protocol the inter-stage checker answers in, and the ONLY three things it can mean. The
 # vocabulary itself lives in `runtime/command_eval.py` beside the code that acts on it; this is the
@@ -246,6 +252,58 @@ def parse_deadline_reply(text: str) -> bool:
 # opaque (no reuse), the fail-closed direction.
 _REACHABLE_SOURCE_MAX_BYTES = 16 * 1024 * 1024
 
+# What `_say_manifest_refused` has already said (review 2026-09-26). The pipeline is resolved several
+# times per eval attempt — the dispatcher, the watchdogs' log plan, the repair and salvage planners —
+# and one planted FIFO would otherwise print the same WARNING at each. Keyed on the refused file's
+# STATE (path, reason, entry identity), so a repair that re-plants it, or a reset that re-materializes
+# the workdir, is said again. Module-level rather than on the engine because this mixin is driven on
+# bare stubs, and a key that names one file's state cannot cross-wire two runs. Cleared when full,
+# which costs at most one repeated line.
+_MANIFEST_REFUSALS_SAID: set = set()
+_MANIFEST_REFUSALS_SAID_MAX = 1024
+
+
+def _say_manifest_refused(path: Path, raw) -> None:
+    """WARN that `looplab_stages.json` is THERE and was not read, and why — once per refused state.
+
+    `raw` is what `_resolve_stages`' bounded read returned for it: None (a link, a FIFO, a directory,
+    unreadable — or simply absent, the ordinary single-command eval, which says nothing) or the bytes
+    of a file past `STAGE_MANIFEST_MAX_BYTES`. The refusal itself is right — no legitimate producer
+    plants a link or a FIFO under that name — but it lands on the single-command fallback, which runs
+    the operator's command alone: the stages the Developer declared never run, the command fails or
+    scores whatever exists, and until this nothing anywhere said why. `lstat` only: never a read, so
+    the sentence costs no more than the refusal did."""
+    from looplab.runtime import command_eval
+
+    try:
+        st = os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return                                        # no manifest: nothing was refused
+    except OSError as exc:
+        st, why = None, f"it could not be examined ({exc.strerror or type(exc).__name__})"
+    else:
+        if raw is not None:
+            why = f"it is larger than the {command_eval.STAGE_MANIFEST_MAX_BYTES:,}-byte bound"
+        elif stat.S_ISLNK(st.st_mode) or is_reparse(st):
+            why = "it is a link, which the engine does not follow"
+        elif stat.S_ISDIR(st.st_mode):
+            why = "it is a directory"
+        elif stat.S_ISFIFO(st.st_mode):
+            why = "it is a FIFO"
+        elif not stat.S_ISREG(st.st_mode):
+            why = "it is not a regular file"
+        else:
+            why = "it could not be read"              # a permission, or swapped after the check
+    said = (str(path), why) + ((st.st_dev, st.st_ino, st.st_mtime_ns) if st is not None else ())
+    if said in _MANIFEST_REFUSALS_SAID:
+        return
+    if len(_MANIFEST_REFUSALS_SAID) >= _MANIFEST_REFUSALS_SAID_MAX:
+        _MANIFEST_REFUSALS_SAID.clear()
+    _MANIFEST_REFUSALS_SAID.add(said)
+    _LOG.warning("the stage manifest %s was REFUSED: %s. This eval falls back to the operator's "
+                 "command alone, so no stage the manifest declares will run.", path, why)
+
+
 # `_resolve_stages`' "the caller did not ask `_operator_stages` yet" — distinct from its `None`
 # answer ("no valid operator list"), which a caller may already hold.
 _ASK = object()
@@ -368,6 +426,10 @@ class EvalStagesMixin:
                 preceding = command_eval.materialized_stages(json.loads(raw.decode("utf-8")))
             except Exception:  # noqa: BLE001 — a malformed manifest just falls back to the single command
                 preceding = None
+        else:
+            # SAID, not silent (review 2026-09-26): a manifest that is THERE but refused lands on
+            # the same fallback as no manifest at all, and only this line tells the two apart.
+            _say_manifest_refused(mf, raw)
         if preceding:
             # THE DIVERGENCE THAT GOT PAST THE AUTHORING GATE, recorded and NOT enforced.
             #
@@ -834,7 +896,7 @@ class EvalStagesMixin:
         return out
 
     @staticmethod
-    def _stage_reachable_files(stages: list, workdir):
+    def _stage_reachable_files(stages: list, workdir, refusal: list | None = None):
         """Repo-relative files the earlier stages' runs REACH — each command's local `.py` script plus
         the TRANSITIVE closure of its workdir-local imports (module files + package `__init__`s, resolved
         against the workdir root AND each script's own directory). Used to decide whether a repair's edits
@@ -845,10 +907,23 @@ class EvalStagesMixin:
         `python -m <module>` that resolves to NO file under the workdir — i.e. installed code) or a
         `.py` path outside the workdir. Fail-closed by construction — a spuriously
         'reachable' file only forces a re-train, but a MISSED dependency would silently score a stale
-        checkpoint (the invariant `_safe_reuse_start` exists to protect).
+        checkpoint (the invariant `_safe_reuse_start` exists to protect). A module in the closure that
+        will not READ — a FIFO, a directory wearing a module's name, a file past
+        `_REACHABLE_SOURCE_MAX_BYTES` — is None too, for the same reason: skipping it would drop its
+        imports. A module that is a LINK is read through it, exactly as the import follows it.
+
+        `refusal`, when a caller passes a list, receives exactly ONE member of
+        `runtime/stage_identity.py::KEY_REASONS` on a None — `opaque_entry` for an entry point this
+        cannot bound, `unreadable_workdir` for a module it could not read (review 2026-09-26). The two
+        are different facts with different fixes, and the stage key records which one it was; the
+        return value is unchanged, so the reuse decisions, which only need "no", pay nothing.
 
         Interim heuristic, superseded long-term by the per-stage ARTIFACT DECLARATION design
         (docs/BACKLOG.md §6 'Deferred design work') — prefer extending that design over adding cases here."""
+        def _refused(code: str) -> None:
+            if refusal is not None:
+                refusal.append(code)
+
         wd = Path(workdir)
         imp_re = re.compile(r"^[ \t]*(from|import)[ \t]+(.+?)[ \t]*$", re.M)
         # Parenthesized MULTI-LINE imports (`from pkg import (\n  a,\n  b,\n)`) span lines, so the
@@ -873,6 +948,7 @@ class EvalStagesMixin:
                     try:
                         rel = str(Path(rel).resolve().relative_to(wd.resolve()))
                     except Exception:  # noqa: BLE001 — an out-of-tree script we can't bound → opaque
+                        _refused("opaque_entry")
                         return None
                 scripts.append(rel)
             # `python -m pkg.mod` NAMES ITS ENTRY POINT BY IMPORT SYNTAX, and until 2026-08-14 that
@@ -903,6 +979,7 @@ class EvalStagesMixin:
                     if (wd / cand).exists():
                         scripts.append(cand)
             if cmd and not scripts:                    # runs SOMETHING, exposes no local entry → opaque
+                _refused("opaque_entry")
                 return None
             pending.extend(scripts)
         while pending:
@@ -919,8 +996,15 @@ class EvalStagesMixin:
             # closure, which is the MISSED-dependency direction that scores a stale checkpoint.
             data = read_bounded_regular_target(p, _REACHABLE_SOURCE_MAX_BYTES + 1)
             if data is None or len(data) > _REACHABLE_SOURCE_MAX_BYTES:
+                _refused("unreadable_workdir")
                 return None
-            src = data.decode("utf-8", errors="replace")
+            # UNIVERSAL NEWLINES, which `read_text` applied and a byte read does not (critic
+            # 2026-09-26, driven): both scans below are line-anchored `re.M`, which ends a line at LF
+            # only, so a module written with lone-CR line ends — valid Python — read as ONE line and
+            # credited none of its imports, and the comment strip below ran from the first `#` to the
+            # end of the file. A repair to a module it imported then reused the stage's stale output.
+            # BEFORE the comment strip, for that second reason.
+            src = normalized_newlines(data.decode("utf-8", errors="replace"))
             # Strip `#` comments BEFORE both import scans: the paren pattern's `[^)]*` group stops
             # at the FIRST ')', so a ')' inside a trailing comment (`vit,  # backbone (legacy)`)
             # would end the group early and silently drop every name after it from the closure.
@@ -982,9 +1066,21 @@ class EvalStagesMixin:
         digests: dict = {}
 
         def _key(stages, index):
-            reachable = EvalStagesMixin._stage_reachable_files(stages[:index + 1], workdir)
-            return stage_input_key(stages, index, workdir, scope=scope, reachable=reachable,
-                                   cwd=cwd, digests=digests)
+            why: list = []
+            reachable = EvalStagesMixin._stage_reachable_files(stages[:index + 1], workdir,
+                                                               refusal=why)
+            key, reason = stage_input_key(stages, index, workdir, scope=scope, reachable=reachable,
+                                          cwd=cwd, digests=digests)
+            # `stage_input_key` reads every None closure as `opaque_entry`, which is right for an
+            # entry point the closure cannot bound and WRONG for a stage whose entry point it found
+            # but one of whose modules would not read (a FIFO, a directory named like a module, a
+            # file past the closure's read bound): that is `unreadable_workdir`, the slug the
+            # runtime already records for "a file would not read", and `looplab stage-dups` counts
+            # the two apart (review 2026-09-26). Relabelled only where the key said `opaque_entry`,
+            # so its own earlier clauses (`no_stage`, `non_default_cwd`) keep their precedence.
+            if reason == "opaque_entry" and why:
+                reason = why[0]
+            return key, reason
         return _key
 
     def _stage_progress_fn(self, node_id, generation, stages=None):

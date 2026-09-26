@@ -102,7 +102,9 @@ predicate refuses on, and on one more:
     bases, so nothing derived from either proves anything about the other.
   * a workdir file that cannot be read. `_safe_reuse_start` never had this clause because it compares
     NAMES; a content key that silently skipped an unreadable file would be a key over a smaller set
-    than it claims, which is the shape that makes two different workdirs collide.
+    than it claims, which is the shape that makes two different workdirs collide. A module of the
+    import closure that will not read makes the closure None as well, and the engine's key function
+    records THAT as `unreadable_workdir`, not `opaque_entry`: the entry point was found.
   * an entry point that resolves to NO file under the workdir (`unresolved_entry`). Also new here:
     `_stage_reachable_files` credits any argv token ending in `.py` as a script, so
     `sh -c "python mine.py"` answers "bounded" with a closure holding one phantom. Harmless there —
@@ -331,6 +333,9 @@ def stage_input_key(stages: list, index: int, workdir, *, scope: str, reachable,
     closure, or None for an opaque entry point — and is INJECTED rather than imported, for the same
     reason `metric_subject.bind_one` takes `confine`: that function lives in `looplab/engine/` and
     `runtime` imports nothing above `core`. One closure rule, computed by the layer that owns it.
+    A None here is answered `opaque_entry`; the closure also says None for a module it could not
+    read, and `EvalStagesMixin._stage_key_fn`, which asks the closure why, records
+    `unreadable_workdir` in its place.
 
     The rest of `looplab_stages.json` is deliberately NOT in the key (`ENGINE_SIDECARS`): a change to
     a LATER stage's entry cannot alter what this one computes, and an EARLIER stage's entry is
