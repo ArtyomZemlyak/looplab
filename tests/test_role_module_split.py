@@ -275,8 +275,16 @@ def test_roles_is_no_longer_a_god_module():
     of `implement` into the shared `_implement`, and the three re-export lines the rule above
     demands. The block's TEXT went to `role_prompts.py::script_parent_block` instead — prompt bytes
     belong to the fragments — which is why that cap moves too. Both move to measured + 1.
+
+    `roles.py` 868 -> 873 and `state_brief.py` 552 -> 593 on 2026-09-26 (doc 67 67.1, what a
+    supported card's verdict rests on: `Settings.card_verdict_support`). In `roles.py`: the switch's
+    `RESEARCHER_HINT_ATTRS` row with its why-comment, the keyword `LLMResearcher.propose` hands the
+    brief, and the re-export line the rule above demands for `SUPPORT_LEVEL_TEXT` / `support_legend`.
+    In `state_brief.py`, which IS the board's builder: the per-row `SUPPORT=` lookup, the level text,
+    and the one legend line under the rows that defines only the levels the board shows. What a board
+    row says is this module's whole job, so nothing moves out; both caps move to measured + 1.
     """
-    caps = {"agents/roles.py": 869, "agents/role_prompts.py": 344, "agents/state_brief.py": 553,
+    caps = {"agents/roles.py": 874, "agents/role_prompts.py": 344, "agents/state_brief.py": 594,
             "agents/role_wrappers.py": 467, "agents/toy_roles.py": 128}
     sizes = {rel: len((_PKG / rel).read_text(encoding="utf-8").splitlines()) for rel in caps}
     over = {rel: (n, caps[rel]) for rel, n in sizes.items() if n >= caps[rel]}

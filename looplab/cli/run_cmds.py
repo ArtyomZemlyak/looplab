@@ -1300,7 +1300,7 @@ def stop_lifted(state) -> str:
     if not state.paused:
         return "the stop was lifted — a later resume/restart un-paused the run"
     if state.resume_pending():
-        if getattr(state, "last_resume_request_mode", "resume") == "finalize":
+        if state.last_resume_request_mode == "finalize":
             return ("a finalize request is pending and unserved — a LoopLab server serves it by "
                     "starting an engine that wraps the run up (one whose root is this run's parent "
                     "directory, when it can read the run's task snapshot); so does `looplab finalize`")

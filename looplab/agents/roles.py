@@ -86,6 +86,7 @@ from looplab.agents.state_brief import (  # noqa: F401
     BOARD_PROMPT_CARDS,
     BOARD_PROMPT_SEED_BUDGET_CHARS,
     BOARD_SEED_CHARS_MAX,
+    SUPPORT_LEVEL_TEXT, support_legend,
     _attempted_belief_groups,
     _is_attempted_live,
     _state_brief,
