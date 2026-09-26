@@ -1878,16 +1878,27 @@ class SpeculationMixin:
         ]
         return min(matches, key=lambda node: node.id) if matches else None
 
-    def _speculative_selection_node_limit(self, state: RunState) -> int:
+    def _speculative_selection_node_limit(
+        self,
+        state: RunState,
+        *,
+        consume_request: bool = False,
+        request_index: Optional[int] = None,
+    ) -> int:
         """Compensate the pure selector for request slots already removed from the live denominator.
 
         Engine's translated ``policy.max_nodes`` excludes every unmaterialized durable request so the
         Strategist and ordinary selectors cannot advertise an owned slot. The pure speculative selector
         independently subtracts excluded requests (and a claim temporarily reopens its exact head), so
         add those receipts back at this call boundary to avoid charging them twice.
+
+        A claim passes the request it converts here AND to `_refresh_speculation_budget`: that
+        denominator no longer charged it, so it is not added back either, and the limit stays the
+        one its election used — only the policy object's own ``max_nodes`` moves.
         """
 
-        return max(0, int(self.policy.max_nodes)) + self._unmaterialized_card_reservations(state)
+        return max(0, int(self.policy.max_nodes)) + self._unmaterialized_card_reservations(
+            state, consume_request=consume_request, request_index=request_index)
 
     @staticmethod
     def _producer_failed_card_ids(state: RunState) -> set[str]:
@@ -1999,7 +2010,11 @@ class SpeculationMixin:
             return "stale:run_is_stopping", None
         if max_eval_seconds is not None and state.total_eval_seconds >= max_eval_seconds:
             return "stale:eval_budget_exhausted", None
-        self._refresh_speculation_budget(state)
+        # The policy is asked with THIS request's slot still free: the question its election asked,
+        # before the request existed. Charged here, the last slot made `next_actions` answer
+        # "budget spent", the claim chose another Card and the election re-chose this one, forever
+        # (`_refresh_speculation_budget` has the measurement).
+        self._refresh_speculation_budget(state, consume_request=True, request_index=position)
         # The exact request head already owns one durable future slot. Convert that ownership into
         # node_building without double-charging it, but never cross a ceiling that was already full
         # when the request arrived (legacy/corrupt prefixes remain pending for budget_extend).
@@ -2007,7 +2022,8 @@ class SpeculationMixin:
             state, events=events, consume_request=True, request_index=position,
         ) < 1:
             return "budget", None
-        selection_limit = self._speculative_selection_node_limit(state)
+        selection_limit = self._speculative_selection_node_limit(
+            state, consume_request=True, request_index=position)
         if card_budget_used(state) >= selection_limit:
             return "stale:selection_limit_reached", None
 
@@ -2084,6 +2100,10 @@ class SpeculationMixin:
                     expected_last_seq=tail,
                 )
         except EventStoreConcurrencyError:
+            # The request is still OPEN, so the slot it owns goes back into the denominator: the
+            # credit above is true only once this claim commits or closes, and every other exit
+            # does one or the other (`budget` credits nothing, the ceiling being full either way).
+            self._refresh_speculation_budget(state, events=events)
             return "retry", None
         if "_scores" in commit_action:
             self.store.append(EV_POLICY_DECISION, {
@@ -2321,6 +2341,14 @@ class SpeculationMixin:
                 # turn and rebuilt it from scratch. Keep the result; a re-election of the same Card at
                 # the same epoch takes it instead of paying for the build again, and its commit still
                 # goes through every check of `_claim_requested_card_build`.
+                # OPEN[reused-card-build-refusal-never-yields] a refusal of a result that was ITSELF
+                # a reuse keeps it again and yields nothing, so any election/claim disagreement at
+                # width > 1 spins inside ONE `_run_card_session` call, where the run loop's
+                # `no_mint_turns` bound cannot see it: the last-slot one (fixed 2026-09-26, see
+                # `_claim_requested_card_build`) held 22 of 50 toy runs at ~97 % CPU until killed.
+                # Drop a reuse after its first refusal, or set `_spec_force_outer`, so a second
+                # disagreement surfaces as an outer turn instead:
+                # proof:absent:_spec_reuse_refused@looplab/engine/speculation.py
                 self._spec_reusable[key] = result
             else:
                 self._discard_spec_result(result)

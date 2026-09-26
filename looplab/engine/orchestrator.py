@@ -3067,10 +3067,29 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 unmaterialized.add(request_index)
         return unmaterialized
 
-    def _unmaterialized_card_reservations(self, state: RunState) -> int:
-        """Count durable requests not yet represented by a distinct physical Node reservation."""
+    def _unmaterialized_card_reservations(
+        self,
+        state: RunState,
+        *,
+        consume_request: bool = False,
+        request_index: Optional[int] = None,
+    ) -> int:
+        """Count durable requests not yet represented by a distinct physical Node reservation.
 
-        return len(self._unmaterialized_card_request_indices(state))
+        ``consume_request`` leaves out the request whose own slot is being converted right now (the
+        queue position ``request_index`` names, else the head): it already owns that slot and must
+        not be charged twice. ONE spelling for the three counts that charge requests: the strict
+        slot count (`_node_reservation_slots_remaining`), the policy denominator
+        (`_refresh_speculation_budget`) and the pure selector's limit
+        (`speculation.py::_speculative_selection_node_limit`). Only the first credited anything
+        until 2026-09-26; `_refresh_speculation_budget` says what the other two cost.
+        """
+
+        unmaterialized = self._unmaterialized_card_request_indices(state)
+        credited = (request_index if request_index is not None else max(
+            0, min(int(state.card_builds_done), len(state.card_build_requests)),
+        ))
+        return len(unmaterialized) - int(bool(consume_request) and credited in unmaterialized)
 
     def _node_reservation_slots_remaining(
         self,
@@ -3091,16 +3110,18 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         if events is None:
             events = self.store.read_all()
         raw_used = self._node_id_ceiling(events, state)
-        unmaterialized = self._unmaterialized_card_request_indices(state)
-        request_used = len(unmaterialized)
-        credited = (request_index if request_index is not None else max(
-            0, min(int(state.card_builds_done), len(state.card_build_requests)),
-        ))
-        if consume_request and credited in unmaterialized:
-            request_used -= 1
+        request_used = self._unmaterialized_card_reservations(
+            state, consume_request=consume_request, request_index=request_index)
         return max(0, self._hard_node_reservation_limit(state) - raw_used - request_used)
 
-    def _refresh_speculation_budget(self, state: RunState, *, events=None) -> None:
+    def _refresh_speculation_budget(
+        self,
+        state: RunState,
+        *,
+        events=None,
+        consume_request: bool = False,
+        request_index: Optional[int] = None,
+    ) -> None:
         """Refresh the live policy denominator without refunding the hard Node admission ceiling.
 
         Card selection ranks an effective view that excludes tombstoned and currently gated Nodes. The
@@ -3108,12 +3129,27 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         its remaining raw slots into the effective denominator so policy intent keeps the filtered view
         while every slot already reserved — including a failed reservation gap — remains spent. This
         overrides the SpeculationMixin helper so serial and speculative Card admission share one limit.
+
+        ``consume_request`` / ``request_index`` are the speculative CLAIM's
+        (`speculation.py::_claim_requested_card_build`): the request it converts is credited,
+        exactly as the strict slot count credits it, so the claim hands the policy the denominator
+        its ELECTION saw — and the election runs before its own request exists. Charged, the LAST
+        slot could never be claimed: the claim's `policy.max_nodes` fell to
+        `card_budget_used(state)`, so `GreedyTree.next_actions` answered "budget spent" where the
+        election had seen one free slot and a due merge; another Card won, the build closed
+        `stale:not_selected_now`, and the election chose the same Card again. MEASURED 2026-09-26
+        on the toy driver (`max_nodes=12, eval_parallel=2, speculation_depth=2`): at build width 4,
+        22 of 50 runs spun at ~97 % CPU until killed — the kept result made each cycle free, so the
+        Card session never handed back; at width 1, 20 of 40 bought the same build 84-85 times and
+        ended `stuck`, skipping confirmation and the noise floor. With the credit: 0 of 90
+        (`tests/test_last_slot_claim_asks_the_election_question.py`).
         """
         hard_limit = self._hard_node_reservation_limit(state)
         if events is None:
             events = self.store.read_all()
         raw_used = self._node_id_ceiling(events, state)
-        request_used = self._unmaterialized_card_reservations(state)
+        request_used = self._unmaterialized_card_reservations(
+            state, consume_request=consume_request, request_index=request_index)
         effective_used = (
             card_budget_used(state) if self.card_driven_selection else len(state.nodes)
         )
