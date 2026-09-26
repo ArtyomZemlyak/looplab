@@ -3406,8 +3406,8 @@ class RunCommandService:
         `replacement_launch_claimed` bookkeeping reached only one of them (doc 25 SC-07).
 
         Past the record's deadline it launches nothing and settles the record instead — the gate
-        `_spawn_under_claim` asks immediately before its Popen, for the same reason
-        (`_settle_if_expired`).
+        `_spawn_under_claim` asks as its LAST deadline question before its Popen (not an instant
+        before it: its docstring names the window), for the same reason (`_settle_if_expired`).
         """
         if self._settle_if_expired(rd, path, record, str(record.get("id") or "")):
             return False
@@ -3449,8 +3449,8 @@ class RunCommandService:
         two sites (`waiting_for_spawn`, whether a `None` pid may overwrite a known one) stays at the
         call sites where a reader can see the divergence.
 
-        NO POPEN PAST THE RECORD'S DEADLINE, asked HERE — immediately before the lease and the Popen,
-        under the sequencer both callers hold (critic 2026-09-26, driven: with the one check made
+        THE RECORD'S DEADLINE, asked HERE for the last time — ahead of the lease and the Popen, under
+        the sequencer both callers hold (critic 2026-09-26, driven: with the one check made
         before `_admit` waited for the sequencer, a record whose deadline passed during that wait had
         its intent appended and an engine spawned 1.01 s past `absolute_deadline_at`). `_admit` asks
         once it holds the sequencer, but its append and observations still run between that check
@@ -3532,7 +3532,8 @@ class RunCommandService:
         after a finalize, reopened the finished run. The gate is asked where the action is decided:
         by `_admit` once it holds the sequencer (a first check made BEFORE that wait, which can last
         `lock_acquire_timeout`, let an intent be appended past its deadline), and again by the two
-        spawn helpers immediately before a Popen.
+        spawn helpers as their last deadline question before a Popen — the last one ASKED, not an
+        instant before it (`_spawn_under_claim` names the window between them).
 
         FOR EVERY POLICY, not only one that would start a driver — the reading the rest of the
         service supports: the monitor's deadline exit is policy-blind; the UI tells the operator

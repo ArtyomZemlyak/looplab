@@ -576,6 +576,26 @@ def test_code_block_mode_builds_nothing_when_nothing_is_known(tmp_path, monkeypa
     assert built == []
 
 
+def test_code_block_mode_builds_nothing_for_a_measured_parent_whose_first_probe_never_ran(
+        tmp_path, monkeypatch):
+    """The same "block #None" child, from a MEASURED parent: its first probe never got its resource,
+    the pass stopped with nothing measured (ENG2-10), and the guard used to ask only about an
+    unmeasured parent (critic 2026-09-26). The ablate row is still written, with its cost."""
+    engine = _crafted(tmp_path / "blocks", metric=0.5, ablate_code_blocks=True)
+    built = []
+
+    async def _probe(source, workdir, parent_id, generation):
+        return None, 2.0, True
+
+    monkeypatch.setattr(engine, "_segment_blocks", lambda code: [(0, 1), (2, 3)])
+    monkeypatch.setattr(engine, "_timed_ablation_probe", _probe)
+    monkeypatch.setattr(engine, "_build_refine_block_child", lambda *a, **k: built.append(1))
+    anyio.run(engine._ablate, 0)
+    row = next(e.data for e in engine.store.read_all() if e.type == "ablate")
+    assert row["impacts"] == {} and row["top_block"] is None and row["eval_seconds"] == 2.0
+    assert built == []
+
+
 def test_code_block_mode_ranks_only_the_essential_blocks_of_an_unmeasured_parent(
         tmp_path, monkeypatch):
     """With no measured parent a surviving block has no delta, and `None` means ESSENTIAL: only the

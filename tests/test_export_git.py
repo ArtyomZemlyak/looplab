@@ -458,6 +458,8 @@ def _disclosed(extra):
                                                 parent_generations={"1": 0})), {0, 1}),
     # A tombstone: the candidate set changed, so the epoch rotates and the survivor re-opens.
     (("node_tombstoned", 1_790_000_100.0, {"node_ids": [1]}), {0}),
+    # An abort: the aborted incumbent leaves the pool, the survivor re-opens (critic 2026-09-26).
+    (("node_abort", 1_790_000_100.0, {"node_id": 1, "generation": 0}), {0}),
 ])
 def test_every_kind_of_requeue_is_watched_not_just_resume_and_reset(tmp_path, opener, requeued):
     """Critic 2026-09-26: a fix that watched only `resume` and `node_reset` passed every test while
@@ -469,6 +471,24 @@ def test_every_kind_of_requeue_is_watched_not_just_resume_and_reset(tmp_path, op
     for node_id in requeued:
         assert superseded[(node_id, 0)].requeued_at == opener[0]
         assert born[(node_id, 1)] == 1_790_000_100
+
+
+def test_no_row_the_requeue_watch_skips_can_rotate_an_epoch(monkeypatch):
+    """The watch skips `_CANNOT_ROTATE` — every fold-ignored diagnostic and `llm_usage`, the
+    commonest row of a paid tail, which re-built the pool at every row (critic 2026-09-26). Sound
+    only if none of them can re-open an incumbent: watched anyway, after a disclosure, none does."""
+    from looplab.events.types import DIAGNOSTIC_EVENTS, EV_LLM_USAGE
+
+    skipped = git_export._CANNOT_ROTATE
+    assert EV_LLM_USAGE in skipped and DIAGNOSTIC_EVENTS <= skipped
+    monkeypatch.setattr(git_export, "_CANNOT_ROTATE", frozenset())
+    usage = {"usage_id": "u1", "cost": 0.25, "prompt_tokens": 100, "completion_tokens": 20}
+    for etype in sorted(skipped):
+        for data in ({}, usage) if etype == EV_LLM_USAGE else ({},):
+            superseded, _born = git_export.node_lifecycles(
+                [SimpleNamespace(seq=i, ts=ts, type=t, data=d)
+                 for i, (t, ts, d) in enumerate(_disclosed([(etype, 1_790_000_100.0, data)]))])
+            assert superseded == {}, etype
 
 
 def test_watching_the_requeue_pool_copies_nothing_until_a_rotation(monkeypatch):

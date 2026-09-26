@@ -512,15 +512,14 @@ class AblationMixin:
                                          **({"superseded": True} if superseded else {})})
         if superseded or not self._ablation_parent_current(parent_id, generation):
             return
-        if top is None and not measured_base:
-            # An unmeasured parent whose blocks all survived: nothing is known about any block, so
-            # there is nothing to refine — no paid child for "block #None" (critic 2026-09-26). The
-            # `ablate` row above still closes an operator's forced-ablate gate.
+        if top is None:
+            # Nothing is known about any block — an unmeasured parent whose blocks all survived, or
+            # a measured one whose FIRST probe never ran (the ENG2-10 stop above) — so there is
+            # nothing to refine: no paid child for "block #None" (critic 2026-09-26, both parents).
+            # The `ablate` row above still closes an operator's forced-ablate gate.
             return
-        top_src = ""
-        if top is not None:
-            s, e = blocks[int(top)]
-            top_src = "\n".join(code.splitlines()[s:e])[:300]
+        s, e = blocks[int(top)]
+        top_src = "\n".join(code.splitlines()[s:e])[:300]
         # Card identity prefers ``hypothesis`` over the richer rationale and requires that seed
         # statement to be bounded printable text.  ``top_src`` is deliberately multiline code, so
         # using the rationale as the implicit statement makes reservation fail and leaves the

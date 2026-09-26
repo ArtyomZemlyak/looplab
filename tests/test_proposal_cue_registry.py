@@ -250,7 +250,7 @@ def test_every_steering_kind_has_an_operator_label_in_the_card_board():
 
     source = (Path(__file__).resolve().parents[1] / "ui" / "src" / "cardBoardModel.js").read_text(
         encoding="utf-8")
-    body = _js_code(source.split("const STEERING_CUES = {", 1)[1].split("\n}\n", 1)[0])
+    body = _top_level(_js_code(source.split("const STEERING_CUES = {", 1)[1].split("\n}\n", 1)[0]))
     labelled = set(re.findall(r"(?:^|[\s,{])([a-z_]+):\s*'", body))
     assert set(CARD_STEERING_CONTEXT_FIELDS) <= labelled, sorted(
         set(CARD_STEERING_CONTEXT_FIELDS) - labelled)
@@ -288,8 +288,27 @@ def _js_code(text: str) -> str:
     return "".join(out)
 
 
+def _top_level(code: str) -> str:
+    """`code` (already through `_js_code`, so no string holds a bracket) with everything nested in a
+    `{…}`, `[…]` or `(…)` blanked: a key of a nested value (`sweep: {node_frontier: 'y'}`) is not a
+    label of the object this reads, and neither is a key whose value is an object (critic
+    2026-09-26)."""
+    out, depth = [], 0
+    for ch in code:
+        if ch in "{[(":
+            depth += 1
+        elif ch in "}])":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            out.append(ch)
+            continue
+        out.append(" ")
+    return "".join(out)
+
+
 def test_a_commented_out_label_is_not_a_label():
-    code = _js_code("a: 'x', // b: 'y'\n/* c: 'z' */ d: 'http://w', e: 'it\\'s',\n"
-                    "f: \"see g: 'y' there\"\n")
+    code = _top_level(_js_code("a: 'x', // b: 'y'\n/* c: 'z' */ d: 'http://w', e: 'it\\'s',\n"
+                               "f: \"see g: 'y' there\", h: {i: 'y', j: ['k: \\'y\\'']},\n"
+                               "l: fn({m: 'y'}), n: '{'\n"))
     import re
-    assert set(re.findall(r"(?:^|[\s,{])([a-z_]+):\s*'", code)) == {"a", "d", "e"}
+    assert set(re.findall(r"(?:^|[\s,{])([a-z_]+):\s*'", code)) == {"a", "d", "e", "n"}

@@ -99,7 +99,8 @@ from looplab.events.eventstore import integrity_sentence
 from looplab.events.replay import (FoldCursor, flagged_node_ids, hard_flagged_ids,
                                    promotion_eligible_nodes)
 from looplab.events.replay_ctx import event_timestamp
-from looplab.events.types import DIAGNOSTIC_EVENTS, EV_NODE_CREATED, EV_NODE_RESET
+from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_NODE_CREATED, EV_NODE_RESET,
+                                  FENCE_NEUTRAL_EVENTS)
 
 GIT_IDENTITY = "LoopLab <looplab@invalid>"
 SOLUTION_PATH = "solution.py"
@@ -320,6 +321,14 @@ def _lifecycle(node, *, superseded_by=None, requeued: bool = False, generation=N
                       **common)
 
 
+# The rows no epoch rotation can start from, so `node_lifecycles` skips its requeue watch across them:
+# every DIAGNOSTIC type is fold-ignored, and `llm_usage` — folded, the commonest row of a paid run's
+# tail — moves the spend ledger and nothing else (`replay_journals.py::_on_llm_usage`). The union of
+# the two sets, not `FENCE_NEUTRAL_EVENTS` alone: that one keeps `finalize_step` for a finalize
+# fence's own reason, and a fold-ignored row rotates nothing either way.
+_CANNOT_ROTATE: frozenset[str] = DIAGNOSTIC_EVENTS | FENCE_NEUTRAL_EVENTS
+
+
 def node_lifecycles(events) -> tuple[dict, dict]:
     """`(superseded, born)` over the log, through the fold's own handlers (`FoldCursor`), in ONE pass.
 
@@ -358,15 +367,16 @@ def node_lifecycles(events) -> tuple[dict, dict]:
         # The requeue's pool, as the fold held it before this event: the evaluated, live incumbents
         # other than the event's own node (a reset's own node is `ending`'s; a new node was never
         # evaluated), watched only while a disclosure stands — the one state a rotation starts from —
-        # and never across a fold-ignored diagnostic row. Their GENERATIONS only: copying every
-        # lifecycle at every row made a disclosed tail quadratic (critic 2026-09-26, driven: 49 s at
-        # 1000 nodes x 2000 rows). A node the event did re-open is copied after it, from the node
-        # itself: a requeue moves the generation and wipes the evaluation, never the code, files,
-        # idea, operator or parents a superseded commit carries.
+        # and never across a row that cannot rotate an epoch (`_CANNOT_ROTATE`: the fold-ignored
+        # diagnostics and the spend row, the commonest row of a paid tail). Their GENERATIONS only:
+        # copying every lifecycle at every row made a disclosed tail quadratic (critic 2026-09-26,
+        # driven: 49 s at 1000 nodes x 2000 rows). A node the event did re-open is copied after it,
+        # from the node itself: a requeue moves the generation and wipes the evaluation, never the
+        # code, files, idea, operator or parents a superseded commit carries.
         pool = ({other.id: other.attempt for other in raw.nodes.values()
                  if other.id != nid and other.status is NodeStatus.evaluated
                  and not other.tombstoned and other.id not in raw.aborted_nodes}
-                if raw.holdout_evaluated_ids and etype not in DIAGNOSTIC_EVENTS else {})
+                if raw.holdout_evaluated_ids and etype not in _CANNOT_ROTATE else {})
         cursor.extend((event,))
         for other_id, generation in pool.items():
             now = raw.nodes.get(other_id)
