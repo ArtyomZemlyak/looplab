@@ -307,6 +307,10 @@ EV_STAGE_FINISHED = "stage_finished"   # one stage of a multi-stage eval pipelin
 EV_BUDGET_EXTEND = "budget_extend"
 EV_HINT = "hint"
 EV_SET_STRATEGY = "set_strategy"
+# doc 68 68.2: an operator makes a DECLARED extra metric the objective every node is ranked by
+# (`key: null` = the task's own metric again) — folded (`events/replay.py::_on_metric_retarget`)
+# instead of a hand-edited `node_evaluated.metric`, with the history of objectives kept.
+EV_METRIC_RETARGET = "metric_retarget"
 EV_FORCE_CONFIRM = "force_confirm"
 EV_FORCE_ABLATE = "force_ablate"
 EV_FORK = "fork"
@@ -1347,7 +1351,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "best_confirmed": PayloadContract(
         "The champion the run confirmed by re-evaluation, and whether that confirmation was significant.",
         required=("generations", "node_id", "search_epoch", "significant"),
-        optional=("attempt", "generation"),
+        optional=("attempt", "generation", "objective_key"),
     ),
     "budget": PayloadContract(
         "The finalization budget receipt: wall clock, in-process seconds, evaluation seconds and node count.",
@@ -1545,7 +1549,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "confirm_eval": PayloadContract(
         "One seed of a champion-confirmation re-evaluation, with its metric and eval seconds.",
         required=("eval_seconds", "generation", "metric", "node_id", "seed"),
-        optional=("attempt", "error", "protocol_profile", "reason", "superseded"),
+        optional=("attempt", "error", "objective_key", "protocol_profile", "reason", "superseded"),
     ),
     "coverage_snapshot": PayloadContract(
         "The search's coverage snapshot at one node.",
@@ -1854,6 +1858,11 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         required=("args", "invocation_id", "result_chars", "result_sha256", "rows", "tool"),
         optional=("source",),          # written by `data["source"] = …` after the literal
     ),
+    "metric_retarget": PayloadContract(
+        "An operator made a declared extra metric the objective every node is ranked by (`key: null`: the task's own again).",
+        required=("key",),
+        optional=("direction", "goal"),
+    ),
     "node_abort": PayloadContract(
         "The operator aborted one node.",
         required=("node_id",),
@@ -1879,7 +1888,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "node_confirmed": PayloadContract(
         "A node's confirmation statistics over its seeds (mean, std).",
         required=("generation", "mean", "node_id", "seeds", "std"),
-        optional=("attempt", "protocol_mixed", "protocol_profile"),
+        optional=("attempt", "objective_key", "protocol_mixed", "protocol_profile"),
     ),
     "node_created": PayloadContract(
         "A node exists: its idea, the code and files the Developer wrote, and its parents.",

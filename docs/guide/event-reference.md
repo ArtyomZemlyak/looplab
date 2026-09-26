@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-158 event types — 112 folded into `RunState`, 46 diagnostic; 981 declared payload keys; 22 types whose whole payload is stored by the fold.
+159 event types — 113 folded into `RunState`, 46 diagnostic; 987 declared payload keys; 22 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -40,7 +40,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `asha_rank` | diagnostic | One ASHA tick's ranking of a running node against its comparable population. | `comparable_population`, `direction`, `endpoint_underperforming`, `generation`, `intermediate`, `kill_comparable`, `node_id`, `population`, `quantile`, `resource_underperforming`, `underperforming` | `resource`, `resource_key` |
 | `asha_verdict` | diagnostic | The ASHA judge's call on a persistently underperforming node: stop or spare, with confidence. | `comparable_population`, `confidence`, `direction`, `generation`, `intermediate`, `kill`, `node_id`, `quantile`, `reason`, `status`, `stop_decided`, `under_streak` | `confidence_valid`, `kill_superseded_by`, `resource`, `resource_key`, `train_monitor_status` |
 | `belief_admission` | diagnostic | How many researcher-proposed beliefs one proposal turn offered and how many the board admitted. | `admitted`, `blank`, `board_read`, `capped`, `proposed`, `repeated`, `restated`, `shape` | — |
-| `best_confirmed` | folded | The champion the run confirmed by re-evaluation, and whether that confirmation was significant. | `generations`, `node_id`, `search_epoch`, `significant` | `attempt`, `generation` |
+| `best_confirmed` | folded | The champion the run confirmed by re-evaluation, and whether that confirmation was significant. | `generations`, `node_id`, `search_epoch`, `significant` | `attempt`, `generation`, `objective_key` |
 | `budget` | diagnostic | The finalization budget receipt: wall clock, in-process seconds, evaluation seconds and node count. | — | `elapsed_s`, `eval_s`, `finalize_scope`, `finish_seq`, `nodes`, `process_s`, `speculation` |
 | `budget_extend` | folded | An operator raising a live run's node, time, eval-spec (`eval_timeout`) or parallelism budget. | — | `add_nodes`, `eval_parallel`, `eval_timeout`, `llm_parallel`, `max_eval_seconds`, `max_parallel`, `max_seconds`, `parallel_build`, `timeout` |
 | `card_added` | folded | A research Card minted into durable inventory: its id, statement and the action it owns. | — | `action`, `at_node`, `concepts`, `footprint`, `generation`, `id`, `idea`, `node_id`, `ownership_receipt`, `parent_card_id`, `parent_generations`, `parent_id`, `parent_ids`, `rationale`, `scored_against`, `scored_against_empty`, `scored_against_generation`, `source`, `statement`, `steering_context` |
@@ -68,7 +68,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `concept_lens_started` | diagnostic | The durable idempotency claim for one paid concept-lens projection. | — | `generation`, `lens_request_id`, `request_digest` |
 | `concept_tag_edited` | folded | The operator re-tagged one node's concepts; the classifier cadence must not clobber it. | `node_id` | `concepts`, `node_generation` |
 | `confirm_done` | folded | The fulfillment receipt for one `force_confirm` request. | `generation`, `node_id` | `attempt` |
-| `confirm_eval` | folded | One seed of a champion-confirmation re-evaluation, with its metric and eval seconds. | `eval_seconds`, `generation`, `metric`, `node_id`, `seed` | `attempt`, `error`, `protocol_profile`, `reason`, `superseded` |
+| `confirm_eval` | folded | One seed of a champion-confirmation re-evaluation, with its metric and eval seconds. | `eval_seconds`, `generation`, `metric`, `node_id`, `seed` | `attempt`, `error`, `objective_key`, `protocol_profile`, `reason`, `superseded` |
 | `coverage_snapshot` | folded · whole | The search's coverage snapshot at one node. | — | `at_node`, `dominant_theme_frac`, `niches`, `nodes`, `operators`, `projection_token`, `recent_dominant_frac`, `theme_entropy`, `themes`, `top_themes` |
 | `cross_run_prior` | folded · whole | Concepts of this proposal a SIMILAR earlier run already tried, and how those runs went. | — | `concept_source`, `literature`, `matched_concepts`, `prior_runs`, `prior_runs_complete`, `prior_runs_omitted`, `prior_runs_total`, `stance`, `v` |
 | `data_leakage` | folded · whole | The deterministic leakage scan's verdicts over the task's data. | `leak`, `verdicts` | — |
@@ -118,11 +118,12 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `llm_usage` | folded | One sanitized provider-call delta, folded cumulatively into the run's durable ledger. | — | `calls`, `completion_tokens`, `cost`, `priced_calls`, `prompt_tokens`, `total_tokens`, `usage_id` |
 | `log_repaired` | diagnostic | The `looplab repair-log` receipt for a rewritten torn log: what was dropped, and where the backup is. | `backup`, `corrupt_line`, `dropped_lines`, `good_records`, `ts` | — |
 | `memory_read` | diagnostic | One memory / cross-run / skill tool call: the rows it showed and the digest of the exact bytes the role saw. | `args`, `invocation_id`, `result_chars`, `result_sha256`, `rows`, `tool` | `source` |
+| `metric_retarget` | folded | An operator made a declared extra metric the objective every node is ranked by (`key: null`: the task's own again). | `key` | `direction`, `goal` |
 | `node_abort` | folded | The operator aborted one node. | `node_id` | `attempt`, `generation`, `reason` |
 | `node_build_delta` | diagnostic | A build byte-identical to another node's — the duplicate is surfaced, never refused. | `generation`, `identical_to`, `node_id`, `parent_ids`, `source_digest` | — |
 | `node_building` | folded | A node id was reserved and its build started; `node_created` clears the marker. | `node_id`, `operator`, `parent_ids` | `attempt`, `card_build_generation`, `card_id`, `generation`, `speculative` |
 | `node_concepts` | folded | The concept ids one node was tagged with, by which mode, against a named vocabulary. | `at_vocab`, `concepts`, `generation`, `mode`, `node_id` | `at_pending`, `attempt` |
-| `node_confirmed` | folded | A node's confirmation statistics over its seeds (mean, std). | `generation`, `mean`, `node_id`, `seeds`, `std` | `attempt`, `protocol_mixed`, `protocol_profile` |
+| `node_confirmed` | folded | A node's confirmation statistics over its seeds (mean, std). | `generation`, `mean`, `node_id`, `seeds`, `std` | `attempt`, `objective_key`, `protocol_mixed`, `protocol_profile` |
 | `node_created` | folded | A node exists: its idea, the code and files the Developer wrote, and its parents. | `code`, `files`, `idea`, `node_id`, `operator`, `parent_ids` | `attempt`, `card_build_generation`, `deleted`, `eval_start_boundary`, `footprint_finalized`, `forked_from`, `generation`, `materialize_aborted_intent`, `model_arm`, `origin`, `parent_generations`, `research_origin`, `seed`, `speculative` |
 | `node_eval_started` | folded | A node's evaluation was dispatched — the promise `node_created`'s eval-start boundary made. | `generation`, `node_id` | `attempt` |
 | `node_evaluated` | folded | A node's terminal: its metric, the trials behind it, its secondary metrics and any trust violations. | `eval_seconds`, `extra_metrics`, `generation`, `metric`, `node_id`, `stdout_tail`, `trials`, `violations` | `attempt`, `extra_metrics_direction`, `extra_metrics_provenance`, `metric_provenance`, `resource_curve`, `self_metric`, `stderr_tail` |

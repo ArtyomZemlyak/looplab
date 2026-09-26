@@ -187,6 +187,12 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   acknowledged as DEFERRED — its toast says it waits for the search that follows — so it never
   blocks a stop and never starts that search itself; a plain reset the drain serves says so, and a
   drain reset that a search launched in the meantime served instead says that.
+- **Rank the run by another metric** (doc 68 68.2) — the Inspector's **Metrics** tab puts **rank by
+  this** beside every extra metric an `eval.metrics` reader DECLARED (never a self-reported one, a
+  key oriented the other way, or on a run with a holdout): the whole run is re-ranked on it as a
+  `metric_retarget` command, the ★ row then reads `objective · <key>`, a line under the table says
+  since when and on what every earlier decision was taken, and **rank by the task metric** undoes
+  it. Hidden on a historical or review view.
 - **Chat / boss** — an agentic run chat turns one message into a plan of ordered actions, with each
   action narrated in a durable feed (`chat.jsonl`). That feed is capped at **32 MiB** per run; past the
   cap further turns are refused with HTTP 413 so one long-lived conversation cannot fill the disk or

@@ -47,6 +47,11 @@ the diff that justified it:
   baseline/target, pinned on `run_started` only when declared). The diff was 1 insertion and 0
   deletions — `"reference_score": null`, what a log with no declaration folds to — and no shared
   leaf changed.
+* 2026-09-26 — `RunState.objective_key` + `RunState.objective_history` (`core/models.py`, doc 68
+  68.2: the objective an operator `metric_retarget` put in force, and every accepted retarget). The
+  diff was 2 insertions and 0 deletions — `"objective_key": null` and `"objective_history": []`, what
+  a log with no retarget folds to — and no shared leaf changed (`Node.task_metric` is excluded from
+  the dump).
 """
 from __future__ import annotations
 

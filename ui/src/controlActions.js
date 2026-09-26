@@ -126,6 +126,12 @@ export const CONTROL = {
   // treatment (never legacy aliases).
   // {policy?, policy_params?, fidelity?, eval_parallel?, llm_parallel?, llm_lane_limits?, card_scoring?}.
   setStrategy: (rid, strategy) => runCommand(rid, 'set_strategy', { strategy }),
+  // doc 68 68.2: rank every node by a DECLARED extra metric (`key: null` = the task's own metric
+  // again). A folded intent the server validates; `goal` optionally restates the run's goal.
+  retargetMetric: (rid, key, { goal } = {}) => runCommand(rid, 'metric_retarget', {
+    key: typeof key === 'string' && key ? key : null,
+    ...(typeof goal === 'string' && goal.trim() ? { goal: goal.trim() } : {}),
+  }),
   // P2: ask the engine to run Deep Research now (read its disclosed bounded result sample + the web,
   // then write a memo; the compact evidence brief never claims omitted middle results were read).
   deepResearch: (rid) => runCommand(rid, 'deep_research', {}),

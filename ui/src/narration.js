@@ -162,6 +162,12 @@ export const NARR = {
     validate: d => nestedValue(d, 'strategy', 'policy'),
     render: (d) => `operator pinned strategy → ${strategySummary(d.strategy)}`,
   },
+  metric_retarget: {
+    validate: d => Object.hasOwn(d || {}, 'key'),
+    render: (d) => (typeof d.key === 'string' && d.key
+      ? `objective → ${d.key} (operator retarget)` : "objective → the task's own metric")
+      + note(d.goal, 70),
+  },
   deep_research: { render: () => 'deep research requested' },
   research_completed: { render: (d) => `deep research (${d.trigger || 'auto'})${note(d.memo?.summary)}` },
   report_generated: { render: (d) => `run report updated${note(d.content?.headline, 90)}` },
@@ -510,7 +516,7 @@ export const GROUPS = [
   ['research', 'research', 'research_completed research_attempted deep_research hypothesis_added hypothesis_merged lessons_refreshed lessons_distilled cross_run_prior hypothesis_updated lessons_reconciled'],
   ['report', 'report', 'report_generated reflection_note skills_promoted report_refresh_failed'],
   ['trust', 'trust', 'reward_hack_suspected data_leakage spec_drift novelty_rejected drift_unavailable workspace_changed novelty_graded train_monitor_alert asha_rank asha_verdict'],
-  ['control', 'actions', 'hint pause resume run_abort node_abort fork promote annotation inject_node force_confirm force_ablate approval_requested approval_granted budget_extend run_reopened spec_approved spec_approval_requested spec_proposed command_ack fork_done inject_done node_reset node_tombstoned concept_tag_edited card_reprioritized card_edited card_resource_pinned card_dropped card_reopened inject_failed comment_created comment_edited comment_resolution_changed trust_gate_changed restart'],
+  ['control', 'actions', 'hint metric_retarget pause resume run_abort node_abort fork promote annotation inject_node force_confirm force_ablate approval_requested approval_granted budget_extend run_reopened spec_approved spec_approval_requested spec_proposed command_ack fork_done inject_done node_reset node_tombstoned concept_tag_edited card_reprioritized card_edited card_resource_pinned card_dropped card_reopened inject_failed comment_created comment_edited comment_resolution_changed trust_gate_changed restart'],
   ['lifecycle', 'lifecycle', 'run_started run_finished llm_cost budget data_profiled data_provenance host_grading diversity_archive setup_started setup_step setup_finished workspace_seeded run_setup_started run_setup_finished env_changed log_repaired card_auto_dropped phase_progress'],
 ]
 export const TYPE2GROUP = Object.fromEntries(GROUPS.flatMap(([group, , types]) =>

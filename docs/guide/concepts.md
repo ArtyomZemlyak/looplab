@@ -410,6 +410,22 @@ inject, a strategy, a confirm) is acked `deferred` and its command settles `succ
 `deferred_to_next_search`: its durable queue waits for the search that follows, and it neither holds
 the run's one in-flight driver command (which refused every stop) nor starts that search itself.
 
+A `metric_retarget` (`{"key": "<extra metric>", "goal": "…"}`, doc 68 68.2) makes a DECLARED extra
+metric — one an `eval.metrics` reader recorded, never a number the candidate printed for itself — the
+objective every node is ranked by, and `"key": null` ranks by the task's own metric again. It is a
+folded intent: no engine is needed, a stopped run is re-ranked the moment it lands and a live one at
+its next fold (`events/replay.py::_on_metric_retarget`). Each node keeps its task metric beside the
+objective's; a node that never recorded the key is unranked; everything MEASURED on the old objective
+stops standing — confirmation means and their per-seed memo, verifier scores, the completion
+certificate — so the confirm phase measures again, on the new key, and stamps every row with the key
+it measured (`objective_key`). A `goal` restates `RunState.goal` (the launch goal stays in
+`run_started` and in the history row), and `RunState.objective_history` keeps every retarget, so a
+decision taken before one reads as taken on the objective of its day. It is refused (a `rejected`
+record, nothing appended) for a direction flip — the requested one, or a key the declaration orients
+the other way — a run with a holdout (host-graded, one already scored, or a withheld scorer
+declared: its unseen number is the task's metric), the objective already in force, and a key no
+evaluated node recorded on the declared channel; the Metrics tab offers only what it would accept.
+
 An idempotency key is scoped to one payload. A retry with the same key and payload returns the same
 command, so a lost HTTP response cannot append the control event or start the engine twice; the same
 key with a different payload is rejected. A failed/timed-out command whose intent is already durable

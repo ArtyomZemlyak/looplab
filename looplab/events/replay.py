@@ -25,7 +25,7 @@ from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, finite_metric,
 from looplab.core.headroom import normalized_reference
 from looplab.core.jsonutil import bounded_int, valid_digest_ref
 from looplab.core.models import (Event, Idea, Node, NodeStatus, RunState, Trial,
-                     coerce_node_id as _coerce_node_id,
+                     coerce_node_id as _coerce_node_id, objective_value, row_objective,
                      EXTRA_METRIC_DECLARED, normalize_extra_metric_backfill,
                      normalize_extra_metric_channels, normalize_extra_metric_directions, normalize_extra_metrics,
                      normalize_researcher_footprint,
@@ -90,6 +90,7 @@ from looplab.events.replay_requests import HANDLERS as _REQUEST_HANDLERS
 from looplab.events.replay_requests import (  # noqa: F401 — re-export
     _advance_request_cursor, _on_force_ablate, _on_force_confirm, _queue_forced_request)
 from looplab.events.types import (
+    EV_METRIC_RETARGET,
     EV_ABLATE, EV_AGENT_VALIDATED, EV_APPROVAL_GRANTED,
     EV_APPROVAL_REQUESTED,
     EV_CONFIRM_EVAL,
@@ -711,6 +712,10 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
                 except Exception:  # noqa: BLE001 — a malformed trial row is skipped, never allowed to break the fold
                     continue
             n.trials = trials
+            # doc 68 68.2: `metric` is the OBJECTIVE's value; the task's own number stays beside it,
+            # so a retarget folded before or after this terminal ranks it on one key.
+            n.task_metric = n.metric
+            _apply_objective(st, n)
             _charge_terminal_cost(st, n, d, ctx)
 
 
@@ -1005,6 +1010,7 @@ def _requeue_partition_bound_results(st: RunState, *, fresh_node_ids: set[int]) 
         n.status = NodeStatus.pending
         n.terminal_event_seq = None
         n.metric = None
+        n.task_metric = None
         n.error = ""
         n.error_reason = ""
         n.triage_rationale = ""
@@ -1165,7 +1171,9 @@ def _on_score_metrics_backfilled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx
     """
     node_id = _coerce_node_id(d)
     node = st.nodes.get(node_id) if node_id is not None else None
-    if node is None or node.metric is None:
+    # The TASK's metric, not the objective's: under a retarget a node without the objective key has
+    # no `metric`, and is exactly the node whose declared extras a backfill may recover (68.2).
+    if node is None or node.task_metric is None:
         return
     # THE LIFECYCLE IT WAS READ FOR (review 2026-09-22, EVT-09). `generation` is a REQUIRED key of
     # this row and nothing read it: a backfill planned against lifecycle 0 and applied after a reset
@@ -1204,6 +1212,9 @@ def _on_score_metrics_backfilled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx
     })
     # ...and NOT `extra_metrics_direction`. See the docstring: the axis stays unorientable because
     # nothing in this run ever said which way is better about it.
+    # Recovered DECLARED values rank on a retargeted objective like live ones (doc 68 68.2); the
+    # backfill marker above is what says they were recovered.
+    _apply_objective(st, node)
 
 
 def _on_applied_params_backfilled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -1347,6 +1358,7 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         n.status = NodeStatus.pending
         n.terminal_event_seq = None
         n.metric = None
+        n.task_metric = None
         n.error = ""
         n.error_reason = ""
         n.triage_rationale = ""   # the crash-triage verdict describes the NOW-abandoned lifecycle
@@ -1613,11 +1625,69 @@ def _on_confirm_eval(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     _reason = d.get("reason")
     retryable_infrastructure = (isinstance(_reason, str)
                                 and _reason in {"gpu_unavailable", "gpu_unpinnable"})
-    if keyed and not retryable_infrastructure:               # per-seed resume memo (#0)
+    # …and only a seed measured on the CURRENT objective is a memo entry (doc 68 68.2): after a
+    # retarget the confirm phase measures again, on the new key.
+    if (keyed and not retryable_infrastructure
+            and row_objective(d.get("objective_key")) == st.objective_key):
         st.confirm_seed_results.setdefault(nid, {})[seed] = _finite_metric(d.get("metric"))
+
+def _apply_objective(st: RunState, n) -> None:
+    """`n.metric` on the run's OBJECTIVE: the task's own metric, or — under an operator retarget
+    (doc 68 68.2) — its DECLARED extra metric `st.objective_key` (`core/models.py::objective_value`),
+    None where it has none: unranked, never ranked on another scale."""
+    n.metric = (n.task_metric if st.objective_key is None
+                else objective_value(n.extra_metrics, n.extra_metrics_provenance, st.objective_key,
+                                     n.extra_metrics_direction, st.direction))
+
+
+def _on_metric_retarget(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    """An operator made a declared extra metric the objective (doc 68 68.2) — an event, where the
+    incident behind it edited `node_evaluated.metric` and `run_started.goal` in the log by hand.
+
+    Every node is re-ranked on the new key, and everything MEASURED on the old one stops standing:
+    confirmation means and their per-seed memo (the confirm phase measures again, on the new key),
+    verifier scores, and the completion certificates. The task's own number stays on each node
+    (`task_metric`), so `key: null` restores it. The history of objectives is kept, so a decision
+    taken before a retarget reads as taken on the objective of its day.
+
+    IGNORED, never half-applied: a malformed key; a `direction` other than the run's — a flip
+    reverses the standing of every past decision and is a new run, not a retarget; a run with a
+    holdout (host-graded, or one already scored), whose unseen number is the task's own metric; and
+    a key already in force (a duplicate row). `serve/control_validation.py` refuses the same cases
+    before anything is appended — and, as a usability rule the fold does not need, a key no evaluated
+    node recorded on the declared channel, and a withheld scorer the task declares."""
+    key = d.get("key")
+    if key is not None and not (isinstance(key, str) and key.strip() and len(key) <= 256):
+        return
+    key = key.strip() if isinstance(key, str) else None
+    direction = d.get("direction")
+    if direction is not None and direction != st.direction:
+        return
+    if st.host_grading or st.holdout_evaluated_ids or key == st.objective_key:
+        return
+    goal = d.get("goal")
+    goal = goal.strip()[:4000] if isinstance(goal, str) and goal.strip() else None
+    st.objective_history.append({"seq": e.seq, "key": key, "previous": st.objective_key,
+                                 **({"goal": goal, "previous_goal": st.goal} if goal else {})})
+    st.objective_key = key
+    if goal:
+        # The RESTATED goal is the run's goal from here on — every prompt and report reads
+        # `st.goal` — and the one it replaces is kept in the history row; the launch record itself
+        # stays `run_started.goal`, which the incident edited in place.
+        st.goal = goal
+    for n in st.nodes.values():
+        _apply_objective(st, n)
+        n.confirmed_mean = n.confirmed_std = n.confirmed_seeds = None
+        n.confirmed_ruler = None
+        n.verifier_score = None
+    st.confirm_seed_results.clear()
+    _invalidate_completion_certificates(st, ctx)
+
 
 def _on_node_confirmed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     n = _node_for_event(st, d)
+    if row_objective(d.get("objective_key")) != st.objective_key:
+        return          # a mean on another objective is not this run's ranking evidence (68.2)
     if (n is not None and n.status is NodeStatus.evaluated
             and n.id not in st.aborted_nodes and not n.tombstoned
             and _generation_matches(n, d, legacy_attempt=True)):
@@ -1746,6 +1816,11 @@ def _on_holdout_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
         if cost_key not in ctx.charged_holdout_keys:
             ctx.charged_holdout_keys.add(cost_key)
             _charge_eval_seconds(st, "holdout", d.get("eval_seconds"))
+    # A holdout is scored on the TASK's own metric, never on a retargeted objective (doc 68 68.2):
+    # the engine runs none while one is in force (`engine/holdout.py`), and a row from a pass that
+    # began before the retarget is another scale's number — its compute is charged above, nothing more.
+    if st.objective_key is not None:
+        return
     if (n is None or n.status is not NodeStatus.evaluated
             or n.id in st.aborted_nodes or n.tombstoned):
         return
@@ -2361,6 +2436,7 @@ def _on_run_width_settled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
 # `_HANDLERS` below is the union `fold` dispatches through.
 _OWN_HANDLERS = {
     EV_RUN_STARTED: _on_run_started,
+    EV_METRIC_RETARGET: _on_metric_retarget,
     EV_NODE_BUILDING: _on_node_building,
     EV_NODE_CREATED: _on_node_created,
     EV_NODE_EVAL_STARTED: _on_node_eval_started,

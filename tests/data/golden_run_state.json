@@ -858,6 +858,8 @@
   },
   "novelty_events": [],
   "novelty_grades": [],
+  "objective_history": [],
+  "objective_key": null,
   "pause_generation": null,
   "pause_node_id": null,
   "pause_reason": null,

@@ -50,6 +50,8 @@ export const STORED_ERROR_CODES = new Set([
   'invalid_run_generation', 'run_generation_changed', 'run_generation_unavailable',
   'config_snapshot_incompatible', 'config_snapshot_invalid',
   'drain_refused', 'drain_needs_stopped_run',
+  'retarget_key_not_declared', 'retarget_direction_flip', 'retarget_with_holdout',
+  'retarget_unchanged',
 ])
 // The two refusals the server answers at admission, nothing appended, when the driver it would start
 // could not read the run's config.snapshot.json (`serve/engine_proc.py::spawn_snapshot_refusal`,
@@ -92,12 +94,33 @@ const DRAIN_REFUSAL_COPY = Object.freeze({
       + 'it to rescore inside the running search.',
   ]),
 })
+// A metric_retarget the server refused (doc 68 68.2, `serve/control_validation.py::
+// _normalize_metric_retarget`): nothing was appended, and "Refresh state…" is not the remedy for any.
+const RETARGET_REFUSAL_COPY = Object.freeze({
+  retarget_key_not_declared: Object.freeze([
+    "No evaluated node recorded that metric on the operator's declared channel",
+    'Pick a metric your eval.metrics readers declare — self-reported values cannot rank a run.',
+  ]),
+  retarget_direction_flip: Object.freeze([
+    'That metric is optimized the other way from this run',
+    'A retarget keeps the direction; start a new run to optimize the other way.',
+  ]),
+  retarget_with_holdout: Object.freeze([
+    'This run has a holdout scored on its own metric',
+    'Its unseen number cannot rank another objective; start a new run for the new target.',
+  ]),
+  retarget_unchanged: Object.freeze([
+    'The run already ranks by that metric',
+    'Nothing to change.',
+  ]),
+})
 // Restored command records intentionally contain only a stable code, never server-authored text.
 // Generate their copy from that code instead of eagerly shipping a large near-duplicate dictionary.
 const storedErrorCopy = code => {
   if (Object.hasOwn(CONFIG_SNAPSHOT_REFUSAL_COPY, code)) return CONFIG_SNAPSHOT_REFUSAL_COPY[code]
   if (Object.hasOwn(DEADLINE_SETTLE_COPY, code)) return DEADLINE_SETTLE_COPY[code]
   if (Object.hasOwn(DRAIN_REFUSAL_COPY, code)) return DRAIN_REFUSAL_COPY[code]
+  if (Object.hasOwn(RETARGET_REFUSAL_COPY, code)) return RETARGET_REFUSAL_COPY[code]
   const title = code === 'engine_failed' ? 'The run engine reported a failure'
     : code.replaceAll('_', ' ')
   let remediation = 'Refresh state before acting again.'

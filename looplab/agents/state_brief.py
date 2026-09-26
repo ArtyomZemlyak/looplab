@@ -488,6 +488,13 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
     from looplab.events.digest import fmt_num, node_metric, unscored_metric_clause
     best = state.best()
     lines = [f"Goal: {state.goal}", f"Optimize direction: {state.direction}."]
+    if state.objective_key:
+        # doc 68 68.2: an operator RETARGET — every metric this brief prints is the declared extra
+        # metric below, not the task's own; the line exists only while one is in force, so a run
+        # without one reads the historical bytes.
+        lines.append(f"Ranked by: {state.objective_key} — the operator made this declared metric "
+                     "the objective; every metric below is its value, and a node that never "
+                     "recorded it is unranked.")
     # THE COORDINATES THAT RAN, not the ones that were asked for. `Idea.params` is a PROPOSAL, and
     # under `params_style: "none"` the Developer realises it by editing the repo — so a repair that
     # fits a run into memory moves the numbers while the proposal stays frozen. These two lines fed

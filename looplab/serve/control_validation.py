@@ -58,9 +58,9 @@ from looplab.events.types import (
     EV_CARD_RESOURCE_PINNED,
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED, EV_CONCEPT_TAG_EDITED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
-    EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_NODE_ABORT, EV_NODE_RESET, EV_PAUSE, EV_PROMOTE,
-    EV_RESTART, EV_RESUME, EV_RUN_ABORT, EV_RUN_CONCEPTS, EV_RUN_REOPENED, EV_SET_STRATEGY,
-    EV_SPEC_APPROVED)
+    EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_METRIC_RETARGET, EV_NODE_ABORT, EV_NODE_RESET,
+    EV_PAUSE, EV_PROMOTE, EV_RESTART, EV_RESUME, EV_RUN_ABORT, EV_RUN_CONCEPTS, EV_RUN_REOPENED,
+    EV_SET_STRATEGY, EV_SPEC_APPROVED)
 from looplab.serve.engine_proc import _resolve_task_file
 # `EnginePolicy` is DEFINED in `serve/protocol.py` (2026-09-26) and imported here as the same class:
 # its values are persisted on every durable command record (`engine_policy`), and `looplab stop
@@ -675,6 +675,92 @@ def _normalize_set_strategy(ctx: _ControlIntake) -> dict:
                  "or a canonical concurrency allocation")
     data["strategy"] = clean_strategy
     return data
+
+
+# ------------------------------------------------------------------ metric_retarget
+
+def _declares_withheld_scorer(rd: Path) -> bool:
+    """Whether the run's task snapshot declares a WITHHELD scorer (`eval.holdout_scorer`). Best
+    effort: an unreadable snapshot declares nothing here, and the engine still runs no holdout under a
+    retargeted objective (`engine/holdout.py::HoldoutGrader.holdout_pending`)."""
+    from looplab.adapters.task_schema import normalize_task
+    try:
+        data = json.loads((rd / "task.snapshot.json").read_text(encoding="utf-8"))
+        spec = normalize_task(data).get("eval") if isinstance(data, dict) else None
+    except (OSError, ValueError, TypeError):    # absent, undecodable, or no task the schema reads
+        return False
+    scorer = spec.get("holdout_scorer") if isinstance(spec, dict) else None
+    return isinstance(scorer, dict) and bool(scorer.get("command"))
+
+
+def _normalize_metric_retarget(ctx: _ControlIntake) -> dict:
+    """`metric_retarget` (doc 68 68.2): make a DECLARED extra metric the objective every node is
+    ranked by, or `key: null` to rank by the task's own metric again. Refused here for the cases the
+    fold ignores (`events/replay.py::_on_metric_retarget`), so an accepted command is one it applies:
+
+    - a `direction` other than the run's: a flip reverses the standing of every past decision and
+      the dispatcher's own orientation (`task.direction`) — a new run, not a retarget;
+    - a run with a holdout (host-graded, one already scored, or a withheld scorer declared): its
+      unseen number is the TASK's metric, which a retargeted objective would be ranked against;
+    - the objective already in force, and a key no evaluated node recorded on the operator's
+      DECLARED channel (`core/models.py::objective_value`) — ranking on it would unrank every node.
+    """
+    from looplab.core.models import EXTRA_METRIC_DECLARED, objective_value
+    data = ctx.data
+    if "key" not in data:
+        raise HTTPException(400, "metric_retarget needs `key`: a declared extra metric, or null")
+    key = None if data.get("key") is None else ctx.text("key", limit=256)
+    state = ctx.state()
+    direction = data.get("direction")
+    if direction is not None and direction != state.direction:
+        raise HTTPException(409, {
+            "code": "retarget_direction_flip",
+            "message": f"this run {'maximizes' if state.direction == 'max' else 'minimizes'} its "
+                       "objective and a retarget keeps the direction: a flip is a new run",
+        })
+    if state.host_grading or state.holdout_evaluated_ids or _declares_withheld_scorer(ctx.rd):
+        raise HTTPException(409, {
+            "code": "retarget_with_holdout",
+            "message": "this run has a holdout, and its unseen number is the task's own metric — "
+                       "a retargeted objective would be ranked against another scale",
+        })
+    if key == state.objective_key:
+        raise HTTPException(409, {
+            "code": "retarget_unchanged",
+            "message": "the run already ranks by "
+                       + (repr(key) if key is not None else "the task's own metric"),
+        })
+    against = sorted({n.extra_metrics_direction.get(key) for n in state.evaluated_nodes()}
+                     - {None, state.direction})
+    if key is not None and against:
+        raise HTTPException(409, {
+            "code": "retarget_direction_flip",
+            "message": f"the operator's declaration orients {key!r} as {against[0]!r} and this run "
+                       f"is {state.direction!r}: a retarget keeps the direction — a flip is a new run",
+        })
+    if key is not None and not any(
+            objective_value(n.extra_metrics, n.extra_metrics_provenance, key,
+                            n.extra_metrics_direction, state.direction) is not None
+            for n in state.evaluated_nodes()):
+        declared = sorted({name for n in state.evaluated_nodes()
+                           for name, channel in (n.extra_metrics_provenance or {}).items()
+                           if channel == EXTRA_METRIC_DECLARED})
+        # The keys that COULD be the objective ride in the message: the durable command record
+        # keeps code, message and remediation, nothing else.
+        named = ", ".join(repr(k) for k in declared[:16]) + (" …" if len(declared) > 16 else "")
+        raise HTTPException(422, {
+            "code": "retarget_key_not_declared",
+            "message": f"no evaluated node recorded {key!r} on the operator's declared channel "
+                       "(`eval.metrics`), so every node would be unranked; declared: "
+                       + (named or "none"),
+        })
+    clean: dict = {"key": key}
+    if direction is not None:
+        clean["direction"] = direction
+    goal = ctx.text("goal", required=False, limit=4000)
+    if goal:
+        clean["goal"] = goal
+    return clean
 
 
 # ------------------------------------------------------------------ inject_node
@@ -1581,6 +1667,7 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
          "eval_parallel", "llm_parallel", "max_parallel", "parallel_build"}),
     EV_HINT: frozenset({"text", "replace"}),
     EV_SET_STRATEGY: frozenset({"strategy"}),
+    EV_METRIC_RETARGET: frozenset({"key", "direction", "goal"}),
     EV_FORCE_CONFIRM: frozenset({"node_id", "generation"}),
     EV_FORCE_ABLATE: frozenset({"node_id", "generation"}),
     EV_FORK: frozenset({"from_node_id", "generation"}),
@@ -1631,6 +1718,7 @@ _CONTROL_NORMALIZERS: dict[str, Optional[Callable]] = {
     EV_BUDGET_EXTEND: _normalize_budget_extend,
     EV_HINT: _normalize_hint,
     EV_SET_STRATEGY: _normalize_set_strategy,
+    EV_METRIC_RETARGET: _normalize_metric_retarget,
     EV_FORCE_CONFIRM: _normalize_node_target,
     EV_FORCE_ABLATE: _normalize_node_target,
     EV_FORK: _normalize_fork,
@@ -1671,6 +1759,7 @@ _CONTROL_PRECONDITIONS: dict[str, Optional[Callable]] = {
     EV_BUDGET_EXTEND: None,
     EV_HINT: None,
     EV_SET_STRATEGY: None,
+    EV_METRIC_RETARGET: None,
     EV_FORCE_CONFIRM: None,
     EV_FORCE_ABLATE: None,
     EV_FORK: None,
@@ -1712,6 +1801,7 @@ _CONTROL_DECISIONS: dict[str, Optional[Callable]] = {
     EV_BUDGET_EXTEND: None,
     EV_HINT: None,
     EV_SET_STRATEGY: None,
+    EV_METRIC_RETARGET: None,
     EV_FORCE_CONFIRM: None,
     EV_FORCE_ABLATE: None,
     EV_FORK: None,
@@ -1768,6 +1858,9 @@ _CONTROL_POLICIES: dict[str, tuple[EnginePolicy, str]] = {
     EV_BUDGET_EXTEND: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
     EV_HINT: (EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_SET_STRATEGY: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
+    # A folded intent, like a hint: the fold re-ranks every node the moment it lands, a live engine
+    # reads it at its next fold, and a stopped run needs no engine to be re-ranked (doc 68 68.2).
+    EV_METRIC_RETARGET: (EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_FORCE_CONFIRM: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
     EV_FORCE_ABLATE: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
     EV_FORK: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),

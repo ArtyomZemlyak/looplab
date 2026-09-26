@@ -23,7 +23,7 @@ from __future__ import annotations
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, SearchFitness, is_usable_metric,
                                   verifier_evidence_digest)
 from looplab.core.models import (Event, Node, NodeStatus, RunState,
-                                 coerce_node_id as _coerce_node_id)
+                                 coerce_node_id as _coerce_node_id, row_objective)
 from looplab.events.replay_ctx import (_MISSING, _FoldCtx, _event_generation, _generation_matches,
                                        _node_for_event)
 from looplab.events.types import (EV_BEST_CONFIRMED, EV_NODE_VERIFIED, EV_REWARD_HACK_SUSPECTED,
@@ -306,6 +306,10 @@ def _on_best_confirmed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
     if "significant" in d and not isinstance(d.get("significant"), bool):
         return
     if "search_epoch" in d and d.get("search_epoch") != st.search_epoch:
+        return
+    # …and to the OBJECTIVE it ranked on (doc 68 68.2): a pass that began before a retarget certifies
+    # a winner on the old key, and closing the gate with it would keep the new objective unconfirmed.
+    if row_objective(d.get("objective_key")) != st.objective_key:
         return
     if not _generation_map_matches(st, d):
         return

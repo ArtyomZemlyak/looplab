@@ -54,9 +54,9 @@ from looplab.events.types import (
     EV_CARD_RESOURCE_PINNED, EV_COMMAND_ACK,
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED, EV_CONCEPT_TAG_EDITED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
-    EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_NODE_ABORT, EV_NODE_RESET, EV_PAUSE, EV_PROMOTE,
-    EV_RESTART, EV_RESUME, EV_RUN_ABORT, EV_RUN_CONCEPTS, EV_RUN_REOPENED, EV_SET_STRATEGY,
-    EV_SPEC_APPROVED)
+    EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_METRIC_RETARGET, EV_NODE_ABORT, EV_NODE_RESET,
+    EV_PAUSE, EV_PROMOTE, EV_RESTART, EV_RESUME, EV_RUN_ABORT, EV_RUN_CONCEPTS, EV_RUN_REOPENED,
+    EV_SET_STRATEGY, EV_SPEC_APPROVED)
 
 # ---- run-generation command precondition ---------------------------------------------------------
 # The read model exposes the generation currently occupying a reusable run id. A brand-new durable
@@ -227,6 +227,7 @@ CONTROL_EVENTS = frozenset({
     EV_FORCE_CONFIRM, EV_FORCE_ABLATE, EV_FORK, EV_ANNOTATION, EV_PROMOTE,
     EV_APPROVAL_GRANTED, EV_SPEC_APPROVED, EV_INJECT_NODE, EV_RUN_REOPENED,
     EV_SET_STRATEGY,   # A7: operator pins/overrides the Strategist's choice (HITL parity)
+    EV_METRIC_RETARGET,  # doc 68 68.2: operator makes a DECLARED extra metric the objective
     EV_DEEP_RESEARCH,  # P2: operator asks the engine to run the Deep-Research stage now
     EV_HYPOTHESIS_ADDED,    # P1: a human registers a hypothesis on the board (open question to test)
     EV_HYPOTHESIS_UPDATED,  # P1: a human abandons a hypothesis line (status=abandoned)

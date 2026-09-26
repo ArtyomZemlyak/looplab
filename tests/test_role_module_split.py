@@ -299,8 +299,13 @@ def test_roles_is_no_longer_a_god_module():
     cap moves to measured + 1.
     Merged 2026-09-26 with the substituted-build return above: `state_brief.py` carries both
     (593 + its 8) — measured 601, cap 602.
+
+    `state_brief.py` 601 -> 608 on 2026-09-26 (doc 68 68.2, an operator `metric_retarget`): the
+    brief is the ONE place the Researcher reads which number every node is ranked by, so the
+    `Ranked by:` line — present only while a retarget is in force — lives beside the `Goal:` line it
+    qualifies. The cap moves to measured + 1.
     """
-    caps = {"agents/roles.py": 876, "agents/role_prompts.py": 344, "agents/state_brief.py": 602,
+    caps = {"agents/roles.py": 876, "agents/role_prompts.py": 344, "agents/state_brief.py": 609,
             "agents/role_wrappers.py": 467, "agents/toy_roles.py": 128}
     sizes = {rel: len((_PKG / rel).read_text(encoding="utf-8").splitlines()) for rel in caps}
     over = {rel: (n, caps[rel]) for rel, n in sizes.items() if n >= caps[rel]}

@@ -22,7 +22,7 @@ import time
 
 import anyio
 
-from looplab.core.models import NodeStatus, RunState
+from looplab.core.models import NodeStatus, RunState, objective_value
 from looplab.engine import comparability
 # Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
 from looplab.engine.shared import engine_fold as fold
@@ -34,6 +34,12 @@ from looplab.trust.cv import cv_summary
 
 
 _CONFIRM_RETRYABLE = object()
+# "Any objective": the snapshot check a caller makes when it measures nothing a retarget retires.
+_ANY_OBJECTIVE = object()
+# Each confirmation row below carries `objective_key` — the key it was measured on (doc 68 68.2) —
+# spelled inline so the payload scan reads it, and ABSENT for the task's own metric, so every row
+# written without a retarget is the historical bytes; the fold counts a stamped row only while that
+# objective is in force (`core/models.py::row_objective`).
 
 # Guardrails for an unsatisfiable durable GPU pin during confirmation (a CPU-only resume, driver loss,
 # or an unenforceable Docker `--gpus` pin). `run()`'s empty-actions branch re-enters `_confirm_phase`
@@ -63,11 +69,15 @@ class ConfirmPhaseMixin:
                 and node.status is NodeStatus.evaluated and not node.tombstoned
                 and node_id not in state.aborted_nodes)
 
-    def _confirmation_snapshot_current(self, generations: dict[str, int]) -> bool:
+    def _confirmation_snapshot_current(self, generations: dict[str, int],
+                                       objective=_ANY_OBJECTIVE) -> bool:
         state = fold(self.store.read_all())
         current = {str(node.id): node.attempt for node in state.nodes.values()
                    if node.id not in state.aborted_nodes and not node.tombstoned}
-        return current == generations
+        # …and the OBJECTIVE the pass ranks and measures on (doc 68 68.2): a retarget mid-pass
+        # retires it, as a reset does — its seeds were measured on the old key.
+        return current == generations and (objective is _ANY_OBJECTIVE
+                                           or state.objective_key == objective)
 
     def _confirm_refusal_recorded(self, node_id: int, generation: int, seed: int,
                                   reason: str) -> bool:
@@ -114,7 +124,7 @@ class ConfirmPhaseMixin:
         state = fold(self.store.read_all())
         return state.halted
 
-    async def _run_confirm_seed(self, nd, s: int):
+    async def _run_confirm_seed(self, nd, s: int, objective=None):
         """One confirm-seed evaluation of node `nd` under seed `s`: materialize a fresh confirm
         workdir, run the FULL-profile eval, and record the `confirm_eval` (+ any `spec_drift`)
         events — the per-seed body `_confirm_phase` and `_confirm_node` each ran verbatim before
@@ -224,7 +234,8 @@ class ConfirmPhaseMixin:
                             self.store.append(EV_CONFIRM_EVAL, {
                                 "node_id": nd.id, "generation": generation, "seed": s,
                                 "eval_seconds": 0.0, "metric": None,
-                                "reason": "gpu_unavailable", "error": str(exc)[:400]})
+                                "reason": "gpu_unavailable", "error": str(exc)[:400],
+                                **({"objective_key": objective} if objective else {})})
                 finally:
                     self._release_gpus(reservation.get("gpu_ids"))
                 return _CONFIRM_RETRYABLE
@@ -260,7 +271,8 @@ class ConfirmPhaseMixin:
                                         "node_id": nd.id, "generation": generation, "seed": s,
                                         "eval_seconds": round(time.time() - _t0, 3), "metric": None,
                                         "reason": "gpu_unpinnable", "error": str(exc)[:400],
-                                        **({"superseded": True} if not still_current else {})})
+                                        **({"superseded": True} if not still_current else {}),
+                                        **({"objective_key": objective} if objective else {})})
                         return _CONFIRM_RETRYABLE
                     cancel.set()
                     tg.cancel_scope.cancel()
@@ -271,7 +283,13 @@ class ConfirmPhaseMixin:
             # satisfiable again, so clear any accumulated consecutive-refusal streak.
             self._confirm_refusal_streak = 0
             current = self._confirmation_node_current(nd.id, generation)
-            valid = (current and res.metric is not None
+            # THE OBJECTIVE's value (doc 68 68.2): under a retarget a seed measures the declared
+            # extra metric the run ranks by, on the same channel rule as the fold's re-rank
+            # (`core/models.py::objective_value`); otherwise the task's own metric, as ever.
+            value = (res.metric if objective is None else objective_value(
+                res.extra_metrics, res.extra_metrics_provenance, objective,
+                res.extra_metrics_direction, self.task.direction))
+            valid = (current and value is not None
                      and res.exit_code == 0 and not res.timed_out)
             # The RULER this seed ran on, the digest a node's own terminal records beside its metric:
             # confirm asks for `full` by name, and only the record says what that resolved to — the
@@ -282,14 +300,15 @@ class ConfirmPhaseMixin:
                 self.store.append(EV_CONFIRM_EVAL, {
                     "node_id": nd.id, "generation": generation, "seed": s,
                     "eval_seconds": round(time.time() - _t0, 3),
-                    "metric": res.metric if valid else None,
+                    "metric": value if valid else None,
                     **({"protocol_profile": ruler} if ruler else {}),
-                    **({"superseded": True} if not current else {})})
+                    **({"superseded": True} if not current else {}),
+                    **({"objective_key": objective} if objective else {})})
                 if current and res.drift is not None:  # Phase 4: drop + audit drifted seeds
                     self.store.append(EV_SPEC_DRIFT,
                                       {"node_id": nd.id, "seed": s, **res.drift,
                                        "generation": generation})
-        return res.metric if valid else None
+        return value if valid else None
 
     async def _confirm_phase(self, state: RunState) -> None:
         """Re-run the top-k evaluated nodes under `confirm_seeds` seeds. Selection picks
@@ -302,6 +321,8 @@ class ConfirmPhaseMixin:
         # Only confirm BREEDABLE leaders (#5, doc 14 §2.2): spending the expensive full-profile seed
         # budget on a constraint-violating OR trust-gated node is wasted — a gate-flagged cheater can
         # never be promoted to best, so it must not take a confirm slot from an honest node either.
+        # The objective the pass ranks and MEASURES on (doc 68 68.2): None is the task's own metric.
+        objective = state.objective_key
         evaluated = sorted(state.breedable_nodes(), key=lambda n: (n.metric, n.id),
                            reverse=(state.direction == "max"))
         topk = evaluated[: self.confirm_top_k]
@@ -310,13 +331,14 @@ class ConfirmPhaseMixin:
         generations = {str(nd.id): nd.attempt for nd in state.nodes.values()
                        if nd.id not in state.aborted_nodes and not nd.tombstoned}
         if not topk:
-            if not self._confirmation_snapshot_current(generations):
+            if not self._confirmation_snapshot_current(generations, objective):
                 return
             async with self._write_lock:
                 self.store.append(EV_BEST_CONFIRMED,
                                   {"node_id": None, "significant": False,
                                    "search_epoch": state.search_epoch,
-                                   "generations": generations})
+                                   "generations": generations,
+                                   **({"objective_key": objective} if objective else {})})
             return
 
         summaries: list[dict] = []
@@ -335,7 +357,7 @@ class ConfirmPhaseMixin:
         spent = fold(self.store.read_all()).total_eval_seconds
         must_confirm = min(2, len(topk))
         for i, nd in enumerate(topk):
-            if (not self._confirmation_snapshot_current(generations)
+            if (not self._confirmation_snapshot_current(generations, objective)
                     or not self._confirmation_node_current(nd.id, nd.attempt)):
                 return
             if nd.confirmed_mean is not None:  # reuse a prior (crashed) attempt's result — FREE, no eval
@@ -367,11 +389,11 @@ class ConfirmPhaseMixin:
             for s in range(self.confirm_seed_base, self.confirm_seed_base + self.confirm_seeds):
                 if s in done:                         # already evaluated this seed earlier
                     continue
-                if (not self._confirmation_snapshot_current(generations)
+                if (not self._confirmation_snapshot_current(generations, objective)
                         or not self._confirmation_node_current(nd.id, nd.attempt)):
                     return
-                m = await self._run_confirm_seed(nd, s)
-                if (not self._confirmation_snapshot_current(generations)
+                m = await self._run_confirm_seed(nd, s, objective)
+                if (not self._confirmation_snapshot_current(generations, objective)
                         or not self._confirmation_node_current(nd.id, nd.attempt)):
                     return
                 if m is _CONFIRM_RETRYABLE:
@@ -400,7 +422,7 @@ class ConfirmPhaseMixin:
                 ruler = comparability.agreed_ruler(comparability.recorded_seed_rulers(
                     events, EV_CONFIRM_EVAL, nd.id, nd.attempt), counted)
                 async with self._write_lock:
-                    if (not self._confirmation_snapshot_current(generations)
+                    if (not self._confirmation_snapshot_current(generations, objective)
                             or not self._confirmation_node_current(nd.id, nd.attempt)):
                         return
                     self.store.append(EV_NODE_CONFIRMED, {
@@ -409,6 +431,7 @@ class ConfirmPhaseMixin:
                         **({"protocol_profile": ruler["protocol_profile"]}
                            if ruler.get("protocol_profile") else {}),
                         **({"protocol_mixed": True} if ruler.get("protocol_mixed") else {}),
+                        **({"objective_key": objective} if objective else {}),
                     })
 
         if summaries:
@@ -416,14 +439,15 @@ class ConfirmPhaseMixin:
             chosen, significant = sel["robust"]["node_id"], sel["significant"]
         else:
             chosen, significant = topk[0].id, False  # all seeds failed -> keep leader
-        if not self._confirmation_snapshot_current(generations):
+        if not self._confirmation_snapshot_current(generations, objective):
             return
         async with self._write_lock:
-            if not self._confirmation_snapshot_current(generations):
+            if not self._confirmation_snapshot_current(generations, objective):
                 return
             self.store.append(EV_BEST_CONFIRMED, {
                 "node_id": chosen, "significant": significant,
-                "search_epoch": state.search_epoch, "generations": generations})
+                "search_epoch": state.search_epoch, "generations": generations,
+                **({"objective_key": objective} if objective else {})})
 
     async def _confirm_node(self, nd) -> None:
         """Operator-forced multi-seed confirmation of ONE node (force_confirm). Records the per-seed
@@ -437,12 +461,13 @@ class ConfirmPhaseMixin:
         state = fold(self.store.read_all())
         seeds = max(self.confirm_seeds, 3)
         done = state.confirm_seed_results.get(nd.id, {})
+        objective = state.objective_key     # measured on the objective in force (doc 68 68.2)
         for s in range(self.confirm_seed_base, self.confirm_seed_base + seeds):
             if s in done:
                 continue
             if not self._confirmation_node_current(nd.id, generation):
                 return
-            result = await self._run_confirm_seed(nd, s)
+            result = await self._run_confirm_seed(nd, s, objective)
             if not self._confirmation_node_current(nd.id, generation):
                 return
             if result is _CONFIRM_RETRYABLE:

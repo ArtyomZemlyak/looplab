@@ -19,6 +19,7 @@ import {
   extraMetricSourceLabel, extraMetricIsBackfilled } from './extraMetrics.js'
 import { inspectorTabs } from './runRouteState.js'
 import { readOnlyLabel } from './runMode.js'
+import { currentRetarget, objectiveLabel, retargetableKeys } from './objectiveModel.js'
 import { nodeAppliedParams, appliedParamsDivergences, appliedParamsChecked,
   appliedParamsNotice, appliedParamsConflicts,
   appliedParamsConflictNotice } from './runIndex.js'
@@ -485,7 +486,8 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
           : visibleDetailStatus === 'error'
             ? <div className="insp-empty">Code is unavailable because full node details failed to load.</div>
             : <div className="insp-empty">Loading code…</div>)}
-        {activeTab === 'Metrics' && <Metrics n={n} detail={detail} state={state} runId={runId} />}
+        {activeTab === 'Metrics' && <Metrics n={n} detail={detail} state={state} runId={runId}
+          onToast={onToast} canRetarget={!readOnly} />}
         {activeTab === 'Trust' && <Trust n={n} drifts={nodeDrifts} />}
         {activeTab === 'Cost' && <Cost state={state} />}
       </div>
@@ -2765,7 +2767,24 @@ export function MetricCurves({ runId, nodeId, attempt = 0, status }) {
 
 // Exported for the same reason `MetricCurves` is: nothing in the suite MOUNTS `Inspector.jsx`, and
 // the objective row's label is a claim about a RECORD that has to be driven, not read off the source.
-export function Metrics({ n, detail, state, runId }) {
+export function Metrics({ n, detail, state, runId, onToast = null, canRetarget = false }) {
+  // THE OBJECTIVE AN OPERATOR MAY PUT IN FORCE (doc 68 68.2): a declared extra metric the whole run
+  // is re-ranked by, offered only on a live view and only where the server would accept it
+  // (`objectiveModel.js::retargetableKeys`); the ★ row names the key once one is in force.
+  const [retargeting, setRetargeting] = useState(false)
+  const retargetable = canRetarget && onToast ? new Set(retargetableKeys(state)) : new Set()
+  const retarget = currentRetarget(state)
+  const doRetarget = async key => {
+    if (retargeting) return
+    setRetargeting(true)
+    try {
+      await submitCommand(CONTROL.retargetMetric(runId, key), {
+        success: key ? `The run now ranks every node by ${key}` : "The run ranks by the task's own metric again",
+        noop: 'The run already ranks by that metric', executing: 'Retarget requested…',
+        failure: 'Retarget failed', transport: 'The retarget could not be submitted. Try again.',
+      }, onToast)
+    } finally { setRetargeting(false) }
+  }
   const seeds = detail?.confirm_seeds_detail || {}
   const vals = Object.entries(seeds).map(([s, v]) => ({ s: Number(s), v })).filter(x => x.v != null).sort((a, b) => a.s - b.s)
   // Every metric reported anywhere in the run (the objective ★ + all extras), shown for
@@ -2844,7 +2863,13 @@ export function Metrics({ n, detail, state, runId }) {
     <div className="section-h">Reported metrics{champ ? ` · best = #${champ.id}` : ''}</div>
     <DataTable caption="Node metric comparison" card={false}><table className="tbl"><thead><tr><th>metric</th><th>source</th><th>this node</th>{showChamp && <th>best #{champ.id}</th>}</tr></thead>
       <tbody>{rows.map(r => <tr key={r.k} className={r.star ? 'chosen-row' : ''}>
-        <td>{r.star ? '★ ' : ''}{r.k}</td>
+        <td>{r.star ? `★ ${objectiveLabel(state)}` : r.k}
+          {!r.star && retargetable.has(r.k) && <button type="button" className="btn xs ghost"
+            disabled={retargeting} title={`Rank every node of this run by ${r.k} instead`}
+            onClick={() => doRetarget(r.k)}>rank by this</button>}
+          {r.star && retarget && canRetarget && onToast && <button type="button" className="btn xs ghost"
+            disabled={retargeting} title="Rank every node by the task's own metric again"
+            onClick={() => doRetarget(null)}>rank by the task metric</button>}</td>
         <td className="muted">{r.star
           ? <span className={objectiveCaveated ? 'warn' : ''}
             title={objectiveSourceHelp(objective)}>{OBJECTIVE_SOURCE_LABEL[objective.channel]}</span>
@@ -2864,6 +2889,12 @@ export function Metrics({ n, detail, state, runId }) {
         scanning a table does not hover every cell. That argument is STRONGER for the ★ row, which
         is the number that drives selection, so the caveat is printed rather than only hovered. It
         renders the SAME sentence the tooltip carries, from the same call, so the two cannot drift. */}
+    {retarget && <div className="muted">
+      The run ranks by <b>{retarget.key}</b> since an operator retarget (event #{retarget.seq}); before
+      it, by {retarget.previous ? <b>{retarget.previous}</b> : "the task's own metric"}, and every
+      decision taken earlier was taken on that objective. Each node keeps its own task metric in the
+      record.
+    </div>}
     {objectiveCaveated && <div className="muted">
       The ★ objective is marked <b>{OBJECTIVE_SOURCE_LABEL[objective.channel]}</b>.{' '}
       {objectiveSourceHelp(objective)}

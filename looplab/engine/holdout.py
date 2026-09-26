@@ -349,6 +349,11 @@ class HoldoutGrader:
         if not ((self._e._holdout_idx and self._e._host_grader is not None)
                 or self.holdout_scorer() is not None):
             return False
+        # NONE UNDER A RETARGETED OBJECTIVE (doc 68 68.2): both sources score the TASK's own metric,
+        # so their number would rank leaders chosen on another scale — the fold ignores such a row
+        # (`events/replay.py::_on_holdout_evaluated`), and without this the phase would re-run forever.
+        if state.objective_key is not None:
+            return False
         return any(nid not in state.holdout_evaluated_ids for nid in self._e._holdout_topk(state))
 
     async def holdout_phase(self, state: RunState) -> None:

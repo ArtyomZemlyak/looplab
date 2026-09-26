@@ -248,6 +248,38 @@ assert (set(EXTRA_METRIC_AUTHENTICATED) | set(EXTRA_METRIC_UNAUTHENTICATED)
     "exactly once")
 
 
+def objective_value(extra_metrics, provenance, key, directions=None,
+                    run_direction=None) -> Optional[float]:
+    """A node's value on a retargeted OBJECTIVE `key` (doc 68 68.2, `metric_retarget`): its extra
+    metric `key` when the operator's own reader recorded it (`EXTRA_METRIC_DECLARED`), else None. An
+    `auto` value is the candidate's own stdout, ungated, and an `engine` one is authenticated but not
+    measured — neither may become what a run is ranked by. A key the declaration ORIENTS against
+    `run_direction` (`directions`, the node's `extra_metrics_direction`) is None too: ranking it
+    the run's way would reward the worse value — a retarget never flips the direction. ONE rule for
+    the fold (`events/replay.py::_apply_objective`), the command intake and the confirm phase, which
+    measures its seeds on the same key (`engine/confirm_phase.py`)."""
+    if not isinstance(key, str) or not key or not isinstance(extra_metrics, dict):
+        return None
+    if not isinstance(provenance, dict) or provenance.get(key) != EXTRA_METRIC_DECLARED:
+        return None
+    declared_way = directions.get(key) if isinstance(directions, dict) else None
+    if declared_way in ("min", "max") and run_direction in ("min", "max") \
+            and declared_way != run_direction:
+        return None
+    value = extra_metrics.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return float(value)
+
+
+def row_objective(stamp) -> Optional[str]:
+    """The objective a CONFIRMATION row was measured on (doc 68 68.2), read off its
+    `objective_key` stamp: the key, or None — the task's own metric, which every row written before
+    a retarget, and every legacy row, is. The confirm phase stamps it (`engine/confirm_phase.py`);
+    the fold counts a row only while that objective is in force (`RunState.objective_key`)."""
+    return stamp if isinstance(stamp, str) and stamp else None
+
+
 def normalize_extra_metric_channels(value, *, max_items: int = 256) -> dict[str, str]:
     """Normalize the `extra_metrics` channel map to `{name: "declared"|"auto"}`.
 
@@ -1540,6 +1572,11 @@ class Node(BaseModel):
     # ordinary domain command. Additive + reader-defaulted: absent on old logs -> False -> unchanged fold.
     tombstoned: bool = False
     metric: Optional[float] = None
+    # The TASK'S OWN metric as this lifecycle's terminal recorded it (doc 68 68.2). `metric` is the
+    # OBJECTIVE's value — this one, unless an operator `metric_retarget` made a declared extra metric
+    # the objective (`RunState.objective_key`). Kept so a retarget applies to terminals folded after
+    # it and can be undone; fold-internal, the durable source stays `node_evaluated.metric`.
+    task_metric: Optional[float] = Field(default=None, exclude=True)
     status: NodeStatus = NodeStatus.pending
     # Fold-internal causal anchor for projections that must identify the FIRST accepted terminal of
     # this lifecycle. Excluded from every public model dump: the durable source remains the event log.
@@ -2067,6 +2104,13 @@ class RunState(BaseModel):
     task_id: str = ""
     goal: str = ""
     direction: str = "min"  # "min" | "max"
+    # THE OBJECTIVE (doc 68 68.2): the operator-DECLARED extra metric a `metric_retarget` made the
+    # one every node is ranked by, or None — the task's own metric. `objective_history` is every
+    # accepted retarget in log order ({seq, key, previous} + {goal, previous_goal} when it restated
+    # the goal), so a decision taken before one reads as taken on the objective of its day.
+    # Additive: None / [] on every log without one.
+    objective_key: Optional[str] = None
+    objective_history: list[dict] = Field(default_factory=list)
     config_hash: str = ""
     # doc 67 67.14: the task's declared baseline/target scores, pinned on `run_started` and folded
     # through `core/headroom.py::normalized_reference` — None on every log that declared none. The
