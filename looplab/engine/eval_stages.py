@@ -460,6 +460,8 @@ class EvalStagesMixin:
                  command_eval.HOST_STAGE_KEY: True}
         if isinstance(hs.get("env"), dict) and hs["env"]:
             stage["env"] = dict(hs["env"])
+        if isinstance(hs.get("expect"), dict) and hs["expect"].get("numeric"):
+            stage["expect"] = {"numeric": list(hs["expect"]["numeric"])}
         return stage
 
     @staticmethod

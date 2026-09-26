@@ -921,6 +921,29 @@ class HostScorerSpec(BaseModel):
     timeout: float = 1800.0
     env: dict[str, str] = Field(default_factory=dict)
     metric: Optional[dict] = None           # reader for the host stage's stdout; None = eval.metric
+    # The operator's REFUSAL CONTRACT on the host stage: `{"numeric": [{key, op, value}, ...]}`,
+    # the same relations a declared stage's `expect.numeric` holds, read off what the SCORER prints.
+    # A scorer that gates a candidate (a quality floor, an order check) and prints the verdict as a
+    # number can say "this candidate is wrong" as a STAGE FAILURE rather than a metric of 0: the
+    # node then enters the repair loop as `expect_failed`, where a 0.0 was simply a result.
+    # MEASURED 2026-09-26 (MiniOneRec inf13, node 1): the run's main idea ran 3.3x faster and
+    # lost 385 of 2,000 users' hits to an indexing bug; scored 0.0 it was never handed back.
+    # Only `numeric`: `files` and `assert` describe a stage's OWN work, and this stage is the host's.
+    expect: Optional[dict] = None
+
+    @field_validator("expect")
+    @classmethod
+    def _expect_numeric_only(cls, v):
+        if v is None:
+            return None
+        if not isinstance(v, dict) or set(v) != {"numeric"}:
+            raise ValueError("host_scorer.expect takes exactly one key, `numeric` — a list of "
+                             "{key, op, value} relations on what the scorer prints")
+        from looplab.runtime.numeric_contract import validate_numeric
+        rels, err = validate_numeric("score", v["numeric"])
+        if err:
+            raise ValueError(f"host_scorer.{err}")
+        return {"numeric": rels}
 
     @field_validator("command")
     @classmethod

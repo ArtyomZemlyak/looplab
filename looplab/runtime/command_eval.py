@@ -3287,15 +3287,35 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
             stage_results[-1][NUMERIC_VALUES_KEY] = _values
             if _defects:
                 stage_results[-1]["status"] = "expect_failed"
-                _problem = ("exited 0 but did NOT satisfy its declared numeric contract: "
+                _problem = (("the OPERATOR'S host scorer REFUSED this candidate: "
+                             + "; ".join(_defects) + ". The scorer and its contract are protected and "
+                             "are not the fault: they measured the candidate's OUTPUT. Its printed row "
+                             "in score.log says what was wrong (quality, order, speed) — repair the "
+                             "candidate's code so that row passes.")
+                            if _stg.get(HOST_STAGE_KEY) else
+                            ("exited 0 but did NOT satisfy its declared numeric contract: "
                             + "; ".join(_defects) + ". The relation is the declarer's own bound on what "
                             "this stage produces — fix the stage or the declaration, do not delete "
-                            "the declaration to make this pass.")
+                            "the declaration to make this pass."))
                 stage_results[-1]["concern"] = _problem[:700]
                 stage_results[-1][EXPECT_SINCE_KEY] = _w0
+                _stderr = f"stage '{_sname}' failed its declared numeric contract: {'; '.join(_defects)}"
+                if _stg.get(HOST_STAGE_KEY):
+                    # WHAT THE REPAIR ACTUALLY READS. Every consumer downstream -- the repair prompt,
+                    # the triage history, `node_repaired.error_in`, the terminal error -- is built
+                    # from the TAIL of this stderr (`evaluate.py::_eval_failure_text`), never from the
+                    # stage row's `concern`. So the refusal says here that the scorer is not the
+                    # stage to edit, and the scorer's OWN stderr follows it, last, where a tail cut
+                    # keeps it: that is where a gating scorer names the cause and the numbers
+                    # (critic review 2026-09-26 of the host refusal contract).
+                    _own = (run.err or "").strip()
+                    _stderr = ("the host scorer REFUSED this candidate (" + "; ".join(_defects)
+                               + "). Do NOT edit the score stage: it is the operator's, protected. "
+                               "Repair the candidate's own code."
+                               + (f"\nThe scorer said:\n{_own[-1200:]}" if _own else ""))
                 run.early = RunResult(
                     exit_code=0, stdout=run.out, metric=None, timed_out=False,
-                    stderr=f"stage '{_sname}' failed its declared numeric contract: {'; '.join(_defects)}",
+                    stderr=_stderr,
                     stages=stage_results, failed_stage=_sname, metric_subject=run.metric_subject)
                 return run
         # WHICH BYTES the stage produced, bound at the instant the contract PASSED and against the
