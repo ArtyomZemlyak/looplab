@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-158 event types — 112 folded into `RunState`, 46 diagnostic; 978 declared payload keys; 22 types whose whole payload is stored by the fold.
+158 event types — 112 folded into `RunState`, 46 diagnostic; 979 declared payload keys; 22 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -56,7 +56,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `card_reopened` | folded | The operator resumed a dropped Card (server-stamped). | `id` | `by`, `dropped_by`, `reason` |
 | `card_reprioritized` | folded | The operator moved one Card's priority. | `id` | `pinned`, `priority`, `source` |
 | `card_resource_pinned` | folded | The operator pinned one Card's GPU footprint. | `id` | `gpu_mem_mib`, `gpus`, `pinned`, `source` |
-| `command_ack` | diagnostic | The engine folded one server command intent — the causal ack that closes it. | `command_id`, `event_seq` | — |
+| `command_ack` | diagnostic | The engine folded one server command intent — the causal ack that closes it. | `command_id`, `event_seq` | `drain_only` |
 | `comment_created` | folded | An operator comment on one node, at that node's generation. | `node_id` | `actor_kind`, `comment_id`, `node_generation`, `text`, `version` |
 | `comment_edited` | folded | A new revision of one comment, compare-and-swapped against the version the author saw. | `comment_id` | `actor_kind`, `base_version`, `node_generation`, `node_id`, `text`, `version` |
 | `comment_resolution_changed` | folded | One comment's resolved flag moved, compare-and-swapped against the version the author saw. | `comment_id` | `actor_kind`, `base_version`, `node_generation`, `node_id`, `resolved`, `version` |

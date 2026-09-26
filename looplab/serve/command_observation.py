@@ -35,7 +35,7 @@ from looplab.events.replay import fold
 from looplab.events.types import EV_CARD_DROPPED, EV_COMMAND_ACK, EV_RUN_ABORT, EV_RUN_FINISHED
 from looplab.serve._log_index import LogIndexCursor, PathLocks, validated_index_bound
 from looplab.serve.protocol import (CONTROL_EVENTS, ack_observed, engine_ack_observed,
-                                    file_command_ack)
+                                    file_command_ack, file_drain_ack)
 
 
 MAX_INDEXED_RUNS = 8
@@ -75,6 +75,9 @@ class _Index(LogIndexCursor):
     # same index concurrently after ``observe`` releases the cache lock.
     intents: Mapping[str, object] = field(default_factory=lambda: MappingProxyType({}))
     acknowledgements: Mapping[str, tuple[object, ...]] = field(
+        default_factory=lambda: MappingProxyType({}))
+    # The subset a DRAIN engine wrote (`serve/protocol.py::file_drain_ack`, doc 68 68.3b).
+    drain_acknowledgements: Mapping[str, tuple[object, ...]] = field(
         default_factory=lambda: MappingProxyType({}))
     run_finishes: tuple[Event, ...] = ()
     latest_run_abort: Optional[Event] = None
@@ -163,6 +166,7 @@ def _apply_delta(index: _Index, events: list[Event]) -> None:
         return
     intents: Optional[dict[str, object]] = None
     acknowledgements: Optional[dict[str, tuple[object, ...]]] = None
+    drain_acknowledgements: Optional[dict[str, tuple[object, ...]]] = None
     finishes: Optional[list[Event]] = None
     latest_abort = index.latest_run_abort
     max_non_control = index.max_non_control_seq
@@ -188,6 +192,10 @@ def _apply_delta(index: _Index, events: list[Event]) -> None:
                 acknowledgements = dict(index.acknowledgements)
             # Filed by the ONE rule `looplab stop --wait` files by too (`serve/protocol.py`).
             file_command_ack(acknowledgements, data)
+            if data.get("drain_only") is True:
+                if drain_acknowledgements is None:
+                    drain_acknowledgements = dict(index.drain_acknowledgements)
+                file_drain_ack(drain_acknowledgements, data)
         if event.type == EV_RUN_FINISHED:
             if finishes is None:
                 finishes = list(index.run_finishes)
@@ -199,6 +207,8 @@ def _apply_delta(index: _Index, events: list[Event]) -> None:
         index.intents = MappingProxyType(intents)
     if acknowledgements is not None:
         index.acknowledgements = MappingProxyType(acknowledgements)
+    if drain_acknowledgements is not None:
+        index.drain_acknowledgements = MappingProxyType(drain_acknowledgements)
     if finishes is not None:
         index.run_finishes = tuple(finishes)
     index.latest_run_abort = latest_abort
@@ -265,6 +275,7 @@ class CommandObservation:
     max_non_control_seq: int
     _intents: Mapping[str, object]
     _acknowledgements: Mapping[str, tuple[object, ...]]
+    _drain_acknowledgements: Mapping[str, tuple[object, ...]]
     _run_finishes: tuple[Event, ...]
     _latest_run_abort: Optional[Event]
     _chunks: tuple[tuple[Event, ...], ...]
@@ -284,6 +295,11 @@ class CommandObservation:
         """`record`'s `engine_ack` postcondition against this revision's acknowledgements — the
         rule `looplab stop --wait` asks too (`serve/protocol.py::engine_ack_observed`)."""
         return engine_ack_observed(record, self._acknowledgements)
+
+    def drain_ack_observed(self, record: dict) -> bool:
+        """The same rule over the acks a DRAIN engine wrote: whether `record`'s intent was served
+        as a drain (doc 68 68.3b), not merely served."""
+        return engine_ack_observed(record, self._drain_acknowledgements)
 
     def has_domain_progress(self, after_seq: int) -> bool:
         """Did ENGINE work land after `after_seq`? Excludes CONTROL_EVENTS, so an operator appending
@@ -465,6 +481,7 @@ class CommandObservationIndex:
                     max_non_control_seq=index.max_non_control_seq,
                     _intents=index.intents,
                     _acknowledgements=index.acknowledgements,
+                    _drain_acknowledgements=index.drain_acknowledgements,
                     _run_finishes=index.run_finishes,
                     _latest_run_abort=index.latest_run_abort,
                     _chunks=index.event_chunks,

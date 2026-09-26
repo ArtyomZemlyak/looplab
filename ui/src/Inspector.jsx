@@ -96,10 +96,11 @@ function ResetBtn({ runId, id, generation, onToast }) {
   const rootRef = useRef(null)
   const triggerRef = useRef(null)
   const menuRef = useRef(null)
-  // The fourth row is the same eval reset served as a DRAIN (doc 68 68.3b): the engine the command
+  // The second row is the same eval reset served as a DRAIN (doc 68 68.3b): the engine the command
   // starts evaluates what is owed and pauses (`looplab resume --drain-only`) instead of resuming the
   // search. The server refuses it on a run an engine is already driving, and wherever the drain
-  // itself would refuse — nothing is recorded then.
+  // itself would refuse — before the reset is recorded, or, when the run changed in between, before
+  // the drain is started (the reset then stays recorded for a resumed search to serve).
   const STAGES = [
     ['eval', 're-score', 'keep the idea + code, just re-run the evaluation (an infra / API-key blip)'],
     ['eval', 're-score, then pause', 'evaluate this node and pause the run — the search does not resume (a drain; the run must be stopped)', true],
@@ -117,6 +118,7 @@ function ResetBtn({ runId, id, generation, onToast }) {
       // surface and the actionable half is "it never reached the server, press it again".
       await submitCommand(CONTROL.resetNode(runId, id, stage, generation, { drainOnly }), {
         success: `Reset #${id} from ${stage}${how} applied — the engine is processing it`, noop: `#${id} already reflects that reset`,
+        superseded: `Reset #${id} from ${stage} applied — by a running search, not a drain: the search continues`,
         executing: `Reset #${id} from ${stage}${how} requested — waiting for the engine`, failure: `Reset #${id} failed`,
         transport: `Reset #${id} could not be submitted. Try again.`,
       }, onToast)
@@ -548,15 +550,21 @@ export function GroupSummary({
 // half keeps only the choreography: the re-run submit and its pending lock.
 function StagePipeline({ node, runId, id, generation, onToast }) {
   const [pendingStage, setPendingStage] = useState(null)
+  // "then pause" serves the stage re-run as a DRAIN (doc 68 68.3b): re-score from `score`, reusing
+  // the trained artifacts, and pause — the rescore the reset menu's drain row cannot express, since
+  // that row re-runs the whole evaluation (critic 2026-09-26).
+  const [drainOnly, setDrainOnly] = useState(false)
   const { rows, notice, failedStage } = stagePipelineView(node)
   if (!rows.length) return null
   const rerun = async (name) => {
     if (!runId || pendingStage) return
     setPendingStage(name)
+    const how = drainOnly ? ', then pause' : ''
     try {
-      await submitCommand(CONTROL.resetNode(runId, id, name, generation), {
-        success: `Reset #${id} from '${name}' applied — the engine is processing it`, noop: `#${id} already reflects that reset`,
-        executing: `Re-run of #${id} from '${name}' requested — waiting for the engine`, failure: 'Re-run failed',
+      await submitCommand(CONTROL.resetNode(runId, id, name, generation, { drainOnly }), {
+        success: `Reset #${id} from '${name}'${how} applied — the engine is processing it`, noop: `#${id} already reflects that reset`,
+        superseded: `Reset #${id} from '${name}' applied — by a running search, not a drain: the search continues`,
+        executing: `Re-run of #${id} from '${name}'${how} requested — waiting for the engine`, failure: 'Re-run failed',
         transport: 'Re-run could not be submitted. Try again.',
       }, onToast)
     }
@@ -564,7 +572,11 @@ function StagePipeline({ node, runId, id, generation, onToast }) {
   }
   return <div className="eval-pipeline">
     <div className="muted eval-pipeline-label">
-      eval pipeline{failedStage ? ` — failed at ${failedStage}` : ''}{runId ? ' · click a stage to re-run from there' : ' · historical result (read-only)'}</div>
+      eval pipeline{failedStage ? ` — failed at ${failedStage}` : ''}{runId ? ' · click a stage to re-run from there' : ' · historical result (read-only)'}
+      {runId && <label className="eval-pipeline-drain"
+        title="evaluate from the chosen stage and pause the run — the search does not resume (a drain; the run must be stopped)">
+        {' · '}<input type="checkbox" checked={drainOnly} disabled={pendingStage != null}
+          onChange={event => setDrainOnly(event.target.checked)} /> then pause</label>}</div>
     {/* The supersession notice sits ABOVE the chips and is `role="status"`, not a title: what an
         operator asked for is a sign that a red strip is not about the attempt that is running, and
         a tooltip is not a sign. It is absent entirely when nothing is superseded, so an unrepaired

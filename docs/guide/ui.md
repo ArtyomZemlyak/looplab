@@ -178,9 +178,14 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   intent; re-development/re-evaluation may still be running and remains visible as normal run work.
   **re-score, then pause** is the same `eval` reset served as a DRAIN (doc 68 68.3b): the engine the
   command starts evaluates what is owed and pauses (`looplab resume --drain-only`) rather than
-  resuming the search. It is refused — nothing recorded — on a run an engine is already driving, and
-  wherever the drain itself would refuse (a finalize pending, a holdout disclosed, a host-graded
-  split re-carved since the incumbents were measured).
+  resuming the search; the eval pipeline's **then pause** box serves a stage click the same way, so
+  a rescore from `score` reuses the trained artifacts and stops. It is refused on a run an engine is
+  already driving, and wherever the drain itself would refuse (a finalize pending, a resume pending,
+  a holdout disclosed, a host-graded split re-carved since the incumbents were measured) — before
+  the reset is recorded, or, when the run changed in between, before the drain starts, with the
+  reset left recorded for a resumed search. A drain engine acknowledges only what it serves, so a
+  fork, inject or strategy sent meanwhile waits for the search that follows; a reset a running
+  search served instead of a drain says so in its toast.
 - **Chat / boss** — an agentic run chat turns one message into a plan of ordered actions, with each
   action narrated in a durable feed (`chat.jsonl`). That feed is capped at **32 MiB** per run; past the
   cap further turns are refused with HTTP 413 so one long-lived conversation cannot fill the disk or

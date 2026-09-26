@@ -83,8 +83,8 @@ const DEADLINE_SETTLE_COPY = Object.freeze({
 const DRAIN_REFUSAL_COPY = Object.freeze({
   drain_refused: Object.freeze([
     'A drain would not drive this run',
-    'Reset without “then pause” to rescore inside a resumed search, or resolve what the refusal '
-      + 'named, then submit a new command.',
+    'Resolve what the refusal named, or rescore inside a resumed search: reset without “then '
+      + 'pause” — or, when the reset was already recorded, resume the run.',
   ]),
   drain_needs_stopped_run: Object.freeze([
     'An engine is already driving this run',
@@ -215,6 +215,12 @@ export function commandFailureRecord(error, previous = error?.commandRecord || n
 // executing is deliberately pending, and terminal server failures stay structured/actionable.
 export function commandFeedback(record, labels = {}) {
   const status = record?.status
+  // A reset asked to be served as a DRAIN and served by a search instead (an engine was already
+  // running, or another launch was in flight): the server says so on the record
+  // (`serve/run_commands.py::RunCommandService._succeeded`), and the toast must not claim the drain.
+  if (status === 'succeeded' && record?.drain_superseded === true) return {
+    kind: 'success', terminal: true, status,
+    message: labels.superseded || labels.success || 'Command completed' }
   if (status === 'succeeded') return { kind: 'success', terminal: true, status,
     message: labels.success || 'Command completed' }
   if (status === 'noop') return { kind: 'success', terminal: true, status,

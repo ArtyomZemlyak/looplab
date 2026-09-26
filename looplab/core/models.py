@@ -2281,8 +2281,9 @@ class RunState(BaseModel):
     # nothing: `finished=False` at least prompts a question, while `reason=error` answers it wrongly.
     #
     # A RECORD, never a decision input. The one predicate that branches on how a run finished —
-    # `cli/run_cmds.py::classify_prior_run`'s `stop_reason == "error"` pending-finalize rung — reads
-    # the COARSE field, and must keep reading it: the class is the engine's, the sentence is prose.
+    # `engine/run_boundary.py::classify_prior_run`'s `stop_reason == "error"` pending-finalize
+    # rung — reads the COARSE field, and must keep reading it: the class is the engine's, the
+    # sentence is prose.
     stop_detail: Optional[str] = None
     confirmed_done: bool = False          # the multi-seed confirmation phase completed (I12)
     # The confirm phase's CERTIFICATE exactly as `replay.py::_select_best` read it — its node id
@@ -2510,13 +2511,14 @@ class RunState(BaseModel):
     pause_event_seq: Optional[int] = Field(default=None, exclude=True)
     # WHY the run is paused, in the pausing writer's own words, folded from `pause.reason`.
     #
-    # A RECORD, never a decision input: nothing branches on this string. The two things that DO branch
-    # — `cli/run_cmds.py::classify_prior_run` and the loop's own break — read `paused`, which is a fact
-    # the fold owns out of band. It is folded because the reason was ALREADY durable and the fold threw
-    # it away: measured over `/var/tmp/looplab-bench/runs-B` (20 real runs), 5 of the 8 that ended with
-    # no `run_finished` had written a `pause` carrying a full sentence naming both the cause and the
-    # remedy, and no reader could reach one word of it — `looplab inspect` printed `finished=False` and
-    # stopped there, which is why one of those five cost hours to investigate.
+    # A RECORD, never a decision input: nothing branches on this string. The two things that DO
+    # branch — `engine/run_boundary.py::classify_prior_run` and the loop's own break — read
+    # `paused`, which is a fact the fold owns out of band. It is folded because the reason was
+    # ALREADY durable and the fold threw it away: measured over `/var/tmp/looplab-bench/runs-B` (20
+    # real runs), 5 of the 8 that ended with no `run_finished` had written a `pause` carrying a full
+    # sentence naming both the cause and the remedy, and no reader could reach one word of it —
+    # `looplab inspect` printed `finished=False` and stopped there, which is why one of those five
+    # cost hours to investigate.
     #
     # Meaningful ONLY while `paused` is True — the same lifetime as `pause_node_id`/`pause_generation`
     # above, and cleared beside them at every site that lifts a pause.

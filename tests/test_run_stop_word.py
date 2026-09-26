@@ -28,7 +28,10 @@ PKG = Path(__file__).resolve().parents[1] / "looplab"
 
 # Every module that decides on the stop word, by the one helper. Two-way with the AST scan below.
 READERS = {
-    "cli/run_cmds.py", "engine/orchestrator.py", "engine/finalize.py", "events/finalize_scope.py",
+    # `engine/run_boundary.py`, not `cli/run_cmds.py`: the prior-run ladder moved there for doc 68
+    # 68.3b, so the server's drain command asks the same one; the CLI re-exports it.
+    "engine/run_boundary.py", "engine/orchestrator.py", "engine/finalize.py",
+    "events/finalize_scope.py",
     "serve/run_commands.py", "serve/appstate.py", "serve/command_observation.py",
     "serve/control_validation.py",
     # `events/finalize_scope.py` is BOTH the helper's home and a reader (its two fold-scope

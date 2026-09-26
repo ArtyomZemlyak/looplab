@@ -506,3 +506,57 @@ def test_a_reset_of_a_finished_host_graded_run_is_not_drained_across_its_split(
     assert out.exit_code == 2, out.output
     assert "was re-carved (search epoch 1) after node(s) 0, 2, 3 were measured" in out.output
     assert [e.seq for e in store.read_all()] == before
+
+
+def test_a_drain_acks_only_what_it_serves_and_says_it_is_a_drain(tmp_path):
+    """LOW (critic 2026-09-26): a drain acked every marked intent it folded — a fork or an inject
+    then read "applied — the engine is processing it" though the drain paused without it, and the
+    search that followed never re-acks an acked intent. It acks what it serves, marked
+    `drain_only`; the rest waits for that search."""
+    from tests.factories import make_engine
+
+    for drain in (True, False):
+        eng = make_engine(tmp_path / f"run-{drain}", drain_only=drain)
+        eng.store.append("node_reset", {"node_id": 0, "from_stage": "eval", "generation": 0,
+                                        "_command_id": "reset-cmd"})
+        eng.store.append("fork", {"node_id": 0, "_command_id": "fork-cmd"})
+        eng._ack_commands(eng.store.read_all())
+        acks = {e.data["command_id"]: e.data for e in eng.store.read_all()
+                if e.type == "command_ack"}
+        if drain:
+            assert set(acks) == {"reset-cmd"} and acks["reset-cmd"]["drain_only"] is True
+        else:
+            assert set(acks) == {"reset-cmd", "fork-cmd"}
+            assert all("drain_only" not in ack for ack in acks.values())
+
+
+def test_an_ignored_terminal_measures_nothing(tmp_path):
+    """LOW (critic 2026-09-26, driven): `measured_epochs` recorded the current epoch for ANY later
+    `node_evaluated` row while the node was evaluated — an ignored duplicate after a reopen marked a
+    stale incumbent as measured on the new rows, and the drain went ahead across the split."""
+    from looplab.engine.run_boundary import classify_prior_run, measured_epochs
+
+    root = tmp_path / "dup"
+    root.mkdir()
+    store = EventStore(root / "events.jsonl")
+    store.append("run_started", {"run_id": "dup", "task_id": "t", "goal": "g", "direction": "max",
+                                 "holdout_fraction": 0.25})
+    store.append("host_grading", {"predictions": "predictions.json", "scorer": "accuracy"})
+    for nid, metric in ((0, 0.4), (1, 0.5)):
+        store.append("node_created", {"node_id": nid, "parent_ids": [], "operator": "draft",
+                                      "idea": {"operator": "draft", "params": {}, "rationale": "r"},
+                                      "code": f"print({nid})"})
+        store.append("node_evaluated", {"node_id": nid, "generation": 0, "metric": metric,
+                                        "violations": []})
+    store.append("run_finished", {"reason": "done"})
+    store.append("resume", {})                       # a reopen: search epoch 1
+    store.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": 0.9,
+                                    "violations": []})   # a duplicate the fold ignores
+    store.append("pause", {})
+    store.append("node_reset", {"node_id": 1, "from_stage": "eval", "generation": 0})
+    events = store.read_all()
+    state = fold(events)
+    assert state.search_epoch == 1 and state.nodes[0].metric == 0.4, "the duplicate is ignored"
+    assert measured_epochs(events)[0] == 0, "node 0 was measured in epoch 0, not re-measured"
+    refused = drain_only_refusal(state, classify_prior_run(state, events), events)
+    assert refused is not None and "after node(s) 0 were measured" in refused[1], refused

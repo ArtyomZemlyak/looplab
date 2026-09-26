@@ -168,7 +168,9 @@ def test_web_and_tui_controls_use_the_authoritative_command_service():
     assert "applyAction" not in combined
     assert "runCommand(" in control and "/control`" not in control and "/resume`" not in control
     assert "submitAssistantDirect(" in assistant
-    assert "CONTROL.resetNode(runId, id, stage, generation)" in inspector
+    # Both reset surfaces go through the command service, the drain flag beside (doc 68 68.3b).
+    assert "CONTROL.resetNode(runId, id, stage, generation, { drainOnly })" in inspector
+    assert "CONTROL.resetNode(runId, id, name, generation, { drainOnly })" in inspector
     assert tui_source.count("self.api.run_command(") >= 2
 
 

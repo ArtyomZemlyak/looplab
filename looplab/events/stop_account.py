@@ -53,9 +53,9 @@ A derivation needs nothing of the dead process, adds no bytes, and cannot be wro
 the run is resumed and finishes, the account changes because the FACTS changed.
 
 THIS IS A RECORD AND NOT A VERDICT (invariant: text may nominate, never decide). Nothing here is a
-gate. `cli/run_cmds.py::classify_prior_run` is the sole decider of what a re-entering command does
-with a lifecycle boundary, it reads `finished`/`paused`/`stop_requested` off the fold, and it must
-stay that way: `tests/test_stop_account.py` pins that it does not read this module. The account is
+gate. `engine/run_boundary.py::classify_prior_run` is the sole decider of what a re-entering
+command does with a lifecycle boundary, it reads `finished`/`paused`/`stop_requested` off the fold,
+and it must stay that way: `tests/test_stop_account.py` pins that it does not read this module. The account is
 deliberately prose plus three plain fields — there is no `owed: bool` here to branch on, because the
 one caller that would want it already has `paused`.
 """
@@ -247,8 +247,8 @@ def _unserved_finalize(state) -> str:
 
     CALLED ONLY FROM THE BRANCHES WHERE NO `run_finished` EXISTS (`paused`, `awaiting_approval`,
     `no_boundary`), and that is the whole reason this needs no predicate of its own. On a run that HAS finished, "is a finalize still outstanding?"
-    is a genuinely subtle question — `cli/run_cmds.py::classify_prior_run` answers it with a stop
-    request NEWER than the accepted finish, or a finish whose own reason is `error` — and this module
+    is a genuinely subtle question — `engine/run_boundary.py::classify_prior_run` answers it with a
+    stop request NEWER than the accepted finish, or a finish whose own reason is `error` — and this module
     deliberately does not answer it a second time. BACKLOG §0.7 measured four implementations of one
     claim/verdict join and every drift was between the copies; a fifth spelling of the pending-finalize
     rung, living in a RECORD where nothing would exercise it, is that finding volunteering to recur.

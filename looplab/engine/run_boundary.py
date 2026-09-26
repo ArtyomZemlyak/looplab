@@ -22,10 +22,20 @@ from typing import Optional
 
 from looplab.core.models import NodeStatus, RunState
 from looplab.events.finalize_scope import incomplete_finalize_scope, is_guarded_abort
+from looplab.events.types import EV_NODE_ABORT, EV_NODE_RESET, EV_PAUSE, EV_RUN_ABORT
 
 # The two wrap-up boundaries: respect the wrap-up already on disk, never lift the run. The CLI's
 # `WRAP_UP_NOTICE` is the notice per kind and is held to exactly this set.
 WRAP_UP_KINDS: frozenset[str] = frozenset({"finalization_pending", "pending_finalize"})
+
+# The command intents a DRAIN engine serves, and so the only ones it acknowledges
+# (`engine/orchestrator.py::Engine._ack_commands`): the resets it evaluates and the gates its loop
+# head honours. Any other intent — a fork, an inject, a strategy, a confirm, a resume — is folded but
+# not served: the drain pauses without it, so it is left UNACKED for the search that follows to
+# serve and ack (critic 2026-09-26: a drain acked them, the server reported "applied — the engine is
+# processing it", and the next engine, which never re-acks an acked intent, left it at that).
+DRAIN_SERVED_INTENTS: frozenset[str] = frozenset({EV_NODE_RESET, EV_NODE_ABORT, EV_PAUSE,
+                                                  EV_RUN_ABORT})
 
 
 def terminal_projection_incomplete(state, events) -> bool:
@@ -158,7 +168,11 @@ def measured_epochs(events) -> dict[int, int]:
             continue
         nid = coerce_node_id(data)
         node = raw.nodes.get(nid) if nid is not None else None
-        if node is not None and node.status is NodeStatus.evaluated:
+        # Only the row the fold ACCEPTED as the node's terminal measures it: a duplicate or a
+        # stale-generation late terminal is ignored by the fold and re-measures nothing (critic
+        # 2026-09-26, driven: an ignored duplicate after a reopen hid a stale incumbent).
+        if (node is not None and node.status is NodeStatus.evaluated
+                and node.terminal_event_seq == getattr(event, "seq", None)):
             out[nid] = int(raw.search_epoch)
     return out
 
@@ -190,6 +204,12 @@ def drain_only_refusal(prior, prior_kind: str, prior_events=None) -> Optional[tu
     if is_wrap_up(prior_kind):
         return 2, ("a finalize is pending on this run and --drain-only never finalizes; run "
                    "`looplab resume` without it (or `looplab finalize`) to complete it")
+    resume_pending = getattr(prior, "resume_pending", None)
+    if callable(resume_pending) and resume_pending():
+        # A durable resume nobody has served yet: the drain's engine would record itself as serving
+        # it and then pause — consuming the operator's resume into the opposite (critic 2026-09-26).
+        return 2, ("a resume is pending on this run and a drain would consume it and pause; let it "
+                   "be served (`looplab resume`), then drain")
     owed = sorted(node.id for node in prior.nodes.values() if drain_owed(prior, node))
     rebuild = [node.id for node in prior.nodes.values() if awaiting_rebuild(prior, node)]
     if not (owed or rebuild):

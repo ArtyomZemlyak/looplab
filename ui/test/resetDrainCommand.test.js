@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { CONTROL } from '../src/api.js'
-import { STORED_ERROR_CODES } from '../src/commandModel.js'
+import { STORED_ERROR_CODES, commandErrorMessage, commandFeedback } from '../src/commandModel.js'
 
 // A node_reset served as a DRAIN (doc 68 68.3b): `drain_only` rides the command BODY — how the reset
 // is served, never a field of the event — and only when asked, so every other body is byte-for-byte
@@ -53,4 +53,18 @@ test('a drain reset carries drain_only, and a plain one carries no such key', as
 test('the two drain refusals are stored codes, restored with their own remedy', () => {
   assert.ok(STORED_ERROR_CODES.has('drain_refused'))
   assert.ok(STORED_ERROR_CODES.has('drain_needs_stopped_run'))
+  // The COPY, not only the membership (critic 2026-09-26): a restored record carries the code alone.
+  const restored = code => commandErrorMessage({ status: 'failed', error: { code } })
+  assert.match(restored('drain_refused'), /A drain would not drive this run/)
+  assert.match(restored('drain_refused'), /when the reset was already recorded, resume the run/)
+  assert.match(restored('drain_needs_stopped_run'), /An engine is already driving this run/)
+})
+
+test('a drain a running search served is not reported as the drain', () => {
+  const labels = { success: 'Reset #3 from eval, then pause applied', superseded: 'Reset #3 applied — by a running search, not a drain' }
+  assert.equal(commandFeedback({ status: 'succeeded' }, labels).message, labels.success)
+  assert.equal(commandFeedback({ status: 'succeeded', drain_superseded: true }, labels).message,
+    labels.superseded)
+  assert.equal(commandFeedback({ status: 'succeeded', drain_superseded: true },
+    { success: 'ok' }).message, 'ok', 'a caller without the label keeps its success copy')
 })

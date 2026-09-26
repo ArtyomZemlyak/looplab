@@ -1783,13 +1783,19 @@ class RunCommandService:
             active.append(claim.stem)
         return sorted(active)
 
-    def _unresolved_equivalent(self, rd: Path, event_type: str,
-                               semantic_payload_digest: str) -> tuple[Optional[Path], Optional[dict]]:
+    def _unresolved_equivalent(self, rd: Path, event_type: str, semantic_payload_digest: str,
+                               *, drain: bool = False) -> tuple[Optional[Path], Optional[dict]]:
         if event_type not in _RETRY_GUARDED_EVENTS:
             return None, None
         candidates = []
         for path, record in self._scan_command_records(rd, on_symlink="refuse"):
             if not record or record.get("event_type") != event_type:
+                continue
+            # HOW it is served is part of the intent (doc 68 68.3b): a reset served as a drain and
+            # one served by a resumed search share a payload and are not the same command. Matched
+            # on the payload alone, a "re-score, then pause" click attached to a pending plain reset
+            # and the whole search resumed (critic 2026-09-26, driven).
+            if (record.get("drain_only") is True) != drain:
                 continue
             record_semantic = record.get("semantic_payload_digest")
             if not record_semantic:
@@ -2387,6 +2393,11 @@ class RunCommandService:
             # cannot drift again.
             record = dict(record)
             record["engine_stopped"] = self._engine_state(rd) is False
+        if record.get("drain_only") is True and not self._observe(rd).drain_ack_observed(record):
+            # The reset was served — by an engine that is not a drain: one that was already running
+            # when it landed, or a launch another spawner had in flight. Said on the record, which
+            # the UI reads, rather than reported as the drain it asked for (critic 2026-09-26).
+            record = {**record, "drain_superseded": True}
         return self._terminal(path, record, "succeeded")
 
     def _reconcile_observation(
@@ -2418,9 +2429,13 @@ class RunCommandService:
         spec = CONTROL_SPECS.get(str(record.get("event_type") or ""))
         if spec is None:
             return record
-        if (record.get("error") or {}).get("code") == DRAIN_REFUSED:
-            # A refused DRAIN is not rescued by a later ack: that ack comes from whatever engine
-            # serves the reset next — a plain resume's search — which is not the drain (68.3b).
+        if record.get("drain_only") is True and not (
+                observation or self._observe(rd)).drain_ack_observed(record):
+            # A failed or timed-out DRAIN is promoted only by a DRAIN's ack. Any other ack comes
+            # from whatever engine served the reset since — a plain resume's search — which is not
+            # what was asked (doc 68 68.3b; critic 2026-09-26, driven: a `spawn_failed` drain read
+            # `succeeded` after the operator's plain resume had resumed the whole search). A drain
+            # the CLI refused never builds an engine, so it is never promoted either.
             return record
         if self._postcondition(rd, record, observation):
             updated = dict(record)
@@ -2651,18 +2666,32 @@ class RunCommandService:
                 "stop the run (pause) and wait for it to stop, then reset with the drain again; or "
                 "reset without it to rescore inside the running search", retryable=False)
         from looplab.engine.run_boundary import classify_prior_run, drain_only_refusal
-        events = EventStore(self._events_path(rd)).read_all()
-        if reset is not None:
-            events = [*events, Event(v=1, seq=(events[-1].seq + 1) if events else 0,
-                                     ts=time.time(), type=EV_NODE_RESET, data=dict(reset))]
-        state = fold(events)
+        # The SHARED observation (`_observe`), whose events and fold are memoized per log revision:
+        # a drain asked at submit, at admission and before every spawn re-parses nothing (critic
+        # 2026-09-26: a fresh EventStore read and fold per ask cost 6.4 s on a 70 MB log, under the
+        # run sequencer). Only the PROSPECTIVE ask folds again — the log plus the reset this command
+        # would append is a state no index holds yet.
+        observation = self._observe(rd)
+        events = list(observation.events())
+        if reset is None:
+            state = observation.state()
+        else:
+            events.append(Event(v=1, seq=(events[-1].seq + 1) if events else 0,
+                                ts=time.time(), type=EV_NODE_RESET, data=dict(reset)))
+            state = fold(events)
         refused = drain_only_refusal(state, classify_prior_run(state, events), events)
         if refused is None:
             return None
         return _error(
             DRAIN_REFUSED, f"a drain would not drive this run: {refused[1]}",
-            ("nothing was served as a drain; resolve what the message names, or reset without the "
-             "drain to rescore inside a resumed search"), retryable=False)
+            # Before the append nothing is recorded; before a spawn the reset already is, and a
+            # plain resume is what serves it (critic 2026-09-26: "reset without the drain" was the
+            # remedy either way).
+            ("nothing was recorded and nothing started; resolve what the message names, or reset "
+             "without the drain to rescore inside a resumed search" if reset is not None else
+             "the reset is recorded and no drain was started for it; resume the run to serve it "
+             "inside a resumed search, or resolve what the message names first"),
+            retryable=False)
 
     @staticmethod
     def _refuse_unreadable_spawn(rd: Path, spec, alive: bool,
@@ -2818,7 +2847,7 @@ class RunCommandService:
                     equivalent_path = equivalent = None
                     if semantic_candidate is not None:
                         equivalent_path, equivalent = self._unresolved_equivalent(
-                            rd, event_type, semantic_candidate)
+                            rd, event_type, semantic_candidate, drain=drain)
                     if equivalent is not None and equivalent_path is not None:
                         existing_id = str(equivalent.get("id") or "")
                         raise HTTPException(
@@ -3573,13 +3602,11 @@ class RunCommandService:
             # (`_claim_and_spawn_resume` refuses it), so launch exactly as before the handshake.
             claimed_elsewhere = False
         if claimed_elsewhere:
+            # For a drain, that launch is a PLAIN resume/finalize (the log ledger has no drain) and
+            # would serve this reset inside the search it resumes; the record says so when it
+            # settles (`_succeeded`: `drain_superseded`, read off who acked it), not here — a later
+            # pass may still start the drain itself.
             self._clear_spawn_claim(rd, command_id)
-            if drain:
-                # That launch is a PLAIN resume/finalize (the log ledger has no drain): it serves
-                # this reset inside the search it resumes. Said on the record rather than hidden.
-                record["drain_superseded"] = True
-                record["updated_at"] = time.time()
-                self._save(path, record)
             return False, LAUNCH_IN_FLIGHT
         try:
             pid = self._spawn(rd, drain_only=drain)

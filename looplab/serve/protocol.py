@@ -176,6 +176,14 @@ def file_command_ack(acknowledgements: dict, data) -> None:
     acknowledgements[marker] = acknowledgements.get(marker, ()) + (data.get("event_seq"),)
 
 
+def file_drain_ack(drain_acknowledgements: dict, data) -> None:
+    """File one `command_ack` payload into `{marker: (event_seq, …)}` IN PLACE when a DRAIN engine
+    wrote it (`drain_only: true`, doc 68 68.3b) — the same keys and values `file_command_ack` files,
+    kept apart so a command that asked for a drain can tell its own engine from a search."""
+    if isinstance(data, dict) and data.get("drain_only") is True:
+        file_command_ack(drain_acknowledgements, data)
+
+
 def command_ack_index(events) -> dict:
     """`{marker: (event_seq, …)}` over every `command_ack` in `events` — the index
     `serve/command_observation.py` builds incrementally, built here in one pass for a reader that

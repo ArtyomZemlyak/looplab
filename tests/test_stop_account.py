@@ -420,8 +420,8 @@ def test_the_stop_vocabulary_is_not_a_failure_reason():
 def test_no_decision_path_reads_the_stop_account():
     """The lifecycle DECIDER must keep deciding on the fold's own facts, never on this record.
 
-    `cli/run_cmds.py::classify_prior_run` picks which event a re-entering command appends. It reads
-    `finished` / `paused` / `stop_requested` / `stop_reason`, and it must not learn to read
+    `engine/run_boundary.py::classify_prior_run` picks which event a re-entering command appends. It
+    reads `finished` / `paused` / `stop_requested` / `stop_reason`, and it must not learn to read
     `pause_reason`, `stop_detail` or the account — those are prose a model or a remote writer can
     shape, and "text may nominate, never decide" is the whole of why they are separated.
 
