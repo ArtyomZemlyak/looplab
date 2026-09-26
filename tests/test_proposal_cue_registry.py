@@ -250,7 +250,44 @@ def test_every_steering_kind_has_an_operator_label_in_the_card_board():
 
     source = (Path(__file__).resolve().parents[1] / "ui" / "src" / "cardBoardModel.js").read_text(
         encoding="utf-8")
-    body = source.split("const STEERING_CUES = {", 1)[1].split("\n}\n", 1)[0]
+    body = _js_code(source.split("const STEERING_CUES = {", 1)[1].split("\n}\n", 1)[0])
     labelled = set(re.findall(r"(?:^|[\s,{])([a-z_]+):\s*'", body))
     assert set(CARD_STEERING_CONTEXT_FIELDS) <= labelled, sorted(
         set(CARD_STEERING_CONTEXT_FIELDS) - labelled)
+
+
+def _js_code(text: str) -> str:
+    """`text` with its JavaScript comments removed, quotes respected: a label commented out is not a
+    label (critic 2026-09-26: `// mixed_comparability: '…'` kept the pin above green)."""
+    out, i, quote = [], 0, None
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            out.append(ch)
+            if ch == "\\" and i + 1 < len(text):
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in "'\"`":
+            quote = ch
+            out.append(ch)
+        elif text.startswith("//", i):
+            end = text.find("\n", i)
+            i = len(text) if end < 0 else end
+            continue
+        elif text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            i = len(text) if end < 0 else end + 2
+            continue
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def test_a_commented_out_label_is_not_a_label():
+    code = _js_code("a: 'x', // b: 'y'\n/* c: 'z' */ d: 'http://w', e: 'it\\'s'\n")
+    import re
+    assert set(re.findall(r"(?:^|[\s,{])([a-z_]+):\s*'", code)) == {"a", "d", "e"}
