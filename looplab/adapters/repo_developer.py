@@ -1199,7 +1199,7 @@ class LLMRepoDeveloper:
 
     # Measured 2026-09-25 (MiniOneRec inf12): nodes 13, 14 and 17 were built under "de-duplicate the
     # first decode step" and none contained it; nothing said so, and the idea was re-proposed and
-    # rejected as "already tried" four times (`engine/activation.py::IDEA_REPORT_NAME`).
+    # rejected as "already tried" four times (`core/idea_report.py::IDEA_REPORT_NAME`).
     _IDEA_FIDELITY_PROPERTIES = {
         "idea_implemented": {
             "type": "string", "enum": ["as_proposed", "partly", "different", "not_implemented"],

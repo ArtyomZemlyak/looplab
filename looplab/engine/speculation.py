@@ -793,7 +793,7 @@ class SpeculationMixin:
     _eval_budget_stop: Optional[BaseException] = None
     #   `_outer_boundary_served_tail`  the log seq at which a session last handed back for a
     #                          RECURRING producer yield, so the same unchanged condition cannot hand
-    #                          back again — see `_card_phase_decide_exit`'s last clause.
+    #                          back again — see `_card_phase_decide_exit`'s rate-limit clause.
     _outer_boundary_served_tail: int = -2
 
     def _evals_inflight(self) -> bool:
@@ -3649,15 +3649,29 @@ class SpeculationMixin:
         # (`boundary_owed`) and every fold-derived stop still hand back unconditionally; only the
         # recurring producer yield is rate-limited, and only while an adopted evaluation is still
         # running, which is what this session then stays alive FOR.
+        #
+        # THE SAME ONCE-PER-DEBT RULE WHEN ADOPTED PRODUCER WORK IS WHAT IS RUNNING (2026-09-26).
+        # The eval half alone needs `not producer_inflight`, so it never covered a session whose only
+        # work is a build (or raw proposal) in the run-scoped group: `closing_holds` is False for it,
+        # the session set the debt and returned, the outer loop paid a cadence pass and came straight
+        # back. Measured on MiniOneRec inf13 (width 2): the run's first build, 8 minutes with no eval
+        # and no pending node, turned the outer loop ~5 times a second — 2,534 cadence passes, each a
+        # full read and fold of the log. On an unmoved tail that session now polls instead, and it
+        # drops the latched `yield_outer` as it does so: a latched one keeps `open_for_production`
+        # False, and the build finishing under it would be closed `commit_not_allowed` rather than
+        # committed (`_serve_card_builds`). The eval half keeps it latched, as it always has: it
+        # holds no producer work a latched flag could refuse.
+        adopted_only = producer_inflight and not closing_holds
         if (
             session.yield_outer
             and not session.boundary_owed
             and not gates.stopping
-            and session.eval_inflight
-            and not producer_inflight
+            and ((session.eval_inflight and not producer_inflight) or adopted_only)
         ):
             tail = events[-1].seq if events else -1
             if tail == self._outer_boundary_served_tail:
+                if adopted_only:
+                    session.yield_outer = False
                 return False              # nothing new to hand back; poll instead of ping-ponging
             self._outer_boundary_served_tail = tail
         if closing_holds:
