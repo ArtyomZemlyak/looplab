@@ -78,6 +78,8 @@ def test_measured_timings_reach_every_number_in_the_sentence(tmp_path):
 
 
 @pytest.mark.skipif(not (ALGOTUNE / ".hf_datasets").is_dir(), reason="needs the AlgoTune checkout")
+@pytest.mark.skipif(not any(Path("/var/tmp/looplab-bench/model-probes").glob("*")),
+                    reason="needs the live probe corpus (the directory survives it, empty)")
 def test_the_flagless_card_is_byte_identical(tmp_path):
     """§115's arm is pinned on card shas. The flag must not move the card that is not asking."""
     def card(*flags):

@@ -620,8 +620,11 @@ def test_the_repair_emit_is_the_only_one_that_offers_a_rollback():
     repair = dev._repair_emit_spec()["function"]["parameters"]["properties"]
     # `activation_markers` (2026-09-23) is on BOTH, because a fresh build is exactly where a new
     # switchable path is written; the rollback remains the repair's alone.
-    assert set(build) == {"summary", "activation_markers"}
-    assert set(repair) == {"summary", "activation_markers", "rollback_stage"}
+    # `idea_implemented` / `built_instead` (2026-09-25, the idea-fidelity report) are on both too:
+    # a repair can substitute an idea as easily as a build.
+    assert set(build) == {"summary", "activation_markers", "idea_implemented", "built_instead"}
+    assert set(repair) == {"summary", "activation_markers", "idea_implemented", "built_instead",
+                           "rollback_stage"}
     assert "rollback_stage" not in build
     desc = repair["rollback_stage"]["description"]
     # The two things a model must know at the moment of answering, in the text it actually reads.

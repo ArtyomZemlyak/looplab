@@ -98,6 +98,11 @@ class SetupPhaseMixin:
             reset_install_latch()
         except Exception:  # noqa: BLE001 - best-effort; a missing helper must not block setup
             pass
+        # A mount the root repo would shadow fails EVERY node's seed; say so before anything is
+        # spent (`workspace_seed.preflight_mount_collision`).
+        if self._repo_spec:
+            from looplab.engine.workspace_seed import preflight_mount_collision
+            preflight_mount_collision(self._repo_spec, seed_mode=(self._seed_mode or "auto"))
         # SETUP-COMPLETION GATE (arch-review §3 P0-3): gate on `setup_done` (folded from
         # setup_finished), NOT on run_id. run_started is appended in the MIDDLE of this block — before
         # AGENTS.md/provenance/host-grading/profiling and the leakage hard-stop — so a crash right

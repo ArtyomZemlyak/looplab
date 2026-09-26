@@ -1410,7 +1410,7 @@ class SpeculationMixin:
         from looplab.agents.agent import handoff_scope
         with self._op_span("card_build", card_id=card_id,
                            card_build_generation=build_generation) as span, \
-                handoff_scope(enabled=getattr(self, "_phase_handoff_summary", False)):
+                handoff_scope(enabled=self._phase_handoff_summary):
             # Read the id from the ACTIVE span rather than from the handle: `_op_span` degrades to a
             # null context when no tracer is wired, and a build with no trace must carry no claim.
             build_trace = tracing.current_ids()[0] if span is not None else None

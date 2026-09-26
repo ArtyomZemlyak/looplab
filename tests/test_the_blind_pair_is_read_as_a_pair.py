@@ -67,7 +67,9 @@ def test_no_blind_phase_means_no_sentence():
 def test_the_live_check_carries_the_pair(tmp_path):
     """Через ВЫЗОВ, а не только через функцию (§399's lesson)."""
     import os
-    if not os.path.isdir("/var/tmp/looplab-bench/model-probes"):
+    # EMPTY is the same as absent: the box keeps the directory after its corpus is gone (18.09).
+    if not os.path.isdir("/var/tmp/looplab-bench/model-probes") or not os.listdir(
+            "/var/tmp/looplab-bench/model-probes"):
         import pytest
         pytest.skip("no bench on this box")
     _ok, detail = sweep_claims.check_money_cue_reaches_the_choosers("/var/tmp/looplab-bench")

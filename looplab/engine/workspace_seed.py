@@ -339,6 +339,62 @@ class MountCollision(RuntimeError):
             f"instead of the declared source. Rename the mount or the repo entry.")
 
 
+def root_seed_top_level(src, *, seed_mode: str = "auto", ignore=None) -> list[str]:
+    """The top-level names seeding the ROOT editable from `src` WOULD produce, without copying it.
+
+    The same rule `seed_repo_tree` applies: under ``auto``/``tracked`` the first path component of
+    every git-tracked file, when git lists any; otherwise the source listing through the copy's own
+    `ignore`. A timed-out or failing listing answers the full listing -- the copy's own fallback.
+    """
+    from looplab.runtime.sandbox import git_subprocess_env
+
+    src = Path(src)
+    if seed_mode != "all":
+        try:
+            out = subprocess.run(["git", "-C", str(src), "ls-files", "-z"],
+                                 capture_output=True, text=True, encoding="utf-8",
+                                 timeout=LS_FILES_TIMEOUT_S, env=git_subprocess_env())
+            if out.returncode == 0:
+                tops = sorted({p.split("/", 1)[0] for p in out.stdout.split("\0") if p})
+                if tops:
+                    return tops
+        except Exception:  # noqa: BLE001 - git missing / wedged -> the copy's full-listing fallback
+            pass
+    try:
+        names = os.listdir(src)
+    except OSError:
+        return []
+    ignore = candidate_ignore() if ignore is None else ignore
+    dropped = set(ignore(str(src), names) or ())
+    return sorted(n for n in names if n not in dropped)
+
+
+def preflight_mount_collision(repo_spec, *, seed_mode: str = "auto", ignore=None) -> None:
+    """Raise the `MountCollision` the first node's seed WOULD raise, at run start instead.
+
+    MEASURED 2026-09-26 (MiniOneRec inf13): a root repo copied from a previous run's node directory
+    carried that node's `assets` mount symlink. Nothing noticed until the first EVALUATION seeded a
+    workspace -- 27 minutes and a deep-research pass, a proposal and a full build later -- and the
+    same build had already copied the 5.2 GB the link pointed at into the node directory. The
+    collision is a fact about the task's inputs, knowable before anything is spent.
+    Reads the SOURCE through the seed's own rule (`root_seed_top_level`), so a gitignored top-level
+    `data/` beside a `data:` mount, which `auto` never copies, is not a false collision.
+    """
+    editables = list((repo_spec or {}).get("editables") or [])
+    root = next((e for e in editables if e.get("name") in (".", "")), None)
+    if root is None:
+        return
+    mounts = [name for name in ([r["name"] for r in (repo_spec.get("references") or [])
+                                 if r.get("mount")] + list(repo_spec.get("data") or {})) if name]
+    if not mounts:
+        return
+    tops = set(root_seed_top_level(root["path"], seed_mode=root.get("seed_mode") or seed_mode
+                                   or "auto", ignore=ignore))
+    clash = next((name for name in mounts if name in tops), None)
+    if clash is not None:
+        raise MountCollision(clash, root.get("path", ""))
+
+
 @dataclass(frozen=True)
 class SeedOps:
     """The four primitives `seed_candidate_workspace` drives, injectable as a bundle.

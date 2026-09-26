@@ -371,7 +371,7 @@ EVIDENCE_CONSUMERS: dict[str, EvidenceConsumer] = {
                          + _ENGINE,
                          _J + "test_the_stage_checker_reads_the_candidates_log_fenced_when_the_"
                          "envelope_is_on"),
-    "engine/novelty.py::NoveltyGateMixin._llm_novelty_gate -> agentic_struct":
+    "engine/novelty.py::NoveltyGateMixin._llm_duplicate_verdict -> agentic_struct":
         EvidenceConsumer(FENCED, "The novelty adjudicator's " + _RUN_TOOLS + _ENGINE,
                          _J + "test_the_novelty_adjudicator_reads_prior_code_fenced_when_the_"
                          "envelope_is_on"),

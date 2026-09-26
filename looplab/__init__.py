@@ -215,6 +215,7 @@ _LAYOUT = {
     "preflight": "agents",    # the pre-run LLM endpoint/credential reachability check
     "findings": "trust",      # one trust-finding shape + the gate namespaces (doc 25 CT-10)
     "fitness": "core",
+    "idea_report": "core",
     "eval_stages": "engine",
     "eventstore": "events",
     "evaluate": "engine",

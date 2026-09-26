@@ -48,7 +48,9 @@ def test_the_percentage_is_of_probes_with_spend(tmp_path):
 def test_the_live_corpus_still_reports_both_halves():
     """Через ВЫЗОВ: пересчёт по спанам дал ровно $1.5537 и 147 из 156 — сверено вторым прибором."""
     import os
-    if not os.path.isdir("/var/tmp/looplab-bench/model-probes"):
+    # EMPTY is the same as absent: the box keeps the directory after its corpus is gone (18.09).
+    if not os.path.isdir("/var/tmp/looplab-bench/model-probes") or not os.listdir(
+            "/var/tmp/looplab-bench/model-probes"):
         import pytest
         pytest.skip("no bench on this box")
     _ok, detail = sweep_claims.check_a_dollar_probe_costs_a_dollar("/var/tmp/looplab-bench")
