@@ -157,6 +157,22 @@ def test_a_pending_resume_request_is_not_a_stopped_run(tmp_path):
     assert out.exit_code == 1, out.output
     assert "does not stand" in out.output and "resume request is pending" in out.output
     assert "the run stays stopped" not in out.output, "it does not stand and stays stopped at once"
+    # WHO serves it, with the conditions (third critic pass: an unconditional "the first server
+    # started on this run's root serves it" was false for a server rooted elsewhere or without
+    # the task snapshot).
+    assert "whose root is this run's parent directory" in out.output
+    assert "task snapshot" in out.output and "so does `looplab resume`" in out.output
+
+
+def test_a_pending_finalize_request_is_named_as_one(tmp_path):
+    """A finalize request is served by `looplab finalize`, which wraps the run up — it does not
+    lift the stop, and the message must not say it does."""
+    rd = _run_dir(tmp_path, in_flight=False)
+    EventStore(rd / "events.jsonl").append("resume_requested", {"mode": "finalize"})
+    out = CliRunner().invoke(app, ["stop", str(rd), "--wait"])
+    assert out.exit_code == 1, out.output
+    assert "finalize request is pending" in out.output and "wraps the run up" in out.output
+    assert "lifts the stop" not in out.output
 
 
 @pytest.mark.parametrize("argv", [["--timeout", "5"], ["--wait", "--timeout", "-1"]])
@@ -332,10 +348,12 @@ def test_a_command_no_live_worker_holds_is_a_note_not_a_failure(tmp_path):
     assert "no engine was running" in out.output
     assert "note: server command(s) `node_reset`" in out.output
     assert "no worker has shown life for 30 s" in out.output
-    # ...and what brings it back, since nothing cancels it (third critic pass: the first note sent
-    # the operator to a "Commands view" that does not exist).
-    assert "a GET of the command, which an open LoopLab tab makes" in out.output
-    assert "Commands view" not in out.output
+    # ...and what brings it back, since nothing cancels it before its deadline: a GET, a
+    # re-submission the UI attaches to, a server restart for a `restart` — NOT "an open tab", which
+    # polls a submitted command for 8 s and stops (fourth critic pass, driven).
+    assert "a GET of the command" in out.output and "submitted again" in out.output
+    assert "`restart`, the next server started on this run's parent directory" in out.output
+    assert "open LoopLab tab" not in out.output and "Commands view" not in out.output
 
 
 def test_the_fresher_of_the_claim_and_the_record_is_the_pulse(tmp_path):
@@ -360,13 +378,78 @@ def test_an_old_uncertain_start_is_a_note_about_the_child_it_may_have_left(tmp_p
     assert "could not tell whether they started an engine" in out.output
 
 
-def test_an_unreadable_record_names_its_remedy(tmp_path):
+def test_an_unreadable_record_starts_nothing_and_names_its_remedy(tmp_path):
+    """A record the server's own reader rejects is driven by NOTHING — a GET of it answers 503 and
+    no recovery reads it — so the stop stands; what it does do is block every later command, and
+    the note names the quarantine (fourth critic pass)."""
     rd = _run_dir(tmp_path, in_flight=False)
     (rd / ".commands").mkdir()
     (rd / ".commands" / f"cmd_{'7' * 32}.json").write_text("{not json", encoding="utf-8")
     out = CliRunner().invoke(app, ["stop", str(rd), "--wait"])
-    assert out.exit_code == 1, out.output
+    assert out.exit_code == 0, out.output
+    assert f"note: command record(s) cmd_{'7' * 32} cannot be read" in out.output
     assert "resolve-activity-claims" in out.output
+
+
+def test_a_large_settled_record_is_read_not_called_unreadable(tmp_path):
+    """The server writes a record with `indent=2` and every non-ASCII character escaped, so a
+    real `inject_node` exceeded the old 1 MiB bound (2,401,601 bytes, driven) — and a SETTLED one
+    then made every `stop --wait` exit 1 with a remedy that did nothing."""
+    from looplab.cli.run_cmds import server_commands_restarting
+
+    rd = _run_dir(tmp_path, in_flight=False)
+    path = _command_record(rd, event_type="inject_node", policy="ensure_running",
+                           status="timed_out")
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["data"] = {"code": "ж" * 400_000}
+    path.write_text(json.dumps(record, indent=2), encoding="utf-8")
+    assert path.stat().st_size > (1 << 20)
+    assert server_commands_restarting(rd) == {"coming": [], "stale": [], "uncertain": [],
+                                              "unreadable": []}
+    out = CliRunner().invoke(app, ["stop", str(rd), "--wait"])
+    assert out.exit_code == 0, out.output
+
+
+def test_a_command_the_engine_already_acknowledged_or_let_expire_starts_nothing(tmp_path):
+    """A server killed after the engine ACKED its command leaves the record `executing`; a GET
+    settles it `succeeded` and spawns nothing, so it is no note at all. Nor is one past its
+    deadline, which a re-drive now settles `timed_out` (fourth critic pass)."""
+    from looplab.cli.run_cmds import _command_acks, server_commands_restarting
+
+    rd = _run_dir(tmp_path, in_flight=False)
+    store = EventStore(rd / "events.jsonl")
+    path = _command_record(rd, event_type="node_reset", policy="ensure_running", age_s=3600,
+                           name="a" * 32)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["event_seq"] = 7
+    path.write_text(json.dumps(record), encoding="utf-8")
+    assert server_commands_restarting(rd)["stale"], "unacked, it is a stale note"
+    store.append("command_ack", {"command_id": f"cmd_{'a' * 32}", "event_seq": 7})
+    acks = _command_acks(store.read_all())
+    assert (f"cmd_{'a' * 32}", 7) in acks
+    assert server_commands_restarting(rd, acked=acks)["stale"] == []
+    expired = _command_record(rd, event_type="fork", policy="ensure_running", name="b" * 32)
+    record = json.loads(expired.read_text(encoding="utf-8"))
+    record["absolute_deadline_at"] = time.time() - 1
+    expired.write_text(json.dumps(record), encoding="utf-8")
+    assert server_commands_restarting(rd, acked=acks)["coming"] == []
+    out = CliRunner().invoke(app, ["stop", str(rd), "--wait"])
+    assert out.exit_code == 0 and "note: server command" not in out.output, out.output
+
+
+@pytest.mark.parametrize("updated", [10 ** 400, "1e999"])
+def test_a_hand_edited_pulse_neither_crashes_the_wait_nor_lives_forever(tmp_path, updated):
+    """`float()` of a 400-digit integer raised `OverflowError` AFTER the pause was appended, and
+    `1e999` (infinity) read as a worker alive forever (fourth critic pass, driven)."""
+    rd = _run_dir(tmp_path, in_flight=False)
+    path = _command_record(rd, event_type="fork", policy="ensure_running")
+    raw = path.read_text(encoding="utf-8")
+    record = json.loads(raw)
+    marker = str(record["updated_at"])
+    path.write_text(raw.replace(marker, str(updated)), encoding="utf-8")
+    out = CliRunner().invoke(app, ["stop", str(rd), "--wait"])
+    assert out.exit_code == 0, out.output
+    assert "note: server command(s) `fork`" in out.output
 
 
 def test_a_recent_uncertain_engine_start_counts_as_coming(tmp_path):
@@ -377,28 +460,30 @@ def test_a_recent_uncertain_engine_start_counts_as_coming(tmp_path):
     _command_record(rd, event_type="fork", policy="ensure_running", status="failed",
                     error={"code": "engine_start_uncertain"})
     assert server_commands_restarting(rd) == {
-        "coming": [f"`fork` (cmd_{'0' * 32}, engine start uncertain)"], "stale": [],
-        "uncertain": []}
+        "coming": [f"`fork` (cmd_{'0' * 32}, engine start uncertain — its child may still be "
+                   "starting)"], "stale": [], "uncertain": [], "unreadable": []}
 
 
 def test_only_an_unsettled_engine_starting_record_counts(tmp_path):
     from looplab.cli.run_cmds import server_commands_restarting
 
     rd = _run_dir(tmp_path, in_flight=False)
-    assert server_commands_restarting(rd) == {"coming": [], "stale": [], "uncertain": []}
+    empty = {"coming": [], "stale": [], "uncertain": [], "unreadable": []}
+    assert server_commands_restarting(rd) == empty
     _command_record(rd, event_type="budget_extend", policy="ensure_running", status="succeeded",
                     name="1" * 32)
     _command_record(rd, event_type="hint", policy="no_spawn", name="2" * 32)
     _command_record(rd, event_type="run_abort", policy="ensure_driver_preserve_stop",
                     name="3" * 32)                     # a finalize driver never lifts the pause
-    assert server_commands_restarting(rd) == {"coming": [], "stale": [], "uncertain": []}
+    assert server_commands_restarting(rd) == empty
     _command_record(rd, event_type="restart", policy="restart_after_exit", status="accepted",
                     name="4" * 32)
     (rd / ".commands" / f"cmd_{'5' * 32}.json").write_text("{not json", encoding="utf-8")
     _command_record(rd, event_type="fork", policy="ensure_running", name="6" * 32, age_s=3600)
     assert server_commands_restarting(rd) == {
-        "coming": [f"`restart` (cmd_{'4' * 32}, accepted)", f"cmd_{'5' * 32} (unreadable)"],
-        "stale": [f"`fork` (cmd_{'6' * 32}, executing)"], "uncertain": []}
+        "coming": [f"`restart` (cmd_{'4' * 32}, accepted)"],
+        "stale": [f"`fork` (cmd_{'6' * 32}, executing)"], "uncertain": [],
+        "unreadable": [f"cmd_{'5' * 32}"]}
 
 
 def test_the_record_a_real_command_worker_leaves_is_the_one_read(tmp_path):
@@ -429,7 +514,8 @@ def test_the_record_a_real_command_worker_leaves_is_the_one_read(tmp_path):
     while client.get(f"/api/runs/run/commands/{hint['id']}").json()["status"] != "succeeded":
         assert time.monotonic() < deadline, "the hint never settled"
         time.sleep(0.02)
-    assert server_commands_restarting(rd) == {"coming": [], "stale": [], "uncertain": []}
+    assert server_commands_restarting(rd) == {"coming": [], "stale": [], "uncertain": [],
+                                              "unreadable": []}
     assert post_command(client, "budget_extend", {"add_nodes": 2}, run_id="run").status_code < 300
     found = server_commands_restarting(rd)
     assert (len(found["coming"]) == 1 and found["coming"][0].startswith("`budget_extend` (cmd_")

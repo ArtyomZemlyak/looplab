@@ -63,7 +63,7 @@ from looplab.serve.engine_proc import (
 from looplab.serve.http import generation_conflict, refusal
 from looplab.serve.protocol import COLLABORATION_EVENTS, CONTROL_EVENTS
 from looplab.serve.protocol import (COMMAND_ACTIVE_STATUSES, COMMAND_TERMINAL_STATUSES,
-                                    ENGINE_START_UNCERTAIN)
+                                    ENGINE_START_UNCERTAIN, deadline_passed)
 
 
 # Kept under this name — its call sites read well — but DERIVED from `serve/protocol.py`, the
@@ -3981,6 +3981,17 @@ class RunCommandService:
             record["absolute_deadline_at"] = time.time() + self.max_observation_timeout
         try:
             if record.get("status") in TERMINAL_STATUSES:
+                return
+            # AN EXPIRED RECORD IS NEVER RE-DRIVEN INTO A SPAWN (critic 2026-09-26, driven). A GET of
+            # a record whose worker died re-enters here, and the spawn ladder in `_admit` ran before
+            # anything looked at the record's own deadline: it started `looplab resume` forty minutes
+            # past it — and, after a finalize, reopened the finished run. The monitor loop already
+            # refuses a second Popen past this bound; the first one now honours it too. What is left
+            # is `_terminalize_expired`'s serialized last look, so a late acknowledgement still
+            # settles the command `succeeded`.
+            spec = CONTROL_SPECS.get(str(record.get("event_type") or ""))
+            if spec is not None and deadline_passed(record.get("absolute_deadline_at")):
+                self._terminalize_expired(rd, path, record, command_id, spec)
                 return
             spec, record = self._admit(rd, path, record, command_id)
             if spec is not None:

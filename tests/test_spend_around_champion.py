@@ -143,6 +143,8 @@ def test_looplab_tokens_prints_the_line(tmp_path):
     line = next(ln for ln in out.output.splitlines() if ln.startswith("champion"))
     assert "node 0" in line and "1,000 tokens ($0.1000) spent to reach it" in line
     assert "3,000 tokens ($0.3000; 75.0 % of tokens, 75.0 % of cost) spent after it" in line
+    # A ledger that covers the run explains nothing away: no caveat line follows the share.
+    assert "the per-call ledger" not in out.output, out.output
 
 
 def test_a_partly_priced_ledger_names_its_priced_calls_and_drops_the_cost_share(tmp_path):
@@ -184,6 +186,11 @@ def test_a_ledger_that_starts_after_the_champion_says_the_reach_is_unrecorded(tm
     # Not "0 tokens ($0.0000) spent to reach it ... 100.0 % of cost" above that sentence (second
     # critic pass): no zero reach and no share.
     assert "spent to reach it" not in line and "%" not in line, line
+    # The one caveat line that belongs here (fourth critic pass): the after part is a floor too on a
+    # run begun without the ledger — and not the first-node sentence, which contradicts "nothing".
+    caveat = out.output.splitlines()[out.output.splitlines().index(line) + 1]
+    assert "the spend after the champion is a floor too" in caveat, caveat
+    assert "may be floors" not in out.output
     # ...and one whose roll-up counted the spend before it says the reach is that roll-up.
     rd3 = tmp_path / "rolled"
     rd3.mkdir()
@@ -256,7 +263,7 @@ def test_a_ledger_that_begins_mid_run_prints_no_share(tmp_path):
     assert "1,000 tokens ($0.1000) spent to reach it" in line and "%" not in line, line
     assert caveat.strip().startswith("the per-call ledger's first row comes after the run's first "
                                      "node"), caveat
-    assert "the reach may be a floor, so no share is printed" in caveat, caveat
+    assert "the reach and the total may be floors, so no share is printed" in caveat, caveat
 
 
 def test_a_roll_up_followed_by_a_gap_prints_no_share(tmp_path):
@@ -288,4 +295,28 @@ def test_a_roll_up_followed_by_a_gap_prints_no_share(tmp_path):
     assert "4,000 tokens ($0.4000) spent to reach it" in line and "%" not in line, line
     assert ("the per-call ledger starts after a cost roll-up: the reach counts that roll-up"
             in caveat), caveat
+    assert "the reach and the total are floors, so no share is printed" in caveat, caveat
+
+
+def test_a_roll_up_before_a_ledger_that_covers_every_node_still_prints_no_share(tmp_path):
+    """Fourth critic pass, driven: roll-up -> first `llm_usage` -> first node. The first-node clause
+    alone would call that ledger whole-run, and a share ("14.9 %") printed above "so no share is
+    printed". The roll-up half of `ledger_covers_run` is what refuses it, and the share and its
+    caveat are gated on the one condition."""
+    rd = tmp_path / "rolled-first"
+    rd.mkdir()
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "max"})
+    store.append("llm_cost", {"cost": 0.3, "calls": 3, "total_tokens": 3000})
+    store.append("llm_usage", {"calls": 1, "priced_calls": 1, "total_tokens": 1000, "cost": 0.1})
+    store.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                  "idea": {"operator": "draft", "params": {}, "rationale": "s"},
+                                  "code": "pass\n"})
+    store.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": 0.9, "violations": []})
+    store.append("llm_usage", {"calls": 1, "priced_calls": 1, "total_tokens": 700, "cost": 0.07})
+    events = store.read_all()
+    split = spend_around_champion(events, fold(events))
+    assert split["rolled_up_before"] is True and split["ledger_covers_run"] is False
+    line, caveat = _champion_lines(rd)
+    assert "%" not in line, line
     assert "the reach and the total are floors, so no share is printed" in caveat, caveat

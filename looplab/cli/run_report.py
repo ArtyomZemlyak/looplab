@@ -607,6 +607,10 @@ def echo_spend_around_champion(*, state, ev_path: Path) -> None:
     typer.echo(f"champion   : node {split['node_id']} landed at seq {split['seq']} — "
                f"{reach_text}; {after['tokens']:,} tokens ({_money(after)}{shares}) spent after it "
                f"was in hand{tail}")
+    # ONE CONDITION for the share and for the line explaining its absence (third critic pass: the
+    # share was gated on `ledger_covers_run` and this line on `rolled`, so the two could disagree).
+    if split["ledger_covers_run"]:
+        return
     if rolled:
         typer.echo("             the per-call ledger starts after a cost roll-up"
                    + (" and after the champion landed" if late else "")
@@ -614,10 +618,14 @@ def echo_spend_around_champion(*, state, ev_path: Path) -> None:
                    "row is in neither part — "
                    + ("both are floors" if late else "the reach and the total are floors")
                    + ", so no share is printed")
-    elif not late and not split["ledger_covers_run"]:
+    elif late:
+        typer.echo("             the per-call ledger starts after the champion landed: on a run begun "
+                   "on a build without it, the spend after the champion is a floor too, so no share "
+                   "is printed")
+    else:
         typer.echo("             the per-call ledger's first row comes after the run's first node "
                    "(a run begun on a build without the ledger, or a first node built without a "
-                   "model call): the reach may be a floor, so no share is printed")
+                   "model call): the reach and the total may be floors, so no share is printed")
 
 
 def echo_edit_types(state) -> None:

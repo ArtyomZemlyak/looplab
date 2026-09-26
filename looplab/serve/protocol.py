@@ -40,6 +40,8 @@ Protocols named here:
 """
 from __future__ import annotations
 
+import math
+import time
 from enum import Enum
 
 from looplab.events.types import (
@@ -103,6 +105,21 @@ class EnginePolicy(str, Enum):
 # Every Python record site (`serve/run_commands.py`, `SPAWN_CLAIM_HATCH` included) spells it through
 # this constant; the React client keeps its own literal (`ui/src/commandModel.js`).
 ENGINE_START_UNCERTAIN = "engine_start_uncertain"
+
+
+def deadline_passed(deadline, now: float | None = None) -> bool:
+    """Has a durable command record's `absolute_deadline_at` passed? False for a value no server
+    writes (absent, a bool, a non-finite number), which keeps such a record on the old path. HERE and
+    not in `serve/run_commands.py` because `looplab stop --wait` asks the same question of the same
+    field without FastAPI installed; the command service's re-drive gate
+    (`RunCommandService._execute`) is the other caller."""
+    if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
+        return False
+    try:
+        value = float(deadline)
+    except OverflowError:
+        return False
+    return math.isfinite(value) and (time.time() if now is None else now) >= value
 
 CONTROL_EVENTS = frozenset({
     EV_RUN_ABORT, EV_PAUSE, EV_RESTART, EV_RESUME, EV_NODE_ABORT, EV_NODE_RESET, EV_BUDGET_EXTEND, EV_HINT,

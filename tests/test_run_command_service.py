@@ -3350,3 +3350,40 @@ def test_the_command_append_baseline_comes_from_the_incremental_index_not_a_full
     assert reparses.count("construct") == built, (
         "a second command built another EventStore instead of appending through the run's own",
         reparses)
+
+
+def test_a_record_past_its_deadline_is_never_re_driven_into_a_spawn(tmp_path):
+    """Critic 2026-09-26, driven: a GET of a record whose worker died re-enters `_execute`, and the
+    spawn ladder in `_admit` ran before anything looked at the record's own `absolute_deadline_at`
+    — it started `looplab resume` forty minutes past it, and after a finalize reopened the finished
+    run. Past its deadline the record gets `_terminalize_expired`'s last look and nothing else."""
+    rd = _seed(tmp_path, paused=True)
+    driver = _Driver()
+    client, srv = _client(tmp_path, driver, observation=5.0)
+    real_start = srv.commands._start_worker
+    srv.commands._start_worker = lambda *_args, **_kwargs: None      # the worker "dies" at once
+    pending = _post(client, "budget_extend", {"add_nodes": 1}, key="expired-redrive").json()
+    assert pending["status"] == "accepted"
+    path = rd / ".commands" / f"{pending['id']}.json"
+    row = json.loads(path.read_text(encoding="utf-8"))
+    row["absolute_deadline_at"] = time.time() - 2400.0               # forty minutes ago
+    path.write_text(json.dumps(row), encoding="utf-8")
+    srv.commands._start_worker = real_start
+    deadline = time.time() + 5.0
+    seen = client.get(f"/api/runs/demo/commands/{pending['id']}").json()
+    while seen["status"] not in {"succeeded", "failed", "timed_out", "rejected"}:
+        assert time.time() < deadline, seen
+        time.sleep(0.02)
+        seen = client.get(f"/api/runs/demo/commands/{pending['id']}").json()
+    assert seen["status"] == "timed_out", seen
+    assert driver.calls == [], "no engine may be started for an expired command"
+    assert "resume" not in _types(rd)
+    # …and one inside its deadline is still re-driven: the bound is the deadline, not the re-drive.
+    srv.commands._start_worker = lambda *_args, **_kwargs: None
+    fresh = _post(client, "budget_extend", {"add_nodes": 2}, key="fresh-redrive").json()
+    srv.commands._start_worker = real_start
+    deadline = time.time() + 5.0
+    while not driver.calls:
+        assert time.time() < deadline, "a record inside its deadline was not re-driven"
+        client.get(f"/api/runs/demo/commands/{fresh['id']}")
+        time.sleep(0.02)
