@@ -210,6 +210,14 @@ def release_unspawned_start_namespace(
     return True
 
 
+def _launch_seed_intent(event_type, data) -> bool:
+    """The seed a launch appends ahead of its engine: an `inject_node` whose server-derived `origin`
+    receipt says `seed_from_run` (`engine/seed_from_run.py::seed_intent`)."""
+    origin = data.get("origin") if isinstance(data, dict) else None
+    return (event_type == "inject_node" and isinstance(origin, dict)
+            and origin.get("seed_from_run") is True)
+
+
 def has_first_run_started(rd: Path) -> bool:
     """Whether the first identity event is a durable, correlated ``run_started``.
 
@@ -218,6 +226,12 @@ def has_first_run_started(rd: Path) -> bool:
     layouts, but fail closed on a torn line, a malformed/unsupported envelope, a sequence gap,
     an unrelated pre-identity event, or a run id that does not name this exact directory.  A
     merely parseable ``{"type": "run_started"}`` is not process evidence.
+
+    ONE related pre-identity row is accepted: the launch's own seed (`Settings.seed_from_run`,
+    doc 67 67.2). `looplab run` appends that `inject_node` intent at sequence zero of a FRESH log,
+    before the engine it then starts writes `setup_started`, and nothing else writes an intent
+    carrying its receipt there (critic 2026-09-26, driven: every seeded web launch was recorded
+    `failed_after_spawn` with its spend unknown, the run itself finished).
     """
     path = rd / "events.jsonl"
     if path.is_symlink():
@@ -256,6 +270,8 @@ def has_first_run_started(rd: Path) -> bool:
                     if event_type == "run_started":
                         run_id = data.get("run_id")
                         return isinstance(run_id, str) and run_id == rd.name
+                    if seq == 0 and _launch_seed_intent(event_type, data):
+                        continue
                     if event_type not in {"setup_started", "setup_step"}:
                         return False
             return False

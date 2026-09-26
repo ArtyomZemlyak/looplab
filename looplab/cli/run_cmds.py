@@ -30,7 +30,8 @@ from looplab.engine.orchestrator import (
     drain_owed,
 )
 from looplab.engine.finalize import finalize_run, incomplete_finalize_scope, is_guarded_abort
-from looplab.engine.seed_from_run import resolve_seed, seed_ignored_note, seed_intent, seed_summary
+from looplab.engine.seed_from_run import (check_seed_direction, resolve_seed, seed_ignored_note,
+                                          seed_intent, seed_summary)
 from looplab.events.replay import fold
 from looplab.adapters.repo_task import eval_reader_path_errors, eval_workspace_conflicts
 from looplab.adapters.tasks import kinds_for, submit_warnings, validate_task
@@ -680,6 +681,16 @@ def _assert_calibration_dir_is_fresh(out: Path, prior_events) -> None:
         )
 
 
+def _log_has_events(run_dir: Path) -> bool:
+    """Whether `run_dir` already holds a run: a non-empty `events.jsonl`. The cheap question asked
+    before the singleton lock, for what a seed resolves; `_open_and_drive` asks the exact one under
+    it, from the log it folds."""
+    try:
+        return (Path(run_dir) / "events.jsonl").stat().st_size > 0
+    except OSError:
+        return False
+
+
 def _publish_run_snapshots(out: Path, task_dict: dict, settings) -> None:
     """Publish this epoch's input snapshots, both inside ONE reset-aware config transaction.
 
@@ -914,12 +925,15 @@ def _open_and_drive(task, task_dict: dict, settings, out: Path, *, crash_after=N
             _publish_run_snapshots(out, task_dict, settings)
             # `Settings.seed_from_run` (doc 67 67.2): a FRESH run's first experiment is the prior
             # run's node, as an operator inject the engine serves before its first creation turn —
-            # appended only now, after the task snapshot its contract receipt compares against.
+            # appended only now, after the snapshots that record the task it is judged against.
             if seed is not None:
                 if prior_events:
                     typer.echo(seed_ignored_note(settings.seed_from_run), err=True)
                 else:
-                    payload, verdict, note = seed_intent(seed, out)
+                    payload, verdict, note = seed_intent(
+                        seed, out, task_dict, direction=getattr(task, "direction", None),
+                        eval_env=getattr(settings, "eval_env", None),
+                        holdout_fraction=getattr(settings, "holdout_fraction", None))
                     # Spelled key by key so the payload-writer scan can read which keys this row
                     # carries (`tests/test_event_payload_contract.py`); an opaque dict is a row
                     # whose declared contract nothing checks.
@@ -1135,6 +1149,17 @@ def run(
                       # also covers a backend set via the .env file (env vars alone miss it), so
                       # Genesis doesn't clobber an explicit user choice.
                       or "backend" in getattr(settings, "model_fields_set", set()))
+    # 3a. `Settings.seed_from_run` (doc 67 67.2), resolved BEFORE Genesis — a paid call — so a
+    # mistyped seed costs nothing, and only for a run directory whose log is still empty: an existing
+    # run is never seeded, so nothing is resolved for it (critic 2026-09-26, driven: re-running a
+    # seeded run whose source had since been removed was refused instead of continued).
+    run_out = out or (Path(file_out) if file_out else Path("runs/run_local"))
+    seed = None
+    if getattr(settings, "seed_from_run", ""):
+        if _log_has_events(run_out):
+            typer.echo(seed_ignored_note(settings.seed_from_run), err=True)
+        else:
+            seed = resolve_seed(settings.seed_from_run, run_out)
     if genesis and goal is not None:
         from looplab.engine import genesis as _genesis
         try:
@@ -1194,11 +1219,13 @@ def run(
         raise typer.BadParameter(f"invalid task: {e}")
     if speculation_gate_calibration:
         task_dict = _calibration_envelope_task_dict(task, settings)
-    out = out or (Path(file_out) if file_out else Path("runs/run_local"))
-    # Resolved and validated BEFORE anything is created (a `ConfigRefusal`: one line, exit 2);
-    # appended by `_open_and_drive` only on a fresh run directory.
-    seed = (resolve_seed(settings.seed_from_run, out)
-            if getattr(settings, "seed_from_run", "") else None)
+    out = run_out
+    if seed is not None:
+        # The champion pick against the direction Genesis (or the file) settled, then the setting
+        # recorded as what it resolved to — `config.snapshot.json` then names the exact node, and a
+        # Replay of this run seeds that node again rather than whatever the source ranks by then.
+        check_seed_direction(seed, getattr(task, "direction", None))
+        settings.seed_from_run = seed.canonical_spec
     _report_submit_notes(task, task_dict, out, settings, planned=genesis and goal is not None)
     driven = _open_and_drive(task, task_dict, settings, out, crash_after=crash_after,
                              speculation_gate_calibration=speculation_gate_calibration,

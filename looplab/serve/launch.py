@@ -632,6 +632,32 @@ def _launch_token(run_id: str, task: dict, settings: dict, source: dict | None,
     })
 
 
+def _resolve_launch_seed(srv, run_dir: Path, task: dict, effective: dict) -> tuple[dict, tuple]:
+    """`Settings.seed_from_run` (doc 67 67.2), answered in the funnel `/api/validate` and
+    `/api/start` share (critic 2026-09-26, driven: the route accepted `nowhere`, `/etc` and
+    `../runs/src1#999`, and the refusal surfaced only in the spawned engine's stderr — after the run
+    name was taken and the keyed start recorded a failure with its spend unknown).
+
+    CONFINED to this server's runs root: a web operator names a run, never a host path (the server's
+    own `import` action and task-file loading are confined the same way). REWRITTEN to the canonical
+    `<run dir>#<node>` it resolved to, so the spawned `looplab run` seeds exactly the node the preview
+    showed, from this directory whatever its working directory. The verdict rides the preview as a
+    warning line — the one place a web operator sees it before the run exists."""
+    spec = str(effective.get("seed_from_run") or "").strip()
+    if not spec:
+        return effective, ()
+    from looplab.core.errors import ConfigRefusal
+    from looplab.engine.seed_from_run import resolve_seed, seed_summary, seed_verdict
+    try:
+        seed = resolve_seed(spec, run_dir, direction=task.get("direction"), confine_to=srv.root)
+    except ConfigRefusal as exc:
+        _reject(422, "invalid_seed", str(exc), "settings.seed_from_run")
+    verdict, note = seed_verdict(seed, task, direction=task.get("direction"),
+                                 eval_env=effective.get("eval_env"),
+                                 holdout_fraction=effective.get("holdout_fraction"))
+    return {**effective, "seed_from_run": seed.canonical_spec}, (seed_summary(seed, verdict, note),)
+
+
 def preflight_start(srv, body: Any) -> LaunchPreflight:
     """Validate and resolve one launch request without any mutation or provider/model operation."""
     if not isinstance(body, dict):
@@ -729,6 +755,8 @@ def preflight_start(srv, body: Any) -> LaunchPreflight:
     # inline calls here and a hand-written copy of them in `cli/run_cmds.py`, so a third warning
     # would have landed on whichever surface its author happened to be editing.
     warnings += task_adapters.submit_warnings(adapter)
+    effective, seed_notes = _resolve_launch_seed(srv, run_dir, canonical_task, effective)
+    warnings += seed_notes
     explicit = tuple(sorted(str(k) for k in launch_settings))
     token = _launch_token(
         run_id, canonical_task, effective, source_fp, referenced_paths,

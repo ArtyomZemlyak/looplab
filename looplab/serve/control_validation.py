@@ -34,7 +34,7 @@ import re
 import secrets
 import unicodedata
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Callable, Optional
 
 from fastapi import HTTPException
@@ -47,7 +47,7 @@ from looplab.core.models import (
     idea_proposal_digest,
 )
 from looplab.core.redact import redact_secrets
-from looplab.events.node_import import node_import_payload
+from looplab.events.node_import import NAME_NOT_TEXT, node_import_payload, portable_relative_name
 from looplab.events.comment_projection import (
     COMMENT_ID_RE, COMMENT_MAX_PER_NODE_GENERATION, COMMENT_MAX_PER_RUN, COMMENT_MAX_VERSION,
     normalize_comment_text)
@@ -707,19 +707,12 @@ def _import_cross_run_source(ctx: _ControlIntake) -> None:
 
 
 def _relative_file_name(value, field: str) -> str:
-    if (not isinstance(value, str) or not value or len(value) > 512
-            or any(ord(ch) < 32 for ch in value)):
+    # The rule is `events/node_import.py::portable_relative_name`, shared with the new-run seed
+    # (`Settings.seed_from_run`); the refusal wording stays this route's.
+    portable, defect = portable_relative_name(value)
+    if defect == NAME_NOT_TEXT:
         raise HTTPException(400, f"{field} entries must be non-empty relative path strings")
-    portable = value.replace("\\", "/")
-    parsed = PurePosixPath(portable)
-    raw_parts = portable.split("/")
-    reserved = {"CON", "PRN", "AUX", "NUL",
-                *(f"COM{i}" for i in range(1, 10)),
-                *(f"LPT{i}" for i in range(1, 10))}
-    if (not parsed.parts or parsed.is_absolute() or ":" in portable
-            or any(part in {"", ".", ".."} for part in raw_parts)
-            or any(part.endswith((".", " ")) for part in raw_parts)
-            or any(part.split(".", 1)[0].upper() in reserved for part in raw_parts)):
+    if portable is None:
         raise HTTPException(400, f"{field} entries must stay within the node workspace")
     return portable
 

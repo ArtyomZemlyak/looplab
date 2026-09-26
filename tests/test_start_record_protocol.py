@@ -331,10 +331,31 @@ def test_the_identity_walk_accepts_both_engine_layouts(tmp_path):
     assert sr.has_first_run_started(current) is True
 
 
+def test_a_launch_seed_ahead_of_the_engine_is_the_one_related_pre_identity_row(tmp_path):
+    """`Settings.seed_from_run` appends its `inject_node` at seq 0 of a fresh log, before the engine
+    writes `setup_started` (critic 2026-09-26, driven: every seeded web launch was recorded
+    `failed_after_spawn`, spend unknown, the run itself finished)."""
+    seeded = _run_dir(tmp_path, "seeded")
+    _log(seeded, _row(0, "inject_node", {"origin": {"run_id": "src", "node_id": 3,
+                                                    "seed_from_run": True}}),
+         _row(1, "setup_started", {}), _row(2, "setup_step", {}),
+         _row(3, "run_started", {"run_id": "seeded"}))
+    assert sr.has_first_run_started(seeded) is True
+
+
+_SEED_ROW = {"origin": {"run_id": "src", "node_id": 3, "seed_from_run": True}}
+
+
 @pytest.mark.parametrize("rows,why", [
     ([_row(0, "run_started", {"run_id": "somebody_else"})], "a run id that names another directory"),
     ([_row(0, "node_created", {}), _row(1, "run_started", {"run_id": "demo"})],
      "an unrelated pre-identity event"),
+    ([_row(0, "inject_node", {"origin": {"run_id": "src", "node_id": 3}}),
+      _row(1, "run_started", {"run_id": "demo"})], "an inject that carries no seed receipt"),
+    ([_row(0, "setup_started", {}), _row(1, "inject_node", _SEED_ROW),
+      _row(2, "run_started", {"run_id": "demo"})], "a seed row anywhere but seq 0"),
+    ([_row(0, "inject_node", _SEED_ROW), _row(1, "inject_node", _SEED_ROW),
+      _row(2, "run_started", {"run_id": "demo"})], "a second seed row"),
     ([_row(0, "setup_started", {}), _row(2, "run_started", {"run_id": "demo"})], "a sequence gap"),
     ([{"type": "run_started", "data": {"run_id": "demo"}}], "a merely parseable envelope"),
 ])

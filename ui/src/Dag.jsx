@@ -8,6 +8,7 @@ import { fmt, layoutWithGroups, nodeClass, delta, workingNodeIds, operatorMeta, 
 import { stripMd } from './markdown.jsx'
 import { nodeChip } from './report.js'
 import { forkChip } from './forkProvenance.js'
+import { seedContractText, seedSource } from './seedProvenance.js'
 import { nodeTheme } from './conceptId.js'
 import { nodeCanonicalConcepts } from './conceptChips.js'
 import { conceptMaterializationStatus, orderConceptTags, runConstantConcepts } from './nodeProjection.js'
@@ -289,6 +290,7 @@ function ExpNode({ data }) {
   // The one thing a node card must not do is present an inherited rationale as this experiment's own
   // justification. `forkChip` is null for every node nobody branched, so an ordinary card is unchanged.
   const branch = forkChip(node)
+  const seed = seedSource(node.origin)
   const cardTitle = op.label + (node.idea?.rationale ? ' — ' + stripMd(node.idea.rationale) : '')
     + (activityVisible ? ` · ${activity.label}` : '')
     + (conceptTruth ? ` · ${conceptTruth}` : '')
@@ -302,7 +304,7 @@ function ExpNode({ data }) {
     workIds.has(Number(node.id)) ? 'currently working' : null,
     theme ? `primary concept axis ${theme}` : null,
     conceptTruth || null,
-    node.origin?.run_id ? `seeded from run ${node.origin.run_id}, experiment ${node.origin.node_id}` : null,
+    seed ? `seeded from run ${seed.name}, experiment ${seed.nodeId}${seedContractText(node.origin)}` : null,
     node.research_origin ? 'proposed from deep research directions' : null,
     // An operator branch is a statement about WHO WROTE THIS IDEA, so it belongs in the selection
     // label beside the other two provenance facts rather than only in a hover title a screen reader
@@ -352,7 +354,13 @@ function ExpNode({ data }) {
           aria-label={`Open source run ${node.origin.run_id}, experiment ${node.origin.node_id}${node.research_origin ? ', informed by research' : ''}`}
           title={`seeded from run ${node.origin.run_id} #${node.origin.node_id}`
             + (node.origin.metric != null ? ` · source metric ${fmt(node.origin.metric)}` : '')
+            + seedContractText(node.origin)
             + (node.research_origin ? ' · informed by deep research' : '')}>⤴</a>
+          : seed ? <span className="origin-chip compact" role="img"
+          aria-label={`Seeded from run ${seed.name}, experiment ${seed.nodeId}`}
+          title={`seeded from run ${seed.dir} #${seed.nodeId}`
+            + (node.origin.metric != null ? ` · source metric ${fmt(node.origin.metric)}` : '')
+            + seedContractText(node.origin)}>⤴</span>
           : node.research_origin ? <span className="origin-chip rsch compact" role="img"
           aria-label="Proposed from deep research directions"
           title={`proposed just after deep research (${node.research_origin.trigger || 'auto'}) at node ${node.research_origin.at_node} — its directions were steering`}><OpIcon name="bulb" size={11} /></span> : null}
