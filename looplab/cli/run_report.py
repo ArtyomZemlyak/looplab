@@ -31,8 +31,8 @@ from typing import Optional
 import typer
 
 from looplab.events.eventstore import EventStore
-from looplab.events.token_spend import (CARD_UNATTRIBUTED, token_spend_by_build,
-                                        token_spend_by_card)
+from looplab.events.token_spend import (CARD_UNATTRIBUTED, spend_around_champion,
+                                        token_spend_by_build, token_spend_by_card)
 
 
 def span_category(sp: dict) -> str:
@@ -543,6 +543,41 @@ def echo_card_and_build_tables(rows, *, state, ev_path: Path, ledger_total: Opti
             # that trade, which until now had no visible price at all.
             typer.echo(f"{spent:>14,}  {share:>5.1f}%  {'':>6}  "
                        f"built and never evaluated ({len(lost)} card(s) discarded before dispatch)")
+
+
+def echo_spend_around_champion(*, state, ev_path: Path) -> None:
+    """One line under the ledger: what the champion cost to REACH and what was spent AFTER it.
+
+    The number doc 56 §131 had to compute by hand over a campaign's meter logs ("a third of
+    everything this campaign has spent went after the answer was already in hand"), now read off one
+    run's own durable ledger (`events/token_spend.py::spend_around_champion`). Silent when there is
+    nothing to split — no champion, no terminal, no ledger — because a line saying "0 after" about a
+    run with no champion would be a claim, not a measurement.
+    """
+    if state is None or not ev_path.exists():
+        return
+    split = spend_around_champion(EventStore(ev_path).read_all(), state)
+    if split is None:
+        return
+
+    def _share(value) -> str:
+        return "n/a" if value is None else f"{100 * value:.1f} %"
+
+    reach, after = split["reach"], split["after"]
+    # AN UNPRICED LEDGER SAYS SO rather than printing `$0.0000` twice: a provider that bills nothing
+    # through this client (the box's own) records `cost: 0.0`, and a zero is a claim about money.
+    priced = bool(split["total"]["cost"])
+
+    def _money(part) -> str:
+        return f"${part['cost']:.4f}" if priced else "unpriced"
+
+    tail = ("" if split["after_seconds"] is None
+            else f", over the last {split['after_seconds'] / 3600:.1f} h of the run")
+    cost_share = f", {_share(split['after_share_cost'])} of cost" if priced else ""
+    typer.echo(f"champion   : node {split['node_id']} landed at seq {split['seq']} — "
+               f"{reach['tokens']:,} tokens ({_money(reach)}) spent to reach it; "
+               f"{after['tokens']:,} tokens ({_money(after)}; {_share(split['after_share_tokens'])} "
+               f"of tokens{cost_share}) spent after it was in hand{tail}")
 
 
 def echo_edit_types(state) -> None:

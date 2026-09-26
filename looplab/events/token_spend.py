@@ -26,6 +26,8 @@ Pure: no I/O, no engine import. The caller reads the files.
 """
 from __future__ import annotations
 
+from typing import Optional
+
 from looplab.events.traceview import _safe_token_count
 
 # A generation span with no `phase` is BUCKETED, never dropped. `looplab timings` learned this the
@@ -402,4 +404,78 @@ def token_spend_by_phase(spans, ledger_total=None) -> dict:
         "residual": None if ledger_total is None else ledger_total - attributed,
         "damaged": damaged,
         "torn_attributes": torn_attributes,
+    }
+
+
+def spend_around_champion(events, state) -> Optional[dict]:
+    """What the run spent to REACH its champion, and what it spent AFTER the champion was in hand.
+
+    MEASURED, and the reason this exists (doc 67 67.3, doc 56 §131): over one benchmark campaign
+    **32.6 % of the money** ($20.57 of $63.11; median per run 26.0 %) was spent after the node that
+    ends up being the champion had already been evaluated — the run had its answer and kept going.
+    That was an ad-hoc analysis over meter logs; no report of a single run could say it, so the early
+    stop it motivates (doc 60 row 2.5) had no per-run number to be judged against.
+
+    THE SPLIT IS THE DURABLE LEDGER'S, AT THE CHAMPION'S TERMINAL. "Reach" is `fold(<events up to and
+    including the champion's current terminal>).llm_cost` and "after" is the whole ledger minus it —
+    through the FOLD rather than a hand sum, for the reason `looplab tokens` gives for its own
+    denominator: `_on_llm_usage` de-duplicates by `usage_id` and starts from a legacy `llm_cost`
+    base, and a second spelling of that rule here would disagree with the number printed above it.
+    The one imprecision is stated rather than hidden: an `llm_usage` row an outbox DRAIN appended
+    (`engine/costs.py`) lands at its drain's position, not its call's, so a call made just before
+    the champion landed can be counted after it. Spend by work already in flight when the champion
+    landed — a sibling build, the confirm phase — is "after" by this definition, which is doc 56's.
+
+    `None` — nothing to split — when the run has no champion, the champion has no recorded terminal,
+    the log carries no ledger at all (`RunState.llm_cost is None`: absent is not zero), or the ledger
+    cannot be PLACED: a log with no `llm_usage` row (a pre-ledger run whose only record is a
+    cumulative `llm_cost` roll-up, written wherever the roll-up happened to be — often at finalize,
+    which would read as "everything was spent after the champion"), or one whose legacy base roll-up
+    sits after the champion's terminal. A split the record cannot support is not printed.
+    Returns `{node_id, seq, reach, after, total, after_share_tokens, after_share_cost,
+    after_seconds}`, each of `reach`/`after`/`total` being `{tokens, cost, calls}`.
+    """
+    from looplab.events.replay import fold
+    from looplab.events.types import EV_LLM_COST, EV_LLM_USAGE
+
+    best = state.best() if state is not None and hasattr(state, "best") else None
+    seq = getattr(best, "terminal_event_seq", None) if best is not None else None
+    ledger = getattr(state, "llm_cost", None)
+    if best is None or seq is None or not isinstance(ledger, dict):
+        return None
+    rows = [event for event in (events or []) if isinstance(getattr(event, "seq", None), int)]
+    # PLACEABLE ONLY WHEN THE LEDGER IS PER-CALL. The fold's base is the latest `llm_cost` roll-up
+    # BEFORE the first `llm_usage` row (`replay_journals.py::_on_llm_cost`); a roll-up is cumulative
+    # and sits where it was written, not where its spend happened.
+    first_usage = next((event.seq for event in rows if event.type == EV_LLM_USAGE), None)
+    if first_usage is None:
+        return None
+    base = [event.seq for event in rows if event.type == EV_LLM_COST and event.seq < first_usage]
+    if base and base[-1] > seq:
+        return None
+    prefix = [event for event in rows if event.seq <= seq]
+    reached = fold(prefix).llm_cost or {}
+
+    def _part(src: dict) -> dict:
+        return {"tokens": _int(src.get("total_tokens")), "calls": _int(src.get("calls")),
+                "cost": round(max(0.0, float(src.get("cost") or 0.0)), 6)}
+
+    reach, total = _part(reached), _part(ledger)
+    after = {"tokens": max(0, total["tokens"] - reach["tokens"]),
+             "calls": max(0, total["calls"] - reach["calls"]),
+             "cost": round(max(0.0, total["cost"] - reach["cost"]), 6)}
+    landed = next((event for event in rows if event.seq == seq), None)
+    last = rows[-1] if rows else None
+    after_seconds = None
+    if landed is not None and last is not None and landed.ts and last.ts:
+        after_seconds = max(0.0, float(last.ts) - float(landed.ts))
+    return {
+        "node_id": best.id,
+        "seq": seq,
+        "reach": reach,
+        "after": after,
+        "total": total,
+        "after_share_tokens": (after["tokens"] / total["tokens"]) if total["tokens"] else None,
+        "after_share_cost": (after["cost"] / total["cost"]) if total["cost"] else None,
+        "after_seconds": after_seconds,
     }

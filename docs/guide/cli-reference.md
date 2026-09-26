@@ -878,6 +878,25 @@ provider call opens two spans against one billed row, and it is reported rather 
 A generation with no phase is bucketed under `(no phase)`, never dropped — `timings` learned that
 the expensive way, having once hidden 143 of one run's 174 spans by dropping the node-less ones.
 
+**The ledger split at the champion.** Under the reconciliation, a run with a champion gets one more
+line — what it spent to *reach* the champion and what it spent *after* the answer was already in
+hand:
+
+```
+champion   : node 7 landed at seq 1234 — 41,210,558 tokens (unpriced) spent to reach it; 75,293,604 tokens (unpriced; 64.6 % of tokens) spent after it was in hand, over the last 9.1 h of the run
+```
+
+It is the durable ledger folded up to the champion's terminal event, and the rest of the ledger —
+the same fold, so it adds up to the `ledger` line above. Doc 56 §131 computed it by hand over a
+benchmark campaign (32.6 % of the money went after the answer was in hand) and no single-run report
+could say it. Two things to read it with: work already in flight when the champion landed (a
+sibling's build, the confirm phase) counts as *after*, and an `llm_usage` row an outbox drain
+appended late sits at the drain's position rather than its call's. Silent when there is no champion
+or no ledger, and when the ledger cannot be placed: a pre-ledger log whose only record is a
+cumulative `llm_cost` roll-up (written wherever the roll-up happened, often at finalize) says nothing
+about when its spend happened, so it gets no split rather than a false one. An unpriced ledger (a
+provider that bills nothing through this client) prints `unpriced`, never `$0.0000`.
+
 **A SECOND table answers "which EXPERIMENT spent it, and was that experiment ever evaluated".**
 Phase says which *kind* of work the tokens bought; it cannot say that a particular build was thrown
 away. On a card-driven run the command now prints a per-card roll-up under the phase table:

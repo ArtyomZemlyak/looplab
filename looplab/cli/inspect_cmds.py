@@ -51,7 +51,7 @@ from looplab.cli.workspace_bytes import (DEFAULT_ENTRY_BUDGET, EntryBudget, meas
                                          render_workspace_bytes, seed_claims)
 from looplab.cli.run_report import (echo_card_and_build_tables, echo_containments,
                                     echo_edit_types, echo_reconciliation, echo_run_opening,
-                                    echo_section, minutes,
+                                    echo_section, echo_spend_around_champion, minutes,
                                     output_fingerprint, span_category, span_seconds,
                                     stage_identity_rows)
 
@@ -196,6 +196,7 @@ def tokens(run_dir: Path = typer.Argument(...),
 
     if not sp_path.exists():
         typer.echo(_ledger_total_line())
+        echo_spend_around_champion(state=state, ev_path=ev_path)   # the ledger alone answers it
         typer.echo("no spans.jsonl — the ledger records totals only, so the split is unavailable.")
         raise typer.Exit(2)
 
@@ -216,6 +217,7 @@ def tokens(run_dir: Path = typer.Argument(...),
         # found") named the record rather than the reader and read identically to a run that simply
         # never traced. Both facts are already in hand at this point.
         typer.echo(_ledger_total_line())
+        echo_spend_around_champion(state=state, ev_path=ev_path)   # the ledger alone answers it
         if unreadable or out["damaged"]:
             typer.echo(f"no generation spans could be read; {unreadable + out['damaged']} damaged "
                        f"span row(s) stepped over — the split is unavailable because spans.jsonl is "
@@ -247,6 +249,7 @@ def tokens(run_dir: Path = typer.Argument(...),
         typer.echo(f"residual   : {out['residual']:>14,} tokens "
                    f"({'spans over-attribute' if out['residual'] < 0 else 'unattributed by any span'})")
 
+    echo_spend_around_champion(state=state, ev_path=ev_path)   # doc 67 67.3: reach vs after
     # THE PER-CARD HALF, in `cli/run_report.py`. Phase answers "which KIND of work spent it";
     # that module answers "which EXPERIMENT spent it, and was that experiment ever evaluated" — the
     # question a run cannot otherwise ask, because the durable ledger carries no card and no node.
