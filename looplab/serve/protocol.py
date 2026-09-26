@@ -96,6 +96,13 @@ class EnginePolicy(str, Enum):
     ENSURE_DRIVER_PRESERVE_STOP = "ensure_driver_preserve_stop"
     RESTART_AFTER_EXIT = "restart_after_exit"
 
+
+# The `error.code` a durable command record settles with when its engine spawn crossed the boundary
+# after which the server cannot tell whether a child started (`run_commands.py::SPAWN_CLAIM_HATCH`,
+# which takes it from here): the record is terminal, yet an engine may still be importing — so
+# `looplab stop --wait` reads a RECENT one as a possible engine start.
+ENGINE_START_UNCERTAIN = "engine_start_uncertain"
+
 CONTROL_EVENTS = frozenset({
     EV_RUN_ABORT, EV_PAUSE, EV_RESTART, EV_RESUME, EV_NODE_ABORT, EV_NODE_RESET, EV_BUDGET_EXTEND, EV_HINT,
     EV_FORCE_CONFIRM, EV_FORCE_ABLATE, EV_FORK, EV_ANNOTATION, EV_PROMOTE,

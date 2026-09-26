@@ -155,6 +155,15 @@ def test_a_partly_priced_ledger_names_its_priced_calls_and_drops_the_cost_share(
     line = next(ln for ln in out.output.splitlines() if ln.startswith("champion"))
     assert "2,000 tokens ($0.1000 over 1 of 2 calls priced) spent to reach it" in line, line
     assert "2,000 tokens ($0.2000; 50.0 % of tokens)" in line and "of cost" not in line, line
+    # A part with NO priced call in a partly priced ledger is `unpriced`, never `$0.0000 over 0 of`.
+    other = tmp_path / "none"
+    other.mkdir()
+    rd2, _store2 = _log(other, [("usage", 1000, 0.0), ("usage", 1000, 0.0), ("node", 0, 0.9),
+                                ("usage", 2000, 0.20)])
+    (rd2 / "spans.jsonl").write_text("", encoding="utf-8")
+    out2 = CliRunner().invoke(app, ["tokens", str(rd2)])
+    line2 = next(ln for ln in out2.output.splitlines() if ln.startswith("champion"))
+    assert "2,000 tokens (unpriced) spent to reach it" in line2 and "over 0 of" not in line2, line2
 
 
 def test_a_ledger_that_starts_after_the_champion_says_the_reach_is_unrecorded(tmp_path):
@@ -166,7 +175,11 @@ def test_a_ledger_that_starts_after_the_champion_says_the_reach_is_unrecorded(tm
     assert split["ledger_starts_after"] is True and split["rolled_up_before"] is False
     (rd / "spans.jsonl").write_text("", encoding="utf-8")
     out = CliRunner().invoke(app, ["tokens", str(rd)])
-    assert "what reaching it cost is unrecorded, not zero" in out.output, out.output
+    line = next(ln for ln in out.output.splitlines() if ln.startswith("champion"))
+    assert "what reaching it cost is unrecorded" in line, line
+    # Not "0 tokens ($0.0000) spent to reach it ... 100.0 % of cost" above that sentence (second
+    # critic pass): no zero reach and no share.
+    assert "spent to reach it" not in line and "%" not in line, line
     # ...and one whose roll-up counted the spend before it says the reach is that roll-up.
     rd3 = tmp_path / "rolled"
     rd3.mkdir()
@@ -185,7 +198,9 @@ def test_a_ledger_that_starts_after_the_champion_says_the_reach_is_unrecorded(tm
     assert split3["reach"]["tokens"] == 3000
     (rd3 / "spans.jsonl").write_text("", encoding="utf-8")
     out3 = CliRunner().invoke(app, ["tokens", str(rd3)])
-    assert "the reach is what the last cost roll-up before it recorded" in out3.output, out3.output
+    assert "the reach is the last cost roll-up before it" in out3.output, out3.output
+    line3 = next(ln for ln in out3.output.splitlines() if ln.startswith("champion"))
+    assert "3,000 tokens" in line3 and "%" not in line3, "both parts are floors: no share"
 
 
 def test_the_after_window_ends_at_the_last_spend_not_the_last_row(tmp_path, monkeypatch):

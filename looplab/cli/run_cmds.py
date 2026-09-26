@@ -1297,31 +1297,48 @@ def stop_lifted(state) -> str:
     return ""
 
 
-def server_commands_restarting(run_dir: Path) -> list[str]:
-    """The server commands that will start an engine into `run_dir` once the current one exits, as
-    printable names — `[]` when there are none.
+# How recently a command worker must have shown life for `stop --wait` to count its command as an
+# engine start that is COMING. A live worker refreshes its `.commands/.<id>.executing` claim on every
+# poll of its monitor (`run_commands.py::RunCommandService._heartbeat_execution`, every 50 ms), and a
+# record no worker has claimed yet is fresh from its own `updated_at`; a claim that stopped moving
+# half a minute ago belongs to a server that is gone. ADVISORY on purpose: the server itself never
+# reclaims on age ("a suspended worker can miss every heartbeat and later resume"), and neither does
+# this — it only decides whether the wait says "will start" (exit 1) or warns (exit 0).
+_COMMAND_WORKER_FRESH_S = 30.0
+
+
+def server_commands_restarting(run_dir: Path, *, now: Optional[float] = None) -> tuple[list, list]:
+    """`(coming, stale)`: the server commands that will start an engine into `run_dir` once the
+    current one exits, and those that would if a server re-read them — as printable names.
 
     THE PRECLAIM FAMILY of engine starter (`engine/run_lifecycle.py`, "the launch-in-flight
     handshake"). A command whose policy is `ENSURE_RUNNING` (`node_reset`, `budget_extend`, `fork`,
-    `inject_node`, …) or `RESTART_AFTER_EXIT` that arrives while a stopped engine is draining is
-    not served by that engine: its worker waits for the exit and then starts `looplab resume`, which
-    LIFTS the stop — and it records that plan only in its durable record under `.commands/`, never
-    in the log `stop_lifted` reads (critic 2026-09-26, driven: an unacknowledged `budget_extend`
-    during the wait, and the wait said "has exited", exit 0). `ENSURE_DRIVER_PRESERVE_STOP` (a
-    finalize) is left out on purpose: its driver finishes the run and never lifts the pause.
+    `inject_node`, …) or `RESTART_AFTER_EXIT` that arrives while a stopped engine is draining is not
+    served by that engine — in the default Card mode the loop has already left and no longer
+    acknowledges commands — so its worker waits for the exit and then starts `looplab resume`, which
+    LIFTS the stop; it records that plan only in its durable record under `.commands/`, never in the
+    log `stop_lifted` reads (critic 2026-09-26, driven). `ENSURE_DRIVER_PRESERVE_STOP` (a finalize)
+    is left out on purpose: its driver finishes the run and never lifts the pause. A record that
+    settled `ENGINE_START_UNCERTAIN` is terminal, yet its child may still be importing, so a recent
+    one counts too.
 
-    Read only once the lock is seen free: while the engine lives, it may still acknowledge such a
-    command itself, and then no worker starts anything. An ACTIVE record is one the worker has not
-    settled; an unreadable one is named, not skipped — the wait cannot tell what it would start."""
-    from looplab.serve.protocol import COMMAND_ACTIVE_STATUSES, EnginePolicy
+    COMING vs STALE is the worker's pulse (`_COMMAND_WORKER_FRESH_S`): a server killed mid-command
+    leaves its record `executing` for good, and reading that as an imminent restart failed every
+    later `stop --wait` for a restart nothing was going to perform (second critic pass). An
+    unreadable record is named as coming — the wait cannot tell what it would start.
 
+    Read only once the lock is seen free: while the engine lives it may still acknowledge such a
+    command itself (the serial dispatch does, mid-evaluation), and then no worker starts anything."""
+    from looplab.serve.protocol import COMMAND_ACTIVE_STATUSES, ENGINE_START_UNCERTAIN, EnginePolicy
+
+    now = time.time() if now is None else now
     starting = {EnginePolicy.ENSURE_RUNNING.value, EnginePolicy.RESTART_AFTER_EXIT.value}
     directory = run_dir / ".commands"
     try:
         paths = sorted(directory.glob("cmd_*.json")) if directory.is_dir() else []
     except OSError:
-        return [f"{directory} (unreadable)"]
-    named = []
+        return [f"{directory} (unreadable)"], []
+    coming, stale = [], []
     for path in paths:
         try:
             if path.is_symlink() or path.stat().st_size > _COMMAND_RECORD_MAX_BYTES:
@@ -1330,12 +1347,25 @@ def server_commands_restarting(run_dir: Path) -> list[str]:
             if not isinstance(record, dict):
                 raise ValueError("not a JSON object")
         except (OSError, ValueError, RecursionError):
-            named.append(f"{path.stem} (unreadable)")
+            coming.append(f"{path.stem} (unreadable)")
             continue
-        if (record.get("status") in COMMAND_ACTIVE_STATUSES
-                and record.get("engine_policy") in starting):
-            named.append(f"`{record.get('event_type')}` ({path.stem}, {record.get('status')})")
-    return named
+        if record.get("engine_policy") not in starting:
+            continue
+        status = record.get("status")
+        uncertain = (isinstance(record.get("error"), dict)
+                     and record["error"].get("code") == ENGINE_START_UNCERTAIN)
+        if status not in COMMAND_ACTIVE_STATUSES and not uncertain:
+            continue
+        claim = directory / f".{path.stem}.executing"
+        try:
+            pulse = claim.stat().st_mtime
+        except OSError:
+            updated = record.get("updated_at")
+            pulse = float(updated) if isinstance(updated, (int, float)) else 0.0
+        label = (f"`{record.get('event_type')}` ({path.stem}, "
+                 + ("engine start uncertain" if uncertain else str(status)) + ")")
+        (coming if now - pulse < _COMMAND_WORKER_FRESH_S else stale).append(label)
+    return coming, stale
 
 
 def await_engine_exit(run_dir: Path, *, timeout_s: float = 0.0, liveness=None, standing=None,
@@ -1404,19 +1434,23 @@ def await_engine_exit(run_dir: Path, *, timeout_s: float = 0.0, liveness=None, s
 
 
 class _TailFold:
-    """The log's fold, re-folded only when its tail moved — `stop --wait` asks every half second,
-    and a whole-log fold per poll measured 0.13-0.15 s on a 30k-event log (critic 2026-09-26): a
-    third of a core for an hours-long wait. Seqs are strictly monotonic, so an unchanged
-    `(length, last seq)` is an unchanged fold; `EventStore.read_all` is itself incremental, so an
-    unchanged log costs a stat. The same key `eval_dispatch.py::_fold_if_tail_moved` uses."""
+    """The log's fold, re-folded only when the log moved — `stop --wait` asks every half second, and
+    a whole-log fold per poll measured 0.13-0.15 s on a 30k-event log (critic 2026-09-26): a third
+    of a core for an hours-long wait. `EventStore.read_all` is itself incremental (an unchanged log
+    costs a stat) and keeps its `Event` objects across ordinary appends, rebuilding them when the
+    file is REPLACED — so the key is the length AND the identity of the first and last event, the
+    rule the engine's own `_ack_commands` cursor uses: a same-length replacement (a reset in place,
+    whose last row is a `resume`) served the stale fold under a `(length, last seq)` key, seqs
+    being dense (second critic pass, driven)."""
 
     def __init__(self, store):
         self._store, self._key, self._state = store, None, None
 
     def __call__(self):
         events = self._store.read_all()
-        key = (len(events), events[-1].seq if events else -1)
-        if key != self._key or self._state is None:
+        key = (len(events), events[0] if events else None, events[-1] if events else None)
+        if (self._state is None or self._key is None or key[0] != self._key[0]
+                or key[1] is not self._key[1] or key[2] is not self._key[2]):
             self._key, self._state = key, fold(events)
         return self._state
 
@@ -1431,8 +1465,9 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
              0.0, "--timeout", help="with --wait: give up after this many seconds (0 = no limit)")):
     """STOP a run: freeze it WITHOUT finalizing — no end-of-run report/lessons/cost roll-up. A running
     engine stops STARTING work on its next iteration, lets every evaluation already running finish,
-    then exits; an attempt that FAILS while the stop is pending (and no deterministic salvage rung
-    recovers its metric) buys no repair or triage and stays pending — `looplab resume` re-runs it.
+    then exits; an attempt that FAILS while the stop is pending buys no repair or triage and stays
+    pending — `looplab resume` re-runs it — unless the engine closes it before its repair decision
+    (a watchdog kill the repair loop does not take, a refused reader, a salvaged metric).
     `--wait` blocks until the engine has exited — "stop after the current node". The run is
     resumable (`looplab resume`) or you can `finalize` it later."""
     # A DIRECT PYTHON CALL (`looplab.cli.stop(rd)`, the compatibility surface `finalize` documents)
@@ -1491,18 +1526,20 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
     outcome, why = await_engine_exit(target, timeout_s=limit, liveness=_probe,
                                      standing=lambda: stop_lifted(current()),
                                      describe=_describe)
+    stale: list = []
     if outcome == "exited":
         # ONE MORE LOOK once the lock has stayed free: the log's own starters (`stop_lifted`), and
         # the server's command workers, which record a planned engine start only in `.commands/`.
         why = stop_lifted(current())
-        restarting = server_commands_restarting(target)
-        if not why and restarting:
-            why = (f"server command(s) {', '.join(restarting)} will start an engine now that this "
-                   "one has exited, and that lifts the stop")
+        coming, stale = server_commands_restarting(target)
+        if not why and coming:
+            why = (f"server command(s) {', '.join(coming)} will start an engine now that "
+                   + ("this one has exited" if seen["alive"] else "no engine holds the lock")
+                   + ", and that lifts the stop")
         if why:
             outcome = "lifted"
     if outcome == "lifted":
-        typer.echo(f"the engine on {run_dir} did not stop: {why}")
+        typer.echo(f"the stop on {run_dir} does not stand: {why}")
         raise typer.Exit(code=1)
     if outcome == "unobservable":
         typer.echo(f"cannot observe {target}/engine.lock (a filesystem without working file "
@@ -1526,6 +1563,13 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
                        + (f" (metric {node.metric})" if node.metric is not None else ""))
     typer.echo(f"the engine on {run_dir} has exited" if seen["alive"]
                else f"no engine was running on {run_dir}; the stop is recorded")
+    if stale:
+        # A record whose worker stopped showing life: nothing starts it NOW, but a LoopLab server
+        # that re-reads it will, and that lifts the stop — said, never silently exit-0'd over.
+        typer.echo(f"note: server command(s) {', '.join(stale)} ask for an engine but no live "
+                   "worker holds them; a LoopLab server that re-reads them will start one and lift "
+                   "the stop — settle or retry them from the run's Commands view first if that is "
+                   "not wanted")
 
 
 @app.command()

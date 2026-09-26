@@ -373,13 +373,14 @@ finish, and then exits; the run stays resumable (`looplab resume`) or you can `f
 The `pause` it appends names itself as the reason (``operator stop (`looplab stop`)``), so the run's
 `stop:` line says who froze it.
 
-**A stop never kills a running evaluation.** An evaluation that scores writes its result as usual.
-One that FAILS while the stop is pending — any failure, whether or not the inline repair loop would
-have retried it — buys no repair and no triage: unless a deterministic salvage rung recovers its
-metric (or the fault is the task's own refused metric reader, which settles), it stays pending with no
-terminal, and `looplab resume` re-runs its code in full where its repair chain stood. So `stop` is
-already "stop after the current node": `--wait` is how you wait for it, instead of watching the log or
-the process table.
+**A stop never kills a running evaluation.** An evaluation that scores writes its result as usual,
+and so does a failure the engine closes BEFORE its repair decision: a live watchdog's kill for a
+reason the repair loop does not take (`asha_underperforming`, `monitor_broken`), a refused metric
+reader, and a failure a deterministic salvage rung recovers — which, with `metric_salvage_repair` on,
+still spends one Developer repair on its cause. Every other failure buys no triage and no repair
+while the stop is pending: it stays pending with no terminal, and `looplab resume` re-runs its code in
+full where its repair chain stood. So `stop` is already "stop after the current node": `--wait` is how
+you wait for it, instead of watching the log or the process table.
 
 ```bash
 looplab stop RUN_DIR [--wait [--timeout SECONDS]]
@@ -398,8 +399,11 @@ cannot observe the lock at all (a filesystem without working file locks), or the
 standing: a later `resume` lifted it; a resume request is pending that a LoopLab server serves by
 starting an engine again; or a server command that starts an engine (`node_reset`,
 `budget_extend`, `fork`, `inject_node`, … — anything whose worker waits for the exit and then runs
-`looplab resume`) is still unsettled in the run's `.commands/`. With no server running, a pending
-request starts nothing, and the message says so.
+`looplab resume`) is still unsettled in the run's `.commands/` with a worker that showed life in the
+last 30 s (or settled "engine start uncertain" that recently). An unsettled one whose worker has gone
+quiet — a server killed mid-command — starts nothing now, so it is a `note:` line and the exit stays
+`0`; a server that re-reads it will start an engine and lift the stop. With no server running, a
+pending resume request starts nothing either, and the message says so.
 
 ## `finalize`
 
@@ -907,8 +911,9 @@ one (a gateway that began pricing mid-run) names its priced calls on each part w
 some of them (`$0.1000 over 1 of 2 calls priced`) and prints no cost share. The hours are the window
 the *after* spend was made in — to the last `llm_usage` row, not to a comment appended later. And a
 ledger whose per-call rows begin only after the champion landed (a run begun on a build without
-them) prints a second line saying so: what reaching it cost is then unrecorded, not zero — or, when a
-cost roll-up came before the champion, it is that roll-up.
+them) says what reaching it cost is unrecorded rather than printing a zero — or, when a cost roll-up
+came before the champion, prints that roll-up and a second line saying both parts are floors — and in
+either case prints no share.
 
 **A SECOND table answers "which EXPERIMENT spent it, and was that experiment ever evaluated".**
 Phase says which *kind* of work the tokens bought; it cannot say that a particular build was thrown

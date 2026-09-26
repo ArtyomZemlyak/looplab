@@ -62,7 +62,8 @@ from looplab.serve.engine_proc import (
     _spawn_engine, child_exited, spawn_snapshot_refusal)
 from looplab.serve.http import generation_conflict, refusal
 from looplab.serve.protocol import COLLABORATION_EVENTS, CONTROL_EVENTS
-from looplab.serve.protocol import COMMAND_ACTIVE_STATUSES, COMMAND_TERMINAL_STATUSES
+from looplab.serve.protocol import (COMMAND_ACTIVE_STATUSES, COMMAND_TERMINAL_STATUSES,
+                                    ENGINE_START_UNCERTAIN)
 
 
 # Kept under this name — its call sites read well — but DERIVED from `serve/protocol.py`, the
@@ -507,7 +508,7 @@ ACTIVE_CLAIM_HATCH = ClaimEscapeHatch(
 
 SPAWN_CLAIM_HATCH = ClaimEscapeHatch(
     canonical_refusal="spawn-claim run must be a canonical direct child",
-    uncertain_code="engine_start_uncertain",
+    uncertain_code=ENGINE_START_UNCERTAIN,
     uncertain_message="The unknown spawn claim is still inside its cold-start safety window.",
     phrase="I verified no LoopLab engine process is running",
     confirmation_code="spawn_claim_confirmation_required",
