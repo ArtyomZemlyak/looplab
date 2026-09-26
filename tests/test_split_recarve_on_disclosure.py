@@ -149,3 +149,35 @@ def test_a_drain_across_a_plain_reopen_is_refused_only_on_an_older_log(tmp_path)
             assert refused is None, refused
         else:
             assert refused is not None and "re-carved (epoch 1)" in refused[1], refused
+
+
+def test_lifting_the_finish_of_a_pinned_run_that_still_owes_work_is_not_refused(tmp_path):
+    """The eval budget finalized the run with a reset node pending: a drain lifts the finish. On an
+    older log the lift re-carves the split, so it is refused; on a pinned run it moves no rows."""
+    from looplab.engine.run_boundary import classify_prior_run, drain_only_refusal
+
+    for pinned in (True, False):
+        root = tmp_path / f"owed-{pinned}"
+        root.mkdir()
+        store = EventStore(root / "events.jsonl")
+        store.append("run_started", {"run_id": "hg", "task_id": "t", "goal": "g",
+                                     "direction": "max", "holdout_fraction": 0.25,
+                                     **({"split_salt": "disclosure"} if pinned else {})})
+        store.append("host_grading", {"predictions": "predictions.json", "scorer": "accuracy"})
+        for nid, metric in ((0, 0.4), (1, 0.5)):
+            store.append("node_created", {"node_id": nid, "parent_ids": [], "operator": "draft",
+                                          "idea": {"operator": "draft", "params": {},
+                                                   "rationale": "r"}, "code": f"print({nid})"})
+            store.append("node_evaluated", {"node_id": nid, "generation": 0, "metric": metric,
+                                            "violations": []})
+        store.append("node_reset", {"node_id": 1, "from_stage": "eval", "generation": 0})
+        store.append("run_finished", {"reason": "eval_budget"})
+        events = store.read_all()
+        state = fold(events)
+        kind = classify_prior_run(state, events)
+        assert kind == "finished" and state.nodes[1].status.value == "pending", kind
+        refused = drain_only_refusal(state, kind, events)
+        if pinned:
+            assert refused is None, refused
+        else:
+            assert refused is not None and "re-carves the split" in refused[1], refused
