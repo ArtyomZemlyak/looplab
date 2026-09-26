@@ -88,10 +88,10 @@ def test_every_registered_task_model_carries_the_field_excluded():
     {"baseline": {"value": float("nan"), "source": "s"}},
     {"baseline": {"value": 1.0, "source": "s", "sorce": "t"}},
     {"target": {"value": 1.0, "source": "s"}},
-    # A NUMBER, as the fold holds it: the lax float coercion took `true` as 1.0 and "9.5" as 9.5
-    # while the fold refuses a bool (critic 2026-09-26).
+    # A NUMBER, as the fold holds it: the lax float coercion took `true` as 1.0 while the fold
+    # refuses a bool (critic 2026-09-26). A numeric string is admitted — see the test below.
     {"baseline": {"value": True, "source": "s"}},
-    {"baseline": {"value": "9.5", "source": "s"}},
+    {"baseline": {"value": "nine", "source": "s"}},
 ])
 def test_an_unsourced_or_malformed_reference_is_refused_at_submit(bad):
     with pytest.raises(ValueError):
@@ -133,6 +133,19 @@ def test_an_undeclared_reference_leaves_run_started_as_it_was(tmp_path, monkeypa
     out, events = _run(tmp_path, monkeypatch, {"kind": "quadratic", "id": "toy", "goal": "g"})
     assert "reference_score" not in next(e.data for e in events if e.type == "run_started")
     assert fold(events).reference_score is None and "headroom:" not in out.output
+
+
+def test_a_yaml_number_and_a_reloaded_snapshot_are_admitted():
+    """PyYAML reads `1e-3` as a STRING, so a numeric string is admitted (the lax coercion reads it);
+    and a run's own snapshot is re-validated `existing_run=True` and never re-judged — refusing
+    either made a YAML target, or an existing run's resume, unusable (critic 2026-09-26, driven)."""
+    task = {"kind": "quadratic", "goal": "g", "direction": "min"}
+    yaml_like = validate_task({**task, "reference_score": {
+        "baseline": {"value": "1e-3", "source": "s"}}})
+    assert yaml_like.reference_score.baseline.value == 0.001
+    reloaded = validate_task({**task, "reference_score": {
+        "baseline": {"value": True, "source": "s"}}}, existing_run=True)
+    assert reloaded.reference_score.baseline.value == 1.0
 
 
 def test_a_web_launch_keeps_the_declaration(tmp_path):

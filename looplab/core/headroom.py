@@ -64,8 +64,8 @@ def normalized_reference(raw) -> Optional[dict]:
 
 
 def headroom(best, reference, direction: str) -> Optional[dict]:
-    """`{baseline, target, gain, gap_closed[, target_not_better]}` for a run whose best is `best`,
-    or None when there is no best or no usable reference. See the module docstring."""
+    """`{baseline, target, best, gain, gap_closed[, target_not_better]}` for a run whose best is
+    `best`, or None when there is no best or no usable reference. See the module docstring."""
     reference = normalized_reference(reference)
     if reference is None or best is None or isinstance(best, bool):
         return None

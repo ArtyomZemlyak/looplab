@@ -232,10 +232,15 @@ def test_the_base_does_not_declare_seed():
     already the first five, in this order, in every one of them.
     """
     assert "seed" not in SyntheticTaskBase.model_fields
-    assert list(SyntheticTaskBase.model_fields) == [
-        "kind", "id", "goal", "direction", "comparison_contract"]
+    # The order that matters is the DUMP's: `reference_score` (doc 67 67.14) is declared on the
+    # base `exclude=True`, so it is a field of every model and a key of no dump.
+    hoisted = [name for name, field in SyntheticTaskBase.model_fields.items() if not field.exclude]
+    assert hoisted == ["kind", "id", "goal", "direction", "comparison_contract"]
+    assert [name for name, field in SyntheticTaskBase.model_fields.items() if field.exclude] == [
+        "reference_score"]
     for model in _SYNTHETIC:
-        assert list(model.model_fields)[:5] == list(SyntheticTaskBase.model_fields)
+        dumped = [name for name, field in model.model_fields.items() if not field.exclude]
+        assert dumped[:5] == hoisted
         assert "seed" in model.model_fields
 
 

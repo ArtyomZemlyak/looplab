@@ -104,12 +104,9 @@ TASK_OPTIONAL_HOOKS: tuple[str, ...] = (
     # Scheduler-facing capability declaration probed by engine/resources.py — registered so an
     # adapter that renames it goes red instead of silently re-acquiring the host GPU pool lease.
     "gpu_capable",
-    # RepoTask-specific field probed by the repo Developer's onboarding flow
-    # (adapters/repo_developer.py) — registered so a one-sided rename goes red like any hook.
-    "onboard_command",
-    # doc 67 67.14: the declared baseline/target scores every task model carries EXCLUDED from its
-    # dump, read by `engine/setup_phase.py::_declared_reference` to pin them on `run_started`.
-    "reference_score")
+    # Fields probed like hooks, so a one-sided rename goes red: RepoTask's onboarding command
+    # (adapters/repo_developer.py); every model's dump-EXCLUDED `reference_score` (doc 67 67.14).
+    "onboard_command", "reference_score")
 
 
 _KINDS = {"quadratic": ToyTask, "regression": RegressionTask,

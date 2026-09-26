@@ -43,6 +43,10 @@ the diff that justified it:
   estimate the LLM freezes onto the node). The diff was 8 insertions and 0 deletions — one
   `"value_prior": null` per node, no shared leaf changed — so the fold produces byte-identically
   what it produced before for this log and nothing recorded under the old snapshot is invalidated.
+* 2026-09-26 — `RunState.reference_score` (`core/models.py`, doc 67 67.14: the task's declared
+  baseline/target, pinned on `run_started` only when declared). The diff was 1 insertion and 0
+  deletions — `"reference_score": null`, what a log with no declaration folds to — and no shared
+  leaf changed.
 """
 from __future__ import annotations
 
