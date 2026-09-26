@@ -2237,8 +2237,11 @@ def _apply_card_returns(st: RunState, ledger: _CardLedger) -> None:
         if only in c.substituted_nodes and (only in st.breed_excluded or not node.feasible):
             continue
         rest = [i for i in c.evidence if i != only]
+        # "In flight" is `_apply_card_selection_readiness`' own spelling of it: pending, and neither
+        # tombstoned nor aborted — a struck rebuild is not work the return can wait on.
         if all(i > only and (other := st.nodes.get(i)) is not None
-               and other.status is NodeStatus.pending for i in rest):
+               and other.status is NodeStatus.pending and not other.tombstoned
+               and i not in st.aborted_nodes for i in rest):
             c.evidence = rest
 
 

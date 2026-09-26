@@ -413,3 +413,18 @@ def test_a_returned_cards_research_origin_survives_a_substitution_return(tmp_pat
     assert card.evidence == [] and card.substituted_nodes == [sub]
     assert card.research_origin == "memo:sha256:" + "d" * 64
     assert card.footprint == {"gpus": 1, "proposed_by": "researcher"}
+
+
+def test_a_struck_rebuild_is_not_work_the_return_waits_on(tmp_path):
+    """The return keeps the forgiven node out only beside a rebuild that is IN FLIGHT by the ledger's
+    own rule — a tombstoned pending rebuild is not, so the card is judged on both, as before."""
+    engine, producer = _setup(tmp_path, "struck")
+    first = _build(engine, producer, "card-2", _report("different"), x=0.3)
+    _evaluate(engine, first, 0.9)
+    producer.last_files = _report("as_proposed", "")
+    second = _commit_speculative_node(engine)
+    assert fold(engine.store.read_all()).cards["card-2"].evidence == [second]
+    engine.store.append("node_tombstoned", {"node_ids": [second]})
+    card = fold(engine.store.read_all()).cards["card-2"]
+    assert card.evidence == sorted([first, second])
+    assert "work_terminal" in card.selection_blockers
