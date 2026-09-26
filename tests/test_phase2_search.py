@@ -289,3 +289,24 @@ def test_a_spend_ceiling_inside_the_batch_semantic_dedup_propagates(tmp_path):
     idea = Idea(operator="draft", rationale="a linear model with strong ridge regularization on")
     with pytest.raises(BudgetExceeded, match="inside an embed"):
         eng._intra_batch_dup(idea, [chosen])
+
+
+def test_a_substituted_node_is_neither_a_semantic_nor_a_param_duplicate(tmp_path):
+    """Its Developer reported building something ELSE (`core/idea_report.py`), so its idea text and
+    params were never tried: re-proposing that idea is the returned card coming back, not a repeat."""
+    from looplab.core.idea_report import IDEA_REPORT_NAME, idea_report_text
+    eng = _mk_engine(tmp_path, novelty_semantic=True)
+    eng._novelty_mode = "algo"
+    text = "try gradient boosting with deep trees and early stopping"
+    sub = _node(0, metric=0.4, rationale=text)
+    sub.idea.params = {"x": 2.0}
+    sub.files = {IDEA_REPORT_NAME: idea_report_text({"idea_implemented": "different"})}
+    st = RunState(direction="max")
+    st.nodes = {0: sub}
+    idea = Idea(operator="improve", params={"x": 2.0}, rationale=text)
+    out = eng._apply_novelty_gate(st, idea, repropose=lambda: pytest.fail("not a duplicate"))
+    assert out.rationale == text and out.params == {"x": 2.0}
+    assert not [e for e in eng.store.read_all() if e.type == "novelty_rejected"]
+    # …and the same node WITHOUT the report is a duplicate on both axes, as before.
+    sub.files = {}
+    assert eng._semantic_duplicate(st, idea)[0] is sub

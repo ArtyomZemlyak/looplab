@@ -275,8 +275,15 @@ def test_roles_is_no_longer_a_god_module():
     of `implement` into the shared `_implement`, and the three re-export lines the rule above
     demands. The block's TEXT went to `role_prompts.py::script_parent_block` instead — prompt bytes
     belong to the fragments — which is why that cap moves too. Both move to measured + 1.
+
+    `state_brief.py` 552 -> 560 on 2026-09-26 (review of 033ed1c6, the substituted-build return):
+    both board windows now CHARGE the NOT TESTED clause their rows render against their character
+    budgets (the claimable window's 20k and the attempted window's 8k were spent on seed length
+    alone), and the belief-grouped row states every member's substitutions. The clause's TEXT and
+    the group join live in `core/idea_report.py` / `RunState.belief_substitution_brief`; what is
+    left here is the budget arithmetic, which is this module's own job. The cap moves to measured + 1.
     """
-    caps = {"agents/roles.py": 869, "agents/role_prompts.py": 344, "agents/state_brief.py": 553,
+    caps = {"agents/roles.py": 869, "agents/role_prompts.py": 344, "agents/state_brief.py": 561,
             "agents/role_wrappers.py": 467, "agents/toy_roles.py": 128}
     sizes = {rel: len((_PKG / rel).read_text(encoding="utf-8").splitlines()) for rel in caps}
     over = {rel: (n, caps[rel]) for rel, n in sizes.items() if n >= caps[rel]}

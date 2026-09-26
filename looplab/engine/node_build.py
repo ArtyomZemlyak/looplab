@@ -310,14 +310,18 @@ class NodeBuildMixin:
             if callable(check):
                 check(floor, what)
 
-    def _ensemble_idea(self, parents) -> Idea:
+    def _ensemble_idea(self, parents, nodes=None) -> Idea:
         """A0b: an ensembling/recombination merge — instruct the Developer to combine the parents'
         solutions (stack/average predictions) rather than mean-averaging params. Carries the mean
         params as a safe payload so a Toy/baseline Developer degrades to the legacy mean-merge."""
         base = merge_idea(parents)
+        from looplab.core.idea_report import idea_report_note
+        # A parent whose Developer built something ELSE is described by what it did not build unless
+        # it says so; the note is "" for every other parent (`core/idea_report.py`).
         descr = "; ".join(
             f"node {p.id} (metric={p.metric}, params={p.idea.params})"
             + (f": {p.idea.rationale[:120]}" if p.idea.rationale else "")
+            + idea_report_note(p, nodes)
             for p in parents)
         base.rationale = ("Ensemble/recombine the top solutions into one stronger pipeline "
                           "(e.g. average or stack their predictions, or merge their best components). "
@@ -598,8 +602,11 @@ class NodeBuildMixin:
         Researcher's R&D lessons, which ride the proposal prompt instead. Most useful on the repair
         path (`_repair` routes through here), where "what fixed this crash class" is exactly relevant."""
         from looplab.agents.hints import render_hint_directives
+        from looplab.core.idea_report import rebuild_note
+        # …and, for a RETURNED card's rebuild only, why it is back (`core/idea_report.py::rebuild_note`).
         blocks = [b for b in (render_hint_directives(state.pending_hints),
-                              self._developer_prior_text(idea).strip()) if b]
+                              self._developer_prior_text(idea).strip(),
+                              rebuild_note(idea, state)) if b]
         if not blocks:
             return idea
         di = idea.model_copy(deep=True)
@@ -1096,7 +1103,7 @@ class NodeBuildMixin:
         if kind == "merge":
             parents = list(action["parent_ids"])
             pnodes = [state.nodes[node_id] for node_id in parents]
-            return _link(self._ensemble_idea(pnodes) if self._merge_mode == "ensemble"
+            return _link(self._ensemble_idea(pnodes, state.nodes) if self._merge_mode == "ensemble"
                          else merge_idea(pnodes), proposed=False)
 
         parent = state.nodes[action["parent_id"]]
@@ -2117,7 +2124,7 @@ class NodeBuildMixin:
         # U3 real merge: this combines Idea metadata only. Developer work remains after reservation.
         if not code and idea_d.get("operator") == "merge" and len(parents) >= 2:
             parent_nodes = [state.nodes[parent_id] for parent_id in parents]
-            idea = (self._ensemble_idea(parent_nodes) if self._merge_mode == "ensemble"
+            idea = (self._ensemble_idea(parent_nodes, state.nodes) if self._merge_mode == "ensemble"
                     else merge_idea(parent_nodes))
         else:
             idea = Idea(**idea_d)

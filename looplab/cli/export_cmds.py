@@ -180,6 +180,7 @@ def export_sft(
     applied, `input_partial` carried through where the chain could not be reconstructed. This copies
     that record; it does not re-read a prompt from anywhere.
     """
+    from looplab.core.idea_report import NOT_A_TEST, idea_report_of
     from looplab.events.traceview import hydrate_inputs, load_spans
 
     store = _require_run_dir(run_dir)
@@ -206,7 +207,7 @@ def export_sft(
         node_id = attributes.get("node_id")
         node = state.nodes.get(node_id) if isinstance(node_id, int) else None
         outcome = {"node_id": node_id, "metric": None, "status": None, "feasible": None,
-                   "error_reason": None}
+                   "error_reason": None, "idea_implemented": None}
         if node is not None:
             status = getattr(node, "status", "")
             outcome = {"node_id": node.id, "metric": node.metric,
@@ -219,12 +220,21 @@ def export_sft(
                        # vocabulary `FAILURE_REASONS` holds. There is no `reason` on a Node, and a
                        # `getattr(node, "reason", None)` would have written a silent `null` into
                        # every row of a corpus whose whole value is the outcome.
-                       "error_reason": getattr(node, "error_reason", None)}
+                       "error_reason": getattr(node, "error_reason", None),
+                       # The Developer's own word on whether the node built its idea
+                       # (`core/idea_report.py`): a `different` node's metric is not the outcome of
+                       # the idea a `propose` turn wrote, and a consumer must be able to tell.
+                       "idea_implemented": idea_report_of(node, state.nodes)[0]}
         if only_successful:
             # THE GROUNDING IS THE POINT, so the filter is the outcome and not the absence of an
             # error: a node that failed for an unrelated reason after a good proposal is still a
             # turn nobody should train on as if it had worked.
             if node is None or node.metric is None or not node.feasible:
+                skipped_ungrounded += 1
+                continue
+            # A PROPOSAL whose build ran something else is not grounded by that build's metric: the
+            # number measured another idea. The build turns themselves stay — their code did run.
+            if attributes.get("op") == "propose" and outcome["idea_implemented"] in NOT_A_TEST:
                 skipped_ungrounded += 1
                 continue
         rows.append({
@@ -249,7 +259,8 @@ def export_sft(
                    "transport failure, refusal) — not an error, and not a training example")
     if skipped_ungrounded:
         typer.echo(f"  {skipped_ungrounded} turn(s) dropped by --only-successful: their node "
-                   "produced no usable metric or was flagged infeasible")
+                   "produced no usable metric, was flagged infeasible, or (for a proposal) built "
+                   "something else than the idea proposed")
     grounded = sum(1 for row in rows if row["outcome"]["metric"] is not None)
     typer.echo(f"  {grounded} of {len(rows)} turn(s) are joined to a node that produced a metric; "
                "the rest carry the outcome they have (a failure, or no node at all — a run-level "

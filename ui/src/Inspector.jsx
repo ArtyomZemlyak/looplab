@@ -864,7 +864,7 @@ function CardLink({ link, onOpenCard }) {
         publish — a historical snapshot, or beyond the published card cap. The stamp is durable; the
         record is simply not in this frame.</div></>
   }
-  const { card, cardId, summary } = link
+  const { card, cardId, summary, substituted } = link
   // `seed_statement` is the IMMUTABLE statement captured at `card_added` and the join key the whole
   // Card ledger keys on; `statement` is an operator-editable DISPLAY overlay. When they differ, the
   // operator paraphrased the question — and only showing the paraphrase hides that.
@@ -891,10 +891,19 @@ function CardLink({ link, onOpenCard }) {
     <div className="muted">{summary.total === 1
       ? 'This is the only attempt at this work item.'
       : `${summary.total} attempts at this work item — this one and ${summary.total - 1} other${summary.total === 2 ? '' : 's'}.`}
-      {summary.evidence > 0 && ` ${summary.evidence} in its evidence list`}
-      {summary.ownedOnly > 0 && `, ${summary.ownedOnly} reserved but not evidence yet`}
-      {summary.substituted > 0 && `, ${summary.substituted} built something else (not a test of it)`}
-      {summary.missing > 0 && `, ${summary.missing} not in this snapshot`}.
+      {/* One clause list, joined once: the clauses are independent, and a leading ", " after the
+          sentence above read ".," whenever the first count was zero. `evidence` is "counted in its
+          verdict" because it leaves out a substituted node even while `card.evidence` still names it. */}
+      {(() => {
+        const parts = [
+          summary.evidence > 0 && `${summary.evidence} counted in its verdict`,
+          summary.ownedOnly > 0 && `${summary.ownedOnly} reserved but not evidence yet`,
+          summary.substituted > 0 && `${summary.substituted} built something else (not a test of it)`,
+          summary.missing > 0 && `${summary.missing} not in this snapshot`,
+        ].filter(Boolean)
+        return parts.length ? ` ${parts.join(', ')}.` : ''
+      })()}
+      {substituted && ' This experiment is one of them: its Developer reported building something else.'}
     </div>
   </>
 }

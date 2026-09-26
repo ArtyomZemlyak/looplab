@@ -12,12 +12,16 @@ export function cardAttemptIndex(state, cards) {
     if (!bucket) return null
     if (!bucket.has(nodeId)) {
       const node = isRecord(nodes[nodeId]) ? nodes[nodeId] : null
-      bucket.set(nodeId, { nodeId, evidence: false, owned: false, present: !!node, node })
+      bucket.set(nodeId, { nodeId, evidence: false, owned: false, substituted: false, present: !!node, node })
     }
     return bucket.get(nodeId)
   }
   for (const card of rows) {
     for (const nodeId of cardNodes(card.evidence)) touch(card.id, nodeId).evidence = true
+    // The SAME join as `cardBoardModel.js::cardAttempts`, which the Inspector reads while the board
+    // reads this one: a substituted build must be flagged in both, or the board calls it evidence
+    // that "fed the verdict" (or a pending reservation) while the Inspector says it was not a test.
+    for (const nodeId of cardNodes(card.substituted_nodes)) touch(card.id, nodeId).substituted = true
   }
   for (const [key, node] of Object.entries(nodes)) {
     const cardId = nodeCardId(node)

@@ -66,9 +66,7 @@ def next_board_prompt_cards(
     used = 0
     for card in cards:
         seed = card.seed_statement or ""
-        # The row renders the substitution clause beside the seed (`board_prompt_lines`), up to ~0.5k
-        # characters on a returned card, so the budget charges it too; "" on every other card, which
-        # keeps the window of a run with no substituted build exactly what it was.
+        # The row renders its substitution clause too ("" unless a build was substituted).
         cost = len(seed) + len(state.card_substitution_brief(card))
         if (not seed or len(seed) > BOARD_SEED_CHARS_MAX
                 or used + cost > BOARD_PROMPT_SEED_BUDGET_CHARS):
@@ -154,12 +152,17 @@ def attempted_board_prompt_cards(state: RunState, shown=(), *,
         rows.append(c)
     selected: list = []
     used = 0
+    # The most a row can render beside its seed is its belief group's substitution clause.
+    groups = (_attempted_belief_groups(state)
+              if any(c.substituted_nodes for c in state.research_cards()) else {})
     for card in reversed(rows):
         seed = card.seed_statement or ""
-        if len(seed) > BOARD_SEED_CHARS_MAX or used + len(seed) > 8_000:
+        cost = len(seed) + len(state.belief_substitution_brief(
+            groups.get(card.belief_id or hypothesis_statement_digest(seed), [card]), card))
+        if len(seed) > BOARD_SEED_CHARS_MAX or used + cost > 8_000:
             continue
         selected.append(card)
-        used += len(seed)
+        used += cost
         if len(selected) == limit:
             break
     return list(reversed(selected))
@@ -282,15 +285,9 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
             if group:
                 card = group[-1]
                 nodes = sorted({node for member in group for node in member.evidence})
-                # The row lists EVERY member's nodes, so it states every member's substitutions too
-                # — an older card's `different` build under NODES with no NOT TESTED clause is the
-                # laundering the clause exists to stop. The row's own card speaks unprefixed.
-                substitution = " ".join(
-                    ("" if member is card else f"{member.id}: ") + brief
-                    for member in group if (brief := state.card_substitution_brief(member)))
             else:
                 nodes = sorted(card.evidence)
-                substitution = state.card_substitution_brief(card)
+            substitution = state.belief_substitution_brief(group or [card], card)
             # …AND WHETHER THE EXPERIMENT THAT RAN IS STILL THE ONE THIS CARD PROPOSED. The arbiter
             # existed and nothing consumed it, which made this block quietly dangerous: a card's
             # `params` is the receipt-bound PROPOSAL, and under `params_style: "none"` the Developer

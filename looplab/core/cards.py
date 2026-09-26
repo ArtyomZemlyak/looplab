@@ -946,7 +946,9 @@ def card_child_rollup(children, *, champion_metric: float | None = None,
             counts[bucket] += 1
         evidence = getattr(child, "evidence", None)
         if isinstance(evidence, list):
-            nodes += len(evidence)
+            # A substituted build ran under the child but did not test it (`Card.substituted_nodes`).
+            substituted = set(getattr(child, "substituted_nodes", None) or ())
+            nodes += sum(1 for n in evidence if n not in substituted)
         delta = getattr(child, "best_delta", None)
         # `isinstance(True, float)` is False, so a bool cannot pose as a delta here; NaN/inf are
         # refused because a direction headlined "best +inf" is worse than one headlined nothing.
@@ -1375,9 +1377,10 @@ class Card(BaseModel):
     # DERIVED in `events/card_ledger.py::_apply_substituted_builds`, always stamped. They RAN, so
     # unlike a discard they keep their metric, their node budget slot and any champion title; what
     # they lose is the claim to have tested THIS card: they never count in its verdict, and a single
-    # one that is the card's whole evidence is taken out of `evidence` so the untested idea returns.
-    # Same once-per-card bound as `discarded_nodes`, and the same overlap caveat: at two they stay in
-    # `evidence` (the card retires, verdict still `open`), and a mixed set keeps them there too.
+    # one that is the card's whole evidence is taken out of `evidence` so the untested idea returns
+    # (never a gated one). The once-per-card bound counts these WITH `discarded_nodes`
+    # (`card_ledger.py::_apply_card_returns`): at two forgiven nodes they all stay in `evidence` and
+    # the card retires (`failed`, verdict `open`); a mixed set keeps them there too.
     substituted_nodes: list[int] = Field(default_factory=list)
     best_delta: Optional[float] = None                  # best improvement-over-parent among evidence (audit)
     # --- The RESEARCH-DIRECTION facet's own identity (DERIVED; `events/card_ledger.py`).

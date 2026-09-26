@@ -987,3 +987,32 @@ def test_an_auto_skill_card_never_quotes_an_unmeasured_number(tmp_path):
     assert body, "the card qualifies, so a skill card must have been drafted"
     assert "#0 draft" in body, "the MEASURED evidence still grounds the card"
     assert "#1" not in body and "0.95" not in body
+
+
+def test_the_reflection_row_of_a_substituted_winner_says_it_built_something_else(tmp_path, monkeypatch):
+    """The cross-run lesson writer reads "What worked" rows; a winner whose Developer built something
+    ELSE (`core/idea_report.py`) is labelled on its row, or the lesson credits the unbuilt idea."""
+    from looplab.core.idea_report import IDEA_REPORT_NAME, idea_report_text
+    from looplab.events.replay import fold
+    import looplab.agents.agent as agent_mod
+
+    task = ToyTask.load(TASK)
+    researcher, developer = task.build_roles()
+    eng = Engine(tmp_path / "run", task=task, researcher=researcher, developer=developer,
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=2),
+                 reflection_priors=True, memory_dir=str(tmp_path / "mem"))
+    eng.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {"lr": 0.1}, "rationale": "single pass"},
+        "files": {IDEA_REPORT_NAME: idea_report_text({"idea_implemented": "different",
+                                                      "built_instead": "the grouped path"})}})
+    eng.store.append("node_evaluated", {"node_id": 0, "metric": 0.5})
+    eng.store.append("run_finished", {"reason": "done", "finalization_required": True})
+    eng._comparative_lessons_on = False
+    scripted = _ScriptedReflect("[GOOD] something")
+    monkeypatch.setattr(agent_mod, "agentic_text", scripted)
+    eng._reflect_client = lambda: object()
+    eng._causal_meta_note = lambda *_a: "note"      # type: ignore[method-assign]
+    eng._write_reflection_note(fold(eng.store.read_all()))
+    row = next(line for line in scripted.prompts[0].splitlines() if line.startswith("#0 draft"))
+    assert "[NOT A TEST OF its IDEA (idea different) — built instead: the grouped path]" in row

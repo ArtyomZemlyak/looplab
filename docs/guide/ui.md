@@ -406,12 +406,16 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   still see exactly which Developer builds the run paid for and threw away — and the question is
   claimable again. It comes back at most ONCE; a card that collects a second such discard keeps both,
   reads Failed and retires, which is what stops a returned idea from looping. Since 2026-09-26 the
-  same return, same bound, covers a build that RAN something else: a node whose Developer reported
+  same return covers a build that RAN something else: a node whose Developer reported
   `idea_implemented: different` or `not_implemented` is listed in `substituted_nodes`, never counts
   in its card's verdict, and — when it is the card's whole evidence — leaves `evidence`, so the
-  untested idea is claimable again (the node keeps its metric and any champion title). At two such
-  builds the card retires with its verdict still `open`. The card pane's attempt list labels such a node `not a test`
-  rather than `evidence` or `reserved`. Unknown future
+  untested idea is claimable again (the node keeps its metric and any champion title; its rebuild is
+  told why it is back). The bound counts both kinds together: a discard and a substitution on one
+  card are its two builds, and the card reads Failed with its verdict still `open`. A returned card
+  keeps its forgiven node out of `evidence` while its rebuild is in flight, so the speculative
+  freshness gate does not discard the rebuild; a substitution that is itself infeasible or
+  trust-excluded is never returned, so no card leaves Gated. The card pane's attempt list labels a
+  substituted node `not a test` rather than `evidence` or `reserved`. Unknown future
   statuses remain visible rather than being hidden. Cards expose receipt
   completeness, selection readiness/blockers, lineage and evidence-node links. Operator controls can
   edit display text, pin the 1-based visible priority, pin a configured GPU request, deliberately

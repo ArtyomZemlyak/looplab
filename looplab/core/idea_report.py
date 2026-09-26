@@ -34,13 +34,26 @@ NOT_A_TEST = ("different", "not_implemented")
 _BUILT_INSTEAD_CHARS = 400
 
 
-def idea_report_text(args) -> Optional[str]:
-    """The report a `done` declared, as file text, or None when it declared nothing usable."""
+def idea_digest(idea) -> Optional[str]:
+    """`idea:<sha256>` of the Idea a build was handed, or None when it has no canonical form."""
+    from looplab.core.jsonutil import canonical_json_digest
+    dump = getattr(idea, "model_dump", None)
+    return canonical_json_digest(dump(mode="json"), prefix="idea:") if callable(dump) else None
+
+
+def idea_report_text(args, *, idea: Optional[str] = None) -> Optional[str]:
+    """The report a `done` declared, as file text, or None when it declared nothing usable.
+
+    `idea` is `idea_digest` of the Idea the build was handed, written beside the answer so a report
+    is about ONE idea: `different` with no `built_instead` is otherwise the same bytes for every
+    build, and `inherited_report` would read an improve child's own honest answer as its parent's."""
     if not isinstance(args, dict) or args.get("idea_implemented") not in IDEA_IMPLEMENTED:
         return None
     built = " ".join(str(args.get("built_instead") or "").split())[:_BUILT_INSTEAD_CHARS]
-    return json.dumps({"idea_implemented": args["idea_implemented"], "built_instead": built},
-                      indent=1)
+    data = {"idea_implemented": args["idea_implemented"], "built_instead": built}
+    if idea:
+        data["idea"] = idea
+    return json.dumps(data, indent=1)
 
 
 # A report `idea_report_text` writes is ~480 characters at most. The file is Developer-writable, so the
@@ -52,12 +65,16 @@ _REPORT_MAX_CHARS = 4096
 @lru_cache(maxsize=4096)
 def _parse_report(text: str) -> tuple[Optional[str], str]:
     """The parse, memoised on the report's own text: the fold reads every card's evidence reports
-    on every fold, and a report is a few hundred immutable bytes, so the key IS the value."""
-    if len(text) > _REPORT_MAX_CHARS:
-        return None, ""
+    on every fold, and a report is a few hundred immutable bytes, so the key IS the value. Only
+    text inside `_REPORT_MAX_CHARS` reaches it (`idea_report_of`), so no oversized key is kept.
+
+    `RecursionError` is caught beside `ValueError`, and it is not defensive noise: 4 KiB of `[`
+    nests past the interpreter's limit, `json.loads` raises it, and this runs inside `fold()` — an
+    uncaught one is a Developer-writable file that stops the run from looping, resuming or
+    replaying, on every fold, because a cache does not memoise an exception."""
     try:
         data = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None, ""
     if not isinstance(data, dict) or data.get("idea_implemented") not in IDEA_IMPLEMENTED:
         return None, ""
@@ -76,8 +93,9 @@ def inherited_report(node, nodes: Optional[Mapping]) -> bool:
     (`adapters/repo_developer.py::_run` now drops it), so a child whose `done` answered nothing
     carried its parent's `different` — and would have retired its own card on the parent's word.
     Logs written before that keep the copy; this is how the readers tell it from a report of its own.
-    A child whose Developer wrote the very same bytes loses its report here — the safe direction: it
-    is counted as a test, which is all a node with no report ever was."""
+    Since reports carry the digest of their idea (`idea_report_text`), a byte match between a parent
+    and a child with different ideas can only be the copy; one about the SAME idea loses its report
+    here — the safe direction: it is counted as a test, which is all a node with no report ever was."""
     text = _report_text(node)
     if text is None or not nodes:
         return False
@@ -91,7 +109,7 @@ def idea_report_of(node, nodes: Optional[Mapping] = None) -> tuple[Optional[str]
     The LATEST report wins: a repair's `node_repaired.files` replaces the build's, so a repair that
     did implement the idea after all says so and is counted again."""
     text = _report_text(node)
-    if text is None or inherited_report(node, nodes):
+    if text is None or len(text) > _REPORT_MAX_CHARS or inherited_report(node, nodes):
         return None, ""
     return _parse_report(text)
 
@@ -114,6 +132,25 @@ def idea_report_note(node, nodes: Optional[Mapping] = None) -> str:
         whose = f"{card}'s" if isinstance(card, str) and card else "its"
         return f" [NOT A TEST OF {whose} IDEA (idea {value}){instead}]"
     return f" [idea {value} built{instead}]"
+
+
+def rebuild_note(idea, state) -> str:
+    """What the Developer rebuilding a RETURNED card must know, or "" (every other build).
+
+    The return (`events/card_ledger.py::_apply_card_returns`) re-elects the card's stored action, and
+    nothing told the rebuild why it was back: the same Developer on the same prompt makes the same
+    "safe" substitution, and the second build retires the card with its idea never tested. Said to
+    the Developer only (`engine/node_build.py::_directed_idea` — `node_created` keeps the idea)."""
+    card = (getattr(state, "cards", None) or {}).get(getattr(idea, "card_id", None) or "")
+    ids = [nid for nid in (getattr(card, "substituted_nodes", None) or []) if isinstance(nid, int)]
+    if not ids:
+        return ""
+    nodes = getattr(state, "nodes", None) or {}
+    said = "; ".join(f"node {nid} built instead: {built[:160] or 'something else'}"
+                     for nid in ids[:2] for built in [idea_report_of(nodes.get(nid), nodes)[1]])
+    return (f"THIS IDEA HAS NOT BEEN TESTED YET — an earlier build of it ran something else ({said}). "
+            "Build the idea as proposed. If it cannot be built here, do not substitute another "
+            "approach: report idea_implemented: not_implemented and say why in built_instead.")
 
 
 def card_substitution_brief(card, nodes: Mapping) -> str:

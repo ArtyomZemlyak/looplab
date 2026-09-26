@@ -153,7 +153,10 @@ class VerifierTiebreakMixin:
             snapshot = verifier_evidence_snapshot(state.direction, node)
             subject = (f"Experiment #{node.id} reported metric={snapshot['metric']} on the task (optimize "
                        f"direction: {state.direction}); its result is genuinely sound and will hold up.")
-            evidence = (f"What it did: {snapshot['rationale']}\n"
+            from looplab.core.idea_report import idea_report_note
+            # "What it did" is the PROPOSAL; a build that did something else says so beside it.
+            evidence = (f"What it did: {snapshot['rationale']}"
+                        f"{idea_report_note(node, state.nodes)}\n"
                         f"Metric: {snapshot['metric']}"
                         + (f"; confirmed mean over {snapshot['confirmed_seeds']} seeds: "
                            f"{snapshot['confirmed_mean']}" if snapshot['confirmed_mean'] is not None else "")

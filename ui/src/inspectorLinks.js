@@ -57,6 +57,9 @@ export function nodeCardLink(state, node) {
     // Every OTHER attempt at this Card's question. Ordered and provenance-tagged by `cardAttempts`.
     siblings: attempts.filter(entry => entry.nodeId !== nodeId),
     summary: cardAttemptSummary(attempts),
+    // Did THIS node's Developer build something else? (`card.substituted_nodes`.) The pane says so
+    // about the node it is showing, not only as a count about the card.
+    substituted: attempts.some(entry => entry.nodeId === nodeId && entry.substituted),
   }
 }
 

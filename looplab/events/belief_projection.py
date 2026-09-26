@@ -67,9 +67,12 @@ def grouped_beliefs(st: RunState) -> list[dict]:
         # SAME (live) set (peer review): the verdict roll-up drops an abandoned member's stance, so
         # folding its evidence would make the two disagree — and the label-max == _evidence_verdict
         # equivalence holds only over the non-abandoned members whose labels the roll-up keeps.
+        # A member's substituted builds are left out for the same reason: its verdict already
+        # ignores them (`card_ledger.py::_apply_substituted_builds`), so the union must too.
         if verdict != "abandoned":
+            substituted = set(getattr(card, "substituted_nodes", None) or ())
             for node_id in (card.evidence or []):
-                if node_id not in group["evidence"]:
+                if node_id not in group["evidence"] and node_id not in substituted:
                     group["evidence"].append(node_id)
         statement = (card.statement or "").strip()
         if statement and statement not in group["statements"]:

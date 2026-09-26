@@ -309,3 +309,41 @@ test('a substituted build is its own lane: neither the verdict\'s evidence nor a
   const roll = cardAttemptSummary(mixed)
   assert.deepEqual([roll.evidence, roll.substituted, roll.ownedOnly], [1, 1, 0])
 })
+
+test('the BOARD\'s join flags a substituted build exactly as the Inspector\'s does, and renders it', () => {
+  // Three shapes (`events/card_ledger.py::_apply_substituted_builds`): returned (out of evidence),
+  // retired (two, both still in evidence), mixed (a real test beside a substitution).
+  const state = {
+    ...STATE,
+    cards: {
+      'card-ret': { id: 'card-ret', status: 'proposed', verdict: 'open', statement: 'Single ragged pass',
+        evidence: [], substituted_nodes: [5], selection_ready: true },
+      'card-two': { id: 'card-two', status: 'failed', verdict: 'open', statement: 'Twice rebuilt',
+        evidence: [8, 9], substituted_nodes: [8, 9], selection_ready: false },
+      'card-mix': { id: 'card-mix', status: 'evaluated', verdict: 'tested', statement: 'Mixed set',
+        evidence: [6, 7], substituted_nodes: [7], selection_ready: false },
+    },
+    cards_projection: { source_valid: true, total: 3, returned: 3, omitted: 0, complete: true, items: {} },
+    nodes: {
+      5: { id: 5, status: 'evaluated', metric: 1.37, idea: { operator: 'draft', card_id: 'card-ret' } },
+      6: { id: 6, status: 'evaluated', metric: 1.0, idea: { operator: 'draft', card_id: 'card-mix' } },
+      7: { id: 7, status: 'evaluated', metric: 0.9, idea: { operator: 'draft', card_id: 'card-mix' } },
+      8: { id: 8, status: 'evaluated', metric: 1.1, idea: { operator: 'draft', card_id: 'card-two' } },
+      9: { id: 9, status: 'evaluated', metric: 1.2, idea: { operator: 'draft', card_id: 'card-two' } },
+    },
+  }
+  const cards = Object.values(state.cards)
+  const index = cardAttemptIndex(state, cards)
+  for (const card of cards) {
+    const strip = entries => entries.map(({ nodeId, evidence, owned, substituted, present }) =>
+      ({ nodeId, evidence, owned, substituted, present }))
+    assert.deepEqual(strip(index.get(card.id)), strip(cardAttempts(state, card)), card.id)
+  }
+  assert.deepEqual(index.get('card-mix').map(entry => [entry.nodeId, entry.substituted]), [[6, false], [7, true]])
+  for (const [cardId, nodeId] of [['card-ret', 5], ['card-two', 8], ['card-mix', 7]]) {
+    const html = render({ state, selectedCardId: cardId })
+    const row = html.split('card-attempt-id').find(part => part.startsWith(`">#${nodeId}<`)) || ''
+    assert.match(row, /not a test/, `${cardId} #${nodeId}`)
+    assert.doesNotMatch(row, /fed the verdict|reserved for this Card/, `${cardId} #${nodeId}`)
+  }
+})

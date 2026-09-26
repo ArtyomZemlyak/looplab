@@ -247,7 +247,10 @@ a human writes them. Three concrete facts sit behind "why aren't they there":
    other are **record setters** (a card is supported when one of its nodes sets the run's SOTA, and
    `best_delta` stays `None` when that node has no evaluated parent to have improved over; since
    2026-09-22 the SOTA is taken over the nodes the champion rule itself counts —
-   `core/fitness.py::counts_toward_best` — so an aborted or trust-flagged node sets none). So a
+   `core/fitness.py::counts_toward_best` — so an aborted or trust-flagged node sets none; and since
+   2026-09-26 a node whose Developer reported building something else — `Card.substituted_nodes` —
+   counts in no verdict of its card, and a skill never quotes its code as the card's technique).
+   So a
    `n_skills: 0` was read for days as "the classifier is over-rejecting" when the classifier was
    never asked. A refused-here card now records `reason: no_measured_delta` or `no_positive_delta`
    under `classifier: "skill-eligibility/v1"`, for `supported` cards only — a `tested`/`open` card is

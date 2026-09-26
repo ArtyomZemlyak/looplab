@@ -105,7 +105,7 @@ def test_a_substituted_build_that_beat_the_record_does_not_make_its_card_support
     assert real.substituted_nodes == [] and real.evidence == [first] and real.verdict == "tested"
 
 
-def test_the_digest_and_the_novelty_judge_say_it_was_not_a_test(tmp_path):
+def test_the_novelty_judges_prior_outcome_says_it_was_not_a_test(tmp_path):
     from looplab.engine.novelty import _prior_outcome
     engine, producer = _setup(tmp_path, "notes")
     sub = _build(engine, producer, "card-2", _report("not_implemented", "nothing"), x=0.3)
@@ -217,7 +217,9 @@ def test_in_a_mixed_evidence_set_only_the_real_node_decides_the_verdict():
 
 
 def test_the_report_file_is_what_the_fold_reads(tmp_path):
-    """Pure function of the log: the node's files come from `node_created`, nothing else."""
+    """The report the fold judges is the one `node_created` carried (not a side file), and folding
+    the same log twice derives the same card. The digest/novelty/reader surfaces are driven in
+    `tests/test_substituted_build_readers.py`."""
     engine, producer = _setup(tmp_path, "fold-only")
     sub = _build(engine, producer, "card-2", _report("different"), x=0.3)
     _evaluate(engine, sub, 0.9)
@@ -226,3 +228,188 @@ def test_the_report_file_is_what_the_fold_reads(tmp_path):
     assert json.loads(created.data["files"][IDEA_REPORT_NAME])["idea_implemented"] == "different"
     first, second = fold(engine.store.read_all()), fold(engine.store.read_all())
     assert first.cards["card-2"].model_dump() == second.cards["card-2"].model_dump()
+
+
+# ------------------------------------------------------------ (5) the return survives its own rebuild
+
+def test_a_returned_cards_rebuild_is_not_superseded_by_the_freshness_gate(tmp_path):
+    """Evidence is re-linked from `idea.card_id` on every fold, so the rebuild put the forgiven node
+    back beside it (`[n1 terminal, n2 pending]`, owner `mixed`), the speculative freshness gate refused
+    the pair, and `_drop_stale_speculation` superseded the rebuild it had just paid for — the return
+    retired its card unbuilt, every time. UNPATCHED here: the real gate decides."""
+    import anyio
+
+    engine, producer = _setup(tmp_path, "rebuild")
+    first = _build(engine, producer, "card-2", _report("different"), x=0.3)
+    _evaluate(engine, first, 0.9)
+    producer.last_files = _report("as_proposed", "")
+    second = _commit_speculative_node(engine)
+
+    card = fold(engine.store.read_all()).cards["card-2"]
+    assert card.evidence == [second] and card.substituted_nodes == [first]
+    assert card.selection_provenance.owner_state == "in_flight"
+    assert card.selection_blockers == ["work_in_flight"]
+    assert anyio.run(engine._drop_stale_speculation) is False
+    assert fold(engine.store.read_all()).nodes[second].status is NodeStatus.pending
+
+    # …and when the rebuild lands as proposed, IT decides the verdict, beside the forgiven node.
+    _evaluate(engine, second, 0.4)
+    card = fold(engine.store.read_all()).cards["card-2"]
+    assert card.evidence == sorted([first, second]) and card.substituted_nodes == [first]
+    assert card.verdict != "open" and card.status == "evaluated"
+    assert "work_terminal" in card.selection_blockers
+
+
+def test_a_discard_then_a_substitution_is_two_forgiven_builds_not_three(tmp_path, monkeypatch):
+    """The bound counts BOTH kinds: a discard returned, rebuilt as a substitution, must retire."""
+    import anyio
+
+    from looplab.engine import speculation as speculation_module
+
+    engine, producer = _setup(tmp_path, "mixed-bound")
+    _add_ready_draft(engine, "card-2", x=0.3)
+    producer.last_files = _report("as_proposed", "")
+    discarded = _commit_speculative_node(engine)
+    monkeypatch.setattr(speculation_module, "speculative_card_is_fresh", lambda *_a, **_k: False)
+    assert anyio.run(engine._drop_stale_speculation) is True
+    monkeypatch.undo()
+    assert fold(engine.store.read_all()).cards["card-2"].selection_ready is True    # returned once
+
+    producer.last_files = _report("different")
+    rebuilt = _commit_speculative_node(engine)
+    assert anyio.run(engine._drop_stale_speculation) is False                        # not superseded
+    _evaluate(engine, rebuilt, 0.8)
+
+    state = fold(engine.store.read_all())
+    card = state.cards["card-2"]
+    assert card.discarded_nodes == [discarded] and card.substituted_nodes == [rebuilt]
+    assert card.evidence == sorted([discarded, rebuilt])
+    assert card.verdict == "open" and card.status == "failed"
+    assert card.selection_ready is False and "work_terminal" in card.selection_blockers
+    assert "card-2" not in [c.id for c in cs.eligible_cards(state, engine.policy)]
+
+
+def test_a_gated_substitution_is_not_returned(tmp_path):
+    """An infeasible (or trust-excluded) build that says "different" keeps its card in `gated`: a
+    return would carry it OUT of the one lane that excludes and buy it a second build."""
+    engine, producer = _setup(tmp_path, "gated")
+    sub = _build(engine, producer, "card-2", _report("different"), x=0.3)
+    engine.store.append("node_evaluated", {
+        "node_id": sub, "generation": 0, "metric": 0.5, "eval_seconds": 1.0, "extra_metrics": {},
+        "stdout_tail": "", "trials": [],
+        "violations": [{"name": "mem", "value": 2.0, "max": 1.0, "min": None}]})
+    state = fold(engine.store.read_all())
+    assert state.nodes[sub].feasible is False
+    card = state.cards["card-2"]
+    assert card.substituted_nodes == [sub] and card.evidence == [sub]
+    assert card.status == "gated" and card.selection_ready is False
+    assert "card_terminal" in card.selection_blockers and card.verdict == "open"
+
+
+def test_a_report_copied_from_the_parent_does_not_move_the_childs_card(tmp_path):
+    """The fold-level half of `core/idea_report.py::inherited_report`: a log written before the
+    Developer dropped the preloaded report carries the parent's `different` in the child's files —
+    byte for byte — and the child's OWN card must not be returned on the parent's word."""
+    engine, producer = _setup(tmp_path, "inherited")
+    parent = _build(engine, producer, "card-1", _report("different"), x=0.2)
+    _evaluate(engine, parent, 1.0)
+    _add_ready_draft(engine, "card-2", x=0.3)
+    state = fold(engine.store.read_all())
+    child = max(state.nodes) + 1
+    engine.store.append("node_created", {
+        "node_id": child, "parent_ids": [parent], "operator": "improve",
+        "idea": {"operator": "improve", "params": {"x": 0.3}, "rationale": "tune it",
+                 "card_id": "card-2"},
+        "files": dict(state.nodes[parent].files)})
+    _evaluate(engine, child, 0.9)
+    state = fold(engine.store.read_all())
+    assert state.nodes[child].files[IDEA_REPORT_NAME] == state.nodes[parent].files[IDEA_REPORT_NAME]
+    assert state.cards["card-1"].substituted_nodes == [parent]     # the parent's own report counts
+    card = state.cards["card-2"]
+    assert child in card.evidence and card.substituted_nodes == []
+    assert card.verdict != "open"
+
+
+def test_the_rebuild_of_a_returned_card_is_told_why_it_is_back(tmp_path):
+    """The Developer (only — `node_created` keeps the Researcher's idea) hears that the earlier build
+    ran something else; the first build of a card hears nothing new."""
+    engine, producer = _setup(tmp_path, "told")
+    seen: list = []
+    implement = producer.implement
+    producer.implement = lambda idea: (seen.append(idea.rationale or ""), implement(idea))[1]
+    first = _build(engine, producer, "card-2", _report("different"), x=0.3)
+    _evaluate(engine, first, 0.9)
+    producer.last_files = _report("as_proposed", "")
+    second = _commit_speculative_node(engine)
+    assert "HAS NOT BEEN TESTED YET" not in seen[0]
+    assert f"node {first} built instead: {_INSTEAD}" in seen[-1]
+    assert "HAS NOT BEEN TESTED YET" not in (fold(engine.store.read_all()).nodes[second].idea.rationale
+                                             or "")
+
+
+# ------------------------------------------------------------ (6) the fold's other clauses, driven
+
+def _raw_node(engine, card_id: str, files: dict, *, parents=()) -> int:
+    """A node under `card_id` appended the way a log carries one — for shapes the election can't
+    reach (a second build of a card that already has evidence)."""
+    node_id = max(fold(engine.store.read_all()).nodes) + 1
+    engine.store.append("node_created", {
+        "node_id": node_id, "parent_ids": list(parents), "operator": "draft", "files": dict(files),
+        "idea": {"operator": "draft", "params": {"x": 0.9}, "rationale": "r", "card_id": card_id}})
+    return node_id
+
+
+def test_in_a_mixed_set_the_substitution_stays_in_evidence_and_the_real_node_decides(tmp_path):
+    engine, producer = _setup(tmp_path, "mixed-fold")
+    real = _build(engine, producer, "card-2", _report("as_proposed", ""), x=0.3)
+    _evaluate(engine, real, 1.0)
+    before = fold(engine.store.read_all()).cards["card-2"]
+    sub = _raw_node(engine, "card-2", _report("different"))
+    _evaluate(engine, sub, 0.1)                   # far better (min), and NOT a test of the idea
+    card = fold(engine.store.read_all()).cards["card-2"]
+    assert card.substituted_nodes == [sub] and card.evidence == sorted([real, sub])
+    assert (card.verdict, card.best_delta) == (before.verdict, before.best_delta)
+    assert card.status == "evaluated" and "work_terminal" in card.selection_blockers
+
+
+def test_a_tombstoned_substitution_is_not_stamped(tmp_path):
+    engine, producer = _setup(tmp_path, "tombstoned")
+    sub = _build(engine, producer, "card-2", _report("different"), x=0.3)
+    _evaluate(engine, sub, 0.5)
+    engine.store.append("node_tombstoned", {"node_ids": [sub]})
+    card = fold(engine.store.read_all()).cards["card-2"]
+    assert card.substituted_nodes == []
+
+
+def test_a_discarded_build_is_forgiven_once_as_a_discard_never_also_as_a_substitution(
+        tmp_path, monkeypatch):
+    import anyio
+
+    from looplab.engine import speculation as speculation_module
+
+    engine, producer = _setup(tmp_path, "discard-not-sub")
+    _add_ready_draft(engine, "card-2", x=0.3)
+    producer.last_files = _report("different")
+    node_id = _commit_speculative_node(engine)
+    monkeypatch.setattr(speculation_module, "speculative_card_is_fresh", lambda *_a, **_k: False)
+    assert anyio.run(engine._drop_stale_speculation) is True
+    card = fold(engine.store.read_all()).cards["card-2"]
+    assert card.discarded_nodes == [node_id] and card.substituted_nodes == []
+    assert card.evidence == [] and card.selection_ready is True
+
+
+def test_a_returned_cards_research_origin_survives_a_substitution_return(tmp_path):
+    """Attribution is not evidence: the returned card still names the memo its build came from."""
+    from looplab.events import card_ledger
+
+    engine, producer = _setup(tmp_path, "origin")
+    sub = _build(engine, producer, "card-2", _report("different"), x=0.3)
+    _evaluate(engine, sub, 0.9)
+    state = fold(engine.store.read_all())
+    state.nodes[sub].idea.footprint = {"gpus": 1}
+    state.nodes[sub].research_origin = {"memo_id": "memo:sha256:" + "d" * 64}
+    card_ledger.derive_cards(state)
+    card = state.cards["card-2"]
+    assert card.evidence == [] and card.substituted_nodes == [sub]
+    assert card.research_origin == "memo:sha256:" + "d" * 64
+    assert card.footprint == {"gpus": 1, "proposed_by": "researcher"}

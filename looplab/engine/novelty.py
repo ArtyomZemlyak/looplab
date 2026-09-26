@@ -325,6 +325,21 @@ def literature_overlap(text: str, literature, *, floor: float = LITERATURE_OVERL
 
 
 
+# The judge's NEVER-RAN sentence, in two spellings. The historical one is sent unless a prior row
+# actually carries the substitution label (`core/idea_report.py::idea_report_note`), so a run whose
+# nodes wrote no idea report — every run before 85eaeae7 — keeps its system prompt byte for byte.
+_NOT_A_TEST_MARK = "NOT A TEST OF"
+_NEVER_RAN = ("An experiment whose recorded idea NEVER RAN is not a tried idea: an "
+              "`inert_path` outcome, or code that shows the idea was not implemented "
+              "(read_code / diff when the outcome alone does not settle it), means the "
+              "idea is still untested, and a proposal to actually implement it is NOVEL. ")
+_NEVER_RAN_WITH_REPORT = (
+    "An experiment whose recorded idea NEVER RAN is not a tried idea: an `inert_path` "
+    "outcome, a row marked NOT A TEST OF … IDEA, or code that shows it was not built "
+    "(read_code / diff when the outcome alone does not settle it), means the "
+    "idea is still untested, and a proposal to actually implement it is NOVEL. ")
+
+
 def _prior_outcome(node, nodes=None) -> str:
     """A tried experiment's outcome as the novelty judge needs it: an `inert_path` node never ran
     its idea (`engine/activation.py`), which is the difference between "tried" and "not built".
@@ -637,10 +652,15 @@ class NoveltyGateMixin:
         text = self._idea_text(idea)
         if len(text) < 20:
             return None, 0.0
+        from looplab.core.idea_report import idea_not_tested
         from looplab.tools.vectorstore import _cosine
         v = self._embedder(text)
         best_n, best_s = None, 0.0
         for n in state.nodes.values():
+            # A node whose Developer built something ELSE never tried its idea's text, so that text is
+            # not a tried idea to be a duplicate of — the LLM judge is told the same (`_NEVER_RAN_*`).
+            if idea_not_tested(n, state.nodes):
+                continue
             nt = self._idea_text(n.idea)
             if len(nt) < 20:
                 continue
@@ -705,11 +725,8 @@ class NoveltyGateMixin:
                              "approach, component, loss, data or direction is NOVEL. Compare both the claim "
                              "and the bounded action identity: operator, params, search space, eval profile "
                              "and the governed evaluation-timeout override are part of what was tried. "
-                             "An experiment whose recorded idea NEVER RAN is not a tried idea: an `inert_path` "
-                             "outcome, a row marked NOT A TEST OF … IDEA, or code that shows it was not built "
-                             "(read_code / diff when the outcome alone does not settle it), means the "
-                             "idea is still untested, and a proposal to actually implement it is NOVEL. "
-                             "Prefer NOVEL unless clearly a repeat."},
+                             + (_NEVER_RAN_WITH_REPORT if _NOT_A_TEST_MARK in brief else _NEVER_RAN)
+                             + "Prefer NOVEL unless clearly a repeat."},
                  {"role": "user",
                   "content": f"PROPOSED idea: {self._idea_prompt_identity(idea, prose_chars=800)}"
                              f"\n\nAlready tried:\n{brief}\n\n"
@@ -1788,8 +1805,11 @@ class NoveltyGateMixin:
         if not params:
             return idea
 
+        from looplab.core.idea_report import idea_not_tested
         nearest, mind = None, float("inf")
         for n in state.nodes.values():
+            if idea_not_tested(n, state.nodes):    # its params belong to an idea it did not build
+                continue
             d = param_distance(params, n.idea.params)
             if d < mind:
                 mind, nearest = d, n.id

@@ -186,6 +186,11 @@ def _evidence_snapshot(claim: dict, state: RunState,
                 params = "<unavailable>"
             row["params"] = _clean(params, 1_200)
         row["rationale"] = _clean(n.idea.rationale or "", 400)
+        # A node whose Developer built something ELSE: its metric is not evidence for its rationale,
+        # which is exactly what a memo claim citing it would assert (`core/idea_report.py`).
+        from looplab.core.idea_report import idea_report_note
+        if (report_note := idea_report_note(n, final_nodes).strip()):
+            row["built"] = _clean(report_note, 400)
         nodes.append(row)
         node_refs.append({"node_id": nid, "generation": generation})
 

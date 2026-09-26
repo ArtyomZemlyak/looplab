@@ -2827,6 +2827,14 @@ class RunState(BaseModel):
         from looplab.core.idea_report import card_substitution_brief
         return card_substitution_brief(card, self.nodes)
 
+    def belief_substitution_brief(self, members, row) -> str:
+        """The clause for a board row that stands for a whole BELIEF group (`propose_brief_fit`): the
+        row lists every member's nodes, so it states every member's substitutions — an older card's
+        `different` build under NODES with no NOT TESTED clause is the laundering the clause exists to
+        stop. `row` (the card the row renders) speaks unprefixed, every other member by its id."""
+        return " ".join(("" if member is row else f"{member.id}: ") + brief
+                        for member in members if (brief := self.card_substitution_brief(member)))
+
     def open_research_beliefs(self, *, only=None) -> list["Card"]:
         """The open, UNTESTED research board as distinct BELIEFS (peer review): the
         `[open_research_cards() with no evidence yet]` list the Researcher proposal feed and foresight

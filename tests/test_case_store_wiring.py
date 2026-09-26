@@ -436,3 +436,24 @@ def test_a_rejected_case_leaves_the_finalize_step_open_and_the_run_alive(tmp_pat
     steps = [e.data.get("step") for e in eng.store.read_all() if e.type == "finalize_step"]
     assert "case" not in steps, steps
     assert "budget" in steps, "the steps around it still completed"
+
+
+def test_a_substituted_champion_is_stored_as_what_it_is(tmp_path):
+    """The champion's Developer reported building something ELSE (`core/idea_report.py`): its params
+    and number are real, its proposal is not what earned them. The case the NEXT run reads says so,
+    and carries no concepts (they are tagged from the unbuilt idea's text)."""
+    from looplab.core.idea_report import IDEA_REPORT_NAME, idea_report_text
+
+    mem = tmp_path / "mem"
+    engine = _engine_over(tmp_path, mem)
+    state = _finished_state("g", rationale="single ragged left-padded pass")
+    state.node_concepts = {0: ["decode/single-pass"]}
+    from looplab.engine.concept_shelf import state_concepts
+    assert state_concepts(state, [0]), "the node IS tagged, so an empty field below is the fix"
+    state.nodes[0].files = {IDEA_REPORT_NAME: idea_report_text(
+        {"idea_implemented": "different", "built_instead": "kept the grouped path"})}
+    engine.lessons.store_case(state)
+    [row] = _case_rows(mem / "cases.jsonl")
+    assert row["rationale"].startswith("single ragged left-padded pass [NOT A TEST OF")
+    assert "kept the grouped path" in row["rationale"] and not row.get("concepts")
+    assert row["params"] == {"x": 3.0} and row["metric"] == 0.25

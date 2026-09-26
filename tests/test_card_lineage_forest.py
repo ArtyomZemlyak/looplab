@@ -25,6 +25,8 @@ making the mutation are named in the assertion messages.
 """
 from __future__ import annotations
 
+import math
+
 from looplab.core.cards import (CARD_CHILD_LIMIT, CARD_CONCEPT_TAG_LIMIT,
                                 CARD_KIND_DIRECTION, CARD_KIND_EXPERIMENT,
                                 CARD_LINEAGE_MAX_DEPTH, Card, CardSelectionProvenance,
@@ -408,3 +410,22 @@ def test_the_union_covers_every_child_even_where_the_id_list_clips():
     # one constant, tied by `tests/test_card_public_projection.py`.
     assert len(cards["dir"].child_concept_tags) == CARD_CONCEPT_TAG_LIMIT, (
         "the union is bounded at the same cap the wire can carry losslessly")
+
+
+def test_a_substituted_child_node_is_neither_the_directions_best_nor_one_of_its_nodes():
+    """`Card.substituted_nodes`: node 2 ran something ELSE than card `e`'s idea. It is not what the
+    direction measured — not its champion-relative best, not one of the experiments it counts."""
+    from looplab.core.models import Idea, Node, NodeStatus
+
+    def node(i, metric):
+        return Node(id=i, operator="draft", idea=Idea(operator="draft", params={}),
+                    status=NodeStatus.evaluated, metric=metric)
+
+    child = _experiment("e", parent="dir", status="evaluated", evidence=[1, 2])
+    child.substituted_nodes = [2]
+    ledger = _CardLedger(cards={c.id: c for c in (_direction("dir"), child)})
+    _apply_card_lineage(ledger, _aliases(), nodes={1: node(1, 0.70), 2: node(2, 0.99)},
+                        direction="max", champion_metric=0.80)
+    rollup = ledger.cards["dir"].child_rollup
+    assert rollup["nodes"] == 1
+    assert math.isclose(rollup["best_vs_champion"], 0.70 - 0.80, abs_tol=1e-12)

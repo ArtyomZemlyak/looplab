@@ -876,7 +876,8 @@ def lineage_lessons(state: RunState, parent, k: int = 5) -> str:
             continue
         if n.status is NodeStatus.failed:
             lessons.append((0.5, f"  #{n.id} {n.operator} FAILED ({n.error_reason or 'error'}): "
-                                 f"{' '.join((n.idea.rationale or '').split())[:70]}"))
+                                 f"{' '.join((n.idea.rationale or '').split())[:70]}"
+                                 + idea_report_note(n, state.nodes)))
             continue
         if n.metric is None:
             continue

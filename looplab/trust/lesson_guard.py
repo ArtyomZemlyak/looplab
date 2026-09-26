@@ -24,6 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from looplab.core.idea_report import idea_report_note
 from looplab.core.models import NodeStatus, RunState, safe_lesson_node_count
 from looplab.trust.verifier import (VerdictReport, lesson_overgeneralization_criteria, verify)
 
@@ -97,8 +98,11 @@ def _evidence_text(rec: dict, state: RunState) -> str:
             parts.append(f"#{nid} {n.operator}: FAILED ({n.error_reason or 'error'}){inert} — "
                          f"{' '.join((n.idea.rationale or '').split())[:90]}")
         else:
+            # …and a build that ran something ELSE is said in words too: its metric is no evidence
+            # about the idea the rationale names (`core/idea_report.py`).
             parts.append(f"#{nid} {n.operator}: metric={n.metric} — "
-                         f"{' '.join((n.idea.rationale or '').split())[:90]}")
+                         f"{' '.join((n.idea.rationale or '').split())[:90]}"
+                         + idea_report_note(n, state.nodes))
     return "\n".join(parts) or "(no evidence recorded)"
 
 
