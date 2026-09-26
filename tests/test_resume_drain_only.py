@@ -6,9 +6,13 @@ Driven through the real CLI on a real toy run, read back off the run's own log.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from typer.testing import CliRunner
 
 from looplab.cli import app
+from looplab.cli.run_cmds import drain_only_refusal
+from looplab.core.models import NodeStatus
 from looplab.engine.orchestrator import (DRAIN_ONLY_PAUSE_REASON, DRAIN_ONLY_STUCK_REASON, Engine,
                                          drain_owed)
 from looplab.events.eventstore import EventStore
@@ -18,31 +22,49 @@ _RUN = ["run", "--no-genesis", "--kind", "quadratic", "--goal", "min (x-3)^2", "
         "--backend", "toy", "--max-nodes", "4"]
 
 
-def _finished_run(tmp_path):
+def _finished_run(tmp_path, *extra, nodes=4):
     rd = tmp_path / "run"
-    out = CliRunner().invoke(app, [*_RUN, "--out", str(rd)])
+    out = CliRunner().invoke(app, [*_RUN, *extra, "--out", str(rd)])
     assert out.exit_code == 0, out.output
     store = EventStore(rd / "events.jsonl")
     state = fold(store.read_all())
-    assert state.finished and len(state.nodes) == 4
+    assert state.finished and len(state.nodes) == nodes
     return rd, store
 
 
-def test_a_rescore_is_evaluated_and_nothing_else_happens(tmp_path, monkeypatch):
+def _reset(store, node_id, stage="eval"):
+    store.append("node_reset", {"node_id": node_id, "from_stage": stage,
+                                "generation": fold(store.read_all()).nodes[node_id].attempt})
+
+
+def _drain(rd):
+    return CliRunner().invoke(app, ["resume", str(rd), "--drain-only"])
+
+
+def _isolated(monkeypatch, tmp_path):
     monkeypatch.setenv("LOOPLAB_MEMORY_DIR", str(tmp_path / "mem"))
     monkeypatch.setenv("LOOPLAB_KNOWLEDGE_DIR", str(tmp_path / "kn"))
+
+
+def test_a_rescore_is_evaluated_and_nothing_else_happens(tmp_path, monkeypatch):
+    _isolated(monkeypatch, tmp_path)
     rd, store = _finished_run(tmp_path)
-    before = fold(store.read_all())
-    node = before.nodes[1]
-    store.append("node_reset", {"node_id": 1, "from_stage": "eval", "generation": node.attempt})
+    node = fold(store.read_all()).nodes[1]
+    _reset(store, 1)
+    # A queued operator inject stays queued: the drain serves no forced request (critic
+    # 2026-09-26: a hook placed after `_serve_forced_requests` built it and nothing went red).
+    store.append("inject_node", {"idea": {"operator": "manual", "params": {"x": 0.5},
+                                          "rationale": "operator hunch"},
+                                 "parent_id": None, "code": None})
     mark = store.read_all()[-1].seq
     # The research overlap is ASKED for on every ordinary dispatch and is a no-op when nothing is
     # due, so its rows alone cannot show the drain never asked: count the asks.
     asked = []
     monkeypatch.setattr(Engine, "_spawn_research", lambda self, tg, state: asked.append(1) or False)
 
-    out = CliRunner().invoke(app, ["resume", str(rd), "--drain-only"])
+    out = _drain(rd)
     assert out.exit_code == 0, out.output
+    assert "drain-only: 1 evaluation(s) owed (node(s) 1)" in out.output
 
     after_events = store.read_all()
     after = fold(after_events)
@@ -56,33 +78,67 @@ def test_a_rescore_is_evaluated_and_nothing_else_happens(tmp_path, monkeypatch):
     kinds = {e.type for e in tail}
     assert not kinds & {"node_created", "node_building", "strategy_decision", "card_build_requested",
                         "research_attempted", "research_completed", "node_confirmed",
-                        "eval_noise_floor", "run_finished"}, sorted(kinds)
+                        "eval_noise_floor", "run_finished", "inject_done"}, sorted(kinds)
     assert asked == [], "the drain's dispatch overlapped a research think"
+    assert after.injects_done == 0 and len(after.inject_requests) == 1, "the inject stays queued"
     # It ends PAUSED, saying why, so the next plain `resume` continues the search.
     assert after.paused
     pauses = [e.data for e in tail if e.type == "pause"]
     assert pauses and pauses[-1].get("reason") == DRAIN_ONLY_PAUSE_REASON
 
 
-def test_with_nothing_pending_it_only_pauses(tmp_path, monkeypatch):
-    monkeypatch.setenv("LOOPLAB_MEMORY_DIR", str(tmp_path / "mem"))
-    monkeypatch.setenv("LOOPLAB_KNOWLEDGE_DIR", str(tmp_path / "kn"))
+def test_a_finished_run_nobody_reset_is_left_exactly_as_it_was(tmp_path, monkeypatch):
+    """Critic 2026-09-26, driven: the plain lift appended `resume` to a finished run, which opens a
+    new search epoch — and after a holdout disclosure the rotation re-queued every evaluated node,
+    which the drain then re-evaluated, all four, on a run nobody had reset."""
+    _isolated(monkeypatch, tmp_path)
     rd, store = _finished_run(tmp_path)
-    mark = store.read_all()[-1].seq
-    out = CliRunner().invoke(app, ["resume", str(rd), "--drain-only"])
+    for node_id in sorted(fold(store.read_all()).nodes)[:3]:     # the shape `holdout.py` writes
+        store.append("holdout_evaluated", {"node_id": node_id, "generation": 0,
+                                           "metric": 1.0, "search_epoch": 0})
+    before = store.read_all()
+    out = _drain(rd)
     assert out.exit_code == 0, out.output
-    tail = [e for e in store.read_all() if e.seq > mark]
-    # The resume lift, the entry's own prior receipts and the loop's exit receipt bracket it; the
-    # one decision in between is the pause.
-    bookkeeping = {"resume", "resume_served", "prior_injected", "run_loop_exited"}
-    assert [e.type for e in tail if e.type not in bookkeeping] == ["pause"], [e.type for e in tail]
-    assert fold(store.read_all()).paused
+    assert "run is finished and nothing is owed an evaluation" in out.output
+    assert [e.seq for e in store.read_all()] == [e.seq for e in before], "nothing was appended"
+    after = fold(store.read_all())
+    assert after.finished and after.search_epoch == fold(before).search_epoch
+
+
+def test_nothing_owed_lifts_no_pause(tmp_path, monkeypatch):
+    _isolated(monkeypatch, tmp_path)
+    rd, store = _finished_run(tmp_path)
+    _reset(store, 1)
+    assert _drain(rd).exit_code == 0                  # rescored, then paused by the drain
+    before = [e.seq for e in store.read_all()]
+    out = _drain(rd)
+    assert out.exit_code == 0 and "nothing is owed an evaluation" in out.output
+    assert [e.seq for e in store.read_all()] == before and fold(store.read_all()).paused
+
+
+def test_what_the_cli_refuses_to_drain():
+    """`drain_only_refusal`'s truth table over folded-state stand-ins."""
+    owed = SimpleNamespace(id=1, status=NodeStatus.pending, tombstoned=False, rerun_from=None,
+                           attempt=1, eval_started=False)
+
+    def state(*, nodes=(), holdout=()):
+        return SimpleNamespace(nodes={n.id: n for n in nodes}, aborted_nodes=set(),
+                               holdout_evaluated_ids=set(holdout))
+
+    assert drain_only_refusal(state(nodes=[owed]), "pending_finalize")[0] == 2
+    assert drain_only_refusal(state(nodes=[owed]), "finalization_pending")[0] == 2
+    assert drain_only_refusal(state(nodes=[owed]), "finished")[0] == 0
+    assert drain_only_refusal(state(), "paused")[0] == 0, "nothing owed: no lift, no re-pause"
+    assert drain_only_refusal(state(nodes=[owed], holdout=[0]), "paused")[0] == 2
+    assert drain_only_refusal(state(nodes=[owed]), "paused") is None
+    assert drain_only_refusal(state(nodes=[owed]), "live") is None
+    waiting = SimpleNamespace(**{**vars(owed), "attempt": 0, "rerun_from": "implement"})
+    assert drain_only_refusal(state(nodes=[waiting]), "live") is None, "the loop head rebuilds it"
 
 
 def test_what_the_drain_owes_is_a_reset_or_an_interrupted_evaluation(tmp_path, monkeypatch):
     """`drain_owed` over the REAL fold of a real run's log, one control event at a time."""
-    monkeypatch.setenv("LOOPLAB_MEMORY_DIR", str(tmp_path / "mem"))
-    monkeypatch.setenv("LOOPLAB_KNOWLEDGE_DIR", str(tmp_path / "kn"))
+    _isolated(monkeypatch, tmp_path)
     _rd, store = _finished_run(tmp_path)
     created = next(e.data for e in store.read_all() if e.type == "node_created"
                    and e.data.get("node_id") == 3)
@@ -110,33 +166,70 @@ def test_what_the_drain_owes_is_a_reset_or_an_interrupted_evaluation(tmp_path, m
 
 def test_a_build_the_search_made_is_left_for_the_search(tmp_path, monkeypatch):
     """A pending node no reset or interruption left owed — a Card's speculative build, above all —
-    is a SEARCH decision: the drain leaves it pending for the next plain resume."""
-    monkeypatch.setenv("LOOPLAB_MEMORY_DIR", str(tmp_path / "mem"))
-    monkeypatch.setenv("LOOPLAB_KNOWLEDGE_DIR", str(tmp_path / "kn"))
+    is a SEARCH decision: the drain rescores the reset node and leaves the build pending."""
+    _isolated(monkeypatch, tmp_path)
     rd, store = _finished_run(tmp_path)
     created = next(e.data for e in store.read_all() if e.type == "node_created"
                    and e.data.get("node_id") == 3)
+    _reset(store, 1)
     store.append("node_created", {**created, "node_id": 4, "parent_ids": [3],
                                   "parent_generations": {"3": 0}})
     mark = store.read_all()[-1].seq
-    out = CliRunner().invoke(app, ["resume", str(rd), "--drain-only"])
+    out = _drain(rd)
     assert out.exit_code == 0, out.output
     tail = [e for e in store.read_all() if e.seq > mark]
     after = fold(store.read_all())
-    assert after.nodes[4].status.value == "pending"
-    assert not any(e.type in ("node_eval_started", "node_evaluated", "node_failed") for e in tail)
+    assert after.nodes[4].status.value == "pending" and after.nodes[1].metric is not None
+    assert not any(e.data.get("node_id") == 4 for e in tail
+                   if e.type in ("node_eval_started", "node_evaluated", "node_failed"))
     assert [e.data.get("reason") for e in tail if e.type == "pause"] == [DRAIN_ONLY_PAUSE_REASON]
 
 
-def test_a_dispatch_that_admits_nothing_pauses_instead_of_spinning(tmp_path, monkeypatch):
-    """The eval budget's reservation rule can refuse a lane before the spent seconds reach the
-    ceiling the loop head tests, and the drain then handed the same node to the dispatch on every
-    turn, forever (found by a mutant that hung). Driven with a dispatch that admits nothing."""
-    monkeypatch.setenv("LOOPLAB_MEMORY_DIR", str(tmp_path / "mem"))
-    monkeypatch.setenv("LOOPLAB_KNOWLEDGE_DIR", str(tmp_path / "kn"))
+def test_a_spent_eval_budget_pauses_the_drain_instead_of_finalizing(tmp_path, monkeypatch):
+    """Critic 2026-09-26, driven: the loop head's eval-budget gate FINALIZED a drained run — the
+    reset node left pending, the report naming the wrong champion. The drain is asked first."""
+    _isolated(monkeypatch, tmp_path)
+    rd, store = _finished_run(tmp_path, "-s", "max_eval_seconds=0.000001", nodes=3)  # seed batch
+    assert fold(store.read_all()).stop_reason == "eval_budget"
+    _reset(store, 2)
+    mark = store.read_all()[-1].seq
+    out = _drain(rd)
+    assert out.exit_code == 0, out.output
+    tail = [e for e in store.read_all() if e.seq > mark]
+    assert "run_finished" not in {e.type for e in tail}, [e.type for e in tail]
+    reasons = [e.data.get("reason") for e in tail if e.type == "pause"]
+    assert len(reasons) == 1 and "the run's eval budget is spent" in reasons[0]
+    assert "node(s) 2 were not evaluated" in reasons[0]
+    after = fold(store.read_all())
+    assert after.paused and after.nodes[2].status.value == "pending"
+
+
+def test_a_finalize_requested_mid_drain_is_the_loop_heads_to_settle(tmp_path, monkeypatch):
+    """A halt intent that lands during the drain hands the turn back to the loop head, whose stop
+    handling finishes the run in-process (critic 2026-09-26: returning `break` left a run with
+    `stop_requested` and no finish, waiting for another driver)."""
+    _isolated(monkeypatch, tmp_path)
     rd, store = _finished_run(tmp_path)
-    store.append("node_reset", {"node_id": 1, "from_stage": "eval",
-                                "generation": fold(store.read_all()).nodes[1].attempt})
+    _reset(store, 1)
+    mark = store.read_all()[-1].seq
+
+    async def finalize_lands(self, evals, state, max_es, *, research=True):
+        self.store.append("run_abort", {"reason": "finalized"})
+
+    monkeypatch.setattr(Engine, "_dispatch_evals", finalize_lands)
+    out = _drain(rd)
+    assert out.exit_code == 0, out.output
+    tail = [e.type for e in store.read_all() if e.seq > mark]
+    assert "run_finished" in tail and "pause" not in tail, tail
+    assert fold(store.read_all()).finished
+
+
+def test_a_dispatch_that_admits_nothing_pauses_instead_of_spinning(tmp_path, monkeypatch):
+    """A turn in which no owed lifecycle moved would hand the same node to the dispatch on every
+    turn, forever (found by a mutant that hung). Driven with a dispatch that admits nothing."""
+    _isolated(monkeypatch, tmp_path)
+    rd, store = _finished_run(tmp_path)
+    _reset(store, 1)
     mark = store.read_all()[-1].seq
     calls = []
 
@@ -146,7 +239,7 @@ def test_a_dispatch_that_admits_nothing_pauses_instead_of_spinning(tmp_path, mon
             raise AssertionError(f"the drain spun: {calls}")
 
     monkeypatch.setattr(Engine, "_dispatch_evals", admits_nothing)
-    out = CliRunner().invoke(app, ["resume", str(rd), "--drain-only"])
+    out = _drain(rd)
     assert out.exit_code == 0, out.output
     assert calls == [[1]], calls
     tail = [e for e in store.read_all() if e.seq > mark]

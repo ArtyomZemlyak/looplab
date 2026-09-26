@@ -165,12 +165,15 @@ SPECULATION_CALIBRATION_VARIANT_FIELDS = SPECULATION_CALIBRATION_PROFILE_VARIANT
 
 
 # The reasons `looplab resume --drain-only` pauses with (doc 68 68.3a, `Engine._drain_only_turn`):
-# nothing it owes is left, or a dispatch admitted none of what it owes. Module constants so the
-# tests read the one spelling.
+# nothing it owes is left, a dispatch admitted none of what it owes, or a budget the loop head would
+# finalize the run on has run out. Module constants so the tests read the one spelling.
 DRAIN_ONLY_PAUSE_REASON = ("drain-only resume: every reset or interrupted evaluation finished; "
                            "`looplab resume` (without --drain-only) continues the search")
 DRAIN_ONLY_STUCK_REASON = ("drain-only resume: no evaluation could be admitted for node(s) {ids}; "
                            "`looplab resume` (without --drain-only) continues the search")
+DRAIN_ONLY_BUDGET_REASON = ("drain-only resume: {budget}, so node(s) {ids} were not evaluated; "
+                            "extend the budget and drain again, or `looplab resume` (without "
+                            "--drain-only) to let the search settle it")
 
 
 def drain_owed(state: RunState, node) -> bool:
@@ -1910,6 +1913,17 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             if _signal == "continue":
                 continue
             max_s, max_es = self._apply_control_overrides(state)
+            # DRAIN ONLY (doc 68 68.3a): after every terminal gate above — a pause or a stop still
+            # wins — and BEFORE anything that builds, serves a forced request, consults, researches
+            # or proposes. And before the two BUDGET gates below, which FINALIZE the run: a drain
+            # whose budget runs out pauses instead, saying which (critic 2026-09-26, driven: an
+            # eval-budget run reset and drained was finalized with the reset node still pending, and
+            # its report named the wrong champion).
+            if self._drain_only:
+                if await self._drain_only_turn(
+                        state, max_es, max_s=max_s, started_at=start) == "break":
+                    break
+                continue
             # Budget (I13): per-invocation wall-clock ceiling (resets on each resume).
             if max_s is not None and (time.time() - start) >= max_s:
                 if self._settle_terminal_gate(state, "time_budget", decision_seq=decision_seq,
@@ -1923,14 +1937,6 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                     and state.total_eval_seconds >= max_es):
                 if self._settle_terminal_gate(state, "eval_budget", decision_seq=decision_seq,
                                        max_es=max_es, drain_forced_request=True) == "break":
-                    break
-                continue
-
-            # DRAIN ONLY (doc 68 68.3a): after every terminal and budget gate above — a pause, a stop
-            # or a ceiling still wins — and BEFORE anything that builds, serves a forced request,
-            # consults, researches or proposes.
-            if self._drain_only:
-                if await self._drain_only_turn(state, max_es) == "break":
                     break
                 continue
 
@@ -2261,7 +2267,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                               "reader) to enable the drift guard."})
         return None
 
-    async def _drain_only_turn(self, state, max_es) -> str:
+    async def _drain_only_turn(self, state, max_es, *, max_s=None, started_at=None) -> str:
         """One turn of `looplab resume --drain-only` (doc 68 68.3a): evaluate what is OWED, and
         when nothing is, pause and hand back — "finish only the pending evaluations and stop".
 
@@ -2277,36 +2283,52 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         asked for exactly that node.
 
         WHAT IT OWES is `drain_owed`: a lifecycle a reset opened, or an evaluation that started and
-        never landed a terminal. A build the search made and has not dispatched stays pending.
+        never landed a terminal. A build the search made and has not dispatched stays pending. Which
+        runs may be drained at all — never a finished one, never one with a finalize pending — is
+        the CLI's to refuse before anything is appended (`cli/run_cmds.py::drain_only_refusal`).
 
-        When nothing owed is left the run PAUSES with a stated reason, through the same control
-        event an operator's pause is — the engine's own precedent is the confirm phase's auto-pause
-        — so it ends as it began (a rescore starts from a paused run), and the next plain `resume`
-        lifts it and searches on.
-
-        NEVER A SPIN. A dispatch can admit none of what it was handed — the eval budget's
-        reservation rule refuses a lane before the spent seconds reach the ceiling the loop head
-        tests — and the same nodes would then be handed to it again on every turn, forever. So a
-        turn in which no owed lifecycle moved pauses instead, naming the nodes it could not admit."""
+        EVERY WAY IT STOPS IS A PAUSE with a stated reason, through the same control event an
+        operator's pause is — the engine's own precedent is the confirm phase's auto-pause — so a
+        later plain `resume` lifts it and searches on:
+          * nothing owed is left (`DRAIN_ONLY_PAUSE_REASON`);
+          * the run's eval budget is spent, or this invocation's time budget has run out — the loop
+            head would FINALIZE the run on either, so the drain is asked first
+            (`DRAIN_ONLY_BUDGET_REASON`);
+          * a turn in which no owed lifecycle moved (`DRAIN_ONLY_STUCK_REASON`): the same nodes
+            would otherwise be handed to the dispatch on every turn, forever — a mutant that dropped
+            the owed filter hung exactly so.
+        A halt intent that lands meanwhile hands the turn back to the loop head, whose stop and
+        pause handling is the run's own (a finalize requested mid-drain finishes in-process)."""
         await self._drain_adopted_evals()
         await self._raise_deferred_eval_budget_stop()
         owed = {node.id: node.attempt for node in state.nodes.values() if drain_owed(state, node)}
         reason = DRAIN_ONLY_PAUSE_REASON
         if owed:
-            await self._dispatch_evals([{"kind": "evaluate", "node_id": node_id}
-                                        for node_id in sorted(owed)], state, max_es, research=False)
-            after = fold(self.store.read_all())
-            # Still owed, on the lifecycle it was handed on: nothing moved it. An abort or a reset
-            # landing meanwhile is a move — the next turn re-derives what is owed.
-            stuck = sorted(node_id for node_id, generation in owed.items()
-                           if (node := after.nodes.get(node_id)) is not None
-                           and node.attempt == generation and drain_owed(after, node))
-            if len(stuck) < len(owed):
-                return "continue"
-            reason = DRAIN_ONLY_STUCK_REASON.format(ids=", ".join(map(str, stuck)))
+            ids = ", ".join(map(str, sorted(owed)))
+            if max_es is not None and state.total_eval_seconds >= max_es:
+                reason = DRAIN_ONLY_BUDGET_REASON.format(
+                    budget=f"the run's eval budget is spent ({state.total_eval_seconds:g} s "
+                           f"of {max_es:g} s)", ids=ids)
+            elif (max_s is not None and started_at is not None
+                  and time.time() - started_at >= max_s):
+                reason = DRAIN_ONLY_BUDGET_REASON.format(
+                    budget=f"this invocation's time budget ({max_s:g} s) has run out", ids=ids)
+            else:
+                await self._dispatch_evals([{"kind": "evaluate", "node_id": node_id}
+                                            for node_id in sorted(owed)],
+                                           state, max_es, research=False)
+                after = fold(self.store.read_all())
+                # Still owed, on the lifecycle it was handed on: nothing moved it. An abort or a
+                # reset landing meanwhile is a move — the next turn re-derives what is owed.
+                stuck = sorted(node_id for node_id, generation in owed.items()
+                               if (node := after.nodes.get(node_id)) is not None
+                               and node.attempt == generation and drain_owed(after, node))
+                if len(stuck) < len(owed):
+                    return "continue"
+                reason = DRAIN_ONLY_STUCK_REASON.format(ids=", ".join(map(str, stuck)))
         async with self._write_lock:
             if self._run_halt_intent():
-                return "break"
+                return "continue"          # the loop head's own stop / pause handling decides
             self.store.append(EV_PAUSE, {"reason": reason})
         return "break"
 

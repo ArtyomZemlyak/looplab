@@ -285,22 +285,30 @@ looplab resume RUN_DIR [OPTIONS]
 | `--max-nodes N` | from the snapshot | Override the node budget on resume |
 | `--drain-only` | off | Evaluate only what a reset or an interruption left owed, then pause (see below) |
 
-**`--drain-only` finishes the owed evaluations and stops** (doc 68 68.3a). It is how a rescore runs
-without resuming the search: reset a node to be re-scored (a click on its `score` stage in the
-Inspector, `node_reset {from_stage: "score"}`, or `from_stage: "eval"`), then
-`looplab resume RUN_DIR --drain-only`. It evaluates every pending node a reset re-opened or whose
-evaluation started and never finished (`engine/orchestrator.py::drain_owed`) through the ordinary
-dispatch — its own repairs included — with no deep research overlapping it. A node the search built
-and has not dispatched yet (a Card's speculative build) stays pending for the next resume: whether it
-runs at all is a search decision. No node is created, no queued fork, inject, confirm or ablation is
-served (they stay queued for the next resume), no Strategist or research cadence runs, and the
-end-of-search ladder (confirmation, the noise floor, finalization) is never reached. A reset from
-`implement` or `propose` is still rebuilt: the operator asked for that node. When nothing owed is left
-the run PAUSES with the reason `drain-only resume: every reset or interrupted evaluation finished`,
-and when the dispatch could admit none of what is owed (the eval budget refused it) it pauses naming
-those nodes instead of asking again. A pause or stop already recorded, or a spend ceiling, still wins;
-a later plain `resume` continues the search. The mode belongs to that one invocation and is not
-recorded as the run's.
+**`--drain-only` finishes the owed evaluations and stops** (doc 68 68.3a). It evaluates every
+pending node a reset re-opened or whose evaluation started and never finished
+(`engine/orchestrator.py::drain_owed`) through the ordinary dispatch — its own repairs included —
+with no deep research overlapping it, and prints what it owes before it starts. A node the search
+built and has not dispatched yet (a Card's speculative build) stays pending for the next resume:
+whether it runs at all is a search decision. No node is created, no queued fork, inject, confirm or
+ablation is served (they stay queued for the next resume), no Strategist or research cadence runs,
+and the end-of-search ladder (confirmation, the noise floor, finalization) is never reached. A reset
+from `implement` or `propose` is still rebuilt: the operator asked for that node.
+
+Every way it stops is a PAUSE with a stated reason, so a later plain `resume` continues the search:
+nothing owed is left (`drain-only resume: every reset or interrupted evaluation finished`); the run's
+eval budget is spent or this invocation's time budget ran out — which would otherwise FINALIZE the
+run — naming the nodes left unevaluated; or a dispatch admitted none of what is owed. A pause or stop
+already recorded still wins. It refuses before appending anything when a finalize is pending (exit
+`2`) or when lifting a pause would open a new search epoch after a holdout disclosure — every
+evaluated node re-queued (exit `2`) — and does nothing on a finished run or when nothing is owed
+(exit `0`; a `node_reset` re-opens a finished run itself). The mode belongs to that one invocation
+and is not recorded as the run's.
+
+Where the owed work comes from: an evaluation a crash interrupted, or a reset recorded while no
+server will drive the run. The Inspector's stage reset is a server command that starts a PLAIN
+`resume` when no engine owns the run — the whole search — and cannot ask for a drain yet (doc 68
+68.3b).
 
 The original launch settings are restored from `config.snapshot.json`, so run-only flags are not silently
 dropped. Seven comparison/selection fields (`card_driven_selection`, `speculation_depth`, `holdout_fraction`,
