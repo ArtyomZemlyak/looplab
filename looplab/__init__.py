@@ -81,6 +81,8 @@ _LAYOUT = {
     "eval_occupancy": "events",  # durable eval-start/terminal occupancy analytics
     "question_board": "tools",   # the Developer/Researcher read of the open-question board
     "token_spend": "events",     # `looplab tokens`' per-phase split of the llm_usage ledger
+    "fidelity_agreement": "events",  # `looplab fidelity-agreement`: cheap vs full ranking (doc 68 68.5)
+    "git_export": "events",      # `looplab export-git`: the node DAG as git history (doc 67 67.15)
     "attention": "serve",
     "archive": "search",
     "artifacts": "serve",
