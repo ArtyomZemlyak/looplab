@@ -857,9 +857,27 @@ export const COMPARABILITY_REFUSAL_TEXT = {
   keys: 'were measured against different evaluation inputs (their recorded comparability keys differ)',
 }
 
+// THE OBJECTIVE REFUSALS, each a whole clause about the set — a set that is not one task and one
+// direction has no pair to name, so these do not complete "two of them …". Four and not one: the
+// one sentence "tasks or directions differ" was printed on the run list's sort option with ONE task
+// selected, over runs that differed only in direction (critic 2026-09-26) — naming a task
+// difference the screen had just ruled out. A missing value is its own code, because "one records
+// none" is a different fact from "they differ", and a surface that said the second about the first
+// would be the same error one field over.
+const OBJECTIVE_REFUSAL_TEXT = {
+  task: 'these runs are of different tasks',
+  task_unrecorded: 'not every one of these runs records a task id',
+  direction: 'these runs share one task, but one minimizes its metric where another maximizes it',
+  direction_unrecorded: 'these runs share one task, but not every one of them records a min/max '
+    + 'direction',
+}
+
 // The SHORT form, for a control too narrow for a sentence (the run list's metric-sort option).
 export const COMPARABILITY_REFUSAL_SHORT = {
-  objective: 'tasks or directions differ',
+  task: 'tasks differ',
+  task_unrecorded: 'task not recorded',
+  direction: 'directions differ',
+  direction_unrecorded: 'direction not recorded',
   substrate: 'source trees differ',
   profile: 'eval profiles differ',
   scorer: 'scorers differ',
@@ -901,27 +919,57 @@ export function metricComparable(runs = []) {
   return runs.length > 0 && metricIncomparability(runs) === ''
 }
 
-// WHY `metricComparable` refuses a set, or '' when it does not (or the set is empty): 'objective'
-// when the task id or the direction differs or is missing — the only case the old sentence "different
-// tasks or objectives" was true of — else the refusal of the first provably-different pair
-// (`pairRefusal`). The ONE reading every refusing surface words its sentence from.
+// The TASK a run row is grouped under: trimmed, and '' for anything that is not a string. The ONE
+// reading `crossRunRank.js`'s bucket and `metricIncomparability` share. The bucket trimmed and this
+// predicate did not, so two runs whose ids differed only by a trailing space were put in one bucket
+// that the predicate then refused as "different tasks" — a refused part with nothing varying in it,
+// whose header, claim and coverage line were all false or blank (critic 2026-09-26, in jsdom).
+export const runTaskId = run => (typeof run?.task_id === 'string' ? run.task_id.trim() : '')
+
+const OBJECTIVE_DIRECTIONS = ['min', 'max']
+
+// WHY `metricComparable` refuses a set, or '' when it does not (or the set is empty). The OBJECTIVE
+// first, and said as what it is — 'task' (two task ids), 'task_unrecorded' (a row with none),
+// 'direction' (one task, min beside max), 'direction_unrecorded' (a row with no min/max) — each
+// PROVEN difference before the absence beside it; else the refusal of the first provably-different
+// pair (`pairRefusal`). The ONE reading every refusing surface words its sentence from.
 export function metricIncomparability(runs = []) {
   const rows = Array.isArray(runs) ? runs : []
   if (!rows.length) return ''
-  const tasks = new Set(rows.map(run => run.task_id))
-  const directions = new Set(rows.map(run => run.direction))
-  if (tasks.size !== 1 || !rows[0].task_id || directions.size !== 1
-      || !['min', 'max'].includes(rows[0].direction)) return 'objective'
+  const tasks = new Set(rows.map(runTaskId))
+  if ([...tasks].filter(Boolean).length > 1) return 'task'
+  if (tasks.has('')) return 'task_unrecorded'
+  const directions = new Set(rows.map(run => (OBJECTIVE_DIRECTIONS.includes(run?.direction)
+    ? run.direction : '')))
+  if ([...directions].filter(Boolean).length > 1) return 'direction'
+  if (directions.has('')) return 'direction_unrecorded'
   return firstRefusal(rows.map(comparabilityRecord).filter(Boolean))
 }
 
 // The sentence a surface prints when it lists a set it may not rank, from `metricIncomparability`.
 export function metricIncomparabilityText(reason) {
   if (!reason) return ''
-  if (reason === 'objective') return 'these runs use different tasks or objectives'
-  const clause = COMPARABILITY_REFUSAL_TEXT[reason]
+  if (Object.hasOwn(OBJECTIVE_REFUSAL_TEXT, reason)) return OBJECTIVE_REFUSAL_TEXT[reason]
+  const clause = Object.hasOwn(COMPARABILITY_REFUSAL_TEXT, reason)
+    ? COMPARABILITY_REFUSAL_TEXT[reason] : ''
   return clause ? `these runs share one task and objective, but two of them ${clause}`
     : `these runs were refused a ranking for a reason this view has no sentence for: “${reason}”`
+}
+
+// WHY the run list's metric sort is off, in the words its `<option>` has room for — or '' when it
+// is ON. One derivation for both the option's state and its words, so the two cannot disagree: the
+// label was computed in `RunList.jsx` beside `metricComparable` rather than from it, printed
+// "select one task" with one task already selected, and then "tasks or directions differ" over one
+// task whose runs differed only in direction (critic 2026-09-26). `taskSelected` is the list's
+// exact task filter; without one the refusal is the filter, whatever the rows say.
+export function metricSortRefusal(runs = [], { taskSelected = false } = {}) {
+  if (!taskSelected) return 'select one task'
+  const rows = Array.isArray(runs) ? runs : []
+  if (!rows.length) return 'no runs'
+  const reason = metricIncomparability(rows)
+  if (!reason) return ''
+  return Object.hasOwn(COMPARABILITY_REFUSAL_SHORT, reason) ? COMPARABILITY_REFUSAL_SHORT[reason]
+    : 'not comparable'
 }
 
 export function sortRuns(runs = [], key = 'time', order = 'desc') {

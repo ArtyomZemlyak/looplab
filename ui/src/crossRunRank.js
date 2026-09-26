@@ -76,8 +76,9 @@
 //     (one task, one direction, one evaluation), so the axis is the group's own objective, and a
 //     prefix-folded run is not drawn for the same reason it holds no rank.
 import {
-  COMPARABILITY_UNKNOWN, bestMetricCaveatNotice, bestMetricCaveats, comparabilityRecord,
-  metricComparable, sourceIncomplete,
+  COMPARABILITY_REFUSAL_TEXT, COMPARABILITY_UNKNOWN, bestMetricCaveatNotice, bestMetricCaveats,
+  comparabilityRecord, metricIncomparability, metricIncomparabilityText, runTaskId,
+  sourceIncomplete,
 } from './runIndex.js'
 
 // THE COMPARABILITY PARTITION, added 2026-08-20, and it is refusal 1 below finally becoming a rule
@@ -107,12 +108,27 @@ const partitionKey = (run) => {
 // per-run metric observations for this task ID yet" over three runs with values (critic 2026-09-26,
 // rendered in jsdom), and the two smoke runs that WERE comparable lost their ranking too.
 //
-// It is split instead, by exactly the discriminators that VARY across it, with absence as a value of
-// its own. That is stricter than the evidence for an absent facet (a run that recorded none has not
-// been shown to differ), and it is applied only to a partition already refused whole, so it can only
-// ADD rankings to what the screen showed before, never take one away. The split is the browser's own
-// and is never persisted — the reason the durable `group_token` leaves these out
+// It is split instead, by exactly the discriminators on which two of its runs RECORDED different
+// values — the only ones that can refuse a pair, since `pairRefusal` asks a facet only when both
+// sides carry it. A discriminator that varies by ABSENCE alone (one recorded value beside runs
+// that recorded none) refuses nothing, and splitting on it would separate runs nothing separates.
+// For the discriminators that do split, absence is a value of its own: a run that recorded no
+// profile cannot be placed on either side of two profiles that disagree. That part is stricter
+// than the evidence (a run that recorded none has not been shown to differ), so each part carries
+// which of its separation is PROVEN and which is only UNRECORDED (`splitProven` /
+// `splitUnrecorded`), and says so in those words (critic 2026-09-26: the "(none recorded)" part
+// printed "provably differ from these", and the coverage line counted it among the runs that
+// provably differ). The split is applied only to a partition already refused whole, so it can only
+// ADD rankings to what the screen showed before, never take one away. It is the browser's own and
+// is never persisted — the reason the durable `group_token` leaves these out
 // (`engine/comparability.py`) does not reach a view.
+//
+// A partition that varies on NONE of them is not split at all: it stays one group, refused,
+// worded from its own refusal (`metricIncomparability`). Inside one task, direction and key the
+// refusal left is a pair of KEYS at a stronger authority than the one the partition is grouped
+// by. Splitting it by nothing produced a part with `split = {}` — truthy — whose header printed an
+// empty label, whose line said "provably differ from these on , so", and whose claim blamed a
+// source tree or protocol that never varied (critic 2026-09-26, rendered in jsdom).
 const DISCRIMINATORS = ['substrate', 'profile', 'scorer', 'fingerprint']
 const discriminatorValues = (run) => {
   const record = comparabilityRecord(run)
@@ -128,13 +144,25 @@ const discriminatorValues = (run) => {
 
 function splitRefusedBucket(bucket) {
   const values = bucket.members.map(entry => discriminatorValues(entry.run))
-  const varying = DISCRIMINATORS.filter(name => new Set(values.map(value => value[name])).size > 1)
+  const varying = DISCRIMINATORS.filter(
+    name => new Set(values.map(value => value[name]).filter(Boolean)).size > 1)
+  if (!varying.length) return [bucket]
+  const unrecordedSomewhere = varying.filter(name => values.some(value => !value[name]))
   const subs = new Map()
   bucket.members.forEach((entry, index) => {
     const split = Object.fromEntries(varying.map(name => [name, values[index][name]]))
     const subKey = varying.map(name => `${name}=${split[name]}`).join('\u0000')
     if (!subs.has(subKey)) {
-      subs.set(subKey, { ...bucket, key: `${bucket.key}\u0000${subKey}`, split, members: [] })
+      subs.set(subKey, {
+        ...bucket, key: `${bucket.key}\u0000${subKey}`, split, members: [],
+        // PROVEN: this part recorded a value, and — every discriminator here holding two or more
+        // recorded values — some other part recorded a different one.
+        splitProven: varying.filter(name => split[name]),
+        // UNRECORDED: this part recorded none, so nothing proves it differs from anyone.
+        splitUnrecorded: varying.filter(name => !split[name]),
+        // Recorded here, but some run of the partition recorded none: apart from THOSE unproven.
+        splitApart: unrecordedSomewhere.filter(name => split[name]),
+      })
     }
     subs.get(subKey).members.push(entry)
   })
@@ -189,7 +217,8 @@ const better = (a, b, direction) => (direction === 'min' ? a < b : a > b)
 // GROUP THE CORPUS. Returns every (task_id, direction) partition that `metricComparable` accepts,
 // plus the runs no partition could take, plus the totals that let a caller state its own coverage.
 //
-// The partition is deliberately built and then RE-TESTED with `metricComparable` instead of being
+// The partition is deliberately built and then RE-TESTED with `metricComparable` — through its own
+// reading `metricIncomparability`, which also says WHY — instead of being
 // trusted because it was keyed on the same two fields. That keeps one definition of "these runs may be
 // compared" in the tree: the day the server ships a metric name and `metricComparable` starts
 // requiring it, this panel tightens on the same commit, with no second predicate to remember.
@@ -201,7 +230,9 @@ export function crossRunGroups(runs = [], { limit = MAX_GROUP_ROWS } = {}) {
   for (const run of rows) {
     const metric = runMetric(run)
     if (!metric) { noMetric.push(run); continue }
-    const taskId = typeof run.task_id === 'string' ? run.task_id.trim() : ''
+    // `runTaskId` and not a local trim: `metricIncomparability` reads the SAME id, so a bucket can
+    // never hold two ids the predicate then refuses as two tasks.
+    const taskId = runTaskId(run)
     const direction = run.direction
     // An ABSENT identity is not a shared identity — the same rule the panel already applied to its
     // own run. Legacy rows that all encode "missing" as '' are not a group of like objectives.
@@ -220,38 +251,40 @@ export function crossRunGroups(runs = [], { limit = MAX_GROUP_ROWS } = {}) {
   }
 
   const groups = []
-  let splitRuns = 0
   for (const bucket of buckets.values()) {
-    if (metricComparable(bucket.members.map(entry => entry.run))) {
+    // REACHABLE, and the test is the POINT: a partition shares one authority key, but the
+    // refuse-only discriminators beside the key — the `substrate`, and since 2026-09-26 the
+    // `protocol` (a smoke-scored champion beside a full-scored one) — can still make a pair in it
+    // provably DIFFERENT. It is never ranked as one: it is split by what differs
+    // (`splitRefusedBucket`), each part re-tested with the same predicate, and a part that STILL
+    // fails keeps every row on screen with no rank at all (`refused`, and `refusal` says WHY) —
+    // failing closed costs a ranking, ranking across two rulers would cost a false one, and hiding
+    // the rows would cost the observations themselves.
+    const refusal = metricIncomparability(bucket.members.map(entry => entry.run))
+    if (!refusal) {
       groups.push(buildGroup(bucket, limit))
       continue
     }
-    // REACHABLE, and the guard above is the POINT: a partition shares one authority key, but the
-    // refuse-only discriminators beside the key — the `substrate`, and since 2026-09-26 the
-    // `protocol` (a smoke-scored champion beside a full-scored one) — can still make a pair in it
-    // provably DIFFERENT. It is never ranked as one: it is split by what varies
-    // (`splitRefusedBucket`), each part re-tested with the same predicate, and a part that STILL
-    // fails keeps every row on screen with no rank at all (`refused`) — failing closed costs a
-    // ranking, ranking across two rulers would cost a false one, and hiding the rows would cost the
-    // observations themselves.
     for (const part of splitRefusedBucket(bucket)) {
-      splitRuns += part.members.length
       groups.push(buildGroup(part, limit, {
-        refused: !metricComparable(part.members.map(entry => entry.run)) }))
+        refusal: part === bucket ? refusal
+          : metricIncomparability(part.members.map(entry => entry.run)) }))
     }
   }
   // Deterministic order, largest first: a caller iterating this must not get a different page because
-  // the server listed its directories in a different order.
+  // the server listed its directories in a different order. The KEY is the last tiebreak, compared
+  // by code unit: two parts of one split share size, task and direction, so without it they came
+  // out in the server's listing order (critic 2026-09-26: reversing the input reversed them), and
+  // the key is NUL-separated — which a locale collation may treat as ignorable, so it is not asked.
   groups.sort((a, b) => b.size - a.size || a.taskId.localeCompare(b.taskId)
-    || a.direction.localeCompare(b.direction))
+    || a.direction.localeCompare(b.direction) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
 
-  const comparable = groups.filter(group => group.size > 1 && group.outcome !== 'refused')
-  const refused = groups.filter(group => group.outcome === 'refused')
+  const tally = groupTally(groups)
   return {
     groups,
-    comparable,
+    comparable: groups.filter(comparableGroup),
     singletons: groups.filter(group => group.size === 1),
-    refused,
+    refused: groups.filter(group => group.outcome === 'refused'),
     noMetric,
     unidentified,
     totals: {
@@ -259,24 +292,58 @@ export function crossRunGroups(runs = [], { limit = MAX_GROUP_ROWS } = {}) {
       withMetric: rows.length - noMetric.length,
       noMetric: noMetric.length,
       unidentified: unidentified.length,
-      groups: groups.length,
-      comparableGroups: comparable.length,
-      singletonGroups: groups.filter(group => group.size === 1).length,
-      // Runs of one task and key that a source tree or protocol split further, and those a split
-      // could still not make agree (shown, never ranked).
-      splitRuns,
-      refusedRuns: refused.reduce((sum, group) => sum + group.size, 0),
-      // Runs that actually sit in a group where a ranking is possible. This is the number the panel
-      // reports as coverage, and on this corpus it is 21 of 45.
-      comparableRuns: comparable.reduce((sum, group) => sum + group.size, 0),
-      rankedRuns: comparable.reduce((sum, group) => sum + group.ranked, 0),
-      integrityExcluded: groups.reduce((sum, group) => sum + group.integrityExcluded, 0),
-      caveatedRuns: groups.reduce((sum, group) => sum + group.caveatedCount, 0),
+      ...tally,
     },
   }
 }
 
-function buildGroup(bucket, limit, { refused = false } = {}) {
+// A COMPARABLE GROUP: two or more runs a ranking may order — one task, one direction, one recorded
+// evaluation, and no pair of them refused. The ONE predicate behind every count this panel prints
+// under that name: the toolbar used to count every group of the task under it (singletons and
+// refused parts included) while the coverage line counted only these, so one screen read
+// "3 comparable groups" above "0 of them sit in 0 comparable groups" (critic 2026-09-26).
+export const comparableGroup = group => isRecord(group) && group.size > 1
+  && group.outcome !== 'refused'
+
+// What a GROUP is, said where the counts are — the toolbar printed a count of them and never said.
+export const GROUP_DEFINITION = 'a group is the runs of one task and one direction that share a '
+  + 'comparability key (or record none), split further by source tree and protocol where those '
+  + 'disagree; a comparable group holds two or more runs a ranking may order'
+
+// THE ONE TALLY of a list of groups: `crossRunGroups` takes its totals from it for the whole box
+// and the panel's toolbar takes its count from it for one task, so the two numbers are one
+// derivation over two scopes and the task's can never exceed the box's.
+export function groupTally(groups = []) {
+  const list = Array.isArray(groups) ? groups.filter(isRecord) : []
+  const runsIn = picked => picked.reduce((sum, group) => sum + group.size, 0)
+  const comparable = list.filter(comparableGroup)
+  const refused = list.filter(group => group.outcome === 'refused')
+  const split = list.filter(group => group.split)
+  const proven = group => Array.isArray(group.splitProven) && group.splitProven.length > 0
+  return {
+    groups: list.length,
+    comparableGroups: comparable.length,
+    singletonGroups: list.filter(group => group.size === 1).length,
+    refusedGroups: refused.length,
+    // Runs of one task and key that a source tree or protocol split further — those whose part
+    // recorded a value another part provably contradicts, and those set apart only because they
+    // recorded none (`splitRefusedBucket`) — and the runs no split could make agree (shown, never
+    // ranked).
+    splitRuns: runsIn(split),
+    splitProvenRuns: runsIn(split.filter(proven)),
+    splitUnrecordedRuns: runsIn(split.filter(group => !proven(group))),
+    refusedRuns: runsIn(refused),
+    // Runs that actually sit in a group where a ranking is possible. This is the number the panel
+    // reports as coverage, and on this corpus it is 21 of 45.
+    comparableRuns: runsIn(comparable),
+    rankedRuns: comparable.reduce((sum, group) => sum + group.ranked, 0),
+    integrityExcluded: list.reduce((sum, group) => sum + group.integrityExcluded, 0),
+    caveatedRuns: list.reduce((sum, group) => sum + group.caveatedCount, 0),
+  }
+}
+
+function buildGroup(bucket, limit, { refusal = '' } = {}) {
+  const refused = !!refusal
   const direction = bucket.direction
   // Eligibility to HOLD A RANK is one rung and it is deterministic: a fold that did not see the whole
   // log describes a prefix, and a prefix's best is not this run's best. It keeps its row and its
@@ -365,8 +432,17 @@ function buildGroup(bucket, limit, { refused = false } = {}) {
     partition: bucket.partition || '',
     comparability: bucket.partition ? String(bucket.partition).split(':')[0] : COMPARABILITY_UNKNOWN,
     // What further split this group from the rest of its partition — `{discriminator: value}`, a
-    // value of '' meaning "recorded none" — or null for a partition that was never refused.
+    // value of '' meaning "recorded none" — or null for a partition that was never split (never
+    // refused, or refused with nothing varying to split it by). Which of it is PROVEN, which only
+    // UNRECORDED here, and which only unrecorded elsewhere: see `splitRefusedBucket`.
     split: isRecord(bucket.split) ? bucket.split : null,
+    splitProven: Array.isArray(bucket.splitProven) ? bucket.splitProven : [],
+    splitUnrecorded: Array.isArray(bucket.splitUnrecorded) ? bucket.splitUnrecorded : [],
+    splitApart: Array.isArray(bucket.splitApart) ? bucket.splitApart : [],
+    // WHY no row of this group holds a rank (`runIndex.js::metricIncomparability`: a pair refusal,
+    // inside one task and direction), or '' for a group that was not refused. The ONE reading the
+    // claim, the header and every unranked row's title are worded from.
+    refusal,
     size: entries.length,
     ranked: ordered.length,
     // The PREFIX-folded rows, whatever else holds a row unranked (a refused part's rows are
@@ -400,10 +476,12 @@ export function groupClaim(group) {
   if (!group) return null
   const objective = group.direction === 'min' ? 'lowest' : 'highest'
   const scope = `${group.size} run${group.size === 1 ? '' : 's'} of task ${group.taskId}`
+  // A REFUSED group is worded from its own refusal: the sentence it replaced blamed "a split by
+  // source tree or protocol" on a group nothing of the kind had split — its runs refused by keys,
+  // or by task ids a trim made one (critic 2026-09-26).
   const claim = group.outcome === 'refused'
-    ? `These ${group.size} runs of ${group.taskId} provably disagree on their evaluation and no split `
-      + 'by source tree or protocol makes them agree, so none holds a rank. Each value is shown and is '
-      + 'true of its own measurement; no ordering between them is.'
+    ? `None of these ${group.size} runs of ${group.taskId} holds a rank: ${refusalClause(group)}. `
+      + 'Each value is shown and is true of its own measurement; no ordering between them is.'
     : group.outcome === 'none'
     ? `No run of ${group.taskId} can hold a rank: every one of these ${group.size} has an incomplete `
       + 'event log, so each value describes a readable prefix.'
@@ -438,7 +516,11 @@ export function groupClaim(group) {
   // telling them that some were measured on one test set and some on another. Refusal 1 above stays
   // verbatim and stays true either way — the metric NAME and UNIT are still not on this row; what
   // changed is that the DATA and the PROTOCOL can now be decidable, and the group says which it is.
-  refusals.push(group.partition
+  //
+  // A REFUSED group gets its own sentence for both answers (`refusedPartitionLine`): a shared key
+  // there is a GROUPING and not an agreement, and "unknown whether they were measured against the
+  // same test set" is false of runs the refusal has just shown differ.
+  refusals.push(group.outcome === 'refused' ? refusedPartitionLine(group) : group.partition
     ? `These ${group.size} run(s) share a recorded comparability key (${group.partition}), so their `
       + 'numbers were measured against the same declared evaluation inputs. Runs of this same task '
       + 'that recorded a DIFFERENT key, or none at all, are in their own group above or below — they '
@@ -447,12 +529,8 @@ export function groupClaim(group) {
       + 'against the same test set, the same corpus or the same protocol — and unknown is not the '
       + 'same as yes. On this box a `repo_task` group has held recall@100 values measured on more '
       + 'than one test set. Declare `eval.inputs` on the task to make this decidable.')
-  if (group.split) {
-    // WHY this group is a part of its partition and not the whole of it (`splitRefusedBucket`).
-    refusals.push('Other runs of this task share its comparability key but provably differ from '
-      + `these on ${splitLabel(group.split)}, so each part is ranked on its own and never against `
-      + 'the other.')
-  }
+  // WHY this group is a part of its partition and not the whole of it (`splitRefusedBucket`).
+  refusals.push(...splitClaims(group))
   if (group.caveatedCount > 0) {
     // The COUNT and the LEADERSHIP are two different facts and the sentence says both: a caveated
     // also-ran is a footnote, a caveated leader is the answer to "which configuration should I
@@ -491,23 +569,103 @@ export function splitLabel(split) {
     .join(', ')
 }
 
+// WHY THIS PART IS A PART, one sentence per kind of separation, and never "provably" about a
+// separation nothing proves (critic 2026-09-26: the "(none recorded)" part said other runs
+// "provably differ from these on eval profile (none recorded)"). `splitRefusedBucket` decides which
+// is which; the header's title and `groupClaim` both print these, so the two cannot disagree.
+export function splitClaims(group) {
+  if (!isRecord(group) || !isRecord(group.split)) return []
+  const list = value => (Array.isArray(value)
+    ? value.filter(name => Object.hasOwn(group.split, name)) : [])
+  const names = picked => picked.map(name => SPLIT_NAMES[name] || name).join(' or ')
+  const these = group.size === 1 ? 'this run' : 'these runs'
+  const proven = list(group.splitProven)
+  const unrecorded = list(group.splitUnrecorded)
+  const apart = list(group.splitApart)
+  const out = []
+  if (proven.length) {
+    out.push(`Runs of this task with the same comparability key that recorded a different `
+      + `${names(proven)} provably differ from ${these} (${splitLabel(Object.fromEntries(
+        proven.map(name => [name, group.split[name]])))}), so each part is ranked on its own and `
+      + 'never against the other.')
+  }
+  // Scoped to the FACET, not the run: a part can be set apart on one facet by absence and provably
+  // differ on another, and "nothing proves a difference" said of the whole run would be false.
+  if (unrecorded.length) {
+    out.push(`${these[0].toUpperCase()}${these.slice(1)} recorded no ${names(unrecorded)}, while `
+      + 'other runs of this task with the same comparability key recorded conflicting ones — not '
+      + 'recorded, so not comparable with either side. '
+      + `${group.size === 1 ? 'It is' : 'They are'} ranked apart from those runs, though a missing `
+      + `${names(unrecorded)} proves no difference.`)
+  }
+  if (apart.length) {
+    out.push(`Runs of this task with the same comparability key that recorded no ${names(apart)} `
+      + `are ranked apart from ${these} as well, though a missing ${names(apart)} proves no `
+      + 'difference.')
+  }
+  return out
+}
+
+// WHY a refused group's runs hold no rank, as a clause. A pair refusal completes "two of them …"
+// (`runIndex.js::COMPARABILITY_REFUSAL_TEXT`); anything else is `metricIncomparabilityText`'s whole
+// clause. '' for a group that was not refused.
+function refusalClause(group, subject = 'two of them') {
+  if (!isRecord(group) || group.outcome !== 'refused') return ''
+  const reason = typeof group.refusal === 'string' ? group.refusal : ''
+  if (reason && Object.hasOwn(COMPARABILITY_REFUSAL_TEXT, reason)) {
+    return `${subject} ${COMPARABILITY_REFUSAL_TEXT[reason]}`
+  }
+  return metricIncomparabilityText(reason) || `${subject} provably disagree on their evaluation`
+}
+
+// The sentence a refused group prints where every other group states its comparability key.
+function refusedPartitionLine(group) {
+  return group.partition
+    ? `These ${group.size} runs are grouped by a shared comparability key (${group.partition}), `
+      + 'but a pair of them is refused all the same (above), so sharing that key does not make '
+      + 'them one evaluation. Runs of this same task that recorded a DIFFERENT key, or none at '
+      + 'all, are in their own group above or below.'
+    : `These ${group.size} runs record no comparability key they could be grouped by, and a pair `
+      + 'of them is refused all the same (above): what their records do carry is enough to show '
+      + 'they differ.'
+}
+
+// The title of a row with NO RANK — or, with no row, of the "not ranked" mark in a refused group's
+// header — naming the refusal that holds it unranked. A refused group's row used to say only that
+// "the runs of this group provably disagree on their evaluation", whatever had refused them; a
+// prefix-folded row keeps its own sentence, and a row that is both says both.
+const PREFIX_ROW_TITLE = "no rank: this run's event log stops being readable, so the value beside "
+  + 'it is the best of a PREFIX'
+export function unrankedRowTitle(group, row = null) {
+  if (!isRecord(group) || group.outcome !== 'refused') return PREFIX_ROW_TITLE
+  return `no rank: ${refusalClause(group, 'two runs of this group')} — no ordering between the `
+    + 'runs of this group is a fact'
+    + (row?.sourceIncomplete ? `; and ${PREFIX_ROW_TITLE.slice('no rank: '.length)}` : '')
+}
+
 // The coverage sentence ABOVE the groups, in the spirit of `conceptForest.js::forestCoverage`: a panel
 // ranking 21 of 45 runs is telling the truth about 21 runs and NOTHING about the other 24, and it may
 // not be read as "the box has been ranked".
 export function rankCoverage(index) {
   const totals = index?.totals
   if (!totals || !Number.isSafeInteger(totals.runs) || totals.runs <= 0) return null
+  const count = value => (Number.isSafeInteger(value) ? value : 0)
   return {
     runs: totals.runs,
     comparableRuns: totals.comparableRuns,
     comparableGroups: totals.comparableGroups,
     outOfScope: totals.runs - totals.comparableRuns,
-    singletonTasks: Number.isSafeInteger(totals.singletonGroups) ? totals.singletonGroups
-      : totals.groups - totals.comparableGroups,
+    // The ONE-RUN groups, read off `groupTally` — never `groups - comparableGroups`, which also
+    // counted every REFUSED group (two or more runs, no rank) as "the only run of its kind".
+    singletonTasks: count(totals.singletonGroups),
     noMetric: totals.noMetric,
     unidentified: totals.unidentified,
-    splitRuns: Number.isSafeInteger(totals.splitRuns) ? totals.splitRuns : 0,
-    refusedRuns: Number.isSafeInteger(totals.refusedRuns) ? totals.refusedRuns : 0,
+    splitRuns: count(totals.splitRuns),
+    // Only these are said to PROVABLY differ; the unrecorded ones are said to be set apart,
+    // unproven.
+    splitProvenRuns: count(totals.splitProvenRuns),
+    splitUnrecordedRuns: count(totals.splitUnrecordedRuns),
+    refusedRuns: count(totals.refusedRuns),
     integrityExcluded: totals.integrityExcluded,
     // The honest ceiling: `true` only when every run on the box sits in a group that can be ranked.
     complete: totals.comparableRuns === totals.runs && totals.runs > 0,
@@ -517,16 +675,22 @@ export function rankCoverage(index) {
 
 // WHAT ONE GROUP'S OVERLAY DRAWS, and what it leaves out, each COUNTED. The rows are the group's
 // ranked rows in rank order, so the legend reads as the leaderboard; a row is drawn only when it
-// carries a validated series. Three exclusions, each for a reason the panel prints:
+// carries a validated series. Four exclusions, each for a reason the panel prints:
 //   - a prefix-folded run (`group.unranked`) is not drawn: its series is the running best of a PREFIX,
 //     and beside complete runs its line would read as a search that stopped early — the same reason
 //     it holds no rank;
+//   - a REFUSED group's other runs are not drawn either, for the reason none of them holds a rank:
+//     one axis over a pair that provably disagrees on its evaluation would order them anyway. They
+//     are counted apart from the prefix-folded ones — `prefix` used to count every unranked row,
+//     so a refused group of complete runs read "2 prefix-folded runs are not drawn" (critic
+//     2026-09-26, the miscount 45d14782 fixed in `integrityExcluded` and not here);
 //   - a row without a series is counted, never drawn as a flat line at any value;
 //   - the rows beyond `MAX_OVERLAY_RUNS` are counted, because the chart cannot tell a ninth apart.
 // `capped` counts drawn runs whose row was subsampled server-side (`complete: false`): the legend
 // marks each and the sentence names the count, since a coarser step is still an honest one.
 export function trajectoryOverlay(group, { limit = MAX_OVERLAY_RUNS } = {}) {
   const ranked = Array.isArray(group?.rows) ? group.rows : []
+  const unranked = Array.isArray(group?.unranked) ? group.unranked : []
   const withSeries = ranked.filter(row => row.trajectory)
   const drawn = withSeries.slice(0, Math.max(0, limit))
   return {
@@ -539,7 +703,9 @@ export function trajectoryOverlay(group, { limit = MAX_OVERLAY_RUNS } = {}) {
     })),
     drawn: drawn.length,
     noSeries: ranked.length - withSeries.length,
-    prefix: Array.isArray(group?.unranked) ? group.unranked.length : 0,
+    prefix: unranked.filter(row => row.sourceIncomplete).length,
+    refused: group?.outcome === 'refused'
+      ? unranked.filter(row => !row.sourceIncomplete).length : 0,
     beyondLimit: withSeries.length - drawn.length,
     capped: drawn.filter(row => !row.trajectory.complete).length,
     limit: Math.max(0, limit),
@@ -555,6 +721,7 @@ export function trajectoryClaim(group, overlay) {
   const left = []
   if (overlay.noSeries) left.push(`${overlay.noSeries} ${plural(overlay.noSeries, 'carries', 'carry')} no series (no feasible measured node, or a row served before the series existed)`)
   if (overlay.prefix) left.push(`${overlay.prefix} prefix-folded ${plural(overlay.prefix, 'run is', 'runs are')} not drawn, for the reason ${plural(overlay.prefix, 'it holds', 'they hold')} no rank`)
+  if (overlay.refused) left.push(`${overlay.refused} ${plural(overlay.refused, 'run is', 'runs are')} not drawn, for the reason ${plural(overlay.refused, 'it holds', 'they hold')} no rank: a pair of this group's runs provably disagrees on its evaluation, and one axis would order them all the same`)
   if (overlay.beyondLimit) left.push(`${overlay.beyondLimit} beyond the ${overlay.limit} lines the chart can tell apart, in rank order`)
   if (overlay.capped) left.push(`${overlay.capped} drawn coarser: more improvements than the row carries`)
   const tail = left.length ? ` ${left.join('; ')}.` : ''

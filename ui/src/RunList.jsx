@@ -11,9 +11,9 @@ import DensityToggle from './DensityToggle.jsx'
 import GlobalMenu from './GlobalMenu.jsx'
 import { OpIcon } from './icons.jsx'
 import {
-  ALL_RUNS as ALL, COMPARABILITY_REFUSAL_SHORT, SELECTION_MAX, UNASSIGNED_RUNS as UNASSIGNED,
+  ALL_RUNS as ALL, SELECTION_MAX, UNASSIGNED_RUNS as UNASSIGNED,
   bestMetricCaveatLabel, bestMetricCaveatNotice, bestMetricCaveats, comparisonScope, filterRuns,
-  indexProjects, effectiveRunStatus, metricComparable, metricIncomparability, projectRunCounts,
+  indexProjects, effectiveRunStatus, metricSortRefusal, projectRunCounts,
   scopeRuns, selectionNotice,
   sortRuns, sourceIncomplete, sourceIntegrityNotice,
 } from './runIndex.js'
@@ -1590,12 +1590,13 @@ export default function RunList({ onOpen, onGlobalNavigate,
       && control.getClientRects().length && !control.matches(':disabled'))
   const compareCheckboxFor = runId => visibleCompareControl('data-compare-run-id', runId)
   const compareRemoveFor = runId => visibleCompareControl('data-compare-remove-id', runId)
-  const metricSortAvailable = taskFilterExact && metricComparable(filtered)
   // WHY the metric sort is off, said on the option: "select one task" was printed with one task
-  // already selected when its runs differed only in protocol or source tree (critic 2026-09-26).
-  const metricSortRefusal = !taskFilterExact ? 'select one task'
-    : !filtered.length ? 'no runs'
-      : COMPARABILITY_REFUSAL_SHORT[metricIncomparability(filtered)] || 'not comparable'
+  // already selected when its runs differed only in protocol or source tree, and then "tasks or
+  // directions differ" over one task whose runs differed only in direction (critic 2026-09-26).
+  // ONE derivation (`runIndex.js::metricSortRefusal`) decides both whether the option is enabled
+  // and what it says, so the two cannot disagree.
+  const metricSortOff = metricSortRefusal(filtered, { taskSelected: taskFilterExact })
+  const metricSortAvailable = !metricSortOff
   const hasActiveFilters = !!query.trim() || taskFilterExact
     || statusFilter !== 'all' || stFilter !== ALL
   const listCriteriaKey = JSON.stringify([
@@ -2656,7 +2657,7 @@ export default function RunList({ onOpen, onGlobalNavigate,
               }}>
                 <option value="time">time</option>
                 <option value="name">name</option>
-                <option value="metric" disabled={!metricSortAvailable}>best metric{metricSortAvailable ? '' : ` (${metricSortRefusal})`}</option>
+                <option value="metric" disabled={!metricSortAvailable}>best metric{metricSortAvailable ? '' : ` (${metricSortOff})`}</option>
                 <option value="task">task</option>
                 <option value="nodes">nodes</option>
                 <option value="phase">phase</option>

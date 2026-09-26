@@ -733,12 +733,18 @@ name/unit, dataset and evaluation identity or a comparison protocol (the run row
 nothing on the row says which artifact a number is about — the metric **subject** is still not published there
 (docs 31/35). No normalized cross-group score, no relative bars, no single axis. If the displayed run has no
 non-blank `task_id`, the panel fails closed with no observations: multiple legacy rows with a missing identity
-are not members of one task. A group is also partitioned by comparability key, and a partition whose members
-still provably disagree — a source tree promoted mid-way, a smoke-scored champion beside a full-scored one —
-is **split** by exactly what differs (source tree, eval profile, scorer, fingerprint; "none recorded" is a
-value of its own). Each part is ranked on its own, and its header names what split it off. A part that still
-disagrees after that is shown with every row and no rank. Before 2026-09-26 such a partition was dropped
-whole: its rows were never drawn, and the panel said it had no observations for the task.
+are not members of one task (ids are compared trimmed, the same reading the metric sort's predicate uses). A
+group is also partitioned by comparability key, and a partition whose members still provably disagree — a
+source tree promoted mid-way, a smoke-scored champion beside a full-scored one — is **split** by exactly the
+facets on which two of its runs recorded different values (source tree, eval profile, scorer, fingerprint). A
+run that recorded none of such a facet is a part of its own, and that part says it is set apart as *not
+recorded, so not comparable* — never that it provably differs; the coverage line counts the two kinds apart.
+Each part is ranked on its own, and its header names what split it off. A partition with nothing to split it
+by (its runs' keys disagree at a stronger authority than the one it is grouped by), and a part that still
+disagrees after the split, are shown with every row and no rank, and say which refusal holds them there.
+Before 2026-09-26 such a partition was dropped whole: its rows were never drawn, and the panel said it had no
+observations for the task. The toolbar and the coverage line count **comparable groups** by one rule — two or
+more runs a ranking may order — and the toolbar says what a group is.
 
 Under the table, **one running-best overlay per comparable group** (since 2026-09-06, doc 52 row 26):
 each run's running best per evaluated experiment as a **step** line — it holds its value until the
@@ -748,7 +754,8 @@ nothing is rescaled or normalized. The series rides on the run row (`trajectory`
 with it), so opening the panel folds nothing. The sentence under each chart counts what is **not**
 drawn and why: rows with no series (no measured node that counts toward the best — feasible, not
 aborted, not trust-flagged, the champion's own rule — or a row served before the series existed),
-prefix-folded runs (not drawn for the reason they hold no rank), rows beyond the eight lines
+prefix-folded runs (not drawn for the reason they hold no rank), the runs of a group refused a ranking (not
+drawn for the same reason, and counted apart from the prefix-folded ones), rows beyond the eight lines
 the chart can tell apart (in rank order), and rows drawn coarser because they held more improvements
 than the row carries. The legend carries each run's **group rank**, and the chart's data view lists
 every exact change point.

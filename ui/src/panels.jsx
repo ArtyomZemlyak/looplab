@@ -23,7 +23,8 @@ import { COMPARABILITY_REFUSAL_TEXT, bestMetricCaveatLabel, metricComparable,
   metricIncomparability, metricIncomparabilityText, nodesComparabilitySplit, sortRuns,
 } from './runIndex.js'
 import {
-  crossRunGroups, groupClaim, rankCoverage, splitLabel, trajectoryClaim, trajectoryOverlay,
+  GROUP_DEFINITION, crossRunGroups, groupClaim, groupTally, rankCoverage, splitClaims, splitLabel,
+  trajectoryClaim, trajectoryOverlay, unrankedRowTitle,
 } from './crossRunRank.js'
 import VirtualTimeline from './VirtualTimeline.jsx'
 import { timelineEventKey } from './timelineModel.js'
@@ -2524,7 +2525,9 @@ export function HyperImportancePanel({ state, onClose }) {
 export function CrossRunPanel({ state, onClose }) {
   const [resource, retry] = usePanelResource(signal => get('/api/runs', { signal }), runsPayload)
   const runs = resource.data || []
-  const task = typeof state.task_id === 'string' && state.task_id.trim() ? state.task_id : ''
+  // TRIMMED, as `crossRunRank.js` groups it (`runIndex.js::runTaskId`): an untrimmed id matched no
+  // group of its own task, and the panel said it had no observations for it.
+  const task = typeof state.task_id === 'string' ? state.task_id.trim() : ''
   const index = useMemo(() => crossRunGroups(runs), [runs])
   const coverage = rankCoverage(index)
   // The run's OWN direction first: this panel opened from a workspace, and the group that run belongs
@@ -2536,12 +2539,16 @@ export function CrossRunPanel({ state, onClose }) {
   const groups = index.groups.filter(group => group.taskId === task)
     .sort((a, b) => own(a) - own(b) || b.size - a.size)
   const elsewhere = index.comparable.filter(group => group.taskId !== task).length
+  // This task's groups counted by the SAME tally the coverage line's box-wide count comes from
+  // (`crossRunRank.js::groupTally`): the toolbar printed every group of the task as "comparable" —
+  // singletons and refused parts included — above a coverage line that counted only the rankable
+  // ones, so one screen said 3 and 0 (critic 2026-09-26).
+  const tally = groupTally(groups)
   const observations = groups.reduce((sum, group) => sum + group.size, 0)
   const omitted = groups.reduce((sum, group) => sum + group.omitted, 0)
+  // An unranked row names what holds it unranked — for a refused group, the refusal itself.
   const rankCell = (row, group) => (row.rank == null
-    ? <span className="muted" title={group.outcome === 'refused'
-      ? 'no rank: the runs of this group provably disagree on their evaluation, so no ordering between them is a fact'
-      : "no rank: this run's event log stops being readable, so the value beside it is the best of a PREFIX"}>—</span>
+    ? <span className="muted" title={unrankedRowTitle(group, row)}>—</span>
     : <span title={row.tied ? `tied with ${row.tied} other run(s) at this value` : 'rank within this comparable group'}>
         #{row.rank}{row.tied ? ' (tie)' : ''}</span>)
   // The caveat rides in the OBJECTIVE cell, beside the number it qualifies, and not in the status
@@ -2561,7 +2568,9 @@ export function CrossRunPanel({ state, onClose }) {
       <PanelResourceNotice resource={resource} label="Cross-run results" onRetry={retry} />
       {resource.data && <div className="panel-resource-toolbar">
         <span className="muted">task ID:</span><code>{task || 'not recorded'}</code>
-        <span className="muted">{groups.length} comparable group{groups.length === 1 ? '' : 's'} · ranked within a group only</span>
+        <span className="muted">{tally.groups} group{tally.groups === 1 ? '' : 's'} of this
+          task, {tally.comparableGroups} comparable · ranked within a group only
+          · {GROUP_DEFINITION}</span>
       </div>}
       {resource.data && !task && <div className="notice resource-warning" role="status">
         <b>Same-task observations unavailable.</b>
@@ -2575,12 +2584,18 @@ export function CrossRunPanel({ state, onClose }) {
               and an operator shown two groups of `repo_task` with no account of why they are two
               would be worse off than before the split. `evaluation unrecorded` is deliberately the
               wording for the absent case rather than a blank: it is a state, not a missing field. */}
+          {/* The SPLIT mark's title and the NOT RANKED mark's title are the model's own sentences
+              (`splitClaims`, `unrankedRowTitle`): a fixed title said "provably differ" of a part
+              set apart only because it recorded nothing, and a refused group's mark named no
+              cause. */}
           <b>{group.taskId} · {group.direction === 'min' ? 'minimize' : 'maximize'} · {group.size} run{group.size === 1 ? '' : 's'}
             {' · '}{group.partition
-              ? <span title="these runs recorded the same comparability key, so their numbers were measured against the same declared evaluation inputs">evaluation {group.partition}</span>
+              ? <span title={group.outcome === 'refused'
+                ? 'these runs recorded the same comparability key, and a pair of them is refused all the same: the key groups them, it does not make them one evaluation'
+                : 'these runs recorded the same comparability key, so their numbers were measured against the same declared evaluation inputs'}>evaluation {group.partition}</span>
               : <span className="warn" title="no run in this group records what its number was measured against; unknown is not the same as comparable">evaluation unrecorded</span>}
-            {group.split && <>{' · '}<span className="warn" title="other runs of this task share this comparability key but provably differ from these on what is named here, so the two parts are ranked apart">{splitLabel(group.split)}</span></>}
-            {group.outcome === 'refused' && <>{' · '}<span className="warn">not ranked</span></>}.</b>
+            {group.split && <>{' · '}<span className="warn" title={splitClaims(group).join(' ')}>{splitLabel(group.split)}</span></>}
+            {group.outcome === 'refused' && <>{' · '}<span className="warn" title={unrankedRowTitle(group)}>not ranked</span></>}.</b>
           <span> {claim.claim}</span>
           <ul style={{ margin: '4px 0 0 16px', padding: 0 }}>
             {claim.refusals.map((line, i) => <li key={i} className="muted">{line}</li>)}
@@ -2619,7 +2634,7 @@ export function CrossRunPanel({ state, onClose }) {
         const overlay = trajectoryOverlay(group)
         return <div key={`${group.key}:trajectory`} className="xr-trajectory" style={{ marginTop: 12 }}>
           {overlay.drawn > 0 && <MultiTrajectory runs={overlay.runs}
-            title={`Running best · ${group.taskId} · ${group.direction === 'min' ? 'lower is better' : 'higher is better'}${group.partition ? ` · evaluation ${group.partition}` : ''}`} />}
+            title={`Running best · ${group.taskId} · ${group.direction === 'min' ? 'lower is better' : 'higher is better'}${group.partition ? ` · evaluation ${group.partition}` : ''}${group.split ? ` · ${splitLabel(group.split)}` : ''}`} />}
           <div className="muted" style={{ fontSize: 11 }}>{trajectoryClaim(group, overlay)}</div>
         </div>
       })}
@@ -2642,9 +2657,14 @@ export function CrossRunPanel({ state, onClose }) {
         {coverage.unidentified > 0 && ` ${coverage.unidentified} could not be placed in a group: no task id or direction to read the metric with.`}
         {/* A partition whose members provably disagree is SPLIT by what differs (source tree, eval
             profile, scorer, fingerprint) and each part ranked on its own; its rows used to vanish
-            into the count above (critic 2026-09-26). */}
-        {coverage.splitRuns > 0 && ` ${coverage.splitRuns} run${coverage.splitRuns === 1 ? '' : 's'} share a task and comparability key with others but provably differ from them in source tree or evaluation protocol, so ${coverage.splitRuns === 1 ? 'it is' : 'they are'} grouped by that as well.`}
-        {coverage.refusedRuns > 0 && ` ${coverage.refusedRuns} of them still disagree after that split and are shown without a rank.`}
+            into the count above (critic 2026-09-26). Only a part that RECORDED a value another part
+            contradicts is counted as provably differing: a part set apart because it recorded none
+            is said to be set apart, and the refused runs are counted on their own, split or not —
+            "N of them still disagree after that split" was printed over a group no split
+            touched. */}
+        {coverage.splitProvenRuns > 0 && ` ${coverage.splitProvenRuns} run${coverage.splitProvenRuns === 1 ? '' : 's'} share a task and comparability key with others but provably differ from some of them in source tree or evaluation protocol, so ${coverage.splitProvenRuns === 1 ? 'it is' : 'they are'} grouped by that as well.`}
+        {coverage.splitUnrecordedRuns > 0 && ` ${coverage.splitUnrecordedRuns} run${coverage.splitUnrecordedRuns === 1 ? '' : 's'} recorded none of the source tree or protocol facets that split ${coverage.splitUnrecordedRuns === 1 ? 'its' : 'their'} task and key — not recorded, so not comparable with either side — and ${coverage.splitUnrecordedRuns === 1 ? 'is' : 'are'} grouped apart without a proven difference.`}
+        {coverage.refusedRuns > 0 && ` ${coverage.refusedRuns} run${coverage.refusedRuns === 1 ? ' is' : 's are'} shown without a rank: a pair in ${coverage.refusedRuns === 1 ? 'its' : 'their'} group provably disagrees on its evaluation, and no split by source tree or protocol separates them.`}
         {elsewhere > 0 && ` ${elsewhere} comparable group(s) belong to other task IDs and are deliberately not shown here — their objectives are unrelated to this run.`}
       </div>}
     </Panel>
