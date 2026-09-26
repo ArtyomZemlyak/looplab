@@ -243,7 +243,7 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
                          + " — none has evidence yet):")
             for card in work_items:
                 lines.append(
-                    f"- CARD_ID={card.id} BELIEF_ID={card.belief_id or ''} "
+                    f"- CARD_ID={card.id} BELIEF_ID={card.belief_id or ''} {state.card_substitution_brief(card)}"
                     f"SEED_STATEMENT_JSON={json.dumps(card.seed_statement, ensure_ascii=False)}")
             if for_proposal:
                 # A CLAIM CONTRACT, and only a caller whose answer is an `Idea` can honour it. This brief
@@ -290,7 +290,7 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
             # applied record disagree with their own proposal, the run's CHAMPION among them —
             # card-132 says batch 4096 / lr 0.001 / 3 epochs and node 13 ran 2048 / 0.0005 / ONE
             # epoch. Silent when the two agree, so the loud case stays loud.
-            drift = card_drift_brief(card)
+            drift = f"{card_drift_brief(card)} {state.card_substitution_brief(card)}".strip()
             lines.append(
                 f"- CARD_ID={card.id} BELIEF_ID={card.belief_id or ''} "
                 f"STATUS={state.card_status_now(card)} VERDICT={card.verdict} "

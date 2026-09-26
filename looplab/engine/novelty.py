@@ -704,8 +704,8 @@ class NoveltyGateMixin:
                              "approach, component, loss, data or direction is NOVEL. Compare both the claim "
                              "and the bounded action identity: operator, params, search space, eval profile "
                              "and the governed evaluation-timeout override are part of what was tried. "
-                             "An experiment whose recorded idea NEVER RAN is not a tried idea: an "
-                             "`inert_path` outcome, or code that shows the idea was not implemented "
+                             "An experiment whose recorded idea NEVER RAN is not a tried idea: an `inert_path` "
+                             "outcome, a row marked NOT A TEST OF … IDEA, or code that shows it was not built "
                              "(read_code / diff when the outcome alone does not settle it), means the "
                              "idea is still untested, and a proposal to actually implement it is NOVEL. "
                              "Prefer NOVEL unless clearly a repeat."},

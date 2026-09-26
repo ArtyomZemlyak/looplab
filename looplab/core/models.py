@@ -2821,6 +2821,12 @@ class RunState(BaseModel):
         return ("building" if card.id in self.cards_being_built() and not card.evidence
                 else card.status)
 
+    def card_substitution_brief(self, card) -> str:
+        """`core/idea_report.py::card_substitution_brief` over this state's nodes — "" for a card no
+        build substituted; a board row splices it in front of its next field (it ends in a space)."""
+        from looplab.core.idea_report import card_substitution_brief
+        return card_substitution_brief(card, self.nodes)
+
     def open_research_beliefs(self, *, only=None) -> list["Card"]:
         """The open, UNTESTED research board as distinct BELIEFS (peer review): the
         `[open_research_cards() with no evidence yet]` list the Researcher proposal feed and foresight

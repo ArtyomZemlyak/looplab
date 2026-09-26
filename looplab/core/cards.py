@@ -1370,6 +1370,15 @@ class Card(BaseModel):
     # The same predicate already refunds the node-budget slot (`node_counts_toward_card_budget`); the
     # slot and the hypothesis are now returned by one fact instead of the slot alone.
     discarded_nodes: list[int] = Field(default_factory=list)
+    # The node ids this Card's evidence names whose Developer REPORTED building something else
+    # (`core/idea_report.py::NOT_A_TEST` — `different` / `not_implemented`), terminal nodes only.
+    # DERIVED in `events/card_ledger.py::_apply_substituted_builds`, always stamped. They RAN, so
+    # unlike a discard they keep their metric, their node budget slot and any champion title; what
+    # they lose is the claim to have tested THIS card: they never count in its verdict, and a single
+    # one that is the card's whole evidence is taken out of `evidence` so the untested idea returns.
+    # Same once-per-card bound as `discarded_nodes`, and the same overlap caveat: at two they stay in
+    # `evidence` (the card retires, verdict still `open`), and a mixed set keeps them there too.
+    substituted_nodes: list[int] = Field(default_factory=list)
     best_delta: Optional[float] = None                  # best improvement-over-parent among evidence (audit)
     # --- The RESEARCH-DIRECTION facet's own identity (DERIVED; `events/card_ledger.py`).
     # `id` is the WORK-ITEM identity and `identity.action_digest` binds the executable action; neither

@@ -515,7 +515,8 @@ def _record_establisher_id(nodes: dict[int, Node], *,
 
 def _usable_evidence(evidence_ids: Iterable[int], nodes: Mapping, *,
                      excluded: Collection[int] = frozenset(),
-                     aborted: Collection[int] = frozenset()) -> tuple[list, list]:
+                     aborted: Collection[int] = frozenset(),
+                     untested: Collection[int] = frozenset()) -> tuple[list, list]:
     """One spelling of a card's evidence populations: (present & non-tombstoned, usable evaluated).
 
     `_evidence_verdict` (the `best_delta`/`supported` half of a card's verdict) and
@@ -527,9 +528,15 @@ def _usable_evidence(evidence_ids: Iterable[int], nodes: Mapping, *,
     "Usable" is `_sota_eligible` — the record setters' own predicate, and through it the
     champion's (review 2026-09-22, EVT-03) — rather than a third spelling of it: an aborted or
     trust-flagged node is no more a card's usable evidence than it is a record.
+
+    `untested` is the card's own `substituted_nodes` (`_apply_substituted_builds`): nodes that ran
+    and are records in their own right, but whose Developer built something ELSE — so they are the
+    one population that is usable for the champion and not for this card. Kept out of the second
+    list only: the first still counts them, so a card whose evidence is all substitutions reads
+    `open` ("all evidence unusable — no verdict") rather than as if it had no evidence at all.
     """
     ev = [nodes[i] for i in evidence_ids if i in nodes and not nodes[i].tombstoned]
-    return ev, [n for n in ev if _sota_eligible(n, excluded, aborted)]
+    return ev, [n for n in ev if _sota_eligible(n, excluded, aborted) and n.id not in untested]
 
 
 def _evidence_verdict(evidence_ids: Iterable[int], nodes: dict[int, Node], direction: str,
@@ -537,6 +544,7 @@ def _evidence_verdict(evidence_ids: Iterable[int], nodes: dict[int, Node], direc
                       *, record_establisher: int | None,
                       excluded: Collection[int] = frozenset(),
                       aborted: Collection[int] = frozenset(),
+                      untested: Collection[int] = frozenset(),
                       ) -> tuple[float | None, str, bool]:
     """Compute (best_delta, status, supported) for one hypothesis/card from its evidence nodes.
 
@@ -547,9 +555,11 @@ def _evidence_verdict(evidence_ids: Iterable[int], nodes: dict[int, Node], direc
     over its parent (or set a run record); tested if evaluated without improvement; testing while
     evidence still runs; open with no (usable) evidence; abandoned overrides all. `excluded` and
     `aborted` must be the sets `record_setters` was derived with — the usable-evidence half and the
-    record half of one verdict read one population (review 2026-09-22, EVT-03)."""
+    record half of one verdict read one population (review 2026-09-22, EVT-03). `untested` is the
+    card's `substituted_nodes`: never support, never "tested", never a record FOR THIS card."""
     better = (lambda a, b: a > b) if direction == "max" else (lambda a, b: a < b)
-    ev, evaluated = _usable_evidence(evidence_ids, nodes, excluded=excluded, aborted=aborted)
+    ev, evaluated = _usable_evidence(evidence_ids, nodes, excluded=excluded, aborted=aborted,
+                                     untested=untested)
     supported = False
     best_delta: float | None = None
     for n in evaluated:
@@ -2129,6 +2139,55 @@ def _apply_unexecuted_discards(st: RunState, ledger: _CardLedger) -> None:
             c.evidence = []
 
 
+def _apply_substituted_builds(st: RunState, ledger: _CardLedger) -> None:
+    """Take a node whose Developer REPORTED building something else out of its Card's verdict — and,
+    once per card, out of its evidence, so the untested idea comes back.
+
+    THE DEFECT. `core/idea_report.py` has the case: inf13's card-2 claimed the single ragged pass
+    works once position_ids and per-request K/V lengths are right; its build reported `different`
+    and rebuilt node 0's grouped path; the node scored 1.373x and the card read `supported` on it.
+    Every reader that keys on a verdict then carried the false statement — the board row, the
+    belief projection, the lessons the run distills — and every reader that keys on `evidence`
+    retired the idea exactly as a never-run discard did before `_apply_unexecuted_discards`: out of
+    the election, out of the claimable untested feed, into "do NOT propose one of these again".
+
+    THE PREDICATE IS THE DEVELOPER'S OWN DECLARATION, read off the node's files — folded from
+    `node_created` / `node_repaired`, so this stays a pure function of the log. It is not inferred:
+    no marker count, no diff heuristic. A node with no report, or `as_proposed`, or `partly`
+    (`idea_report.NOT_A_TEST` says why that one stays), is untouched. PENDING nodes are skipped:
+    returning a card while its own node is still running would let the election build it twice at
+    once; the node is judged when it lands. A proven never-run discard is `_apply_unexecuted_
+    discards`' business and is skipped too, so no node is forgiven twice.
+
+    WHAT CHANGES, and it is less than a discard's: the node RAN. It keeps its metric, its budget
+    slot, its place in the tree and any champion title — only its claim on THIS card goes.
+    * Always: stamped in `substituted_nodes`, and never counted in the verdict (`untested` in
+      `_evidence_verdict` / `_usable_evidence`), mixed evidence set or not — a real node beside it
+      decides the verdict alone.
+    * Once per card: a single substitution that is the card's WHOLE evidence leaves `evidence`, so
+      the card is `proposed`/`open` and selection-ready again.
+    * At two it stays (both do): the card has twice been built as something else, which says the
+      idea does not get built as proposed here, and the run stops paying for it — the card retires
+      through the ordinary `work_terminal` path with its verdict still `open`, never `supported`.
+    Worst case per card is two Developer builds, the discard bound's own arithmetic.
+    """
+    from looplab.core.idea_report import idea_not_tested
+
+    for c in ledger.cards.values():
+        forgiven = set(c.discarded_nodes)
+        substituted = sorted(
+            node_id for node_id in c.evidence
+            if node_id not in forgiven
+            and (node := st.nodes.get(node_id)) is not None
+            and not node.tombstoned
+            and node.status is not NodeStatus.pending
+            and idea_not_tested(node)
+        )
+        c.substituted_nodes = substituted
+        if len(substituted) == 1 and set(substituted) == set(c.evidence):
+            c.evidence = []
+
+
 def _apply_card_verdicts(
         st: RunState, ledger: _CardLedger, control_ids: dict[str, set[str]]) -> None:
     cards = ledger.cards
@@ -2155,7 +2214,8 @@ def _apply_card_verdicts(
             c.evidence, st.nodes, st.direction, _record_setters,
             any(control_id in st.hypotheses_abandoned
                 for control_id in control_ids.get(c.id, {c.id})),
-            record_establisher=_record_establisher, excluded=_excluded, aborted=_aborted)
+            record_establisher=_record_establisher, excluded=_excluded, aborted=_aborted,
+            untested=frozenset(c.substituted_nodes))
 
 
 def _drop_author(receipt: dict) -> str:
@@ -2585,7 +2645,7 @@ def _apply_card_enrichment(
         # ids out of `evidence`, and a novelty/cross-run/footprint sidecar produced during that build
         # still belongs to the card it was built for. Dropping them here would silently un-home those
         # signals as a side effect of returning the idea, which is the opposite of the intent.
-        for nid in [*c.evidence, *c.discarded_nodes]:
+        for nid in [*c.evidence, *c.discarded_nodes, *c.substituted_nodes]:
             node_to_card.setdefault(nid, cid)   # first card claiming a node wins (evidence is per-card)
 
     incomplete_cards = _recompact_card_enrichment(
@@ -2599,7 +2659,7 @@ def _apply_card_enrichment(
     # sharpest form of the loss being fixed — the retired ideas measured on `rubertlite-dr-unified-v7`
     # came from deep research, and a returned card that no longer names its memo is half a return.
     for c in cards.values():
-        for nid in [*c.evidence, *c.discarded_nodes]:
+        for nid in [*c.evidence, *c.discarded_nodes, *c.substituted_nodes]:
             n = st.nodes.get(nid)
             if n is None or n.idea is None:
                 continue
@@ -3198,8 +3258,9 @@ def _apply_card_lineage(ledger: _CardLedger, aliases: _CardAliases, *,
         for k in kids:
             # The champion's exclusions (review 2026-09-22, EVT-03): a child whose only better
             # number is an aborted or trust-flagged one did not beat the champion either.
-            _, _usable = _usable_evidence(getattr(cards[k], "evidence", None) or [], node_map,
-                                          excluded=excluded, aborted=aborted)
+            _, _usable = _usable_evidence(
+                getattr(cards[k], "evidence", None) or [], node_map, excluded=excluded,
+                aborted=aborted, untested=frozenset(getattr(cards[k], "substituted_nodes", None) or ()))
             _best = None
             for _n in _usable:
                 _best = _n.metric if _best is None else (
@@ -3277,6 +3338,7 @@ def derive_cards(
     control_ids = _card_control_ids(identity, ledger)
     control_ids = _fold_merged_cards(st, identity, ledger, aliases, control_ids)
     _apply_unexecuted_discards(st, ledger)
+    _apply_substituted_builds(st, ledger)
     _apply_card_verdicts(st, ledger, control_ids)
     dropped = _apply_card_drops(st, ledger, aliases)
     building_card_nodes = _card_building_ids(st, ledger, aliases)

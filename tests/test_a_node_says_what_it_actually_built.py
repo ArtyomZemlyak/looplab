@@ -35,15 +35,23 @@ def test_only_a_deviation_is_noted():
     assert idea_report_note(_node(idea_report_text({"idea_implemented": "as_proposed"}))) == ""
     note = idea_report_note(_node(idea_report_text({"idea_implemented": "different",
                                                     "built_instead": "reverted one flag"})))
-    assert "idea different" in note and "reverted one flag" in note
+    assert "NOT A TEST OF its IDEA (idea different)" in note and "reverted one flag" in note
     assert idea_report_note(_node("not json")) == ""
+    # a partial build is noted, and is NOT called "not a test" (`idea_report.NOT_A_TEST` says why)
+    partial = idea_report_note(_node(idea_report_text({"idea_implemented": "partly",
+                                                       "built_instead": "only the MLP"})))
+    assert partial.startswith(" [idea partly built") and "NOT A TEST" not in partial
+    # the node's own card is named when it has one, so a digest row says WHOSE idea it was not
+    carded = _node(idea_report_text({"idea_implemented": "different"}),
+                   idea=types.SimpleNamespace(card_id="card-2"))
+    assert idea_report_note(carded) == " [NOT A TEST OF card-2's IDEA (idea different)]"
 
 
 def test_the_novelty_judge_sees_the_deviation():
     from looplab.engine.novelty import _prior_outcome
     node = _node(idea_report_text({"idea_implemented": "not_implemented", "built_instead": "nothing"}),
                  status=types.SimpleNamespace(value="evaluated"), metric=1.03, error_reason=None)
-    assert _prior_outcome(node).startswith("metric=1.03 [idea not_implemented")
+    assert _prior_outcome(node).startswith("metric=1.03 [NOT A TEST OF its IDEA (idea not_implemented)")
 
 
 def _dev():

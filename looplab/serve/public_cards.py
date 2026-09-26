@@ -47,7 +47,8 @@ _FIELDS = (
     "selection_provenance",
     "selection_blockers", "selection_ready", "concept_source", "statement", "statement_edit_seq",
     "seed_statement", "source",
-    "created_at_node", "rationale", "evidence", "discarded_nodes", "best_delta", "merged_into",
+    "created_at_node", "rationale", "evidence", "discarded_nodes", "substituted_nodes", "best_delta",
+    "merged_into",
     "aliases",
     "belief_aliases",
     # `reopenable` rides BESIDE `dropped_by` and is not derivable from it, which is the whole reason
@@ -103,7 +104,10 @@ _REF_LIST_FIELDS = {"aliases", "belief_aliases", "concept_tags", "child_concept_
 # ids a Developer call built for this card and the freshness gate threw away before dispatch. Without
 # it on the wire a returned card reads `proposed` with no evidence — i.e. indistinguishable from one
 # that was never built at all — and the operator loses the only record that the run paid for it.
-_INT_LIST_FIELDS = {"evidence", "parent_ids", "status_nodes", "discarded_nodes"}
+# `substituted_nodes` is the same VISIBILITY half for a build that RAN something else than its card's
+# idea (`events/card_ledger.py::_apply_substituted_builds`): without it a returned card reads
+# `proposed` with no evidence, and the node that ran under its id — maybe the champion — is unexplained.
+_INT_LIST_FIELDS = {"evidence", "parent_ids", "status_nodes", "discarded_nodes", "substituted_nodes"}
 # The direction rollup's closed vocabulary (`core/cards.py::card_child_rollup`).
 #
 # `Card.child_card_ids` is deliberately NOT on this wire. Every edge it inverts is already published

@@ -405,7 +405,12 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   node ids move out of `evidence` into `discarded_nodes` — published beside it, so the operator can
   still see exactly which Developer builds the run paid for and threw away — and the question is
   claimable again. It comes back at most ONCE; a card that collects a second such discard keeps both,
-  reads Failed and retires, which is what stops a returned idea from looping. Unknown future
+  reads Failed and retires, which is what stops a returned idea from looping. Since 2026-09-26 the
+  same return, same bound, covers a build that RAN something else: a node whose Developer reported
+  `idea_implemented: different` or `not_implemented` is listed in `substituted_nodes`, never counts
+  in its card's verdict, and — when it is the card's whole evidence — leaves `evidence`, so the
+  untested idea is claimable again (the node keeps its metric and any champion title). At two such
+  builds the card retires with its verdict still `open`. Unknown future
   statuses remain visible rather than being hidden. Cards expose receipt
   completeness, selection readiness/blockers, lineage and evidence-node links. Operator controls can
   edit display text, pin the 1-based visible priority, pin a configured GPU request, deliberately
