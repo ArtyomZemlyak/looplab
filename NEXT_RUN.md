@@ -28,6 +28,11 @@ corpus is chosen per-node by a repair is not comparable to the 0.793426 champion
         -s eval_env=VS_LOCAL_DATA_ROOT=/home/jovyan/data/dr-local \
         > runs/e5small-dr-unified-vNN.console.log 2>&1 < /dev/null &
 
+To start the new round FROM the previous champion instead of from scratch, add
+`-s seed_from_run=runs/e5small-dr-unified-vPREV` (optionally `#<node>`): the prior node becomes the
+new run's first experiment, re-evaluated here, with a receipt saying whether the two runs share an
+evaluation contract (`engine/seed_from_run.py`, doc 67 67.2).
+
 `setsid`, because a plain `nohup` dies with the tool timeout. Then verify BOTH before reporting a
 launch: a live pid AND a non-empty `events.jsonl`.
 

@@ -20,8 +20,9 @@ from pydantic import ValidationError
 from looplab.core.atomicio import atomic_write_text
 from looplab.core.latebind import late_bound
 from looplab.events.eventstore import EventStore, EventStoreConcurrencyError
-from looplab.events.types import (EV_APPROVAL_GRANTED, EV_PAUSE, EV_RESUME, EV_RESUME_SERVED,
-                                  EV_RUN_ABORT, EV_RUN_FINISHED, EV_RUN_REOPENED, EV_SPEC_APPROVED)
+from looplab.events.types import (EV_APPROVAL_GRANTED, EV_INJECT_NODE, EV_PAUSE, EV_RESUME,
+                                  EV_RESUME_SERVED, EV_RUN_ABORT, EV_RUN_FINISHED, EV_RUN_REOPENED,
+                                  EV_SPEC_APPROVED)
 from looplab.engine.orchestrator import (
     Engine,
     SPECULATION_CALIBRATION_PROFILE_DIGEST,
@@ -29,6 +30,7 @@ from looplab.engine.orchestrator import (
     drain_owed,
 )
 from looplab.engine.finalize import finalize_run, incomplete_finalize_scope, is_guarded_abort
+from looplab.engine.seed_from_run import resolve_seed, seed_ignored_note, seed_intent, seed_summary
 from looplab.events.replay import fold
 from looplab.adapters.repo_task import eval_reader_path_errors, eval_workspace_conflicts
 from looplab.adapters.tasks import kinds_for, submit_warnings, validate_task
@@ -822,7 +824,7 @@ def _refuse_held_out_labels_inside_the_workspace(task, out) -> None:
 
 
 def _open_and_drive(task, task_dict: dict, settings, out: Path, *, crash_after=None,
-                    speculation_gate_calibration: bool = False, explicit_settings=()):
+                    speculation_gate_calibration: bool = False, explicit_settings=(), seed=None):
     """THE RUN LIFECYCLE, from a resolved task + settings + run dir to a driven terminal: the startable
     checks, the healthy-log gate, the `engine.lock` singleton, the prior-run classification (refuse a
     different task, reopen a finished run, lift a stopped one), the engine build, the published
@@ -910,6 +912,16 @@ def _open_and_drive(task, task_dict: dict, settings, out: Path, *, crash_after=N
             _preflight_speculation_authority(eng, prior_events)
             _preflight_settled_widths(eng, prior_events, surface="run")
             _publish_run_snapshots(out, task_dict, settings)
+            # `Settings.seed_from_run` (doc 67 67.2): a FRESH run's first experiment is the prior
+            # run's node, as an operator inject the engine serves before its first creation turn —
+            # appended only now, after the task snapshot its contract receipt compares against.
+            if seed is not None:
+                if prior_events:
+                    typer.echo(seed_ignored_note(settings.seed_from_run), err=True)
+                else:
+                    payload, verdict, note = seed_intent(seed, out)
+                    eng.store.append(EV_INJECT_NODE, payload)
+                    typer.echo(seed_summary(seed, verdict, note))
         # Continue a run dir that ALREADY FINISHED. Without this, re-entering the loop folds the log,
         # sees finished=True and breaks at once — printing the OLD best and doing no work. That silently
         # no-ops a re-run with a bigger --max-nodes, and (worse) makes a run that finished with
@@ -1177,10 +1189,14 @@ def run(
     if speculation_gate_calibration:
         task_dict = _calibration_envelope_task_dict(task, settings)
     out = out or (Path(file_out) if file_out else Path("runs/run_local"))
+    # Resolved and validated BEFORE anything is created (a `ConfigRefusal`: one line, exit 2);
+    # appended by `_open_and_drive` only on a fresh run directory.
+    seed = (resolve_seed(settings.seed_from_run, out)
+            if getattr(settings, "seed_from_run", "") else None)
     _report_submit_notes(task, task_dict, out, settings, planned=genesis and goal is not None)
     driven = _open_and_drive(task, task_dict, settings, out, crash_after=crash_after,
                              speculation_gate_calibration=speculation_gate_calibration,
-                             explicit_settings=explicit_settings)
+                             explicit_settings=explicit_settings, seed=seed)
     if driven is None:
         return
     state, eng, prior_kind = driven

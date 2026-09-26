@@ -100,7 +100,10 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 228
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 229
+    # 228 -> 229 on 2026-09-26: `seed_from_run` (doc 67 67.2) -- a new run seeded from a prior
+    # run's node. A ROW on the LAUNCH ground. Verified by INTERSECTION: 228 keys common to the
+    # previous keyset plus exactly that one, none removed.
     # 227 -> 228 on 2026-09-26: `noise_floor_mid_search` (doc 67 67.1a) -- the noise floor measured
     # once mid-search. A ROW on the SPEND ground, OFF by default. Verified by INTERSECTION: 227 keys
     # common to the previous keyset plus exactly that one, none removed.
@@ -464,7 +467,8 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # 260 -> 261 on 2026-09-26: `brief_mixed_comparability` (a curated row, so both counts move).
     # 261 -> 262 on 2026-09-26: `brief_node_frontier` (a curated row, so both counts move).
     # 262 -> 263 on 2026-09-26: `noise_floor_mid_search` (a curated row, so both counts move).
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 263
+    # 263 -> 264 on 2026-09-26: `seed_from_run` (a curated row, so both counts move).
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 264
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

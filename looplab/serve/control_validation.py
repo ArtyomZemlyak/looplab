@@ -40,11 +40,6 @@ from typing import Callable, Optional
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from looplab.core.concepts import (
-    normalized_concept_materialization_receipt,
-    normalized_concept_renames,
-    resolve_concept_set,
-)
 from looplab.core.hardware import detect_gpus, gpu_free_mib_uncached
 from looplab.core.models import (
     CARD_STATEMENT_MAX_CHARS,
@@ -52,6 +47,7 @@ from looplab.core.models import (
     idea_proposal_digest,
 )
 from looplab.core.redact import redact_secrets
+from looplab.events.node_import import node_import_payload
 from looplab.events.comment_projection import (
     COMMENT_ID_RE, COMMENT_MAX_PER_NODE_GENERATION, COMMENT_MAX_PER_RUN, COMMENT_MAX_VERSION,
     normalize_comment_text)
@@ -704,41 +700,10 @@ def _import_cross_run_source(ctx: _ControlIntake) -> None:
         raise HTTPException(409, f"source experiment #{sn} in run {sr} is tombstoned")
     if sn in sst.aborted_nodes:
         raise HTTPException(409, f"source experiment #{sn} in run {sr} is aborted")
-    sidea = durable_idea_payload(snode.idea)
-    receipt = (getattr(sst, "node_concept_materialization_receipts", None) or {}).get(sn)
-    receipt_valid = (receipt is None
-                     or normalized_concept_materialization_receipt(receipt) is not None)
-    membership_known = sn in (getattr(sst, "node_concepts", None) or {})
-    effective: set[str] = set()
-    membership_problem = None
-    if receipt is None and receipt_valid and membership_known:
-        effective, membership_problem = resolve_concept_set(
-            sst.node_concepts[sn],
-            normalized_concept_renames(getattr(sst, "concept_consolidation", None)))
-    if receipt is None and receipt_valid and membership_known and membership_problem is None:
-        # a source delta is relative to the SOURCE base/DAG. Import its effective
-        # snapshot as an exact full set so the target run cannot reinterpret it against new parents.
-        sidea.update({"concept_mode": "full", "concepts": sorted(effective),
-                      "concepts_added": [], "concepts_removed": []})
-    else:
-        # Unknown/partial/unavailable source membership must not transport a relative or future
-        # envelope. The experiment/code import remains useful; taxonomy stays genuinely absent.
-        for field in ("concept_mode", "concepts", "concepts_added", "concepts_removed"):
-            sidea.pop(field, None)
-    note = f"imported from run {sr} #{sn}"
-    base = (sidea.get("rationale") or "").strip()
-    sidea["rationale"] = f"{base} | {note}" if base else note
-    data["idea"] = sidea
-    data["code"] = snode.code or None
-    data["files"] = dict(snode.files)
-    data["deleted"] = list(snode.deleted)
-    # ATTEMPT-STAMPED: a node id survives `node_reset`, so `(run_id, node_id)` alone stops
-    # identifying the bytes that were actually imported the moment the source node is re-run —
-    # the receipt and its UI link then point at a different experiment than the one this snapshot
-    # came from. `attempt` is the source node's lifecycle generation at import time; it is
-    # additive, so older receipts simply carry no `source_attempt` and read exactly as before.
-    data["origin"] = {"run_id": sr, "node_id": sn, "metric": snode.robust_metric,
-                      "source_attempt": getattr(snode, "attempt", 0)}
+    # The snapshot itself is `events/node_import.py::node_import_payload` — ONE spelling shared
+    # with the new-run launch form (`Settings.seed_from_run`, doc 67 67.2): the concept rule, the
+    # rationale note and the attempt-stamped `origin` receipt all moved there verbatim.
+    data.update(node_import_payload(sst, sn, sr))
 
 
 def _relative_file_name(value, field: str) -> str:

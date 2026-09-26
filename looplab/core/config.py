@@ -1686,6 +1686,18 @@ class Settings(BaseSettings):
     # evaluations at a moment the operator did not ask for them) is the historical end-of-search
     # pass; the one reader is the engine knob `_noise_floor_mid_search`.
     noise_floor_mid_search: bool = False
+    # SEED A NEW RUN FROM A PRIOR ONE (doc 67 67.2, `engine/seed_from_run.py`): `PATH` or `PATH#NODE`
+    # — a run directory (absolute, relative to the working directory, or a sibling run's id under this
+    # run's runs root) and optionally a node other than its champion. On a FRESH run directory only,
+    # `looplab run` (the web start route spawns it too) imports that node — code, files, idea — as the
+    # run's first experiment: an operator `inject_node` whose `origin` receipt is marked
+    # `seed_from_run` and carries the EVALUATION-CONTRACT verdict (`engine/eval_contract.py`: same,
+    # different — naming the facet — or unknown). The seed is evaluated under THIS run's protocol; the
+    # source's number rides the receipt as provenance only. WHY: rounds were chained by hand
+    # (`NEXT_RUN.md`) and each started from scratch, node 0's median 27 against a prior champion of
+    # 169 (doc 60 item 2.3). Empty = off. Inert on an existing run directory, so a resume never
+    # re-seeds; the engine never reads it (a CLI-side launch fact), so no EngineOptions field.
+    seed_from_run: str = ""
     # D1 holdout-gated promotion (B6, Arbor-style): for host-graded tasks, reserve this fraction of
     # the held-out labels as a FINAL holdout partition the search never sees — every search/confirm
     # eval is scored on the remaining rows only, and at finish the val-top-k are re-scored on the

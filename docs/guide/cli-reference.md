@@ -237,6 +237,15 @@ looplab run examples/regression_task.json --backend llm \
 looplab run examples/repo_task.json --backend llm --developer-backend opencode
 ```
 
+**Start from a prior run's champion** (doc 67 67.2). `-s seed_from_run=PATH[#NODE]` makes a prior
+run's node — its champion by default — the new run's first experiment: `looplab run` imports its
+code, files and idea as an operator inject before the engine starts, the engine evaluates it under
+THIS run's own protocol, and its `origin` receipt says whether the two runs' evaluation contracts
+are the `same`, `different` (naming the command, reader or paths that differ) or `unknown`
+(`engine/seed_from_run.py`). PATH is a run directory, or a sibling run's id under the new run's
+runs root. A bad source is refused (exit `2`) before the run directory is created; on a directory
+that already has events the setting is ignored, so a resume never re-seeds.
+
 **Exit codes.** `run` and `resume` share them, because a wrapper, a CI step or an `&&` chain reads
 the status and nothing else:
 

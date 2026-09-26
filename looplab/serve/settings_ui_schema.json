@@ -35,6 +35,14 @@
           "help": "Search strategy: greedy, evolutionary, MCTS, ASHA, or BOHB (ASHA's schedule × surrogate proposal). ASHA is successive-halving SELECTION: each rung keeps its top ⌈n/η⌉ and promotes an unexpanded survivor, and `asha_live` can additionally stop a persistently underperforming node early. The rung is recorded as an audit receipt — per-node eval fidelity/budget is NOT scaled by rung yet (BACKLOG A1), so this allocates ATTEMPTS, not compute."
         },
         {
+          "key": "seed_from_run",
+          "label": "Seed from a prior run",
+          "type": "text",
+          "default": "",
+          "placeholder": "off",
+          "help": "A prior run to start from: its directory or run id, optionally #<node> (default: its champion). On a NEW run only, that node's code and files become the first experiment, evaluated under this run's own protocol; its receipt says whether the source's number was measured by the same evaluation contract (same / different / unknown). Empty = off."
+        },
+        {
           "key": "card_driven_selection",
           "label": "Card queue selection",
           "type": "bool",
