@@ -527,6 +527,14 @@ def _on_card_build_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> Non
         _close_card_build_request(st, request_index, skipped)
         if skipped == "producer_failed" and card_id not in st.card_build_producer_failed:
             st.card_build_producer_failed.append(card_id)
+        if skipped == "producer_failed":
+            # Every accepted give-up's REASON, per Card, in close order ("" = none named, which is
+            # every row written before reasons existed). Read only by
+            # `speculation.py::_producer_failed_card_ids`, to tell the restart quarantine from a
+            # producer that really failed; the list above is untouched, so no other reader moves.
+            reason = d.get("skipped_reason")
+            st.card_build_producer_failed_reasons.setdefault(card_id, []).append(
+                reason.strip()[:64] if isinstance(reason, str) else "")
         return
     if skipped is not None or d.get("speculative") is not True:
         return

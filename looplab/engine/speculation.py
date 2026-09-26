@@ -106,7 +106,21 @@ CARD_BUILD_SKIP_REASONS = (
     # adopted build, width > 1, outlives the session the swap waits for). Nothing is wrong with the
     # Card; the build is simply not the treatment the run now uses.
     "builder_replaced",
+    # The ONE `producer_failed` close that is not a producer giving up: the head carried an attempt
+    # receipt from a process that DIED (a restart, a kill), and no live producer owns it. See
+    # `UNRECONCILED_AFTER_RESTART` for why this close alone does not bar the Card.
+    "unreconciled_after_restart",
 )
+
+# THE RESTART CLOSE, NAMED (2026-09-27, operator review of MiniOneRec inf13). A head whose attempt
+# receipt belongs to a dead process is quarantined `producer_failed` so the possibly-billed provider
+# work is not silently bought twice — and that word used to bar the Card from speculative election
+# FOR GOOD, sending it to the serial lane whose `await` blocks evaluation admission for the whole
+# build. Measured on inf13: every restart closed its in-flight card this way (card-7 at seq 2547), and
+# a node reset during the resulting serial build waited 41 min on an idle GPU. A restart is not the
+# Card's fault, so ONE such close leaves it speculatively electable (`_producer_failed_card_ids`); a
+# second close of any kind — a restart loop the Card itself provokes included — bars it as before.
+UNRECONCILED_AFTER_RESTART = "unreconciled_after_restart"
 
 # WHY a consumed raw proposal staged nothing BEFORE the staging fence could say — the two
 # pre-staging paths of `_serve_raw_card_stage`, named beside `CARD_BUILD_SKIP_REASONS` because a
@@ -1283,6 +1297,40 @@ class SpeculationMixin:
     def _terminal_intent(state: RunState) -> bool:
         return state.halted
 
+    @staticmethod
+    def _pause_drains_builds(state: RunState) -> bool:
+        """Is the run PAUSED by `looplab stop --drain-builds`, and nothing stronger?
+
+        While it holds, a build already running finishes and COMMITS (its node lands pending, to be
+        evaluated after `looplab resume`) instead of being closed `run_is_stopping` and discarded;
+        nothing new is elected, and a request no producer is running for is closed as today. Never
+        on a finish or an abort (`finished` / `stop_requested`): those end the run, and a node
+        committed into an ending run is work nobody will evaluate.
+
+        MEASURED 2026-09-27 on MiniOneRec inf13: every operator restart threw away the builds in
+        flight (card-7 at seq 2547; card-4 committed seconds before a kill), each up to an hour of
+        Developer work, because a finished build under any halt is closed `run_is_stopping`."""
+        return bool(state.paused and getattr(state, "pause_drain_builds", False)
+                    and not state.finished and not state.stop_requested)
+
+    # How often a drain-builds pause re-checks its adopted producers from the outer loop, which has no
+    # wake-up stream of its own. Each check re-folds the log, and a build takes minutes to hours, so a
+    # couple of seconds costs nothing in latency and keeps a long drain from re-folding hundreds of
+    # times a minute.
+    _DRAIN_BUILDS_POLL_S = 2.0
+
+    def _draining_builds_in_flight(self, state: RunState) -> bool:
+        """A drain-builds pause still has work to wait for: a live producer, or a finished result for
+        a request that is still open (the next serve commits it)."""
+        self._ensure_speculation_state()
+        if self._spec_build_inflight:
+            return True
+        outstanding = {
+            key for request in self._outstanding_requests(state)
+            if (key := self._request_key(request)) is not None
+        }
+        return any(key in outstanding for key in self._spec_builds)
+
     def _discard_spec_result(self, result: Optional[SpecBuildResult]) -> None:
         if result is None or result.roles is None:
             return
@@ -1613,7 +1661,10 @@ class SpeculationMixin:
                     or not parent_generations_current(latest, reserved.parent_generations)
                 )
                 transient = (
-                    latest.halted
+                    # …except a DRAIN-BUILDS pause, whose whole point is this commit
+                    # (`_pause_drains_builds`): the node lands pending and `looplab resume`
+                    # evaluates it.
+                    (latest.halted and not self._pause_drains_builds(latest))
                     or (
                         max_eval_seconds is not None
                         and latest.total_eval_seconds >= max_eval_seconds
@@ -1906,11 +1957,18 @@ class SpeculationMixin:
 
     @staticmethod
     def _producer_failed_card_ids(state: RunState) -> set[str]:
-        """Replay-accepted give-ups that must next use the serial compatibility path."""
+        """Replay-accepted give-ups that must next use the serial compatibility path.
 
+        Except a Card whose ONLY `producer_failed` close is the restart quarantine
+        (`UNRECONCILED_AFTER_RESTART`): nothing about that Card failed — its producer's process died —
+        so it stays speculatively electable. A second close of any kind bars it as before. A log
+        written before the reason existed carries none, so every legacy close still bars."""
+
+        reasons = getattr(state, "card_build_producer_failed_reasons", None) or {}
         return {
             card_id for card_id in state.card_build_producer_failed
             if isinstance(card_id, str) and card_id
+            and reasons.get(card_id) != [UNRECONCILED_AFTER_RESTART]
         }
 
     def _election_excluded_card_ids(self, state: RunState) -> set[str]:
@@ -2010,7 +2068,7 @@ class SpeculationMixin:
         # (`inert` was an undiagnosed proxy for which bound ended the session), same remedy.
         if generation != state.search_epoch:
             return "stale:search_epoch_rotated", None
-        if self._terminal_intent(state):
+        if self._terminal_intent(state) and not self._pause_drains_builds(state):
             return "stale:run_is_stopping", None
         if max_eval_seconds is not None and state.total_eval_seconds >= max_eval_seconds:
             return "stale:eval_budget_exhausted", None
@@ -2208,9 +2266,15 @@ class SpeculationMixin:
         #
         # It cannot wedge finalization: `_terminal_intent` is tested BEFORE this and wins the reason
         # ladder, so a stopping run still closes the head as `run_is_stopping` with a producer live.
-        commit_refused_this_turn = not allow_commit
+        # A DRAIN-BUILDS PAUSE (`_pause_drains_builds`) is the one halt under which a build already
+        # running is still worth its commit: the pause is not a fact about the world the build was
+        # made for, only an instruction to start nothing new. So it neither moves the world nor
+        # refuses the commit; the producer-less head below is closed instead of waiting for a
+        # producer the closed production gate will never start.
+        draining = self._pause_drains_builds(state)
+        commit_refused_this_turn = not allow_commit and not draining
         world_moved = (key[1] != state.search_epoch
-                       or self._terminal_intent(state)
+                       or (self._terminal_intent(state) and not draining)
                        or budget_exhausted)
         # …AND LEFT OPEN WHEN THE BUILD HAS ALREADY FINISHED (2026-09-24). The rule above held the
         # head only while the producer ran; the session then waited the build out (a live producer
@@ -2243,7 +2307,9 @@ class SpeculationMixin:
             # quality denominator stay unchanged. The `card_build_attempted` row is what says WHY.
             if (key not in self._spec_build_inflight
                     and self._head_has_unreconciled_attempt(state, key)):
-                closed = self._append_card_build_done(request, skipped="producer_failed")
+                closed = self._append_card_build_done(
+                    request, skipped="producer_failed",
+                    skipped_reason=UNRECONCILED_AFTER_RESTART)
                 if closed:
                     self._spec_force_outer = True
                 return closed
@@ -2293,6 +2359,11 @@ class SpeculationMixin:
                 return self._append_card_build_done(
                     request, skipped="stale",
                     skipped_reason="card_gone" if merged_away else "card_dropped")
+            if draining and key not in self._spec_build_inflight:
+                # Nothing is running for it and nothing new may start: close it the way any other
+                # halt would, so the drain can end.
+                return self._append_card_build_done(
+                    request, skipped="stale", skipped_reason="run_is_stopping")
             return False
         if self._spec_request_builder.get(key, self._spec_builder_generation) != (
                 self._spec_builder_generation):

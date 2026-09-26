@@ -800,11 +800,27 @@ def test_recovery_head_with_an_unreconciled_attempt_is_quarantined_not_reissued(
     events = engine.store.read_all()
     done = [event for event in events if event.type == EV_CARD_BUILD_DONE]
     assert len(done) == 1 and done[0].data.get("skipped") == "producer_failed"
+    # …NAMED as the restart quarantine (2026-09-27): the coarse word is unchanged for every reader.
+    assert done[0].data.get("skipped_reason") == "unreconciled_after_restart"
     assert producer.calls == 0, "quarantine must never re-issue the possibly-charged provider work"
     assert not [event for event in events if event.type == EV_NODE_BUILDING]
     final = fold(events)
     assert final.card_builds_done == 1 and engine._head_request(final) is None
-    # Serial-fallback-only from here: the Card is still buildable, just never speculatively re-elected.
+    # ONE restart close does not bar the Card: its producer's process died, the Card did nothing
+    # wrong, and the serial lane it used to be sent to blocks evaluation admission for a whole build
+    # (41 min on MiniOneRec inf13). It is elected SPECULATIVELY again, through the real election.
+    assert engine._card_requires_serial_fallback(key[0]) is False
+    again = _request(engine)
+    assert engine._request_key(again)[0] == key[0]
+    # A SECOND close of the same Card — here a second dead process — bars it as before, so a Card
+    # that itself keeps killing the process cannot loop.
+    state = fold(engine.store.read_all())
+    engine.store.append(EV_CARD_BUILD_ATTEMPTED, {
+        "card_id": key[0], "generation": key[1],
+        "index": engine._request_position(state, engine._request_key(again)),
+    })
+    assert engine._serve_card_builds() is True
+    assert producer.calls == 0
     assert engine._card_requires_serial_fallback(key[0]) is True
 
 

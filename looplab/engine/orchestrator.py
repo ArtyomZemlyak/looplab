@@ -1866,6 +1866,15 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                     break
                 continue
             if state.paused:
+                # `looplab stop --drain-builds`: a build still running is waited for and committed
+                # before the pause takes the engine down (`_pause_drains_builds`). No session runs
+                # here, so only ADOPTED producers can still be in flight; a bounded poll, because
+                # this loop has no wake-up stream of its own and each turn re-folds the log.
+                if (self._speculation_enabled() and self._pause_drains_builds(state)
+                        and self._draining_builds_in_flight(state)):
+                    self._close_card_build_before_terminal_gate(state)
+                    await anyio.sleep(self._DRAIN_BUILDS_POLL_S)
+                    continue
                 if self._close_card_build_before_terminal_gate(state):
                     continue
                 break

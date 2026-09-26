@@ -1972,7 +1972,9 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "pause": PayloadContract(
         "The run paused — by an operator, or by the engine with a stated reason.",
         required=(),
-        optional=("attempt", "detail", "generation", "node_id", "reason"),
+        # `drain_builds`: the operator's `looplab stop --drain-builds` — builds already running
+        # finish and commit before the engine exits.
+        optional=("attempt", "detail", "drain_builds", "generation", "node_id", "reason"),
     ),
     "phase_progress": PayloadContract(
         "One build/eval phase started or finished — the live activity feed's row.",

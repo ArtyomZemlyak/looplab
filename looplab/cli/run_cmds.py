@@ -1410,6 +1410,17 @@ def _in_flight_node_ids(state) -> list[int]:
                   and not getattr(n, "tombstoned", False))
 
 
+def _open_build_card_ids(state) -> list[str]:
+    """The Cards whose durable build request is still open — what `--drain-builds` waits to commit.
+    Read off the same queue the engine serves (`card_build_requests` past the cursor, less the
+    positions a producer already closed ahead of it), so the CLI and the engine agree on "in flight"."""
+    requests = list(getattr(state, "card_build_requests", None) or [])
+    done = max(0, min(int(getattr(state, "card_builds_done", 0) or 0), len(requests)))
+    ahead = set(getattr(state, "card_builds_done_ahead", None) or ())
+    return [str(r.get("card_id")) for i, r in enumerate(requests)
+            if i >= done and i not in ahead and isinstance(r, dict)]
+
+
 def stop_lifted(state) -> str:
     """Why the stop no longer stands, or `""` while it does — as far as the LOG can say. A pause that a
     later `resume` lifted, or a resume request no engine has served yet (the server's post-exit waiter
@@ -1658,18 +1669,26 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
              help="block until the engine has exited: every evaluation already running is left to "
                   "finish (a stop never kills one), and then the process releases engine.lock"),
          timeout: float = typer.Option(
-             0.0, "--timeout", help="with --wait: give up after this many seconds (0 = no limit)")):
+             0.0, "--timeout", help="with --wait: give up after this many seconds (0 = no limit)"),
+         drain_builds: bool = typer.Option(
+             False, "--drain-builds",
+             help="let every build already running finish and COMMIT its node (evaluated after "
+                  "`looplab resume`) instead of discarding it; nothing new is started")):
     """STOP a run: freeze it WITHOUT finalizing — no end-of-run report/lessons/cost roll-up. A running
     engine stops STARTING work on its next iteration, lets every evaluation already running finish,
     then exits; an attempt that FAILS while the stop is pending buys no repair or triage and stays
     pending — `looplab resume` re-runs it — unless the engine closes it before its repair decision
     (a watchdog kill the repair loop does not take, a refused reader, a salvaged metric).
-    `--wait` blocks until the engine has exited — "stop after the current node". The run is
+    `--wait` blocks until the engine has exited — "stop after the current node". `--drain-builds`
+    also keeps every Card build already running: it finishes and commits its node before the engine
+    exits, instead of being closed `run_is_stopping` and discarded (measured on MiniOneRec inf13:
+    each restart threw away up to an hour of Developer work per build in flight). The run is
     resumable (`looplab resume`) or you can `finalize` it later."""
     # A DIRECT PYTHON CALL (`looplab.cli.stop(rd)`, the compatibility surface `finalize` documents)
     # leaves Typer's OptionInfo defaults in place, and an OptionInfo is truthy: only a real `True`
     # waits, so an old caller keeps the old non-blocking behaviour.
     waiting = wait is True
+    draining = drain_builds is True
     limit = float(timeout) if isinstance(timeout, (int, float)) else 0.0
     # REFUSED BEFORE ANYTHING IS APPENDED: a flag the command would silently ignore, or read as its
     # opposite (a negative "limit" is no limit, and so is `nan`, which no elapsed time ever reaches),
@@ -1685,9 +1704,14 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
     # names no reason — nobody can say why" (`events/stop_account.py`) — about a stop an operator
     # typed. `reason` is an optional key of the `pause` contract and the fold already carries it to
     # `RunState.pause_reason`; nothing decides on it (`classify_prior_run` is pinned not to read it).
-    store.append(EV_PAUSE, {"reason": "operator stop (`looplab stop`)"})
+    # `drain_builds` rides the pause row only when asked for, so a plain stop writes the exact row it
+    # always did; the fold reads it only while this pause stands (`RunState.pause_drain_builds`).
+    store.append(EV_PAUSE, ({"reason": "operator stop (`looplab stop --drain-builds`)",
+                             "drain_builds": True} if draining
+                            else {"reason": "operator stop (`looplab stop`)"}))
     typer.echo(f"stopped {run_dir} (frozen, not finalized) — `looplab resume` to continue, "
-               "`looplab finalize` to wrap it up")
+               "`looplab finalize` to wrap it up"
+               + ("; builds already running will finish and commit first" if draining else ""))
     if not waiting:
         return
     from looplab.engine.run_lifecycle import engine_liveness
@@ -1707,16 +1731,28 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
 
     first = _probe(target)
     # `eval_activity_started` outlives a crashed owner, so a node is "running" only while an engine
-    # may hold the lock; with a definite "no engine" there is nothing to wait for or report on.
-    running = _in_flight_node_ids(current()) if first is not False else []
+    # may hold the lock; with a definite "no engine" there is nothing to wait for or report on. The
+    # same holds for the Card builds a drain waits to commit (`_open_build_card_ids`): an open request
+    # outlives the engine that elected it.
+    at_stop = current() if first is not False else None
+    running = _in_flight_node_ids(at_stop) if at_stop is not None else []
+    building = _open_build_card_ids(at_stop) if at_stop is not None and draining else []
+    node_floor = max(at_stop.nodes, default=-1) if at_stop is not None else -1
     if running and first is True:
         typer.echo(f"waiting for the engine to finish {len(running)} evaluation(s) already "
                    f"running (node {', '.join(map(str, running))}) and exit — a stop never "
                    "kills one")
+    if building and first is True:
+        typer.echo(f"and for {len(building)} build(s) to finish and commit "
+                   f"({', '.join(building)})")
 
     def _describe() -> str:
-        still = _in_flight_node_ids(current())
-        return (f"still waiting: node {', '.join(map(str, still))} evaluating" if still
+        now = current()
+        still = _in_flight_node_ids(now)
+        builds = _open_build_card_ids(now) if draining else []
+        parts = ([f"node {', '.join(map(str, still))} evaluating"] if still else []) + (
+            [f"build(s) {', '.join(builds)} still running"] if builds else [])
+        return ("still waiting: " + "; ".join(parts) if parts
                 else "still waiting: no evaluation running, the engine is finishing its turn")
 
     outcome, why = await_engine_exit(target, timeout_s=limit, liveness=_probe,
@@ -1748,6 +1784,15 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
                    "is recorded; the engine exits once its running evaluation(s) finish")
         raise typer.Exit(code=1)
     after = current()
+    if building and seen["alive"]:
+        # Only a node minted AFTER the stop was recorded is this drain's commit; an older node of
+        # the same Card is an earlier build.
+        committed = {n.idea.card_id: n.id for n in after.nodes.values()
+                     if n.id > node_floor and getattr(n.idea, "card_id", None) in building}
+        for card_id in building:
+            typer.echo(f"  {card_id}: " + (f"committed as node {committed[card_id]} — pending, "
+                                           "`looplab resume` evaluates it"
+                                           if card_id in committed else "closed without a node"))
     for node_id in (running if seen["alive"] else []):
         node = after.nodes.get(node_id)
         if node is None:

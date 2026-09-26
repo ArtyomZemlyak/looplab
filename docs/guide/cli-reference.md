@@ -421,8 +421,20 @@ while the stop is pending: it stays pending with no terminal, and `looplab resum
 full where its repair chain stood. So `stop` is already "stop after the current node": `--wait` is how
 you wait for it, instead of watching the log or the process table.
 
+**A plain stop does throw away Card builds still running**: a halted head is closed
+`run_is_stopping` and the finished result is discarded. `--drain-builds` keeps them — every build
+already running finishes and **commits** its node (it lands pending; `looplab resume` evaluates it),
+nothing new is elected, and a request no producer is running for is closed as before. It rides the
+`pause` row as `drain_builds: true` and applies only while that pause stands, never to a finish or
+an abort. With `--wait` it also names the builds it is waiting on and says, per Card, whether it
+committed a node.
+
+A build that a KILLED engine left behind (no drain) is quarantined `producer_failed` on resume,
+named `skipped_reason: unreconciled_after_restart`; one such close leaves the Card speculatively
+electable, a second close of any kind sends it to the serial lane as before.
+
 ```bash
-looplab stop RUN_DIR [--wait [--timeout SECONDS]]
+looplab stop RUN_DIR [--wait [--timeout SECONDS]] [--drain-builds]
 ```
 
 | Option | Default | Description |
@@ -430,6 +442,7 @@ looplab stop RUN_DIR [--wait [--timeout SECONDS]]
 | `RUN_DIR` | *(required)* | Run directory to stop |
 | `--wait` | off | Block until the engine has exited (it releases `engine.lock` after its running evaluations land), printing which node(s) it is waiting on every 30 s and how each ended |
 | `--timeout SECONDS` | `0` (no limit) | With `--wait`: give up after this long, exit `1`; the stop itself stays recorded and is still honoured. Refused (exit `2`, nothing appended) without `--wait`, or when negative or not finite (`nan` would never be reached) |
+| `--drain-builds` | off | Let every Card build already running finish and commit its node before the engine exits, instead of discarding it |
 
 `--wait` exits `0` once the engine is gone — the lock has to stay free for a second, so a
 `looplab resume` already waiting on it, which takes it straight back and lifts the stop, is waited on

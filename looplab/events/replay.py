@@ -2198,6 +2198,10 @@ def _on_pause(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         # the log it replayed. Every producer already bounds its own text at the append site.
         reason = d.get("reason")
         st.pause_reason = str(reason) if isinstance(reason, str) and reason.strip() else None
+        # …and whether the operator asked for running builds to finish and commit before the engine
+        # exits (`looplab stop --drain-builds`). `is True`, not truthiness: a forged/garbled value
+        # must not turn a stop into a drain.
+        st.pause_drain_builds = d.get("drain_builds") is True
 
 
 def _on_restart(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
