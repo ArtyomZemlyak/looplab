@@ -34,7 +34,6 @@ import re
 import secrets
 import unicodedata
 from dataclasses import dataclass
-from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
 
@@ -67,14 +66,11 @@ from looplab.events.types import (
     EV_RESTART, EV_RESUME, EV_RUN_ABORT, EV_RUN_CONCEPTS, EV_RUN_REOPENED, EV_SET_STRATEGY,
     EV_SPEC_APPROVED)
 from looplab.serve.engine_proc import _resolve_task_file
-from looplab.serve.protocol import COLLABORATION_EVENTS, CONTROL_EVENTS
-
-
-class EnginePolicy(str, Enum):
-    NO_SPAWN = "no_spawn"
-    ENSURE_RUNNING = "ensure_running"
-    ENSURE_DRIVER_PRESERVE_STOP = "ensure_driver_preserve_stop"
-    RESTART_AFTER_EXIT = "restart_after_exit"
+# `EnginePolicy` is DEFINED in `serve/protocol.py` (2026-09-26) and imported here as the same class:
+# its values are persisted on every durable command record (`engine_policy`), and `looplab stop
+# --wait` reads those records to tell whether a command will start an engine after the current one
+# exits — from the CLI, which cannot import this module without the `[ui]` extra (fastapi).
+from looplab.serve.protocol import COLLABORATION_EVENTS, CONTROL_EVENTS, EnginePolicy
 
 
 @dataclass(frozen=True)

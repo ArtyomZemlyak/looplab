@@ -40,6 +40,8 @@ Protocols named here:
 """
 from __future__ import annotations
 
+from enum import Enum
+
 from looplab.events.types import (
     EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
     EV_CARD_DROPPED, EV_CARD_EDITED, EV_CARD_REOPENED, EV_CARD_REPRIORITIZED,
@@ -81,6 +83,18 @@ COMMAND_SUCCEEDED_STATUSES = frozenset({"succeeded", "noop"})
 COMMAND_FAILED_STATUSES = frozenset({"failed", "rejected", "timed_out"})
 COMMAND_TERMINAL_STATUSES = COMMAND_SUCCEEDED_STATUSES | COMMAND_FAILED_STATUSES
 COMMAND_STATUSES = COMMAND_ACTIVE_STATUSES | COMMAND_TERMINAL_STATUSES
+
+
+class EnginePolicy(str, Enum):
+    """What a control command asks of the ENGINE PROCESS — `serve/control_validation.py`'s
+    `_CONTROL_POLICIES` assigns one per control event and the command worker acts on it. Its value is
+    persisted on every durable command record as `engine_policy`, and read back outside the server
+    by `looplab stop --wait` (`cli/run_cmds.py::server_commands_restarting`), which is why it lives
+    here, beside the other record words, and not in the fastapi-importing module that assigns it."""
+    NO_SPAWN = "no_spawn"
+    ENSURE_RUNNING = "ensure_running"
+    ENSURE_DRIVER_PRESERVE_STOP = "ensure_driver_preserve_stop"
+    RESTART_AFTER_EXIT = "restart_after_exit"
 
 CONTROL_EVENTS = frozenset({
     EV_RUN_ABORT, EV_PAUSE, EV_RESTART, EV_RESUME, EV_NODE_ABORT, EV_NODE_RESET, EV_BUDGET_EXTEND, EV_HINT,

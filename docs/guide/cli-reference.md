@@ -374,10 +374,12 @@ The `pause` it appends names itself as the reason (``operator stop (`looplab sto
 `stop:` line says who froze it.
 
 **A stop never kills a running evaluation.** An evaluation that scores writes its result as usual.
-One that fails in a way the inline repair loop would retry buys no repair and no triage while the stop
-is pending: it stays pending, and `looplab resume` re-runs its code in full where its repair chain
-stood; a failure the loop would not retry settles as it always does. So `stop` is already "stop after
-the current node": `--wait` is how you wait for it, instead of watching the log or the process table.
+One that FAILS while the stop is pending — any failure, whether or not the inline repair loop would
+have retried it — buys no repair and no triage: unless a deterministic salvage rung recovers its
+metric (or the fault is the task's own refused metric reader, which settles), it stays pending with no
+terminal, and `looplab resume` re-runs its code in full where its repair chain stood. So `stop` is
+already "stop after the current node": `--wait` is how you wait for it, instead of watching the log or
+the process table.
 
 ```bash
 looplab stop RUN_DIR [--wait [--timeout SECONDS]]
@@ -387,12 +389,17 @@ looplab stop RUN_DIR [--wait [--timeout SECONDS]]
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run directory to stop |
 | `--wait` | off | Block until the engine has exited (it releases `engine.lock` after its running evaluations land), printing which node(s) it is waiting on every 30 s and how each ended |
-| `--timeout SECONDS` | `0` (no limit) | With `--wait`: give up after this long, exit `1`; the stop itself stays recorded and is still honoured. Refused (exit `2`, nothing appended) without `--wait` or when negative |
+| `--timeout SECONDS` | `0` (no limit) | With `--wait`: give up after this long, exit `1`; the stop itself stays recorded and is still honoured. Refused (exit `2`, nothing appended) without `--wait`, or when negative or not finite (`nan` would never be reached) |
 
-`--wait` exits `0` once the engine is gone (immediately if none was running), and `1` if it timed
-out, cannot observe the lock at all (a filesystem without working file locks), or the stop stopped
-standing while it waited — a later `resume` lifted it, or a resume request is pending that the
-server's post-exit waiter would serve by starting an engine again.
+`--wait` exits `0` once the engine is gone — the lock has to stay free for a second, so a
+`looplab resume` already waiting on it, which takes it straight back and lifts the stop, is waited on
+rather than missed — and within about a second if none was running. It exits `1` if it timed out,
+cannot observe the lock at all (a filesystem without working file locks), or the stop stopped
+standing: a later `resume` lifted it; a resume request is pending that a LoopLab server serves by
+starting an engine again; or a server command that starts an engine (`node_reset`,
+`budget_extend`, `fork`, `inject_node`, … — anything whose worker waits for the exit and then runs
+`looplab resume`) is still unsettled in the run's `.commands/`. With no server running, a pending
+request starts nothing, and the message says so.
 
 ## `finalize`
 
@@ -883,7 +890,7 @@ line — what it spent to *reach* the champion and what it spent *after* the ans
 hand:
 
 ```
-champion   : node 7 landed at seq 1234 — 41,210,558 tokens (unpriced) spent to reach it; 75,293,604 tokens (unpriced; 64.6 % of tokens) spent after it was in hand, over the last 9.1 h of the run
+champion   : node 7 landed at seq 1234 — 41,210,558 tokens (unpriced) spent to reach it; 75,293,604 tokens (unpriced; 64.6 % of tokens) spent after it was in hand, over the 9.1 h that followed
 ```
 
 It is the durable ledger folded up to the champion's terminal event, and the rest of the ledger —
@@ -895,7 +902,13 @@ appended late sits at the drain's position rather than its call's. Silent when t
 or no ledger, and when the ledger cannot be placed: a pre-ledger log whose only record is a
 cumulative `llm_cost` roll-up (written wherever the roll-up happened, often at finalize) says nothing
 about when its spend happened, so it gets no split rather than a false one. An unpriced ledger (a
-provider that bills nothing through this client) prints `unpriced`, never `$0.0000`.
+provider that bills nothing through this client) prints `unpriced`, never `$0.0000`; a PARTLY priced
+one (a gateway that began pricing mid-run) names its priced calls on each part whose cost sums only
+some of them (`$0.1000 over 1 of 2 calls priced`) and prints no cost share. The hours are the window
+the *after* spend was made in — to the last `llm_usage` row, not to a comment appended later. And a
+ledger whose per-call rows begin only after the champion landed (a run begun on a build without
+them) prints a second line saying so: what reaching it cost is then unrecorded, not zero — or, when a
+cost roll-up came before the champion, it is that roll-up.
 
 **A SECOND table answers "which EXPERIMENT spent it, and was that experiment ever evaluated".**
 Phase says which *kind* of work the tokens bought; it cannot say that a particular build was thrown

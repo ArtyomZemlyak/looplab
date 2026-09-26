@@ -432,8 +432,21 @@ def spend_around_champion(events, state) -> Optional[dict]:
     cumulative `llm_cost` roll-up, written wherever the roll-up happened to be — often at finalize,
     which would read as "everything was spent after the champion"), or one whose legacy base roll-up
     sits after the champion's terminal. A split the record cannot support is not printed.
+
+    TWO THINGS A PRINTED SPLIT MUST SAY ABOUT ITSELF (critic 2026-09-26, both driven). A ledger whose
+    per-call rows begin only AFTER the champion's terminal — a run begun on a build without the
+    ledger, stopped by `looplab stop` (no roll-up), resumed on one with it — folds to a reach of 0
+    that is indistinguishable from a champion that really cost nothing: `ledger_starts_after` says
+    so, and `rolled_up_before` whether a cost roll-up at least counted the spend before it. And a
+    ledger only PARTLY priced (a gateway that began pricing mid-run) sums a cost over the priced calls
+    alone: every part carries `priced_calls` beside `calls`.
+
+    `after_seconds` runs from the champion's terminal to the LAST `llm_usage` row after it — the
+    window the "after" spend was made in, not the log's last row: an operator's comment appended a
+    week later is not the run spending. `None` when nothing was spent after.
     Returns `{node_id, seq, reach, after, total, after_share_tokens, after_share_cost,
-    after_seconds}`, each of `reach`/`after`/`total` being `{tokens, cost, calls}`.
+    after_seconds, ledger_starts_after, rolled_up_before}`, each of `reach`/`after`/`total` being
+    `{tokens, cost, calls, priced_calls}`.
     """
     from looplab.events.replay import fold
     from looplab.events.types import EV_LLM_COST, EV_LLM_USAGE
@@ -458,17 +471,20 @@ def spend_around_champion(events, state) -> Optional[dict]:
 
     def _part(src: dict) -> dict:
         return {"tokens": _int(src.get("total_tokens")), "calls": _int(src.get("calls")),
+                "priced_calls": _int(src.get("priced_calls")),
                 "cost": round(max(0.0, float(src.get("cost") or 0.0)), 6)}
 
     reach, total = _part(reached), _part(ledger)
     after = {"tokens": max(0, total["tokens"] - reach["tokens"]),
              "calls": max(0, total["calls"] - reach["calls"]),
+             "priced_calls": max(0, total["priced_calls"] - reach["priced_calls"]),
              "cost": round(max(0.0, total["cost"] - reach["cost"]), 6)}
     landed = next((event for event in rows if event.seq == seq), None)
-    last = rows[-1] if rows else None
+    last_spend = next((event for event in reversed(rows)
+                       if event.type == EV_LLM_USAGE and event.seq > seq), None)
     after_seconds = None
-    if landed is not None and last is not None and landed.ts and last.ts:
-        after_seconds = max(0.0, float(last.ts) - float(landed.ts))
+    if landed is not None and last_spend is not None and landed.ts and last_spend.ts:
+        after_seconds = max(0.0, float(last_spend.ts) - float(landed.ts))
     return {
         "node_id": best.id,
         "seq": seq,
@@ -478,4 +494,6 @@ def spend_around_champion(events, state) -> Optional[dict]:
         "after_share_tokens": (after["tokens"] / total["tokens"]) if total["tokens"] else None,
         "after_share_cost": (after["cost"] / total["cost"]) if total["cost"] else None,
         "after_seconds": after_seconds,
+        "ledger_starts_after": first_usage > seq,
+        "rolled_up_before": bool(base),
     }

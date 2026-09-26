@@ -13,6 +13,8 @@ wrong question: "the pause is folded" is minutes or hours earlier than "nothing 
 """
 from __future__ import annotations
 
+import itertools
+import json
 import threading
 import time
 from pathlib import Path
@@ -40,13 +42,40 @@ class _Clock:
         self.now += seconds
 
 
-def test_it_returns_as_soon_as_the_lock_is_seen_free():
-    answers = iter([True, True, True, False])
+def test_it_returns_once_the_lock_has_stayed_free():
+    answers = itertools.chain([True, True, True], itertools.repeat(False))
     clock, said = _Clock(), []
     assert await_engine_exit(Path("r"), liveness=lambda _rd: next(answers), clock=clock,
                              sleep=clock.sleep, echo=said.append,
-                             poll_s=0.5) == ("exited", "")
-    assert clock.now == 1.5 and said == []
+                             poll_s=0.5, settle_s=1.0) == ("exited", "")
+    assert clock.now == 2.5 and said == []       # free at 1.5 s, and still free a second later
+
+
+def test_a_lock_taken_straight_back_is_waited_on_and_its_lift_reported():
+    """A `looplab resume` in its hand-off wait takes the lock within moments of the release and only
+    then appends the `resume` that lifts the stop — so a free lock must STAY free before it counts."""
+    clock = _Clock()
+    answers = iter([True, False, True, True, True])
+    lifted = iter(["", "", "", "", "the stop was lifted"])
+    assert await_engine_exit(Path("r"), liveness=lambda _rd: next(answers),
+                             standing=lambda: next(lifted), clock=clock, sleep=clock.sleep,
+                             echo=lambda _m: None, poll_s=0.5,
+                             settle_s=1.0) == ("lifted", "the stop was lifted")
+    # ...and one that finishes the run instead (a finalize driver) is waited out to its own exit.
+    clock = _Clock()
+    answers = itertools.chain([True, False, True, True], itertools.repeat(False))
+    assert await_engine_exit(Path("r"), liveness=lambda _rd: next(answers), clock=clock,
+                             sleep=clock.sleep, echo=lambda _m: None, poll_s=0.5,
+                             settle_s=1.0) == ("exited", "")
+    assert clock.now == 3.0
+
+
+def test_a_timeout_never_fires_while_a_free_lock_is_settling():
+    """"still holds its lock" would be false: the settle is bounded, so it finishes instead."""
+    clock = _Clock()
+    assert await_engine_exit(Path("r"), timeout_s=0.5, liveness=lambda _rd: False, clock=clock,
+                             sleep=clock.sleep, echo=lambda _m: None, poll_s=0.5,
+                             settle_s=1.0) == ("exited", "")
 
 
 def test_it_says_what_it_is_waiting_on_at_the_echo_cadence():
@@ -74,7 +103,7 @@ def test_a_timeout_gives_up_and_an_unobservable_lock_is_not_guessed():
     assert await_engine_exit(Path("r"), liveness=lambda _rd: None, clock=clock,
                              sleep=clock.sleep, echo=lambda _m: None) == ("unobservable", "")
     # ...but ONE unreadable probe (a lock file racing its own creation) does not end the wait.
-    answers = iter([None, True, None, None, False])
+    answers = itertools.chain([None, True, None, None], itertools.repeat(False))
     assert await_engine_exit(Path("r"), liveness=lambda _rd: next(answers), clock=clock,
                              sleep=clock.sleep, echo=lambda _m: None) == ("exited", "")
 
@@ -255,3 +284,118 @@ def test_without_wait_it_does_not_block_even_on_a_held_lock(tmp_path):
         release.set()
         holder.join(5)
     assert fold(EventStore(rd / "events.jsonl").read_all()).paused
+
+
+# ------------------------------------------------ the server's other family of engine starter
+def _command_record(rd: Path, *, event_type: str, policy: str, status: str = "executing",
+                    name: str = "0" * 32) -> Path:
+    """A durable command record the way `serve/run_commands.py` writes one (the keys this reads)."""
+    directory = rd / ".commands"
+    directory.mkdir(exist_ok=True)
+    path = directory / f"cmd_{name}.json"
+    path.write_text(json.dumps({"id": f"cmd_{name}", "status": status, "event_type": event_type,
+                                "engine_policy": policy, "postcondition": "engine_ack"}),
+                    encoding="utf-8")
+    return path
+
+
+def test_a_server_command_that_will_start_an_engine_means_the_stop_does_not_stand(tmp_path):
+    """An `ENSURE_RUNNING` command that arrives while a stopped engine drains is not served by it:
+    its worker waits for the exit and then starts `looplab resume`, which LIFTS the stop — and that
+    plan is in `.commands/`, never in the log (critic 2026-09-26: "has exited", exit 0)."""
+    rd = _run_dir(tmp_path, in_flight=False)
+    _command_record(rd, event_type="budget_extend", policy="ensure_running")
+    out = CliRunner().invoke(app, ["stop", str(rd), "--wait"])
+    assert out.exit_code == 1, out.output
+    assert "did not stop: server command(s) `budget_extend`" in out.output
+    assert "will start an engine" in out.output
+
+
+def test_only_an_unsettled_engine_starting_record_counts(tmp_path):
+    from looplab.cli.run_cmds import server_commands_restarting
+
+    rd = _run_dir(tmp_path, in_flight=False)
+    assert server_commands_restarting(rd) == []                        # no `.commands/` at all
+    _command_record(rd, event_type="budget_extend", policy="ensure_running", status="succeeded",
+                    name="1" * 32)
+    _command_record(rd, event_type="hint", policy="no_spawn", name="2" * 32)
+    _command_record(rd, event_type="run_abort", policy="ensure_driver_preserve_stop",
+                    name="3" * 32)                     # a finalize driver never lifts the pause
+    assert server_commands_restarting(rd) == []
+    _command_record(rd, event_type="restart", policy="restart_after_exit", status="accepted",
+                    name="4" * 32)
+    (rd / ".commands" / f"cmd_{'5' * 32}.json").write_text("{not json", encoding="utf-8")
+    assert server_commands_restarting(rd) == [f"`restart` (cmd_{'4' * 32}, accepted)",
+                                              f"cmd_{'5' * 32} (unreadable)"]
+
+
+def test_the_record_a_real_command_worker_leaves_is_the_one_read(tmp_path):
+    """Pinned against the WRITER: a `budget_extend` submitted to the real command service while an
+    engine is alive (so its worker waits on the exit) is named; the `hint` beside it is not."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from looplab.cli.run_cmds import server_commands_restarting
+    from looplab.serve.run_commands import RunCommandService
+    from looplab.serve.server import make_app
+    from tests.factories import post_command
+
+    rd = _run_dir(tmp_path, in_flight=False)
+    (rd / "task.snapshot.json").write_text('{"kind":"quadratic","goal":"g","direction":"min"}',
+                                          encoding="utf-8")
+    application = make_app(tmp_path)
+    srv = application.state.looplab
+    srv.commands = RunCommandService(
+        srv, engine_alive=lambda _rd: True, spawn_engine=lambda *a, **k: 4242,
+        process_alive=lambda _pid: True, process_identity=lambda _pid: "child",
+        startup_timeout=0.05, command_timeout=5.0, poll_interval=0.01,
+        max_observation_timeout=10.0)
+    client = TestClient(application)
+    # One active command per run: the `hint` (NO_SPAWN, settled once its intent is folded) first.
+    hint = post_command(client, "hint", {"text": "keep going"}, key="h", run_id="run").json()
+    deadline = time.monotonic() + 10
+    while client.get(f"/api/runs/run/commands/{hint['id']}").json()["status"] != "succeeded":
+        assert time.monotonic() < deadline, "the hint never settled"
+        time.sleep(0.02)
+    assert server_commands_restarting(rd) == []
+    assert post_command(client, "budget_extend", {"add_nodes": 2}, run_id="run").status_code < 300
+    named = server_commands_restarting(rd)
+    assert len(named) == 1 and named[0].startswith("`budget_extend` (cmd_"), named
+
+
+@pytest.mark.parametrize("value", ["nan", "inf"])
+def test_a_timeout_no_elapsed_time_can_reach_is_refused(tmp_path, value):
+    rd = _run_dir(tmp_path, in_flight=False)
+    before = len(EventStore(rd / "events.jsonl").read_all())
+    out = CliRunner().invoke(app, ["stop", str(rd), "--wait", "--timeout", value])
+    assert out.exit_code == 2, out.output
+    assert len(EventStore(rd / "events.jsonl").read_all()) == before
+
+
+def test_the_wait_refolds_only_when_the_log_moved(tmp_path, monkeypatch):
+    """Every poll asks whether the stop still stands; a whole-log fold per poll was a third of a core
+    on a 30k-event log (critic 2026-09-26)."""
+    from looplab.cli import run_cmds
+
+    rd = _run_dir(tmp_path, in_flight=False)
+    store = EventStore(rd / "events.jsonl")
+    calls = []
+    monkeypatch.setattr(run_cmds, "fold", lambda events: calls.append(len(events)) or fold(events))
+    current = run_cmds._TailFold(store)
+    first = current()
+    assert current() is first and current() is first and len(calls) == 1
+    store.append("pause", {})
+    assert current().paused and len(calls) == 2
+
+
+def test_an_inconclusive_first_probe_does_not_turn_a_wait_into_no_engine(tmp_path, monkeypatch):
+    """`was_alive` came from ONE probe: an unreadable first one made an hours-long wait end with
+    "no engine was running". Whether an engine was EVER seen is what the last line reports."""
+    from looplab.engine import run_lifecycle
+
+    rd = _run_dir(tmp_path, in_flight=True)
+    answers = itertools.chain([None, True, True], itertools.repeat(False))
+    monkeypatch.setattr(run_lifecycle, "engine_liveness", lambda _rd: next(answers))
+    out = CliRunner().invoke(app, ["stop", str(rd), "--wait"])
+    assert out.exit_code == 0, out.output
+    assert "has exited" in out.output and "no engine was running" not in out.output

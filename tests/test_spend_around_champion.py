@@ -20,14 +20,16 @@ from looplab.events.token_spend import spend_around_champion
 
 
 def _log(tmp_path, rows):
-    """`rows` is a list of ("usage", tokens, cost[, usage_id]) / ("node", id, metric) steps."""
+    """`rows` is a list of ("usage", tokens, cost[, usage_id]) / ("node", id, metric) steps. A usage
+    row is priced exactly when it states a cost, the way `engine/costs.py` records a provider that
+    bills nothing through this client (`priced_calls: 0`)."""
     rd = tmp_path / "run"
     rd.mkdir()
     store = EventStore(rd / "events.jsonl")
     store.append("run_started", {"run_id": "run", "task_id": "t", "goal": "g", "direction": "max"})
     for step in rows:
         if step[0] == "usage":
-            payload = {"calls": 1, "priced_calls": 1, "prompt_tokens": step[1] // 2,
+            payload = {"calls": 1, "priced_calls": int(step[2] > 0), "prompt_tokens": step[1] // 2,
                        "completion_tokens": step[1] - step[1] // 2, "total_tokens": step[1],
                        "cost": step[2]}
             if len(step) > 3:
@@ -54,8 +56,9 @@ def test_the_ledger_is_split_at_the_champions_terminal(tmp_path):
     state = fold(events)
     split = spend_around_champion(events, state)
     assert split["node_id"] == 1
-    assert split["reach"] == {"tokens": 4000, "calls": 2, "cost": 0.4}
-    assert split["after"] == {"tokens": 6000, "calls": 2, "cost": 0.6}
+    assert split["reach"] == {"tokens": 4000, "calls": 2, "priced_calls": 2, "cost": 0.4}
+    assert split["after"] == {"tokens": 6000, "calls": 2, "priced_calls": 2, "cost": 0.6}
+    assert split["ledger_starts_after"] is False
     assert split["total"]["tokens"] == state.llm_cost["total_tokens"] == 10000
     assert split["after_share_tokens"] == pytest.approx(0.6)
     assert split["after_share_cost"] == pytest.approx(0.6)
@@ -140,3 +143,70 @@ def test_looplab_tokens_prints_the_line(tmp_path):
     line = next(ln for ln in out.output.splitlines() if ln.startswith("champion"))
     assert "node 0" in line and "1,000 tokens ($0.1000) spent to reach it" in line
     assert "3,000 tokens ($0.3000; 75.0 % of tokens, 75.0 % of cost) spent after it" in line
+
+
+def test_a_partly_priced_ledger_names_its_priced_calls_and_drops_the_cost_share(tmp_path):
+    """A gateway that began pricing mid-run: the reach's `$0.1000` is a sum over ONE of its two
+    calls, and a cost share would be a ratio of two floors (critic 2026-09-26: "100.0 % of cost")."""
+    rd, _store = _log(tmp_path, [("usage", 1000, 0.0), ("usage", 1000, 0.10), ("node", 0, 0.9),
+                                 ("usage", 2000, 0.20)])
+    (rd / "spans.jsonl").write_text("", encoding="utf-8")
+    out = CliRunner().invoke(app, ["tokens", str(rd)])
+    line = next(ln for ln in out.output.splitlines() if ln.startswith("champion"))
+    assert "2,000 tokens ($0.1000 over 1 of 2 calls priced) spent to reach it" in line, line
+    assert "2,000 tokens ($0.2000; 50.0 % of tokens)" in line and "of cost" not in line, line
+
+
+def test_a_ledger_that_starts_after_the_champion_says_the_reach_is_unrecorded(tmp_path):
+    """A pre-ledger session found the champion and `looplab stop` wrote no roll-up; a resumed build
+    with the ledger then billed everything after it. "0 to reach it" is not a measurement."""
+    rd, store = _log(tmp_path, [("node", 0, 0.9), ("usage", 1000, 0.10)])
+    events = store.read_all()
+    split = spend_around_champion(events, fold(events))
+    assert split["ledger_starts_after"] is True and split["rolled_up_before"] is False
+    (rd / "spans.jsonl").write_text("", encoding="utf-8")
+    out = CliRunner().invoke(app, ["tokens", str(rd)])
+    assert "what reaching it cost is unrecorded, not zero" in out.output, out.output
+    # ...and one whose roll-up counted the spend before it says the reach is that roll-up.
+    rd3 = tmp_path / "rolled"
+    rd3.mkdir()
+    store3 = EventStore(rd3 / "events.jsonl")
+    store3.append("run_started", {"run_id": "r3", "task_id": "t", "goal": "g", "direction": "max"})
+    store3.append("llm_cost", {"cost": 0.5, "calls": 3, "total_tokens": 3000})
+    store3.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                   "idea": {"operator": "draft", "params": {}, "rationale": "s"},
+                                   "code": "pass\n"})
+    store3.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": 0.9,
+                                     "violations": []})
+    store3.append("llm_usage", {"calls": 1, "priced_calls": 1, "total_tokens": 100, "cost": 0.01})
+    events3 = store3.read_all()
+    split3 = spend_around_champion(events3, fold(events3))
+    assert split3["ledger_starts_after"] is True and split3["rolled_up_before"] is True
+    assert split3["reach"]["tokens"] == 3000
+    (rd3 / "spans.jsonl").write_text("", encoding="utf-8")
+    out3 = CliRunner().invoke(app, ["tokens", str(rd3)])
+    assert "the reach is what the last cost roll-up before it recorded" in out3.output, out3.output
+
+
+def test_the_after_window_ends_at_the_last_spend_not_the_last_row(tmp_path, monkeypatch):
+    """An operator's comment a week later is not the run spending (critic 2026-09-26)."""
+    import time as _time
+
+    rd, store = _log(tmp_path, [("usage", 1000, 0.10), ("node", 0, 0.9), ("usage", 3000, 0.30)])
+    events = store.read_all()
+    spent_until = events[-1].ts
+    week = _time.time() + 7 * 24 * 3600
+    monkeypatch.setattr(_time, "time", lambda: week)
+    store.append("annotation", {"node_id": 0, "text": "looked at it later"})
+    monkeypatch.undo()
+    events = store.read_all()
+    split = spend_around_champion(events, fold(events))
+    landed = next(e for e in events if e.type == "node_evaluated")
+    assert split["after_seconds"] == pytest.approx(max(0.0, spent_until - landed.ts))
+    # Nothing billed after the champion: no window at all, whatever rows follow it.
+    rd2 = tmp_path / "quiet"
+    rd2.mkdir()
+    _rd2, store2 = _log(rd2, [("usage", 1000, 0.10), ("node", 0, 0.9)])
+    store2.append("annotation", {"node_id": 0, "text": "done"})
+    events2 = store2.read_all()
+    assert spend_around_champion(events2, fold(events2))["after_seconds"] is None

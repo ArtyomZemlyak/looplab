@@ -563,21 +563,35 @@ def echo_spend_around_champion(*, state, ev_path: Path) -> None:
     def _share(value) -> str:
         return "n/a" if value is None else f"{100 * value:.1f} %"
 
-    reach, after = split["reach"], split["after"]
+    reach, after, total = split["reach"], split["after"], split["total"]
     # AN UNPRICED LEDGER SAYS SO rather than printing `$0.0000` twice: a provider that bills nothing
-    # through this client (the box's own) records `cost: 0.0`, and a zero is a claim about money.
-    priced = bool(split["total"]["cost"])
+    # through this client (the box's own) records `cost: 0.0`, and a zero is a claim about money. A
+    # PARTLY priced one (a gateway that began pricing mid-run) names its priced calls on every part
+    # whose cost is a sum over some of them, and its cost share — a ratio of two floors — is left out.
+    priced = bool(total["priced_calls"]) or bool(total["cost"])
+    fully = total["priced_calls"] >= total["calls"]
 
     def _money(part) -> str:
-        return f"${part['cost']:.4f}" if priced else "unpriced"
+        if not priced:
+            return "unpriced"
+        text = f"${part['cost']:.4f}"
+        if part["priced_calls"] < part["calls"]:
+            text += f" over {part['priced_calls']} of {part['calls']} calls priced"
+        return text
 
     tail = ("" if split["after_seconds"] is None
-            else f", over the last {split['after_seconds'] / 3600:.1f} h of the run")
-    cost_share = f", {_share(split['after_share_cost'])} of cost" if priced else ""
+            else f", over the {split['after_seconds'] / 3600:.1f} h that followed")
+    cost_share = f", {_share(split['after_share_cost'])} of cost" if priced and fully else ""
     typer.echo(f"champion   : node {split['node_id']} landed at seq {split['seq']} — "
                f"{reach['tokens']:,} tokens ({_money(reach)}) spent to reach it; "
                f"{after['tokens']:,} tokens ({_money(after)}; {_share(split['after_share_tokens'])} "
                f"of tokens{cost_share}) spent after it was in hand{tail}")
+    if split["ledger_starts_after"]:
+        typer.echo("             the per-call ledger starts after the champion landed (a run begun "
+                   "on a build without it): "
+                   + ("the reach is what the last cost roll-up before it recorded"
+                      if split["rolled_up_before"]
+                      else "what reaching it cost is unrecorded, not zero"))
 
 
 def echo_edit_types(state) -> None:
