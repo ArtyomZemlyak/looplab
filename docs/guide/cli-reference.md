@@ -64,6 +64,7 @@ looplab approve         Ratify a paused run (HITL / onboarding)
 looplab bench           Capability self-benchmark across tasks
 looplab ui              Serve the live React UI (needs the [ui] extra)
 looplab tui             Terminal control plane: start/steer runs by chat (no browser)
+looplab export-git      The node DAG as a git repository: a commit per node, its parents as the DAG, `Looplab-*` trailers (doc 67 67.15)
 looplab export-mlflow   Log the champion to MLflow
 looplab export-notebook Export the champion as a runnable .ipynb
 looplab export-sft      This run's model turns as execution-grounded SFT rows, each carrying its node's outcome (doc 52 row 33)
@@ -2716,6 +2717,42 @@ This command exports a run that has already happened. To have MLflow receive a r
 parent — set [`mlflow_tracking_uri`](configuration.md) (`LOOPLAB_MLFLOW_TRACKING_URI`) before
 `looplab run` / `looplab resume`. It is blank (off) by default because a tracking server is an
 egress boundary.
+
+## `export-git`
+
+The run's node DAG as a **git repository**, so `git log --graph`, `git diff node-3 node-7`,
+`git bisect` and `git blame` read it (doc 67 67.15, `events/git_export.py`).
+
+```bash
+looplab export-git RUN_DIR OUT_DIR
+```
+
+| Argument | Description |
+|---|---|
+| `RUN_DIR` | Run directory to export (read-only: nothing is appended) |
+| `OUT_DIR` | Where the new repository goes; it must not exist, or be an empty directory |
+
+Each node is one commit, published as the lightweight tag `node-<id>`. Its parents are the node's
+`parent_ids`, so a merge node has two, and a draft has none. Branch `champion` points at the promoted
+champion, or at the fold's best if none was promoted, and is checked out. With no champion yet,
+nothing is checked out.
+
+A commit's tree is the node's own files: its `files` map, which is the whole edit set relative to the
+task's base tree (every materialization seeds that base and writes `files` on top), plus
+`solution.py` for a node with `code`. The base tree itself is not in the log (doc 67 67.12), so it
+is not in the export; a node's `deleted` names are removals from that base and are listed in the
+message. Task assets are the task's, and are left out.
+
+The message's `Looplab-*` trailers carry the node, attempt, operator, parents, status, metric,
+confirmed mean, holdout metric, failure reason and params, and mark the champion. A script reads
+them with `git log --format='%(trailers:key=Looplab-Metric,valueonly)'`. A path a checkout could
+turn against its reader (absolute, `..`, a `.git` component, a drive prefix) is counted as
+`Looplab-Skipped-Paths` and never written.
+
+The export is **deterministic**: parents before children, sorted paths, each commit dated by its
+node's first `node_created` row, and one fixed identity. One log therefore exports to the same
+commit ids every time. It is a projection, never a second source of truth: nothing reads it back.
+It needs `git` on the `PATH`, and exits `2` without it or over a non-empty `OUT_DIR`.
 
 ## `export-notebook`
 

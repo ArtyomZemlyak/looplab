@@ -6,6 +6,7 @@ shared `_engine` builder back from `looplab.cli` at module level without an impo
 """
 from __future__ import annotations
 
+import functools
 import json
 from pathlib import Path
 from typing import Optional
@@ -158,6 +159,50 @@ def export_notebook(
     dest = out or (run_dir / "champion.ipynb")
     atomic_write_text(dest, json.dumps(nb, indent=1))
     typer.echo(f"wrote {dest}")
+
+
+@app.command(name="export-git")
+def export_git(
+    run_dir: Path = typer.Argument(..., help="Run dir whose node DAG to export."),
+    out: Path = typer.Argument(..., help="Directory for the new git repository (absent or empty)."),
+):
+    """Export the run's node DAG as a GIT REPOSITORY: one commit per node, its parents as the
+    commit's parents, the node's own files as the tree, the metric and receipts as `Looplab-*`
+    trailers (doc 67 67.15, `events/git_export.py`). Each node is tag `node-<id>`; branch `champion`
+    is checked out. Read-only on the run; the export is a projection of the log, never read back.
+    The task's base tree is not in the log, so a commit holds only the files the node itself wrote."""
+    import shutil
+    import subprocess
+
+    from looplab.events.git_export import CHAMPION_REF, champion_id, fast_import_stream
+
+    git = shutil.which("git")
+    if git is None:
+        typer.echo("git is not installed — nothing to export into")
+        raise typer.Exit(2)
+    if out.exists() and (not out.is_dir() or any(out.iterdir())):
+        typer.echo(f"{out} exists and is not an empty directory — refusing to write into it")
+        raise typer.Exit(2)
+    store = _require_run_dir(run_dir)
+    events = store.read_all()
+    state = fold(events)
+    stream = fast_import_stream(events, state)
+    run = functools.partial(subprocess.run, check=True, capture_output=True)
+    try:
+        run([git, "init", "--quiet", str(out)])
+        run([git, "-C", str(out), "fast-import", "--quiet", "--done"], input=stream)
+        winner = champion_id(state)
+        if winner is not None:
+            run([git, "-C", str(out), "symbolic-ref", "HEAD", CHAMPION_REF])
+            run([git, "-C", str(out), "reset", "--hard", "--quiet"])
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+        typer.echo(f"git failed: {' '.join(map(str, exc.cmd[:4]))} — "
+                   f"{detail[-1] if detail else f'exit {exc.returncode}'}")
+        raise typer.Exit(1)
+    typer.echo(f"exported {len(state.nodes)} node(s) of {run_dir} to {out} as tags node-<id>"
+               + (f"; branch champion = node {winner}, checked out" if winner is not None
+                  else "; no champion yet, so nothing is checked out"))
 
 
 @app.command(name="export-sft")
