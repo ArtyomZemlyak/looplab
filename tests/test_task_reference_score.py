@@ -44,6 +44,8 @@ def test_the_headroom_arithmetic_in_both_directions():
 def test_the_fold_keeps_only_a_sourced_finite_reference():
     assert normalized_reference(_REF) == _REF
     assert normalized_reference({"baseline": {"value": 1.0}}) is None, "no source, no reference"
+    assert normalized_reference({"baseline": {"value": 1.0, "source": "   "}}) is None, \
+        "a blank source is no source: the fold holds a hand-edited log to the submit-time rule"
     assert normalized_reference({"baseline": {"value": float("inf"), "source": "s"}}) is None
     assert normalized_reference({"baseline": {"value": True, "source": "s"}}) is None
     partial = normalized_reference({"baseline": {"value": 1.0, "source": "s"},
