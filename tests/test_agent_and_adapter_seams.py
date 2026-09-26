@@ -37,10 +37,14 @@ def test_the_subset_is_exactly_the_prose_cues():
     carries the GPU RESOURCE CONTRACT cue announcing the POOL size and the experiment TIME-BUDGET cue,
     and each ceiling has to be the last number the model reads on ITS OWN axis. They do not fight for
     the final slot because neither names the other's quantity — `_gpu_budget_hint` (docs/29 F1b) names
-    no wall clock and `_time_budget_hint` (docs/29 F1h) names no device count."""
+    no wall clock and `_time_budget_hint` (docs/29 F1h) names no device count.
+
+    `_ablation_probe_hint` (doc 67 67.4, 2026-09-26) sits BEFORE the two budget cues for that same
+    reason: it names neither a device count nor a wall clock, and is empty on every call but the one
+    refine proposal after a parameter ablation."""
     assert RESEARCHER_PROMPT_CUES == (
-        "_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint", "_gpu_budget_hint",
-        "_time_budget_hint")
+        "_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint",
+        "_ablation_probe_hint", "_gpu_budget_hint", "_time_budget_hint")
 
 
 @pytest.mark.parametrize("module,holder,method", [
