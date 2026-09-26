@@ -20,6 +20,7 @@ board read card-2 `supported` on it, i.e. told the Researcher the single pass wa
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 from typing import Mapping, Optional
 
 IDEA_REPORT_NAME = "looplab_idea_report.json"
@@ -42,28 +43,69 @@ def idea_report_text(args) -> Optional[str]:
                       indent=1)
 
 
-def idea_report_of(node) -> tuple[Optional[str], str]:
-    """`(idea_implemented, built_instead)` off the node's report file; `(None, "")` when there is no
-    report or it cannot be read. The LATEST report wins: a repair's `node_repaired.files` replaces the
-    build's, so a repair that did implement the idea after all says so and is counted again."""
+# A report `idea_report_text` writes is ~480 characters at most. The file is Developer-writable, so the
+# reader bounds it rather than trusting it: anything longer than this was not written by a `done` and
+# reads as no report. The cap is on what gets PARSED, which the fold does for every evidence node.
+_REPORT_MAX_CHARS = 4096
+
+
+@lru_cache(maxsize=4096)
+def _parse_report(text: str) -> tuple[Optional[str], str]:
+    """The parse, memoised on the report's own text: the fold reads every card's evidence reports
+    on every fold, and a report is a few hundred immutable bytes, so the key IS the value."""
+    if len(text) > _REPORT_MAX_CHARS:
+        return None, ""
     try:
-        data = json.loads((getattr(node, "files", None) or {}).get(IDEA_REPORT_NAME) or "{}")
-    except (ValueError, TypeError, AttributeError):
+        data = json.loads(text)
+    except ValueError:
         return None, ""
     if not isinstance(data, dict) or data.get("idea_implemented") not in IDEA_IMPLEMENTED:
         return None, ""
     return data["idea_implemented"], " ".join(str(data.get("built_instead") or "").split())
 
 
-def idea_not_tested(node) -> bool:
+def _report_text(node) -> Optional[str]:
+    files = getattr(node, "files", None)
+    text = files.get(IDEA_REPORT_NAME) if isinstance(files, Mapping) else None
+    return text if isinstance(text, str) and text else None
+
+
+def inherited_report(node, nodes: Optional[Mapping]) -> bool:
+    """Is this node's report its PARENT's, byte for byte? The repo Developer pre-loads an improve /
+    refine build with the parent's files, and until 2026-09-26 the report rode along with them
+    (`adapters/repo_developer.py::_run` now drops it), so a child whose `done` answered nothing
+    carried its parent's `different` — and would have retired its own card on the parent's word.
+    Logs written before that keep the copy; this is how the readers tell it from a report of its own.
+    A child whose Developer wrote the very same bytes loses its report here — the safe direction: it
+    is counted as a test, which is all a node with no report ever was."""
+    text = _report_text(node)
+    if text is None or not nodes:
+        return False
+    return any(_report_text(nodes.get(pid)) == text
+               for pid in (getattr(node, "parent_ids", None) or ()))
+
+
+def idea_report_of(node, nodes: Optional[Mapping] = None) -> tuple[Optional[str], str]:
+    """`(idea_implemented, built_instead)` off the node's report file; `(None, "")` when there is no
+    report, it cannot be read, or — given the run's `nodes` — it is the parent's (`inherited_report`).
+    The LATEST report wins: a repair's `node_repaired.files` replaces the build's, so a repair that
+    did implement the idea after all says so and is counted again."""
+    text = _report_text(node)
+    if text is None or inherited_report(node, nodes):
+        return None, ""
+    return _parse_report(text)
+
+
+def idea_not_tested(node, nodes: Optional[Mapping] = None) -> bool:
     """Did this node's Developer report that it did NOT build its idea (`NOT_A_TEST`)?"""
-    return idea_report_of(node)[0] in NOT_A_TEST
+    return idea_report_of(node, nodes)[0] in NOT_A_TEST
 
 
-def idea_report_note(node) -> str:
+def idea_report_note(node, nodes: Optional[Mapping] = None) -> str:
     """" [NOT A TEST OF card-N's IDEA — …]" for a node whose Developer said it built something else,
-    " [idea partly built — …]" for a partial build, "" otherwise (as proposed, or no report)."""
-    value, built = idea_report_of(node)
+    " [idea partly built — …]" for a partial build, "" otherwise (as proposed, or no report). Pass
+    the run's `nodes` wherever a caller has them, so an inherited report is not read as this node's."""
+    value, built = idea_report_of(node, nodes)
     if value is None or value == "as_proposed":
         return ""
     instead = f" — built instead: {built[:160]}" if built else ""
@@ -84,7 +126,7 @@ def card_substitution_brief(card, nodes: Mapping) -> str:
         return ""
     parts = []
     for nid in ids[:3]:
-        _value, built = idea_report_of(nodes.get(nid))
+        _value, built = idea_report_of(nodes.get(nid), nodes)
         parts.append(f"node {nid} built " + (f"instead: {built[:120]}" if built else "something else"))
     counted = [nid for nid in (getattr(card, "evidence", None) or []) if nid not in ids]
     if counted:

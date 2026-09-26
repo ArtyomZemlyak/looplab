@@ -410,7 +410,8 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   `idea_implemented: different` or `not_implemented` is listed in `substituted_nodes`, never counts
   in its card's verdict, and — when it is the card's whole evidence — leaves `evidence`, so the
   untested idea is claimable again (the node keeps its metric and any champion title). At two such
-  builds the card retires with its verdict still `open`. Unknown future
+  builds the card retires with its verdict still `open`. The card pane's attempt list labels such a node `not a test`
+  rather than `evidence` or `reserved`. Unknown future
   statuses remain visible rather than being hidden. Cards expose receipt
   completeness, selection readiness/blockers, lineage and evidence-node links. Operator controls can
   edit display text, pin the 1-based visible priority, pin a configured GPU request, deliberately

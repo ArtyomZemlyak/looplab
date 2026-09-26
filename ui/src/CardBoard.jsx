@@ -738,7 +738,9 @@ function _CardAttempts({ attempts, selectedNodeId, onOpenNode, coverage = null, 
         // the verdict" and "this node was reserved for the card" are different claims, and a node
         // that is still building has only the second. Flattening them would report an in-flight
         // build as settled evidence.
-        const lane = entry.evidence ? 'evidence' : 'reserved'
+        // A SUBSTITUTED build ran and has a metric, but its Developer built something else: it
+        // neither fed this card's verdict nor is a pending reservation, whichever list holds it.
+        const lane = entry.substituted ? 'not a test' : entry.evidence ? 'evidence' : 'reserved'
         return <li key={entry.nodeId}>
           <button type="button"
             className={'card-attempt' + (selectedNodeId === entry.nodeId ? ' on' : '')
@@ -756,8 +758,10 @@ function _CardAttempts({ attempts, selectedNodeId, onOpenNode, coverage = null, 
               {entry.present ? statusText : 'not in snapshot'}</span>
             {attempt != null && <span className="muted">attempt {attempt}</span>}
             {metric != null && <span className="card-attempt-metric">{fmt(metric)}</span>}
-            <span className={'chip xs' + (lane === 'reserved' ? ' warn' : '')}
-              title={lane === 'evidence'
+            <span className={'chip xs' + (lane === 'evidence' ? '' : ' warn')}
+              title={lane === 'not a test'
+                ? 'its Developer reported building something else — it ran, but it is not a test of this Card’s idea and does not count in its verdict'
+                : lane === 'evidence'
                 ? 'in the Card’s evidence list — this attempt reached a terminal and fed the verdict'
                 : 'reserved for this Card by its mint stamp, but not yet in the evidence list'}>{lane}</span>
           </button>

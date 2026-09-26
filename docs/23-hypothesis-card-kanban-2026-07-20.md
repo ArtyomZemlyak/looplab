@@ -365,6 +365,7 @@ Layer 3 must remain disabled until the native mint/link lifecycle removes that a
 | `evidence` | nodes whose `idea.card_id == id` (or whose statement hash-joins) | derived |
 | `status_nodes` | the node ids the lifecycle `status` was derived from — for `building`, the reserved `node_building` node, which `evidence` deliberately never carries | derived (2026-08-14) |
 | `discarded_nodes` | the node ids `is_unevaluated_speculative_discard` PROVES never reached a sandbox (a prefetch the Card freshness gate superseded before dispatch). Disjoint from `evidence` by construction — see §3.1 | derived (2026-08-15) |
+| `substituted_nodes` | the terminal node ids whose Developer REPORTED building something else (`looplab_idea_report.json`: `different` / `not_implemented`, `core/idea_report.py::NOT_A_TEST`; a report byte-identical to a parent's is the parent's and does not count). They ran and keep their metric, but never count in the card's verdict; a single one that is the card's whole evidence leaves `evidence` (once per card), and at two the card retires with its verdict `open` — `events/card_ledger.py::_apply_substituted_builds` | derived (2026-09-26) |
 | `research_origin`, `lesson_refs`, `claim_refs` | `Node.research_origin`, memo, lessons/claims stores | link |
 | `steering_context` (why proposed: cues + strategist stance + memo id) | proposal-cue hints + `active_strategy` — **homeless today** | new field |
 | `status` (derived maturity/lifecycle) | `_derive_cards` from fields + `st.nodes` | derived |

@@ -893,6 +893,7 @@ function CardLink({ link, onOpenCard }) {
       : `${summary.total} attempts at this work item — this one and ${summary.total - 1} other${summary.total === 2 ? '' : 's'}.`}
       {summary.evidence > 0 && ` ${summary.evidence} in its evidence list`}
       {summary.ownedOnly > 0 && `, ${summary.ownedOnly} reserved but not evidence yet`}
+      {summary.substituted > 0 && `, ${summary.substituted} built something else (not a test of it)`}
       {summary.missing > 0 && `, ${summary.missing} not in this snapshot`}.
     </div>
   </>

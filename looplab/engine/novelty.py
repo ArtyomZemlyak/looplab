@@ -325,9 +325,10 @@ def literature_overlap(text: str, literature, *, floor: float = LITERATURE_OVERL
 
 
 
-def _prior_outcome(node) -> str:
+def _prior_outcome(node, nodes=None) -> str:
     """A tried experiment's outcome as the novelty judge needs it: an `inert_path` node never ran
-    its idea (`engine/activation.py`), which is the difference between "tried" and "not built"."""
+    its idea (`engine/activation.py`), which is the difference between "tried" and "not built".
+    `nodes` (the run's) lets the report note tell a parent's copied report from the node's own."""
     from looplab.core.idea_report import idea_report_note
     status = getattr(getattr(node, "status", None), "value", str(getattr(node, "status", "")))
     if status == "failed":
@@ -336,7 +337,7 @@ def _prior_outcome(node) -> str:
         head = f"metric={getattr(node, 'metric', None)}"
     else:
         head = status or "unknown"
-    return head + idea_report_note(node)
+    return head + idea_report_note(node, nodes)
 
 class BatchProposal(NamedTuple):
     """What ONE batched proposal produced: `_propose_batch`'s RETURN VALUE (review 2026-09-22,
@@ -684,7 +685,7 @@ class NoveltyGateMixin:
             node_operator = json.dumps(
                 _bounded_prompt_text(getattr(node, "operator", ""), 160), ensure_ascii=False)
             row = (
-                f"#{node.id} node_operator={node_operator} outcome={_prior_outcome(node)}: "
+                f"#{node.id} node_operator={node_operator} outcome={_prior_outcome(node, state.nodes)}: "
                 f"{self._idea_prompt_identity(node.idea, prose_chars=240)}"
             )
             if used + len(row) + (1 if prior_rows else 0) > _IDEA_PROMPT_PRIOR_CHARS:

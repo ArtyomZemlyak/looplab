@@ -292,3 +292,20 @@ test('the board is no longer a panel, so nothing can open it as an overlay', () 
   assert.ok(!route.RUN_ROUTE_PANELS.includes('hypotheses'))
   assert.equal(route.LEGACY_PANEL_VIEWS.hypotheses, 'cards')
 })
+
+test('a substituted build is its own lane: neither the verdict\'s evidence nor a reservation', () => {
+  // `events/card_ledger.py::_apply_substituted_builds`: node 5 ran something else and was taken out
+  // of `evidence` (the once-per-card return); node 6 is a real test in a mixed set beside node 7,
+  // another substitution that stayed in `evidence`.
+  const state = { nodes: {
+    5: { status: 'evaluated', metric: 1.37, idea: { card_id: 'card-ret' } },
+    6: { status: 'evaluated', metric: 1.0, idea: { card_id: 'card-mix' } },
+    7: { status: 'evaluated', metric: 0.9, idea: { card_id: 'card-mix' } },
+  } }
+  const returned = cardAttempts(state, { id: 'card-ret', evidence: [], substituted_nodes: [5] })
+  assert.deepEqual(returned.map(entry => [entry.nodeId, entry.substituted, entry.evidence]), [[5, true, false]])
+  assert.deepEqual([cardAttemptSummary(returned).substituted, cardAttemptSummary(returned).ownedOnly], [1, 0])
+  const mixed = cardAttempts(state, { id: 'card-mix', evidence: [6, 7], substituted_nodes: [7] })
+  const roll = cardAttemptSummary(mixed)
+  assert.deepEqual([roll.evidence, roll.substituted, roll.ownedOnly], [1, 1, 0])
+})

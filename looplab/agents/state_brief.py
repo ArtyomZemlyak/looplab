@@ -66,11 +66,15 @@ def next_board_prompt_cards(
     used = 0
     for card in cards:
         seed = card.seed_statement or ""
+        # The row renders the substitution clause beside the seed (`board_prompt_lines`), up to ~0.5k
+        # characters on a returned card, so the budget charges it too; "" on every other card, which
+        # keeps the window of a run with no substituted build exactly what it was.
+        cost = len(seed) + len(state.card_substitution_brief(card))
         if (not seed or len(seed) > BOARD_SEED_CHARS_MAX
-                or used + len(seed) > BOARD_PROMPT_SEED_BUDGET_CHARS):
+                or used + cost > BOARD_PROMPT_SEED_BUDGET_CHARS):
             continue
         selected.append(card)
-        used += len(seed)
+        used += cost
         if len(selected) == BOARD_PROMPT_CARDS:
             break
     return selected
@@ -278,8 +282,15 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
             if group:
                 card = group[-1]
                 nodes = sorted({node for member in group for node in member.evidence})
+                # The row lists EVERY member's nodes, so it states every member's substitutions too
+                # — an older card's `different` build under NODES with no NOT TESTED clause is the
+                # laundering the clause exists to stop. The row's own card speaks unprefixed.
+                substitution = " ".join(
+                    ("" if member is card else f"{member.id}: ") + brief
+                    for member in group if (brief := state.card_substitution_brief(member)))
             else:
                 nodes = sorted(card.evidence)
+                substitution = state.card_substitution_brief(card)
             # …AND WHETHER THE EXPERIMENT THAT RAN IS STILL THE ONE THIS CARD PROPOSED. The arbiter
             # existed and nothing consumed it, which made this block quietly dangerous: a card's
             # `params` is the receipt-bound PROPOSAL, and under `params_style: "none"` the Developer
@@ -290,7 +301,7 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
             # applied record disagree with their own proposal, the run's CHAMPION among them —
             # card-132 says batch 4096 / lr 0.001 / 3 epochs and node 13 ran 2048 / 0.0005 / ONE
             # epoch. Silent when the two agree, so the loud case stays loud.
-            drift = f"{card_drift_brief(card)} {state.card_substitution_brief(card)}".strip()
+            drift = f"{card_drift_brief(card)} {substitution}".strip()
             lines.append(
                 f"- CARD_ID={card.id} BELIEF_ID={card.belief_id or ''} "
                 f"STATUS={state.card_status_now(card)} VERDICT={card.verdict} "

@@ -2659,6 +2659,14 @@ class LLMRepoDeveloper:
             # the node being repaired (the create-batch builds every node before any eval).
             write.files = dict(base or {})
             write.deleted = list(base_deleted or [])
+            if not error:
+                # The idea report is PER BUILD, not part of the solution: it says whether THIS
+                # Developer call built THIS node's idea. Carried verbatim from the parent, a child whose
+                # `done` answers nothing (it is optional, and a salvaged session never calls `done`)
+                # would inherit the parent's `different` and retire its OWN card as a substitution
+                # (`events/card_ledger.py::_apply_substituted_builds`). A repair keeps the node's own.
+                from looplab.core.idea_report import IDEA_REPORT_NAME
+                write.files.pop(IDEA_REPORT_NAME, None)
         elif error and (self.last_files or self.last_deleted):   # legacy repair (no explicit base):
             write.files = dict(self.last_files)                  # best-effort carry of the last build
             write.deleted = list(self.last_deleted)

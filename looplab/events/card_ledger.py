@@ -2181,7 +2181,7 @@ def _apply_substituted_builds(st: RunState, ledger: _CardLedger) -> None:
             and (node := st.nodes.get(node_id)) is not None
             and not node.tombstoned
             and node.status is not NodeStatus.pending
-            and idea_not_tested(node)
+            and idea_not_tested(node, st.nodes)
         )
         c.substituted_nodes = substituted
         if len(substituted) == 1 and set(substituted) == set(c.evidence):
@@ -2606,13 +2606,18 @@ def _apply_card_applied_params(st: RunState, ledger: _CardLedger) -> None:
     wrong for a field whose entire purpose is to be distinguishable from the declaration. A card
     whose nodes predate the applied record (or never bound a metric) publishes NOTHING and the empty
     map means "not recorded", never "the same as proposed".
+
+    A node in `substituted_nodes` is skipped: its Developer said it built something ELSE, so its
+    coordinates are not where THIS card's experiment ran — the board would print them as the card's
+    drift beside the clause saying the same node never tested it.
     """
     for card in ledger.cards.values():
         card.applied_params = {}
         card.applied_params_node = None
+        substituted = set(card.substituted_nodes)
         for node_id in sorted(card.evidence, reverse=True):
             node = st.nodes.get(node_id)
-            if node is None or node.status is not NodeStatus.evaluated:
+            if node is None or node.status is not NodeStatus.evaluated or node_id in substituted:
                 continue
             provenance = getattr(node, "metric_provenance", None)
             record = provenance.get("applied_params") if isinstance(provenance, dict) else None
