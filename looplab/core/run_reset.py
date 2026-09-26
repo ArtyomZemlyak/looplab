@@ -19,6 +19,11 @@ from looplab.core.fence import (
 
 RUN_RESET_MARKER = ".looplab-resetting.json"
 RUN_RESET_OPERATION_ENV = "LOOPLAB_RESET_OPERATION_ID"
+# The SEED a Replay hands its `looplab run` child (doc 67 67.2): the path of the run's own seq-0
+# seed row, staged beside the task before the archive (`serve/reset_route.py::_prepare_receipt`),
+# which the child appends verbatim instead of resolving a source by path again. Read only beside
+# `RUN_RESET_OPERATION_ENV`, and outside the `LOOPLAB_<FIELD>` Settings namespace on purpose.
+RUN_RESET_SEED_ENV = "LOOPLAB_RESET_SEED_ROW"
 # Aliases, not second declarations: the shapes and the 8 KiB cap are the fence PROTOCOL's, shared
 # with the deletion fence (doc 25 CO-01), and these names stay because callers/tests import them.
 RUN_RESET_MARKER_MAX_BYTES = FENCE_MAX_BYTES

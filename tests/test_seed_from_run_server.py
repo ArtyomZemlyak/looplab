@@ -1,16 +1,19 @@
 """`Settings.seed_from_run` on the SERVER — the critic's re-check of 2026-09-26, finding by finding.
 
-The launch route confined the seed; three other doors did not. A Replay re-seeds the run from its
-recorded setting in a spawned `looplab run` that learned only AFTER the archive whether the seed still
-resolved — a source deleted since stranded the run, and a seed a config PUT had pointed anywhere was
-read unconfined (HIGH). A saved default seeded every web launch of the server (LOW). And the route's
-own containment check admitted a linked `events.jsonl` and the deletion quarantine (LOW).
+The launch route confined the seed; three other doors did not. A Replay re-seeded the run by
+resolving its recorded setting again in the spawned `looplab run`, AFTER the archive — a source
+deleted since stranded the run, one Replayed since handed back a different experiment under the same
+node id, a config PUT or the server's environment pointed it anywhere (HIGH, then MEDIUM on the
+re-check). A Replay now freezes the row the run was born with and its child appends it verbatim. A
+saved default seeded every web launch of the server (LOW), and the route's own containment check
+admitted a linked `events.jsonl` and the deletion quarantine (LOW).
 """
 from __future__ import annotations
 
 import json
 import os
 import shutil
+from pathlib import Path
 
 import pytest
 
@@ -76,84 +79,242 @@ def _replacement_spawn(rd, spawns):
     return spawn
 
 
-def _refused_before_archiving(response, seeded, before, spawns):
-    assert response.status_code == 409, response.text
-    detail = response.json()["detail"]
-    assert detail["code"] == "replay_seed_invalid", detail
-    assert "Clear seed_from_run" in detail["remediation"]
-    assert not spawns and (seeded / "events.jsonl").read_bytes() == before
-    assert not list(seeded.glob("*.reset-*")), "Replay archived the run before refusing it"
-    assert not list(seeded.glob(".looplab-reset-task-*")), "the staged task was left behind"
-    return detail
+def _birth_row(rd):
+    return dict(EventStore(rd / "events.jsonl").read_all()[0].data)
 
 
-# ------------------------------------------------------------------ Replay (HIGH)
+def _frozen_row(env):
+    """What the Replay handed its child: `seed_from_run` blank — it resolves nothing — and, when
+    the run is re-seeded, the path of the frozen row."""
+    from looplab.core.run_reset import RUN_RESET_SEED_ENV
 
-def test_a_replay_whose_seed_is_gone_is_refused_while_the_run_is_intact(root, monkeypatch):
-    """Driven: the source run is deleted, then the seeded run is Replayed. The refusal comes before
-    the archive, so the run stays listed and readable — and editable, since no reset marker is up:
-    clearing the seed is the one per-run edit, and a Replay then relaunches it unseeded."""
+    assert env["LOOPLAB_SEED_FROM_RUN"] == "", "a Replay child never resolves a seed by path"
+    path = env.get(RUN_RESET_SEED_ENV)
+    if path is None:
+        return None
+    row = json.loads(open(path, encoding="utf-8").read())
+    assert isinstance(row, dict), f"a staged seed is a ROW, never {row!r}"
+    return row
+
+
+# ------------------------------------------------------------------ Replay
+
+def test_a_replay_re_seeds_from_the_birth_row_even_after_the_source_is_gone(root, monkeypatch):
+    """HIGH (critic 2026-09-26, driven): the Replay's child resolved the recorded spec after the
+    archive, and a deleted source stranded the run. The row the run was born with is frozen before
+    the archive and handed over; nothing is resolved, so the source's absence changes nothing."""
     from looplab.serve.routers import control as control_router
 
     src, seeded = _source_and_seeded(root)
-    before = (seeded / "events.jsonl").read_bytes()
+    born = _birth_row(seeded)
     shutil.rmtree(src)
     spawns: list = []
-    monkeypatch.setattr(control_router, "_spawn_engine", lambda *a, **kw: spawns.append((a, kw)))
+    monkeypatch.setattr(control_router, "_spawn_engine", _replacement_spawn(seeded, spawns))
     with TestClient(make_app(root)) as client:
-        detail = _refused_before_archiving(client.post("/api/runs/seeded/reset"), seeded, before,
-                                           spawns)
-        assert "is not a run under this server's runs root" in detail["message"]
-        assert client.get("/api/runs/seeded/state").status_code == 200
+        assert client.post("/api/runs/seeded/reset").status_code == 200
+    (_args, env), = spawns
+    assert _frozen_row(env) == born
+
+
+def test_a_replay_re_seeds_the_experiment_even_after_the_source_was_replayed(root, monkeypatch):
+    """MEDIUM (critic 2026-09-26, driven): node ids restart in a replayed source, so the recorded
+    `<dir>#<node>` named a different experiment — and the verdict still said `same`. The frozen row
+    carries the born-with code whatever the source holds now."""
+    from looplab.serve.routers import control as control_router
+
+    src, seeded = _source_and_seeded(root)
+    born = _birth_row(seeded)
+    shutil.rmtree(src)                               # the source regenerated: same ids, new code
+    regenerated = EventStore(src / "events.jsonl")
+    (src / "events.jsonl").parent.mkdir(parents=True, exist_ok=True)
+    regenerated.append("run_started", {"run_id": "src", "task_id": "toy", "goal": "g",
+                                       "direction": "min"})
+    for nid in range(born["origin"]["node_id"] + 1):
+        regenerated.append("node_created", {
+            "node_id": nid, "parent_ids": [], "operator": "draft",
+            "idea": {"operator": "draft", "params": {"x": 7.5}, "rationale": "regenerated"},
+            "code": "print('REGENERATED')\n"})
+        regenerated.append("node_evaluated", {"node_id": nid, "generation": 0, "metric": 20.25,
+                                              "violations": []})
+    spawns: list = []
+    monkeypatch.setattr(control_router, "_spawn_engine", _replacement_spawn(seeded, spawns))
+    with TestClient(make_app(root)) as client:
+        assert client.post("/api/runs/seeded/reset").status_code == 200
+    (_args, env), = spawns
+    frozen = _frozen_row(env)
+    assert frozen == born and "REGENERATED" not in frozen["code"]
+
+
+def test_a_replay_never_reads_the_snapshots_spec_nor_the_servers_environment(
+        root, tmp_path, monkeypatch):
+    """A hand-edited snapshot pointing outside the runs root, and — MEDIUM on the re-check — a
+    server whose environment carries `LOOPLAB_SEED_FROM_RUN` for a run whose snapshot predates the
+    field: neither reaches the child. A seeded run re-seeds its birth row; an unseeded one nothing."""
+    from looplab.serve.routers import control as control_router
+
+    src, seeded = _source_and_seeded(root)
+    born = _birth_row(seeded)
+    outside = tmp_path / "elsewhere" / "src"
+    assert _run(outside, "--max-nodes", "2").exit_code == 0
+    snapshot = seeded / "config.snapshot.json"
+    snapshot.write_text(json.dumps({**json.loads(snapshot.read_text()),
+                                    "seed_from_run": f"{outside}#0"}))
+    plain = root / "plain"
+    assert _run(plain, "--max-nodes", "2").exit_code == 0
+    legacy = json.loads((plain / "config.snapshot.json").read_text())
+    legacy.pop("seed_from_run")                  # written before the field existed
+    (plain / "config.snapshot.json").write_text(json.dumps(legacy))
+    hand = root / "hand"                         # never seeded; its snapshot edited to name one
+    assert _run(hand, "--max-nodes", "2").exit_code == 0
+    edited = json.loads((hand / "config.snapshot.json").read_text())
+    (hand / "config.snapshot.json").write_text(json.dumps({**edited,
+                                                           "seed_from_run": f"{src}#0"}))
+    monkeypatch.setenv("LOOPLAB_SEED_FROM_RUN", "src")
+    spawns: list = []
+    for rd in (seeded, plain, hand):
+        monkeypatch.setattr(control_router, "_spawn_engine", _replacement_spawn(rd, spawns))
+        with TestClient(make_app(root)) as client:
+            if rd is plain:
+                assert client.get("/api/runs/plain/config").json()["seed_from_run"] == ""
+            assert client.post(f"/api/runs/{rd.name}/reset").status_code == 200, rd
+    (_a, seeded_env), (_b, plain_env), (_c, hand_env) = spawns
+    assert _frozen_row(seeded_env) == born
+    assert _frozen_row(plain_env) is None
+    assert _frozen_row(hand_env) is None, "a run is re-seeded only with a row it was born with"
+
+
+def test_a_cleared_seed_replays_unseeded_and_the_ui_can_clear_it(root, monkeypatch):
+    """The one per-run edit is CLEARING the seed — by `""`, `null` or the per-run form's blank
+    (MEDIUM on the re-check: `null` was a 422 and the form refused a blank) — and a Replay then
+    starts unseeded; any other value is refused."""
+    from looplab.serve.routers import control as control_router
+
+    _src, seeded = _source_and_seeded(root)
+    spawns: list = []
+    monkeypatch.setattr(control_router, "_spawn_engine", _replacement_spawn(seeded, spawns))
+    with TestClient(make_app(root)) as client:
         generation = http_run_generation(client, "seeded")
         moved = client.put("/api/runs/seeded/config", json={
             "settings": {"seed_from_run": str(root / "elsewhere")},
             "expected_generation": generation})
         assert moved.status_code == 422 and "can't be changed per-run" in moved.text
         cleared = client.put("/api/runs/seeded/config", json={
-            "settings": {"seed_from_run": ""}, "expected_generation": generation})
+            "settings": {"seed_from_run": None}, "expected_generation": generation})
         assert cleared.status_code == 200, cleared.text
-        monkeypatch.setattr(control_router, "_spawn_engine", _replacement_spawn(seeded, spawns))
-        replay = client.post("/api/runs/seeded/reset")
-        assert replay.status_code == 200, replay.text
+        assert json.loads((seeded / "config.snapshot.json").read_text())["seed_from_run"] == ""
+        assert client.post("/api/runs/seeded/reset").status_code == 200
     (_args, env), = spawns
-    assert env["LOOPLAB_SEED_FROM_RUN"] == "", "the cleared seed is what the replacement is told"
+    assert _frozen_row(env) is None, "a cleared seed is not re-seeded"
 
 
-def test_a_replay_re_seeds_the_node_the_run_was_born_from(root, monkeypatch):
-    from looplab.serve.routers import control as control_router
+def test_a_replay_child_appends_the_frozen_row_and_resolves_nothing(root, monkeypatch):
+    """The CHILD half, driven through the real CLI with the Replay's two variables: the first row
+    is the frozen one, byte for byte, the snapshot records its spec, and the source — deleted —
+    is never looked up."""
+    from looplab.core.run_reset import RUN_RESET_OPERATION_ENV, RUN_RESET_SEED_ENV
 
     src, seeded = _source_and_seeded(root)
-    champion = fold(EventStore(src / "events.jsonl").read_all()).best()
+    born = _birth_row(seeded)
+    shutil.rmtree(src)
+    frozen = root / ".frozen-seed.json"
+    frozen.write_text(json.dumps(born))
+    monkeypatch.setenv(RUN_RESET_OPERATION_ENV, "0" * 8 + "-0000-4000-8000-" + "0" * 12)
+    monkeypatch.setenv(RUN_RESET_SEED_ENV, str(frozen))
+    child = root / "child"
+    out = _run(child, "--max-nodes", "2")
+    assert out.exit_code == 0, out.output
+    assert "re-seeded (Replay)" in out.output
+    first = EventStore(child / "events.jsonl").read_all()[0]
+    assert first.type == "inject_node" and dict(first.data) == born
+    assert (json.loads((child / "config.snapshot.json").read_text())["seed_from_run"]
+            == born["origin"]["run_dir"] + "#" + str(born["origin"]["node_id"]))
+    monkeypatch.delenv(RUN_RESET_OPERATION_ENV)      # outside a Replay the variable is inert
+    stray = root / "stray"
+    assert _run(stray, "--max-nodes", "2").exit_code == 0
+    assert EventStore(stray / "events.jsonl").read_all()[0].type != "inject_node"
+
+
+def test_the_frozen_row_is_immutable_and_named_by_its_operation(root, monkeypatch):
+    """The receipt pins the staged row by name and digest, both or neither, and never lets a later
+    save move either — the child appends what these name."""
+    from looplab.serve.reset_transaction import (
+        ResetReceiptError, load_reset_receipt, save_reset_receipt)
+    from looplab.serve.routers import control as control_router
+
+    _src, seeded = _source_and_seeded(root)
     spawns: list = []
     monkeypatch.setattr(control_router, "_spawn_engine", _replacement_spawn(seeded, spawns))
     with TestClient(make_app(root)) as client:
         assert client.post("/api/runs/seeded/reset").status_code == 200
-    (_args, env), = spawns
-    assert env["LOOPLAB_SEED_FROM_RUN"] == f"{src.resolve()}#{champion.id}"
+    path, = root.glob(".looplab-reset-receipt-*.json")
+    receipt = load_reset_receipt(path)
+    assert receipt["seed_stage"] == f".looplab-reset-seed-{receipt['id']}.json"
+    assert (seeded / receipt["seed_stage"]).is_file()
+    original = path.read_bytes()
+    # The SHAPE, read on the way in — each case alone, so no other rule answers for it.
+    for bad in ({k: v for k, v in receipt.items() if k != "seed_digest"},    # both or neither
+                {k: v for k, v in receipt.items() if k != "seed_stage"},
+                {**receipt, "seed_stage": ".looplab-reset-seed-other.json"},
+                {**receipt, "seed_digest": "not-a-digest"}):
+        path.write_text(json.dumps(bad))
+        with pytest.raises(ResetReceiptError):
+            load_reset_receipt(path)
+    path.write_bytes(original)
+    # …and IMMUTABLE on the way out: a well-formed digest still may not move.
+    with pytest.raises(ResetReceiptError, match="immutable"):
+        save_reset_receipt(path, {**receipt, "seed_digest": "0" * 64})
+    assert load_reset_receipt(path) == receipt
 
 
-def test_a_replay_never_reads_a_seed_outside_the_runs_root(root, tmp_path, monkeypatch):
-    """The recorded setting is the operator's file, and a hand edit (or a config PUT, before it was
-    refused) could point it anywhere; the spawned `looplab run` resolves it UNconfined. The Replay
-    asks the server's own rule first."""
+def test_a_frozen_row_changed_after_the_commit_is_never_appended(root, monkeypatch):
+    from looplab.serve import reset_route
     from looplab.serve.routers import control as control_router
 
     _src, seeded = _source_and_seeded(root)
-    outside = tmp_path / "elsewhere" / "src"
-    assert _run(outside, "--max-nodes", "2").exit_code == 0
-    snapshot = seeded / "config.snapshot.json"
-    snapshot.write_text(json.dumps({**json.loads(snapshot.read_text()),
-                                    "seed_from_run": f"{outside}#0"}))
-    before = (seeded / "events.jsonl").read_bytes()
     spawns: list = []
-    monkeypatch.setattr(control_router, "_spawn_engine", lambda *a, **kw: spawns.append((a, kw)))
+    monkeypatch.setattr(control_router, "_spawn_engine", _replacement_spawn(seeded, spawns))
+    real = reset_route._frozen_launch
+
+    def tampered(srv, rd, record, **kwargs):
+        (rd / record["seed_stage"]).write_text(json.dumps({"forged": True}))
+        return real(srv, rd, record, **kwargs)
+
+    monkeypatch.setattr(reset_route, "_frozen_launch", tampered)
     with TestClient(make_app(root)) as client:
-        detail = _refused_before_archiving(client.post("/api/runs/seeded/reset"), seeded, before,
-                                           spawns)
-    # What was asked is the run's own recorded setting (its config GET shows it); what the server
-    # probed for it is not echoed.
-    assert f"{outside}#0" in detail["message"] and "looked for" not in detail["message"]
+        answer = client.post("/api/runs/seeded/reset")
+    assert answer.status_code == 425 and "frozen seed row changed" in answer.text, answer.text
+    assert spawns == []
+
+
+@pytest.mark.parametrize("failure", ["staging", "publication"])
+def test_a_replay_refused_before_its_commit_leaves_no_staged_row(root, monkeypatch, failure):
+    """Staging the row failed after it became visible, or the writer fence could not be published:
+    nothing is durable, so neither staged file may stay behind in the run."""
+    from looplab.core.run_reset import RunResetStorageError
+    from looplab.serve import reset_route
+
+    _src, seeded = _source_and_seeded(root)
+    if failure == "staging":
+        real = reset_route.strict_atomic_write_bytes
+
+        def write_then_fail(path, data, *args, **kwargs):
+            real(path, data, *args, **kwargs)
+            if Path(path).name.startswith(".looplab-reset-seed-"):
+                raise OSError("parent fsync failed")
+
+        monkeypatch.setattr(reset_route, "strict_atomic_write_bytes", write_then_fail)
+        code = "replay_seed_unstaged"
+    else:
+        def refuse(*_args, **_kwargs):
+            raise RunResetStorageError("fence unavailable")
+
+        monkeypatch.setattr(reset_route, "publish_run_reset_marker", refuse)
+        code = "reset_outcome_unknown"
+    with TestClient(make_app(root)) as client:
+        answer = client.post("/api/runs/seeded/reset")
+    assert answer.status_code == 503 and code in answer.text, answer.text
+    assert (seeded / "events.jsonl").is_file(), "refused before the archive"
+    assert sorted(p.name for p in seeded.glob(".looplab-reset-*")) == []
 
 
 # ------------------------------------------------------------------ the launch route
@@ -249,3 +410,82 @@ def test_a_later_run_of_the_directory_keeps_the_seed_the_run_was_born_from(root)
     assert _run(plain, "--max-nodes", "2").exit_code == 0
     assert _run(plain, "--max-nodes", "3", "-s", f"seed_from_run={src}").exit_code == 0
     assert json.loads((plain / "config.snapshot.json").read_text())["seed_from_run"] == ""
+    # …and a seed the operator CLEARED stays cleared (critic 2026-09-26: the next `looplab run`
+    # wrote the born-with spec back over it, and the Replay seeded again).
+    snapshot = seeded / "config.snapshot.json"
+    snapshot.write_text(json.dumps({**json.loads(snapshot.read_text()), "seed_from_run": ""}))
+    assert _run(seeded, "--max-nodes", "4").exit_code == 0
+    assert json.loads(snapshot.read_text())["seed_from_run"] == ""
+
+
+# ------------------------------------------------------------------ critic 2026-09-26, re-check
+
+def test_the_locator_is_the_servers_whole_run_rule(root, tmp_path):
+    """Each clause of `serve/launch.py::server_seed_locator`, driven (its mutants survived): a
+    source whose `.commands` is a link is refused (`validate_paths`), and a runs root reached
+    through a symlink admits an absolute spec under the real root (the parent is RESOLVED)."""
+    src = root / "src"
+    assert _run(src, "--max-nodes", "2").exit_code == 0
+    linked = root / "linkedcmds"
+    shutil.copytree(src, linked)
+    shutil.rmtree(linked / ".commands", ignore_errors=True)
+    os.symlink(tmp_path, linked / ".commands")
+    client = TestClient(make_app(root))
+    verdict = client.post("/api/validate", json=_launch("linkedcmds")).json()
+    assert verdict["ready"] is False and verdict["code"] == "invalid_seed", verdict
+    alias = tmp_path / "alias-root"
+    os.symlink(root, alias)
+    via_alias = TestClient(make_app(alias))
+    # Spelled either way, through either root: only a RESOLVED parent is the same directory.
+    for server in (via_alias, client):
+        for spec in (str(src), str(alias / "src")):
+            verdict = server.post("/api/validate", json=_launch(spec)).json()
+            assert verdict["ready"] is True, (spec, verdict)
+
+
+def test_a_task_files_settings_layer_seeds_a_web_launch(root):
+    """A launch fact comes from the launch's OWN layers — the body's settings and the task file's
+    `settings:` block both (the task-file half's mutant survived)."""
+    src = root / "src"
+    assert _run(src, "--max-nodes", "2").exit_code == 0
+    task_file = root / "seeded-task.json"
+    task_file.write_text(json.dumps({
+        "task": {"benchmark": "quadratic", "goal": "minimize the objective", "direction": "min"},
+        "settings": {"seed_from_run": "src"}}))
+    body = {"run_id": "from-file", "task_file": str(task_file)}
+    preview = TestClient(make_app(root)).post("/api/start/preflight", json=body).json()
+    assert preview["ok"] is True, preview
+    assert preview["preview"]["settings"]["seed_from_run"].startswith(str(src.resolve()) + "#")
+
+
+def test_the_settings_page_never_shows_the_servers_ambient_seed(root, monkeypatch):
+    """NIT (critic 2026-09-26): with `LOOPLAB_SEED_FROM_RUN` in the server's environment the global
+    settings GET showed it as the resolved value and the default — a value no launch uses, which
+    the form then echoed into a refused save."""
+    monkeypatch.setenv("LOOPLAB_SEED_FROM_RUN", "src")
+    client = TestClient(make_app(root))
+    body = client.get("/api/settings").json()
+    assert body["settings"]["seed_from_run"] == "" and body["defaults"]["seed_from_run"] == ""
+    assert client.put("/api/settings", json={"settings": body["settings"]}).status_code == 200
+
+
+def test_the_pre_genesis_direction_check_reads_only_a_settled_direction(root, monkeypatch):
+    """LOW (critic 2026-09-26, driven): mlebench_real's `direction: auto` was compared as a
+    direction ("this run auto it"). Only `min`/`max` is settled before the adapter runs."""
+    import looplab.cli.run_cmds as run_cmds
+
+    asked = []
+
+    def spy(spec, out, *, direction=None, locate=None):
+        asked.append(direction)
+        raise SystemExit(0)
+
+    monkeypatch.setattr(run_cmds, "resolve_seed", spy)
+    for direction in ("auto", "max"):
+        task_file = root / f"task-{direction}.json"
+        root.mkdir(parents=True, exist_ok=True)
+        task_file.write_text(json.dumps({"task": {"kind": "quadratic", "goal": "g",
+                                                  "direction": direction}}))
+        CliRunner().invoke(app, ["run", str(task_file), "--no-genesis", "--backend", "toy",
+                                 "-s", "seed_from_run=src", "--out", str(root / direction)])
+    assert asked == [None, "max"], asked

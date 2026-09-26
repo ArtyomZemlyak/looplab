@@ -328,8 +328,13 @@ def build_router(srv) -> APIRouter:
             defaults = Settings().model_dump()
             defaults.pop("llm_api_key", None)
             defaults.pop("llm_api_key_base_url", None)
+            resolved = s.masked_snapshot()
+            for key in LAUNCH_ONLY_FIELDS:
+                # A launch fact is no default, so this server's environment is not shown as one
+                # either: the form would echo it back into a refused save (critic 2026-09-26).
+                resolved[key] = defaults[key] = Settings.model_fields[key].default
             response = {
-                "settings": s.masked_snapshot(),
+                "settings": resolved,
                 "overrides": overrides,
                 "defaults": defaults,
                 "settings_revision": store.ui_settings_revision(),

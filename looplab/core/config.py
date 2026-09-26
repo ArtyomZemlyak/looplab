@@ -3711,6 +3711,13 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # at every commit before this one; `tests/test_noise_floor_mid_search.py` holds that `false`
     # measures at the end, as before.
     "noise_floor_mid_search": False,
+    # THE SEED, added 2026-09-26 (doc 67 67.2). Not a treatment the rows above describe — a launch
+    # fact, blank by default — and pinned for a different reason: a snapshot written before the field
+    # existed must read it BLANK, not from the environment `settings_from_snapshot` otherwise fills a
+    # missing key from. Without the row a Replay of any older run, on a server whose environment
+    # carried `LOOPLAB_SEED_FROM_RUN`, re-seeded a run that was never seeded (critic 2026-09-26,
+    # driven). `""` is every such run's truth.
+    "seed_from_run": "",
     # THE JUDGES' PROMPT TRUTHS, added 2026-09-23 defaulting ON (review 2026-09-22, Q-1). (a) holds.
     # (b) is the two rows above's DIFFERENT-PROMPT ground: ON, the pilot, the triage judge and the
     # repair critic are handed different bytes (the triage opening, its watchdog sentence and scout

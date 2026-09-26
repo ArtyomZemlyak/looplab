@@ -21,7 +21,7 @@ from looplab.core.atomicio import (
 from looplab.core.config import settings_from_snapshot
 from looplab.core.pathsafe import run_child_name_defect, validate_run_child
 from looplab.core.run_reset import (
-    RUN_RESET_OPERATION_ENV, RUN_RESET_OPERATION_RE, RunResetFenceError,
+    RUN_RESET_OPERATION_ENV, RUN_RESET_OPERATION_RE, RUN_RESET_SEED_ENV, RunResetFenceError,
     RunResetStorageError, load_run_reset_marker, publish_run_reset_marker)
 from looplab.core.trace_append import SPAN_APPEND_JOURNAL_NAME
 from looplab.events.eventstore import EventStoreLockError, interprocess_lock
@@ -231,6 +231,15 @@ def _frozen_launch(
     }
     env = srv.settings.ordinary_settings_env(launch_settings)
     env[RUN_RESET_OPERATION_ENV] = operation_id
+    if record.get("seed_stage"):
+        # THE SEED THE RUN WAS BORN WITH, frozen before the archive (`_prepare_receipt`): the child
+        # appends it verbatim, so no source is resolved by path again.
+        seed_stage = rd / record["seed_stage"]
+        seed_bytes = _read_bounded_regular(
+            seed_stage, _TASK_MAX_BYTES, code="reset_frozen_inputs_unavailable", label="seed row")
+        if hashlib.sha256(seed_bytes).hexdigest() != record["seed_digest"]:
+            _pending(record, "The frozen seed row changed after Replay was committed.")
+        env[RUN_RESET_SEED_ENV] = str(seed_stage)
     return spawn_args, env, launch_settings
 
 
@@ -395,46 +404,63 @@ def _prepare_receipt(
         # So a legacy run carrying a spec a later rule refuses can `resume` but cannot Replay, by
         # design. Making Replay work for those runs means changing what it SPAWNS (a re-entry rather
         # than a submit), not what it validates. `tests/test_eval_reader_paths.py` pins both halves.
-        replay_task = load_task(task_stage)
+        load_task(task_stage)
     except Exception as exc:  # noqa: BLE001
         _discard_unpublished_task_stage(task_stage)
         raise HTTPException(409, {
             "code": "replay_task_invalid",
             "message": "Replay task is invalid; Replay did not archive or restart the run.",
         }) from exc
-    record["effective_config"] = _replay_seed(srv, rd, replay_task, effective_config, task_stage)
+    _freeze_birth_seed(rd, record, effective_config, task_stage)
     return record
 
 
-def _replay_seed(srv, rd: Path, task, effective_config: dict, task_stage: Path) -> dict:
-    """The frozen `seed_from_run`, resolved as the start route resolves it — BEFORE any authority is
-    published, so a refusal leaves the run exactly as it was (critic 2026-09-26, HIGH, driven).
-
-    The spawned `looplab run` re-seeds a fresh log, and it used to find out only after the archive:
-    a source deleted since the launch stranded the run archived with no replacement (its receipt
-    `reset_pending`, `/api/runs` empty, `/state` 404), and a seed a config PUT had pointed anywhere
-    was read unconfined. Refused here, a 409 names the seed's own refusal while the run is intact —
-    and still editable, since no reset marker is published yet: clearing the seed in its config is
-    the way to Replay it unseeded (`routers/runs.py::_put_run_config_locked` allows exactly that)."""
-    spec = str(effective_config.get("seed_from_run") or "").strip()
-    if not spec:
-        return effective_config
-    from looplab.core.errors import ConfigRefusal
-    from looplab.engine.seed_from_run import resolve_seed
-    from looplab.serve.launch import server_seed_locator
+def _birth_seed_row(rd: Path) -> Optional[dict]:
+    """The seed row this run was born with (its seq-0 `inject_node` marked `seed_from_run`), or None
+    — also for a log whose FIRST record cannot be read: a Replay stays usable on a damaged log,
+    which is often why it is replayed, and only the first line is read."""
+    from looplab.core.models import Event
+    from looplab.engine.seed_from_run import birth_seed_row
+    from looplab.events.eventstore import iter_event_jsonl
     try:
-        seed = resolve_seed(spec, rd, direction=getattr(task, "direction", None),
-                            locate=server_seed_locator(srv))
-    except ConfigRefusal as exc:
+        first = next(iter(iter_event_jsonl(rd / "events.jsonl")), None)
+        return birth_seed_row([Event(**first)] if isinstance(first, dict) else [])
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _freeze_birth_seed(rd: Path, record: dict[str, Any], effective_config: dict,
+                       task_stage: Path) -> None:
+    """Stage the seed the run was BORN with beside its task, for the child to append verbatim
+    (critic 2026-09-26, driven three ways). Re-resolving the recorded `<run dir>#<node>` by path
+    re-seeded whatever that path held NOW: a source deleted since stranded the run archived with no
+    replacement; a source that had itself been Replayed handed back a different experiment under the
+    same node id, with the verdict still `same`; and a pre-field snapshot filled the setting from the
+    server's own environment. The row is the fact; nothing is resolved.
+
+    Seeded only when the log's first row IS a seed and the run's config still names one — a per-run
+    config edit that CLEARED it (`routers/runs.py::_put_run_config_locked`) is how an operator
+    Replays a seeded run unseeded. The child is told `seed_from_run=""`, so it never resolves a path
+    either, and records the born-with spec in its own snapshot."""
+    row = _birth_seed_row(rd)
+    wanted = str(effective_config.get("seed_from_run") or "").strip()
+    record["effective_config"] = {**effective_config, "seed_from_run": ""}
+    if row is None or not wanted:
+        return
+    seed_stage = rd / f".looplab-reset-seed-{record['id']}.json"
+    seed_bytes = json.dumps(row, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    try:
+        strict_atomic_write_bytes(seed_stage, seed_bytes)
+    except OSError as exc:
         _discard_unpublished_task_stage(task_stage)
-        raise HTTPException(409, {
-            "code": "replay_seed_invalid",
-            "message": f"Replay would seed this run again and the seed is refused — {exc}. Replay "
-                       "did not archive or restart the run.",
-            "remediation": "Clear seed_from_run in this run's settings to Replay it unseeded, or "
-                           "start a new run.",
+        _discard_unpublished_task_stage(seed_stage)
+        raise HTTPException(503, {
+            "code": "replay_seed_unstaged",
+            "message": "Replay could not stage the seed this run was born with; Replay did not "
+                       "archive or restart the run.",
         }) from exc
-    return {**effective_config, "seed_from_run": seed.canonical_spec}
+    record["seed_stage"] = seed_stage.name
+    record["seed_digest"] = hashlib.sha256(seed_bytes).hexdigest()
 
 
 def _flush_reset_cost_evidence(srv, rd: Path) -> None:
@@ -923,6 +949,8 @@ def _publish_and_archive(
                     and prepared_record is not None):
                 _discard_unpublished_task_stage(
                     rd / prepared_record["task_stage"])
+                if prepared_record.get("seed_stage"):
+                    _discard_unpublished_task_stage(rd / prepared_record["seed_stage"])
             raise HTTPException(503, {
                 "code": "reset_outcome_unknown",
                 "operation_id": operation_id,

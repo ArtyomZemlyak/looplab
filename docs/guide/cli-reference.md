@@ -249,15 +249,17 @@ unrecorded `eval_env` or `holdout_fraction`, or a task no adapter reads, each na
 directory, or a sibling run's id under the new run's runs root; a trailing `#<integer>` names the
 node when the text before it is a run; a blank value is off. A bad source is refused (exit `2`)
 before the run directory is created and before Genesis runs: no run there, a corrupt log, no
-champion or one ranked in the other direction, a withdrawn node, nothing to import, or what the
-engine's own inject validation refuses. The setting is recorded in `config.snapshot.json` as the
-`<run dir>#<node>` it resolved to. On a directory that already has events it is ignored — a resume
-never re-seeds — and the snapshot keeps what the run was born from. The web start route admits only
-a run of its own runs root (by the server's own run rule), takes the seed from the launch alone —
-never a saved default — and answers a bad one at `/api/validate` (`ready: false`, `status: 422`,
-`invalid_seed`). A Replay re-seeds the node the run was born from, and refuses (409
-`replay_seed_invalid`) before anything is archived when that no longer resolves; a per-run config
-edit may clear the seed, never change it.
+champion, a withdrawn node, nothing to import, or what the engine's own inject validation refuses. A
+champion ranked in the other direction is refused before Genesis too when `--direction` or the task
+file settles the direction, and after Genesis otherwise. The setting is recorded in
+`config.snapshot.json` as the `<run dir>#<node>` it resolved to. On a directory that already has
+events it is ignored — a resume never re-seeds — and the snapshot keeps what the run was born from.
+The web start route admits only a run of its own runs root (by the server's own run rule), takes the
+seed from the launch alone — never a saved default — and answers a bad one at `/api/validate`
+(`ready: false`, `status: 422`, `invalid_seed`). A Replay re-seeds from the row the run was born
+with, frozen before anything is archived and appended verbatim — never resolved by path again, so a
+source deleted or Replayed since changes nothing; a per-run config edit may clear the seed (the
+Replay then starts unseeded), never change it.
 
 **Exit codes.** `run` and `resume` share them, because a wrapper, a CI step or an `&&` chain reads
 the status and nothing else:

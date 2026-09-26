@@ -173,6 +173,14 @@ export function parseSettingValue(field, raw, { allowClear = true } = {}) {
   if (field.type === 'enum' && raw === '' && field.options?.includes('')) {
     return { valid: true, value: '', error: '' }
   }
+  // In the per-run panel (`allowClear: false`) a text field whose DEFAULT is blank takes a blank as
+  // that value, not as a missing one — it cannot be cleared, and for `seed_from_run` the blank IS the
+  // off switch: how a seeded run is Replayed unseeded (critic 2026-09-26: the panel refused it as
+  // "required"). The global page keeps blank = clear, so an environment value is not shadowed.
+  if (!allowClear && field.type === 'text' && field.default === '' && !field.nullable
+      && (raw == null || (typeof raw === 'string' && raw.trim() === ''))) {
+    return { valid: true, value: '', error: '' }
+  }
   if (raw == null || (typeof raw === 'string' && raw.trim() === '')) {
     return allowClear || field.nullable
       ? { valid: true, value: null, error: '' }

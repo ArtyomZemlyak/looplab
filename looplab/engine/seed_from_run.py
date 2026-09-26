@@ -54,17 +54,19 @@ recorded one, turns `same` into `unknown` and is named — it may, not must, cha
 
 SPEC GRAMMAR. `PATH` or `PATH#NODE`. PATH is a run directory — absolute, relative to the working
 directory, or a sibling run's id under the new run's own runs root. A server admits only a run of
-ITS runs root, by its own run-directory rule (`locate`, `serve/launch.py::server_seed_locator`),
-both at launch and when a Replay re-seeds a run. A trailing `#<integer>` names the node when the
+ITS runs root, by its own run-directory rule (`locate`, `serve/launch.py::server_seed_locator`). A
+trailing `#<integer>` names the node when the
 text before it names a run, else the whole text is the path, so a run whose name holds a `#` stays
 addressable. Without `#NODE` the source's CHAMPION (`RunState.best()`) is taken. Surrounding
 whitespace is not part of a spec, and a blank one is off (`core/config.py::Settings`).
 
-A SEED IS A FACT OF BIRTH. `recorded_seed_spec` reads it off the run's own first row, and a later
-`looplab run` of the directory records that and nothing else, so what a Replay re-seeds is what the
-run was born from. A Replay resolves it again — under the server's rule, before anything is archived
-(`serve/reset_route.py::_prepare_receipt`) — and a per-run config edit may clear it, never change it
-(`serve/routers/runs.py::_put_run_config_locked`).
+A SEED IS A FACT OF BIRTH. `birth_seed_row` reads it off the run's own first row, and a later
+`looplab run` of the directory records that and nothing else. A Replay re-seeds from that ROW, frozen
+before anything is archived (`serve/reset_route.py::_freeze_birth_seed`) and appended verbatim by its
+child (`frozen_seed_payload`) — never re-resolved by path, which re-seeded whatever the path held by
+then: a deleted source stranded the run, a Replayed one handed back another experiment under the
+same node id (critic 2026-09-26). A per-run config edit may clear the seed, so a Replay starts
+unseeded, never change it (`serve/routers/runs.py::_put_run_config_locked`).
 """
 from __future__ import annotations
 
@@ -296,18 +298,19 @@ def _recorded_eval_env(source: Path, state) -> Optional[dict]:
     return {} if isinstance(snapshot, dict) and "eval_env" in snapshot else None
 
 
-def _canonical_task(task) -> Optional[dict]:
-    """`task` as its adapter dumps it — the one form two declarations compare in (critic
+def _canonical_task(task) -> tuple[Optional[dict], str]:
+    """`(task as its adapter dumps it, "")` — the one form two declarations compare in (critic
     2026-09-26: the CLI records the task as written, `cmd:` spellings and all, and the web start
-    route as the adapter dumps it, so the same evaluation read as a different one) — or None for a
-    declaration no adapter accepts. `existing_run=True`: the source's is a recorded snapshot."""
+    route as the adapter dumps it, so the same evaluation read as a different one) — or `(None,
+    why)` for a declaration no adapter accepts, e.g. a dataset task whose data is gone.
+    `existing_run=True`: the source's is a recorded snapshot."""
     if not isinstance(task, dict):
-        return None
+        return None, "no task snapshot"
     from looplab.adapters.tasks import validate_task
     try:
-        return validate_task(dict(task), existing_run=True).model_dump(mode="json")
-    except Exception:  # noqa: BLE001 — a declaration no adapter reads is UNKNOWN, never a difference
-        return None
+        return validate_task(dict(task), existing_run=True).model_dump(mode="json"), ""
+    except Exception as exc:  # noqa: BLE001 — a declaration no adapter reads is UNKNOWN, never a difference
+        return None, (str(exc).strip().splitlines() or [type(exc).__name__])[0][:200]
 
 
 def _task_snapshot(run_dir: Path) -> Optional[dict]:
@@ -340,12 +343,21 @@ def seed_verdict(seed: SeedSource, task: dict, *, direction: Optional[str], eval
     two tasks it calls equal may still declare different stages or an eval `env` (critic
     2026-09-26). Anything that differs, or that either side cannot state, is `unknown`, named."""
     name = seed.run_dir.name
-    mine, theirs = _canonical_task(task), _canonical_task(_task_snapshot(seed.run_dir))
+    raw_theirs = _task_snapshot(seed.run_dir)
+    (mine, why_mine), (theirs, why_theirs) = _canonical_task(task), _canonical_task(raw_theirs)
     notes, facets = [], []
     if mine is None or theirs is None:
-        verdict = "unknown"
+        # A side no adapter reads — the source's dataset moved, say — still DECLARES what it read
+        # and ran: the raw contract decides `different` on its own facets (critic 2026-09-26: a
+        # proven difference read `unknown` once the source's data was gone), and `same` is never
+        # claimed from a declaration half read.
+        this, other = contract_from_task(mine or task), contract_from_task(theirs or raw_theirs)
+        verdict = "different" if comparable(this, other) is False else "unknown"
+        if verdict == "different":
+            notes.append(contract_notice(this, other, other_run_id=name))
         notes.append(("This run's task" if mine is None else f"Run {name}'s task snapshot")
-                     + " could not be read as a task, so the two evaluations cannot be compared.")
+                     + f" could not be read as a task ({why_mine or why_theirs}), so the two "
+                     "declarations cannot be compared in full.")
     else:
         this, other = contract_from_task(mine), contract_from_task(theirs)
         if comparable(this, other) is False:
@@ -414,24 +426,55 @@ def seed_summary(seed: SeedSource, verdict: str, note: str) -> str:
             + "It is evaluated here under this run's own protocol.")
 
 
-def recorded_seed_spec(events) -> str:
-    """The canonical spec a run was BORN seeded from, read off its own log, or "".
-
-    The seed is a fact of the run's first row (`serve/start_record.py::_launch_seed_intent` admits
-    it only at seq 0), so a later `looplab run` of the same directory — whatever it passes — records
-    this and nothing else in `config.snapshot.json`, which a Replay reads (critic 2026-09-26: the
-    snapshot was overwritten with the new invocation's value, dropping or inventing a seed)."""
-    first = next(iter(events or ()), None)
-    data = getattr(first, "data", None)
+def seed_row_spec(data) -> str:
+    """The canonical `<run dir>#<node>` a seed row's `origin` receipt names, or "" for any row that
+    is not a well-formed seed — the one reading of a seed row's identity."""
     origin = data.get("origin") if isinstance(data, dict) else None
-    if (getattr(first, "type", None) != EV_INJECT_NODE or getattr(first, "seq", None) != 0
-            or not isinstance(origin, dict) or origin.get("seed_from_run") is not True):
+    if not isinstance(origin, dict) or origin.get("seed_from_run") is not True:
         return ""
     run_dir, node_id = origin.get("run_dir"), origin.get("node_id")
     if (not isinstance(run_dir, str) or not run_dir or isinstance(node_id, bool)
             or not isinstance(node_id, int)):
         return ""
     return f"{run_dir}#{node_id}"
+
+
+def birth_seed_row(events) -> Optional[dict]:
+    """The seed row a run was BORN with — its seq-0 `inject_node` marked `seed_from_run` — as its
+    payload, or None. The seed is a fact of the run's first row (`serve/start_record.py::
+    _launch_seed_intent` admits it only at seq 0); a later inject with the same marking is not one."""
+    first = next(iter(events or ()), None)
+    data = getattr(first, "data", None)
+    if (getattr(first, "type", None) != EV_INJECT_NODE or getattr(first, "seq", None) != 0
+            or not seed_row_spec(data)):
+        return None
+    return dict(data)
+
+
+def recorded_seed_spec(events) -> str:
+    """The canonical spec a run was BORN seeded from, read off its own log, or "". A later `looplab
+    run` of the same directory — whatever it passes — records this and nothing else in
+    `config.snapshot.json` (critic 2026-09-26: the snapshot was overwritten with the new
+    invocation's value, dropping or inventing a seed)."""
+    return seed_row_spec(birth_seed_row(events))
+
+
+def frozen_seed_payload(raw: bytes) -> dict:
+    """The seed row a Replay froze for its `looplab run` child (`serve/reset_route.py::
+    _prepare_receipt`), checked for the shape `seed_intent` builds; `ConfigRefusal` otherwise. The
+    child appends it VERBATIM rather than resolving a source by path again: the run is re-seeded
+    with the node it was born with even when the source has since been deleted, moved or replayed
+    into different nodes under the same ids (critic 2026-09-26)."""
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ConfigRefusal(f"the Replay's frozen seed is unreadable: {exc}") from exc
+    if (not isinstance(data, dict) or not seed_row_spec(data)
+            or not isinstance(data.get("idea"), dict) or not isinstance(data.get("code"), str)
+            or not isinstance(data.get("files"), dict) or not isinstance(data.get("deleted"), list)
+            or data.get("parent_id") is not None):
+        raise ConfigRefusal("the Replay's frozen seed is not a seed row")
+    return data
 
 
 def seed_ignored_note(spec: Optional[str]) -> str:

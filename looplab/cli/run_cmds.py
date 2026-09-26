@@ -42,8 +42,9 @@ from looplab.engine.run_boundary import (  # noqa: F401 - re-exported under the 
     terminal_projection_incomplete,
 )
 from looplab.engine.finalize import finalize_run, incomplete_finalize_scope
-from looplab.engine.seed_from_run import (check_seed_direction, recorded_seed_spec, resolve_seed,
-                                          seed_ignored_note, seed_intent, seed_summary)
+from looplab.engine.seed_from_run import (check_seed_direction, frozen_seed_payload,
+                                          recorded_seed_spec, resolve_seed, seed_ignored_note,
+                                          seed_intent, seed_row_spec, seed_summary)
 from looplab.events.replay import fold
 from looplab.adapters.repo_task import eval_reader_path_errors, eval_workspace_conflicts
 from looplab.adapters.tasks import kinds_for, submit_warnings, validate_task
@@ -703,8 +704,37 @@ def _refuse_held_out_labels_inside_the_workspace(task, out) -> None:
     raise typer.Exit(2)
 
 
+def _frozen_seed() -> Optional[dict]:
+    """The seed row a Replay froze for this child (`core/run_reset.py::RUN_RESET_SEED_ENV`), or None
+    outside a Replay. Read only beside the Replay's own operation id, so a stray variable in an
+    operator's shell cannot seed an ordinary `looplab run`."""
+    from looplab.core.errors import ConfigRefusal
+    from looplab.core.run_reset import RUN_RESET_OPERATION_ENV, RUN_RESET_SEED_ENV
+    path = os.environ.get(RUN_RESET_SEED_ENV)
+    if not path or not os.environ.get(RUN_RESET_OPERATION_ENV):
+        return None
+    try:
+        raw = Path(path).read_bytes()
+    except OSError as exc:
+        raise ConfigRefusal(f"the Replay's frozen seed is unreadable: {exc}") from exc
+    return frozen_seed_payload(raw)
+
+
+def _prior_snapshot_cleared_seed(out: Path) -> bool:
+    """Whether this run's `config.snapshot.json` holds a DELIBERATELY blank `seed_from_run` — a
+    per-run config edit that cleared the seed so a Replay starts unseeded (critic 2026-09-26: the
+    next `looplab run` of the directory wrote the born-with spec back over it)."""
+    try:
+        snapshot = json.loads((out / "config.snapshot.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return (isinstance(snapshot, dict) and "seed_from_run" in snapshot
+            and not str(snapshot.get("seed_from_run") or "").strip())
+
+
 def _open_and_drive(task, task_dict: dict, settings, out: Path, *, crash_after=None,
-                    speculation_gate_calibration: bool = False, explicit_settings=(), seed=None):
+                    speculation_gate_calibration: bool = False, explicit_settings=(), seed=None,
+                    frozen_seed: Optional[dict] = None):
     """THE RUN LIFECYCLE, from a resolved task + settings + run dir to a driven terminal: the startable
     checks, the healthy-log gate, the `engine.lock` singleton, the prior-run classification (refuse a
     different task, reopen a finished run, lift a stopped one), the engine build, the published
@@ -793,10 +823,14 @@ def _open_and_drive(task, task_dict: dict, settings, out: Path, *, crash_after=N
             _preflight_settled_widths(eng, prior_events, surface="run")
             if prior_events:
                 # A SEED IS A FACT OF BIRTH (`engine/seed_from_run.py::recorded_seed_spec`): the
-                # snapshot a Replay re-seeds from records what this log's first row was seeded from,
-                # never this invocation's value — ignored for an existing run, it used to overwrite
-                # the record (critic 2026-09-26: dropping the seed, or inventing one).
-                settings.seed_from_run = recorded_seed_spec(prior_events)
+                # snapshot records what this log's first row was seeded from, never this
+                # invocation's value — ignored for an existing run, it used to overwrite the record
+                # (critic 2026-09-26: dropping the seed, or inventing one). A seed the operator
+                # CLEARED in the snapshot stays cleared: that is how a Replay starts unseeded.
+                settings.seed_from_run = ("" if _prior_snapshot_cleared_seed(out)
+                                          else recorded_seed_spec(prior_events))
+            elif frozen_seed is not None:
+                settings.seed_from_run = seed_row_spec(frozen_seed)
             _publish_run_snapshots(out, task_dict, settings)
             # `Settings.seed_from_run` (doc 67 67.2): a FRESH run's first experiment is the prior
             # run's node, as an operator inject the engine serves before its first creation turn —
@@ -817,6 +851,15 @@ def _open_and_drive(task, task_dict: dict, settings, out: Path, *, crash_after=N
                         "files": payload["files"], "deleted": payload["deleted"],
                         "origin": payload["origin"], "parent_id": payload["parent_id"]})
                     typer.echo(seed_summary(seed, verdict, note))
+            elif frozen_seed is not None and not prior_events:
+                # A Replay: the row this run was born with, verbatim — receipt and verdict included,
+                # which are facts of that birth (`serve/reset_route.py::_freeze_birth_seed`).
+                eng.store.append(EV_INJECT_NODE, {
+                    "idea": frozen_seed["idea"], "code": frozen_seed["code"],
+                    "files": frozen_seed["files"], "deleted": frozen_seed["deleted"],
+                    "origin": frozen_seed["origin"], "parent_id": frozen_seed["parent_id"]})
+                typer.echo(f"re-seeded (Replay) from the row this run was born with: "
+                           f"{seed_row_spec(frozen_seed)}")
         # Continue a run dir that ALREADY FINISHED. Without this, re-entering the loop folds the log,
         # sees finished=True and breaks at once — printing the OLD best and doing no work. That silently
         # no-ops a re-run with a bigger --max-nodes, and (worse) makes a run that finished with
@@ -1030,7 +1073,8 @@ def run(
     # seeded run whose source had since been removed was refused instead of continued).
     run_out = out or (Path(file_out) if file_out else Path("runs/run_local"))
     seed = None
-    if getattr(settings, "seed_from_run", ""):
+    frozen_seed = _frozen_seed()
+    if frozen_seed is None and getattr(settings, "seed_from_run", ""):
         if _log_has_events(run_out):
             typer.echo(seed_ignored_note(settings.seed_from_run), err=True)
         else:
@@ -1038,7 +1082,10 @@ def run(
             # settled — an explicit `--direction`, or a task no Genesis will re-author — so that
             # refusal costs no paid call either (critic 2026-09-26); the check after Genesis stays.
             settled = direction if (genesis and goal is not None) else task_dict.get("direction")
-            seed = resolve_seed(settings.seed_from_run, run_out, direction=settled or None)
+            # Only a DIRECTION is settled: mlebench_real's `auto` is resolved by the adapter later
+            # (critic 2026-09-26: `auto` was refused as "this run auto it").
+            seed = resolve_seed(settings.seed_from_run, run_out,
+                                direction=settled if settled in ("max", "min") else None)
     if genesis and goal is not None:
         from looplab.engine import genesis as _genesis
         try:
@@ -1108,7 +1155,8 @@ def run(
     _report_submit_notes(task, task_dict, out, settings, planned=genesis and goal is not None)
     driven = _open_and_drive(task, task_dict, settings, out, crash_after=crash_after,
                              speculation_gate_calibration=speculation_gate_calibration,
-                             explicit_settings=explicit_settings, seed=seed)
+                             explicit_settings=explicit_settings, seed=seed,
+                             frozen_seed=frozen_seed)
     if driven is None:
         return
     state, eng, prior_kind = driven

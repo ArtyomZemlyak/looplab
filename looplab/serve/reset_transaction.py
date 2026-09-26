@@ -66,7 +66,12 @@ _RECEIPT_KEYS = frozenset({
 # spelled explicitly at launch. Replay relaunches with a fresh `looplab run`, which writes a fresh
 # `run_started`; without the names the new generation would lose the operator's launch width pins
 # (`engine/widths.py::operator_width_axes`). Absent = the run recorded none (or predates the record).
-_OPTIONAL_RECEIPT_KEYS = frozenset({"archive_suffix", "archive_stamp", "explicit_settings"})
+#
+# `seed_stage` + `seed_digest` (doc 67 67.2): the seed row the run was born with, staged beside the
+# task and handed to the child to append verbatim (`reset_route.py::_freeze_birth_seed`). Both or
+# neither: absent = the run was not born seeded, or its operator cleared the seed.
+_OPTIONAL_RECEIPT_KEYS = frozenset({"archive_suffix", "archive_stamp", "explicit_settings",
+                                    "seed_stage", "seed_digest"})
 _STATUS_FOR_PHASE = {
     "prepared": "pending",
     "archiving": "pending",
@@ -96,6 +101,8 @@ _IMMUTABLE_RECEIPT_FIELDS = frozenset({
     "archive_suffix",
     "artifacts", "task_stage", "task_digest", "effective_config", "created_at",
     "explicit_settings",
+    # Frozen with the task stage, for the same reason: the child appends the row these name.
+    "seed_stage", "seed_digest",
 })
 
 
@@ -196,6 +203,12 @@ def _validate_receipt(value: Any, *, path: Path) -> dict[str, Any]:
                 and len(value["explicit_settings"]) <= 1024
                 and all(isinstance(k, str) and 0 < len(k) <= 128
                         for k in value["explicit_settings"])))
+            or ("seed_stage" in value) != ("seed_digest" in value)
+            or ("seed_stage" in value and not (
+                isinstance(value["seed_stage"], str)
+                and value["seed_stage"] == f".looplab-reset-seed-{value['id']}.json"
+                and isinstance(value["seed_digest"], str)
+                and _SHA256_RE.fullmatch(value["seed_digest"]) is not None))
             or isinstance(value.get("created_at"), bool)
             or not isinstance(value.get("created_at"), (int, float))
             or not math.isfinite(value["created_at"])

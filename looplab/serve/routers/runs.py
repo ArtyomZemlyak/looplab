@@ -2955,7 +2955,11 @@ def build_router(srv) -> APIRouter:
         # this one was never launched from, and was a way past the launch route's confinement: a PUT of
         # any string, then Replay (critic 2026-09-26, HIGH, driven).
         if "seed_from_run" in incoming:
+            # Stored STRIPPED, and `null` is a clear like `""` (critic 2026-09-26: `null` was a 422,
+            # the one spelling of "off" an API client would reach for, and a padded value was
+            # stored as typed).
             wanted = str(incoming["seed_from_run"] or "").strip()
+            incoming = {**incoming, "seed_from_run": wanted}
             if wanted and wanted != str(updated.get("seed_from_run") or "").strip():
                 raise HTTPException(422, "seed_from_run can't be changed per-run after launch — it "
                                          "records the run this one was seeded from, which a Replay "

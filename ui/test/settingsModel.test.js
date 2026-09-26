@@ -97,6 +97,24 @@ test('numeric settings distinguish invalid input from a deliberate blank clear',
     { valid: true, value: null, error: '' })
 })
 
+test('a blank-default text field takes a blank as its value in the per-run panel only', () => {
+  // `seed_from_run`: blank is the off switch a seeded run is Replayed unseeded with.
+  const seed = FIELD_BY_KEY.seed_from_run
+  assert.equal(seed.default, '')
+  for (const raw of ['', '   ', null, undefined]) {
+    assert.deepEqual(parseSettingValue(seed, raw, { allowClear: false }),
+      { valid: true, value: '', error: '' })
+  }
+  // A named source passes through as typed; the server strips it (`core/config.py`).
+  assert.deepEqual(parseSettingValue(seed, 'runs/a#3', { allowClear: false }),
+    { valid: true, value: 'runs/a#3', error: '' })
+  // The global page still reads blank as CLEAR, so an environment value is never shadowed.
+  assert.deepEqual(parseSettingValue(seed, ''), { valid: true, value: null, error: '' })
+  // A text field with a real default is still required in the per-run panel.
+  assert.match(parseSettingValue(FIELD_BY_KEY.docker_image, '', { allowClear: false }).error,
+    /required/i)
+})
+
 test('validation catches a blanked REQUIRED non-numeric field, not just int/float', () => {
   // A blank required enum/text under a run-config edit (allowClear:false) must be flagged. Before the fix
   // settingsValidationErrors only checked int/float, so the field silently coerced to INVALID_SETTING_VALUE

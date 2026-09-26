@@ -13,13 +13,12 @@ from __future__ import annotations
 
 import ast
 import sys
-from pathlib import Path
 
 from looplab.core.config import Settings
 from looplab.runtime import seccomp
 from looplab.runtime.sandbox import run_argv
+from _source_scan import PKG, iter_trees
 
-_ROOT = Path(__file__).resolve().parents[1] / "looplab"
 _PREFIX = Settings.model_config.get("env_prefix", "LOOPLAB_")
 
 
@@ -27,8 +26,8 @@ def _wire_names() -> dict[str, str]:
     """Every module-level `LOOPLAB_*` string constant under `runtime/` and `engine/`, by where."""
     found = {}
     for package in ("runtime", "engine"):
-        for path in sorted((_ROOT / package).rglob("*.py")):
-            for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        for path, tree in iter_trees(PKG / package):
+            for node in tree.body:
                 targets = (node.targets if isinstance(node, ast.Assign)
                            else [node.target] if isinstance(node, ast.AnnAssign) else [])
                 value = getattr(node, "value", None)
@@ -36,7 +35,7 @@ def _wire_names() -> dict[str, str]:
                         and value.value.startswith(_PREFIX)):
                     for target in targets:
                         if isinstance(target, ast.Name):
-                            found[value.value] = f"{path.relative_to(_ROOT.parent)}::{target.id}"
+                            found[value.value] = f"{path.relative_to(PKG.parent)}::{target.id}"
     return found
 
 

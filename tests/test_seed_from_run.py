@@ -523,3 +523,73 @@ def test_the_web_route_pins_the_seed_it_showed(web):
         assert body["ok"] is True, body
         assert body["preview"]["settings"]["seed_from_run"] == f"{src.resolve()}#{champion.id}"
         assert any(w.startswith(f"seeded from run src1 #{champion.id}") for w in body["warnings"])
+
+
+def test_a_proven_difference_survives_a_source_declaration_no_adapter_reads(isolated, tmp_path):
+    """LOW (critic 2026-09-26, driven): a dataset source whose data was gone could not be read as a
+    task, and a `different` the raw declarations prove read `unknown`. The raw contract still
+    decides `different`, and the cause is named."""
+    runs = isolated / "runs"
+    kept = tmp_path / "corpus-v2.csv"
+    kept.write_text("x,y\n1,2\n3,4\n")
+    gone = {"kind": "dataset", "direction": "min", "data_path": str(tmp_path / "corpus-v1.csv"),
+            "metric": "rmse"}
+    src = _declared_source(runs, "prior", gone)
+    seed = resolve_seed(str(src), runs / "new")
+    verdict, note = seed_verdict(seed, {**gone, "data_path": str(kept)}, direction="min",
+                                 eval_env={}, holdout_fraction=0.25)
+    assert verdict == "different" and "declared paths" in note, note
+    assert "could not be read as a task (" in note
+
+
+def test_the_birth_row_is_the_first_row_only(isolated):
+    """`birth_seed_row` reads seq 0 and nothing later: a seed-marked inject further down the log is
+    an import, not how the run was born (its seq-0 guard's mutant survived)."""
+    from looplab.engine.seed_from_run import birth_seed_row, recorded_seed_spec
+    from looplab.events.eventstore import EventStore as Store
+
+    src, _prior = _source(isolated)
+    seeded = isolated / "runs" / "seeded"
+    assert _run(seeded, "--max-nodes", "2", "-s", f"seed_from_run={src}").exit_code == 0
+    events = Store(seeded / "events.jsonl").read_all()
+    assert birth_seed_row(events) == dict(events[0].data)
+    later = isolated / "runs" / "later"
+    later.mkdir()
+    store = Store(later / "events.jsonl")
+    store.append("run_started", {"run_id": "later", "task_id": "t", "goal": "g",
+                                 "direction": "min"})
+    store.append("inject_node", dict(events[0].data))
+    assert birth_seed_row(store.read_all()) is None and recorded_seed_spec(store.read_all()) == ""
+    # The rule, stated: a seed row is a birth only at seq 0 — the start record admits it nowhere else.
+    from looplab.core.models import Event
+    row = dict(events[0].data)
+    assert birth_seed_row([Event(seq=0, type="inject_node", data=row)]) == row
+    assert birth_seed_row([Event(seq=3, type="inject_node", data=row)]) is None
+
+
+def test_an_unknown_home_is_not_a_run(isolated):
+    """`~user` with no such user raises RuntimeError from `expanduser`; it is a refusal, not a
+    traceback (the clause's mutant survived)."""
+    runs = isolated / "runs"
+    runs.mkdir()
+    with pytest.raises(ConfigRefusal, match="no run directory"):
+        resolve_seed("~no-such-user-looplab-test/run", runs / "x")
+
+
+def test_a_frozen_seed_is_a_seed_row_or_refused():
+    """What a Replay's child appends verbatim (`frozen_seed_payload`) has the shape `seed_intent`
+    builds, or the child refuses before it writes anything."""
+    from looplab.engine.seed_from_run import frozen_seed_payload
+
+    row = {"idea": {"operator": "draft", "params": {}, "rationale": "r"}, "code": "print(1)\n",
+           "files": {}, "deleted": [], "parent_id": None,
+           "origin": {"seed_from_run": True, "run_dir": "/runs/src", "node_id": 2}}
+    assert frozen_seed_payload(json.dumps(row).encode()) == row
+    for bad in (b"\xff", b"{", b"null", b"[]",
+                {**row, "origin": {**row["origin"], "seed_from_run": False}},
+                {**row, "origin": {**row["origin"], "node_id": True}},
+                {**row, "idea": "draft"}, {**row, "code": None}, {**row, "files": []},
+                {**row, "deleted": {}}, {**row, "parent_id": 0}):
+        raw = bad if isinstance(bad, bytes) else json.dumps(bad).encode()
+        with pytest.raises(ConfigRefusal, match="frozen seed"):
+            frozen_seed_payload(raw)
