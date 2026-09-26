@@ -692,7 +692,8 @@ it exists for. The declaration names a path; the key is the digest.
 *orderings*:
 
 * **within a run** — `champion_metric_caveats` adds `mixed_comparability` when the run's own evaluated
-  nodes carry provably different keys, so the portfolio row says the champion won a mixed field. It
+  nodes carry provably different keys (or, see *The protocol* below, provably different rulers), so
+  the portfolio row says the champion won a mixed field. It
   fires on `different` and never on `unknown`: inside one run the key is constant by construction, so a
   member that caveated silence would fire on every run and mean nothing;
 * **across runs** — `/api/runs` publishes `best_metric_comparability`, and `ui/src/runIndex.js::
@@ -700,7 +701,7 @@ it exists for. The declaration names a path; the key is the digest.
   panel's cross-run rung and `crossRunRank.js` all ask) refuses a set containing two provably different
   keys. The cross-run panel sub-partitions each `(task_id, direction)` group by key, so a ranking is
   published only inside a partition and every other subset stays on screen, named and unranked;
-* **the Pareto front** — a banner when one run's nodes split by key, because dominance is a pairwise
+* **the Pareto front** — a banner when one run's nodes split by key or protocol, because dominance is a pairwise
   metric comparison and a front over points that do not share an axis is not a front;
 * **the warm start** — `store_case` stamps the key on every new case row and `JsonlCaseLibrary` elects
   its cross-run champion **within one key only**, so a case measured on one test set can no longer be
@@ -763,7 +764,11 @@ refuse-only facets, each a digest, describing the conditions the number was meas
   `{"metric": 0.071, "eval_fingerprint": {"repetition_penalty": 1.0, "num_beams": 5, "split": "v2"}}`.
   The last such line wins, and only its sha256 is recorded. Name only what is the SAME for every node
   measured the same way: a per-node value — a checkpoint path, a node id, a timestamp, a per-node
-  seed — makes every pair read as different.
+  seed — makes every pair read as different. And name your own DEADLINE here if the eval sizes its
+  work by it: `profile` is the override tokens only, so two profiles that differ in nothing but their
+  timeout read as one ruler, although the eval can see its own (`LOOPLAB_EVAL_TIMEOUT_S`) — left out
+  on purpose, because a `budget_extend{eval_timeout}` mid-run would otherwise split every run it
+  touches into two rulers.
 
 Each facet follows the substrate's rule on its own: it refuses a comparison only when **both** records
 carry it and they differ, it never certifies (a matching ruler over different data is still not one
@@ -771,8 +776,9 @@ evaluation), and a facet one side never recorded is silence. A run whose own nod
 different rulers raises `mixed_comparability` on its champion, and every ranking surface above
 refuses to order such a pair. The fingerprint is read off the same stdout the metric is — the host
 scorer's own when one runs — so it is exactly as trustworthy as the metric beside it, and because it
-can only refuse, a forged (or `null`) later line can at worst add a caveat or silence the facet, the
-same as printing none — never make two different rulers read as one.
+can only refuse, a forged (or `null`) later line can at worst add a caveat or silence the facet —
+and silencing it hides a difference exactly as printing none would. What it can never do is
+certify: no fingerprint makes two rulers one.
 
 **Every stage records what it RAN ON and what it MADE — the stage identity.** Since 2026-08-17 the
 engine derives two facts per stage and writes them onto the `stage_finished` row. Neither gates

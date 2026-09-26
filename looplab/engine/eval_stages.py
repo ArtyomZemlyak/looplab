@@ -245,6 +245,20 @@ class EvalStagesMixin:
     """The engine's staged-eval cluster. See the module docstring for the mixin convention
     (`self` is the Engine)."""
 
+    @staticmethod
+    def _operator_stages(es):
+        """The operator's declared `eval.stages`, VALIDATED — or None when there is no list, or the
+        list fails `validate_stages` (the run then falls back to the single command). THE one test of
+        whether an eval runs the operator's own pipeline VERBATIM, the branch of `_resolve_stages` in
+        which the profile-built `cmd` never executes; `_eval_pipeline` asks it for that reason."""
+        from looplab.runtime import command_eval
+
+        task_stages = es.get("stages")
+        if not (isinstance(task_stages, list) and task_stages):
+            return None
+        clean, err = command_eval.validate_stages(task_stages, allow_env=True, existing_run=True)
+        return clean if err is None else None
+
     def _resolve_stages(self, workdir, es, params=None, score_cmd=None, score_timeout=None):
         """Resolve the ordered eval pipeline, with the operator's `cmd` (es) AUTHORITATIVE and
         non-overridable (redesign: the agent can't rewrite how it's scored):
@@ -289,9 +303,8 @@ class EvalStagesMixin:
             # submission. A refusal here does not reach the operator — it lands on the fallback
             # below — so a retroactive clause (the closed stage-key set) would silently discard
             # the declared pipeline and score later nodes of this run by a different one.
-            clean, err = command_eval.validate_stages(
-                task_stages, allow_env=True, existing_run=True)
-            if err is None:
+            clean = self._operator_stages(es)
+            if clean is not None:
                 if host:
                     # THE HOST'S IS THE ONLY `score`. `validate_stages` reserves nothing for the
                     # OPERATOR's own list (they own scoring), which is right when their `cmd` IS
@@ -639,7 +652,10 @@ class EvalStagesMixin:
         # `eval.stages` list runs verbatim and `cmd` is never executed, so the profile moved no argv
         # there — and recording its overrides anyway made a smoke node and a full node with byte-
         # identical chains read as two rulers (a spurious `mixed_comparability`, refused rankings).
-        if stages and not any(isinstance(s, dict) and s.get("command") == cmd for s in stages):
+        # Decided by the BRANCH `_resolve_stages` took, through the one test it takes it on — not
+        # by comparing argv, which an operator stage spelled like `cmd` plus its smoke overrides
+        # would have matched by coincidence (second critic pass, 2026-09-26).
+        if self._operator_stages(es) is not None:
             protocol = {**protocol, "overrides": []}
         return cmd, timeout, self._leash_stages(stages), protocol
 

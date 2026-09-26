@@ -346,7 +346,7 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   anywhere in its subtree *including its own experiments* — never a sum, since two experiments testing
   one sharpening would add their gains into a total nobody measured — with `own` shown separately
   when the row's own experiments did worse than a sharper child. And a row whose evidence nodes
-  recorded **provably different comparability keys** says `mixed comparability` beside the number
+  recorded **provably different comparability keys** (or evaluation protocols) says `mixed comparability` beside the number
   rather than hiding it, exactly as a champion that won a mixed field does: blanking it would leave
   the questions that got the most work showing nothing. Absent keys are silence, not disagreement.
   A question with no experiment yet keeps its row and says so — it is the most actionable row on the

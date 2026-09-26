@@ -164,8 +164,9 @@ from typing import Optional
 #                   from any text an agent wrote — `engine/repair_verify.py::declared_param_
 #                   overrides` owns the rule and its bounds; this is a call to it, not a second copy.
 #   mixed_comparability — this run's OWN evaluated nodes carry PROVABLY DIFFERENT comparability keys
-#                   (`engine/comparability.py`), so the champion is the winner of a field that was
-#                   not all measured against the same data. Like `params_overridden` this is not a
+#                   or evaluation protocols (`engine/comparability.py` — the `protocol` facets since
+#                   2026-09-26: profile, scorer, fingerprint), so the champion is the winner of a
+#                   field that was not all measured against the same data or with the same ruler. Like `params_overridden` this is not a
 #                   claim about HOW the number was measured but about WHAT IT IS A NUMBER FOR: a
 #                   selector that ordered 0.79 measured on one test set against 0.77 measured on
 #                   another has not chosen the better model, and no rung in the tree could tell.

@@ -889,7 +889,8 @@ export function ParetoPanel({ state, onClose, onSelect }) {
               and a banner over silence would show on every run and mean nothing. */}
           {nodesSplitByComparability(nodes) && <div className="warn" style={{ marginTop: 8 }}>
             ⚠ This run&rsquo;s nodes were <b>not all measured against the same evaluation</b> — their
-            recorded comparability keys provably differ. Dominance between two such nodes is not a
+            recorded comparability keys, or the evaluation protocols they ran under (profile, scorer,
+            fingerprint), provably differ. Dominance between two such nodes is not a
             fact, so this front orders points that do not share an axis. Each value is still true of
             its own measurement; the front is not.
           </div>}
@@ -2626,6 +2627,10 @@ export function CrossRunPanel({ state, onClose }) {
         nothing on this box ranks them. {/* EVALUATION is the third term since 2026-08-20: a group is
           partitioned by comparability key as well, so a task with several runs can hold several
           singletons — which is the finding, not a rounding error in this sentence. */}
+        {/* UNIDENTIFIED is counted too (critic 2026-09-26): without it a box of 3 runs whose one
+            partition was refused WHOLE — a smoke-scored champion beside a full-scored one — read
+            "0 comparable … 0 no metric, 0 singletons", three runs accounted for by nothing. */}
+        {coverage.unidentified > 0 && ` ${coverage.unidentified} could not be placed in a group: no task id or direction to read the metric with, or a group whose members provably disagree on their evaluation (data or protocol), which is refused whole rather than ranked.`}
         {elsewhere > 0 && ` ${elsewhere} comparable group(s) belong to other task IDs and are deliberately not shown here — their objectives are unrelated to this run.`}
       </div>}
     </Panel>

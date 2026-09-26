@@ -60,9 +60,10 @@ _RESULT_FIELDS = (
     "extra_metrics_provenance", "extra_metrics_direction", "violations", "trials", "stages",
     "metric_subject", "eval_inputs", "applied_params", "effective_train_batch", "self_metric",
     "host_scorer",
-    # The protocol facets' inputs (doc 68 §1, 2026-09-26): the resolved profile's override tokens
-    # (operator-owned, from the task spec) and the DIGEST of a printed `eval_fingerprint` (never the
-    # value), so a node finalized from its settle record keeps the facets a live terminal records.
+    # The protocol facets' inputs (doc 68 §1, 2026-09-26), both as DIGESTS: the resolved profile's
+    # facet (`comparability.py::digested_protocol` — never the override argv, which no other row
+    # carries) and the digest of a printed `eval_fingerprint` (never the value), so a node finalized
+    # from its settle record keeps the facets a live terminal records.
     "eval_protocol", "eval_fingerprint",
 )
 
@@ -81,9 +82,13 @@ def settled_result_record(res, *, stdout_tail: str, stderr_tail: str) -> dict:
     re-running the evaluator. The tails are the caller's (`_redacted_tail`, the one redact-then-cut
     order every durable tail takes); a stream too long for them loses its front, exactly as the
     terminal's own `stdout_tail` column does."""
+    from looplab.engine.comparability import digested_protocol
+
     rec: dict[str, Any] = {"v": SETTLED_RESULT_VERSION}
     for name in _RESULT_FIELDS:
         value = getattr(res, name, None)
+        if name == "eval_protocol":
+            value = digested_protocol(value)
         if value is not None and value is not False:
             rec[name] = value
     rec["stdout_tail"] = stdout_tail or ""

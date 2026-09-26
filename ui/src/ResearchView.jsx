@@ -200,7 +200,7 @@ export default function ResearchView({ cards, state, renderCard }) {
                 : (roll.best > 0 ? ' ok' : ''))}
                 title={roll.mixedComparability
                   ? 'the experiments behind these numbers recorded provably different comparability'
-                    + ' keys, so this best won a mixed field'
+                    + ' keys or evaluation protocols, so this best won a mixed field'
                   : `best improvement measured under this question, by ${roll.bestCardId}`}>
                 best {_delta(roll.best)}
                 {roll.bestCardId && roll.bestCardId !== row.id ? ` by ${roll.bestCardId}` : ''}

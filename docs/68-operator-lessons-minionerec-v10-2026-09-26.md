@@ -181,7 +181,7 @@ seed). Движок складывает его в провенанс и при 
 и сначала нужна критика.
 
 - **68.1** *Закрыто 2026-09-26: здесь стоял `no-eval-fingerprint`. Отпечаток есть: eval печатает
-  `eval_fingerprint` (любое JSON-значение на своей последней JSON-строке —
+  `eval_fingerprint` (любое JSON-значение; читается с последней JSON-строки stdout, несущей этот ключ, —
   `runtime/sandbox.py::json_line_fingerprint`), а движок кладёт его дайджест в
   `metric_provenance.comparability.protocol` рядом с двумя фасетами, которые знает сам: overrides
   разрешённого eval-профиля (`runtime/command_eval.py::eval_protocol`) и дайджест программы

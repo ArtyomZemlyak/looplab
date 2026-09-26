@@ -267,7 +267,11 @@ def test_every_prefixed_call_site_reads_through_the_shared_predicate():
     # Exemptions are matched on the REASON, not the filename. Exempting whole files would let a
     # genuinely re-derived 64-hex predicate slip in beside an unrelated random-id check — which is
     # exactly what happened to the first draft of this test.
-    non_digest_lengths = ("== 32", "!= 32", "{12, 32}")
+    non_digest_lengths = ("== 32", "!= 32", "{12, 32}",
+                          # 16-hex TRUNCATED comparability keys (`engine/comparability.py::
+                          # _KEY_CHARS`, the settle row's pre-digested `profile` facet): a digest,
+                          # but not the 64-hex shape `valid_digest_ref` reads.
+                          "== _KEY_CHARS")
 
     offenders = []
     for path, text in iter_sources():

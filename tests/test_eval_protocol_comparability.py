@@ -232,11 +232,16 @@ def test_the_dispatcher_records_the_profile_it_ran_and_the_fingerprint_printed(t
     assert comparability_status(*records) == DIFFERENT
 
 
-def test_an_operator_declared_pipeline_records_no_overrides_it_never_ran(tmp_path):
+@pytest.mark.parametrize("extra", [[], ["steps=1"]])
+def test_an_operator_declared_pipeline_records_no_overrides_it_never_ran(tmp_path, extra):
     """THE CRITIC'S FALSE DIFFERENT, driven: an OPERATOR-declared `eval.stages` list runs verbatim and
     never executes the profile's command, so smoke and full dispatch byte-identical chains — and
-    must record the same protocol, or two nodes measured identically read as two rulers."""
-    stages = [{"name": "score", "command": [sys.executable, "ttrain_cli.py"]}]
+    must record the same protocol, or two nodes measured identically read as two rulers.
+
+    `["steps=1"]` is the second pass's case: an operator stage spelled exactly like `cmd` plus the
+    smoke overrides. Deciding "did `cmd` run" by comparing argv matched it by coincidence under
+    smoke and not under full, so the pair read as two rulers; the branch decides it now."""
+    stages = [{"name": "score", "command": [sys.executable, "ttrain_cli.py", *extra]}]
     task = RepoTask(id="staged", goal="g", direction="max", editable_path=str(FIXTURE),
                     edit_surface=["*.json"], protect=["ttrain_cli.py"],
                     eval=EvalSpec(command=[sys.executable, "ttrain_cli.py"], metric=_M,
@@ -262,13 +267,18 @@ def test_the_settle_record_keeps_both_facets(tmp_path):
     from looplab.runtime.sandbox import RunResult
 
     live = RunResult(exit_code=0, stdout="", stderr="", metric=0.5, timed_out=False,
-                     eval_protocol={"profile": "full", "overrides": ["steps=100"]},
+                     eval_protocol={"profile": "full", "overrides": ["steps=100", "--key=s3cret"]},
                      eval_fingerprint=_fp({"repetition_penalty": 1.0}))
     record = settled_result_record(live, stdout_tail="", stderr_tail="")
+    # DIGESTS ONLY (second critic pass): the settle row was the one event carrying raw override argv.
+    assert "steps=100" not in json.dumps(record) and "s3cret" not in json.dumps(record)
     back, reason = result_from_record(json.loads(json.dumps(record)))
     assert reason == "" and back is not None
-    assert back.eval_protocol == live.eval_protocol
+    assert (protocol_record(eval_protocol=back.eval_protocol, fingerprint=back.eval_fingerprint)
+            == protocol_record(eval_protocol=live.eval_protocol, fingerprint=live.eval_fingerprint))
     assert back.eval_fingerprint == live.eval_fingerprint
+    # A malformed pre-digested value is absent, never a facet.
+    assert protocol_record(eval_protocol={"profile_digest": "not-a-digest"}) is None
 
 
 class _AlternatingProfiles(RepoParamResearcher):

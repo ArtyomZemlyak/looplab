@@ -258,6 +258,36 @@ def inferred_material(task) -> Optional[list]:
 PROTOCOL_FACETS = ("profile", "scorer", "fingerprint")
 
 
+# The key a settle record carries the `profile` facet under, ALREADY DIGESTED — never the override
+# tokens themselves (second critic pass, 2026-09-26: the settle row had become the one event carrying
+# raw operator argv past the redaction funnel). `engine/settled_recovery.py` writes it through
+# `digested_protocol`; `_profile_facet` passes it through, so a node finalized from its settle record
+# records the digest a live terminal would.
+PROFILE_DIGEST_KEY = "profile_digest"
+
+
+def _profile_facet(eval_protocol) -> str:
+    """The `profile` facet of one `eval_protocol` record: the digest of its override tokens, the
+    pre-digested `PROFILE_DIGEST_KEY` a settle record carries, or `""` (absent) for anything else."""
+    if not isinstance(eval_protocol, dict):
+        return ""
+    overrides = eval_protocol.get("overrides")
+    if isinstance(overrides, list):
+        return _digest(["overrides", [str(token)[:256] for token in overrides[:64]]])
+    digest = eval_protocol.get(PROFILE_DIGEST_KEY)
+    if (isinstance(digest, str) and len(digest) == _KEY_CHARS
+            and all(ch in "0123456789abcdef" for ch in digest)):
+        return digest
+    return ""
+
+
+def digested_protocol(eval_protocol) -> Optional[dict]:
+    """`eval_protocol` as a settle record may persist it — `{PROFILE_DIGEST_KEY: digest}`, or `None`
+    when it carries no readable profile facet."""
+    digest = _profile_facet(eval_protocol)
+    return {PROFILE_DIGEST_KEY: digest} if digest else None
+
+
 def protocol_record(*, eval_protocol=None, host_scorer=None, fingerprint=None) -> Optional[dict]:
     """`{facet: digest}` for the facets this measurement recorded, or `None` when it recorded none.
 
@@ -265,10 +295,7 @@ def protocol_record(*, eval_protocol=None, host_scorer=None, fingerprint=None) -
     cannot be read is ABSENT, never a digest of nothing: `_protocol_mismatch` only refuses over a
     facet BOTH sides carry, so an absent facet keeps every pre-2026-09-26 record reading as it did.
     """
-    facets = {}
-    overrides = eval_protocol.get("overrides") if isinstance(eval_protocol, dict) else None
-    if isinstance(overrides, list):
-        facets["profile"] = _digest(["overrides", [str(token)[:256] for token in overrides[:64]]])
+    facets = {"profile": _profile_facet(eval_protocol)}
     program = host_scorer.get("program_sha256") if isinstance(host_scorer, dict) else None
     if isinstance(program, str) and program:
         facets["scorer"] = _digest(["program_sha256", program[:128]])
@@ -549,10 +576,13 @@ def group_token(record: Optional[dict]) -> str:
 
 
 def run_split_by_key(nodes) -> bool:
-    """Do this run's own evaluated nodes carry more than one PROVABLY DIFFERENT comparability key?
+    """Do this run's own evaluated nodes carry a PROVABLY DIFFERENT pair of comparability records?
 
-    True is the within-run refusal: the run compared its own candidates against different data, so
-    its champion is the winner of a mixed field. Cheap by construction — inside one run the key is
+    True is the within-run refusal: the run compared its own candidates against different data, or
+    under different evaluation protocols (a `protocol` facet both sides recorded and that differs —
+    a `smoke` profile beside a `full` one, an edited scorer), so its champion is the winner of a
+    mixed field. The NAME predates the protocol facets; it asks `comparability_status`, which
+    checks both. Cheap by construction — inside one run the key is
     normally constant, so this walks the nodes and finds one pair.
 
     Asked PAIRWISE through `comparability_status` rather than by counting distinct keys, because two

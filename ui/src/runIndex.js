@@ -84,8 +84,8 @@ export function sourceIntegrityNotice(run = {}) {
 // `nodeAppliedParams` below, on the node's own Metrics tab.
 //
 // The FOURTH member, `mixed_comparability`, is of the third's kind and not the first pair's: it says
-// the run's own evaluated nodes were not all measured against the same data
-// (`looplab/engine/comparability.py`), so the champion won a mixed field. Like `params_overridden`
+// the run's own evaluated nodes were not all measured against the same data, or not all with the same
+// evaluation protocol (`looplab/engine/comparability.py`), so the champion won a mixed field. Like `params_overridden`
 // it does not doubt the measurement — it doubts what the measurement is OF.
 export const CHAMPION_CAVEAT_SALVAGED = 'salvaged'
 export const CHAMPION_CAVEAT_TRUST_FLAGGED = 'trust_flagged'
@@ -145,7 +145,8 @@ export function bestMetricCaveatNotice(run = {}) {
             + 'itself was measured normally; what is in question is what it is a measurement of.'
           : slug === CHAMPION_CAVEAT_MIXED_COMPARABILITY
             ? 'This run’s own nodes were not all measured against the same evaluation — their '
-              + 'recorded comparability keys provably differ — so this number won a mixed field. '
+              + 'recorded comparability keys, or the evaluation protocols they ran under (profile, '
+              + 'scorer, fingerprint), provably differ — so this number won a mixed field. '
               + 'The values are each true of their own measurement; the ordering between them is '
               + 'not.'
             : slug === CHAMPION_CAVEAT_MERGED_COORDINATES
@@ -816,8 +817,8 @@ function statusOfRecords(left, right) {
 const anyKeyConflict = records => records.some((record, i) => records.slice(i + 1).some(
   other => statusOfRecords(record, other) === COMPARABILITY_DIFFERENT))
 
-// Do these NODES carry provably different keys? The within-run refusal, for a panel that orders or
-// dominates one run's own nodes against each other.
+// Do these NODES carry provably different keys (or protocols — `statusOfRecords` asks both)? The
+// within-run refusal, for a panel that orders or dominates one run's own nodes against each other.
 export const nodesSplitByComparability = (nodes = []) => anyKeyConflict(
   (Array.isArray(nodes) ? nodes : []).map(nodeComparabilityRecord).filter(Boolean))
 
@@ -828,7 +829,8 @@ export function comparabilityStatus(a, b) {
   return statusOfRecords(comparabilityRecord(a), comparabilityRecord(b))
 }
 
-// Does this set of RUNS contain a pair whose keys are provably different? The cross-run refusal.
+// Does this set of RUNS contain a pair whose keys (or protocols) are provably different? The
+// cross-run refusal.
 export const comparabilityConflict = (runs = []) => anyKeyConflict(
   (Array.isArray(runs) ? runs : []).map(comparabilityRecord).filter(Boolean))
 
