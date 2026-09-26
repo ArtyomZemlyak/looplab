@@ -512,9 +512,50 @@ def test_a_parent_with_no_metric_gets_no_invented_sign_and_no_note(tmp_path, mon
     monkeypatch.setattr(engine.researcher, "propose", _propose)
     anyio.run(engine._ablate, 0)
     row = next(e.data for e in engine.store.read_all() if e.type == "ablate")
-    assert row["impacts"], "the probes ran and measured"
+    assert row["impacts"], "the probes ran"
     assert set(row["signed_impacts"].values()) == {None}
     assert seen and not any(seen), "no note is stamped from signs nobody can state"
+
+
+def test_a_parent_with_no_metric_gets_no_invented_impact_and_no_highest_impact_claim(
+        tmp_path, monkeypatch):
+    """…and the sensitivity beside the sign was the same invention: `|probe - 0.0|` is the probe's
+    own magnitude, so `impacts` read `{'x': 11.25, 'y': 7.25}` and the child's rationale said
+    "refine highest-impact 'x'" of a node nobody measured (critic 2026-09-26, driven)."""
+    engine = _crafted(tmp_path / "pending", metric=None)
+    built = []
+    monkeypatch.setattr(engine, "_build_refine_block_child",
+                        lambda parent, parent_id, generation, idea, state: built.append(idea))
+    anyio.run(engine._ablate, 0)
+    row = next(e.data for e in engine.store.read_all() if e.type == "ablate")
+    assert row["impacts"] and set(row["impacts"].values()) == {None}, row["impacts"]
+    (idea,) = built
+    assert "highest-impact" not in idea.rationale
+    assert "has no measured metric, so no parameter's impact could be measured" in idea.rationale
+    assert idea.rationale.endswith(f"refine '{sorted(row['impacts'])[0]}'"), "the historical pick"
+
+
+def test_code_block_mode_ranks_only_the_essential_blocks_of_an_unmeasured_parent(
+        tmp_path, monkeypatch):
+    """With no measured parent a surviving block has no delta, and `None` means ESSENTIAL: only the
+    block whose removal broke the run is known, and it alone can be the one refined."""
+    from types import SimpleNamespace
+
+    engine = _crafted(tmp_path / "blocks", metric=None, ablate_code_blocks=True)
+    probes = iter([SimpleNamespace(metric=0.8, exit_code=0, timed_out=False),
+                   SimpleNamespace(metric=None, exit_code=1, timed_out=False),
+                   SimpleNamespace(metric=9.0, exit_code=0, timed_out=False)])
+
+    async def _probe(source, workdir, parent_id, generation):
+        return next(probes), 1.0, True
+
+    monkeypatch.setattr(engine, "_segment_blocks", lambda code: [(0, 1), (2, 3), (4, 5)])
+    monkeypatch.setattr(engine, "_timed_ablation_probe", _probe)
+    monkeypatch.setattr(engine, "_build_refine_block_child", lambda *a, **k: None)
+    anyio.run(engine._ablate, 0)
+    row = next(e.data for e in engine.store.read_all() if e.type == "ablate")
+    assert row["impacts"] == {"1": None} and row["signed_impacts"] == {"1": None}
+    assert row["top_block"] == "1", "never block 2 for its 9.0 against a made-up 0.0"
 
 
 def test_code_block_mode_signs_each_block_by_the_direction(tmp_path, monkeypatch):

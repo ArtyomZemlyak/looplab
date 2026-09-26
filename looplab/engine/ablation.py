@@ -211,7 +211,10 @@ class AblationMixin:
             await self._ablate_code(parent_id, generation, ablation_id)
             return
         base = parent.metric if parent.metric is not None else 0.0
-        impacts: dict[str, float] = {}
+        # None per probe when the parent has no measured metric (below): `|probe - 0.0|` is the
+        # probe's own magnitude, not an impact (critic 2026-09-26, driven: a forced ablation of a
+        # pending parent recorded `{'x': 11.25, 'y': 7.25}` and "refined the highest-impact 'x'").
+        impacts: dict[str, Optional[float]] = {}
         # THE DIRECTION THE SENSITIVITY THROWS AWAY (doc 67 67.4): `impacts` is MLE-STAR's `|Δ|`,
         # which is how the digest, the UI and the narrative read it — and it cannot tell a component
         # the run is better WITHOUT from one it cannot do without. Recorded beside it, never in its
@@ -249,7 +252,7 @@ class AblationMixin:
                     # pass stops with what it measured (ENG2-10).
                     break
                 if res.metric is not None and res.exit_code == 0 and not res.timed_out:
-                    impacts[p] = abs(res.metric - base)
+                    impacts[p] = abs(res.metric - base) if measured_base else None
                     signed_impacts[p] = (_signed_gain(res.metric, base, state.direction)
                                          if measured_base else None)
                 if superseded:
@@ -267,7 +270,8 @@ class AblationMixin:
         if superseded or not self._ablation_parent_current(parent_id, generation):
             return
 
-        top = max(impacts, key=impacts.get) if impacts else (
+        measured = {name: value for name, value in impacts.items() if value is not None}
+        top = max(measured, key=measured.get) if measured else (
             sorted(parent.idea.params)[0] if parent.idea.params else None)
         # The refiner SEES ITS PROBES under `Settings.ablation_probe_hint` (doc 67 67.4): stamped
         # for this one call and cleared after it, so no later proposal inherits a stale note. OFF,
@@ -287,8 +291,10 @@ class AblationMixin:
         new_params = dict(parent.idea.params)
         if top is not None and top in proposal.params:
             new_params[top] = proposal.params[top]
-        idea = Idea(operator="refine_block", params=new_params,
-                    rationale=f"ablation: refine highest-impact '{top}' (impacts={impacts})",
+        rationale = (f"ablation: refine highest-impact '{top}' (impacts={impacts})" if measured else
+                     f"ablation: node {parent_id} has no measured metric, so no parameter's impact "
+                     f"could be measured; refine '{top}'")
+        idea = Idea(operator="refine_block", params=new_params, rationale=rationale,
                     footprint=proposal.footprint,
                     concept_mode="delta", concepts_added=[], concepts_removed=[])
         self._build_refine_block_child(parent, parent_id, generation, idea, state)
@@ -475,14 +481,17 @@ class AblationMixin:
                     # impact below, ranked MOST essential). Recording it that way would elect a
                     # block nobody measured; the pass stops with what it measured (ENG2-10).
                     break
-                if res.metric is not None and res.exit_code == 0 and not res.timed_out:
+                ran = res.metric is not None and res.exit_code == 0 and not res.timed_out
+                if ran and measured_base:
                     impacts[str(idx)] = round(abs(res.metric - base), 6)
-                    signed_impacts[str(idx)] = (
-                        round(_signed_gain(res.metric, base, state.direction), 6)
-                        if measured_base else None)
-                else:
+                    signed_impacts[str(idx)] = round(
+                        _signed_gain(res.metric, base, state.direction), 6)
+                elif not ran:
                     impacts[str(idx)] = None   # removing this block broke the run => essential block
                     signed_impacts[str(idx)] = None
+                # (A block the run SURVIVED without, under a parent with no measured metric, is not
+                # recorded: there is no delta to rank it by, and None here means ESSENTIAL. Only
+                # the blocks whose removal broke the run are known, and they alone can win.)
                 if superseded:
                     break
 
