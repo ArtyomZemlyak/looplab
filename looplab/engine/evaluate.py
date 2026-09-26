@@ -75,7 +75,7 @@ from looplab.core.models import (DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX,
 from looplab.core.node_evidence import begin_metrics_attempt
 from looplab.core.run_identity import run_ref
 from looplab.engine.asha_monitor import extract_resource_curve
-from looplab.engine.comparability import comparability_record
+from looplab.engine.comparability import comparability_record, protocol_record
 # THE ATTEMPT LOOP'S PURE DECISIONS (review 2026-09-22, ENG2-06): the phases below read the engine,
 # ASK one of these, and act on the answer — see that module's docstring for the four and for what
 # deliberately stays here. The answer ladder moved there verbatim with its private spellings; the
@@ -4836,8 +4836,16 @@ class EvaluateMixin:
                 # the one input that reads the run itself: the comparability key.
                 _inputs_prov = getattr(a.res, "eval_inputs", None)
                 # `_substrate` was read above, BEFORE this lock was taken (ENG2-11) — see there.
-                _cmp = comparability_record(task=self._task_snapshot_for_comparability(),
-                                            inputs_prov=_inputs_prov, substrate=_substrate)
+                # …and the PROTOCOL it was measured under (doc 68 §1): the profile's overrides the
+                # dispatcher resolved, the host scorer's program digest and whatever the eval printed
+                # as its `eval_fingerprint`. Pure and in-memory, like the key it rides beside.
+                _cmp = comparability_record(
+                    task=self._task_snapshot_for_comparability(),
+                    inputs_prov=_inputs_prov, substrate=_substrate,
+                    protocol=protocol_record(
+                        eval_protocol=getattr(a.res, "eval_protocol", None),
+                        host_scorer=getattr(a.res, "host_scorer", None),
+                        fingerprint=getattr(a.res, "eval_fingerprint", None)))
                 _terminal = evaluated_terminal(
                     violations=_eval_payload["violations"], metric=a.res.metric,
                     salvaged=a.salvaged, salvage_cause_repaired=a.salvage_cause_repaired,

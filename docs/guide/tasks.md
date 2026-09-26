@@ -744,6 +744,36 @@ mirrors the same rule, and both halves are driven from one shared truth table
 (`tests/fixtures/comparability_status_cases.json`) so the browser and the engine cannot disagree about
 whether two numbers may be ordered.
 
+**The protocol: the ruler, per facet.** Since 2026-09-26 the record also carries `protocol` — a map of
+refuse-only facets, each a digest, describing the conditions the number was measured under
+(`engine/comparability.py::protocol_record`):
+
+* `profile` — the override tokens the resolved eval profile (`eval.profiles`) appended to the command
+  that actually ran — the single command, or the protected `score` / `self_score` stage. An
+  operator-declared `eval.stages` list runs verbatim and never runs that command, so there the facet
+  records no overrides. A `smoke` number and a `full` number are different measurements; the
+  Strategist's fidelity and `idea.eval_profile` can put both in one run, and before this nothing on
+  either record said so.
+* `scorer` — the host scorer program's content digest (`host_scorer.program_sha256`): editing the
+  scorer mid-run changes the ruler under every later node.
+* `fingerprint` — what your eval **prints** about its own conditions. Put an `eval_fingerprint` key on
+  a stdout JSON line — any JSON value, up to 4,096 characters of canonical JSON — and name in it
+  whatever decides the measurement and the engine cannot see: the decoder settings the scorer actually
+  used, the scorer's version, a hash of the test split, e.g.
+  `{"metric": 0.071, "eval_fingerprint": {"repetition_penalty": 1.0, "num_beams": 5, "split": "v2"}}`.
+  The last such line wins, and only its sha256 is recorded. Name only what is the SAME for every node
+  measured the same way: a per-node value — a checkpoint path, a node id, a timestamp, a per-node
+  seed — makes every pair read as different.
+
+Each facet follows the substrate's rule on its own: it refuses a comparison only when **both** records
+carry it and they differ, it never certifies (a matching ruler over different data is still not one
+evaluation), and a facet one side never recorded is silence. A run whose own nodes were scored under
+different rulers raises `mixed_comparability` on its champion, and every ranking surface above
+refuses to order such a pair. The fingerprint is read off the same stdout the metric is — the host
+scorer's own when one runs — so it is exactly as trustworthy as the metric beside it, and because it
+can only refuse, a forged (or `null`) later line can at worst add a caveat or silence the facet, the
+same as printing none — never make two different rulers read as one.
+
 **Every stage records what it RAN ON and what it MADE — the stage identity.** Since 2026-08-17 the
 engine derives two facts per stage and writes them onto the `stage_finished` row. Neither gates
 anything, neither costs a model call, and nothing in the loop branches on either:

@@ -34,6 +34,24 @@
      "b": {"keys": {"measured": "J"}, "substrate": "a1"}, "status": "different"},
     {"name": "an empty-string substrate is absent, not a value",
      "a": {"keys": {"measured": "K"}, "substrate": ""},
-     "b": {"keys": {"measured": "K"}, "substrate": "b2"}, "status": "same"}
+     "b": {"keys": {"measured": "K"}, "substrate": "b2"}, "status": "same"},
+    {"name": "same keys, DIFFERENT profile protocol — a smoke score against a full one",
+     "a": {"keys": {"measured": "K"}, "protocol": {"profile": "p1"}},
+     "b": {"keys": {"measured": "K"}, "protocol": {"profile": "p2"}}, "status": "different"},
+    {"name": "a protocol mismatch refuses even where the authority could not have certified",
+     "a": {"keys": {"inferred": "K"}, "protocol": {"fingerprint": "f1"}},
+     "b": {"keys": {"inferred": "K"}, "protocol": {"fingerprint": "f2"}}, "status": "different"},
+    {"name": "a protocol facet on one side only is silence, never agreement",
+     "a": {"keys": {"measured": "K"}, "protocol": {"profile": "p1", "fingerprint": "f1"}},
+     "b": {"keys": {"measured": "K"}, "protocol": {"profile": "p1"}}, "status": "same"},
+    {"name": "an agreeing protocol does not rescue differing keys",
+     "a": {"keys": {"measured": "K"}, "protocol": {"scorer": "s1"}},
+     "b": {"keys": {"measured": "J"}, "protocol": {"scorer": "s1"}}, "status": "different"},
+    {"name": "an agreeing protocol certifies nothing at a non-certifying authority",
+     "a": {"keys": {"inferred": "K"}, "protocol": {"scorer": "s1"}},
+     "b": {"keys": {"inferred": "K"}, "protocol": {"scorer": "s1"}}, "status": "unknown"},
+    {"name": "an empty-string protocol facet is absent, not a value",
+     "a": {"keys": {"measured": "K"}, "protocol": {"scorer": ""}},
+     "b": {"keys": {"measured": "K"}, "protocol": {"scorer": "s2"}}, "status": "same"}
   ]
 }

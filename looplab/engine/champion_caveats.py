@@ -171,9 +171,14 @@ from typing import Optional
 #                   another has not chosen the better model, and no rung in the tree could tell.
 #
 #                   IT IS `DIFFERENT` AND NEVER `UNKNOWN`, which is what makes the member nearly
-#                   free and is the reason it is safe to ship. Inside one run the key is constant by
+#                   free and is the reason it is safe to ship. Inside one run the KEY is constant by
 #                   construction — one task snapshot, one input declaration, one contract — so the
-#                   normal answer is a single key and the loop finds no pair. An UNKNOWN key (every
+#                   normal answer is a single key and the loop finds no pair. What CAN move within a
+#                   run is a refuse-only discriminator beside the key: the `substrate` when a fix is
+#                   promoted mid-run, and since 2026-09-26 the `protocol` — a node scored on `smoke`
+#                   beside one scored on `full`, an edited host scorer, a changed printed
+#                   `eval_fingerprint` — and those are exactly the mixed fields this member exists to
+#                   name, not noise. An UNKNOWN key (every
 #                   node of every run written before 2026-08-20, and every task that declares no
 #                   `eval.inputs`) contributes nothing here: silence is not a second key, and
 #                   caveating it would fire this member on all 46 run directories on this box and

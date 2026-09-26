@@ -775,6 +775,20 @@ const substrateMismatch = (left, right) => {
     && !!mine && !!theirs && mine !== theirs
 }
 
+// THE MEASUREMENT PROTOCOL, the substrate's rule per facet (`engine/comparability.py::
+// _protocol_mismatch`, 2026-09-26): the eval profile's overrides, the host scorer's program digest
+// and the `eval_fingerprint` the eval printed. Each facet refuses only when BOTH records carry it and
+// they differ — a facet one side never recorded is silence — and agreement certifies nothing.
+const PROTOCOL_FACETS = ['profile', 'scorer', 'fingerprint']
+const protocolMismatch = (left, right) => {
+  const mine = left?.protocol
+  const theirs = right?.protocol
+  if (!mine || typeof mine !== 'object' || !theirs || typeof theirs !== 'object') return false
+  return PROTOCOL_FACETS.some(facet => typeof mine[facet] === 'string'
+    && typeof theirs[facet] === 'string' && !!mine[facet] && !!theirs[facet]
+    && mine[facet] !== theirs[facet])
+}
+
 // THE PAIR DECISION, over already-extracted records. Split out so there is ONE of it: the tri-state
 // below and the conflict scan underneath both answer "may these two be ordered", and they were two
 // separate spellings of it — which is how the `substrate` discriminator came to be added to
@@ -790,6 +804,8 @@ function statusOfRecords(left, right) {
   // `looplab repair-candidates` explicitly urges) splits two nodes with identical input keys, and
   // the run list, RegistryPanel, ParetoPanel and crossRunRank went on ordering them.
   if (substrateMismatch(left, right)) return COMPARABILITY_DIFFERENT
+  // …and the protocol, on the same ground and in the same place as the engine asks it.
+  if (protocolMismatch(left, right)) return COMPARABILITY_DIFFERENT
   const authority = commonAuthority(left, right)
   if (!authority) return COMPARABILITY_UNKNOWN
   if (left.keys[authority] !== right.keys[authority]) return COMPARABILITY_DIFFERENT

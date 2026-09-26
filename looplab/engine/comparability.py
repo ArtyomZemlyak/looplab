@@ -153,7 +153,7 @@ def _digest(payload) -> str:
     try:
         encoded = json.dumps({"v": KEY_VERSION, "m": payload}, ensure_ascii=False,
                              sort_keys=True, separators=(",", ":")).encode("utf-8")
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):
         return ""
     return hashlib.sha256(encoded).hexdigest()[:_KEY_CHARS]
 
@@ -236,7 +236,50 @@ def inferred_material(task) -> Optional[list]:
             [str(token)[:256] for token in command], [str(path)[:256] for path in paths]]
 
 
-def comparability_record(*, task=None, inputs_prov=None, substrate=None) -> Optional[dict]:
+# THE MEASUREMENT PROTOCOL's facets, in the order a notice names the first that differs. Each is a
+# separate REFUSAL-ONLY discriminator — the `substrate` rule, per facet — and they are kept apart
+# rather than hashed into one digest because ABSENCE differs per facet: a run that began printing a
+# fingerprint half-way would otherwise make every node before it "different" from every node after
+# it, when nothing about the measurement changed except that one side started to say so.
+#
+#   profile     — the resolved eval profile's OVERRIDE TOKENS (`command_eval.eval_protocol`): what
+#                 separates a `smoke`-scored number from a `full`-scored one (doc 68 §1's live hole:
+#                 the Strategist's fidelity puts search nodes on one and endgame nodes on the other,
+#                 and `select_best_node` ranks them in one pool).
+#   scorer      — the host scorer program's content digest (`host_scorer.program_sha256`): an
+#                 operator who edits the scorer mid-run changes the ruler under every later node.
+#   fingerprint — what the eval PRINTED about its own conditions (`sandbox.json_line_fingerprint`,
+#                 key `eval_fingerprint`, carried as a sha256 of its canonical JSON): decoder
+#                 settings, scorer version, split hash — the `repetition_penalty` 1.1-vs-1.0 case,
+#                 which nothing the engine owns could see.
+#
+# `profile` records the overrides that REACHED the executed chain (`eval_stages.py::_eval_pipeline`):
+# none under an operator-declared `eval.stages` list, which never runs the profile's command.
+PROTOCOL_FACETS = ("profile", "scorer", "fingerprint")
+
+
+def protocol_record(*, eval_protocol=None, host_scorer=None, fingerprint=None) -> Optional[dict]:
+    """`{facet: digest}` for the facets this measurement recorded, or `None` when it recorded none.
+
+    Total over junk (every input is read off a `RunResult` or a hand-edited log). A facet that
+    cannot be read is ABSENT, never a digest of nothing: `_protocol_mismatch` only refuses over a
+    facet BOTH sides carry, so an absent facet keeps every pre-2026-09-26 record reading as it did.
+    """
+    facets = {}
+    overrides = eval_protocol.get("overrides") if isinstance(eval_protocol, dict) else None
+    if isinstance(overrides, list):
+        facets["profile"] = _digest(["overrides", [str(token)[:256] for token in overrides[:64]]])
+    program = host_scorer.get("program_sha256") if isinstance(host_scorer, dict) else None
+    if isinstance(program, str) and program:
+        facets["scorer"] = _digest(["program_sha256", program[:128]])
+    if isinstance(fingerprint, str) and fingerprint:
+        facets["fingerprint"] = _digest(["eval_fingerprint", fingerprint[:128]])
+    facets = {name: value for name, value in facets.items() if value}
+    return facets or None
+
+
+def comparability_record(*, task=None, inputs_prov=None, substrate=None,
+                         protocol=None) -> Optional[dict]:
     """The record that rides beside a metric — `{"version", "authority", "keys"}` — or `None`.
 
     `None` when no family could be built at all, which is `unknown` at every consumer. It is a
@@ -281,6 +324,15 @@ def comparability_record(*, task=None, inputs_prov=None, substrate=None) -> Opti
     digest = _digest(substrate) if substrate else None
     if digest:
         record["substrate"] = digest
+    # THE PROTOCOL — the conditions the number was measured under (`protocol_record`). Outside `keys`
+    # for the substrate's reason: a matching protocol certifies nothing (the same ruler over
+    # different data is not one evaluation), so it may only ever DISCRIMINATE. Absent when nothing
+    # was recorded, which is every log before 2026-09-26 and every solution-tier eval.
+    if isinstance(protocol, dict):
+        facets = {name: value for name, value in protocol.items()
+                  if name in PROTOCOL_FACETS and isinstance(value, str) and value}
+        if facets:
+            record["protocol"] = facets
     return record
 
 
@@ -330,11 +382,32 @@ def _substrate_mismatch(this: Optional[dict], other: Optional[dict]) -> Optional
     return None
 
 
+def _protocol_mismatch(this: Optional[dict],
+                       other: Optional[dict]) -> Optional[tuple[str, str, str]]:
+    """`(facet, mine, theirs)` for the FIRST protocol facet both records carry and disagree on.
+
+    `_substrate_mismatch`'s rule, per facet and for the same reasons: ONE spelling for the status
+    and the notice, both sides must carry the facet (absence is silence, never "the same ruler"),
+    and agreeing certifies nothing. Facets are asked in `PROTOCOL_FACETS` order so the notice names
+    the same facet every time for one pair.
+    """
+    mine = (this or {}).get("protocol")
+    theirs = (other or {}).get("protocol")
+    if not isinstance(mine, dict) or not isinstance(theirs, dict):
+        return None
+    for facet in PROTOCOL_FACETS:
+        left, right = mine.get(facet), theirs.get(facet)
+        if isinstance(left, str) and isinstance(right, str) and left and right and left != right:
+            return facet, left, right
+    return None
+
+
 def comparability_status(this: Optional[dict], other: Optional[dict]) -> str:
     """`SAME` | `DIFFERENT` | `UNKNOWN` for two comparability records. Never raises.
 
     THE RULE, in one place, so no surface may write a second one:
       * both carry a SUBSTRATE and they DIFFER       -> DIFFERENT   (checked FIRST, see below)
+      * both carry a PROTOCOL facet and it DIFFERS   -> DIFFERENT   (refusal-only, like substrate)
       * either side absent, or no shared authority   -> UNKNOWN
       * the shared authority's keys DIFFER           -> DIFFERENT   (at every authority)
       * they are equal at a CERTIFYING authority     -> SAME
@@ -354,6 +427,11 @@ def comparability_status(this: Optional[dict], other: Optional[dict]) -> str:
     # deliberately not "the same", which is what keeps every pre-2026-08-24 log reading as it did.
     if _substrate_mismatch(this, other) is not None:
         return DIFFERENT
+    # …AND SO IS THE PROTOCOL, on the same ground: a number measured under a different ruler (a
+    # `smoke` override set, an edited scorer, a decoder the eval says it ran differently) is not on
+    # one scale with this one whatever the input keys say, and a matching protocol certifies nothing.
+    if _protocol_mismatch(this, other) is not None:
+        return DIFFERENT
     authority = _common_authority(this, other)
     if authority is None:
         return UNKNOWN
@@ -368,6 +446,17 @@ _SUBSTRATE_NOTICE = (
     "NOT COMPARABLE: {who}ran on a different source tree (substrate {theirs} vs {mine}). A fix "
     "promoted into the editable repo moves the ground every later experiment is measured on, so the "
     "two values are not on one scale whatever their input keys say.")
+# One clause per protocol facet, naming what differed in words an operator can act on.
+_PROTOCOL_CLAUSES = {
+    "profile": "was scored under a different eval profile (a different set of profile overrides "
+               "— e.g. a `smoke` pass against a `full` one)",
+    "scorer": "was scored by a different host scorer program (its bytes changed between the two)",
+    "fingerprint": "printed a different `eval_fingerprint` (the eval itself says it measured under "
+                   "different conditions)",
+}
+_PROTOCOL_NOTICE = (
+    "NOT COMPARABLE: {who}{clause} (protocol {facet} {theirs} vs {mine}). The two values were "
+    "measured with different rulers, so neither is a target for the other.")
 _NOTICES = {
     DIFFERENT: ("NOT COMPARABLE: {who}measured its number against a different evaluation "
                 "({authority} key {theirs} vs {mine}). The two values are not on one scale and "
@@ -401,6 +490,12 @@ def comparability_notice(this: Optional[dict], other: Optional[dict], *,
         pair = _substrate_mismatch(this, other)
         if pair is not None:
             return _SUBSTRATE_NOTICE.format(who=who, theirs=pair[1], mine=pair[0])
+        # …and so does a protocol mismatch, for the same reason: the authority keys may agree.
+        facet_pair = _protocol_mismatch(this, other)
+        if facet_pair is not None:
+            facet, mine, theirs = facet_pair
+            return _PROTOCOL_NOTICE.format(who=who, clause=_PROTOCOL_CLAUSES[facet], facet=facet,
+                                           theirs=theirs, mine=mine)
         authority = _common_authority(this or {}, other or {}) or AUTHORITY_INFERRED
         return _NOTICES[DIFFERENT].format(
             who=who, authority=authority,
@@ -446,6 +541,10 @@ def group_token(record: Optional[dict]) -> str:
     # exactly what `looplab repair-candidates` urges an operator to do — so one promoted fix would
     # put every later run in a singleton group and the library would stop electing anything at all.
     # A refusal about ONE PAIR must not become a fact about a whole corpus.
+    #
+    # THE PROTOCOL IS LEFT OUT FOR THE FIRST OF THOSE TWO REASONS (2026-09-26). It moves less often
+    # than the substrate, but a token that splits on it is STRICTER than the evidence all the same,
+    # and a run whose endgame rescored on `full` would split its own cases in two.
     return f"{authority}:{key}" if key else ""
 
 

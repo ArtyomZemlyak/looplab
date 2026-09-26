@@ -180,8 +180,22 @@ seed). Движок складывает его в провенанс и при 
 (skew-аудит) маркеров не получают: по §8 это, вероятно, промпт/скилл исследователя, а не механизм,
 и сначала нужна критика.
 
-- **68.1** OPEN[no-eval-fingerprint] отпечаток параметров измерения в провенансе узла и проверка
-  равенства отпечатков при сравнении узлов (§1). proof:absent:eval_fingerprint@looplab
+- **68.1** *Закрыто 2026-09-26: здесь стоял `no-eval-fingerprint`. Отпечаток есть: eval печатает
+  `eval_fingerprint` (любое JSON-значение на своей последней JSON-строке —
+  `runtime/sandbox.py::json_line_fingerprint`), а движок кладёт его дайджест в
+  `metric_provenance.comparability.protocol` рядом с двумя фасетами, которые знает сам: overrides
+  разрешённого eval-профиля (`runtime/command_eval.py::eval_protocol`) и дайджест программы
+  host-скорера. `engine/comparability.py::comparability_status` отказывает в сравнении, если
+  расходится любой фасет, записанный у обеих сторон; совпадение ничего не удостоверяет (правило
+  `substrate`, пофасетно). Проверка критиком нашла живую дыру того же рода без всякого скрипта: узлы
+  на `smoke` и на `full` ранжировались в одном пуле — теперь чемпион такого прогона несёт
+  `mixed_comparability`.*
+- **68.1a** OPEN[mixed-protocol-absent-from-brief] бриф Researcher'а (канал PUSH) не говорит, что
+  лидеры измерены разными линейками (профиль, скорер, отпечаток): расхождение видно в UI, в бандле
+  ревьюера, в `looplab comparability` и агенту, который сам вызовет сравнение узлов (`tools/node_diff.py`,
+  канал PULL), но не в том, что Researcher получает каждый ход. Это изменение промпта — флаг по
+  умолчанию OFF и строка `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` (§1).
+  proof:absent:run_split_by_key@looplab/agents+absent:champion_metric_caveats@looplab/agents
 - **68.2** OPEN[no-metric-retarget-command] смена ключа цели как операторское событие с пересчётом
   `node.metric` из записанных `extra_metrics` вместо правки журнала (§2). proof:absent:metric_retarget@looplab
 - **68.3** OPEN[no-node-rescore-command] повтор только стадии score на сохранённом артефакте узла (§2).

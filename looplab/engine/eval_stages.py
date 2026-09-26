@@ -580,8 +580,11 @@ class EvalStagesMixin:
         return out
 
     def _eval_pipeline(self, node, workdir, profile=None):
-        """WHAT AN EVAL WILL RUN: `(command, timeout, stages)` for this node at this profile — the
-        ONE derivation, called by both the side that RUNS it and the sides that PLAN against it.
+        """WHAT AN EVAL WILL RUN: `(command, timeout, stages, protocol)` for this node at this
+        profile — the ONE derivation, called by both the side that RUNS it and the sides that PLAN
+        against it. `protocol` is `command_eval.eval_protocol` at the profile resolved HERE, handed
+        out rather than re-derived by the dispatcher, so the record of which profile a number was
+        measured under reads the same `_strategy_fidelity` the command was built from (doc 68 §1).
 
         Two readers, straddling the same line `runtime/command_eval.py::eval_spec_time_budget`
         straddles (its docstring says so for the same reason):
@@ -629,7 +632,16 @@ class EvalStagesMixin:
         # has recorded the manifest's raw over-budget facts — so the dispatcher and every planner
         # (the repair floor's `declared_pipeline_seconds`, the watchdogs' log plan) see the leash that
         # will actually kill the stage. Idempotent over the operator stages already leashed above.
-        return cmd, timeout, self._leash_stages(stages)
+        protocol = command_eval.eval_protocol(es, prof)
+        # THE OVERRIDES COUNT ONLY WHERE THEY RUN (critic 2026-09-26). `build_command` appends them
+        # to `cmd`, and `cmd` runs as the single command, as the protected `score` stage after a
+        # Developer manifest, or as `self_score` before a host scorer. An OPERATOR-declared
+        # `eval.stages` list runs verbatim and `cmd` is never executed, so the profile moved no argv
+        # there — and recording its overrides anyway made a smoke node and a full node with byte-
+        # identical chains read as two rulers (a spurious `mixed_comparability`, refused rankings).
+        if stages and not any(isinstance(s, dict) and s.get("command") == cmd for s in stages):
+            protocol = {**protocol, "overrides": []}
+        return cmd, timeout, self._leash_stages(stages), protocol
 
     def _leash_stages(self, stages):
         """A resolved stage chain under the operator's live `budget_extend{eval_timeout}` — `stages`

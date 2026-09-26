@@ -16,6 +16,7 @@ Reads the metric from the last stdout line that is JSON containing a "metric" ke
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -489,6 +490,13 @@ class RunResult:
     # at all. An unoriented key reads back `unknown` at every consumer, and a consumer that ranks
     # must DROP such a dimension rather than assume one; see `oriented_extra_metrics_only`.
     extra_metrics_direction: Optional[dict] = None
+    # THE MEASUREMENT'S CONDITIONS, two halves (doc 68 §1; `engine/comparability.py::protocol_record`).
+    # `eval_fingerprint` is the DIGEST of what the eval PRINTED about them (`json_line_fingerprint`,
+    # command tier only); `eval_protocol` is what the ENGINE knows it asked for — the resolved
+    # profile's override tokens (`command_eval.eval_protocol`), set by the dispatcher. Both are
+    # records that can only refuse a comparison; None on every path that has neither.
+    eval_fingerprint: Optional[str] = None
+    eval_protocol: Optional[dict] = None
     violations: Optional[list] = None
     # Intra-node sweep: when the solution ran a grid of configs in one process, it emits a final
     # `{"trials": [...]}` line; this carries that raw list of trial dicts. The orchestrator picks
@@ -673,7 +681,10 @@ def json_line_extras(text: str, primary_key: str = "metric") -> dict:
     secondary metrics, so an experiment that prints {"metric": x, "recall@10": y, "mrr": z} surfaces
     ALL of them with no per-task config. Structural/bookkeeping keys and non-numeric values are skipped;
     only the primary key drives selection (extras are audit-only)."""
-    _skip = {primary_key, "metric", "trials", "params", "seconds", "second", "time", "epoch", "step"}
+    _skip = {primary_key, "metric", "trials", "params", "seconds", "second", "time", "epoch", "step",
+             # A NUMERIC fingerprint is a statement about the measurement, not a second metric
+             # (critic 2026-09-26): `json_line_fingerprint` reads it, this must not re-read it.
+             EVAL_FINGERPRINT_KEY}
     obj = _last_json_dict(text, lambda o: primary_key in o)
     if obj is None:
         return {}
@@ -740,6 +751,51 @@ def json_line_trials(text: str) -> Optional[list]:
 
 # Back-compat alias (pre-rename importers/tests use `_json_line_trials`).
 _json_line_trials = json_line_trials
+
+
+# The key an eval prints to NAME THE CONDITIONS its number was measured under (doc 68 §1): the
+# decoder settings, the scorer's version, the test split's hash — whatever the operator's scorer
+# knows decides the measurement and the engine cannot see. The case that motivated it: an eval
+# decoder silently inherited each checkpoint's `generation_config`, so one backbone was scored at
+# `repetition_penalty=1.1` and the rest at 1.0, and nothing any record carried could tell.
+EVAL_FINGERPRINT_KEY = "eval_fingerprint"
+# Bounded because it rides on the node's terminal (as a digest, `engine/comparability.py`), and a
+# value past the bound is REFUSED rather than truncated: two long fingerprints that share a prefix
+# would otherwise read equal, and an absent fingerprint is silence, which is the honest reading.
+EVAL_FINGERPRINT_MAX_CHARS = 4096
+
+
+def json_line_fingerprint(text: str) -> Optional[str]:
+    """The sha256 of the canonical JSON of the `eval_fingerprint` value on the LAST stdout JSON line
+    carrying one, or None.
+
+    Any JSON value but `null` / an empty string, object or list, within `EVAL_FINGERPRINT_MAX_CHARS`
+    of canonical JSON. A DIGEST and not the value (critic 2026-09-26), for three reasons: it is all
+    a refusal-only facet needs (`engine/comparability.py::protocol_record`); it is bounded and flat,
+    so a deeply nested value cannot raise `RecursionError` at the node terminal — measured, a 983-deep
+    list passed the size bound here and failed the node there, pausing the run; and it can ride in
+    the settle record without persisting candidate-influenced text past the redaction funnel.
+
+    It is read off the same stdout the metric is (the host scorer's own, when one runs), so it is
+    exactly as trustworthy as the metric line beside it. It can only REFUSE a comparison: a matching
+    fingerprint certifies nothing, so a forged or `null` later line can at worst add a caveat or
+    silence the facet — the same as printing none — and never make two rulers read as one."""
+    try:
+        obj = _last_json_dict(text, lambda o: EVAL_FINGERPRINT_KEY in o)
+    except RecursionError:
+        return None
+    if obj is None:
+        return None
+    value = obj[EVAL_FINGERPRINT_KEY]
+    if value is None or (isinstance(value, (str, dict, list)) and not value):
+        return None
+    try:
+        rendered = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    except (TypeError, ValueError, RecursionError):
+        return None
+    if len(rendered) > EVAL_FINGERPRINT_MAX_CHARS:
+        return None
+    return hashlib.sha256(rendered.encode("ascii")).hexdigest()
 
 
 # `parse_mem_bytes` was defined here. It moved to `core/numeric.py` (review 2026-09-22, CORE-05) so

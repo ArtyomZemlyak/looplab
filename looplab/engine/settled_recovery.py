@@ -60,6 +60,10 @@ _RESULT_FIELDS = (
     "extra_metrics_provenance", "extra_metrics_direction", "violations", "trials", "stages",
     "metric_subject", "eval_inputs", "applied_params", "effective_train_batch", "self_metric",
     "host_scorer",
+    # The protocol facets' inputs (doc 68 §1, 2026-09-26): the resolved profile's override tokens
+    # (operator-owned, from the task spec) and the DIGEST of a printed `eval_fingerprint` (never the
+    # value), so a node finalized from its settle record keeps the facets a live terminal records.
+    "eval_protocol", "eval_fingerprint",
 )
 
 # How much of `eval.log` rule 2 reads: the live capture it stands in for keeps a ~64 KB tail per

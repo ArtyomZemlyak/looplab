@@ -181,8 +181,11 @@ export function crossRunGroups(runs = [], { limit = MAX_GROUP_ROWS } = {}) {
   const groups = []
   for (const bucket of buckets.values()) {
     if (!metricComparable(bucket.members.map(entry => entry.run))) {
-      // Unreachable by construction today; kept because the guard above is the POINT — if the shared
-      // predicate ever rejects this partition, the rows go to the unranked bucket rather than through.
+      // REACHABLE, and the guard above is the POINT: a partition shares one authority key, but the
+      // refuse-only discriminators beside the key — the `substrate`, and since 2026-09-26 the
+      // `protocol` (a smoke-scored champion beside a full-scored one) — can still make a pair in it
+      // provably DIFFERENT. Such a partition goes WHOLE to the unranked bucket rather than through:
+      // failing closed costs a ranking, ranking across two rulers would cost a false one.
       unidentified.push(...bucket.members.map(entry => entry.run))
       continue
     }

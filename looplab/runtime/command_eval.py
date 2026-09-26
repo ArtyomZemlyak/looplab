@@ -51,7 +51,7 @@ from looplab.runtime.stage_identity import (STAGE_INPUT_KEY, STAGE_KEY_REASON,  
                                             STAGE_OUTPUTS_KEY, stage_output_identity)
 from looplab.runtime.sandbox import (RunResult, _to_float, docker_gpu_argv,
                                      docker_gpu_env, docker_run_argv, docker_timed_out,
-                                     finite_timeout, json_line_extras,
+                                     finite_timeout, json_line_extras, json_line_fingerprint,
                                      json_line_metric, json_line_trials, readonly_rootfs_argv,
                                      require_docker_cli, run_argv)
 
@@ -2105,6 +2105,49 @@ def stage_time_budget_refusal(stages, budget: Optional[float]) -> Optional[str]:
         "how long it really needs: that is what tells the operator to raise it.")
 
 
+def resolved_profile(eval_spec: dict, profile: Optional[str] = None) -> Optional[dict]:
+    """The declared profile an eval at `profile` runs under, or None — `build_command`'s rule,
+    spelled once so the command and the PROTOCOL record (`eval_protocol`) cannot disagree.
+
+    An explicitly-requested name that isn't defined uses NO overrides (the base/full command) —
+    never a cheaper fallback, so confirm("full") can't silently run the smoke eval. profile=None
+    means "search default" -> the conventional "smoke".
+
+    Returns the RAW declared value, unguarded, exactly as `build_command` always read it: a
+    grandfathered snapshot's malformed profile must keep failing (or not) the way it did when it
+    was recorded, so the tolerance lives in the one reader that needs it (`eval_protocol`)."""
+    profiles = eval_spec.get("profiles") or {}
+    return profiles.get(profile) if profile else profiles.get("smoke")
+
+
+def eval_protocol(eval_spec: dict, profile: Optional[str] = None) -> dict:
+    """WHAT THIS EVAL MEASURES UNDER that is the same for every node at one profile: the profile's
+    override tokens, which `build_command` appends to the score command.
+
+    Recorded beside the metric (`RunResult.eval_protocol`) so two numbers measured under DIFFERENT
+    overrides can be refused a ranking (`engine/comparability.py::protocol_record`). The live case
+    (doc 68 §1, critic 2026-09-26): `idea.eval_profile` or the Strategist's fidelity puts search
+    nodes on `smoke` and endgame nodes on `full`, `select_best_node` ranks them in one pool, and
+    nothing on either record said which profile its number came from.
+
+    THE OVERRIDES, NOT THE NAME, and not the timeout. Two names with the same overrides run the same
+    measurement (an undeclared `smoke` and an undeclared `full` both run the base command); a
+    timeout decides whether a run FINISHES, and `budget_extend{eval_timeout}` moves it mid-run, so
+    folding it in would refuse every pair either side of an operator's extension. The node's own
+    `%params%` are deliberately absent: they differ per node by design and are what is being
+    compared, not the ruler it is compared on."""
+    # `build_command`'s OWN expression, so the two agree on every input it accepts — including a
+    # grandfathered snapshot whose `overrides` is a bare string, which it appends character by
+    # character. On an input it refuses (a non-dict profile) this is never reached through
+    # `_eval_pipeline`, and answers `[]` rather than raising when called directly.
+    try:
+        prof = resolved_profile(eval_spec, profile)
+        overrides = [str(token) for token in list((prof or {}).get("overrides", []))]
+    except (AttributeError, TypeError):
+        prof, overrides = None, []
+    return {"profile": (profile or "smoke") if prof else None, "overrides": overrides}
+
+
 def build_command(eval_spec: dict, params: Optional[dict] = None,
                   profile: Optional[str] = None) -> tuple[list[str], float]:
     """Build the eval argv + timeout from an eval_spec, an eval profile (smoke/full), and
@@ -2121,11 +2164,7 @@ def build_command(eval_spec: dict, params: Optional[dict] = None,
     _argv = list(eval_spec["command"])
     _had_token = "%params%" in _argv
     cmd = expand_params(_argv, params)                        # %params% token -> --key value
-    profiles = eval_spec.get("profiles") or {}
-    # Resolve the profile. An explicitly-requested name that isn't defined uses NO overrides
-    # (the base/full command) — never a cheaper fallback, so confirm("full") can't silently
-    # run the smoke eval. profile=None means "search default" -> the conventional "smoke".
-    prof = profiles.get(profile) if profile else profiles.get("smoke")
+    prof = resolved_profile(eval_spec, profile)
     overrides = list((prof or {}).get("overrides", []))
     # Explicit presence check (not `or`) keeps this defensive dict-level function deterministic for
     # snapshots/callers that bypass task admission. New EvalSpec profiles require timeout > 0.
@@ -3514,7 +3553,10 @@ def captured_result_fields(out: str, workdir: str, metric: dict, m: Optional[flo
     return {"metric": m, "drift": drift, "extra_metrics": extra,
             "extra_metrics_provenance": extra_channels,
             "extra_metrics_direction": extra_directions,
-            "violations": (viol or None), "trials": trials}
+            "violations": (viol or None), "trials": trials,
+            # What the eval said about the CONDITIONS it measured under (doc 68 §1), off the same
+            # stdout the primary was read from; a record that can only refuse a comparison.
+            "eval_fingerprint": json_line_fingerprint(out) if not to else None}
 
 
 def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,

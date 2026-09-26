@@ -909,7 +909,7 @@ class EvalDispatchMixin:
             # this line would not run — they used to re-implement it and had already lost `profile`.
             # It is the derivation only: `_ensure_run_setup`/`_sync_node_deps` above are the
             # dispatcher's own side effects and stay here, where a planner can never reach them.
-            cmd, timeout, stages = self._eval_pipeline(node, workdir, profile)
+            cmd, timeout, stages, _protocol = self._eval_pipeline(node, workdir, profile)
             if canary is not None:
                 from looplab.engine.eval_canary import capped_pipeline
                 timeout, stages = capped_pipeline(timeout, stages, float(canary["timeout"]))
@@ -1143,6 +1143,11 @@ class EvalDispatchMixin:
                         if start_stage is _UNSET else start_stage))
             except Exception:  # noqa: BLE001 - a record may never cost a node its terminal
                 res.effective_train_batch = None
+            # THE PROTOCOL SIDE — which profile's overrides the score command ran under, as
+            # `_eval_pipeline` resolved them for THIS dispatch (`command_eval.eval_protocol`). A pure
+            # record: it folds into `metric_provenance.comparability` at the terminal, where it can
+            # only refuse ranking a smoke-scored node against a full-scored one (doc 68 §1).
+            res.eval_protocol = _protocol
         else:
             # Intra-node sweep nodes run a whole grid in one process, so they need ~N× the
             # single-eval budget. `sweep_timeout_mult` scales the wall-clock for sweep nodes only;
