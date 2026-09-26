@@ -341,3 +341,29 @@ def test_the_probe_runs_at_the_declared_profile_the_champion_was_measured_on(tmp
     # Operator-declared stages run verbatim: every profile records no overrides, so one ruler.
     engine._eval_spec = {**spec, "stages": [{"name": "score", "command": ["python", "score.py"]}]}
     assert engine._noise_probe_profile(_node_with_ruler(tmp_path / "f", digest([]))) is None
+
+
+def test_the_probe_picks_a_profile_it_can_run_for_as_long_as_the_search_ran(tmp_path):
+    """Critic 2026-09-26, driven. The ruler digest covers the overrides only, and the pick was the
+    alphabet's first match: a malformed `broken` entry (reported as the empty-override ruler) failed
+    every repeat, and a `debug` profile with `full`'s overrides ran the repeats under 5 s."""
+    from looplab.engine.comparability import protocol_record
+
+    def digest(overrides):
+        return protocol_record(eval_protocol={"overrides": overrides})["profile"]
+
+    engine = make_engine(tmp_path / "e")
+    engine._strategy_fidelity = None                      # historical: `smoke`
+    engine._eval_spec = {"command": ["python", "score.py"],
+                         "profiles": {"smoke": {"overrides": ["steps=1"]}, "full": {},
+                                      "broken": "not-a-dict"}}
+    full_node = _node_with_ruler(tmp_path / "a", digest([]))
+    assert engine._noise_probe_profile(full_node) == "full", "never the profile that cannot run"
+    engine._eval_spec = {"command": ["python", "score.py"], "timeout": 600,
+                         "profiles": {"smoke": {"overrides": ["steps=1"], "timeout": 60},
+                                      "full": {"overrides": ["steps=100"], "timeout": 7200},
+                                      "debug": {"overrides": ["steps=100"], "timeout": 5}}}
+    long_node = _node_with_ruler(tmp_path / "b", digest(["steps=100"]))
+    assert engine._noise_probe_profile(long_node) == "full", "the longest timeout, not `debug`'s 5 s"
+    engine._eval_spec["profiles"]["full"]["timeout"] = 5
+    assert engine._noise_probe_profile(long_node) == "full", "a tie goes to `full`, then `smoke`"

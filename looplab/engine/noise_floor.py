@@ -125,6 +125,7 @@ class NoiseFloorMixin:
         (`eval_stages.py::_profile_protocol`), with the operator's stage list validated once."""
         from looplab.engine.comparability import protocol_record, record_of
         from looplab.engine.shared import effective_eval_spec
+        from looplab.runtime.command_eval import build_command
 
         record = record_of(nd)
         protocol = record.get("protocol") if isinstance(record, dict) else None
@@ -143,10 +144,25 @@ class NoiseFloorMixin:
         if ruler(historical) == target:
             return None
         declared = es.get("profiles") if isinstance(es.get("profiles"), dict) else {}
-        for name in sorted({"smoke", "full", *(n for n in declared if isinstance(n, str))}):
-            if ruler(name) == target:
-                return name
-        return None
+        matches = {}
+        for name in {"smoke", "full", *(n for n in declared if isinstance(n, str))}:
+            if ruler(name) != target:
+                continue
+            # Only a profile `build_command` can RUN, and its timeout (critic 2026-09-26, driven): a
+            # malformed entry reports the empty-override ruler through `eval_protocol`'s tolerance
+            # and then fails every repeat, so the floor recorded n=0.
+            try:
+                matches[name] = build_command(es, {}, name)[1]
+            except (AttributeError, KeyError, TypeError, ValueError):
+                continue
+        if not matches:
+            return None
+        # The ruler digest covers the OVERRIDES only, so two names can match and differ in their
+        # timeout — a `debug` profile's 5 s would kill the repeat that `full`'s 7200 s let finish.
+        # The LONGEST timeout (it changes whether a run finishes, never what it measures), then
+        # `full`, `smoke` and the rest by name: deterministic, never the alphabet's first.
+        rank = {"full": 0, "smoke": 1}
+        return min(matches, key=lambda name: (-matches[name], rank.get(name, 2), name))
 
     async def _run_noise_seed(self, nd, s: int, profile: "str | None" = None):
         """One repeat of node `nd`'s evaluation under seed `s`, recorded as `eval_noise_seed`.
