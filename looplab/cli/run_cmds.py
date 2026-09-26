@@ -430,9 +430,11 @@ def drain_only_refusal(prior, prior_kind: str, prior_events=None) -> Optional[tu
     rebuild = [node.id for node in prior.nodes.values() if _awaiting_rebuild(prior, node)]
     if not (owed or rebuild):
         if prior_kind == "finished":
-            return 0, ("run is finished and nothing is owed an evaluation — nothing to drain. A "
-                       "`node_reset` re-opens a finished run; lifting the finish here would open a "
-                       "new search epoch instead")
+            # Not "a reset re-opens it INSTEAD of a new epoch": a reset of a finished run opens one
+            # too (critic 2026-09-26) — the finish is simply not lifted for nothing.
+            return 0, ("run is finished and nothing is owed an evaluation — nothing to drain; the "
+                       "finish is left as it was (a `node_reset` re-opens a finished run, in a new "
+                       "search epoch like any reopen)")
         return 0, "nothing is owed an evaluation — nothing to drain; the run is left as it was"
     if prior_kind in ("paused", "finished") and prior.holdout_evaluated_ids:
         return 2, ("a holdout was disclosed on this run: lifting its "

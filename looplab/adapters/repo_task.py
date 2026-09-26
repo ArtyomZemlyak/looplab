@@ -120,11 +120,14 @@ class ReferenceMark(BaseModel):
 
     @field_validator("value", mode="before")
     @classmethod
-    def _a_number(cls, v):
+    def _not_a_boolean(cls, v, info: ValidationInfo):
         # A NUMBER, as the fold holds it (`core/headroom.py::normalized_reference` refuses a bool):
-        # the lax float coercion accepted `true` as 1.0 and `"9.5"` as 9.5 (critic 2026-09-26).
-        if isinstance(v, bool) or not isinstance(v, (int, float)):
-            raise ValueError("a reference score must be a number, not a string or a boolean")
+        # the lax float coercion took `true` as 1.0 (critic 2026-09-26). A numeric STRING stays
+        # admitted — PyYAML reads `1e-3` as one, and the lax coercion refuses a non-numeric one —
+        # and a reloaded snapshot is never re-judged (`_grandfathered`; critic 2026-09-26, driven:
+        # refusing strings made a YAML `1e-3` target and an existing run's snapshot unusable).
+        if isinstance(v, bool) and not _grandfathered(info):
+            raise ValueError("a reference score must be a number, not a boolean")
         return v
 
     @field_validator("value")

@@ -302,8 +302,9 @@ budget ran out — which would otherwise FINALIZE the run — naming the nodes l
 eval budget, raise `max_eval_seconds` in the run's `config.snapshot.json` and drain again: a plain
 `resume` finalizes on the same budget; the time budget is per invocation, so draining again is the
 remedy); or a dispatch admitted none of what is owed. With a time budget it hands one eval width
-(`max_parallel` evaluations) per turn, so the clock is asked between batches. A pause or stop already recorded still wins, and the systemic-failure stop —
-every node failed — never finishes a drain. It refuses before appending anything (exit `2`) when a
+(`eval_parallel` evaluations) per turn, so the clock is asked between batches. A pause or stop
+already recorded still wins, and the systemic-failure stop — every node failed — never finishes a
+drain. It refuses before appending anything (exit `2`) when a
 finalize is pending; when lifting a pause or a finish would open a new search epoch after a holdout
 disclosure, re-queuing every evaluated node; and when owed nodes were RE-QUEUED by that rotation
 rather than reset — after a disclosure one reset re-opens every incumbent for a full re-evaluation,

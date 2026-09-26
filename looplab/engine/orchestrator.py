@@ -2298,8 +2298,9 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
 
         WHAT IT OWES is `drain_owed`: a lifecycle a reset opened, or an evaluation that started and
         never landed a terminal. A build the search made and has not dispatched stays pending. Which
-        runs may be drained at all — never a finished one, never one with a finalize pending — is
-        the CLI's to refuse before anything is appended (`cli/run_cmds.py::drain_only_refusal`).
+        runs may be drained at all — never one with a finalize pending, a finished one only when
+        lifting it re-carves no host-graded split — is the CLI's to refuse before anything is
+        appended (`cli/run_cmds.py::drain_only_refusal`).
 
         EVERY WAY IT STOPS IS A PAUSE with a stated reason, through the same control event an
         operator's pause is — the engine's own precedent is the confirm phase's auto-pause — so a
