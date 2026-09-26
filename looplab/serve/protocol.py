@@ -184,6 +184,14 @@ def file_drain_ack(drain_acknowledgements: dict, data) -> None:
         file_command_ack(drain_acknowledgements, data)
 
 
+def file_deferred_ack(deferred_acknowledgements: dict, data) -> None:
+    """File one `command_ack` payload into `{marker: (event_seq, …)}` IN PLACE when a drain acked
+    the intent WITHOUT serving it (`deferred: true`, doc 68 68.3b) — the command settles
+    `deferred_to_next_search` rather than reading as applied."""
+    if isinstance(data, dict) and data.get("deferred") is True:
+        file_command_ack(deferred_acknowledgements, data)
+
+
 def command_ack_index(events) -> dict:
     """`{marker: (event_seq, …)}` over every `command_ack` in `events` — the index
     `serve/command_observation.py` builds incrementally, built here in one pass for a reader that

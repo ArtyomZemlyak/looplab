@@ -1463,9 +1463,10 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "command_ack": PayloadContract(
         "The engine folded one server command intent — the causal ack that closes it.",
         required=("command_id", "event_seq"),
-        # `drain_only`: the acking engine is a DRAIN (doc 68 68.3b), which acks only what it serves
-        # (`engine/run_boundary.py::DRAIN_SERVED_INTENTS`); absent on every other engine's ack.
-        optional=("drain_only",),
+        # `drain_only`: the acking engine is a DRAIN (doc 68 68.3b); absent on every other engine's
+        # ack. `deferred`: that drain did not SERVE the intent (`engine/run_boundary.py::
+        # DRAIN_SERVED_INTENTS`) — its durable queue waits for the search that follows.
+        optional=("deferred", "drain_only"),
     ),
     # THE THREE COMMENT ROWS DESCRIBE WHAT THE LOG CARRIES, not what a caller may send (review
     # 2026-09-22, EVT-05). `serve/control_validation.py::_normalize_comment_created` and

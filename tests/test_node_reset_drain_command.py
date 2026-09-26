@@ -344,3 +344,148 @@ def test_a_drain_command_re_parses_no_more_of_the_log_than_a_plain_one(tmp_path,
 
     plain, drain = decoded(tmp_path / "plain", False), decoded(tmp_path / "drain", True)
     assert drain - plain < 60, (plain, drain)
+
+
+# ------------------------------------------------------------------ critic 2026-09-26, third pass
+
+def _real_ack(rd, *, drain):
+    """The engine's OWN ack pass (`engine/orchestrator.py::Engine._ack_commands`), as a drain's loop
+    head or control watcher runs it, over the log as it stands."""
+    from looplab.engine.orchestrator import Engine
+
+    eng = object.__new__(Engine)
+    eng.store = EventStore(rd / "events.jsonl")
+    eng._drain_only = drain
+    eng._ack_commands(eng.store.read_all())
+
+
+def _ack_once_appended(client, rd, record):
+    """The drain's next ack pass, taken once the command's intent is IN the log — the worker
+    appends it off the request thread, and a pass before that has nothing to ack."""
+    import time as _time
+
+    deadline = _time.time() + 10
+    while _time.time() < deadline:
+        current = client.get(f"/api/runs/demo/commands/{record['id']}").json()
+        if current.get("event_seq") is not None:
+            _real_ack(rd, drain=True)
+            return current
+        _time.sleep(0.01)
+    raise AssertionError(f"the intent was never appended: {current}")
+
+
+def _draining(tmp_path):
+    """A drain command whose engine is ALIVE and has served its reset — the moment an operator
+    sends something else."""
+    rd = _seed(tmp_path, paused=True)
+    store = EventStore(rd / "events.jsonl")
+    store.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": 1.0,
+                                    "violations": []})
+    store.append("node_created", {"node_id": 1, "parent_ids": [], "operator": "draft",
+                                  "idea": {"operator": "draft", "params": {}, "rationale": "b"},
+                                  "code": "print(2)"})
+    store.append("node_evaluated", {"node_id": 1, "generation": 0, "metric": 2.0,
+                                    "violations": []})
+    driver = _Driver()
+
+    def drain_child():
+        driver.alive = True
+        _real_ack(rd, drain="--drain-only" in driver.calls[-1][0])
+
+    driver.on_spawn = drain_child
+    client, _srv = _client(tmp_path, driver, timeout=30.0, observation=60.0)
+    drain = _terminal(client, _post(client, "node_reset", _reset(), "drain", drain_only=True).json())
+    assert drain["status"] == "succeeded" and "drain_superseded" not in drain, drain
+    return rd, driver, client
+
+
+@pytest.mark.parametrize("event_type,data,deferred", [
+    ("fork", {"from_node_id": 1, "generation": 0}, True),      # node 0 is the drain's reset
+    ("inject_node", {"idea": {"operator": "manual", "params": {"x": 1.0}, "rationale": "r"},
+                     "code": "print(1)"}, True),
+    ("budget_extend", {"max_eval_seconds": 1e6}, False),
+])
+def test_a_command_sent_during_a_drain_settles_and_never_locks_the_stop_out(
+        tmp_path, event_type, data, deferred):
+    """HIGH (critic 2026-09-26, third pass, driven end to end): a drain acked only what it served,
+    so a fork, an inject or a budget extension sent while it ran sat `executing` — every `pause` and
+    finalize answered 409 `command_in_progress` for the whole drain — and when the drain paused the
+    monitor started the search it was waiting for, lifting the pause. The drain now acks it as
+    DEFERRED (a budget extension it serves), the command settles at once, and the stop gets in."""
+    rd, driver, client = _draining(tmp_path)
+    sent = _post(client, event_type, data, "during").json()
+    _ack_once_appended(client, rd, sent)           # the drain's next loop head / watcher tick
+    settled = _terminal(client, client.get(f"/api/runs/demo/commands/{sent['id']}").json())
+    assert settled["status"] == "succeeded", settled
+    assert settled.get("deferred_to_next_search", False) is deferred, settled
+    stop = _post(client, "pause", {}, "stop")
+    assert stop.status_code == 200, stop.text
+    driver.alive = False
+    spawns = len(driver.calls)
+    # The seeded run is paused already (the fake drain never lifted it): `noop` is the pause
+    # ADMITTED and satisfied — what the lockout refused was admission itself.
+    assert _terminal(client, stop.json())["status"] in ("succeeded", "noop")
+    assert len(driver.calls) == spawns, "nothing started a search after the drain"
+
+
+def test_a_plain_reset_a_drain_served_says_so(tmp_path):
+    """NIT (critic 2026-09-26, third pass): the mirror of `drain_superseded` — a plain reset sent
+    while a drain ran is served BY the drain, which then pauses instead of searching on."""
+    rd, _driver, client = _draining(tmp_path)
+    sent = _post(client, "node_reset", _reset(generation=1), "plain-during").json()
+    _ack_once_appended(client, rd, sent)
+    settled = _terminal(client, client.get(f"/api/runs/demo/commands/{sent['id']}").json())
+    assert settled["status"] == "succeeded" and settled["served_by_drain"] is True, settled
+    assert "deferred_to_next_search" not in settled
+
+
+def test_an_uncertain_drain_becomes_retryable_once_its_child_is_gone(tmp_path):
+    """LOW (critic 2026-09-26, third pass, driven): the drain-ack guard sat in front of the rung that
+    turns `engine_start_uncertain` into a retryable timeout, so a drain whose child never took the
+    lock stayed `retryable: false` forever — a plain reset in the same place did not."""
+    import time as _time
+
+    from test_run_command_service import RunCommandService, TestClient, make_app
+
+    for drain in (False, True):
+        root = tmp_path / f"drain-{drain}"
+        _seed(root, paused=True)
+        silent = _Driver()                          # a pid, and never the lock
+        app = make_app(root)
+        srv = app.state.looplab
+        srv.commands = RunCommandService(
+            srv, engine_alive=silent.is_alive, spawn_engine=silent.spawn,
+            process_alive=silent.is_process_alive, startup_timeout=0.05, command_timeout=0.15,
+            poll_interval=0.01, max_observation_timeout=0.25)
+        client = TestClient(app)
+        body = {"type": "node_reset", "data": _reset(),
+                "expected_generation": http_run_generation(client, "demo"),
+                **({"drain_only": True} if drain else {})}
+        record = client.post("/api/runs/demo/commands", headers={"Idempotency-Key": "k"},
+                             json=body).json()
+        deadline = _time.time() + 10
+        while record["status"] not in ("failed", "timed_out", "succeeded") \
+                and _time.time() < deadline:
+            _time.sleep(0.01)
+            record = client.get(f"/api/runs/demo/commands/{record['id']}").json()
+        assert record["error"]["code"] == "engine_start_uncertain", record
+        silent.pid_running = False                  # definitive death: no duplicate Popen hazard
+        refreshed = client.get(f"/api/runs/demo/commands/{record['id']}").json()
+        assert refreshed["error"]["retryable"] is True, (drain, refreshed)
+
+
+def test_a_drain_a_search_served_since_it_failed_is_not_retried_into_success(tmp_path):
+    """NIT (critic 2026-09-26, third pass, driven): GET keeps a failed drain failed when a SEARCH
+    served its reset, but a retry re-drove it and settled `succeeded` on that same ack. The retry is
+    refused as spent — nothing is left for a drain to evaluate."""
+    rd = _seed(tmp_path, paused=True)
+    (rd / "task.snapshot.json").unlink()            # a clean `spawn_failed`
+    client, _srv = _client(tmp_path, _Driver())
+    failed = _terminal(client, _post(client, "node_reset", _reset(), "drain-then-search",
+                                     drain_only=True).json())
+    assert failed["status"] == "failed" and failed["error"]["retryable"] is True, failed
+    _ack_marked(rd)                                  # a plain resume's search served the reset
+    assert client.get(f"/api/runs/demo/commands/{failed['id']}").json()["status"] == "failed"
+    retry = client.post(f"/api/runs/demo/commands/{failed['id']}/retry")
+    assert retry.status_code == 409, retry.text
+    assert retry.json()["detail"]["code"] == "command_intent_spent", retry.text

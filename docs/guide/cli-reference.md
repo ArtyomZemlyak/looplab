@@ -346,7 +346,11 @@ Where the owed work comes from: an evaluation a crash interrupted, a reset recor
 will drive the run, or the Inspector's **re-score, then pause**: a `node_reset` command with
 `drain_only`, whose worker starts this very `resume --drain-only` instead of a plain resume (doc 68
 68.3b). The server asks the same refusals first — on the log plus the reset it would append — so a
-drain it admits is one this command drives, and a refused one records nothing.
+drain it admits is one this command drives: refused at submission it records nothing, and refused at
+the re-check before the spawn it leaves the reset recorded for a resumed search. A command sent while
+the drain runs that it does not serve (a fork, an inject, a strategy) is acknowledged as deferred and
+settles at once, marked `deferred_to_next_search`: it waits for the search that follows, and neither
+blocks a stop nor starts that search itself.
 
 The original launch settings are restored from `config.snapshot.json`, so run-only flags are not silently
 dropped. Seven comparison/selection fields (`card_driven_selection`, `speculation_depth`, `holdout_fraction`,

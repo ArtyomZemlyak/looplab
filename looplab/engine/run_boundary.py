@@ -22,20 +22,30 @@ from typing import Optional
 
 from looplab.core.models import NodeStatus, RunState
 from looplab.events.finalize_scope import incomplete_finalize_scope, is_guarded_abort
-from looplab.events.types import EV_NODE_ABORT, EV_NODE_RESET, EV_PAUSE, EV_RUN_ABORT
+from looplab.events.types import (EV_BUDGET_EXTEND, EV_NODE_ABORT, EV_NODE_RESET, EV_PAUSE,
+                                  EV_RESTART, EV_RESUME, EV_RUN_ABORT, EV_RUN_REOPENED)
 
 # The two wrap-up boundaries: respect the wrap-up already on disk, never lift the run. The CLI's
 # `WRAP_UP_NOTICE` is the notice per kind and is held to exactly this set.
 WRAP_UP_KINDS: frozenset[str] = frozenset({"finalization_pending", "pending_finalize"})
 
-# The command intents a DRAIN engine serves, and so the only ones it acknowledges
-# (`engine/orchestrator.py::Engine._ack_commands`): the resets it evaluates and the gates its loop
-# head honours. Any other intent — a fork, an inject, a strategy, a confirm, a resume — is folded but
-# not served: the drain pauses without it, so it is left UNACKED for the search that follows to
-# serve and ack (critic 2026-09-26: a drain acked them, the server reported "applied — the engine is
-# processing it", and the next engine, which never re-acks an acked intent, left it at that).
+# The command intents a DRAIN engine SERVES (`engine/orchestrator.py::Engine._ack_commands`): the
+# resets it evaluates, the gates its loop head honours, and a budget extension, whose overrides it
+# applies like any engine (`_apply_control_overrides`, at its loop head and in the control watcher).
+# Any other intent — a fork, an inject, a strategy, a confirm — is folded but not served: its
+# durable queue waits for the search that follows. The drain acknowledges it all the same, marked
+# `deferred`, and the command settles `deferred_to_next_search`. Left unacked (critic 2026-09-26,
+# third pass, driven), it sat `executing` for the whole drain, its `command_in_progress` refused the
+# operator's pause and finalize, and the monitor then started the search it was waiting for, lifting
+# the pause the drain was asked to leave; acked plainly (the second pass), the server said
+# "applied".
 DRAIN_SERVED_INTENTS: frozenset[str] = frozenset({EV_NODE_RESET, EV_NODE_ABORT, EV_PAUSE,
-                                                  EV_RUN_ABORT})
+                                                  EV_RUN_ABORT, EV_BUDGET_EXTEND})
+# …and the intents a drain leaves UNACKED on purpose: a resume (or the legacy reopen) and a restart
+# ask for the search ITSELF, so their command starts it once the drain has paused — what the
+# operator asked for, and never a deferral nobody would serve. (A resume sent while the drain runs
+# unpaused is a `noop` at admission and never reaches the log.)
+DRAIN_LEFT_FOR_THE_SEARCH: frozenset[str] = frozenset({EV_RESUME, EV_RUN_REOPENED, EV_RESTART})
 
 
 def terminal_projection_incomplete(state, events) -> bool:

@@ -195,7 +195,9 @@ class HoldoutGrader:
         return public if public is not None else (self._e._assets or {})
 
     def build_holdout_idx(self, fraction: float, epoch: int = 0) -> frozenset:
-        """D1: the reserved holdout partition for a given fraction (+ search epoch, P0-2), or empty
+        """D1: the reserved holdout partition for a given fraction (+ the split salt, P0-2 —
+        `RunState.split_salt`, doc 68 68.3c: the disclosures consumed, or the search epoch on a log
+        older than that rule), or empty
         when holdout doesn't apply (no host grader, non-list labels, or fraction<=0).
 
         For real MLE-bench the partition is the SEARCH SPLIT over the public train rows (doc 52

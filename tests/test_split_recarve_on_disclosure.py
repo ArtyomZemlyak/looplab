@@ -181,3 +181,47 @@ def test_lifting_the_finish_of_a_pinned_run_that_still_owes_work_is_not_refused(
             assert refused is None, refused
         else:
             assert refused is not None and "re-carves the split" in refused[1], refused
+
+
+_INJECT_CODE = ("import json\n"
+                "preds = [i % 2 for i in range(40)]\n"
+                "json.dump(preds, open('predictions.json', 'w'))\n"
+                "print(json.dumps({'metric': 0.0}))\n")
+
+
+def test_the_live_rebuild_carves_the_split_salt_once_the_epochs_part(tmp_path, monkeypatch):
+    """The loop head re-carves the rows LIVE when a rotation lands in the same process (critic
+    2026-09-26, third pass, driven with real engines): a stop without a disclosure, a plain reopen
+    (search epoch 1, split salt 0), a disclosure at the resumed engine's finish, then an operator
+    inject landing right after it — a rotation that moves the search epoch to 2 and the split salt
+    to 1. The rows the engine scores on from then on are the SPLIT salt's; its search-epoch mutant
+    survived every other test in this file."""
+    rd = tmp_path / "run"
+    first = _engine(rd, max_nodes=1, holdout_top_k=1)
+    monkeypatch.setattr(first, "_holdout_pending", lambda state: False)
+    assert anyio.run(first.run).finished
+    EventStore(rd / "events.jsonl").append("resume", {})
+    second = _engine(rd, max_nodes=3, holdout_top_k=1)
+    real_phase = second._holdout_phase
+    injected = []
+
+    async def phase_then_inject(state):
+        await real_phase(state)
+        if not injected:
+            injected.append(True)
+            second.store.append("inject_node", {
+                "idea": {"operator": "manual", "params": {"x": 0.5}, "rationale": "late hunch"},
+                "parent_id": None, "code": _INJECT_CODE})
+            second.store.append("budget_extend", {"add_nodes": 1})
+
+    monkeypatch.setattr(second, "_holdout_phase", phase_then_inject)
+
+    async def bounded():
+        with anyio.fail_after(120):
+            return await second.run()
+
+    final = anyio.run(bounded)
+    assert injected and final.search_epoch == 2 and final.split_salt == 1, (
+        final.search_epoch, final.split_salt)
+    assert set(second._holdout_idx) == set(second._build_holdout_idx(0.25, final.split_salt))
+    assert set(second._holdout_idx) != set(second._build_holdout_idx(0.25, final.search_epoch))

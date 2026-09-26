@@ -119,6 +119,7 @@ function ResetBtn({ runId, id, generation, onToast }) {
       await submitCommand(CONTROL.resetNode(runId, id, stage, generation, { drainOnly }), {
         success: `Reset #${id} from ${stage}${how} applied — the engine is processing it`, noop: `#${id} already reflects that reset`,
         superseded: `Reset #${id} from ${stage} applied — by a running search, not a drain: the search continues`,
+        servedByDrain: `Reset #${id} from ${stage} applied — by the drain that was running: the run pauses when it finishes`,
         executing: `Reset #${id} from ${stage}${how} requested — waiting for the engine`, failure: `Reset #${id} failed`,
         transport: `Reset #${id} could not be submitted. Try again.`,
       }, onToast)
@@ -564,6 +565,7 @@ function StagePipeline({ node, runId, id, generation, onToast }) {
       await submitCommand(CONTROL.resetNode(runId, id, name, generation, { drainOnly }), {
         success: `Reset #${id} from '${name}'${how} applied — the engine is processing it`, noop: `#${id} already reflects that reset`,
         superseded: `Reset #${id} from '${name}' applied — by a running search, not a drain: the search continues`,
+        servedByDrain: `Reset #${id} from '${name}' applied — by the drain that was running: the run pauses when it finishes`,
         executing: `Re-run of #${id} from '${name}'${how} requested — waiting for the engine`, failure: 'Re-run failed',
         transport: 'Re-run could not be submitted. Try again.',
       }, onToast)

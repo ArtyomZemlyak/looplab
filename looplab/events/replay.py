@@ -2117,10 +2117,13 @@ def _on_resume_or_run_reopened(st: RunState, e: Event, d: dict, ctx: "_FoldCtx")
         # P0-2 freshly-hidden per-epoch holdout: the prior epoch's holdout was DISCLOSED at the
         # finish (its scores drove the champion pick), so the reopened epoch must NOT re-score its
         # new candidates on that same partition — the engine rebuilds `_holdout_idx` for the new
-        # epoch (a different, never-disclosed split). Clear the gate + the now-stale holdout metrics
-        # so the holdout phase re-runs and re-scores every current leader on the fresh split (keeping
-        # the champion comparable on ONE holdout). New holdout_evaluated events carry the new epoch;
-        # a late one stamped with the prior epoch is dropped by the epoch guard in _on_holdout_evaluated.
+        # SPLIT salt (a different, never-disclosed split: the salt counts the disclosures consumed
+        # on a run pinned `split_salt: "disclosure"`, doc 68 68.3c, so a reopen with none moves no
+        # rows; on an older log it is the search epoch, as it always was). Clear the gate + the
+        # now-stale holdout metrics so the holdout phase re-runs and re-scores every current leader
+        # on the fresh split (keeping the champion comparable on ONE holdout). New holdout_evaluated
+        # events carry the new epoch; a late one stamped with the prior epoch is dropped by the
+        # epoch guard in _on_holdout_evaluated.
     st.paused = False
     st.pause_node_id = None
     st.pause_generation = None

@@ -183,9 +183,10 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   already driving, and wherever the drain itself would refuse (a finalize pending, a resume pending,
   a holdout disclosed, a host-graded split re-carved since the incumbents were measured) — before
   the reset is recorded, or, when the run changed in between, before the drain starts, with the
-  reset left recorded for a resumed search. A drain engine acknowledges only what it serves, so a
-  fork, inject or strategy sent meanwhile waits for the search that follows; a reset a running
-  search served instead of a drain says so in its toast.
+  reset left recorded for a resumed search. A fork, inject or strategy sent while a drain runs is
+  acknowledged as DEFERRED — its toast says it waits for the search that follows — so it never
+  blocks a stop and never starts that search itself; a plain reset the drain serves says so, and a
+  drain reset that a search launched in the meantime served instead says that.
 - **Chat / boss** — an agentic run chat turns one message into a plan of ordered actions, with each
   action narrated in a durable feed (`chat.jsonl`). That feed is capped at **32 MiB** per run; past the
   cap further turns are refused with HTTP 413 so one long-lived conversation cannot fill the disk or

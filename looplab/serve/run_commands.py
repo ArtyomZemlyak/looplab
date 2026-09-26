@@ -2393,11 +2393,24 @@ class RunCommandService:
             # cannot drift again.
             record = dict(record)
             record["engine_stopped"] = self._engine_state(rd) is False
-        if record.get("drain_only") is True and not self._observe(rd).drain_ack_observed(record):
+        observation = self._observe(rd)
+        if record.get("drain_only") is True and not observation.drain_ack_observed(record):
             # The reset was served — by an engine that is not a drain: one that was already running
             # when it landed, or a launch another spawner had in flight. Said on the record, which
             # the UI reads, rather than reported as the drain it asked for (critic 2026-09-26).
             record = {**record, "drain_superseded": True}
+        elif record.get("postcondition") == "engine_ack" and observation.deferred_ack_observed(
+                record):
+            # A DRAIN saw the intent and did not serve it (doc 68 68.3b): its queue waits for the
+            # search that follows, and the record says so instead of "applied" (critic 2026-09-26,
+            # third pass: left pending, it locked the operator's pause out for the whole drain).
+            record = {**record, "deferred_to_next_search": True}
+        elif (record.get("drain_only") is not True
+              and record.get("postcondition") == "engine_ack"
+              and observation.drain_ack_observed(record)):
+            # …and the mirror of `drain_superseded`: a plain command a DRAIN served, after which
+            # the run pauses rather than searching on (critic 2026-09-26, third pass).
+            record = {**record, "served_by_drain": True}
         return self._terminal(path, record, "succeeded")
 
     def _reconcile_observation(
@@ -2429,15 +2442,16 @@ class RunCommandService:
         spec = CONTROL_SPECS.get(str(record.get("event_type") or ""))
         if spec is None:
             return record
-        if record.get("drain_only") is True and not (
-                observation or self._observe(rd)).drain_ack_observed(record):
-            # A failed or timed-out DRAIN is promoted only by a DRAIN's ack. Any other ack comes
-            # from whatever engine served the reset since — a plain resume's search — which is not
-            # what was asked (doc 68 68.3b; critic 2026-09-26, driven: a `spawn_failed` drain read
-            # `succeeded` after the operator's plain resume had resumed the whole search). A drain
-            # the CLI refused never builds an engine, so it is never promoted either.
-            return record
-        if self._postcondition(rd, record, observation):
+        # A failed or timed-out DRAIN is promoted only by a DRAIN's ack. Any other ack comes from
+        # whatever engine served the reset since — a plain resume's search — which is not what was
+        # asked (doc 68 68.3b; critic 2026-09-26, driven: a `spawn_failed` drain read `succeeded`
+        # after the operator's plain resume had resumed the whole search). A drain the CLI refused
+        # never builds an engine, so it is never promoted either. It gates the PROMOTION only: the
+        # uncertain-start rung below stays reachable, or a drain whose child crossed that boundary
+        # could never become retryable (critic 2026-09-26, third pass, driven).
+        promotable = not (record.get("drain_only") is True
+                          and not observation.drain_ack_observed(record))
+        if promotable and self._postcondition(rd, record, observation):
             updated = dict(record)
             updated["reconciled_from"] = status
             return self._succeeded(rd, path, updated)
@@ -2672,12 +2686,14 @@ class RunCommandService:
         # run sequencer). Only the PROSPECTIVE ask folds again — the log plus the reset this command
         # would append is a state no index holds yet.
         observation = self._observe(rd)
-        events = list(observation.events())
+        # READ-ONLY, uncopied (`events_view`): the fold and the drain rule only read the events,
+        # and the prospective reset rides on a shallow list of its own.
+        events = observation.events_view()
         if reset is None:
             state = observation.state()
         else:
-            events.append(Event(v=1, seq=(events[-1].seq + 1) if events else 0,
-                                ts=time.time(), type=EV_NODE_RESET, data=dict(reset)))
+            events = [*events, Event(v=1, seq=(events[-1].seq + 1) if events else 0,
+                                     ts=time.time(), type=EV_NODE_RESET, data=dict(reset))]
             state = fold(events)
         refused = drain_only_refusal(state, classify_prior_run(state, events), events)
         if refused is None:
@@ -3012,6 +3028,23 @@ class RunCommandService:
             record = self._reconcile_observation(rd, path, record)
             if record.get("status") == "succeeded":
                 return self._public(record)
+            observation = self._observe(rd)
+            if (record.get("drain_only") is True and record.get("event_seq") is not None
+                    and observation.engine_ack_observed(record)
+                    and not observation.drain_ack_observed(record)):
+                # A SEARCH served this drain's reset since it failed: the GET above keeps it failed
+                # (a search is not the drain that was asked for), and a retry may not promote it
+                # either — its re-drive would observe that same ack and settle `succeeded` (critic
+                # 2026-09-26, third pass). Nothing is left for a drain to evaluate.
+                raise HTTPException(409, {
+                    "code": "command_intent_spent",
+                    "existing_command_id": command_id,
+                    "current_status": record.get("status"),
+                    "message": ("A resumed search already served this drain's reset, so nothing "
+                                "is left for a drain to evaluate."),
+                    "remediation": ("Submit a NEW command with a new idempotency key if the node "
+                                    "must be rescored again."),
+                })
             self._reject_unresolved_reset(rd, "retry this run command")
             if (record.get("event_type") not in COLLABORATION_EVENTS
                     and self._recent_spawn_claim(rd)):

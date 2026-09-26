@@ -121,7 +121,7 @@ from looplab.core.models import BENIGN_TERMINAL_REASONS, Event, NodeStatus, RunS
 # `drain_owed` lives with the drain rules the server's command worker also asks (doc 68 68.3b);
 # the drain turn below reads it, and the name stays importable from here.
 # `drain_owed` is read by the drain turn below and re-exported under this module's old spelling.
-from looplab.engine.run_boundary import DRAIN_SERVED_INTENTS, drain_owed
+from looplab.engine.run_boundary import DRAIN_LEFT_FOR_THE_SEARCH, DRAIN_SERVED_INTENTS, drain_owed
 from looplab.core.errors import ConfigRefusal, EnvironmentRefusal
 from looplab.core.llm_budget import RunBudget
 from looplab.core.phase_events import phase_sink_scope
@@ -1245,21 +1245,24 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 acked.add((str((event.data or {}).get("command_id")),
                            (event.data or {}).get("event_seq")))
 
-        # A DRAIN (`resume --drain-only`, doc 68 68.3b) acks only the intents it serves
-        # (`engine/run_boundary.py::DRAIN_SERVED_INTENTS`) and says so on each ack, so a command
-        # that asked for a drain can tell its own engine from a search (`drain_only`), and one it
-        # does not serve stays unacked for the search that follows (critic 2026-09-26).
+        # A DRAIN (`resume --drain-only`, doc 68 68.3b) says so on each ack (`drain_only`), so a
+        # command that asked for a drain can tell its own engine from a search, and it acks an
+        # intent it does not serve (`engine/run_boundary.py::DRAIN_SERVED_INTENTS`) as `deferred`:
+        # seen, queued for the search that follows, never "applied" — and never left pending, which
+        # locked the operator's pause out for the whole drain (critic 2026-09-26, third pass). A
+        # resume or a restart it leaves unacked: those ask for that search itself
+        # (`DRAIN_LEFT_FOR_THE_SEARCH`).
         drain = bool(getattr(self, "_drain_only", False))
-        pending: list[tuple[str, int]] = []
+        pending: list[tuple[str, int, bool]] = []
         for index in range(cursor, total):
             event = events[index]
             command_id = (event.data or {}).get("_command_id")
             identity = (str(command_id), event.seq)
             if command_id and identity not in acked:
-                if drain and event.type not in DRAIN_SERVED_INTENTS:
+                if drain and event.type in DRAIN_LEFT_FOR_THE_SEARCH:
                     continue
                 acked.add(identity)
-                pending.append(identity)
+                pending.append((*identity, drain and event.type not in DRAIN_SERVED_INTENTS))
 
         # Append the diagnostics FIRST, then commit the process-local cursor/seen against the exact
         # folded snapshot. A crash before the commit is harmless (a restart re-bootstraps from cursor
@@ -1267,10 +1270,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # unadvanced, the next call re-scans this suffix and re-attempts the un-acked intents (the
         # already-appended acks are re-observed and deduped in the first pass). A subsequent call sees
         # the new ack rows in its suffix.
-        for command_id, event_seq in pending:
+        for command_id, event_seq, deferred in pending:
             self.store.append(EV_COMMAND_ACK, {
                 "command_id": command_id, "event_seq": event_seq,
                 **({"drain_only": True} if drain else {}),
+                **({"deferred": True} if deferred else {}),
             })
         self._command_ack_initialized = True
         self._command_ack_cursor = total

@@ -403,7 +403,12 @@ A `node_reset` may add `"drain_only": true` beside `data`: the command then star
 It is how the reset is SERVED, never a field of the event, and it is part of the command's identity
 below. It is refused on any other type, on a run an engine is already driving, and wherever the
 drain itself would refuse (`engine/run_boundary.py::drain_only_refusal`, asked before the reset is
-appended and again before every spawn).
+appended and again before every spawn). A drain engine acks every command intent it folds, marked
+`drain_only` — bar a resume or a restart, which ask for the search itself and are left for their
+command to start once the drain has paused; one it does not serve (`engine/run_boundary.py::DRAIN_SERVED_INTENTS` — a fork, an
+inject, a strategy, a confirm) is acked `deferred` and its command settles `succeeded` with
+`deferred_to_next_search`: its durable queue waits for the search that follows, and it neither holds
+the run's one in-flight driver command (which refused every stop) nor starts that search itself.
 
 An idempotency key is scoped to one payload. A retry with the same key and payload returns the same
 command, so a lost HTTP response cannot append the control event or start the engine twice; the same

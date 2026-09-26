@@ -68,3 +68,21 @@ test('a drain a running search served is not reported as the drain', () => {
   assert.equal(commandFeedback({ status: 'succeeded', drain_superseded: true },
     { success: 'ok' }).message, 'ok', 'a caller without the label keeps its success copy')
 })
+
+test('a command a drain deferred, and a reset a drain served, say so rather than "applied"', () => {
+  // Critic 2026-09-26, third pass: a fork sent during a drain now settles at once, marked deferred,
+  // instead of blocking every stop — and its toast must not claim it was applied.
+  const deferred = commandFeedback({ status: 'succeeded', deferred_to_next_search: true },
+    { requested: 'Fork', success: 'Fork applied' })
+  assert.equal(deferred.kind, 'success')
+  assert.match(deferred.message, /^Fork recorded — a drain is running and does not serve it; the next search will/)
+  assert.doesNotMatch(deferred.message, /applied/)
+  const served = commandFeedback({ status: 'succeeded', served_by_drain: true },
+    { success: 'Reset applied', servedByDrain: 'Reset applied — by the drain' })
+  assert.equal(served.message, 'Reset applied — by the drain')
+  const unlabelled = commandFeedback({ status: 'succeeded', served_by_drain: true },
+    { success: 'Reset applied' })
+  assert.match(unlabelled.message, /by a drain; the run pauses when it finishes/)
+  assert.equal(commandFeedback({ status: 'succeeded' }, { success: 'Reset applied' }).message,
+    'Reset applied', 'every other record reads as before')
+})

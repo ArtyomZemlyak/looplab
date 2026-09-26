@@ -8,8 +8,10 @@ states (no score feedback during a run; one final grade) was violated on the one
 its credible benchmark. The run then published a test-selected number as if it were not.
 
 WHAT IT IS. A deterministic slice of the PUBLIC train rows — chosen by `engine/triage.py::
-_holdout_indices` over (row count, `holdout_fraction`, `search_epoch`), i.e. pinned by `run_started`
-exactly like the generic host-graded holdout — is HIDDEN from the agent: removed from its `train.csv`,
+_holdout_indices` over (row count, `holdout_fraction`, the split salt `RunState.split_salt` — the
+disclosures consumed on a run pinned `split_salt: "disclosure"`, the search epoch on an older one,
+doc 68 68.3c), i.e. pinned by `run_started` exactly like the generic host-graded holdout — is HIDDEN
+from the agent: removed from its `train.csv`,
 appended to its `test.csv` with the target columns dropped, and added to its `sample_submission.csv`.
 The candidate writes ONE `submission.csv` covering both populations, exactly as before. At search time
 the host grades the hidden rows against answers carved here, with the competition's OWN grader

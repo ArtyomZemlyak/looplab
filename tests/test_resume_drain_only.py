@@ -508,26 +508,40 @@ def test_a_reset_of_a_finished_host_graded_run_is_not_drained_across_its_split(
     assert [e.seq for e in store.read_all()] == before
 
 
-def test_a_drain_acks_only_what_it_serves_and_says_it_is_a_drain(tmp_path):
-    """LOW (critic 2026-09-26): a drain acked every marked intent it folded — a fork or an inject
-    then read "applied — the engine is processing it" though the drain paused without it, and the
-    search that followed never re-acks an acked intent. It acks what it serves, marked
-    `drain_only`; the rest waits for that search."""
+def test_a_drain_acks_what_it_serves_and_defers_the_rest_saying_so(tmp_path):
+    """A drain acks every marked intent it folds, as a drain (`drain_only`), and marks the ones it
+    does not serve `deferred`: their queue waits for the search that follows. Acked plainly, a fork
+    or an inject read "applied" though the drain paused without it (critic 2026-09-26); left
+    unacked, the command sat `executing` for the whole drain, refused the operator's pause, and its
+    monitor then started the search, lifting the drain's pause (the third pass). A budget extension
+    is SERVED: the drain applies its overrides like any engine."""
+    from looplab.engine.run_boundary import DRAIN_LEFT_FOR_THE_SEARCH, DRAIN_SERVED_INTENTS
     from tests.factories import make_engine
 
+    intents = {"node_reset": {"node_id": 0, "from_stage": "eval", "generation": 0},
+               "budget_extend": {"max_eval_seconds": 100.0}, "pause": {},
+               "fork": {"from_node_id": 0, "generation": 0}, "hint": {"text": "t"},
+               "inject_node": {"idea": {"operator": "manual", "params": {}, "rationale": "r"},
+                               "code": "print(1)"},
+               "set_strategy": {"strategy": {"policy": "greedy"}}}
+    served = {"node_reset", "budget_extend", "pause"}
+    assert served <= DRAIN_SERVED_INTENTS and not (set(intents) - served) & DRAIN_SERVED_INTENTS
     for drain in (True, False):
         eng = make_engine(tmp_path / f"run-{drain}", drain_only=drain)
-        eng.store.append("node_reset", {"node_id": 0, "from_stage": "eval", "generation": 0,
-                                        "_command_id": "reset-cmd"})
-        eng.store.append("fork", {"node_id": 0, "_command_id": "fork-cmd"})
+        for event_type, data in intents.items():
+            eng.store.append(event_type, {**data, "_command_id": f"{event_type}-cmd"})
+        # A resume asks for the search ITSELF: a drain leaves it for its command to start.
+        eng.store.append("resume", {"_command_id": "resume-cmd"})
         eng._ack_commands(eng.store.read_all())
         acks = {e.data["command_id"]: e.data for e in eng.store.read_all()
                 if e.type == "command_ack"}
-        if drain:
-            assert set(acks) == {"reset-cmd"} and acks["reset-cmd"]["drain_only"] is True
-        else:
-            assert set(acks) == {"reset-cmd", "fork-cmd"}
-            assert all("drain_only" not in ack for ack in acks.values())
+        assert "resume" in DRAIN_LEFT_FOR_THE_SEARCH
+        assert set(acks) == {f"{t}-cmd" for t in intents} | ({"resume-cmd"} if not drain else set())
+        for event_type in intents:
+            ack = acks[f"{event_type}-cmd"]
+            assert ack.get("drain_only") is (True if drain else None), (drain, ack)
+            assert ack.get("deferred") is (True if drain and event_type not in served else None), (
+                drain, event_type, ack)
 
 
 def test_an_ignored_terminal_measures_nothing(tmp_path):
