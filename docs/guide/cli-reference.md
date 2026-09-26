@@ -65,7 +65,7 @@ looplab approve         Ratify a paused run (HITL / onboarding)
 looplab bench           Capability self-benchmark across tasks
 looplab ui              Serve the live React UI (needs the [ui] extra)
 looplab tui             Terminal control plane: start/steer runs by chat (no browser)
-looplab export-git      The node DAG as a git repository: a commit per node, its parents as the DAG, `Looplab-*` trailers (doc 67 67.15)
+looplab export-git      The node DAG as a git repository: a commit per node lifecycle, its parents as the DAG, `Looplab-*` trailers (doc 67 67.15)
 looplab export-mlflow   Log the champion to MLflow
 looplab export-notebook Export the champion as a runnable .ipynb
 looplab export-sft      This run's model turns as execution-grounded SFT rows, each carrying its node's outcome (doc 52 row 33)
@@ -2779,30 +2779,75 @@ looplab export-git RUN_DIR OUT_DIR
 
 | Argument | Description |
 |---|---|
-| `RUN_DIR` | Run directory to export (read-only: nothing is appended) |
-| `OUT_DIR` | Where the new repository goes; it must not exist, or be an empty directory |
+| `RUN_DIR` | Run directory to export (read-only: nothing is appended, nothing is written inside it) |
+| `OUT_DIR` | Where the new repository goes; it must not exist or must be an empty directory, and it may be neither a symbolic link nor inside `RUN_DIR` |
 
-Each node is one commit, published as the lightweight tag `node-<id>`. Its parents are the node's
-`parent_ids`, so a merge node has two, and a draft has none. Branch `champion` points at the promoted
-champion, or at the fold's best if none was promoted, and is checked out. With no champion yet,
-nothing is checked out.
+**One commit per node lifecycle.** A node id survives `node_reset`: a reset opens a new lifecycle
+*generation* of the same id, and a `propose`/`implement` reset rebuilds it with new code. So each
+lifecycle is its own commit. A node's current lifecycle is the lightweight tag `node-<id>`; one a
+later reset superseded is `node-<id>.g<generation>`, and its message says so and carries no
+`Looplab-Metric` (the fold dropped that number at the reset). A commit's parents are the exact
+parent lifecycles the node was built from (`Node.parent_generations`), so a merge has two, a draft
+none, and a child of a parent that was reset since points at the code it actually saw.
 
-A commit's tree is the node's own files: its `files` map, which is the whole edit set relative to the
-task's base tree (every materialization seeds that base and writes `files` on top), plus
-`solution.py` for a node with `code`. The base tree itself is not in the log (doc 67 67.12), so it
-is not in the export; a node's `deleted` names are removals from that base and are listed in the
-message. Task assets are the task's, and are left out.
+Branch `champion` points at the fold's best — `RunState.best()`, the node the run row, the reviewer
+bundle and the UI crown — and is checked out. An operator's promote alias is published as branch
+`promoted` and never checked out in the best's place (a promote checks no status, so it can name a
+weaker or a failed node). With no best yet, nothing is checked out.
 
-The message's `Looplab-*` trailers carry the node, attempt, operator, parents, status, metric,
-confirmed mean, holdout metric, failure reason and params, and mark the champion. A script reads
-them with `git log --format='%(trailers:key=Looplab-Metric,valueonly)'`. A path a checkout could
-turn against its reader (absolute, `..`, a `.git` component, a drive prefix) is counted as
-`Looplab-Skipped-Paths` and never written.
+A commit's tree is the lifecycle's own files as its checkout held them: the `files` map — the whole
+edit set relative to the task's base tree, since every materialization seeds that base and writes
+`files` on top — where `solution.py` is always the node's `code` (the sandbox writes it from `code`
+and never from a `files["solution.py"]`), minus the names the materializer never writes from a node
+(the task's assets, a ratified onboarding adapter) and the names the node's own `deleted` list
+removes. The base tree itself is not in the log (doc 67 67.12), so it is not in the export; a node's
+`deleted` names are removals from that base and are listed in the message.
+
+A path a checkout or a receiving host could turn against its reader is left out: absolute or `..`;
+any name NTFS or HFS+ reads as `.git` (`.git.`, `GIT~1`, …) or that starts `.git` (`.gitattributes`,
+`.gitmodules`, `.github/`, `.gitlab-ci.yml`), `.lfsconfig` and `.mailmap`; a Windows device name
+(`con`, `NUL.py`), a character Windows cannot store (`<>:"|?*`) or a control character, a trailing
+dot or space, a component over 255 bytes. Of two names one filesystem stores as one file
+(`dir\x` and `dir/x`, `A.py` and `a.py`, a file `a` and a file `a/b.py`) the first in sorted order is
+kept. Every name left out, for whatever reason, is counted by reason in `Looplab-Skipped-Paths`.
+
+The message's `Looplab-*` trailers:
+
+| Trailer | Carries |
+|---|---|
+| `Looplab-Run`, `-Node`, `-Generation`, `-Operator` | the run, the node id, the lifecycle generation, the operator |
+| `Looplab-Parents` | the parents' tags (`node-2`, `node-0.g0`), or `none` |
+| `Looplab-Status` | `evaluated`, `failed` or `pending` (with `tombstoned`, `aborted` or an awaited rebuild), or `superseded …` |
+| `Looplab-Metric` | the metric as Python's `repr` of the float, `none` without one; absent on a superseded lifecycle |
+| `Looplab-Feasible`, `-Violations`, `-Counts-Toward-Best` | beside a metric: whether it counts toward the best (`core/fitness.py::counts_toward_best`), and the violations that say why not |
+| `Looplab-Salvaged`, `-Trust-Flagged` | a salvaged metric; a high-precision trust flag, and whether the run's `trust_gate` enforced it |
+| `Looplab-Confirmed-Mean`, `-Holdout-Metric`, `-Error-Reason`, `-Params` | as the fold holds them; `Params` is cut at 2,000 characters and says so |
+| `Looplab-Deleted-From-Base`, `-Skipped-Paths` | removals from the base tree; the names this export left out, by reason |
+| `Looplab-Champion`, `-Champion-Caveats` | on the best only, with its `best_metric_caveats` |
+| `Looplab-Promoted` | on the operator's promote alias |
+| `Looplab-Log-Incomplete` | on every commit, when the log is readable only up to a corrupt line |
+
+A script reads them with `git log --format='%(trailers:key=Looplab-Metric,valueonly)'` — and should
+read `Looplab-Counts-Toward-Best` beside it, because an infeasible or a trust-excluded node can carry
+the largest number. Every value is one line with control characters stripped, so no free-text field
+can forge a trailer or hide the ones after it.
+
+Git runs **hermetically**: every `GIT_*` variable is dropped (a `GIT_DIR` that a hook or a shell set
+cannot redirect the export onto another repository), no user or system config is read, hooks and
+fsmonitor are off, and the repository is always SHA-1. It is built in a sibling directory, checked
+with `git fsck --strict`, and moved into place only whole: a failure leaves nothing at `OUT_DIR`.
 
 The export is **deterministic**: parents before children, sorted paths, each commit dated by its
-node's first `node_created` row, and one fixed identity. One log therefore exports to the same
-commit ids every time. It is a projection, never a second source of truth: nothing reads it back.
-It needs `git` on the `PATH`, and exits `2` without it or over a non-empty `OUT_DIR`.
+lifecycle's first `node_created` row (or by the reset that opened it), one fixed identity at `+0000`.
+One log therefore exports to the same commit ids every time. It is a projection, never a second
+source of truth: nothing reads it back.
+
+It needs `git` 2.29 or later on the `PATH`. It exits `2`, with one line on stderr, without it, over
+an `OUT_DIR` that exists and is not an empty directory, is a symbolic link or sits inside `RUN_DIR`,
+and for a run with no nodes yet. It exits `1` when git itself fails, printing git's own `fatal:` or
+`error` line. A log readable only up to a corrupt line is exported up to that line — as
+`export-bundle` and `export-notebook` do — with the `[INCOMPLETE RECORD]` note on stderr and on
+every commit.
 
 ## `export-notebook`
 

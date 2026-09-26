@@ -6,8 +6,8 @@ shared `_engine` builder back from `looplab.cli` at module level without an impo
 """
 from __future__ import annotations
 
-import functools
 import json
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -161,48 +161,190 @@ def export_notebook(
     typer.echo(f"wrote {dest}")
 
 
+# Seconds ONE git call of `export-git` may take. `fast-import` of a long run is the slow one (every
+# lifecycle's files, once each); past this the child is killed, everything the export built is
+# removed and the command exits 1 — a hung git (a lock another process holds, a filesystem that
+# stopped answering) must not hold the command, or leave a half-built repository, forever.
+_GIT_TIMEOUT_S = 600.0
+
+
+def _hermetic_git_env(home: str) -> dict:
+    """The environment every `export-git` git call runs in: the caller's, minus EVERY `GIT_*`
+    variable, with no system or global config and an empty HOME.
+
+    Review 2026-09-26, driven: with `GIT_DIR=victim/.git GIT_WORK_TREE=victim` in the environment —
+    what every git HOOK runs with (an absolute `GIT_DIR`; a pre-commit hook also gets
+    `GIT_INDEX_FILE=<repo>/.git/index.lock`) — the export exited 0, OUT stayed empty, and the victim
+    repository got tag `node-0`, branch `champion`, a moved HEAD, and its tracked, staged and
+    uncommitted work destroyed by `reset --hard`: `-C OUT` does not override `GIT_DIR`. Dropping the
+    whole family takes `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE` / `GIT_OBJECT_DIRECTORY` /
+    `GIT_CONFIG_PARAMETERS` and `GIT_DEFAULT_HASH` (which moved every commit id) at once, and no
+    user or system config — `init.defaultObjectFormat`, `core.hooksPath`, a template dir, a filter —
+    is read at all. `LC_ALL=C` keeps git's own words English: the failure line is picked out of them.
+    """
+    env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
+    env.pop("LANGUAGE", None)
+    env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "HOME": home,
+                "XDG_CONFIG_HOME": home, "LC_ALL": "C"})
+    return env
+
+
+def _git_argv(git: str, repo: Path, *args: str) -> list:
+    """`git` pointed EXPLICITLY at `repo` — never at whatever the environment or the cwd names — with
+    the per-call config no environment can move: no hooks, no fsmonitor daemon, no line-ending
+    rewrite of checked-out bytes, and a checkout that refuses what NTFS or HFS+ would read as `.git`
+    (`events/git_export.py::safe_tree_path` left those out already; this is the second lock)."""
+    return [git, "--git-dir", str(repo / ".git"), "--work-tree", str(repo),
+            "-c", f"core.hooksPath={os.devnull}", "-c", "core.fsmonitor=false",
+            "-c", "core.autocrlf=false", "-c", "core.protectNTFS=true", "-c", "core.protectHFS=true",
+            *args]
+
+
+def _git_failure_line(stderr) -> str:
+    """The line that says WHY git failed: its `fatal:` (else `error`) line. Not the last line, which
+    for fast-import is "dumping crash report to …" — a file the cleanup has already removed."""
+    lines = [line.strip() for line in (stderr or b"").decode("utf-8", "replace").splitlines()
+             if line.strip()]
+    for prefix in ("fatal:", "error"):
+        picked = next((line for line in lines if line.startswith(prefix)), None)
+        if picked is not None:
+            return picked
+    return lines[-1] if lines else ""
+
+
+def _export_git_target_refusal(run_dir: Path, out: Path) -> Optional[str]:
+    """Why `export-git` will not build its repository at `out`, or None — each one the operator's to
+    change, so each a refusal (exit 2), stated before anything is created anywhere."""
+    if out.is_symlink():
+        # Dangling or not: the repository would land wherever the link points, which is not what
+        # the operator named, and a dangling one would be created THROUGH.
+        return (f"{out} is a symbolic link{'' if out.exists() else ' to nothing'} — refusing to "
+                "build a repository through it; name a real directory")
+    try:
+        occupied = out.exists() and (not out.is_dir() or any(out.iterdir()))
+    except OSError as exc:
+        return f"cannot read {out} ({exc}) — name a directory export-git can create or use"
+    if occupied:
+        return (f"{out} exists and is not an empty directory — refusing to write into it; name a "
+                "new or an empty directory")
+    target, run = Path(os.path.abspath(out)).resolve(), run_dir.resolve()
+    if target == run or run in target.parents:
+        return (f"{out} is inside the run directory {run_dir} — export-git is read-only on the run; "
+                "name a directory outside it")
+    return None
+
+
 @app.command(name="export-git")
 def export_git(
     run_dir: Path = typer.Argument(..., help="Run dir whose node DAG to export."),
     out: Path = typer.Argument(..., help="Directory for the new git repository (absent or empty)."),
 ):
-    """Export the run's node DAG as a GIT REPOSITORY: one commit per node, its parents as the
-    commit's parents, the node's own files as the tree, the metric and receipts as `Looplab-*`
-    trailers (doc 67 67.15, `events/git_export.py`). Each node is tag `node-<id>`; branch `champion`
-    is checked out. Read-only on the run; the export is a projection of the log, never read back.
-    The task's base tree is not in the log, so a commit holds only the files the node itself wrote."""
+    """Export the run's node DAG as a GIT REPOSITORY: one commit per node lifecycle, its parents the
+    exact parent lifecycles it was built from, its own files as the tree, the metric and the receipts
+    that decide whether it counts as `Looplab-*` trailers (doc 67 67.15, `events/git_export.py`).
+    Each node's current lifecycle is tag `node-<id>`, one a reset superseded `node-<id>.g<gen>`;
+    branch `champion` is the fold's best and is checked out, branch `promoted` the operator's promote
+    alias when there is one. Read-only on the run; the export is a projection of the log, never read
+    back. The task's base tree is not in the log, so a commit holds only the files the node itself
+    wrote. Git runs hermetically — no GIT_* variable and no user or system config reaches it — and
+    the repository is built beside OUT and moved into place only once it is whole."""
     import shutil
     import subprocess
+    import tempfile
+    import uuid
 
-    from looplab.events.git_export import CHAMPION_REF, champion_id, fast_import_stream
+    from looplab.cli import log_integrity_from
+    from looplab.core.atomicio import rmtree_readonly_aware
+    from looplab.engine.champion_caveats import champion_metric_caveats
+    from looplab.events.git_export import CHAMPION_BRANCH, fast_import_stream
+
+    def refuse(message: str):
+        # On STDERR, as the exit-code table says of every refusal (`2`: one message, on stderr).
+        typer.echo(message, err=True)
+        raise typer.Exit(2)
 
     git = shutil.which("git")
     if git is None:
-        typer.echo("git is not installed — nothing to export into")
-        raise typer.Exit(2)
-    if out.exists() and (not out.is_dir() or any(out.iterdir())):
-        typer.echo(f"{out} exists and is not an empty directory — refusing to write into it")
-        raise typer.Exit(2)
-    store = _require_run_dir(run_dir)
+        refuse("git is not installed (not on PATH) — install git to export a run as a repository")
+    store = _require_run_dir(run_dir)     # also states an incomplete log on stderr, and continues
+    refusal = _export_git_target_refusal(run_dir, out)
+    if refusal:
+        refuse(refusal)
     events = store.read_all()
     state = fold(events)
-    stream = fast_import_stream(events, state)
-    run = functools.partial(subprocess.run, check=True, capture_output=True)
+    if not state.nodes:
+        # Not an empty repository: one with no commits exports nothing, and would read as a run
+        # whose DAG was exported and found empty. `export-sft` refuses its own "nothing" the same way.
+        refuse(f"{run_dir} has no nodes yet — there is no DAG to export")
+    # A corrupt log folds its readable prefix, exactly as `export-bundle` and `export-notebook` do;
+    # `_require_run_dir` already said so on stderr, and every commit says so too (the repository's
+    # reader never sees this terminal).
+    export = fast_import_stream(events, state, champion_caveats=champion_metric_caveats(state),
+                                log_integrity=log_integrity_from(store))
+    out = Path(os.path.abspath(out))
+    # A SIBLING of OUT, so the last step is a rename within one filesystem and nothing is ever
+    # half-built AT out: a failure after `git init` used to leave objects, tags, sometimes a
+    # checkout and a `fast_import_crash_*` there, exit 1, and then refuse the re-run because OUT
+    # was "not an empty directory". `mkdir` rather than `mkdtemp`, so the repository gets the
+    # umask's mode and not a private 0700.
+    stage = out.parent / f".{out.name}.{uuid.uuid4().hex[:12]}.export-git"
     try:
-        run([git, "init", "--quiet", str(out)])
-        run([git, "-C", str(out), "fast-import", "--quiet", "--done"], input=stream)
-        winner = champion_id(state)
-        if winner is not None:
-            run([git, "-C", str(out), "symbolic-ref", "HEAD", CHAMPION_REF])
-            run([git, "-C", str(out), "reset", "--hard", "--quiet"])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        stage.mkdir()
+    except OSError as exc:
+        refuse(f"cannot create the repository beside {out} ({exc}) — name a writable location")
+    step, failure, leftover = "git init", "", ""
+    try:
+        with tempfile.TemporaryDirectory(prefix="looplab-export-git-home-") as home:
+            env = _hermetic_git_env(home)
+
+            def run(*args, stdin=None):
+                return subprocess.run(_git_argv(git, stage, *args), input=stdin, check=True,
+                                      capture_output=True, env=env, timeout=_GIT_TIMEOUT_S)
+
+            run("init", "--quiet", "--template=", "--object-format=sha1",
+                f"--initial-branch={CHAMPION_BRANCH}")
+            step = "git fast-import"
+            run("fast-import", "--quiet", "--done", stdin=export.stream)
+            # BEFORE success is reported: a tree a receiving host's `fsck` refuses
+            # (`receive.fsckObjects`) is a failed export, whatever fast-import accepted.
+            step = "git fsck --strict"
+            run("fsck", "--strict", "--no-progress")
+            if export.champion is not None:
+                step = "the checkout of branch champion"
+                run("reset", "--hard", "--quiet")
+        step = "the move into place"
+        if out.is_dir():
+            out.rmdir()   # the EMPTY directory named; os.rename cannot replace one on Windows
+        os.rename(stage, out)
     except subprocess.CalledProcessError as exc:
-        detail = (exc.stderr or b"").decode("utf-8", "replace").strip().splitlines()
-        typer.echo(f"git failed: {' '.join(map(str, exc.cmd[:4]))} — "
-                   f"{detail[-1] if detail else f'exit {exc.returncode}'}")
+        failure = f"{step} failed: {_git_failure_line(exc.stderr) or f'exit {exc.returncode}'}"
+    except subprocess.TimeoutExpired:
+        failure = f"{step} did not finish within {int(_GIT_TIMEOUT_S)} s"
+    except OSError as exc:
+        failure = f"{step} failed: {exc}"
+    finally:
+        # Every way out but a completed move — a git failure, a timeout, Ctrl-C — removes what was
+        # built. Read-only-aware: git writes its pack files 0444, which Windows will not unlink.
+        if stage.exists():
+            try:
+                rmtree_readonly_aware(stage)
+            except OSError as exc:
+                leftover = f"; the partial build at {stage} could not be removed ({exc})"
+    if failure:
+        typer.echo(f"export-git: {failure} — nothing was written to {out}{leftover}", err=True)
         raise typer.Exit(1)
-    typer.echo(f"exported {len(state.nodes)} node(s) of {run_dir} to {out} as tags node-<id>"
-               + (f"; branch champion = node {winner}, checked out" if winner is not None
-                  else "; no champion yet, so nothing is checked out"))
+    parts = [f"exported {len(state.nodes)} node(s) of {run_dir} to {out}: {export.commits} "
+             f"commit(s), each node's current lifecycle as tag node-<id>"]
+    if export.superseded:
+        parts.append(f"{export.superseded} superseded lifecycle(s) as node-<id>.g<generation>")
+    parts.append(f"branch champion = node {export.champion}, checked out"
+                 if export.champion is not None else "no champion yet, so nothing is checked out")
+    if export.promoted is not None:
+        parts.append(f"branch promoted = node {export.promoted}")
+    if export.skipped_paths:
+        parts.append(f"{export.skipped_paths} path(s) left out, counted as Looplab-Skipped-Paths")
+    typer.echo("; ".join(parts))
 
 
 @app.command(name="export-sft")
