@@ -188,9 +188,13 @@ def test_a_log_damaged_part_way_is_said_to_be(tmp_path):
     with open(store.path, "ab") as handle:
         handle.write(b'{"seq": 999, "type": "node_evaluated", "data": {broken\n')
         handle.write(b'{"seq": 1000, "type": "run_finished", "ts": 1.0, "data": {}}\n')
+    _run(root / "b", [_both(0, 0.5, 0.6), _both(1, 0.7, 0.8)])
     out = CliRunner().invoke(app, ["fidelity-agreement", str(root)])
     assert out.exit_code == 0, out.output
-    assert "damaged part-way" in out.output
+    # The ONE wording (`eventstore.py::integrity_sentence`), and the run is left out: "we cannot
+    # show you this run", never its prefix counted as the whole.
+    assert "[INCOMPLETE RECORD] a" in out.output and "Skipped." in out.output
+    assert "1 run(s); 1 with an ordered cheap/full pair" in out.output
 
 
 def test_the_confirm_phase_records_the_ruler_its_mean_was_measured_on(tmp_path, monkeypatch):
@@ -230,3 +234,32 @@ def test_the_confirm_phase_records_the_ruler_its_mean_was_measured_on(tmp_path, 
             else:
                 assert row["protocol_mixed"] is True and "protocol_profile" not in row
                 assert state.nodes[row["node_id"]].confirmed_ruler is None
+
+
+def test_a_failed_confirm_seed_does_not_mix_the_ruler(tmp_path, monkeypatch):
+    """The ruler is agreed over the seeds the mean COUNTS: a seed that failed measured nothing and
+    recorded no ruler, and counting it would turn every node with one crashed seed `protocol_mixed`
+    (critic 2026-09-26: that mutant survived every test, none of which had a failed seed)."""
+    from looplab.engine.comparability import protocol_record
+    from tests.factories import make_engine
+
+    full = {"profile": "full", "overrides": ["steps=100"]}
+    engine = make_engine(tmp_path / "crash", n_seeds=3, max_nodes=6, confirm_top_k=2,
+                         confirm_seeds=2)
+    real = engine._run_eval
+
+    def _run_eval(node, workdir, env=None, profile=None, *args, **kwargs):
+        res = real(node, workdir, env, profile, *args, **kwargs)
+        if profile == "full":
+            res.eval_protocol = dict(full)
+            if (env or {}).get("LOOPLAB_EVAL_SEED") == "2":
+                res.metric, res.exit_code = None, 1            # the second seed crashes
+        return res
+
+    monkeypatch.setattr(engine, "_run_eval", _run_eval)
+    anyio.run(engine.run)
+    confirmed = [e.data for e in engine.store.read_all() if e.type == "node_confirmed"]
+    assert confirmed and all(row["seeds"] == 1 for row in confirmed), confirmed
+    expected = protocol_record(eval_protocol=full)["profile"]
+    assert all(row.get("protocol_profile") == expected and "protocol_mixed" not in row
+               for row in confirmed), confirmed

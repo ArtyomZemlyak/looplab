@@ -230,3 +230,29 @@ def test_a_reuse_refused_again_is_released_and_the_session_hands_back(tmp_path, 
     assert len(requests) == len(refused) == 2, (requests, refused)
     assert producer.calls == 1, "the second request reused the first build, and nothing more"
     assert not engine._spec_reusable, "released, not kept a third time"
+
+
+def test_a_close_that_burns_the_reserved_id_leaves_no_phantom_slot(tmp_path, monkeypatch):
+    """The claim's credit is true only for a request that becomes a node. A commit that fails after
+    `node_building` reserved the id closes the request `commit_failed` and BURNS that id, so the
+    strict denominator is re-derived after the close (critic 2026-09-26, driven: `policy.max_nodes`
+    read one slot the ceiling no longer had, for every unrefreshed reader until the next refresh)."""
+    engine, _producer = _engine(tmp_path / "burn", depth=1)
+    _last_slot_board(engine)
+    request = _request(engine)
+    result = _build_result(engine, request)
+    engine._ensure_speculation_state()
+    engine._spec_builds[result.key] = result
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("the commit failed before node_created")
+
+    monkeypatch.setattr(engine, "_create_node", _boom)
+    assert engine._serve_card_builds() is True
+    closes = [e.data for e in engine.store.read_all() if e.type == EV_CARD_BUILD_DONE]
+    assert closes[-1].get("skipped_reason") == "commit_failed", closes
+    after = engine.policy.max_nodes
+    state = fold(engine.store.read_all())
+    engine._refresh_speculation_budget(state)
+    assert after == engine.policy.max_nodes
+    assert engine._node_reservation_slots_remaining(state) == 0, "the burned id was the last slot"

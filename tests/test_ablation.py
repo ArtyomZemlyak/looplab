@@ -477,3 +477,65 @@ def test_the_flag_ships_on_resumes_off_and_is_off_at_every_constructor():
     assert settings_from_snapshot(legacy).ablation_probe_hint is False
     assert EngineOptions().ablation_probe_hint is False
     assert EngineOptions.from_settings(Settings()).ablation_probe_hint is True
+
+
+def _crafted(tmp_path, *, metric, code="a = 1\n\nb = 2\n\nprint(a + b)\n", **engine_kw):
+    """An engine over a log holding ONE node, evaluated at `metric` (None: left pending)."""
+    from looplab.core.models import Idea, durable_idea_payload
+
+    engine = make_engine(tmp_path, policy=GreedyTree(n_seeds=3, max_nodes=12, ablate_every=1,
+                                                     enable_merge=False), **engine_kw)
+    engine.store.append("run_started", {"run_id": tmp_path.name, "task_id": "toy", "goal": "g",
+                                        "direction": "min", **engine._run_start_pinned_values()})
+    idea = Idea(operator="draft", params={"x": 0.5, "y": 0.5}, rationale="r")
+    engine.store.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                         "idea": durable_idea_payload(idea), "code": code})
+    if metric is not None:
+        engine.store.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": metric,
+                                               "violations": []})
+    return engine
+
+
+def test_a_parent_with_no_metric_gets_no_invented_sign_and_no_note(tmp_path, monkeypatch):
+    """An operator `force_ablate` on a PENDING node is accepted, and the sensitivity then measures
+    against a fallback 0.0. A sign against that is invented — and the refiner was told
+    "x: needed (-9.25 without it)" of a node nobody measured (critic 2026-09-26, driven)."""
+    engine = _crafted(tmp_path / "pending", metric=None, ablation_probe_hint=True)
+    seen = []
+    monkeypatch.setattr(engine, "_build_refine_block_child", lambda *a, **k: None)
+    real = engine.researcher.propose
+
+    def _propose(state, parent):
+        seen.append(getattr(engine.researcher, "_ablation_probe_hint", None))
+        return real(state, parent)
+
+    monkeypatch.setattr(engine.researcher, "propose", _propose)
+    anyio.run(engine._ablate, 0)
+    row = next(e.data for e in engine.store.read_all() if e.type == "ablate")
+    assert row["impacts"], "the probes ran and measured"
+    assert set(row["signed_impacts"].values()) == {None}
+    assert seen and not any(seen), "no note is stamped from signs nobody can state"
+
+
+def test_code_block_mode_signs_each_block_by_the_direction(tmp_path, monkeypatch):
+    """Minimized objective, the node measured 1.0: block 0 removed measured 0.8 (better without it,
+    +0.2), block 1 measured 1.5 (needed, -0.5), block 2 broke the run (no sign) — the sign the
+    sensitivity `|Δ|` beside it drops (critic 2026-09-26: only the param path was driven)."""
+    from types import SimpleNamespace
+
+    engine = _crafted(tmp_path / "blocks", metric=1.0, ablate_code_blocks=True)
+    probes = iter([SimpleNamespace(metric=0.8, exit_code=0, timed_out=False),
+                   SimpleNamespace(metric=1.5, exit_code=0, timed_out=False),
+                   SimpleNamespace(metric=None, exit_code=1, timed_out=False)])
+
+    async def _probe(source, workdir, parent_id, generation):
+        return next(probes), 1.0, True
+
+    monkeypatch.setattr(engine, "_segment_blocks", lambda code: [(0, 1), (2, 3), (4, 5)])
+    monkeypatch.setattr(engine, "_timed_ablation_probe", _probe)
+    monkeypatch.setattr(engine, "_build_refine_block_child", lambda *a, **k: None)
+    anyio.run(engine._ablate, 0)
+    row = next(e.data for e in engine.store.read_all() if e.type == "ablate")
+    assert row["mode"] == "code_blocks"
+    assert row["impacts"] == {"0": pytest.approx(0.2), "1": pytest.approx(0.5), "2": None}
+    assert row["signed_impacts"] == {"0": pytest.approx(0.2), "1": pytest.approx(-0.5), "2": None}

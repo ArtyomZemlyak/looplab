@@ -1545,7 +1545,8 @@ so this is the ordering of the candidates the search PROMOTED, never of those it
 comparison crosses seed sets (the search at seed 0, confirm from `confirm_seed_base`, 1 by default),
 so a disagreement is fidelity OR noise. An operator-forced confirmation writes no `node_confirmed`
 and is not read. Only nodes whose number counts toward the best are read. A run whose event log is
-damaged part-way is read to its valid prefix and says so on stderr. With no ordered pair anywhere it
+damaged part-way is SKIPPED, by every corpus instrument, with the store's own `[INCOMPLETE RECORD]`
+sentence on stderr: its prefix is not the run. With no ordered pair anywhere it
 says `NO ORDERED PAIR` rather than printing an agreement. It arms nothing, and doc 52's
 `smoke-full-rank-fidelity-unmeasured` is the box measurement it exists for.
 

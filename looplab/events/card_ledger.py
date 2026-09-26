@@ -663,6 +663,29 @@ def measured_ruler(node: Node) -> str | None:
     return ruler if isinstance(ruler, str) and ruler else None
 
 
+def _records_disagree(candidate: Node, incumbent: Node) -> bool:
+    """Do the two numbers' own comparability records name a different source tree, or a protocol
+    facet both recorded and disagree on? `engine/comparability.py`'s refuse-only discriminators
+    (`_substrate_mismatch`, `_protocol_mismatch`), read here because this module is a leaf over
+    `core`; absence on either side is silence, as there. A pair on two scorers or two printed
+    fingerprints is no within-ruler gain, whatever the floor's own profile (critic 2026-09-26)."""
+    def record(node):
+        provenance = getattr(node, "metric_provenance", None)
+        found = provenance.get("comparability") if isinstance(provenance, dict) else None
+        return found if isinstance(found, dict) else {}
+
+    mine, theirs = record(candidate), record(incumbent)
+    left, right = mine.get("substrate"), theirs.get("substrate")
+    if isinstance(left, str) and isinstance(right, str) and left and right and left != right:
+        return True
+    ours, other = mine.get("protocol"), theirs.get("protocol")
+    if not isinstance(ours, dict) or not isinstance(other, dict):
+        return False
+    return any(isinstance(ours.get(facet), str) and isinstance(other.get(facet), str)
+               and ours[facet] and other[facet] and ours[facet] != other[facet]
+               for facet in ("profile", "scorer", "fingerprint"))
+
+
 def _floor_std(floor: dict, candidate: Node, incumbent: Node) -> float:
     """The floor's per-evaluation spread when it measured the ruler BOTH numbers were read on, else 0.
 
@@ -684,6 +707,8 @@ def _floor_std(floor: dict, candidate: Node, incumbent: Node) -> float:
     only withholds `within_noise`, never mints it."""
     std = floor.get("std")
     if not is_usable_metric(std) or std <= 0 or floor.get("reason") or floor.get("protocol_mixed"):
+        return 0.0
+    if _records_disagree(candidate, incumbent):
         return 0.0
     recorded = floor.get("protocol_profile")
     rulers = [measured_ruler(n) for n in (candidate, incumbent)]

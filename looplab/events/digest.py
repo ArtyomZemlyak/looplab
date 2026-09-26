@@ -247,32 +247,51 @@ def node_frontier(state: RunState, k: int = 5, *, max_children: int = 2,
     parent)]}` — `{}` while the run has no more feasible nodes than its `k` leaders, where "little
     explored" is true of every node and says nothing.
 
-    PROMISING: a leader (`top_nodes(state, k)`, the rows the brief already lists) with at most
-    `max_children` children. DEAD END: a feasible evaluated LEAF that did not beat its best feasible
-    parent, most recent first — a direction tried once and dropped. A child is any node naming it
-    as a parent that is not tombstoned; `research_targets` answers a different question (axis
-    coverage, for deep research) and is not read."""
+    DEAD END: a feasible evaluated LEAF that did not beat its best feasible parent, most recent
+    first — a direction tried once and dropped. PROMISING: a leader (`top_nodes(state, k)`, the rows
+    the brief already lists) with at most `max_children` children that is NOT a dead end — a root,
+    or a node that beat its best parent (critic 2026-09-26: the runner-up is very often a leaf child
+    of the champion that did not beat it, and the first cut named it both).
+
+    A CHILD is exploration the run bought or is buying: any node naming it as a parent that is not
+    tombstoned, not operator-aborted and not a speculative build discarded before it was evaluated
+    (`Node.never_evaluated`), and every build in flight (`RunState.buildings`) — a node with three
+    builds under way is not "little explored" (critic 2026-09-26, driven). `research_targets`
+    answers a different question (axis coverage, for deep research) and is not read."""
     feasible = [n for n in state.feasible_nodes() if node_metric(n) is not None]
     if len(feasible) <= k:
         return {}
+    aborted = set(state.aborted_nodes or ())
     children: dict[int, int] = {}
-    for node in state.nodes.values():
-        if node.tombstoned:
-            continue
-        for parent_id in dict.fromkeys(node.parent_ids):
+
+    def _count(parent_ids) -> None:
+        for parent_id in dict.fromkeys(parent_ids or ()):
             children[parent_id] = children.get(parent_id, 0) + 1
+
+    for node in state.nodes.values():
+        if not (node.tombstoned or node.id in aborted or node.never_evaluated):
+            _count(node.parent_ids)
+    for node_id, marker in (state.buildings or {}).items():
+        if node_id not in state.nodes and isinstance(marker, dict):
+            _count(marker.get("parent_ids"))
     better = (lambda a, b: a > b) if state.direction == "max" else (lambda a, b: a < b)
-    promising = [(n, children.get(n.id, 0)) for n in top_nodes(state, k)
-                 if children.get(n.id, 0) <= max_children]
     by_id = {n.id: n for n in feasible}
-    ends = []
-    for node in sorted(feasible, key=lambda n: -n.id):
+
+    def _dead_end_of(node):
+        """The best parent `node` failed to beat, when it is a leaf that did; else None."""
         parents = [by_id[p] for p in node.parent_ids if p in by_id]
         if children.get(node.id, 0) or not parents:
-            continue
+            return None
         best = (max if state.direction == "max" else min)(parents, key=node_metric)
-        if not better(node_metric(node), node_metric(best)):
-            ends.append((node, best))
+        return None if better(node_metric(node), node_metric(best)) else best
+
+    promising = [(n, children.get(n.id, 0)) for n in top_nodes(state, k)
+                 if children.get(n.id, 0) <= max_children and _dead_end_of(n) is None]
+    ends = []
+    for node in sorted(feasible, key=lambda n: -n.id):
+        parent = _dead_end_of(node)
+        if parent is not None:
+            ends.append((node, parent))
         if len(ends) >= dead_ends:
             break
     return {"promising": promising, "dead_ends": ends}

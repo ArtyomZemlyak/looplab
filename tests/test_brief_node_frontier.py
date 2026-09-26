@@ -39,10 +39,35 @@ def _state(tmp_path, tree=_TREE, *, tombstoned=()):
 
 def test_the_frontier_is_the_little_explored_leaders_and_the_dead_ends(tmp_path):
     frontier = node_frontier(_state(tmp_path))
-    # Leaders by metric: 4 (0.70), 6 (0.68), 5 (0.65), 7 (0.62), 1 (0.60) — 1 has three children.
-    assert [(n.id, count) for n, count in frontier["promising"]] == [(4, 1), (6, 0), (5, 0), (7, 0)]
+    # Leaders by metric: 4 (0.70), 6 (0.68), 5 (0.65), 7 (0.62), 1 (0.60) — 1 has three children,
+    # and 6 is the runner-up leaf that did NOT beat the champion, its parent: a dead end, never
+    # "promising" too (critic 2026-09-26: the first cut named it both).
+    assert [(n.id, count) for n, count in frontier["promising"]] == [(4, 1), (5, 0), (7, 0)]
     # Leaves that did not beat their parent, most recent first: 6 (0.68 < 4's 0.70), 3 (0.40 < 0.50).
     assert [(n.id, p.id) for n, p in frontier["dead_ends"]] == [(6, 4), (3, 0)]
+    assert not ({n.id for n, _c in frontier["promising"]}
+                & {n.id for n, _p in frontier["dead_ends"]})
+
+
+def test_builds_in_flight_are_children_and_discarded_or_aborted_ones_are_not(tmp_path):
+    """A leader with three builds under way is not "little explored" (critic 2026-09-26, driven:
+    speculation prefetch makes this common); a child the operator aborted, or a speculative build
+    discarded before it was evaluated, bought no exploration."""
+    store_state = _state(tmp_path / "flight")
+    assert 5 in [n.id for n, _c in node_frontier(store_state)["promising"]]
+    store = EventStore(tmp_path / "flight" / "events.jsonl")
+    for node_id in (20, 21, 22):
+        store.append("node_building", {"node_id": node_id, "operator": "improve",
+                                       "parent_ids": [5]})
+    busy = node_frontier(fold(store.read_all()))
+    assert 5 not in [n.id for n, _c in busy["promising"]], "three builds in flight under node 5"
+    # Node 4's one child (6) aborted: node 4 is back to no children.
+    aborted = _state(tmp_path / "aborted")
+    aborted.aborted_nodes = {6}
+    assert (4, 0) in [(n.id, c) for n, c in node_frontier(aborted)["promising"]]
+    discarded = _state(tmp_path / "discarded")
+    discarded.nodes[6].never_evaluated = True
+    assert (4, 0) in [(n.id, c) for n, c in node_frontier(discarded)["promising"]]
 
 
 def test_a_tombstoned_child_is_no_child(tmp_path):
@@ -64,11 +89,11 @@ def test_the_cue_says_both_halves_and_records_the_promising_nodes(tmp_path):
     state = _state(tmp_path)
     text, steering = _cue(tmp_path, state, on=True)
     assert text.startswith("\nNODE FRONTIER — promising but little explored (a leader with at most "
-                           "2 children): node 4 (metric=0.7, 1 child); node 6 (metric=0.68, 0 "
+                           "2 children): node 4 (metric=0.7, 1 child); node 5 (metric=0.65, 0 "
                            "children)")
     assert (". Dead ends (a leaf that did not beat its parent and was never extended): node 6 "
             "(0.68 vs parent 4's 0.7); node 3 (0.4 vs parent 0's 0.5).") in text
-    assert steering == [{"kind": "node_frontier", "node_ids": [4, 6, 5, 7]}]
+    assert steering == [{"kind": "node_frontier", "node_ids": [4, 5, 7]}]
     assert normalize_steering_context(steering) == steering, "a registered steering kind"
 
 

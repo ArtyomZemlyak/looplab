@@ -71,7 +71,8 @@ def _folded(runs_root: Path) -> Iterator[tuple[str, object, Path, list]]:
     aborting the corpus: an instrument that answers nothing because one of forty runs is damaged is
     an instrument nobody runs.
     """
-    from looplab.events.eventstore import EventLogCorruptionError, EventStore, log_integrity
+    from looplab.events.eventstore import (EventLogCorruptionError, EventStore, integrity_sentence,
+                                           log_integrity)
     from looplab.events.replay import fold
 
     for run_dir in _run_dirs(runs_root):
@@ -82,15 +83,14 @@ def _folded(runs_root: Path) -> Iterator[tuple[str, object, Path, list]]:
                        err=True)
             continue
         # A log damaged part-way READS as its valid prefix — `EventLogCorruptionError` fires on an
-        # append, never on `read_all` — so without this line a corrupt run was counted as a whole
-        # one, with whatever its prefix held (critic 2026-09-26, driven). The receipt is the ONE
-        # operator-facing statement of that (`eventstore.py::log_integrity`).
-        integrity = log_integrity(run_dir / _EVENTS)
-        if not integrity.get("complete"):
-            typer.echo(f"  ! {run_dir.name}: the event log is damaged part-way — only its first "
-                       f"{len(events)} event(s) are read"
-                       + (f", {integrity['dropped_lines']} line(s) behind the break are not"
-                          if integrity.get("dropped_lines") else ""), err=True)
+        # append, never on `read_all` — so a corrupt run was counted as a whole one, its prefix in
+        # every pooled figure (critic 2026-09-26, driven). The receipt's contract is "we cannot show
+        # you this run", not a footnote on numbers printed anyway (`eventstore.py::log_integrity`),
+        # so the run is SKIPPED, in the one wording every text surface prints for it.
+        sentence = integrity_sentence(log_integrity(run_dir / _EVENTS), run_label=run_dir.name)
+        if sentence:
+            typer.echo(f"  ! {sentence} Skipped.", err=True)
+            continue
         yield run_dir.name, fold(events), run_dir, events
 
 

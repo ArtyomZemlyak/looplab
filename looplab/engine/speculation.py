@@ -2018,7 +2018,8 @@ class SpeculationMixin:
         # before the request existed. Charged here, the last slot made `next_actions` answer
         # "budget spent", the claim chose another Card and the election re-chose this one, forever
         # (`_refresh_speculation_budget` has the measurement).
-        self._refresh_speculation_budget(state, consume_request=True, request_index=position)
+        self._refresh_speculation_budget(
+            state, events=events, consume_request=True, request_index=position)
         # The exact request head already owns one durable future slot. Convert that ownership into
         # node_building without double-charging it, but never cross a ceiling that was already full
         # when the request arrived (legacy/corrupt prefixes remain pending for budget_extend).
@@ -2360,6 +2361,15 @@ class SpeculationMixin:
                 self._spec_reusable[key] = result
             else:
                 self._discard_spec_result(result)
+        if outcome != "created":
+            # THE CLAIM'S CREDIT IS TRUE ONLY FOR A MATERIALIZED REQUEST. `_claim_requested_card_build`
+            # handed the policy this request's slot back for its selection, which is exact once the
+            # request becomes a node — and not after a close that burned the id `node_building`
+            # reserved (`commit_failed`, `commit_not_ours`), nor after a close whose CAS ran out and
+            # left the request open (critic 2026-09-26, driven: `policy.max_nodes` read one slot
+            # the ceiling no longer had, for every unrefreshed reader until the next refresh). The
+            # strict denominator is re-derived from the log as it now stands.
+            self._refresh_speculation_budget(fold(self.store.read_all()))
         return closed
 
     def _commit_ready_builds_before_cadence(self, state: RunState,

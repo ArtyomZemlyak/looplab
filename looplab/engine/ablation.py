@@ -20,6 +20,7 @@ from uuid import uuid4
 import anyio
 
 from looplab.core.containment import contain
+from looplab.core.fitness import is_usable_metric
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import Idea, durable_idea_payload
 from looplab.engine.card_reservation import scored_anchor
@@ -58,8 +59,9 @@ def ablation_probe_note(parent_id: int, top, signed: dict, direction: str) -> st
     parameter: positive when the run did BETTER without it. The sensitivity `|Δ|` that picks `top`
     cannot say which way a parameter pulls, and the refiner used to be asked for a value blind to
     every one of these numbers — including a probe that beat the node, which is kept nowhere."""
+    signed = {name: gain for name, gain in (signed or {}).items() if is_usable_metric(gain)}
     if not signed:
-        return ""
+        return ""        # nothing measured against a measured node: nothing to tell the refiner
     order = sorted(signed, key=lambda name: (-abs(signed[name]), str(name)))
     parts = []
     for name in order[:_PROBE_NOTE_MAX]:
@@ -214,8 +216,11 @@ class AblationMixin:
         # which is how the digest, the UI and the narrative read it — and it cannot tell a component
         # the run is better WITHOUT from one it cannot do without. Recorded beside it, never in its
         # place: `_signed_gain` below, positive when the probe measured the objective BETTER with
-        # the component removed. Nothing reads it to decide yet.
-        signed_impacts: dict[str, float] = {}
+        # the component removed. None for a parent with no measured metric (an operator
+        # `force_ablate` on a pending or failed node): the `0.0` the sensitivity falls back to is no
+        # measurement, and a sign against it is invented (critic 2026-09-26, driven).
+        signed_impacts: dict[str, Optional[float]] = {}
+        measured_base = is_usable_metric(parent.metric)
         abl_seconds = 0.0                       # P1-2: sum the probe wall-clock so it's budgeted
         superseded = False
         with self.tracer.span(
@@ -245,7 +250,8 @@ class AblationMixin:
                     break
                 if res.metric is not None and res.exit_code == 0 and not res.timed_out:
                     impacts[p] = abs(res.metric - base)
-                    signed_impacts[p] = _signed_gain(res.metric, base, state.direction)
+                    signed_impacts[p] = (_signed_gain(res.metric, base, state.direction)
+                                         if measured_base else None)
                 if superseded:
                     break
         async with self._write_lock:
@@ -442,8 +448,10 @@ class AblationMixin:
         blocks = self._segment_blocks(code)
         impacts: dict[str, Optional[float]] = {}
         # Signed beside the sensitivity, as in `_ablate`; None where `impacts` is None (the run broke
-        # without the block, so there is no measured objective to sign).
+        # without the block, so there is no measured objective to sign), and for a parent with no
+        # measured metric.
         signed_impacts: dict[str, Optional[float]] = {}
+        measured_base = is_usable_metric(parent.metric)
         abl_seconds = 0.0                       # P1-2: budget the code-block probes too
         superseded = False
         with self.tracer.span(
@@ -469,7 +477,9 @@ class AblationMixin:
                     break
                 if res.metric is not None and res.exit_code == 0 and not res.timed_out:
                     impacts[str(idx)] = round(abs(res.metric - base), 6)
-                    signed_impacts[str(idx)] = round(_signed_gain(res.metric, base, state.direction), 6)
+                    signed_impacts[str(idx)] = (
+                        round(_signed_gain(res.metric, base, state.direction), 6)
+                        if measured_base else None)
                 else:
                     impacts[str(idx)] = None   # removing this block broke the run => essential block
                     signed_impacts[str(idx)] = None

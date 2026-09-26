@@ -3133,7 +3133,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         ``consume_request`` / ``request_index`` are the speculative CLAIM's
         (`speculation.py::_claim_requested_card_build`): the request it converts is credited,
         exactly as the strict slot count credits it, so the claim hands the policy the denominator
-        its ELECTION saw — and the election runs before its own request exists. Charged, the LAST
+        its ELECTION saw as far as its OWN request is concerned — and the election runs before its
+        own request exists. (A request elected AFTER it is charged, as at any refresh; that cannot
+        flip the last slot, because that election itself needed a free slot with this one charged.)
+        The credit is true once the request becomes a node; `_serve_card_builds` re-derives the
+        strict value after every other outcome. Charged, the LAST
         slot could never be claimed: the claim's `policy.max_nodes` fell to
         `card_budget_used(state)`, so `GreedyTree.next_actions` answered "budget spent" where the
         election had seen one free slot and a due merge; another Card won, the build closed

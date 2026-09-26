@@ -227,6 +227,36 @@ def test_both_numbers_must_have_been_measured_on_the_floors_ruler(tmp_path, rule
     assert verdict_support([1], st) == SUPPORT_SINGLE_RUN
 
 
+def test_a_pair_on_two_scorers_is_no_within_ruler_gain(tmp_path):
+    """Both numbers on the floor's profile, but scored by two different host scorer programs (or
+    run on two source trees): the floor's profile match says nothing about THEM (critic
+    2026-09-26: only the profile facet was compared)."""
+    nodes = [(0, [], 0.70), (1, [0], 0.72)]
+    same = _run(tmp_path / "same", nodes, floor_std=0.02, floor={"protocol_profile": SMOKE},
+                rulers={0: SMOKE, 1: SMOKE})
+    assert verdict_support([1], same) == SUPPORT_WITHIN_NOISE
+    (tmp_path / "scorers").mkdir()
+    store = EventStore(tmp_path / "scorers" / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "max"})
+    for i, parents, metric in nodes:
+        idea = Idea(operator="improve" if parents else "draft", params={"lr": 0.001 * (i + 1)},
+                    rationale=f"exp {i}", hypothesis=f"h{i}")
+        store.append("node_created", {"node_id": i, "parent_ids": parents, "operator": idea.operator,
+                                      "idea": durable_idea_payload(idea), "code": "", "files": {},
+                                      "generation": 0})
+        provenance = _provenance(SMOKE)
+        provenance["comparability"]["protocol"]["scorer"] = ("s" if i else "t") * 16
+        store.append("node_evaluated", {"node_id": i, "generation": 0, "metric": metric,
+                                        "eval_seconds": 1.0, "extra_metrics": {}, "stdout_tail": "",
+                                        "trials": [], "violations": [],
+                                        "metric_provenance": provenance})
+    store.append("eval_noise_floor", {"node_id": 0, "generation": 0, "seeds": [1, 2, 3],
+                                      "metrics": [0.7, 0.7, 0.7], "n": 3, "mean": 0.7,
+                                      "std": 0.02, "sem": 0.02 / math.sqrt(3), "spread": 0.04,
+                                      "protocol_profile": SMOKE})
+    assert verdict_support([1], fold(store.read_all())) == SUPPORT_SINGLE_RUN
+
+
 def test_a_floor_that_recorded_no_ruler_is_not_used_for_numbers_that_did(tmp_path):
     """A floor written before the record, over nodes written after it: nothing says it matches."""
     st = _run(tmp_path, [(0, [], 0.70), (1, [0], 0.72)], floor_std=0.02,

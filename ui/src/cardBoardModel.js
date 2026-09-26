@@ -369,8 +369,8 @@ export function cardAttemptSummary(attempts) {
 // feature that would need a new wire field. These two are the ones with real content behind them.
 // ---------------------------------------------------------------------------------------------
 
-// The 17 structured cue kinds `core/cards.py::CARD_STEERING_CONTEXT_FIELDS` closes over, in
-// the operator's words. This is a
+// The structured cue kinds `core/cards.py::CARD_STEERING_CONTEXT_FIELDS` closes over, in the
+// operator's words — every one of them, pinned by `tests/test_proposal_cue_registry.py`. This is a
 // LABEL table, not a validator: an unknown kind renders its own id rather than being dropped, because
 // the vocabulary is versioned server-side and a silently-hidden new cue is worse than an ugly one.
 const STEERING_CUES = {
@@ -382,6 +382,7 @@ const STEERING_CUES = {
   cross_run_advisory: 'a cross-run advisory', cross_run_tools: 'cross-run tools',
   concept_authoring: 'concept authoring', concept_slug_reuse: 'concept slug reuse',
   research_memo: 'a research memo', strategy: 'the Strategist', sweep: 'a sweep',
+  mixed_comparability: 'leaders measured on another ruler', node_frontier: 'the node frontier',
 }
 
 /**

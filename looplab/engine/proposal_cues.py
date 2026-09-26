@@ -589,13 +589,26 @@ class ProposalCuesMixin:
         from looplab.engine.comparability import difference_reason, record_of
         from looplab.events.digest import fmt_num, node_metric, top_nodes
 
+        def shown(node):
+            """The record of the number the brief SHOWS for `node` (`node_metric`, its confirmed
+            mean when it has one — critic 2026-09-26): its search record, with a confirmed node's
+            protocol narrowed to the ruler its confirmation ran on (`Node.confirmed_ruler`), the one
+            facet that record carries; unknown when it recorded none."""
+            record = record_of(node)
+            if record is None or node.confirmed_mean is None:
+                return record
+            record = {name: value for name, value in record.items() if name != "protocol"}
+            if node.confirmed_ruler:
+                record["protocol"] = {"profile": node.confirmed_ruler}
+            return record
+
         champion = state.best()
-        mine = record_of(champion) if champion is not None else None
+        mine = shown(champion) if champion is not None else None
         if mine is None:
             return "", []
         named: list[tuple[int, str]] = []
         for node in top_nodes(state, 5):
-            reason = None if node.id == champion.id else difference_reason(mine, record_of(node))
+            reason = None if node.id == champion.id else difference_reason(mine, shown(node))
             if reason:
                 named.append((node.id, f"node {node.id} (metric={fmt_num(node_metric(node))}) "
                                        f"{reason}"))

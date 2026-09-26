@@ -46,8 +46,9 @@ def test_the_reason_names_what_differs_in_the_status_rules_own_order():
     assert difference_reason(base, None) is None and difference_reason(None, base) is None
 
 
-def _state(tmp_path, nodes):
-    """`nodes` is [(id, metric, comparability record or None)], direction max."""
+def _state(tmp_path, nodes, *, confirmed=()):
+    """`nodes` is [(id, metric, comparability record or None)], direction max; `confirmed` is
+    [(id, mean, ruler)] — a confirmation whose seeds ran on `ruler`."""
     store = EventStore(tmp_path / "events.jsonl")
     store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "max"})
     for node_id, metric, record in nodes:
@@ -57,6 +58,9 @@ def _state(tmp_path, nodes):
         store.append("node_evaluated", {
             "node_id": node_id, "generation": 0, "metric": metric, "violations": [],
             **({"metric_provenance": {"comparability": record}} if record else {})})
+    for node_id, mean, ruler in confirmed:
+        store.append("node_confirmed", {"node_id": node_id, "generation": 0, "mean": mean,
+                                        "std": 0.01, "seeds": 3, "protocol_profile": ruler})
     return fold(store.read_all())
 
 
@@ -110,3 +114,17 @@ def test_the_flag_ships_off_resumes_off_and_is_off_at_every_constructor():
     assert EngineOptions().brief_mixed_comparability is False
     on = Settings(brief_mixed_comparability=True)
     assert EngineOptions.from_settings(on).brief_mixed_comparability is True
+
+
+def test_a_confirmed_leader_is_compared_on_the_ruler_of_the_number_the_brief_shows(tmp_path):
+    """The brief shows a confirmed node's confirmation MEAN (`node_metric`), so its ruler is the one
+    its confirmation ran on, not its search terminal's (critic 2026-09-26). Node 0 was searched on
+    smoke and confirmed on full, the champion's ruler: its shown number is comparable, and nothing
+    is said. Node 2, confirmed on smoke, is named."""
+    state = _state(tmp_path, [(0, 0.90, _record(profile=SMOKE)), (1, 0.99, _record(profile=FULL)),
+                              (2, 0.80, _record(profile=FULL))],
+                   confirmed=[(0, 0.91, FULL), (1, 0.99, FULL), (2, 0.81, SMOKE)])
+    assert state.best().id == 1
+    text, steering = _cue(tmp_path, state, on=True)[1]
+    assert "node 0" not in text and "node 2 (metric=0.81) " in text
+    assert steering == [{"kind": "mixed_comparability", "node_ids": [2]}]

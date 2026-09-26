@@ -236,3 +236,21 @@ def test_the_fragments_concatenate_in_registry_order(monkeypatch):
 
     assert host.researcher._complexity_hint == "".join(f"<{i}>" for i in range(count))
     assert [entry["siblings"] for entry in host.researcher._steering_context] == list(range(count))
+
+
+def test_every_steering_kind_has_an_operator_label_in_the_card_board():
+    """`ui/src/cardBoardModel.js::STEERING_CUES` renders an unknown kind as its raw id, on purpose —
+    so a kind added to the closed vocabulary without a label shows up as `node_frontier` on the
+    board and nothing is red (critic 2026-09-26: two kinds landed that way). Read by parsing the
+    object literal's keys, not by a substring anywhere in the file."""
+    import re
+    from pathlib import Path
+
+    from looplab.core.cards import CARD_STEERING_CONTEXT_FIELDS
+
+    source = (Path(__file__).resolve().parents[1] / "ui" / "src" / "cardBoardModel.js").read_text(
+        encoding="utf-8")
+    body = source.split("const STEERING_CUES = {", 1)[1].split("\n}\n", 1)[0]
+    labelled = set(re.findall(r"(?:^|[\s,{])([a-z_]+):\s*'", body))
+    assert set(CARD_STEERING_CONTEXT_FIELDS) <= labelled, sorted(
+        set(CARD_STEERING_CONTEXT_FIELDS) - labelled)
