@@ -277,7 +277,12 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               The 'field set changed too' branch: exactly `['brief_node_frontier']` added and `[]`
 #               removed; `_EXPECTED_FIELD_COUNT` goes 258 -> 259 and both pins are re-set. INERT for
 #               a calibration replicate on the row above's ground.
-_EXPECTED_DIGEST = "sha256:9bb88df31eae847cd4ab8e6146435b8c604fc5d0445e242299b9b09e7ef0e281"
+#   2026-09-26  + noise_floor_mid_search (doc 67 67.1a: the eval noise floor measured once
+#               mid-search). The 'field set changed too' branch: exactly `['noise_floor_mid_search']`
+#               added and `[]` removed; `_EXPECTED_FIELD_COUNT` goes 259 -> 260 and both pins are
+#               re-set. INERT for a calibration replicate: off on both surfaces, and with it off the
+#               probe runs where it always did (and only when `eval_noise_seeds` asks for it).
+_EXPECTED_DIGEST = "sha256:7670d6ebaf5244f353d2edf072a62eccde7302af52ff022612a99ba572262c72"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -769,7 +774,8 @@ _EXPECTED_DIGEST = "sha256:9bb88df31eae847cd4ab8e6146435b8c604fc5d0445e242299b9b
 #   2026-09-26  + ablation_probe_hint (doc 67 67.4): 256 -> 257; see the digest history above.
 #   2026-09-26  + brief_mixed_comparability (doc 68 68.1a): 257 -> 258; see the digest history above.
 #   2026-09-26  + brief_node_frontier (doc 67 67.9): 258 -> 259; see the digest history above.
-_EXPECTED_FIELD_COUNT = 259
+#   2026-09-26  + noise_floor_mid_search (doc 67 67.1a): 259 -> 260; see the digest history above.
+_EXPECTED_FIELD_COUNT = 260
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

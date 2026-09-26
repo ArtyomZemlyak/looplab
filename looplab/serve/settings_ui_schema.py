@@ -29,7 +29,7 @@ SETTINGS_UI_SCHEMA_VERSION = 2
 # here reading as if 207 were derived while it is typed, which is the drift it warns about. The
 # unforgeable gate is `SETTINGS_UI_SCHEMA_KEYSET_REVISION` further down; this integer is the
 # human-readable half the docs sentence quotes, and `_load_schema` refuses when the two disagree.
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 227
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 228
 # On the KEYSET REVISION below: DERIVED, and deliberately no longer a hand-pinned review gate: a
 # bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
@@ -310,7 +310,11 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # — whether the proposal brief names the promising, little-explored leaders and the dead ends. OFF
 # by default; a row on the same ground. Re-derived by INTERSECTION: the 226 previous keys plus
 # exactly that one, none removed.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "c97e426641bd9ceb0f4d9422378dc16b412a1ef9a972c9a7d15560edd88e0219"
+# 227 -> 228 on 2026-09-26: `noise_floor_mid_search` (doc 67 67.1a), beside `eval_noise_seeds` —
+# whether the noise floor is measured once mid-search instead of at the end. OFF by default; a row
+# because an operator must be able to move a spend they opted into. Re-derived by INTERSECTION: the
+# 227 previous keys plus exactly that one, none removed.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "178cfb7b6a882fd99b75845859139fba600d167b16209acc924cb6c838a53895"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

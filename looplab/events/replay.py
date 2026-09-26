@@ -1708,6 +1708,9 @@ def _on_eval_noise_floor(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> No
            if isinstance(d.get("protocol_profile"), str) and 0 < len(d["protocol_profile"]) <= 64
            else {}),
         **({"protocol_mixed": True} if d.get("protocol_mixed") is True else {}),
+        # The creation-boundary pass (doc 67 67.1a), only as True: the end ladder re-measures after a
+        # mid-search pass that counted fewer than two repeats (`noise_floor.py::_noise_floor_due`).
+        **({"mid_search": True} if d.get("mid_search") is True else {}),
         **({"reason": str(d.get("reason"))[:200]} if isinstance(d.get("reason"), str) else {}),
     }
 

@@ -788,7 +788,14 @@
           "label": "Eval noise-floor repeats",
           "type": "int",
           "default": 0,
-          "help": "Re-evaluate ONE candidate — the champion — this many times under the SEARCH's own protocol (its own eval profile, seeds 0..N-1) and record the spread of its metric: the run's evaluation NOISE FLOOR. 0 = off (and 1 is off too: one number has no spread). Not confirmation — confirm re-scores the top-k at the FULL profile from a DISJOINT seed base and its mean SELECTS; this repeats the same protocol on one node and selects nothing. The record (`eval_noise_floor`) carries the metrics, the mean, the sample std, the range and `sem`, the same quantity the >1-SE selection rule compares a margin against, so “is this champion's margin bigger than the noise?” becomes checkable. It spends real eval seconds — N full evaluations at the end of the run — which is why it is opt-in, and nothing that decides reads it."
+          "help": "Re-evaluate ONE candidate — the champion — this many times under the SEARCH's own protocol (its own eval profile, seeds 0..N-1) and record the spread of its metric: the run's evaluation NOISE FLOOR. 0 = off (and 1 is off too: one number has no spread). Not confirmation — confirm re-scores the top-k at the FULL profile from a DISJOINT seed base and its mean SELECTS; this repeats the same protocol on one node and selects nothing. The record (`eval_noise_floor`) carries the metrics, the mean, the sample std, the range and `sem`, the same quantity the >1-SE selection rule compares a margin against, so “is this champion's margin bigger than the noise?” becomes checkable. It spends real eval seconds — N full evaluations at the end of the run, or mid-search under the next setting — which is why it is opt-in, and nothing that decides reads it."
+        },
+        {
+          "key": "noise_floor_mid_search",
+          "label": "Measure the noise floor mid-search",
+          "type": "bool",
+          "default": false,
+          "help": "With eval noise-floor repeats of 2 or more, measure the floor ONCE mid-search — the first time a champion exists and no evaluation is in flight — instead of at the end, so the proposal board's SUPPORT token can hold a gain to it while the search runs. The same N evaluations, spent earlier; a mid-search pass that counted fewer than two repeats leaves the end-of-search pass due. Off = measured at the end, as before."
         },
         {
           "key": "eval_canary",

@@ -34,13 +34,22 @@ WHAT IT IS NOT. It is not confirmation, even though both run seeds:
   the champion's own terminal recorded and runs the repeats at it. It keeps the historical
   resolution whenever that already resolves to the champion's ruler, or nothing recorded one.
 
+  WHEN IT RUNS. Once per run, on the champion of that moment: by default in the empty-action ladder
+  at the END of the search, before confirm; under `Settings.noise_floor_mid_search` (doc 67 67.1a)
+  at the first creation boundary where a champion exists and no evaluation is in flight
+  (`_noise_floor_mid_search_due`), because the proposal board's SUPPORT token holds a gain to this
+  floor and a floor that lands after the search is never read BY it. A mid-search pass that counted
+  fewer than two repeats leaves the end pass due (`_noise_floor_due`); the flag can move the
+  measurement earlier, never lose it.
+
   It is also not a node TERMINAL. Every repeat writes `eval_noise_seed`, never
   `node_evaluated`/`node_failed` — invariant #2 is one terminal per node, and a candidate that
   minted a second one could win twice off one build.
 
 WHAT READS IT: nothing that decides, on purpose. An instrument that also moved a champion could not
 be used to judge the champions it moved. It is on `RunState.eval_noise_floor` and in the log, for
-`looplab replay`, for a reviewer, and for whatever eventually consults a noise floor deliberately.
+`looplab replay`, for a reviewer, and for the proposal board's SUPPORT token
+(`events/card_ledger.py::verdict_support`), which says how much a verdict rests on and decides nothing.
 
 WHAT IS STILL OWED: the NUMBER on a real task. This module is the mechanism — a run CAN record its
 own spread, and does when asked. What the spread IS on a GPU-graded task, and whether any champion
@@ -106,12 +115,39 @@ class NoiseFloorMixin:
     """The engine's eval-noise-floor cluster. See the module docstring; `self` is the Engine."""
 
     def _noise_floor_due(self, state: RunState) -> bool:
-        """Is this run's noise floor still unmeasured, and did the operator ask for it?
+        """Is this run's noise floor still unmeasured, and did the operator ask for it? The
+        END-of-search ladder's question (`orchestrator.py::_handle_no_actions`).
 
         `eval_noise_seeds` is already clamped in `Engine.__init__` (0 and 1 both mean off — one
         number has no spread), so OFF is one comparison and the phase is never entered: a run that
-        did not ask for the probe is byte-identical to one built before it existed."""
-        return self.eval_noise_seeds > 0 and state.eval_noise_floor is None
+        did not ask for the probe is byte-identical to one built before it existed.
+
+        A MID-SEARCH pass (`_noise_floor_mid_search_due`, doc 67 67.1a) that counted fewer than two
+        repeats — every seed abstained on a device another evaluation held — measured nothing, and
+        leaves this pass due: the flag may move the measurement earlier, never lose it. The END pass
+        carries no `mid_search` mark, so whatever it counts, it is the last."""
+        if self.eval_noise_seeds <= 0:
+            return False
+        floor = state.eval_noise_floor
+        return floor is None or (isinstance(floor, dict) and floor.get("mid_search") is True
+                                 and (floor.get("n") or 0) < 2)
+
+    def _noise_floor_mid_search_due(self, state: RunState) -> bool:
+        """Measure the floor NOW, mid-search (doc 67 67.1a, `Settings.noise_floor_mid_search`)?
+
+        Once per run — only while no floor row exists, so a mid-search pass never re-enters, even
+        one that measured nothing (the end ladder owns that retry) — the first time the run has a
+        champion with a number, and only when no evaluation is in flight in this process: a repeat
+        waits a bounded minute for the eval resource and ABSTAINS after it, so a pass started over
+        a multi-hour training would record nothing and spend the one early chance. The loop asks at
+        its creation boundary, where the decision prefix is stable (`orchestrator.py`, before the
+        plan and the action selection)."""
+        if not (getattr(self, "_noise_floor_mid_search", False) and self.eval_noise_seeds > 0):
+            return False
+        if state.eval_noise_floor is not None or self._running_eval_node_ids():
+            return False
+        champion = state.best()
+        return champion is not None and champion.metric is not None
 
     def _noise_probe_profile(self, nd) -> "str | None":
         """The declared eval profile whose protocol is the RULER `nd`'s search number was measured
@@ -236,8 +272,12 @@ class NoiseFloorMixin:
                     **({"superseded": True} if not current else {})})
         return res.metric if valid else None
 
-    async def _noise_floor_phase(self, state: RunState) -> None:
+    async def _noise_floor_phase(self, state: RunState, *, mid_search: bool = False) -> None:
         """Measure this run's evaluation noise floor once, on the champion, and record it.
+
+        `mid_search` is the loop's creation-boundary pass (`_noise_floor_mid_search_due`, doc 67
+        67.1a), marked on the summary row so the end ladder can tell a mid-search pass that measured
+        nothing from its own.
 
         ONE PASS, ALWAYS TERMINATING. The summary row is both the record and the phase's completion
         gate, and it is appended at the end of every pass that reaches its end — including a pass
@@ -254,7 +294,8 @@ class NoiseFloorMixin:
         if nd is None or nd.metric is None:
             # Nothing to be noisy about. Record the honest empty measurement so the pass completes
             # and the ladder moves on, instead of re-entering a probe that has no subject.
-            await self._append_noise_floor(None, None, seeds, [], None, None, "no_candidate")
+            await self._append_noise_floor(None, None, seeds, [], None, None, "no_candidate",
+                                           mid_search=mid_search)
             return
         generation = nd.attempt
         done = dict(state.eval_noise_seed_results.get(nd.id, {}))
@@ -289,12 +330,14 @@ class NoiseFloorMixin:
         await self._append_noise_floor(
             nd.id, generation, seeds, metrics, nd.metric,
             getattr(nd.idea, "eval_profile", None), reason,
-            protocol=agreed_ruler(rulers, [s for s in seeds if recorded.get(s) is not None]))
+            protocol=agreed_ruler(rulers, [s for s in seeds if recorded.get(s) is not None]),
+            mid_search=mid_search)
 
     async def _append_noise_floor(self, node_id, generation, seeds, metrics, search_metric,
-                                  profile, reason, *, protocol=None) -> None:
+                                  profile, reason, *, protocol=None, mid_search=False) -> None:
         """The ONE writer of `eval_noise_floor`, so the summary and its arithmetic cannot drift.
-        `protocol` is `comparability.py::agreed_ruler`'s answer: the ruler the counted repeats ran on."""
+        `protocol` is `comparability.py::agreed_ruler`'s answer: the ruler the counted repeats ran on.
+        `mid_search` marks the creation-boundary pass (doc 67 67.1a); absent on the end-ladder one."""
         summary = noise_floor_summary(metrics)
         protocol = protocol or {}
         async with self._write_lock:
@@ -307,4 +350,5 @@ class NoiseFloorMixin:
                 **({"protocol_profile": protocol["protocol_profile"]}
                    if protocol.get("protocol_profile") else {}),
                 **({"protocol_mixed": True} if protocol.get("protocol_mixed") else {}),
+                **({"mid_search": True} if mid_search else {}),
                 **({"reason": reason} if reason else {})})

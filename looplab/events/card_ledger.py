@@ -626,13 +626,15 @@ def _evidence_verdict(evidence_ids: Iterable[int], nodes: dict[int, Node], direc
 # VERDICT is left exactly as it is — `search/card_selection.py` reads `open` off it and lesson
 # distillation reads `supported` — and this says, beside it, how much it rests on.
 #
-# WHEN IT CAN SAY MORE THAN `single_run`. The confirmations and the floor are written only by the
-# empty-action ladder at the END of the search (`engine/orchestrator.py::_handle_no_actions` ->
-# `_noise_floor_phase`, `_confirm_phase`), and both are off by default (`eval_noise_seeds`,
-# `confirm_top_k`), so a proposal made DURING the search sees `single_run` on every supported card
-# (critic 2026-09-26, driven: 18 tokens of 18 across three toy runs with both opted in). The other
-# levels reach a run extended or reopened after its ladder; a floor measured mid-search is doc 67's
-# open item `verdict-support-inputs-arrive-after-the-search`. Strongest first:
+# WHEN IT CAN SAY MORE THAN `single_run`. The confirmations are written only by the empty-action
+# ladder at the END of the search (`engine/orchestrator.py::_handle_no_actions` -> `_confirm_phase`),
+# and so is the floor (`_noise_floor_phase`) unless `Settings.noise_floor_mid_search` moves it to the
+# first creation boundary with a champion (doc 67 67.1a). All are off by default (`eval_noise_seeds`,
+# `confirm_top_k`, the mid-search flag): without them a proposal made DURING the search sees
+# `single_run` on every supported card (critic 2026-09-26, driven: 18 tokens of 18 across three toy
+# runs with both instruments opted in, before the flag). With the flag a mid-search floor can say
+# `within_noise` from its landing on; `replicated` and `not_replicated` still reach only a run
+# extended or reopened after its ladder. Strongest first:
 SUPPORT_REPLICATED = "replicated"          # both sides confirmed over seeds; the gain holds beyond 1 SE
 SUPPORT_SINGLE_RUN = "single_run"          # one measurement of each side, not re-run
 SUPPORT_WITHIN_NOISE = "within_noise"      # one measurement of each, inside the run's measured floor

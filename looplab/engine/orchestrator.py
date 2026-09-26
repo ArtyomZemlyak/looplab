@@ -2028,6 +2028,15 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                     continue
                 state = fold(fresh_events)
 
+            # THE MID-SEARCH NOISE FLOOR (doc 67 67.1a, `Settings.noise_floor_mid_search`): the floor
+            # the empty-action ladder measures at the END, measured here instead — once, the first
+            # time a champion exists and no evaluation is in flight — so the proposal board's SUPPORT
+            # token can hold a gain to it while the search still runs. At this boundary the decision
+            # prefix is stable (every cadence and Card session above has already had its turn); the
+            # pass always appends its summary row, which is also its gate, so it cannot re-enter.
+            if self._noise_floor_mid_search_due(state):
+                await self._noise_floor_phase(state, mid_search=True)
+                continue
             # THE PLAN (doc 52 row 18): written / re-cut on the main task at this creation boundary,
             # then read back off the fold so the reserve below is the durable row's, never a local's.
             if self._ensure_plan(state):

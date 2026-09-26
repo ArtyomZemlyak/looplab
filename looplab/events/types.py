@@ -1660,7 +1660,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         "The repeated-seed spread of ONE candidate's metric: the run's own evaluation noise floor.",
         required=("generation", "mean", "metrics", "n", "node_id", "profile", "search_metric",
                   "seeds", "sem", "spread", "std"),
-        optional=("protocol_mixed", "protocol_profile", "reason"),
+        optional=("mid_search", "protocol_mixed", "protocol_profile", "reason"),
     ),
     "eval_noise_seed": PayloadContract(
         "One repeat of that candidate's evaluation, with its seed, metric and eval seconds.",

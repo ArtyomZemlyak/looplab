@@ -2477,7 +2477,9 @@ class RunState(BaseModel):
     # `eval_noise_seed_results` is {node_id: {seed: metric|None}} — the per-seed resume memo, the
     # same shape and the same job as `confirm_seed_results` above; `eval_noise_floor` is the pass's
     # SUMMARY (metrics, mean, std, sem, spread) and doubles as its completion gate, so a finished
-    # probe is never bought twice. Both default empty/None on old logs. Read by nothing that
+    # probe is never bought twice — bar one retry: a MID-SEARCH pass (`mid_search: True`, doc 67
+    # 67.1a) that counted fewer than two repeats leaves the end-of-search pass due, and the end
+    # pass's row then stands (last row wins). Both default empty/None on old logs. Read by nothing that
     # decides: the floor is what makes a champion's margin CHECKABLE, and an instrument that also
     # moved the champion could not be used to judge the champions it moved.
     eval_noise_seed_results: dict[int, dict] = Field(default_factory=dict)

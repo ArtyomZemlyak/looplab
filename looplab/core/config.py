@@ -978,9 +978,10 @@ class Settings(BaseSettings):
     # `SUPPORT=replicated|single_run|within_noise|not_replicated`
     # (`events/card_ledger.py::verdict_support`) with a one-line legend of the levels shown. The
     # VERDICT itself does not move (selection reads `open`, lesson distillation reads `supported`).
-    # Reaches ONLY the two propose paths. DURING the search it reads `single_run` on every row: the
-    # confirmations and the floor it would consult are written only by the end-of-search ladder, and
-    # both are off by default — doc 67's open `verdict-support-inputs-arrive-after-the-search`. It changes a PROMPT and buys no call, so `false` reproduces the historical prompt
+    # Reaches ONLY the two propose paths. DURING the search it reads `single_run` on every row unless
+    # `noise_floor_mid_search` (below `eval_noise_seeds`) measured the floor early: the confirmations
+    # are written only by the end-of-search ladder, and every one of these inputs is off by default
+    # (doc 67 67.1a). It changes a PROMPT and buys no call, so `false` reproduces the historical prompt
     # BYTE FOR BYTE, every constructor defaults it OFF, and a pre-field snapshot resumes OFF (its
     # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row). Read through ONE reader, the engine knob
     # `_card_verdict_support`, stamped per proposal onto the Researcher as `_verdict_support`
@@ -1671,6 +1672,19 @@ class Settings(BaseSettings):
     # construction. Nothing consults it: an instrument that also moved a champion could not be used
     # to judge the champions it moved.
     eval_noise_seeds: int = Field(default=0, ge=0)
+    # THE MID-SEARCH NOISE FLOOR (doc 67 67.1a). With `eval_noise_seeds` >= 2, measure that floor ONCE
+    # MID-SEARCH — at the first creation boundary where a champion exists and no evaluation is in
+    # flight (`engine/noise_floor.py::_noise_floor_mid_search_due`) — instead of in the empty-action
+    # ladder at the end. WHY: the proposal board's SUPPORT token (`Settings.card_verdict_support`,
+    # `events/card_ledger.py::verdict_support`) holds a single-run gain to this floor, and a floor
+    # that lands only after the search is never read BY the search — a critic's three toy runs with
+    # both instruments on printed 18 SUPPORT tokens, all 18 `single_run`. The same N evaluations,
+    # spent earlier, on the champion of that moment. A mid-search pass that counted fewer than two
+    # repeats (every seed abstained on a busy device) leaves the end-of-search pass due, so this can
+    # only move the measurement earlier, never lose it. OFF (the shipped default: it spends
+    # evaluations at a moment the operator did not ask for them) is the historical end-of-search
+    # pass; the one reader is the engine knob `_noise_floor_mid_search`.
+    noise_floor_mid_search: bool = False
     # D1 holdout-gated promotion (B6, Arbor-style): for host-graded tasks, reserve this fraction of
     # the held-out labels as a FINAL holdout partition the search never sees — every search/confirm
     # eval is scored on the remaining rows only, and at finish the val-top-k are re-scored on the
@@ -3666,6 +3680,12 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # ground: (a) holds, (b) is a prompt an operator may turn on for a resumed run, (c) is `False`;
     # `tests/test_brief_node_frontier.py` holds that `false` is the historical prompt.
     "brief_node_frontier": False,
+    # THE MID-SEARCH NOISE FLOOR, added 2026-09-26 defaulting OFF (doc 67 67.1a). (a) holds. (b) is
+    # a SPEND ground rather than a prompt one: ON, the floor's repeats run mid-search, so a resumed
+    # run would buy evaluations at a moment its original launch never did. (c) is `False`, pointable
+    # at every commit before this one; `tests/test_noise_floor_mid_search.py` holds that `false`
+    # measures at the end, as before.
+    "noise_floor_mid_search": False,
     # THE JUDGES' PROMPT TRUTHS, added 2026-09-23 defaulting ON (review 2026-09-22, Q-1). (a) holds.
     # (b) is the two rows above's DIFFERENT-PROMPT ground: ON, the pilot, the triage judge and the
     # repair critic are handed different bytes (the triage opening, its watchdog sentence and scout

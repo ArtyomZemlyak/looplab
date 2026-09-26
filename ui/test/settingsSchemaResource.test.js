@@ -226,7 +226,9 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   measured on another ruler. A row because it changes a prompt; the Python half moved too.
   //   226 -> 227 (2026-09-26): `brief_node_frontier` — the proposal brief names the node frontier.
   //   A row because it changes a prompt; the Python half moved too.
-  assert.equal(Object.keys(schema.fieldByKey).length, 227)
+  //   227 -> 228 (2026-09-26): `noise_floor_mid_search` — the noise floor measured once mid-search.
+  //   A row because an operator must be able to move a spend they opted into; the Python half moved too.
+  assert.equal(Object.keys(schema.fieldByKey).length, 228)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

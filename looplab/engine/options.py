@@ -153,6 +153,9 @@ class EngineOptions:
     # records the spread of its own metric. 0 = off on BOTH sides — the same default, so no
     # options-divergence row — and off means `engine/noise_floor.py` is never entered.
     eval_noise_seeds: int = 0
+    # doc 67 67.1a (2026-09-26): measure that floor mid-search, once, the first time a champion exists
+    # (`Settings.noise_floor_mid_search`). OFF on both surfaces, so no divergence-table row.
+    noise_floor_mid_search: bool = False
     max_seconds: Optional[float] = None
     max_eval_seconds: Optional[float] = None
     # The run's LLM spend caps, reserved at admission (`core/llm_budget.py`, doc 52 row 15).

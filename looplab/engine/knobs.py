@@ -398,6 +398,8 @@ class EngineKnobs:
     # the `< 2` clamp is the SETTING's stated rule rather than a silent one: a single repeat has
     # no spread, so 1 is off exactly as 0 is, and `_noise_floor_due` never has to re-decide it.
     eval_noise_seeds = Knob("eval_noise_seeds", _noise_floor_repeats)
+    # doc 67 67.1a: the same floor, measured mid-search (`noise_floor.py::_noise_floor_mid_search_due`).
+    _noise_floor_mid_search = Knob("noise_floor_mid_search", bool)
     _holdout_select = Knob("holdout_select", bool)
     _holdout_top_k = Knob("holdout_top_k", lambda v: max(1, int(v)))
     _select_verifier = Knob("select_verifier", bool)
