@@ -94,7 +94,7 @@ from dataclasses import dataclass
 from typing import Iterable, Optional
 
 from looplab.core.jsonutil import surrogate_safe
-from looplab.core.models import coerce_node_id
+from looplab.core.models import NodeStatus, coerce_node_id
 from looplab.events.eventstore import integrity_sentence
 from looplab.events.replay import (FoldCursor, flagged_node_ids, hard_flagged_ids,
                                    promotion_eligible_nodes)
@@ -288,9 +288,10 @@ class _Lifecycle:
     node: object = None
     reached: str = ""                # superseded only: the status the lifecycle had reached
     reset_stage: str = ""            # superseded only: the `from_stage` of the reset that ended it
+    requeued_at: str = ""            # superseded by the holdout epoch's requeue: the event type
 
 
-def _lifecycle(node, *, superseded_by=None) -> _Lifecycle:
+def _lifecycle(node, *, superseded_by=None, requeued: bool = False) -> _Lifecycle:
     files = getattr(node, "files", None)
     deleted = getattr(node, "deleted", None)
     idea = getattr(node, "idea", None)
@@ -310,19 +311,30 @@ def _lifecycle(node, *, superseded_by=None) -> _Lifecycle:
     common["files"] = dict(common["files"])
     return _Lifecycle(idea=idea.model_copy(deep=True) if hasattr(idea, "model_copy") else idea,
                       reached=str(getattr(status, "value", status) or ""),
-                      reset_stage=str(data.get("from_stage", "eval")), **common)
+                      reset_stage="" if requeued else str(data.get("from_stage", "eval")),
+                      requeued_at=str(getattr(superseded_by, "type", "") or "") if requeued else "",
+                      **common)
 
 
 def node_lifecycles(events) -> tuple[dict, dict]:
     """`(superseded, born)` over the log, through the fold's own handlers (`FoldCursor`), in ONE pass.
 
-    `superseded[(id, generation)]` is each lifecycle an ACCEPTED `node_reset` ended, as the fold held
-    it just before that reset; `born[(id, generation)]` is the commit date of every lifecycle the fold
-    opened — its first accepted `node_created`, else the reset that opened it. Accepted is READ off the
-    fold, never re-derived: a `node_created` was accepted when the fold installed a new Node for its
-    id, a reset when it moved the node to the next generation. A stale build, a late rebuild of a
-    superseded lifecycle, a reset naming the wrong generation — each is decided by the handler that
-    decides it for every other reader of the log, and this only watches."""
+    `superseded[(id, generation)]` is each lifecycle the fold ENDED, as it held it just before the
+    event that ended it; `born[(id, generation)]` is the commit date of every lifecycle the fold
+    opened — its first accepted `node_created`, else the event that opened it. Accepted is READ off
+    the fold, never re-derived: a `node_created` was accepted when the fold installed a new Node for
+    its id, a reset or a requeue when it moved the node to the next generation. A stale build, a late
+    rebuild of a superseded lifecycle, a reset naming the wrong generation — each is decided by the
+    handler that decides it for every other reader of the log, and this only watches.
+
+    TWO THINGS END A LIFECYCLE. An accepted `node_reset` of that node, and — once a holdout was
+    disclosed — the EPOCH REQUEUE: when the search changes again (a resume or reopen, a new node, a
+    stamped reset of any node, a tombstone, an abort), the fold re-opens every evaluated incumbent
+    as a fresh generation so it is re-scored on the newly hidden rows
+    (`replay.py::_requeue_partition_bound_results`). No reset names those nodes, and watching resets
+    alone lost them (critic 2026-09-26: a child became a root commit citing a parent "not in the
+    log", both dated 1970). The pool is watched only while `holdout_evaluated_ids` is non-empty —
+    the precondition of every rotation — so a run that never disclosed one pays nothing for it."""
     cursor = FoldCursor()
     # The raw accumulated state the handlers mutate, before any post-pass — the thing `FoldCursor`
     # exists to keep (`tests/test_event_payload_contract.py` reads it the same way). `snapshot()`
@@ -339,7 +351,20 @@ def node_lifecycles(events) -> tuple[dict, dict]:
         before = raw.nodes.get(nid) if nid is not None else None
         ending = (_lifecycle(before, superseded_by=event)
                   if etype == EV_NODE_RESET and before is not None else None)
+        # The requeue's pool, as the fold held it before this event: the evaluated, live incumbents
+        # other than the event's own node (a reset's own node is `ending`'s; a new node was never
+        # evaluated). Copied only while a disclosure stands, the one state a rotation starts from.
+        pool = ({other.id: _lifecycle(other, superseded_by=event, requeued=True)
+                 for other in raw.nodes.values()
+                 if other.id != nid and other.status is NodeStatus.evaluated
+                 and not other.tombstoned and other.id not in raw.aborted_nodes}
+                if raw.holdout_evaluated_ids else {})
         cursor.extend((event,))
+        for other_id, was in pool.items():
+            now = raw.nodes.get(other_id)
+            if now is not None and now.attempt == was.generation + 1:
+                superseded[(other_id, was.generation)] = was
+                opened.setdefault((other_id, now.attempt), _git_time(event))
         after = raw.nodes.get(nid) if nid is not None else None
         if after is None:
             continue
@@ -552,6 +577,12 @@ def _message(lc: _Lifecycle, ctx: _Context, skipped: Counter) -> str:
                 ("Looplab-Parents", ", ".join(parents) or "none")]
     if node is not None:
         trailers += _receipts(node, ctx)
+    elif lc.requeued_at:
+        trailers.append(("Looplab-Status",
+                         f"superseded — the disclosed holdout's epoch rotated at `{lc.requeued_at}` "
+                         f"and re-opened {ctx.tag(lc.node_id, lc.generation + 1)} for re-evaluation "
+                         f"on the newly hidden rows; this lifecycle had reached '{lc.reached}' and "
+                         f"is no longer a candidate"))
     else:
         trailers.append(("Looplab-Status",
                          f"superseded — a node_reset from '{lc.reset_stage}' opened "

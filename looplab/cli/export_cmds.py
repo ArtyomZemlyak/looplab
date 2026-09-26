@@ -181,12 +181,40 @@ def _hermetic_git_env(home: str) -> dict:
     `GIT_CONFIG_PARAMETERS` and `GIT_DEFAULT_HASH` (which moved every commit id) at once, and no
     user or system config — `init.defaultObjectFormat`, `core.hooksPath`, a template dir, a filter —
     is read at all. `LC_ALL=C` keeps git's own words English: the failure line is picked out of them.
+
+    `GIT_ATTR_NOSYSTEM` too (critic 2026-09-26, under strace): config is not the only host-wide
+    file git reads, and a system `/etc/gitattributes` (`text eol=crlf`, `ident`,
+    `working-tree-encoding`) would rewrite the checked-out champion, which would then no longer hold
+    the node's bytes. `XDG_CONFIG_HOME` pointed at the empty HOME already hides the user's own.
     """
     env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
     env.pop("LANGUAGE", None)
-    env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "HOME": home,
-                "XDG_CONFIG_HOME": home, "LC_ALL": "C"})
+    env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_ATTR_NOSYSTEM": "1", "HOME": home, "XDG_CONFIG_HOME": home, "LC_ALL": "C"})
     return env
+
+
+# `git init --object-format` is git 2.29's (October 2020); an older git fails the init with
+# "unknown option", which is the operator's to fix, so it is REFUSED up front (exit 2) rather than
+# reported as a failed export (exit 1) — the docs promised exactly that before the code did.
+_MIN_GIT = (2, 29)
+
+
+def _git_version(git: str) -> Optional[tuple]:
+    """`(major, minor)` as `git version` reports it, or None when it cannot be read (the init then
+    says what went wrong, as any git failure does). Run hermetically, like every other git call."""
+    import re
+    import subprocess
+    import tempfile
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="looplab-export-git-home-") as home:
+            done = subprocess.run([git, "version"], capture_output=True, timeout=30,
+                                  env=_hermetic_git_env(home))
+    except (OSError, subprocess.SubprocessError):
+        return None
+    found = re.search(rb"git version (\d+)\.(\d+)", done.stdout or b"")
+    return (int(found.group(1)), int(found.group(2))) if found else None
 
 
 def _git_argv(git: str, repo: Path, *args: str) -> list:
@@ -242,12 +270,13 @@ def export_git(
     """Export the run's node DAG as a GIT REPOSITORY: one commit per node lifecycle, its parents the
     exact parent lifecycles it was built from, its own files as the tree, the metric and the receipts
     that decide whether it counts as `Looplab-*` trailers (doc 67 67.15, `events/git_export.py`).
-    Each node's current lifecycle is tag `node-<id>`, one a reset superseded `node-<id>.g<gen>`;
-    branch `champion` is the fold's best and is checked out, branch `promoted` the operator's promote
-    alias when there is one. Read-only on the run; the export is a projection of the log, never read
-    back. The task's base tree is not in the log, so a commit holds only the files the node itself
-    wrote. Git runs hermetically — no GIT_* variable and no user or system config reaches it — and
-    the repository is built beside OUT and moved into place only once it is whole."""
+    Each node's current lifecycle is tag `node-<id>`, one a reset or the holdout epoch's requeue
+    superseded `node-<id>.g<gen>`; branch `champion` is the fold's best and is checked out, branch
+    `promoted` the operator's promote alias when there is one. Read-only on the run; the export is a
+    projection of the log, never read back. The task's base tree is not in the log, so a commit holds
+    only the files the node itself wrote. Git runs hermetically — no GIT_* variable, no user or system
+    config and no system gitattributes reach it — and the repository is built beside OUT and moved
+    into place only once it is whole."""
     import shutil
     import subprocess
     import tempfile
@@ -266,6 +295,10 @@ def export_git(
     git = shutil.which("git")
     if git is None:
         refuse("git is not installed (not on PATH) — install git to export a run as a repository")
+    version = _git_version(git)
+    if version is not None and version < _MIN_GIT:
+        refuse(f"git {version[0]}.{version[1]} is too old — export-git needs git "
+               f"{_MIN_GIT[0]}.{_MIN_GIT[1]} or later (`git init --object-format`)")
     store = _require_run_dir(run_dir)     # also states an incomplete log on stderr, and continues
     refusal = _export_git_target_refusal(run_dir, out)
     if refusal:

@@ -96,8 +96,9 @@ def _git_run(repo: Path, *args, check: bool = True) -> subprocess.CompletedProce
     victim repository, and `-C` would not override it), no user or system config, no hooks, and a
     timeout — the same discipline `export_cmds.py::_hermetic_git_env` holds the export to."""
     env = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
-    env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "HOME": str(repo),
-                "XDG_CONFIG_HOME": str(repo), "LC_ALL": "C"})
+    env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_ATTR_NOSYSTEM": "1", "HOME": str(repo), "XDG_CONFIG_HOME": str(repo),
+                "LC_ALL": "C"})
     return subprocess.run(["git", "--git-dir", str(repo / ".git"), "--work-tree", str(repo),
                            "-c", f"core.hooksPath={os.devnull}", "-c", "core.fsmonitor=false",
                            *args], capture_output=True, env=env, timeout=_GIT_TIMEOUT_S,
@@ -342,6 +343,94 @@ def test_an_eval_reset_is_its_own_lifecycle_dated_by_the_reset(tmp_path):
     assert _git(repo, "log", "-1", "--format=%at", "node-0") == "1790000200"
     assert _trailer(repo, "node-0", "Looplab-Metric") == "0.55"
     assert "a node_reset from 'eval' opened node-0" in _body(repo, "node-0.g0")
+
+
+def test_a_lifecycle_the_holdout_requeue_reopened_is_its_own_commit(tmp_path):
+    """Critic 2026-09-26, driven: after a holdout is disclosed, the fold RE-OPENS every evaluated
+    incumbent as a fresh generation when the search changes again (`replay.py::
+    _requeue_partition_bound_results` — here at the `resume` that reopens the finished run). No
+    `node_reset` names them, and the export watched only resets: node 1 became a root commit citing
+    `node-0.g0 (not in the log)` and both commits were dated 1970."""
+    rd = tmp_path / "run"
+    _write_log(rd, [
+        ("run_started", 1_790_000_000.0, {"run_id": "run", "task_id": "t", "goal": "g",
+                                          "direction": "max"}),
+        ("node_created", 1_790_000_010.0, _created(0, [], code="print(0)\n")),
+        ("node_evaluated", 1_790_000_020.0, {"node_id": 0, "generation": 0, "metric": 0.5,
+                                             "violations": []}),
+        ("node_created", 1_790_000_030.0, _created(1, [0], code="print(1)\n",
+                                                   parent_generations={"0": 0})),
+        ("node_evaluated", 1_790_000_040.0, {"node_id": 1, "generation": 0, "metric": 0.6,
+                                             "violations": []}),
+        ("holdout_evaluated", 1_790_000_050.0, {"node_id": 1, "generation": 0, "metric": 0.55,
+                                                "search_epoch": 0}),
+        ("run_finished", 1_790_000_060.0, {}),
+        ("resume", 1_790_000_100.0, {}),
+        ("node_evaluated", 1_790_000_110.0, {"node_id": 0, "generation": 1, "metric": 0.51,
+                                             "violations": []}),
+        ("node_evaluated", 1_790_000_120.0, {"node_id": 1, "generation": 1, "metric": 0.61,
+                                             "violations": []}),
+        ("node_created", 1_790_000_200.0, _created(2, [1], code="print(2)\n",
+                                                   parent_generations={"1": 1})),
+        ("node_evaluated", 1_790_000_210.0, {"node_id": 2, "generation": 0, "metric": 0.7,
+                                             "violations": []}),
+    ])
+    repo = tmp_path / "repo"
+    result = _export(rd, repo)
+    assert result.exit_code == 0, result.output
+    assert "2 superseded lifecycle(s) as node-<id>.g<generation>" in result.stdout
+    # Generation 0 of each incumbent is its own commit, dated by its own node_created and wired to
+    # the lifecycle it was built from…
+    assert _git(repo, "log", "-1", "--format=%at", "node-0.g0") == "1790000010"
+    assert _git(repo, "log", "-1", "--format=%at", "node-1.g0") == "1790000030"
+    assert _trailer(repo, "node-1.g0", "Looplab-Parents") == "node-0.g0"
+    assert _git(repo, "rev-parse", "node-1.g0^") == _git(repo, "rev-parse", "node-0.g0^{commit}")
+    requeued = _body(repo, "node-0.g0")
+    assert ("Looplab-Status: superseded — the disclosed holdout's epoch rotated at `resume` and "
+            "re-opened node-0 for re-evaluation on the newly hidden rows; this lifecycle had reached "
+            "'evaluated' and is no longer a candidate") in requeued
+    # …and the lifecycle the requeue opened is dated by that rotation, the same code re-scored.
+    assert _git(repo, "log", "-1", "--format=%at", "node-0") == "1790000100"
+    assert _git(repo, "log", "-1", "--format=%at", "node-1") == "1790000100"
+    assert (_git(repo, "rev-parse", "node-1^{tree}") == _git(repo, "rev-parse", "node-1.g0^{tree}"))
+    assert _trailer(repo, "node-1", "Looplab-Metric") == "0.61"
+    # A child built from the re-opened lifecycle names THAT one.
+    assert _trailer(repo, "node-2", "Looplab-Parents") == "node-1"
+    assert _git(repo, "rev-parse", "node-2^") == _git(repo, "rev-parse", "node-1^{commit}")
+
+
+def test_a_reset_after_a_disclosure_ends_the_other_incumbents_lifecycles_too(tmp_path):
+    """The same requeue, opened by a stamped `node_reset` of ANOTHER node: node 2's reset re-opens
+    nodes 0 and 1 as well, so node-2.g0's parent is node 1's generation 0 — a commit, not a name."""
+    rd = tmp_path / "run"
+    _write_log(rd, [
+        ("run_started", 1_790_000_000.0, {"run_id": "run", "task_id": "t", "goal": "g",
+                                          "direction": "max"}),
+        ("node_created", 1_790_000_010.0, _created(0, [], code="print(0)\n")),
+        ("node_evaluated", 1_790_000_020.0, {"node_id": 0, "generation": 0, "metric": 0.5,
+                                             "violations": []}),
+        ("node_created", 1_790_000_030.0, _created(1, [0], code="print(1)\n",
+                                                   parent_generations={"0": 0})),
+        ("node_evaluated", 1_790_000_040.0, {"node_id": 1, "generation": 0, "metric": 0.6,
+                                             "violations": []}),
+        ("node_created", 1_790_000_050.0, _created(2, [1], code="print(2)\n",
+                                                   parent_generations={"1": 0})),
+        ("node_evaluated", 1_790_000_060.0, {"node_id": 2, "generation": 0, "metric": 0.7,
+                                             "violations": []}),
+        ("holdout_evaluated", 1_790_000_070.0, {"node_id": 2, "generation": 0, "metric": 0.65,
+                                                "search_epoch": 0}),
+        ("node_reset", 1_790_000_100.0, {"node_id": 2, "generation": 0, "from_stage": "eval"}),
+    ])
+    repo = tmp_path / "repo"
+    result = _export(rd, repo)
+    assert result.exit_code == 0, result.output
+    assert "3 superseded lifecycle(s) as node-<id>.g<generation>" in result.stdout
+    assert _trailer(repo, "node-2.g0", "Looplab-Parents") == "node-1.g0"
+    assert _git(repo, "rev-parse", "node-2.g0^") == _git(repo, "rev-parse", "node-1.g0^{commit}")
+    assert "a node_reset from 'eval' opened node-2" in _body(repo, "node-2.g0")
+    assert "epoch rotated at `node_reset` and re-opened node-1" in _body(repo, "node-1.g0")
+    for tag in ("node-0", "node-1", "node-2"):
+        assert _git(repo, "log", "-1", "--format=%at", tag) == "1790000100", tag
 
 
 def test_the_champion_is_the_fold_best_and_a_promote_is_published_beside_it(tmp_path):
@@ -617,6 +706,25 @@ def test_it_refuses_a_non_empty_target_and_a_missing_git(tmp_path, monkeypatch):
     result = _export(rd, tmp_path / "fresh")
     assert result.exit_code == 2 and "git is not installed" in result.stderr
     assert not (tmp_path / "fresh").exists()
+
+
+def test_a_git_older_than_the_object_format_option_is_refused_up_front(tmp_path, monkeypatch):
+    """The docs promised exit 2 for a git older than 2.29; the code let `git init
+    --object-format` fail with exit 1 (critic 2026-09-26, driven with a wrapper that rejects the
+    option). The version is asked first, and read off the real git here."""
+    from looplab.cli import export_cmds
+
+    real = export_cmds._git_version(shutil.which("git"))
+    assert isinstance(real, tuple) and len(real) == 2 and real >= export_cmds._MIN_GIT, real
+    rd = _run(tmp_path)
+    repo = tmp_path / "repo"
+    monkeypatch.setattr(export_cmds, "_git_version", lambda git: (2, 20))
+    result = _export(rd, repo)
+    assert result.exit_code == 2, result.output
+    assert "git 2.20 is too old — export-git needs git 2.29 or later" in result.stderr
+    assert not repo.exists() and _leftovers(tmp_path) == []
+    # No system gitattributes reaches the export either: they would rewrite the checked-out bytes.
+    assert export_cmds._hermetic_git_env(str(tmp_path))["GIT_ATTR_NOSYSTEM"] == "1"
 
 
 def test_it_refuses_a_file_a_target_inside_the_run_and_an_empty_run(tmp_path):

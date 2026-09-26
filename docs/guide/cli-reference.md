@@ -2833,16 +2833,19 @@ the largest number. Every value is one line with control characters stripped, so
 can forge a trailer or hide the ones after it.
 
 Git runs **hermetically**: every `GIT_*` variable is dropped (a `GIT_DIR` that a hook or a shell set
-cannot redirect the export onto another repository), no user or system config is read, hooks and
-fsmonitor are off, and the repository is always SHA-1. It is built in a sibling directory, checked
+cannot redirect the export onto another repository), no user or system config or system
+`gitattributes` is read, hooks and fsmonitor are off, and the repository is always SHA-1. It is built in a sibling directory, checked
 with `git fsck --strict`, and moved into place only whole: a failure leaves nothing at `OUT_DIR`.
 
 The export is **deterministic**: parents before children, sorted paths, each commit dated by its
-lifecycle's first `node_created` row (or by the reset that opened it), one fixed identity at `+0000`.
+lifecycle's first `node_created` row (or by the event that opened it: a reset, or the holdout
+epoch's requeue, which re-opens every evaluated incumbent once a disclosed holdout's search changes
+again), one fixed identity at `+0000`.
 One log therefore exports to the same commit ids every time. It is a projection, never a second
 source of truth: nothing reads it back.
 
-It needs `git` 2.29 or later on the `PATH`. It exits `2`, with one line on stderr, without it, over
+It needs `git` 2.29 or later on the `PATH`. It exits `2`, with one line on stderr, without it (or
+when `git version` reports an older one), over
 an `OUT_DIR` that exists and is not an empty directory, is a symbolic link or sits inside `RUN_DIR`,
 and for a run with no nodes yet. It exits `1` when git itself fails, printing git's own `fatal:` or
 `error` line. A log readable only up to a corrupt line is exported up to that line — as
