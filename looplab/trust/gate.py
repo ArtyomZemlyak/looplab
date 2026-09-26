@@ -14,4 +14,4 @@ from __future__ import annotations
 # resolving (and `standard_error_difference`, which this module has always carried).
 from looplab.core.fitness import one_se_better, standard_error_difference  # noqa: F401 — re-exported
 
-__all__ = ["one_se_better"]
+__all__ = ["one_se_better", "standard_error_difference"]

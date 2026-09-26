@@ -962,9 +962,11 @@ class Settings(BaseSettings):
     # champion), at the >1-SE rule, or at the measured eval noise floor — so a gain inside the noise
     # read as a finding and steered the next proposals. ON: a supported card's row carries
     # `SUPPORT=replicated|single_run|within_noise|not_replicated`
-    # (`events/card_ledger.py::verdict_support`) with a one-line legend. The VERDICT itself does
-    # not move (selection reads `open`, lesson distillation reads `supported`). Reaches ONLY the two
-    # propose paths. It changes a PROMPT and buys no call, so `false` reproduces the historical prompt
+    # (`events/card_ledger.py::verdict_support`) with a one-line legend of the levels shown. The
+    # VERDICT itself does not move (selection reads `open`, lesson distillation reads `supported`).
+    # Reaches ONLY the two propose paths. DURING the search it reads `single_run` on every row: the
+    # confirmations and the floor it would consult are written only by the end-of-search ladder, and
+    # both are off by default — doc 67's open `verdict-support-inputs-arrive-after-the-search`. It changes a PROMPT and buys no call, so `false` reproduces the historical prompt
     # BYTE FOR BYTE, every constructor defaults it OFF, and a pre-field snapshot resumes OFF (its
     # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row). Read through ONE reader, the engine knob
     # `_card_verdict_support`, stamped per proposal onto the Researcher as `_verdict_support`

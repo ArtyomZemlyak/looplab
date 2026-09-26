@@ -263,7 +263,7 @@
           "label": "Board verdict support",
           "type": "bool",
           "default": true,
-          "help": "A supported card on the proposal board says what its verdict rests on: replicated (its confirmation seeds hold the gain beyond 1 SE), a single measurement, one inside the run's measured eval noise, or a gain its confirmation seeds did not hold. The verdict itself does not change. Off = the pre-2026-09-26 proposal prompt, byte for byte."
+          "help": "A supported card on the proposal board says what its verdict rests on: replicated (it and what it beat were each re-run over seeds and the gain held beyond 1 SE), a single measurement of each, one inside the run's measured eval noise, or a gain the re-runs did not hold beyond 1 SE. Re-runs and the noise floor come from the end-of-search confirm and noise-floor passes, so during the search a card reads single measurement. The verdict itself does not change. Off = the pre-2026-09-26 proposal prompt, byte for byte."
         },
         {
           "key": "feature_engineering",

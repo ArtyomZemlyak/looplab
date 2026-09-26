@@ -162,11 +162,27 @@ def attempted_board_prompt_cards(state: RunState, shown=(), *,
 
 
 # Said once under the rows, and only when a row carries a SUPPORT token — a board with no supported
-# card, and every board with the switch off, renders its historical bytes.
-SUPPORT_LEGEND = ("SUPPORT, on a supported card, says what the verdict rests on: replicated = its "
-                  "confirmation seeds hold the gain beyond 1 SE; single_run = one measurement, not "
-                  "replicated; within_noise = one measurement whose gain is inside this run's "
-                  "measured eval noise; not_replicated = its confirmation seeds did not hold the gain.")
+# card, and every board with the switch off, renders its historical bytes. It defines only the levels
+# the board SHOWS (critic 2026-09-26: during the search every row reads `single_run` —
+# `events/card_ledger.py`, "WHEN IT CAN SAY MORE" — and three definitions no row carries were read in
+# every proposal). Keyed and ordered as `events/card_ledger.py::SUPPORT_LEVELS`, which `agents/`
+# reaches only through a deferred import; `tests/test_card_verdict_support.py` pins the two equal.
+SUPPORT_LEVEL_TEXT = {
+    "replicated": ("replicated = it and what it beat were each re-run over seeds, and the gain held "
+                   "beyond 1 SE"),
+    "single_run": "single_run = one measurement of it and of what it beat, not re-run",
+    "within_noise": ("within_noise = one measurement of each, and the gain is inside this run's "
+                     "measured eval noise"),
+    "not_replicated": ("not_replicated = it and what it beat were each re-run over seeds, and the "
+                       "gain did not hold beyond 1 SE"),
+}
+
+
+def support_legend(levels) -> str:
+    """The one legend line for the SUPPORT levels a board shows, strongest first."""
+    shown = [text for level, text in SUPPORT_LEVEL_TEXT.items() if level in levels]
+    return ("SUPPORT, on a supported card, says what the verdict rests on: "
+            + "; ".join(shown) + ".")
 
 
 def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
@@ -279,7 +295,7 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
     # (its status is the question's current state: a retry still running reads as running) with the
     # union of every live card's nodes.
     grouped = _attempted_belief_groups(state) if fit else {}
-    qualified = False
+    shown_levels: set = set()
     if attempted:
         lines.append("Research questions ALREADY on the board (each already has an experiment — "
                      "do NOT propose one of these again as if it were new):")
@@ -309,7 +325,8 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
             if support and card.verdict == "supported":
                 from looplab.events.card_ledger import verdict_support
                 level = verdict_support(card.evidence, state)
-                qualified = qualified or level is not None
+                if level is not None:
+                    shown_levels.add(level)
             lines.append(
                 f"- CARD_ID={card.id} BELIEF_ID={card.belief_id or ''} "
                 f"STATUS={state.card_status_now(card)} VERDICT={card.verdict} "
@@ -317,8 +334,8 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
                 + f"NODES={nodes} "
                 + (f"{drift} " if drift else "")
                 + f"SEED_STATEMENT_JSON={json.dumps(card.seed_statement, ensure_ascii=False)}")
-        if qualified:
-            lines.append(SUPPORT_LEGEND)
+        if shown_levels:
+            lines.append(support_legend(shown_levels))
         if for_proposal:
             # THE PROMISE THAT WAS MADE HERE AND NEVER EXISTED, removed rather than implemented, and
             # the choice is deliberate. It read: "If one of these genuinely needs another attempt,

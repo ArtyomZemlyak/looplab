@@ -624,11 +624,19 @@ def _evidence_verdict(evidence_ids: Iterable[int], nodes: dict[int, Node], direc
 # measured noise floor (`RunState.eval_noise_floor`). The proposal board shows that verdict to the
 # Researcher, so a gain inside the noise read as a finding and steered the next proposals. The
 # VERDICT is left exactly as it is — `search/card_selection.py` reads `open` off it and lesson
-# distillation reads `supported` — and this says, beside it, how much it rests on. Strongest first:
-SUPPORT_REPLICATED = "replicated"          # its confirmation seeds hold the gain beyond 1 SE
-SUPPORT_SINGLE_RUN = "single_run"          # one measurement; nothing measured says it is noise
-SUPPORT_WITHIN_NOISE = "within_noise"      # one measurement, inside the run's measured noise floor
-SUPPORT_NOT_REPLICATED = "not_replicated"  # its confirmation seeds did NOT hold the gain beyond 1 SE
+# distillation reads `supported` — and this says, beside it, how much it rests on.
+#
+# WHEN IT CAN SAY MORE THAN `single_run`. The confirmations and the floor are written only by the
+# empty-action ladder at the END of the search (`engine/orchestrator.py::_handle_no_actions` ->
+# `_noise_floor_phase`, `_confirm_phase`), and both are off by default (`eval_noise_seeds`,
+# `confirm_top_k`), so a proposal made DURING the search sees `single_run` on every supported card
+# (critic 2026-09-26, driven: 18 tokens of 18 across three toy runs with both opted in). The other
+# levels reach a run extended or reopened after its ladder; a floor measured mid-search is doc 67's
+# open item `verdict-support-inputs-arrive-after-the-search`. Strongest first:
+SUPPORT_REPLICATED = "replicated"          # both sides confirmed over seeds; the gain holds beyond 1 SE
+SUPPORT_SINGLE_RUN = "single_run"          # one measurement of each side, not re-run
+SUPPORT_WITHIN_NOISE = "within_noise"      # one measurement of each, inside the run's measured floor
+SUPPORT_NOT_REPLICATED = "not_replicated"  # both sides confirmed; the gain does NOT hold beyond 1 SE
 SUPPORT_LEVELS = (SUPPORT_REPLICATED, SUPPORT_SINGLE_RUN, SUPPORT_WITHIN_NOISE,
                   SUPPORT_NOT_REPLICATED)
 
@@ -640,24 +648,49 @@ def _replicated(node: Node) -> bool:
             and not isinstance(seeds, bool) and seeds >= 2)
 
 
-def _gain_support(candidate: Node, incumbent: Node, direction: str, noise_std: float) -> str:
+def _floor_std(floor: dict, candidate: Node, incumbent: Node) -> float:
+    """The floor's per-evaluation spread when it measured the ruler BOTH numbers were read on, else 0.
+
+    The probe re-measures the champion under its own `idea.eval_profile` (`engine/noise_floor.py`),
+    and a spread measured on `full` says nothing about a gain read on `smoke` (critic 2026-09-26,
+    driven: a `full` floor rated a `smoke` gain `within_noise`). The names are compared as recorded:
+    the fold holds no eval spec that could resolve two names to one set of overrides, and an
+    unmatched floor only withholds `within_noise`, never mints it. A floor the probe itself marked
+    (`reason`, e.g. `superseded`) is not a measurement of what it names, and is not used."""
+    std = floor.get("std")
+    if not is_usable_metric(std) or std <= 0 or floor.get("reason"):
+        return 0.0
+    profile = floor.get("profile")
+    if any(getattr(getattr(n, "idea", None), "eval_profile", None) != profile
+           for n in (candidate, incumbent)):
+        return 0.0
+    return float(std)
+
+
+def _gain_support(candidate: Node, incumbent: Node, direction: str, floor: dict) -> str:
     """How much ONE measured gain of `candidate` over `incumbent` rests on (`SUPPORT_LEVELS`).
 
-    A replicated candidate is held to `core/fitness.py::one_se_better` — the confirm gate's own rule
-    — against the incumbent's confirmed mean when it has one, else its single measurement. A single
-    measurement is held to the run's measured floor: `std` there is the spread of ONE evaluation of
-    one unchanged candidate, so a difference of two single measurements has sd `std·√2`, the 1-SE
-    reading of the same rule (`standard_error_difference` gives a single measurement no SE of its
-    own, which is right for a gate that compares only means, and would make every gain clear it)."""
-    if _replicated(candidate):
-        inc_mean = _replicated(incumbent)
+    `replicated` / `not_replicated` only when BOTH sides carry a confirmation (`_replicated`), and
+    then by the confirm gate's own comparison: two confirmed MEANS under one protocol — the full
+    profile over the confirm seeds — held to `core/fitness.py::one_se_better` with each side's own
+    SE (`trust/confirm.py::robust_selection`). A confirmed candidate against an UNconfirmed incumbent
+    is not that comparison (critic 2026-09-26, driven): the mean is read on the full profile over
+    seeds disjoint from the search's, the incumbent's number on the search profile at seed 0 — two
+    rulers — and `standard_error_difference` gives a single measurement no spread at all, so a
+    +0.0001 gain over one read `replicated`. The champion selector refuses the same mix: it ranks
+    confirmed nodes only among confirmed nodes (`events/replay_selection.py`).
+
+    Everything else is one measurement of each side on the search's own protocol, held to the run's
+    measured floor when that floor measured the same ruler (`_floor_std`): `std` there is the spread
+    of ONE evaluation of one unchanged candidate, so a difference of two single measurements has sd
+    `std·√2`, the 1-SE reading of the same rule."""
+    if _replicated(candidate) and _replicated(incumbent):
         held = one_se_better(
-            candidate.confirmed_mean,
-            incumbent.confirmed_mean if inc_mean else incumbent.metric,
+            candidate.confirmed_mean, incumbent.confirmed_mean,
             candidate.confirmed_std or 0.0, candidate.confirmed_seeds, direction,
-            (incumbent.confirmed_std or 0.0) if inc_mean else 0.0,
-            incumbent.confirmed_seeds if inc_mean else 0)
+            incumbent.confirmed_std or 0.0, incumbent.confirmed_seeds)
         return SUPPORT_REPLICATED if held else SUPPORT_NOT_REPLICATED
+    noise_std = _floor_std(floor, candidate, incumbent)
     if noise_std > 0:
         gain = ((candidate.metric - incumbent.metric) if direction == "max"
                 else (incumbent.metric - candidate.metric))
@@ -699,7 +732,6 @@ def verdict_support(evidence_ids: Iterable[int], st: RunState) -> str | None:
     aborted = frozenset(st.aborted_nodes or ())
     better = (lambda a, b: a > b) if direction == "max" else (lambda a, b: a < b)
     floor = st.eval_noise_floor if isinstance(st.eval_noise_floor, dict) else {}
-    noise_std = floor.get("std") if is_usable_metric(floor.get("std")) else 0.0
     bases = _record_bases(st.nodes, direction, excluded=excluded, aborted=aborted)
     _ev, evaluated = _usable_evidence(evidence_ids, st.nodes, excluded=excluded, aborted=aborted)
     found: set[str] = set()
@@ -709,10 +741,10 @@ def verdict_support(evidence_ids: Iterable[int], st: RunState) -> str | None:
         if parents:
             parent = (max if direction == "max" else min)(parents, key=lambda p: p.metric)
             if better(n.metric, parent.metric):
-                found.add(_gain_support(n, parent, direction, noise_std))
+                found.add(_gain_support(n, parent, direction, floor))
         beaten = st.nodes.get(bases[n.id]) if n.id in bases else None
         if beaten is not None:
-            found.add(_gain_support(n, beaten, direction, noise_std))
+            found.add(_gain_support(n, beaten, direction, floor))
     return next((level for level in SUPPORT_LEVELS if level in found), None)
 
 
