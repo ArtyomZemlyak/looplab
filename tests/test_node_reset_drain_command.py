@@ -198,7 +198,7 @@ def test_a_drain_reset_of_a_finished_host_graded_run_is_refused_across_its_split
     record = _post(client, "node_reset", _reset(), "split-drain", drain_only=True).json()
     assert record["status"] == "rejected", record
     assert record["error"]["code"] == "drain_refused", record
-    assert "re-carved (search epoch 1) after node(s) 1 were measured" in record["error"]["message"]
+    assert "re-carved (epoch 1) after node(s) 1 were measured" in record["error"]["message"]
     assert "node_reset" not in _types(rd) and driver.calls == []
 
 

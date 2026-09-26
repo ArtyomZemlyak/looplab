@@ -140,20 +140,34 @@ def requeued_by_epoch(prior, prior_events, owed) -> list[int]:
     return sorted(out)
 
 
-def _epoch_salted_split(prior) -> bool:
-    """Whether the host scores this run's search on a split salted by the search epoch: host grading
-    with a holdout fraction above 0 — or one the log never pinned (older than the 2026-07-03 pin),
-    which the resume fills from the snapshot's default: unknown is not zero (critic 2026-09-26)."""
+def _host_split(prior) -> bool:
+    """Whether the host scores this run's search on a carved split: host grading with a holdout
+    fraction above 0 — or one the log never pinned (older than the 2026-07-03 pin), which the resume
+    fills from the snapshot's default: unknown is not zero (critic 2026-09-26)."""
     if not getattr(prior, "host_grading", None):
         return False
     fraction = getattr(prior, "holdout_fraction", None)
     return fraction is None or float(fraction) > 0
 
 
+def _lift_recarves(prior) -> bool:
+    """Whether lifting this run's FINISH re-carves its host split: on a log older than doc 68 68.3c
+    the split is salted by the search epoch, which every reopen advances. A run that pinned the
+    disclosure rule re-carves only when a disclosed holdout is consumed — refused on its own clause."""
+    return _host_split(prior) and not getattr(prior, "split_salt_disclosure", False)
+
+
+def _split_salt(prior) -> int:
+    """`RunState.split_salt`, read off a folded state or a test double that carries only the epoch."""
+    salt = getattr(prior, "split_salt", None)
+    return int((getattr(prior, "search_epoch", 0) if salt is None else salt) or 0)
+
+
 def measured_epochs(events) -> dict[int, int]:
-    """The search epoch each node's latest evaluation was MEASURED in: the fold's `search_epoch` right
-    after that node's last accepted `node_evaluated` row, read off the fold itself (`FoldCursor`, one
-    pass) — a rotation that re-queues a node re-measures it, a finished-reopen does not."""
+    """The split epoch each node's latest evaluation was MEASURED on: the fold's `split_salt` (the
+    search epoch on a log older than doc 68 68.3c) right after that node's last accepted
+    `node_evaluated` row, read off the fold itself (`FoldCursor`, one pass) — a rotation that
+    re-queues a node re-measures it, a finished-reopen does not."""
     from looplab.core.models import coerce_node_id
     from looplab.events.replay import FoldCursor
     from looplab.events.types import EV_NODE_EVALUATED
@@ -173,7 +187,7 @@ def measured_epochs(events) -> dict[int, int]:
         # 2026-09-26, driven: an ignored duplicate after a reopen hid a stale incumbent).
         if (node is not None and node.status is NodeStatus.evaluated
                 and node.terminal_event_seq == getattr(event, "seq", None)):
-            out[nid] = int(raw.search_epoch)
+            out[nid] = int(raw.split_salt)
     return out
 
 
@@ -193,11 +207,14 @@ def drain_only_refusal(prior, prior_kind: str, prior_events=None) -> Optional[tu
     * owed nodes the epoch rotation RE-QUEUED rather than anyone reset — one reset after a
       disclosure re-opens every incumbent, and a drain would retrain each of them from scratch
       without having said so (exit 2);
-    * a FINISHED host-graded run with a holdout split: lifting a finish opens a new search epoch,
-      which re-carves the rows the host scores the search on, so the drained node would be ranked
-      against incumbents measured on other rows (exit 2; critic 2026-09-26, driven; the root is
-      doc 68 68.3c) — and the same split already re-carved since an incumbent was measured, which
-      is where a reset of a finished run leaves it (`measured_epochs`);
+    * a FINISHED host-graded run with a holdout split, started before doc 68 68.3c: lifting a
+      finish opens a new search epoch, which there re-carves the rows the host scores the search
+      on, so the drained node would be ranked against incumbents measured on other rows (exit 2;
+      critic 2026-09-26, driven) — and the same split already re-carved since an incumbent was
+      measured, which is where a reset of such a finished run leaves it (`measured_epochs`). A run
+      started since re-carves only when a disclosure is consumed (`RunState.split_salt`), so a
+      plain reopen moves no rows and a drain across it is not refused;
+    * a resume pending, which the drain's engine would consume and then pause (exit 2);
     * any other FINISHED run that still owes work — the eval budget finalized it with a reset node
       pending — is lifted and drained like a paused one.
     """
@@ -226,15 +243,14 @@ def drain_only_refusal(prior, prior_kind: str, prior_events=None) -> Optional[tu
                    + " opens a new search epoch and re-queues every evaluated node for "
                    "re-evaluation on the newly hidden rows, which --drain-only will not buy on its "
                    "own; resume without --drain-only if that is the intent")
-    salted = _epoch_salted_split(prior)
-    if prior_kind == "finished" and salted:
+    if prior_kind == "finished" and _lift_recarves(prior):
         return 2, ("this host-graded run is finished, and lifting a finish opens a new search epoch, "
-                   "which re-carves the split the host scores the search on: node(s) "
-                   f"{', '.join(map(str, owed or rebuild))} would be scored on other rows than every "
-                   "incumbent they are ranked against (doc 68 68.3c). --drain-only will not mix the "
-                   "two; a plain `looplab resume` would")
-    epoch = int(getattr(prior, "search_epoch", 0) or 0)
-    if salted and epoch > 0:
+                   "which on a run started before doc 68 68.3c re-carves the split the host scores "
+                   f"the search on: node(s) {', '.join(map(str, owed or rebuild))} would be scored on "
+                   "other rows than every incumbent they are ranked against. --drain-only will not "
+                   "mix the two; a plain `looplab resume` would")
+    epoch = _split_salt(prior)
+    if _host_split(prior) and epoch > 0:
         # The SAME mixing when the epoch already moved before the drain — a reset of a finished run
         # opens one itself and clears the finish, so the clause above never saw it (critic
         # 2026-09-26, driven: a reset node re-scored 0.5111 on new rows against incumbents measured
@@ -246,7 +262,7 @@ def drain_only_refusal(prior, prior_kind: str, prior_events=None) -> Optional[tu
                        and node.id not in prior.aborted_nodes and node.id not in owed
                        and measured.get(node.id, 0) < epoch)
         if stale:
-            return 2, (f"the split this host-graded run is scored on was re-carved (search epoch "
+            return 2, (f"the split this host-graded run is scored on was re-carved (epoch "
                        f"{epoch}) after node(s) {', '.join(map(str, stale))} were measured: node(s) "
                        f"{', '.join(map(str, owed or rebuild))} would be scored on other rows than "
                        "the incumbents they are ranked against (doc 68 68.3c). --drain-only will not "

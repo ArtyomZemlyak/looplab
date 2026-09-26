@@ -615,14 +615,16 @@ class ReentryMixin:
         if _entry.holdout_fraction is not None:
             self._holdout_fraction = _entry.holdout_fraction
             self._holdout_select = _entry.holdout_select
-            # P0-2 freshly-hidden per-epoch holdout: rebuild the partition for the CURRENT search
-            # epoch. A run reopened after finishing (search_epoch>=1) then scores its new candidates
-            # on a never-disclosed split instead of the one revealed at the prior finish ('already-
-            # seen exam'). Epoch 0 rebuilds the byte-identical original partition, so a normal
-            # single-epoch run (and every replay of an existing log) is unchanged.
-            self._holdout_idx = self._build_holdout_idx(self._holdout_fraction, _entry.search_epoch)
+            # P0-2 freshly-hidden per-epoch holdout: rebuild the partition for the CURRENT split
+            # epoch. A run reopened after a DISCLOSURE then scores its new candidates on a
+            # never-disclosed split instead of the one revealed at the prior finish ('already-seen
+            # exam'); a plain reopen keeps the rows every incumbent was measured on (doc 68 68.3c —
+            # `RunState.split_salt`, the search epoch on a log older than that rule). Epoch 0
+            # rebuilds the byte-identical original partition, so a normal single-epoch run (and every
+            # replay of an existing log) is unchanged.
+            self._holdout_idx = self._build_holdout_idx(self._holdout_fraction, _entry.split_salt)
             self._apply_search_split()
-            self._holdout_epoch = _entry.search_epoch
+            self._holdout_epoch = _entry.split_salt
         # E4: cross-run meta-learned priors. Excluding THIS run's id matters on resume: a run that
         # already mid-run-distilled its own comparative lessons (M6) must not read them back as if
         # they were another run's experience — its own results are already in the digest. The stamp

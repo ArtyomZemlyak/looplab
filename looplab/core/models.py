@@ -2301,6 +2301,15 @@ class RunState(BaseModel):
     # confirmed (the confirm phase is skipped) or re-approved. Defaults 0; old logs stay at 0 and
     # fold byte-identically until an actual reopen-after-finish occurs.
     search_epoch: int = 0
+    # THE HOST SPLIT'S OWN EPOCH (doc 68 68.3c): how many disclosed holdouts a reopen has consumed —
+    # the rotations that must hide the disclosed rows again, and the only ones that may re-carve the
+    # split the host scores the search on. `search_epoch` also counts a plain reopen, which only ends
+    # confirmation/approval; salting the split by it re-carved the rows under every incumbent on each
+    # reopen (review 2026-09-26: 0.5111 against 0.4444 on other rows). Read through `split_salt`,
+    # and only where `run_started` pinned the rule (`split_salt_disclosure`) — an older log keeps the
+    # search-epoch salt it was scored under. Both re-entry authority, excluded from every dump.
+    split_epoch: int = Field(default=0, exclude=True)
+    split_salt_disclosure: bool = Field(default=False, exclude=True)
     # P1-1 recoverable-intent kernel: seq of the last durable `resume_requested` (appended by /resume
     # before spawning the detached engine) and of the last engine-written `resume_served` (appended
     # once the engine holds the singleton lock). A request whose seq is NEWER than the last serve is an
@@ -2765,6 +2774,14 @@ class RunState(BaseModel):
         return sorted(v)
 
     # --- read helpers (no mutation) ---
+    @property
+    def split_salt(self) -> int:
+        """The epoch that SALTS the host's search/holdout split (`engine/triage.py::
+        _holdout_indices`): the disclosures consumed on a run that pinned the rule at start
+        (`split_salt_disclosure`, doc 68 68.3c), else — every older log — the search epoch, as the
+        run was scored under."""
+        return self.split_epoch if self.split_salt_disclosure else self.search_epoch
+
     def resume_pending(self) -> bool:
         """P1-1: a durable resume intent was recorded but no engine has served it yet (its request seq
         is newer than the last serve). Combined by the reconciler with a not-alive / not-finished probe

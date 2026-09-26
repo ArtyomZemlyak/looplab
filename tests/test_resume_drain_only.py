@@ -491,7 +491,7 @@ def test_a_split_re_carved_since_the_incumbents_were_measured_refuses_the_drain(
     state = fold(reopened)
     assert state.search_epoch == 1 and not state.finished, "the reset reopened it, epoch and all"
     code, message = drain_only_refusal(state, classify_prior_run(state, reopened), reopened)
-    assert code == 2 and "re-carved (search epoch 1) after node(s) 0 were measured" in message
+    assert code == 2 and "re-carved (epoch 1) after node(s) 0 were measured" in message
 
 
 def test_a_reset_of_a_finished_host_graded_run_is_not_drained_across_its_split(
@@ -504,7 +504,7 @@ def test_a_reset_of_a_finished_host_graded_run_is_not_drained_across_its_split(
     before = [e.seq for e in store.read_all()]
     out = _drain(rd)
     assert out.exit_code == 2, out.output
-    assert "was re-carved (search epoch 1) after node(s) 0, 2, 3 were measured" in out.output
+    assert "was re-carved (epoch 1) after node(s) 0, 2, 3 were measured" in out.output
     assert [e.seq for e in store.read_all()] == before
 
 

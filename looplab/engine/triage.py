@@ -420,11 +420,13 @@ def _holdout_indices(n: int, fraction: float, epoch: int = 0) -> frozenset:
     rows are chosen is spread deterministically through the label order by Knuth multiplicative
     hashing (no head/tail bias if the data is sorted).
 
-    P0-2 freshly-hidden per-epoch holdout: `epoch` (RunState.search_epoch) SALTS the hash so a run
-    reopened after finishing scores its new candidates on a DIFFERENT, never-disclosed partition
-    instead of the already-revealed one ('already-seen exam'). `epoch=0` XORs with 0 -> the exact
-    original selection, so a normal single-epoch run (and every existing log/golden replay) is
-    byte-identical; only a reopened run (epoch>=1) rotates to a fresh split."""
+    P0-2 freshly-hidden per-epoch holdout: `epoch` (`RunState.split_salt`) SALTS the hash so a run
+    reopened after its holdout was DISCLOSED scores its new candidates on a DIFFERENT,
+    never-disclosed partition instead of the already-revealed one ('already-seen exam'). It counts
+    disclosures consumed — a plain reopen keeps the rows every incumbent was measured on (doc 68
+    68.3c) — and is the search epoch on a log older than that rule. `epoch=0` XORs with 0 -> the
+    exact original selection, so a normal single-epoch run (and every existing log/golden replay) is
+    byte-identical; only a re-carved split (epoch>=1) rotates to fresh rows."""
     if float(fraction) <= 0 or n < 2:
         return frozenset()          # fraction 0 = holdout off; n<2 can't split without collapsing
     k = max(1, min(n - 1, int(round(float(fraction) * n))))   # exact reserved count, non-degenerate

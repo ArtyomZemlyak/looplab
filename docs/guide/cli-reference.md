@@ -327,13 +327,14 @@ remedy); or a dispatch admitted none of what is owed. With a time budget it hand
 (`eval_parallel` evaluations) per turn, so the clock is asked between batches. A pause or stop
 already recorded still wins, and the systemic-failure stop — every node failed — never finishes a
 drain. It refuses before appending anything (exit `2`) when a
-finalize is pending; when lifting a pause or a finish would open a new search epoch after a holdout
-disclosure, re-queuing every evaluated node; and when owed nodes were RE-QUEUED by that rotation
-rather than reset — after a disclosure one reset re-opens every incumbent for a full re-evaluation,
-and it names them; and when the run is host-graded and holds a holdout split that lifting its
-finish would re-carve, or that was already re-carved since an incumbent was measured (a reset of a
-finished run opens a new search epoch too) — the drained node would be ranked against incumbents
-measured on other rows (doc 68 68.3c). It does
+finalize is pending; when a resume is pending (its engine would consume it, then pause); when
+lifting a pause or a finish would open a new search epoch after a holdout disclosure, re-queuing
+every evaluated node; and when owed nodes were RE-QUEUED by that rotation rather than reset — after
+a disclosure one reset re-opens every incumbent for a full re-evaluation, and it names them; and,
+on a host-graded run started before doc 68 68.3c, when lifting its finish would re-carve the holdout
+split or it was already re-carved since an incumbent was measured — the drained node would be ranked
+against incumbents measured on other rows. A run started since re-carves its split only when a
+disclosed holdout is consumed, so a plain reopen keeps the rows (`RunState.split_salt`). It does
 nothing when nothing is owed (exit `0`; a `node_reset` re-opens a finished run itself); any other
 finished run that still owes work — the eval budget finalized it with a reset node pending — is
 lifted and drained. The mode belongs to that one invocation and is not

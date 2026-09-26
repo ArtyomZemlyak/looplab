@@ -187,6 +187,13 @@ class SetupPhaseMixin:
                             # restores this shared contract from the fold rather than accepting a later
                             # snapshot edit that would mix incomparable scores or selection rules.
                             **self._run_start_pinned_values(),
+                            # Doc 68 68.3c: the host split is re-carved only when a disclosed
+                            # holdout is consumed (`RunState.split_salt`). PRESENT ONLY on a run that
+                            # can carve one — host grading and a fraction above 0 — so every other
+                            # payload, the calibration lane's included, stays byte-identical.
+                            **({"split_salt": "disclosure"}
+                               if self._host_grader is not None
+                               and float(self._holdout_fraction or 0.0) > 0 else {}),
                             # F1d: the run-level DECLARED ENVIRONMENT, when there is one. ABSENT
                             # otherwise, which keeps the default `run_started` payload BYTE-IDENTICAL
                             # — the same discipline `_run_start_pinned_values` follows for the Card

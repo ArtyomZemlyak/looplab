@@ -1804,11 +1804,12 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             reconciled_tail = self.store.read_all()
             if (reconciled_tail[-1].seq if reconciled_tail else -1) != decision_seq:
                 continue
-            if state.search_epoch != self._holdout_epoch:
+            if state.split_salt != self._holdout_epoch:
                 # A reset/new candidate can win the finish race AFTER holdout disclosure while this
                 # same Engine process stays alive. Rebuild immediately; waiting for a CLI re-entry
-                # would stamp epoch-N events while still scoring the epoch-(N-1) partition.
-                self._holdout_epoch = state.search_epoch
+                # would score the new candidates on the disclosed partition. Keyed on the SPLIT's
+                # epoch (`RunState.split_salt`, doc 68 68.3c): a plain reopen re-carves nothing.
+                self._holdout_epoch = state.split_salt
                 self._holdout_idx = self._build_holdout_idx(
                     self._holdout_fraction, self._holdout_epoch)
                 self._apply_search_split()

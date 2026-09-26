@@ -281,6 +281,10 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # setting can't make pre/post-resume metrics incomparable.
     _hf = d.get("holdout_fraction")
     st.holdout_fraction = float(_hf) if is_usable_metric(_hf) else None
+    # Doc 68 68.3c: the host split is re-carved only when a disclosed holdout is consumed. Written
+    # by the engine only for a run that can carve one (host grading, a fraction above 0), so every
+    # other `run_started` stays byte-identical; absent -> the search-epoch salt of every older log.
+    st.split_salt_disclosure = d.get("split_salt") == "disclosure"
     # R1-c: recorded at start so replay applies the same selection rule (config isn't available to the
     # pure fold). Absent in old logs -> False -> byte-identical legacy selection.
     # The fold stays pinned to the RECORDED value (never a live re-read); the engine re-pins its own
@@ -1070,6 +1074,10 @@ def _rotate_search_epoch(st: RunState, *, requeue_partition_scores: bool,
                          fresh_node_ids: set[int] | None = None) -> None:
     """Advance one epoch and invalidate every value bound to the disclosed partition."""
     st.search_epoch += 1
+    if st.holdout_evaluated_ids:
+        # A disclosure is being consumed: the one rotation that re-carves the host split
+        # (`RunState.split_salt`, doc 68 68.3c). A plain reopen advances the search epoch alone.
+        st.split_epoch += 1
     st.holdout_evaluated_ids.clear()
     st.holdout_epoch_aware = False   # the disclosure is consumed; the new epoch has none yet
     for candidate in st.nodes.values():

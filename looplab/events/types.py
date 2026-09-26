@@ -2151,7 +2151,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "speculation_calibration_gpu_inventory", "speculation_calibration_profile_digest",
             "speculation_calibration_seed", "speculation_depth", "speculation_depth_auto",
             "speculation_gate_receipt_digest", "speculation_implementation_digest",
-            "speculation_policy_scope", "speculation_runtime_scope_sha256",
+            "speculation_policy_scope", "speculation_runtime_scope_sha256", "split_salt",
             "task_id", "trust_gate", "verifier_ci_tie", "workspace"
         ),
     ),
