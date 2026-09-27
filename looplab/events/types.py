@@ -135,6 +135,9 @@ EV_SPEC_PROPOSED = "spec_proposed"
 EV_SPEC_APPROVAL_REQUESTED = "spec_approval_requested"
 EV_SPEC_DRIFT = "spec_drift"
 EV_WORKSPACE_CHANGED = "workspace_changed"
+# The TASK a re-entry reads hashes differently from the one the run started on (doc 69 69.19):
+# DIAGNOSTIC — recorded, never refused, and read by nothing that decides (`engine/reentry.py`).
+EV_TASK_CHANGED = "task_changed"
 EV_ENV_CHANGED = "env_changed"           # P0-5: the Python/lib environment differs from run start (resume)
 EV_DIVERSITY_ARCHIVE = "diversity_archive"
 # Breadth read-model recorded at the strategist cadence (narrowing curve). The fold handler never
@@ -1191,6 +1194,7 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_PRIOR_INJECTED, EV_MEMORY_READ,
     EV_EVAL_INVOCATION_CLAIMED, EV_EVAL_INVOCATION_SETTLED, EV_EVAL_INVOCATION_RECOVERED,
     EV_EVAL_CANARY_STARTED, EV_EVAL_CANARY_FINISHED,
+    EV_TASK_CHANGED,
 })
 
 # ROWS THAT CANNOT MOVE A DECISION FENCE — one named predicate, because each fence spelling its own
@@ -2343,6 +2347,12 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "verifier_group_scored": PayloadContract(
         "One verifier round over a GROUP of nodes, keyed on the contract and evidence digests.",
         required=("contract", "members", "requested_samples", "v"),
+        optional=(),
+    ),
+    "task_changed": PayloadContract(
+        "A re-entry read a task hashing differently from the last recorded (the run's start, or "
+        "the previous row's `now`).",
+        required=("now", "was"),
         optional=(),
     ),
     "workspace_changed": PayloadContract(

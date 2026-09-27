@@ -53,7 +53,7 @@ from looplab.engine.finalize import incomplete_finalize_scope, is_guarded_abort
 from looplab.engine.shared import engine_fold as fold
 from looplab.engine.widths import (EVAL_WIDTH_MAX, LLM_WIDTH_MAX, operator_width_axes,
                                    settled_width_refusal)
-from looplab.events.types import EV_LESSONS_STORE_UNAVAILABLE
+from looplab.events.types import EV_LESSONS_STORE_UNAVAILABLE, EV_TASK_CHANGED
 from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROFILE_DIGEST,
                                                     SPECULATION_POLICY_SCOPE)
 
@@ -519,6 +519,30 @@ class ReentryMixin:
         if causes:
             reject(*causes)
 
+    def _record_task_change(self, events, entry: RunState) -> None:
+        """THE TASK THIS RUN STARTED ON, compared at every re-entry (doc 69 69.19).
+
+        `run_started.config_hash` is the task identity a resume compares its own config against
+        (`core/setup_identity.py::setup_config_hash`) — and nothing compared it: an operator who
+        edited the task (a `--task-file`, or `task.snapshot.json` by hand) changed what every later
+        node is measured against and left no trace. RECORDED, NEVER REFUSED: the edit may be meant.
+        The rows chain like `workspace_changed`'s — `was` is the last row's `now`, or the hash the run
+        started on — read off the raw log, since the row is fold-ignored. The hash is of the task AS
+        THIS BUILD READS IT, so a build that reads the same document differently moves it too; the
+        row says the two readings differ, never who changed what."""
+        started = getattr(entry, "config_hash", "")
+        if not (entry.run_id and isinstance(started, str) and started):
+            return
+        from looplab.core.setup_identity import setup_config_hash
+        last = started
+        for e in events:
+            now = e.data.get("now") if e.type == EV_TASK_CHANGED and isinstance(e.data, dict) else None
+            if isinstance(now, str) and now:
+                last = now
+        now = setup_config_hash(self.task.model_dump(mode="json"))
+        if now != last:
+            self.store.append(EV_TASK_CHANGED, {"was": last, "now": now})
+
     def _reentry_repin(self) -> bool:
         _events = self.store.read_all()
         _entry = fold(_events)
@@ -527,6 +551,7 @@ class ReentryMixin:
         # re-reads a tail another writer may have extended.
         self._repin_settled_widths(_entry)
         self._require_pinned_speculation_receipt(_entry)
+        self._record_task_change(_events, _entry)
         self._pending_finalize_scope = incomplete_finalize_scope(_events)
         # A failed finalize attempt is recorded as a guarded-abort finish (`error`, or the ceiling's
         # `budget_exhausted`) by the CLI guard, but its durable stop is still pending. Treat that as

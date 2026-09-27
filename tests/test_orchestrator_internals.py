@@ -185,6 +185,58 @@ def test_a_re_entry_that_reads_the_workspace_another_way_writes_no_row(tmp_path,
                 if e.type == "workspace_changed"]
 
 
+def test_a_task_edited_between_entries_is_recorded_and_the_rows_chain(tmp_path):
+    """Doc 69 69.19: `run_started.config_hash` is what a resume compares its task against, and
+    nothing compared it — an operator's edit to the task changed what later nodes are measured
+    against and left no trace. Every re-entry that reads a task hashing differently from the last
+    recorded writes a fold-ignored `task_changed` row; one that reads the same writes nothing.
+    MUTATION: compare against the run's start only -> the second edit's `was` is wrong; skip the
+    check -> no rows."""
+    from looplab.events.eventstore import EventStore
+    from looplab.events.types import DIAGNOSTIC_EVENTS, EV_TASK_CHANGED
+
+    repo = _repo(tmp_path, 'import json; print(json.dumps({"metric": 1.0}))\n')
+    run_dir = tmp_path / "run"
+
+    def enter(goal):
+        t = RepoTask(id="w", goal=goal, direction="max", editable_path=str(repo),
+                     edit_surface=["*.txt"],
+                     eval=EvalSpec(command=[sys.executable, "run.py"], metric=_M))
+        r, d = t.build_roles()
+        return anyio.run(Engine(run_dir, task=t, researcher=r, developer=d,
+                                sandbox=SubprocessSandbox(),
+                                policy=GreedyTree(n_seeds=1, max_nodes=1)).run)
+
+    def rows():
+        return [e.data for e in EventStore(run_dir / "events.jsonl").read_all()
+                if e.type == EV_TASK_CHANGED]
+
+    started = enter("maximize the metric").config_hash
+    assert started and rows() == [], "a fresh run records its own task, no change"
+    enter("maximize the metric")
+    assert rows() == [], "the same task: nothing"
+    enter("maximize the metric on the filtered split")
+    enter("maximize the metric on the filtered split")
+    enter("maximize the metric on the held-out split")
+    first, second = rows()
+    assert first["was"] == started and first["now"] != started
+    assert second["was"] == first["now"] and second["now"] not in (started, first["now"])
+    assert EV_TASK_CHANGED in DIAGNOSTIC_EVENTS
+    # A log whose `run_started` recorded no hash (written before the field) has nothing to compare:
+    # no row, rather than one claiming the task changed from "" (MUTATION: drop that guard).
+    from looplab.events.replay import fold
+
+    legacy = EventStore(tmp_path / "legacy" / "events.jsonl")
+    legacy.append("run_started", {"run_id": "r", "task_id": "w", "goal": "g", "direction": "max"})
+    t = RepoTask(id="w", goal="g", direction="max", editable_path=str(repo), edit_surface=["*.txt"],
+                 eval=EvalSpec(command=[sys.executable, "run.py"], metric=_M))
+    r, d = t.build_roles()
+    engine = Engine(tmp_path / "legacy", task=t, researcher=r, developer=d,
+                    sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1))
+    engine._record_task_change(legacy.read_all(), fold(legacy.read_all()))
+    assert not [e for e in legacy.read_all() if e.type == EV_TASK_CHANGED]
+
+
 def test_two_ways_of_reading_one_source_are_not_a_change():
     """A `git rev-parse` that timed out once falls to the stat hash, and the chain read git→hash as
     a change and hash→git as another, with nothing changed (critic 2026-09-27, driven). Only two
