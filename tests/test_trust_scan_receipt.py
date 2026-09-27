@@ -234,10 +234,20 @@ def test_the_detector_list_is_the_scan_s_own_decision_not_a_second_copy(tmp_path
     both = make_engine(tmp_path / "both", n_seeds=1, max_nodes=1,
                        code_leakage_detect=True, critic_check=True, reward_hack_detect=True,
                        workdir_audit=True)
-    names = both._trust_scan_detectors(_LEAKY_SOLUTION)
-    assert set(names) == {TRUST_DETECTOR_REWARD_HACK, TRUST_DETECTOR_WORKDIR_AUDIT,
-                          TRUST_DETECTOR_CODE_LEAKAGE, TRUST_DETECTOR_CRITIC}
-    assert list(names) == [name for name in TRUST_DETECTORS if name in set(names)], "order is the contract"
+    # The workdir audit compares the workdir against the protected names and the assets; with
+    # neither it compares an empty set, and it is not named among the detectors that looked (doc 69
+    # 69.18: "9/9 clean" on a repo task with nothing protected). The toy task places none.
+    assert not both._audited_names()
+    assert TRUST_DETECTOR_WORKDIR_AUDIT not in both._trust_scan_detectors(_LEAKY_SOLUTION)
+    for field, value in (("_assets", {"train.csv": "a,b\n"}),
+                         ("_repo_spec", {"protected_names": ["score.py"]})):
+        setattr(both, field, value)
+        names = both._trust_scan_detectors(_LEAKY_SOLUTION)
+        assert set(names) == {TRUST_DETECTOR_REWARD_HACK, TRUST_DETECTOR_WORKDIR_AUDIT,
+                              TRUST_DETECTOR_CODE_LEAKAGE, TRUST_DETECTOR_CRITIC}, field
+        assert list(names) == [name for name in TRUST_DETECTORS if name in set(names)], (
+            "order is the contract")
+        setattr(both, field, {})
 
     # Every OTHER detector must be named OFF explicitly: since 2026-08-23 `reward_hack_detect`
     # defaults ON (and `workdir_audit` always did), so a test that names only the one it wants would

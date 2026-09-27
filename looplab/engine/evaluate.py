@@ -1545,6 +1545,12 @@ class EvaluateMixin:
         external-agent calls by len(params) per ablation (ADR-7 cost rule)."""
         return getattr(self.developer, "inner", self.developer)
 
+    def _audited_names(self) -> set:
+        """What the workdir audit compares a candidate's workdir against: the task's protected names
+        and the assets the engine placed there — one derivation, read by the detector list the
+        receipt reports AND by the scan (doc 69 69.18)."""
+        return set(self._repo_spec.get("protected_names", [])) | set(self._assets)
+
     def _trust_scan_detectors(self, scan_src: str) -> tuple[str, ...]:
         """WHICH detectors this engine will run over one node's surface, in `TRUST_DETECTORS` order.
 
@@ -1563,7 +1569,10 @@ class EvaluateMixin:
             names.append(TRUST_DETECTOR_REWARD_HACK)
             if self._exploit_suite is not None:
                 names.append(TRUST_DETECTOR_EXPLOIT_SUITE)
-            if self._workdir_audit:
+            # …and only over something to compare: with no protected name and no asset the audit
+            # compares an EMPTY set, and the receipt listed it beside the detectors that looked —
+            # "9/9 clean" on a repo task with nothing protected (doc 69 69.18).
+            if self._workdir_audit and self._audited_names():
                 names.append(TRUST_DETECTOR_WORKDIR_AUDIT)
         if self._code_leakage_detect and scan_src:
             names.append(TRUST_DETECTOR_CODE_LEAKAGE)
@@ -1666,7 +1675,7 @@ class EvaluateMixin:
         sigs: list[dict] = []
         if TRUST_DETECTOR_REWARD_HACK in detectors:
             from looplab.trust.reward_hack import detect_reward_hacks, grader_import_sanctioned
-            protected = set(self._repo_spec.get("protected_names", [])) | set(self._assets)
+            protected = self._audited_names()
             # The grader-IMPORT waiver keys on the task genuinely MATERIALIZING
             # grader.py (an ASSET → calling `grader.score(...)` is the documented
             # grading contract, e.g. the in-workdir mlebench brief). Pass it explicitly
