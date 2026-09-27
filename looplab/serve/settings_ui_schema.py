@@ -29,7 +29,7 @@ SETTINGS_UI_SCHEMA_VERSION = 2
 # here reading as if 207 were derived while it is typed, which is the drift it warns about. The
 # unforgeable gate is `SETTINGS_UI_SCHEMA_KEYSET_REVISION` further down; this integer is the
 # human-readable half the docs sentence quotes, and `_load_schema` refuses when the two disagree.
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 231
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 232
 # On the KEYSET REVISION below: DERIVED, and deliberately no longer a hand-pinned review gate: a
 # bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
@@ -326,7 +326,12 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # the different-prompt ground (the second). The branch pinned 223 -> 225 against a tree without the
 # six rows above, so neither side's digest is carried: RE-DERIVED over the merged keyset by
 # INTERSECTION — the 229 previous keys plus exactly those two, none removed.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "5bcbc624ffb9c44df77a3f0644bfa7c00ffd4bf52336ea88aa34a5b9e57c8ef1"
+# 231 -> 232 on 2026-09-26: `host_scorer_account`, beside those two — whether a host-contract
+# refusal's failure text is the scorer's own account (`host_scorer.diagnosis_key`) instead of the
+# stderr tail. A row on the different-prompt ground, like `host_refusal_repair_lead`. The branch
+# pinned 225 -> 226 against a tree without origin's six rows; RE-DERIVED by INTERSECTION over the
+# merged keyset: the 231 previous keys plus exactly that one, none removed.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "e1fd200e0cf1040139f965bcc2d1aa798d9a8e461ea9ad73daffdd691558f884"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

@@ -234,7 +234,9 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   229 -> 231 (2026-09-26): `host_refusal_deferral` + `host_refusal_repair_lead` — whether a
   //   first host-contract refusal holds the judge's reject_idea for one repair, and whether its
   //   diagnosis leads the repair. The Python half moved too.
-  assert.equal(Object.keys(schema.fieldByKey).length, 231)
+  //   231 -> 232 (2026-09-26): `host_scorer_account` — whether a host refusal's failure text is the
+  //   scorer's own account instead of the stderr tail. The Python half moved too.
+  assert.equal(Object.keys(schema.fieldByKey).length, 232)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

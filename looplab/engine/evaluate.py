@@ -67,6 +67,9 @@ import orjson
 from looplab.core.atomicio import atomic_write_text
 from looplab.core.errors import (BudgetExceeded, RunSetupRefusal, budget_stop_leaf,
                                  exception_leaves)
+# The fence a host refusal's account rides in, and the cut that keeps it well formed in every
+# narrower window a reader takes of the failure text (`_eval_failure_text`, `repair_ledger_row`).
+from looplab.core.evidence import EVIDENCE_LABEL, fence_untrusted, fenced_tail
 from looplab.core.models import (DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX, NodeStatus,
                                  coerce_node_id,
                                  developer_artifact_footprint,
@@ -89,7 +92,7 @@ from looplab.engine.eval_attempt_rules import (  # noqa: F401 — the ladder's r
 from looplab.engine.crash_repair import developer_repair_history
 from looplab.engine.eval_stages import STAGE_MANIFEST_NAME
 from looplab.engine.shared import (host_refusal_deferral, host_refusal_repair_lead,
-                                   repair_context_record)
+                                   host_scorer_account, repair_context_record)
 from looplab.engine.metric_salvage import (DEFAULT_METRIC_SALVAGE, SALVAGE_CAUSE_TRIAGE_ACTION,
                                            cause_repair_context, salvage_gates,
                                            declaration_actually_corrected,
@@ -176,10 +179,20 @@ _JUDGE_HISTORY_ROWS = 12
 _JUDGE_ERROR_CHARS = 300
 # HOW MUCH OF THE FAILURE THE RECORD KEEPS, as opposed to how much the PROMPT carries.
 #
-# `_eval_failure_text` is 500 characters and is four things at once — the repair prompt, the judge's
-# history rows, the terminal's `error`, and `node_repaired.error_in`. Three of those are paid text
-# and must not grow. The fourth is the RECORD, and it has been the same 500 characters as the
-# prompt purely because one string served both.
+# `_eval_failure_text` is built on a 500-character stderr tail and is four things at once — the
+# repair prompt, the judge's history rows, the terminal's `error`, and `node_repaired.error_in`.
+# Three of those are paid text, and none of them grows by accident: each reader that keeps less
+# takes its own window of the string (the judge history's `_JUDGE_ERROR_CHARS`, the 200-character
+# "last eval error" of the provider-failure rewrites), always through `core/evidence.py::
+# fenced_tail`. The fourth is the RECORD, and it has been the same 500 characters as the prompt
+# purely because one string served both.
+#
+# ONE DELIBERATE EXCEPTION to "500 characters": a host-contract refusal under
+# `Settings.host_scorer_account` carries the scorer's own account instead of the tail — the failed
+# stage, the broken relations, the protected-scorer warning and the account capped at 2,000
+# characters and fenced — about 2,300 characters with one declared relation, and bounded by that
+# cap plus the at most eight relations a contract may declare (`numeric_contract.
+# MAX_STAGE_NUMERIC_RELATIONS`). It is priced as that switch's cost: OFF, the text is the tail.
 #
 # MEASURED (`judgebench/triage_corpus.py` states it in its own header): `res.stderr` was clamped at
 # 64,000 bytes per stream when the classifier read it, and 500 characters survived to disk. Not one
@@ -713,25 +726,59 @@ def _earlier_host_refusals(events, node_id: int, generation: int, attempt: int,
     return max(0, len(rows) - 1)
 
 
-def _held_reject_from_log(repair_log) -> Optional[str]:
+def _ledger_fix(rationale) -> str:
+    """A `node_repaired.rationale` as the ledger row keeps it — `repair_ledger_row`'s `fix`, the ONE
+    spelling, which a held verdict's words are read through on both of its paths
+    (`_held_reject_words`)."""
+    return str(rationale)[:200]
+
+
+def _held_reject_words(fix) -> str:
+    """The words a held `reject_idea` stands on: the ledger's `fix` of the deferred row, or a fixed
+    sentence when the judge gave none.
+
+    ONE function for BOTH paths, and that is its whole job. The live path used to hold the judge's
+    FULL rationale while a resumed process read the ledger's 200-character `fix` off the durable row,
+    so the terminal a held verdict settles into (`_settle_held_reject`, `node_failed.
+    triage_rationale`) and the repair prompt that shows it carried different bytes for the same
+    verdict depending on whether the process had restarted in between. Both now take the durable
+    ledger text: the live path computes it from the rationale exactly as the row it is about to
+    append will carry it (`_repair_row_rationale` then `_ledger_fix`), the resume reads it back."""
+    return str(fix or "").strip() or "the failure judge answered reject_idea"
+
+
+def _held_reject_from_log(repair_log, *, enabled: bool) -> Optional[str]:
     """The judge's `reject_idea` a deferral holds OPEN, read off this lifecycle's repair rows.
 
     Open iff the NEWEST repair row is the one a deferral bought (`judge_deferred`, coerced to its
     closed vocabulary): any later verdict that bought another repair appends a newer row without
     it, and any later verdict that ended the node wrote its terminal (a node with a terminal is
     not resumed). The held words are that row's `fix` — the judge's rationale as the ledger keeps
-    it — or a fixed sentence when the row has none."""
+    it — through `_held_reject_words`, the rule the live path holds them by.
+
+    `enabled` is `Settings.host_refusal_deferral` as the run holds it (`shared.py::
+    host_refusal_deferral`), and it is REQUIRED: with the switch off nothing may be held, so a
+    deferred row this lifecycle cannot have written under its own settings (a hand-edited log, a
+    snapshot resumed with the switch off) settles nothing onto the terminal."""
+    if not enabled:
+        return None
     rows = [r for r in (repair_log or []) if isinstance(r, dict)]
     if not rows or coerce_judge_deferred(rows[-1].get("judge_deferred")) is None:
         return None
-    return str(rows[-1].get("fix") or "").strip() or "the failure judge answered reject_idea"
+    return _held_reject_words(rows[-1].get("fix"))
 
 
-def _champion_metric(state) -> Optional[float]:
-    """The folded champion's metric (`RunState.best()`), or None when there is none yet."""
+def _champion(state) -> tuple[Optional[float], Optional[int]]:
+    """The folded champion as the value gate reads it: `(metric, node id)` off `RunState.best()`, or
+    `(None, None)` when there is none yet — the pair `deferred_triage_verdict` is asked with and
+    records on the row it holds (`DeferredVerdict.as_row`)."""
     best = state.best() if state is not None and hasattr(state, "best") else None
     metric = getattr(best, "metric", None) if best is not None else None
-    return float(metric) if isinstance(metric, (int, float)) and not isinstance(metric, bool) else None
+    if not isinstance(metric, (int, float)) or isinstance(metric, bool):
+        return None, None
+    node_id = getattr(state, "best_node_id", None)
+    return float(metric), (node_id if isinstance(node_id, int) and not isinstance(node_id, bool)
+                           else None)
 
 
 def repair_ledger_row(d: dict, *, attempts: int) -> dict:
@@ -747,9 +794,13 @@ def repair_ledger_row(d: dict, *, attempts: int) -> dict:
     differ. `attempts` is the running count the ledger falls back to for a row with no ordinal.
     """
     n = _durable_int(d.get("attempt"), default=None)
+    # `error` is the failure text's LAST `_JUDGE_ERROR_CHARS`, cut by `fenced_tail`: byte for byte
+    # the plain tail, except that a cut inside a fenced block — a host refusal's account under
+    # `Settings.host_scorer_account` — keeps the tail of the block's interior fenced again rather
+    # than its closing marker alone around the candidate-influenced text before it.
     row = {"attempt": n if n is not None else attempts,
-           "error": str(d.get("error_in", ""))[-_JUDGE_ERROR_CHARS:],
-           "fix": str(d.get("rationale", ""))[:200],
+           "error": fenced_tail(str(d.get("error_in", "")), _JUDGE_ERROR_CHARS, EVIDENCE_LABEL),
+           "fix": _ledger_fix(d.get("rationale", "")),
            "stages_passed": d.get("stages_passed")}
     # THE AUTHENTICATED CAUSE, and it is `in`-guarded for the same reason `changed` below is: a
     # row written before this column existed does not know what its cause was, and telling F8's
@@ -1240,7 +1291,9 @@ class EvalAttempt:
     # real verdict (`AGENT_TRIAGE_ACTIONS`) — which then stands, whatever it is — and settled onto the
     # terminal by `_settle_held_reject` if the chain ends first (the Developer stuck, a dead provider,
     # a floor, the budget, a stop). NOT cleared per attempt, unlike `judge_deferred` above: it spans the
-    # chain. Seeded from the durable rows at loop start (`_held_reject_from_log`), so a resume keeps it.
+    # chain. Seeded from the durable rows at loop start (`_held_reject_from_log`, only while the run
+    # holds `Settings.host_refusal_deferral`), so a resume keeps it — in the ledger's bytes on both
+    # paths (`_held_reject_words`).
     held_reject: Any = None
     # True when THIS attempt's result is a FAILED eval canary's (`engine/eval_canary.py`) rather than
     # the full eval's: bound by RUN_ATTEMPT (reset at its top), read by SALVAGE — which must never
@@ -1916,9 +1969,11 @@ class EvaluateMixin:
         """What the RECORD keeps about a failed eval — deliberately wider than what the prompt says.
 
         THE SPLIT THIS EXISTS TO MAKE. `_eval_failure_text` below is one string doing four jobs, and
-        three of them are paid text that must not grow: the repair prompt, the judge's history rows,
-        and the terminal's `error` field. The fourth is `node_repaired.error_in`, the durable record,
-        and it has been clamped to the prompt's 500 characters only because one string served both.
+        three of them are paid text that must not grow BY THIS WINDOW: the repair prompt, the judge's
+        history rows, and the terminal's `error` field (the one growth they take is a switch's own —
+        a host refusal's account under `Settings.host_scorer_account`, bounded there). The fourth is
+        `node_repaired.error_in`, the durable record, and it has been clamped to the prompt's 500
+        characters only because one string served both.
         This is the record's own window. NOTHING ON THE PROMPT PATH READS IT — that is the property
         the guard test drives, because the moment something does, this becomes a silent 32x increase
         in the cost of every repair.
@@ -2022,19 +2077,26 @@ class EvaluateMixin:
         # the STRIPPED text while keeping the unstripped bytes when there is content leaves
         # every non-blank tail byte-identical.
         # THE HOST SCORER'S OWN ACCOUNT, when the task declared a key for it and it refused
-        # (`HostScorerSpec.diagnosis_key`; 2026-09-26, inf13). The stderr TAIL below is the wrong
-        # window for it: in 5 of 5 refusals measured it opened with progress-bar or CUDA residue,
-        # cut the protected-scorer warning off, and fit the scorer's account only after that
-        # account had been squeezed under 500 characters. So the account rides WHOLE (capped at the
-        # read, `command_eval.HOST_DIAGNOSIS_CHARS`), fenced as evidence because the candidate's code
-        # runs inside the scorer's process, with no tail; `error_evidence` keeps the raw stderr.
+        # (`HostScorerSpec.diagnosis_key`; 2026-09-26, inf13), under `Settings.host_scorer_account`
+        # — the task field names the key, the switch lets it into a prompt, so a run launched before
+        # the switch keeps the tail below byte for byte. The stderr TAIL is the wrong window for it:
+        # in 5 of 5 refusals measured it opened with progress-bar or CUDA residue, cut the
+        # protected-scorer warning off, and fit the scorer's account only after that account had
+        # been squeezed under 500 characters. So the account rides WHOLE (capped at the read,
+        # `command_eval.HOST_DIAGNOSIS_CHARS`), fenced as evidence because the candidate's code runs
+        # inside the scorer's process, with no tail; `error_evidence` keeps the raw stderr. The
+        # relations that broke ride in front of it (`RunResult.host_defects`), because with more
+        # than one declared the account alone does not say WHICH bound refused the candidate. Every
+        # reader that keeps a narrower window of this string cuts it with `fenced_tail`, so the
+        # block it keeps is still one block (`repair_ledger_row`, the provider-failure rewrites).
         _host_diag = getattr(res, "host_diagnosis", None)
-        if isinstance(_host_diag, str) and _host_diag.strip():
-            from looplab.core.evidence import EVIDENCE_LABEL, fence_untrusted
+        if host_scorer_account(self) and isinstance(_host_diag, str) and _host_diag.strip():
             _failed = str(getattr(res, "failed_stage", "") or "")
+            _defects = [str(d) for d in (getattr(res, "host_defects", None) or []) if str(d).strip()]
             return ((f"[failed stage: {_failed}]\n" if _failed else "")
                     + "The operator's host scorer REFUSED this candidate's output through its "
-                    "declared contract. Do NOT edit the score stage: it is the operator's, "
+                    "declared contract" + (f" ({'; '.join(_defects)})" if _defects else "")
+                    + ". Do NOT edit the score stage: it is the operator's, "
                     "protected. Repair the candidate's own code. The scorer's own account:\n"
                     + fence_untrusted(self._redact(_host_diag.strip()), EVIDENCE_LABEL))
         _stderr_tail = self._redact(res.stderr[-500:])
@@ -3319,8 +3381,9 @@ class EvaluateMixin:
         # moving failure next to fixes that touch different code. The model gets the trajectory,
         # not a scalar someone else already reduced it to.
         a.repair_log: list[dict] = list(_durable_rows)
-        # A held `reject_idea` an earlier process deferred and nothing has ruled on since.
-        a.held_reject = _held_reject_from_log(a.repair_log)
+        # A held `reject_idea` an earlier process deferred and nothing has ruled on since — only
+        # while the run holds the switch that can hold one.
+        a.held_reject = _held_reject_from_log(a.repair_log, enabled=host_refusal_deferral(self))
         # A repair that returned something that is not Python at all. Counted directly rather than
         # inferred from the SyntaxError it produces: the error text can vary per attempt (a
         # provider request id), the FACT cannot. See
@@ -4171,6 +4234,10 @@ class EvaluateMixin:
             _refused = _host_contract_refused(a.res, self._resolved_stages(a.node, a.workdir))
             _events = self.store.read_all() if _refused else []
             _now = fold(_events) if _refused else None
+            # The champion the value gate holds the would-be number against, and its node: both
+            # ride on the row the deferral writes (`DeferredVerdict.as_row`), so the decision can be
+            # re-checked off the log.
+            _champion_value, _champion_node = _champion(_now)
             a.judge_deferred = deferred_triage_verdict(
                 action, enabled=True, engine_reason=a._engine_reason,
                 host_contract_refused=_refused,
@@ -4179,13 +4246,14 @@ class EvaluateMixin:
                     str(getattr(a.res, "failed_stage", "") or "")) == 0,
                 cap_headroom=a.attempt + 1 < int(a._repair_cap),
                 would_be=getattr(a.res, "host_would_be", None),
-                champion=_champion_metric(_now),
+                champion=_champion_value, champion_node_id=_champion_node,
                 direction=getattr(_now, "direction", None) or getattr(a.state, "direction", "max"))
         if a.judge_deferred is not None:
             action = "repair"
-            # The judge's words, HELD: they are this chain's verdict unless a later attempt rules.
-            a.held_reject = (str(a.triage.get("rationale", "") or "").strip()
-                             or "the failure judge answered reject_idea")
+            # The judge's words, HELD: they are this chain's verdict unless a later attempt rules —
+            # in the bytes the `node_repaired` row this repair appends will carry and a resumed
+            # process reads back (`_held_reject_words`), not the raw rationale.
+            a.held_reject = _held_reject_words(_ledger_fix(self._repair_row_rationale(a.triage)))
         # WHAT THE VERDICT DOES TO THE ATTEMPT. `abandon` and `reject_idea` (the idea itself is
         # wrong -> mark the lineage; steer to a new idea) end it on the judge's word; a judge that
         # produced no usable verdict ends it too, in the two shapes that are not the same condition
@@ -4534,8 +4602,11 @@ class EvaluateMixin:
             # eval that anyone was asked about. A diagnostician's non-answer is a different
             # fact and is recorded as `unclassified`/`undiagnosed` where it happens, above.
             a._reason_source = REASON_SOURCE_ENGINE
+            # The last 200 characters of the failure text, cut by `fenced_tail` (the plain tail
+            # unless the cut falls inside a host refusal's fenced account, whose interior is then
+            # cut and fenced again): the terminal never keeps a closing marker without its opening.
             a.err = (f"{_dev_err}\n[the Developer's own session failed, so this node was never "
-                   f"repaired. Its last eval error was: {a.err[-200:]}]")
+                   f"repaired. Its last eval error was: {fenced_tail(a.err, 200, EVIDENCE_LABEL)}]")
             await self._auto_pause_provider_failure(
                 "the Developer's LLM provider failed while repairing node "
                 f"{a.node_id}, so the repair returned an error instead of code — {_dev_err}")
@@ -4634,7 +4705,7 @@ class EvaluateMixin:
                 # its two sibling log-derived verdicts (`train_monitor` / `asha_monitor`'s
                 # `reason`) have gone through `_redact` since B3. `error_in` beside it is
                 # already covered: `err` derives from the redacted `_stderr_tail`.
-                "rationale": self._redact(str(a.triage.get("rationale", "")))[:300],
+                "rationale": self._repair_row_rationale(a.triage),
                 # The judge's evidence columns, made durable (invariant #5: additive, and the
                 # fold ignores them — `_on_node_repaired` reads code/files/deleted/footprint
                 # only). `_durable_repair_ledger` reads exactly these back after a resume;
@@ -4882,6 +4953,13 @@ class EvaluateMixin:
                     "spent": a.full_retrains, "attempt": a.attempt})
         return PHASE_RETRY
 
+    def _repair_row_rationale(self, triage) -> str:
+        """The judge's rationale as the `node_repaired` row carries it (`rationale`): redacted, then
+        cut at 300. A method because two sites must agree on it byte for byte — the append, and the
+        live hold `_eval_decide_repair` takes of a deferred verdict, whose words must be the ones a
+        resumed process reads back off that row (`_held_reject_words`)."""
+        return self._redact(str(triage.get("rationale", "")))[:300]
+
     def _settle_held_reject(self, a: "EvalAttempt") -> None:
         """A HELD `reject_idea` BECOMES THE TERMINAL when the chain ends before the judge rules again.
 
@@ -4890,9 +4968,11 @@ class EvaluateMixin:
         fails without a second ruling — the Developer declaring it stuck on that repair, a dead
         repair provider (whose run-level pause has already been asked), a floor, the budget, an
         unreadable judge, a stop — the judge's verdict is the last word the chain has, so it is the
-        terminal: `idea_rejected` under the judge's own rationale, which is what the Researcher
-        reads and what `card_ledger` treats as a rejected idea. The way the chain actually ended is
-        kept in `error`. A no-op unless a hold is open, so every other terminal is unchanged."""
+        terminal: `idea_rejected` under the judge's own rationale — as the durable ledger keeps it,
+        on the live path and after a resume alike (`_held_reject_words`) — which is what the
+        Researcher reads and what `card_ledger` treats as a rejected idea. The way the chain
+        actually ended is kept in `error`. A no-op unless a hold is open, so every other terminal is
+        unchanged."""
         held = a.held_reject
         if not held:
             return

@@ -100,7 +100,9 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 231
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 232
+    # 231 -> 232 on 2026-09-26: `host_scorer_account` (a curated row beside the two below). Verified
+    # by INTERSECTION: 231 keys common to the previous keyset plus exactly that one.
     # 229 -> 231 on 2026-09-26: `host_refusal_deferral` + `host_refusal_repair_lead` (curated rows).
     # Verified by INTERSECTION: 229 keys common to the previous keyset plus exactly those two.
     # 228 -> 229 on 2026-09-27: `max_launch_timeout_s` -- the hard per-launch wall-clock ceiling (24 h
@@ -473,7 +475,9 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # 263 -> 264 on 2026-09-27: `max_launch_timeout_s` (a curated row, so both counts move).
     # 264 -> 266 on 2026-09-26: `host_refusal_deferral` + `host_refusal_repair_lead` (curated rows,
     # so both counts move).
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 266
+    # 266 -> 267 on 2026-09-26: `host_scorer_account` (a curated row, so both counts move); the AST
+    # scan of `Settings` against the pre-change tree reports exactly `['host_scorer_account']` added.
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 267
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

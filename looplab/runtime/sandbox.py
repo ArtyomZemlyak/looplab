@@ -640,6 +640,13 @@ class RunResult:
     # account of why. None on every other path, including a host stage that passed.
     host_would_be: Optional[float] = None
     host_diagnosis: Optional[str] = None
+    # …and WHICH of the operator's declared relations the refusal broke, in declaration order and
+    # spelled as `numeric_contract.numeric_contract_defects` spells them (`refused == 0 — the stage
+    # printed refused = 1`): the scorer's account says why in its own words, this says which bound,
+    # and with more than one relation declared the account alone does not name it. Carried as the
+    # fact rather than re-parsed out of `stderr`, which the scorer's own output shares. None on every
+    # path but a host-contract refusal.
+    host_defects: Optional[list] = None
 
     # SETUP: True when the run's SETUP command — the one the engine itself ran, before the eval —
     # exited non-zero or timed out. The out-of-band twin of `timed_out`/`stalled`/`diverged`, and it

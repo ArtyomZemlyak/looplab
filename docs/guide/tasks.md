@@ -223,9 +223,10 @@ the candidate's own code printed. `cmd.host_scorer` (2026-09-06, doc 52 row 10a 
   scorer's result row are read on such a refusal, with the same last-occurrence rule:
   `would_be_key` names the metric the refused candidate WOULD have scored (what
   `host_refusal_deferral` holds against the champion), and `diagnosis_key` names a string — the
-  scorer's own account of why — which then reaches the triage judge and the repair whole (capped at
-  2,000 characters, fenced as evidence) in place of the stderr tail they are otherwise given. Never
-  add a relation on a key that can be `null` on an accepted candidate: an unprinted key fails closed.
+  scorer's own account of why — which, under the run setting `host_scorer_account`, then reaches the
+  triage judge and the repair whole (capped at 2,000 characters, fenced as evidence, after the
+  relations that broke) in place of the stderr tail they are otherwise given. Never add a relation on
+  a key that can be `null` on an accepted candidate: an unprinted key fails closed.
 * **What it does not do.** It does not withhold a split: a host scorer that reads a test set the
   candidate can also read is *consistent*, not hidden. That is the next section's job.
 

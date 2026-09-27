@@ -264,6 +264,16 @@ def host_refusal_repair_lead(engine) -> bool:
     return bool(getattr(engine, "_host_refusal_repair_lead", False))
 
 
+def host_scorer_account(engine) -> bool:
+    """`Settings.host_scorer_account` as the failure text reads it — the ONE reading.
+
+    Asked by `evaluate._eval_failure_text`: whether a host-contract refusal's text is the scorer's
+    own account (`HostScorerSpec.diagnosis_key`) in place of the stderr tail. On
+    `repair_context_record`'s ground (OFF when absent): the task field names the key, and only this
+    switch lets it into a prompt."""
+    return bool(getattr(engine, "_host_scorer_account", False))
+
+
 class SharedEngineMixin:
     """Cross-cluster members, mixed into `Engine` like every other mixin. In here `self` IS the
     Engine, exactly as in the concern mixins."""

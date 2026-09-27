@@ -300,7 +300,16 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               Rebased onto the six fields above: the branch pinned 255 -> 257 and 802196a4…
 #               against a tree without them, so neither side's digest describes the result.
 #               RECOMPUTED from the merged module (the pre-change tree re-derives a070e278…).
-_EXPECTED_DIGEST = "sha256:82148327d79b7a43e06bdf5251b659b841db5382ab23adac2033ca4399a1f4b3"
+#   2026-09-26  + host_scorer_account (a host-contract refusal's failure text is the scorer's own
+#               account instead of the stderr tail — the critic's fix to 71652c49, which had let the
+#               task field alone change the prompt). The 'field set changed too' branch: an AST scan
+#               of `Settings`' annotated assignments against the pre-change tree reports exactly
+#               `['host_scorer_account']` added and `[]` removed; `_EXPECTED_FIELD_COUNT` goes
+#               263 -> 264 and both pins are re-set (the pre-change tree re-derives the old digest
+#               82148327…; the branch's own 257 -> 258 and a3c14635… were cut against a tree without
+#               origin's six fields). INERT for a calibration replicate (the profile ships it False,
+#               and the toy workload declares no host scorer); re-pinned on the COMPLETE-envelope rule.
+_EXPECTED_DIGEST = "sha256:bb52777578bd27e9916c7908ec05d196fbe84a83301c46b70c660cbe4bfd54bd"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -795,7 +804,8 @@ _EXPECTED_DIGEST = "sha256:82148327d79b7a43e06bdf5251b659b841db5382ab23adac2033c
 #   2026-09-26  + noise_floor_mid_search (doc 67 67.1a): 259 -> 260; see the digest history above.
 #   2026-09-27  + max_launch_timeout_s (the configurable launch ceiling): 260 -> 261; see above.
 #   2026-09-26  + host_refusal_deferral, host_refusal_repair_lead: 261 -> 263; see the digest history.
-_EXPECTED_FIELD_COUNT = 263
+#   2026-09-26  + host_scorer_account: 263 -> 264; see the digest history.
+_EXPECTED_FIELD_COUNT = 264
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

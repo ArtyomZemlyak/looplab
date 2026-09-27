@@ -1084,16 +1084,17 @@ class Settings(BaseSettings):
     # `engine/shared.py::repair_context_record`. No extra call, and no metric, champion,
     # selectability decision or violation moves on it (docs/36): only what the repair is TOLD.
     repair_context_record: bool = True
-    # THE OPERATOR'S HOST SCORER REFUSES; THE REPAIR HEARS WHY (2026-09-26, MiniOneRec inf13). Two
+    # THE OPERATOR'S HOST SCORER REFUSES; THE REPAIR HEARS WHY (2026-09-26, MiniOneRec inf13). Three
     # switches for a task whose `host_scorer.expect` gates candidates (a quality floor, an order
-    # check) — both OFF, both inert for a task that declares no host contract.
+    # check) — all OFF, all inert for a task that declares no host contract.
     #
     # `host_refusal_deferral`: the FIRST refusal of a node's lifecycle by the host contract buys ONE
     # repair before the crash-triage judge's `reject_idea` may end it — held, never discarded: if the
     # chain then ends without a second verdict (the Developer stuck, a dead provider, a floor, the
     # budget, a stop) the held `reject_idea` is the terminal. Only when the task declares
-    # `host_scorer.would_be_key` and the refused candidate's would-be number beats the champion, and
-    # only with repair-cap headroom for a second judged attempt (`eval_attempt_rules.
+    # `host_scorer.would_be_key` and the refused candidate's would-be number beats the champion (a
+    # run with no champion yet defers nothing: there is no number the repair could be shown to be
+    # worth), and only with repair-cap headroom for a second judged attempt (`eval_attempt_rules.
     # deferred_triage_verdict`). Measured: nodes 5 and 6 were rejected at zero repairs (6 on the
     # false premise "the gate demands byte-exact answers"); reset with the diagnosis in hand, node 5
     # reached 4.17x inside the gate in two repairs — while node 9 (would-be 2.11x under a 4.17x
@@ -1109,6 +1110,17 @@ class Settings(BaseSettings):
     # instead of L+s) and neither sentence reached the Developer, who spent ~25 min per repair
     # re-deriving it. It changes a PROMPT, so it ships OFF with a legacy row.
     host_refusal_repair_lead: bool = False
+    # `host_scorer_account`: on a host-contract refusal, the failure text — the repair prompt, the
+    # triage judge's `err` and history, `node_repaired.error_in`, the terminal's `error` — is the
+    # failed stage, the relations that broke, the protected-scorer warning and the scorer's OWN
+    # account (the string the task names in `host_scorer.diagnosis_key`, capped at 2,000 characters
+    # and fenced as evidence) instead of the 500-character stderr tail, which in 5 of 5 inf13
+    # refusals opened with progress-bar or CUDA residue and cut the warning off
+    # (`evaluate._eval_failure_text`). The task field names WHICH key; this switch decides whether
+    # the engine reads it into a prompt at all, because the task field alone is no opt-in a resumed
+    # snapshot can hold: a run launched before this field resumes with the historical tail, byte
+    # for byte (`LEGACY_CONFIG_SNAPSHOT_DEFAULTS`). It changes a PROMPT, so it ships OFF.
+    host_scorer_account: bool = False
     # === Inline crash repair ==============================================================
     # Hybrid in-node crash repair: when an LLM-generated node CRASHES at runtime (mechanical errors
     # — bad import, removed kwarg, typo), the agent triages it and may repair the code IN PLACE within
@@ -3710,6 +3722,11 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # mid-log. (c) is `False`, pointable at every commit before this one.
     "host_refusal_deferral": False,
     "host_refusal_repair_lead": False,
+    # …and `host_scorer_account` (the scorer's own account in place of the stderr tail), on the same
+    # DIFFERENT-PROMPT ground: ON, a host refusal's failure text — the repair prompt, the triage
+    # judge's `err` and history, `error_in` / `error` — changes bytes, and the task field that names
+    # the key is no switch a resumed snapshot can hold. (c) is `False`, the historical tail.
+    "host_scorer_account": False,
     # THE NODE BUDGET CUE, added 2026-09-23 defaulting ON (Q-3, the Researcher's context audit).
     # (a) holds. (b) is the rows above's DIFFERENT-PROMPT ground: ON, every proposal prompt gains a
     # line stating the run's remaining node budget and its plan phase, so a resumed run would change

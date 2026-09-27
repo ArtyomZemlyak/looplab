@@ -175,10 +175,12 @@ class EngineKnobs:
     # The repair context as the engine's own record (review 2026-09-22, ENG2-14 / ES2-05). Read by
     # `shared.py::repair_context_record`, the one place the repair path learns it.
     _repair_context_record = Knob("repair_context_record", bool)
-    # The host-refusal pipeline (2026-09-26): read by `shared.py::host_refusal_deferral` and
-    # `shared.py::host_refusal_repair_lead`, the one place the repair path learns each.
+    # The host-refusal pipeline (2026-09-26): read by `shared.py::host_refusal_deferral`,
+    # `shared.py::host_refusal_repair_lead` and `shared.py::host_scorer_account`, the one place the
+    # repair path learns each.
     _host_refusal_deferral = Knob("host_refusal_deferral", bool)
     _host_refusal_repair_lead = Knob("host_refusal_repair_lead", bool)
+    _host_scorer_account = Knob("host_scorer_account", bool)
     # Hybrid in-node crash repair (triage + inline repair). See Settings.inline_repair.
     _inline_repair = Knob("inline_repair")
     _inline_repair_attempts = Knob("inline_repair_attempts",

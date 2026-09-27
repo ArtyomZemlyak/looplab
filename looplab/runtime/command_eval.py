@@ -3407,7 +3407,11 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
                     exit_code=0, stdout=run.out, metric=None, timed_out=False,
                     stderr=_stderr,
                     stages=stage_results, failed_stage=_sname, metric_subject=run.metric_subject,
-                    host_would_be=_would_be, host_diagnosis=_diagnosis)
+                    host_would_be=_would_be, host_diagnosis=_diagnosis,
+                    # Which relations broke, as the fact (`RunResult.host_defects`): the failure
+                    # text that replaces the stderr tail with the scorer's account must still name
+                    # them (`evaluate._eval_failure_text`).
+                    host_defects=list(_defects) if _stg.get(HOST_STAGE_KEY) else None)
                 return run
         # WHICH BYTES the stage produced, bound at the instant the contract PASSED and against the
         # identical `_w0` floor it was just held to. `verify_stage_artifacts` proves the artifact is

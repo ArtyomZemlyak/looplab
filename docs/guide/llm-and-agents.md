@@ -575,12 +575,14 @@ one triage call per attempt.
 **One exception to "`reject_idea` ends the node", off by default** (`host_refusal_deferral`,
 2026-09-26). When the operator's host scorer refuses a candidate through its declared contract
 (`cmd.host_scorer.expect`) for the FIRST time in a node's lifecycle, the task declares
-`host_scorer.would_be_key`, the refused candidate's would-be number beats the champion, and the repair
+`host_scorer.would_be_key`, the refused candidate's would-be number beats the current champion (a run
+with no champion yet defers nothing), and the repair
 cap leaves room for another judged attempt, a `reject_idea` is **held** for one repair: the repair's
 prompt shows the verdict and the judge's words, the next judged attempt decides (`reject_idea`
 included), and if the chain ends first — the Developer declaring it stuck, a dead provider, a floor,
 the budget, a stop — the held `reject_idea` is the node's terminal. The durable `node_repaired` row
-records the hold (`judge_deferred`) beside the engine's `repair`. Measured on MiniOneRec inf13: two
+records the hold (`judge_deferred`, with the would-be number and the champion's metric and node id the
+gate compared) beside the engine's `repair`. Measured on MiniOneRec inf13: two
 fast candidates were rejected at their first refusal (one on a false premise about the gate), and one
 reached 4.17x inside the gate in two repairs once reset.
 

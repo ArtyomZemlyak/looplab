@@ -486,7 +486,7 @@
           "label": "First host refusal buys one repair",
           "type": "bool",
           "default": false,
-          "help": "When the operator's host scorer refuses a candidate through its declared contract (host_scorer.expect) for the first time, and its would-be number (host_scorer.would_be_key) beats the champion, the triage judge's reject_idea is HELD for one repair instead of ending the node; if the chain ends before the judge rules again, the held reject_idea is the terminal. Off = reject_idea always ends the node."
+          "help": "When the operator's host scorer refuses a candidate through its declared contract (host_scorer.expect) for the first time, and its would-be number (host_scorer.would_be_key) beats the current champion (no champion yet: no deferral), the triage judge's reject_idea is HELD for one repair instead of ending the node; if the chain ends before the judge rules again, the held reject_idea is the terminal. Off = reject_idea always ends the node."
         },
         {
           "key": "host_refusal_repair_lead",
@@ -494,6 +494,13 @@
           "type": "bool",
           "default": false,
           "help": "The triage diagnostician's account of WHY the operator's host scorer refused leads the repair Developer's text (it is withheld on other engine-final reasons). Off = the historical repair text, byte for byte."
+        },
+        {
+          "key": "host_scorer_account",
+          "label": "Host refusal: the scorer's own account",
+          "type": "bool",
+          "default": false,
+          "help": "When the operator's host scorer refuses a candidate and the task names the scorer's account key (host_scorer.diagnosis_key), the triage judge and the repair read the failed stage, the relations that broke, the protected-scorer warning and that account (up to 2,000 characters, fenced as evidence) instead of the last 500 characters of stderr. Off = the historical stderr tail, byte for byte."
         },
         {
           "key": "inline_repair",

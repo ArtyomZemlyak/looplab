@@ -30,7 +30,7 @@ from typing import Optional
 
 from looplab.core.costs_text import budget_line
 from looplab.core.errors import BudgetExceeded, OperatorRefusal, budget_stop_leaf
-from looplab.core.evidence import fence_kwargs
+from looplab.core.evidence import EVIDENCE_LABEL, fence_kwargs, fenced_head
 from looplab.core.models import Idea, DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX
 from looplab.core.parse import LLMClient
 from looplab.tools.patch import SurfacePolicy
@@ -2734,7 +2734,13 @@ class LLMRepoDeveloper:
             # A repair session gets the node's ACTUAL pipeline restated when knowable (P33) — the
             # system prompt's "trust the task message's pipeline" clause is conditional on it.
             user += self._repair_stage_note(op_stages, write)
-            user += _REPO_DEV_REPAIR_BLOCK.format(already=already) + error[:4000]
+            # The repair context's FIRST 4,000 characters, cut by `fenced_head`: byte for byte the
+            # plain head, unless the cut falls inside a fenced block — a host refusal's account under
+            # `Settings.host_scorer_account` (`evaluate._eval_failure_text`), which rides behind the
+            # held verdict and the diagnosis and so can straddle 4,000 — whose interior is then cut
+            # and fenced again, never left open with its closing marker cut away.
+            user += (_REPO_DEV_REPAIR_BLOCK.format(already=already)
+                     + fenced_head(error, 4000, EVIDENCE_LABEL))
         # A fresh implement (not a repair) on a real repo runs THREE explicit, separately-traced phases —
         # each its own focused tool-loop + emit so the context stays small and the trace reads cleanly
         # (Developer · stages → plan → implement):

@@ -43,6 +43,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Optional
 
+from looplab.core.evidence import EVIDENCE_LABEL, fenced_tail
 from looplab.core.models import developer_stuck_reason, is_developer_error, is_developer_stuck
 from looplab.engine.failure_diagnosis import REASON_SOURCE_ENGINE
 from looplab.engine.metric_salvage import unbound_subject_violation_rows
@@ -330,7 +331,9 @@ def triage_verdict_outcome(action, rationale, *, err: str, node_id) -> TriageVer
             # wired and the call did not complete — the same dead-provider condition the
             # circuit breaker exists for, and exactly how the 2345-repair incident began.
             # Routed to that breaker (terminal + RUN-level pause) rather than to a quiet
-            # per-node abandon the operator would have to infer a provider outage from.
+            # per-node abandon the operator would have to infer a provider outage from. The failure
+            # text's last 200 characters are cut by `fenced_tail`: byte for byte the plain tail,
+            # unless the cut falls inside a host refusal's fenced account, which it then re-fences.
             return TriageVerdictOutcome(
                 True, ("abandon", "the repair-stop judge could not be reached — "
                                   "treating it as a provider failure, not as "
@@ -339,7 +342,7 @@ def triage_verdict_outcome(action, rationale, *, err: str, node_id) -> TriageVer
                 err=(f"crash-triage failed: {_judge_err}\n[the model that decides whether "
                      f"to keep repairing this node could not be reached, so the node was "
                      f"stopped rather than repaired blind. Its last eval error was: "
-                     f"{err[-200:]}]"),
+                     f"{fenced_tail(err, 200, EVIDENCE_LABEL)}]"),
                 pause=(f"the crash-triage model could not be reached while deciding whether to "
                        f"keep repairing node {node_id} — {_judge_err}"))
         # THE MODEL ANSWERED SOMETHING UNREADABLE. The endpoint is demonstrably alive
@@ -366,12 +369,24 @@ FIRST_HOST_REFUSAL_DEFERRAL = "first_host_refusal_buys_one_repair"
 
 @dataclass(frozen=True)
 class DeferredVerdict:
-    """A judge's verdict the engine did not act on YET: what it answered, and the rule that held it."""
+    """A judge's verdict the engine did not act on YET: what it answered, the rule that held it, and
+    what the rule's VALUE GATE compared — the refused candidate's would-be number and the champion's
+    metric and node it was held against — so a deferral can be re-checked off the log alone."""
     action: str
     rule: str
+    would_be: Optional[float] = None
+    champion_metric: Optional[float] = None
+    champion_node_id: Optional[int] = None
 
     def as_row(self) -> dict:
-        return {"action": self.action, "rule": self.rule}
+        """The `node_repaired.judge_deferred` column. `action`/`rule` are the closed vocabulary every
+        reader coerces to (`coerce_judge_deferred`); the gate's three inputs ride beside them for the
+        AUDIT, each only when known, and nothing that decides or prompts reads them."""
+        row: dict = {"action": self.action, "rule": self.rule}
+        for key in ("would_be", "champion_metric", "champion_node_id"):
+            if getattr(self, key) is not None:
+                row[key] = getattr(self, key)
+        return row
 
 
 def _beats(value: float, champion: float, direction: str) -> bool:
@@ -381,7 +396,8 @@ def _beats(value: float, champion: float, direction: str) -> bool:
 
 def deferred_triage_verdict(action, *, enabled: bool, engine_reason, host_contract_refused: bool,
                             first_host_refusal: bool, cap_headroom: bool, would_be=None,
-                            champion=None, direction: str = "max") -> Optional[DeferredVerdict]:
+                            champion=None, champion_node_id=None,
+                            direction: str = "max") -> Optional[DeferredVerdict]:
     """MAY THE JUDGE END A NODE WITH `reject_idea` ON ITS FIRST HOST REFUSAL? Not yet — sometimes.
 
     A refusal by the operator's host scorer (`host_scorer.expect.numeric`, e.g. `refused == 0`)
@@ -407,10 +423,21 @@ def deferred_triage_verdict(action, *, enabled: bool, engine_reason, host_contra
       (`attempt + 1 < effective cap`): with `inline_repair_attempts=1` a deferral would spend the
       only repair and the floor would end the node without the judge ever answering again;
     * a VALUE GATE — `would_be`, the metric the refused candidate would have scored under the
-      task's declared `host_scorer.would_be_key`, must be finite and must beat the `champion` in
-      the task `direction` (no champion yet: nothing to beat). No declared number, no deferral:
-      holding a judge's stop needs evidence the candidate is worth a repair, and node 9 is what
-      buying one without it costs (~40 minutes for a candidate that could not have won).
+      task's declared `host_scorer.would_be_key`, must be finite and must beat a finite `champion`
+      in the task `direction`. No declared number, no deferral: holding a judge's stop needs
+      evidence the candidate is worth a repair, and node 9 is what buying one without it costs
+      (~40 minutes for a candidate that could not have won).
+    * …and NO CHAMPION, NO DEFERRAL (critic review 2026-09-26; it used to read "no champion yet:
+      nothing to beat" and DEFER). The only evidence of worth this rule reads is a COMPARISON, and
+      with no champion there is nothing the would-be number can be shown to beat: every finite
+      number beat nothing, so the gate held every first refusal of a run's opening nodes, including
+      the ones it exists to let go — and the held repair's own prompt ("the scorer's own number
+      says this candidate would beat the current champion") told the Developer something false.
+      A run's first nodes are judged as they always were; the deferral begins once there is a
+      number to hold a refusal against.
+
+    `champion_node_id` decides nothing: it rides onto the verdict beside the two numbers the gate
+    compared (`DeferredVerdict.as_row`), so the row a deferral writes can be re-checked off the log.
 
     Then the verdict waits — the attempt goes on to ONE repair with the refusal in hand — and it is
     HELD, not discarded: the next judged attempt decides (`reject_idea` included), and if the chain
@@ -429,20 +456,28 @@ def deferred_triage_verdict(action, *, enabled: bool, engine_reason, host_contra
     if isinstance(would_be, bool) or not math.isfinite(value):
         return None
     try:
-        best = float(champion) if champion is not None else None
+        best = (float(champion) if champion is not None and not isinstance(champion, bool)
+                else None)
     except (TypeError, ValueError):
         best = None
-    if best is not None and math.isfinite(best) and not _beats(value, best, direction):
+    if best is None or not math.isfinite(best) or not _beats(value, best, direction):
         return None
-    return DeferredVerdict(str(action), FIRST_HOST_REFUSAL_DEFERRAL)
+    node = (champion_node_id if isinstance(champion_node_id, int)
+            and not isinstance(champion_node_id, bool) else None)
+    return DeferredVerdict(str(action), FIRST_HOST_REFUSAL_DEFERRAL, would_be=value,
+                           champion_metric=best, champion_node_id=node)
 
 
 def coerce_judge_deferred(value) -> Optional[dict]:
     """A `judge_deferred` column in the CLOSED vocabulary its one writer spells, or None.
 
-    Durable rows are read back by the judge history, the renderers and the corpus; a hand-edited or
-    foreign row must not put an arbitrary action or rule word in front of a judge. The only
-    deferral that exists holds `reject_idea` under `FIRST_HOST_REFUSAL_DEFERRAL`."""
+    Durable rows are read back by the judge history, the renderers, the MLE-bench transcript and
+    the corpus; a hand-edited or foreign row must not put an arbitrary action or rule word in front
+    of a judge, and every one of them reads the column through here. The only deferral that exists
+    holds `reject_idea` under `FIRST_HOST_REFUSAL_DEFERRAL`. The value gate's audit columns beside
+    them (`would_be`, `champion_metric`, `champion_node_id`) are the log's record of the decision and
+    are deliberately NOT carried: no reader that renders or decides needs a number the rule already
+    compared."""
     if (isinstance(value, dict) and value.get("action") == "reject_idea"
             and value.get("rule") == FIRST_HOST_REFUSAL_DEFERRAL):
         return {"action": "reject_idea", "rule": FIRST_HOST_REFUSAL_DEFERRAL}
