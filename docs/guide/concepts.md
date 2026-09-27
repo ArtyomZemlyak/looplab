@@ -1534,6 +1534,14 @@ membership on the `Idea` with an explicit contract:
   event is the raw audit source. Replay materializes the effective full set in `RunState.node_concepts`
   after the complete DAG has folded.
 
+An id a **model** returns is held to the form its prompt asked for (doc 69, 69.22):
+`search/concept_graph.py::model_concept_id` refuses an echo of the prompt's own template (`axis/slug`,
+`axis/short-slug`, `n/a`, `none`) and any placeholder word (`placeholder`, `todo`, `tbd`), and the
+importance audit behind the coverage directive also refuses an id that names no axis. The node tagger
+refuses such a response whole (the node falls back to the heuristic tagger), and consolidation drops a
+rename to one. Recorded memberships and replay are not re-checked. One real segment keeps an id:
+`regularization/none` is a concept.
+
 ### The run-constant half of a membership
 
 Because the delta contract materializes each node's set as *base ∪ delta*, a run whose base is wide

@@ -20,6 +20,7 @@ from typing import Optional
 from looplab.core.concepts import MAX_MATERIALIZED_CONCEPTS, normalize_concept_id
 from looplab.core.errors import BudgetExceeded
 from looplab.core.models import RunState
+from looplab.search import concept_graph
 from looplab.search.concept_graph import ConceptGraph, _normalize_concept_id
 
 
@@ -270,6 +271,10 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
             # only the valid subset would turn a malformed classifier output into trusted evidence.
             if any(normalize_concept_id(raw) is None for raw in value):
                 raise ValueError("concept_ids contains an invalid concept id")
+            # …and so is an id that is the prompt's own `axis/slug` template or a placeholder: it
+            # would be GROWN into the vocabulary as a concept (doc 69 69.22).
+            if any(not concept_graph.model_concept_id(raw) for raw in value):
+                raise ValueError("concept_ids contains a template or placeholder id")
             return value
 
     known_tags = known_tags or {}

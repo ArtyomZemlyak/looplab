@@ -25,7 +25,7 @@ from looplab.core.models import RunState
 # the suite still uses (`tests/test_retro_tag_persist.py` forces a CAS race through it). Same
 # hazard CLAUDE.md records for `serve/scope_actions.py` importing store names by value. Types and
 # the pure `_normalize_concept_id` wrapper are exempt: nothing patches those.
-from looplab.search import concept_analytics, concept_tagging
+from looplab.search import concept_analytics, concept_graph, concept_tagging
 from looplab.search.concept_graph import Concept, ConceptGraph, _normalize_concept_id
 
 
@@ -84,7 +84,9 @@ def derive_reference_concepts(task_goal: str, coverage: dict, *, client, asset_b
     seen = set(explored)
     items: list[dict] = []
     for it in out.missing:
-        cid = _normalize_concept_id(it.concept_id)
+        # The prompt asked for `axis/short-slug`: an echo of that template, a placeholder or an
+        # id with no axis is not a direction (doc 69 69.22) — it would be the coverage directive.
+        cid = concept_graph.model_concept_id(it.concept_id, axis_required=True)
         if cid and cid not in seen:
             seen.add(cid)
             items.append({"concept_id": cid, "why": (it.why or "").strip()[:160]})
@@ -212,7 +214,9 @@ def consolidate_concepts(graph: "ConceptGraph", tags: dict, *, client=None, embe
             idset = set(ids)
             for p in out.merges:
                 raw = _normalize_concept_id(p.raw)
-                canon = _normalize_concept_id(p.canonical)
+                # A canonical that is the prompt's own `axis/slug` template renames a real
+                # concept to nothing (doc 69 69.22).
+                canon = concept_graph.model_concept_id(p.canonical)
                 # `raw not in decided`: a recorded decision is AUTHORITATIVE — freeze BOTH known raws AND
                 # known canonicals (`decided` = keys ∪ values). Guarding only the keys would let the model
                 # re-canonicalize a known canonical B->C, which `_final` then rewrites A->B into A->C — the

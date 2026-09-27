@@ -480,3 +480,35 @@ def skeleton_for(task_type: str, *, text: str = "") -> ConceptGraph:
 def _normalize_concept_id(raw) -> str:
     # search analytics share the core bounded identity contract with replay and serve.
     return normalize_concept_id(raw) or ""
+
+
+# AN ID A MODEL RETURNS IS HELD TO THE FORM ITS PROMPT ASKED FOR (doc 69 69.22). The concept prompts
+# spell the id's SHAPE in words — `axis/short-slug` (the importance audit), `axis/slug` and
+# `axis/family/method/variant` (the tagger), `axis/slug` (consolidation) — and an echo of that shape,
+# or the shape filled with a placeholder, is an id `normalize_concept_id` accepts: a literal
+# `placeholder` reached the coverage directive of a real run, and from there every proposal prompt
+# ("0 coverage in {…} — direct the next proposals there"). Words, not ids: a segment is split on
+# `-`/`_`/`.`, so `short-slug` and `axis_name` are caught with the bare `slug` and `axis`.
+_PLACEHOLDER_WORDS = frozenset({"placeholder", "tbd", "tba", "todo", "xxx"})
+_TEMPLATE_WORDS = _PLACEHOLDER_WORDS | frozenset({
+    "axis", "short", "slug", "family", "method", "variant", "concept", "id", "name", "example",
+    "none", "null", "unknown", "na", "n", "a"})
+_SEGMENT_WORD_SPLIT = re.compile(r"[-_.]+")
+
+
+def model_concept_id(raw, *, axis_required: bool = False) -> str:
+    """`_normalize_concept_id` for an id a MODEL returned: "" also when it is its prompt's template
+    rather than a concept — any word of it a placeholder (`data/placeholder`), or every word of every
+    segment a template word (`axis/short-slug`, `n/a`, `none`) — and, with `axis_required`, when it
+    names no axis (`ensembling`, from a prompt that asked for `axis/short-slug`). A segment with one
+    real word keeps the id: `regularization/none` is a tag, `loss/method` a concept."""
+    cid = _normalize_concept_id(raw)
+    if not cid:
+        return ""
+    segments = cid.split("/")
+    words = [[w for w in _SEGMENT_WORD_SPLIT.split(seg) if w] for seg in segments]
+    if (any(w in _PLACEHOLDER_WORDS for ws in words for w in ws)
+            or all(w in _TEMPLATE_WORDS for ws in words for w in ws)
+            or (axis_required and len(segments) < 2)):
+        return ""
+    return cid

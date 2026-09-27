@@ -1131,3 +1131,77 @@ def test_the_live_gates_hand_the_resolver_the_runs_own_goal():
     state.goal = "minimise a quadratic over one variable"
     assert engine._graded_novelty_precheck(state, variant) is None, (
         "…and a goal outside every pack leaves the pre-gate exactly as it was: no vocabulary")
+
+
+# --------------------------------------------------------------------------- #
+# Doc 69 69.22 — an id a MODEL returns is held to the form its prompt asked for
+# --------------------------------------------------------------------------- #
+
+class _AuditClient:
+    """The importance audit's provider, answered through the REAL structured parse."""
+    def __init__(self, ids):
+        self.ids = ids
+
+    def complete_tool(self, messages, json_schema):
+        return {"missing": [{"concept_id": cid, "why": f"why {cid}"} for cid in self.ids]}
+
+    def complete_text(self, messages):
+        return "not json"
+
+
+def test_the_importance_audit_refuses_a_template_a_placeholder_and_an_axisless_id():
+    """A real run's coverage directive named a literal `placeholder`, and from there every proposal
+    prompt ("0 coverage in {…} — direct the next proposals there"): the audit's ids passed the
+    SYNTAX check and nothing else. The prompt asks for `axis/short-slug`; its echo, a placeholder,
+    and an id naming no axis are not directions. An id with one real segment still is."""
+    from looplab.search.concept_map import derive_reference_concepts
+
+    out = derive_reference_concepts(
+        "maximize recall", {"concept_touch": {"loss/x": 1}},
+        client=_AuditClient(["placeholder", "axis/short-slug", "data/placeholder", "n/a", "none",
+                             "ensembling", "Data/Synthetic-Queries", "regularization/none"]))
+    assert [m["concept_id"] for m in out] == ["data/synthetic-queries", "regularization/none"]
+
+
+def test_llm_tagger_rejects_a_template_id_as_untrusted_fallback(tmp_path):
+    """The tagger GROWS what it is given: `axis/slug` (its own prompt's spelling of a new id) would
+    become a concept in the vocabulary. The response is refused whole, like any id outside the
+    schema, and the node falls back to the heuristic."""
+    st = fold(_store(tmp_path, [("dcl", "decoupled contrastive loss run", 0.5)]).read_all())
+    graph, modes = dense_retrieval_skeleton(), {}
+    tags = tag_nodes_llm(st, graph, _TagClient(["loss/decoupled-contrastive", "axis/slug"]),
+                         grow=True, producer_modes=modes)
+    assert "axis/slug" not in graph and "axis/slug" not in tags[0]
+    assert modes == {0: "offline-heuristic"}
+
+
+def test_consolidate_drops_a_rename_to_a_template_id(monkeypatch):
+    import looplab.core.parse as parse_mod
+    from looplab.search import concept_map as cm
+    g = ConceptGraph([Concept("augmentation/mixup", "mixup", ("augmentation",)),
+                      Concept("data-augmentation/cutmix", "cutmix", ("data-augmentation",))])
+    tags = {0: frozenset({"augmentation/mixup"}), 1: frozenset({"data-augmentation/cutmix"})}
+
+    class _P:
+        def __init__(s, r, c): s.raw, s.canonical = r, c
+
+    class _Out:
+        merges = [_P("data-augmentation/cutmix", "axis/slug"),
+                  _P("augmentation/mixup", "augmentation/placeholder")]
+    monkeypatch.setattr(parse_mod, "parse_structured", lambda *a, **k: _Out())
+    g2, t2, rename = cm.consolidate_concepts(g, tags, client=object())
+    assert rename == {}
+    assert "data-augmentation/cutmix" in g2 and "axis/slug" not in g2
+    assert t2[1] == frozenset({"data-augmentation/cutmix"})
+
+
+def test_a_model_concept_id_keeps_every_real_concept():
+    """The refusal is for a TEMPLATE, never a vocabulary: one real word keeps the id."""
+    from looplab.search.concept_graph import model_concept_id
+    for cid in ("loss/method", "regularization/none", "features/id", "loss/contrastive/dcl",
+                "negatives/external-mining", "ensembling"):
+        assert model_concept_id(cid) == cid
+    assert model_concept_id("ensembling", axis_required=True) == ""
+    for echo in ("axis/slug", "axis_name/short_slug", "axis/family/method/variant", "concept-id",
+                 "placeholder", "data/placeholder-1", "n/a", "unknown", "", None, "bad!"):
+        assert model_concept_id(echo) == ""

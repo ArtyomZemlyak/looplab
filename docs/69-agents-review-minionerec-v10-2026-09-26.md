@@ -243,7 +243,7 @@ SID already appears in the user's history … roughly doubles raw UnseenRecall@2
   одним hint — у него нет долговечного канала. Предложение: заметки оператора с ключом `task.family`,
   а не `task_id` (он меняется с каждой версией прогона).
 - Концепт-идентификаторы от LLM не валидируются: в директиву покрытия попал буквальный `placeholder`,
-  словарь пришёл из семейства dense-retrieval (69.22).
+  словарь пришёл из семейства dense-retrieval (69.22, 69.22a).
 
 ## 6. Направление поиска
 
@@ -366,7 +366,8 @@ UnseenRecall@20=0.03328)» уйдёт в межпрогонные claims как 
 - **69.19** OPEN[task-edit-unrecorded-on-resume] resume не сравнивает `config_hash` задачи (§5.4). proof:absent:config_hash@looplab/engine/reentry.py
 - **69.20** OPEN[workspace-changed-once-per-run] `workspace_changed` пишется не больше одного раза за прогон (§5.4). proof:`present:and not state.workspace_changed:@looplab/engine/setup_phase.py`
 - **69.21** OPEN[operator-rejections-ignored-by-prior] пассивный приор не учитывает решений оператора по claims (§5.4). proof:absent:claim_decisions@looplab/engine/lessons_priors.py
-- **69.22** OPEN[llm-concept-ids-unvalidated] концепт-id из ответа LLM принимаются без проверки формы (§5.4). proof:`present:if cid and cid not in seen:@looplab/search/concept_map.py`
+- **69.22** *Закрыто 2026-09-27: здесь стоял `llm-concept-ids-unvalidated`. Концепт-id, который вернула модель, теперь проверяется на форму, о которой просил промпт: `search/concept_graph.py::model_concept_id`. Отказ получает эхо шаблона — все слова всех сегментов шаблонные (`axis/short-slug`, `axis/family/method/variant`, `n/a`, `none`); заглушка в любом слове (`placeholder`, `data/placeholder-1`, `todo`, `tbd`); а у аудита важности, чей промпт просит `axis/short-slug`, ещё и id без оси (`ensembling`). Один настоящий сегмент сохраняет id: `regularization/none` и `loss/method` остаются. Проверка стоит на трёх входах из ответа модели: аудит важности (`derive_reference_concepts` — это ключи директивы покрытия и дальше каждого промпта предложений); валидатор теггера узлов (ответ с таким id отвергается целиком, узел уходит в эвристику, как при любом id вне схемы; иначе id был бы ВЫРАЩЕН в словарь); канонический id переименования в консолидации. Уже записанные `node_concepts` и реплей не пере-проверяются: их выводы детерминированы по журналу (`tests/test_concept_graph.py`). Вторая половина наблюдения §5.4 — словарь из семейства dense-retrieval — здесь не тронута, это 69.22a.*
+- **69.22a** OPEN[concept-pack-picked-by-two-goal-words] единственный курированный пакет (dense-retrieval) выбирается по тексту цели, если она называет два его доменных концепта (`search/concept_graph.py::skeleton_for`); словарь прогона генеративной рекомендации пришёл из него (§5.4). Текста цели прогона в дереве нет, так что выбор не пере-измерен. proof:`present:_SKELETON_TEXT_MIN_CONCEPTS = 2@looplab/search/concept_graph.py`
 
 **Направление поиска (§6)**
 - **69.23** OPEN[strategist-blind-to-gpu-pool] бриф стратега не несёт бюджета GPU на эксперимент (§6.1). proof:absent:per_experiment_gpu_budget@looplab/agents/strategist.py
