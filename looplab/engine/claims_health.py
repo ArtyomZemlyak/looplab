@@ -37,6 +37,8 @@ from looplab.engine.governance_health import (
     validate_revision_fields,
 )
 from looplab.engine.memory import _CLAIM_STANCES, _NEGATIVE, normalize_statement
+# The fingerprint fence and the id bound are the WRITER's (doc 69 69.14): read here.
+from looplab.engine.memory import _MAX_SOURCE_FINGERPRINT, _MAX_SOURCE_ID  # noqa: F401
 from looplab.trust.cross_run import (
     cross_run_identity_text,
     cross_run_text,
@@ -53,9 +55,7 @@ _MAX_DECISION_METRIC = 200
 # Same reasoning: the ledger declares a decision's scope, but the context pack and the
 # assessment projections both bound it too, so the bound lives with the other bounds.
 _MAX_DECISION_SCOPE = 500
-_MAX_SOURCE_ID = 500
 _MAX_SOURCE_EVIDENCE = 256
-_MAX_SOURCE_FINGERPRINT = 256
 _MAX_CLAIM_PROJECTION_ITEMS = 64
 _MAX_CONTEXT_CLAIMS = 64
 _MAX_RETRIEVAL_HITS = 64

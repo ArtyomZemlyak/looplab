@@ -1016,3 +1016,30 @@ def test_the_reflection_row_of_a_substituted_winner_says_it_built_something_else
     eng._write_reflection_note(fold(eng.store.read_all()))
     row = next(line for line in scripted.prompts[0].splitlines() if line.startswith("#0 draft"))
     assert "[NOT A TEST OF its IDEA (idea different) — built instead: the grouped path]" in row
+
+
+def test_the_writer_bounds_a_fingerprint_to_what_the_reader_accepts():
+    """Doc 69 69.14 (driven on a real run's store: a 336-token goal fingerprint hid 29 of 77 lesson
+    rows, and the reconcile that found one stale retired nothing). The reader refuses a fingerprint
+    past `_MAX_SOURCE_FINGERPRINT` tokens or with a token past `_MAX_SOURCE_ID`; the writer now owns
+    both bounds and never writes past them — keeping the kind/direction/metric facets — while every
+    fingerprint the reader already accepted is byte for byte what it was."""
+    from looplab.engine.claims_health import _valid_claim_source_row
+    from looplab.engine.memory import _MAX_SOURCE_FINGERPRINT, _MAX_SOURCE_ID
+
+    short = task_fingerprint("repo", "max", "maximize recall on the dev split", metric="recall",
+                             param_names=["lr"])
+    assert short == sorted({"kind:repo", "dir:max", "metric:recall", "maximize", "recall", "dev",
+                            "split", "param:lr"})
+    # Words and an over-long token that SORT BEFORE the facets, so a plain sorted cut would keep
+    # them and drop `dir:`/`kind:`/`metric:` (and the over-long one would be written).
+    goal = " ".join(f"aword{i:04d}" for i in range(400)) + " " + "a" * (_MAX_SOURCE_ID + 1)
+    long = task_fingerprint("repo", "max", goal, metric="recall", param_names=["lr"])
+    assert len(long) == _MAX_SOURCE_FINGERPRINT and long == sorted(long)
+    assert {"kind:repo", "dir:max", "metric:recall"} <= set(long)
+    assert all(len(token) <= _MAX_SOURCE_ID for token in long)
+    row = {"statement": "a wider margin helps", "outcome": "supported", "evidence": [1],
+           "task_id": "t", "run_id": "r", "fingerprint": long}
+    assert _valid_claim_source_row(row, research=False)
+    assert not _valid_claim_source_row({**row, "fingerprint": long + ["zzz"]}, research=False), (
+        "precondition: one token more and the reader refuses the row")

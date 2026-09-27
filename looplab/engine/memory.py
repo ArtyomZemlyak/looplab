@@ -117,6 +117,17 @@ def _goal_tokens(goal: str, *, universal: bool) -> list[str]:
             if len(w) > 2 and w not in _STOP]
 
 
+# THE READER'S FENCE, OWNED BY THE WRITER (doc 69 69.14). `engine/claims_health.py::
+# _valid_claim_source_row` refuses a row whose fingerprint holds more tokens than this, or a token
+# longer than `_MAX_SOURCE_ID` — so a fingerprint `task_fingerprint` built past either was written and
+# never read: a 336-token goal fingerprint hid 29 of 77 store rows, and the reconcile that found one of
+# them stale retired nothing (doc 69 §5.2). Defined here, where the fingerprint is built, and imported
+# by the reader (`claims_health` already imports this module; the reverse would be a cycle).
+_MAX_SOURCE_ID = 500
+_MAX_SOURCE_FINGERPRINT = 256
+_FINGERPRINT_FACETS = ("kind:", "dir:", "metric:")
+
+
 def task_fingerprint(kind: str, direction: str, goal: str, metric: str = "",
                      param_names: Optional[list[str]] = None, *, universal: bool = False) -> list[str]:
     """A cheap, deterministic content fingerprint of a task as a token SET (M2). Cross-run transfer
@@ -136,7 +147,22 @@ def task_fingerprint(kind: str, direction: str, goal: str, metric: str = "",
         toks.add(w)
     for p in (param_names or []):
         toks.add(f"param:{str(p).lower()}")
-    return sorted(toks)
+    return bound_fingerprint(toks)
+
+
+def bound_fingerprint(tokens) -> list[str]:
+    """The sorted fingerprint, BOUNDED to what `claims_health._valid_claim_source_row` accepts (doc 69
+    69.14). One the reader already accepts is returned byte for byte as it always was; one it would
+    refuse loses every token past `_MAX_SOURCE_ID` (a cut would mint a token no task has), keeps the
+    kind/direction/metric facets, and fills the remaining slots with the rest in sorted order —
+    deterministic, so every writer of one task's rows keys them alike."""
+    out = sorted(tokens)
+    if len(out) <= _MAX_SOURCE_FINGERPRINT and all(len(t) <= _MAX_SOURCE_ID for t in out):
+        return out
+    fitting = [t for t in out if len(t) <= _MAX_SOURCE_ID]
+    facets = [t for t in fitting if t.startswith(_FINGERPRINT_FACETS)]
+    rest = [t for t in fitting if not t.startswith(_FINGERPRINT_FACETS)]
+    return sorted(facets + rest[:max(0, _MAX_SOURCE_FINGERPRINT - len(facets))])
 
 
 

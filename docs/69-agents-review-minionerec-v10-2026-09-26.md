@@ -205,7 +205,7 @@ metric?»), но ничто не связало его с числами узл�
 такую победу в память; ко-метрики пишет кандидат — ловушка для честного Гудхарта, не для подделки;
 пороги калибровать на корпусе `runs/`.
 
-### 5.2 Урок «гудхарта» лежит в общей памяти как `supported` и не снимается (69.14, 69.15)
+### 5.2 Урок «гудхарта» лежит в общей памяти как `supported` и не снимается (69.14, 69.14a, 69.15)
 
 seq 3364 (через 5 мин ПОСЛЕ стопа, §4.3): `lessons_distilled` записал «Drop SFT target positions whose
 SID already appears in the user's history … roughly doubles raw UnseenRecall@20», `supported`,
@@ -357,7 +357,8 @@ UnseenRecall@20=0.03328)» уйдёт в межпрогонные claims как 
 
 **Метрика и доверие (§5)**
 - **69.13** OPEN[no-metric-behaviour-detector] словарь trust-детекторов закрыт и не содержит проверки поведения метрики (§5.1). proof:`present:TRUST_DETECTOR_CODE_LEAKAGE, TRUST_DETECTOR_CRITIC, TRUST_DETECTOR_FEATURE_CV)@looplab/trust/scan_receipt.py`
-- **69.14** OPEN[lesson-writer-exceeds-reader-fence] писатель уроков не знает порога отпечатка читателя (§5.2). proof:absent:_MAX_SOURCE_FINGERPRINT@looplab/engine/memory.py
+- **69.14** *Закрыто 2026-09-27: здесь стоял `lesson-writer-exceeds-reader-fence`. Порог отпечатка (`_MAX_SOURCE_FINGERPRINT` = 256 токенов, `_MAX_SOURCE_ID` = 500 символов на токен) теперь определён у писателя, в `engine/memory.py`, и `engine/claims_health.py::_valid_claim_source_row` читает его оттуда — два числа больше не расходятся. `task_fingerprint` отдаёт отпечаток через `engine/memory.py::bound_fingerprint`: принимаемый читателем — байт в байт прежний; отвергаемый — без токенов длиннее 500 символов (обрезка создала бы токен, которого нет ни у одной задачи), с сохранёнными гранями `kind:`/`dir:`/`metric:` и остальными токенами в порядке сортировки до 256. Порог не поднят (§5.2, критика). Пассивный приор забора не применяет и сравнивает по Jaccard; у той же задачи с 336 токенами новый отпечаток против старой строки даёт 256/336 ≈ 0,76, выше порога 0,34. Строки, записанные до этого исправления, не мигрированы — это 69.14a (`tests/test_lessons_fingerprint.py`).*
+- **69.14a** OPEN[lesson-rows-past-fence-unmigrated] строки уроков, записанные до 69.14 с отпечатком за забором читателя (29 из 77 в сторе v10), по-прежнему невидимы огороженному читателю; нужен обслуживающий проход без вызова модели, который пере-ограничивает их отпечаток тем же `bound_fingerprint` (§5.2). proof:absent:bound_fingerprint@looplab/cli
 - **69.15** OPEN[lesson-retire-uses-fenced-set] изъятие устаревших уроков идёт по огороженному набору, признание — по неогороженному (§5.2). proof:`present:cur = load_claim_source_path(@looplab/engine/lessons_reconcile.py`
 - **69.16** OPEN[report-omits-champion-caveats] контекст отчёта не читает оговорок чемпиона (§5.3). proof:absent:champion_metric_caveats@looplab/serve/report.py
 - **69.17** *Закрыто 2026-09-27: здесь стоял `schema-echo-parses-as-empty-report`. Лучший кандидат, который несёт имена и ни одного из объявленных схемой (её собственное эхо, пример другой формы), больше не возвращается как ответ, а отказывается `ParseError` — и строгим обходом, и мягким `literal_eval`-запасом (`core/parse.py::_answers`); следующий парсер, а за ним запасной путь вызывающего (детерминированный отчёт `serve/report.py`) решают сами. Пустой объект `{}` — все поля по умолчанию — остаётся ответом, вызов без схемы — прежним обходом. `tests/test_json_extraction_picks_the_answer.py`: тест предела кандидатов закреплял прежнее поведение («за пределом всё равно отвечает» — `{"unrelated": 0}` как ответ) и переписан.*
