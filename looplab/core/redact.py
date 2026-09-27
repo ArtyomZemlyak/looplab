@@ -394,38 +394,6 @@ def redact_env_values(text: str, env=None) -> str:
     return text
 
 
-# One `NAME=VALUE` line of a dotenv file: an optional `export`, the name, `=`, the value.
-_ENV_FILE_ASSIGNMENT = re.compile(r"^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_.\-]*)(\s*=\s*)(.*)$")
-
-
-def redact_env_file_text(text: str) -> str:
-    """A `*.env` KNOB file as a model may read it (doc 69 69.36: the task's knobs lived in `*.env`
-    files, and 51 `read_file` refusals and 55 probes that printed them bought what one read gives).
-
-    Every VALUE a child process would be refused (`envsafe.is_secret_env`: a secret-shaped NAME, or
-    a URL carrying inline credentials) is masked whole — that screen, and not this module's narrow
-    `_SECRET_KEY_RE`, because the reader is a possibly-remote model and the safe direction is the
-    sandbox's: withhold one too many. Every other line passes the known-shape and this box's
-    env-value screens (a credential under an innocent name). Comments, blank lines and every other
-    value are the file's own text: they are the task's knobs, the reason the file is read at all."""
-    if not text:
-        return text
-    out: list[str] = []
-    for line in text.splitlines(keepends=True):
-        body = line.rstrip("\r\n")
-        end = line[len(body):]
-        m = _ENV_FILE_ASSIGNMENT.match(body)
-        if m is not None:
-            value = m.group(4).strip()
-            bare = (value[1:-1] if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\""
-                    else value)
-            if is_secret_env(m.group(2), bare):
-                out.append(f"{m.group(1)}{m.group(2)}{m.group(3)}***REDACTED***{end}")
-                continue
-        out.append(redact_env_values(redact_secrets(body, entropy=False)) + end)
-    return "".join(out)
-
-
 def redact_output_tail(text: str, *, entropy: bool, env=None) -> str:
     """The persisted-tail redactor, and the ONE place the `redact_output` split is spelled.
 

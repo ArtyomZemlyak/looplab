@@ -310,8 +310,7 @@ class RepoScoutTools:
             return f"(no such file: {path})"
         if _looks_secret(p):
             return f"(refused: {p.name} looks like a credential/secret file — not read)"
-        knobs = _pathsafe.env_knob_file(p)
-        if not _readable(p) and not knobs:
+        if not _readable(p):
             try:
                 sz = p.stat().st_size
             except OSError:
@@ -335,10 +334,6 @@ class RepoScoutTools:
             data = p.read_text(encoding="utf-8-sig", errors="replace")
         except OSError as e:
             return f"(could not read: {e})"
-        if knobs:
-            # A `*.env` knob file, read with every secret-shaped value masked (doc 69 69.36).
-            from looplab.core.redact import redact_env_file_text
-            data = redact_env_file_text(data)
         return self._paginate(data, start_line, lines)
 
     @staticmethod

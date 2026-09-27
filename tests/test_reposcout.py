@@ -94,37 +94,6 @@ def test_env_example_readable_but_env_refused(tmp_path):
     assert "sk-real" not in t.execute("read_file", {"path": str(r / ".env")})
 
 
-def test_a_knob_env_file_is_read_with_its_secrets_masked(tmp_path, monkeypatch):
-    """Doc 69 69.36: a task's knobs lived in `*.env` files and `read_file` refused every one — 51
-    refusals and 55 probes printing them in one run. A `*.env` KNOB file is read now, with every
-    value a child process would be refused masked (a secret-shaped name, a URL with inline
-    credentials), a known credential shape masked under any name, and this box's own secret values
-    masked wherever they appear; a `.env*` dotfile stays refused. MUTATION: serve it unmasked -> a
-    secret reaches the model; drop the knob branch -> the file is refused."""
-    monkeypatch.setenv("LOOPLAB_TEST_PRIVATE_TOKEN", "boxsecret-9f8e7d6c5b4a")
-    r = tmp_path / "repo"; (r / "configs").mkdir(parents=True)
-    (r / "configs" / "train.env").write_text(
-        "# knobs for the SFT stage\n"
-        "export LR=3e-4\n"
-        "BATCH_SIZE=64\n"
-        "MODEL_PATH=/models/qwen\n"
-        "HF_TOKEN=hf_abcdefghijklmnopqrstuvwxyzABCDEF\n"
-        'DATABASE_URL="postgres://user:pw@db.internal/runs"\n'
-        "MIRROR=boxsecret-9f8e7d6c5b4a\n"
-        "PULL_NOTE=clone with ghp_abcdefghijklmnopqrstuvwxyz0123456789\n", encoding="utf-8")
-    (r / ".env.local").write_text("LR=1\n", encoding="utf-8")
-    t = RepoScoutTools([r])
-    text = t.execute("read_file", {"path": str(r / "configs" / "train.env")})
-    for knob in ("# knobs for the SFT stage", "export LR=3e-4", "BATCH_SIZE=64",
-                 "MODEL_PATH=/models/qwen"):
-        assert knob in text, text
-    assert "HF_TOKEN=***REDACTED***" in text and "hf_abcdef" not in text
-    assert "DATABASE_URL=***REDACTED***" in text and "pw@" not in text
-    assert "boxsecret-9f8e7d6c5b4a" not in text, "this box's own secret value, under any name"
-    assert "PULL_NOTE=clone with" in text and "ghp_abcdef" not in text, "a known shape, any name"
-    assert "LR=1" not in t.execute("read_file", {"path": str(r / ".env.local")})
-
-
 def test_read_is_allowlist_no_false_positive_on_token(tmp_path):
     """read_file is an allowlist (unknown extensions not read), but a legit code file whose NAME
     contains 'token' (tokenizer.py — common in NLP repos) must still be readable."""
