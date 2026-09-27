@@ -16,6 +16,13 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 from looplab.core.advisory_payloads import sanitize_report_payload
+from looplab.engine.champion_caveats import (CHAMPION_CAVEAT_MERGED_COORDINATES,
+                                             CHAMPION_CAVEAT_MIXED_COMPARABILITY,
+                                             CHAMPION_CAVEAT_PARAMS_OVERRIDDEN,
+                                             CHAMPION_CAVEAT_RETARGETED_OBJECTIVE,
+                                             CHAMPION_CAVEAT_SALVAGED,
+                                             CHAMPION_CAVEAT_TRUST_FLAGGED,
+                                             champion_metric_caveats)
 from looplab.events.digest import (experiments_digest, metric_scored_invalid, node_metric,
                                    node_theme)
 from looplab.core.models import NodeStatus, RunState
@@ -141,6 +148,15 @@ def _report_context(state: RunState) -> str:
                      "checked and is excluded from best. Declare `eval.metric.subject`")
     if best is not None and best.confirmed_mean is None:
         flags.append("the champion is single-seed (not multi-seed confirmed)")
+    # THE CHAMPION'S OWN CAVEATS (doc 69 69.16): the engine's receipt on the number this report
+    # leads with (`engine/champion_caveats.py::champion_metric_caveats`, the one derivation the run
+    # row, the reviewer bundle and the git export read). Unread here, a real run's report called
+    # every number "directly comparable" beside `mixed_comparability`. A slug this build words
+    # nothing for is named as it is, never dropped; the retarget is the Objective line above.
+    for slug in champion_metric_caveats(state):
+        if slug != CHAMPION_CAVEAT_RETARGETED_OBJECTIVE:
+            flags.append(_CHAMPION_CAVEAT_FLAGS.get(
+                slug, f"the engine records the champion caveat {slug!r}"))
     if flags:
         lines.append("Trust flags: " + "; ".join(flags) + ".")
     if state.research:
@@ -151,6 +167,28 @@ def _report_context(state: RunState) -> str:
     if dig:
         lines.append(dig)
     return "\n".join(lines)
+
+
+# One trust-flag clause per champion caveat, on the meaning `ui/src/runIndex.js::
+# bestMetricCaveatNotice` gives the same slug.
+_CHAMPION_CAVEAT_FLAGS = {
+    CHAMPION_CAVEAT_SALVAGED: (
+        "the champion's metric was NOT measured: its evaluation failed and the run's own declared "
+        "reader recovered the number, which `metric_salvage` lets compete"),
+    CHAMPION_CAVEAT_TRUST_FLAGGED: (
+        "the champion carries a high-precision reward-hack or leakage signal this run's trust_gate "
+        "did not enforce"),
+    CHAMPION_CAVEAT_PARAMS_OVERRIDDEN: (
+        "the champion's own code assigns a different value to a parameter its experiment declares, "
+        "so its params are not the configuration that produced the number"),
+    CHAMPION_CAVEAT_MIXED_COMPARABILITY: (
+        "this run's nodes were NOT all measured against the same evaluation (their comparability "
+        "keys, source trees or evaluation protocols provably differ): the champion won a mixed "
+        "field, so the numbers are not directly comparable"),
+    CHAMPION_CAVEAT_MERGED_COORDINATES: (
+        "the champion is a mean-merge: its params are the average of its parents' and no "
+        "experiment ever trained that configuration"),
+}
 
 
 def _g(v: Optional[float]) -> str:

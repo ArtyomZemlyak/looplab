@@ -144,6 +144,47 @@ def test_the_report_does_not_accuse_a_salvaged_node_of_breaking_a_constraint():
     assert "1 evaluated node(s) carry a SALVAGED metric" in both
 
 
+def test_the_report_names_the_champion_s_own_caveats(tmp_path, monkeypatch):
+    """Doc 69 69.16: a real run's report called every number "directly comparable" while the
+    engine's receipt on its champion said `mixed_comparability` — the report's context never read
+    it. The trust flags now carry the engine's own derivation, one clause per slug, and nothing on
+    a run whose champion has no caveat."""
+    from looplab.core.models import durable_idea_payload
+    from looplab.engine.champion_caveats import champion_metric_caveats
+    from looplab.events.eventstore import EventStore
+    from looplab.serve import report as report_mod
+
+    def run(name, profiles):
+        store = EventStore(tmp_path / name / "events.jsonl")
+        store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g",
+                                     "direction": "max"})
+        for nid, (metric, profile) in enumerate(profiles):
+            idea = Idea(operator="draft", params={}, rationale=f"n{nid}")
+            store.append("node_created", {"node_id": nid, "parent_ids": [], "operator": "draft",
+                                          "idea": durable_idea_payload(idea), "code": "pass\n"})
+            record = {"version": 1, "authority": "declared", "keys": {"declared": "k" * 16},
+                      "protocol": {"profile": profile}}
+            store.append("node_evaluated", {"node_id": nid, "generation": 0, "metric": metric,
+                                            "violations": [],
+                                            "metric_provenance": {"comparability": record}})
+        return fold(store.read_all())
+
+    mixed = run("mixed", [(0.9, "a" * 16), (0.8, "b" * 16)])
+    assert champion_metric_caveats(mixed) == ["mixed_comparability"]
+    assert "the champion won a mixed field, so the numbers are not directly comparable" in (
+        _report_context(mixed))
+    clean = run("clean", [(0.9, "a" * 16), (0.8, "a" * 16)])
+    assert champion_metric_caveats(clean) == []
+    assert "comparable" not in _report_context(clean) and "caveat" not in _report_context(clean)
+    # A slug this build has no clause for is NAMED, never dropped; the retarget is the Objective
+    # line's, not a second trust flag.
+    monkeypatch.setattr(report_mod, "champion_metric_caveats",
+                        lambda state: ["retargeted_objective", "brand_new"])
+    flagged = _report_context(clean)
+    assert "the engine records the champion caveat 'brand_new'" in flagged
+    assert "retargeted_objective" not in flagged
+
+
 def test_report_generated_folds_latest_wins():
     evs = [
         Event(seq=0, type="run_started", data={"run_id": "r", "task_id": "t", "direction": "min"}),
