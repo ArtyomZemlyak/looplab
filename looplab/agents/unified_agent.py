@@ -434,8 +434,12 @@ class UnifiedAgent(WrapsDeveloper):
                 # whenever its order differed from the menu's top-2 order (the fallback then silently
                 # defaulted to legal[0]/draft instead of the recommendation). `frozenset` is order-neutral
                 # for merges and a no-op for the single-parent / draft kinds.
+                # …and by BLOCK (doc 67 67.5): two simplifications of one champion share kind and
+                # parent, so the first one listed matched whichever the policy recommended. None on
+                # both sides for every other kind.
                 if (a.get("kind") == recommended.get("kind")
-                        and frozenset(_parents(a)) == frozenset(_parents(recommended))):
+                        and frozenset(_parents(a)) == frozenset(_parents(recommended))
+                        and a.get("block") == recommended.get("block")):
                     default_idx = i
                     break
         if self._pilot_client is None:        # pilot model not wired -> take the policy recommendation

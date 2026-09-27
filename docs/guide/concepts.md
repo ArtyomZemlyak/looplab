@@ -1156,13 +1156,17 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
 - **ablation-driven refinement** — neutralize a parameter (or a whole code block with
   `ablate_code_blocks`) to find the highest-impact lever, then refine it (`ablate_every`).
 - **simplify** (`ablation_simplify`, off by default; doc 67 67.5) — a code-block probe that measured
-  the objective no worse without a block nominates that program as a node (`operator: simplify`,
-  with a `simplified` receipt naming the parent lifecycle and the block), built with no model call
-  and evaluated like any other. The selector takes it over the node it was cut from **on a tie,
-  simpler**: not worse by more than one SE of the difference (the confirmation's spread when both
-  are confirmed, else plain "not worse"), the deepest such cut first, on the search pick and on the
-  holdout pick alike; the holdout and confirm slots go to it first, so a one-slot protocol can grade
-  it. Without that rule an equal simplification never became the champion: the champion only grew.
+  the objective no worse without a block that changes what runs (not a comment, a docstring or a
+  `pass`) nominates that program as a node (`operator: simplify`, with a `simplified` receipt naming
+  the parent lifecycle and the block — held by the fold to the exact cut and the parent's files),
+  built with no model call and evaluated like any other; a reset of it re-derives the same program.
+  The selector takes it over the node it was cut from **on a tie, simpler**: not worse by more than
+  the leader's own SE (the confirmation's spread when both are confirmed, else plain "not worse"),
+  never over a node that beats it by more than one SE, the deepest such cut first, on the search
+  pick and on the holdout pick alike. The confirm and holdout passes measure it in an EXTRA slot
+  after their own top-k (MLE-bench's one private grade goes to the would-be champion). Never
+  nominated on a host-graded run, whose probe the host does not grade. Without that rule an equal
+  simplification never became the champion: the champion only grew.
 - **merge / ensemble** — recombine two parents: a param mean, or a code-recombination ensemble
   (`merge_mode=ensemble`). This is the multi-parent DAG.
 - **sweep** — one node runs a whole grid of trials in a single process.

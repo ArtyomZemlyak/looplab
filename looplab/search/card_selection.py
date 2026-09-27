@@ -1065,6 +1065,14 @@ def _protected_due_action(
     if len(fallback) != 1:
         return None
     action = fallback[0]
+    if action.get("kind") == "simplify":
+        # doc 67 67.5: the policy nominates a simplification of the champion "before breeding
+        # anything else" — and an ordinary Card replaced it, so it was built only on an empty board
+        # (critic 2026-09-27, driven). No Card carries a simplify action, so protecting it means the
+        # unpinned Cards yield the turn to the legacy fallback, as a due merge's do.
+        parent = action.get("parent_id")
+        return (("simplify", (parent,))
+                if isinstance(parent, int) and not isinstance(parent, bool) else None)
     key = _action_key(action)
     if key is None:
         return None
@@ -1297,9 +1305,9 @@ def _selection_after_forced_gates(
         ]
     else:
         due_key = _protected_due_action(fallback)
-        # Operator pins are an explicit override band.  Without one, a due merge/ablate/bandit action
-        # must either claim its exact Card or execute through the unchanged legacy fallback; unrelated
-        # open-band Cards cannot silently erase the policy cadence.
+        # Operator pins are an explicit override band.  Without one, a due merge/ablate/bandit (or
+        # simplify, doc 67 67.5) action must either claim its exact Card or execute through the
+        # unchanged legacy fallback; unrelated open-band Cards cannot silently erase the policy cadence.
         if due_key is not None and not any(card.pinned for card in cards):
             cards = [
                 card for card in cards

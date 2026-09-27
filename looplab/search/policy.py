@@ -23,9 +23,11 @@ policy picked), `_reason` (one-line why), and — ASHA only — `_rung` / `_prom
 """
 from __future__ import annotations
 
+import functools
 import math
 from typing import Callable, Optional, Protocol
 
+from looplab.core.code_blocks import code_blocks  # noqa: F401 — moved to core; re-exported (doc 67 67.5)
 from looplab.core.errors import ConfigRefusal
 from looplab.core.models import NodeStatus, RunState
 
@@ -143,41 +145,60 @@ class SearchPolicy(Protocol):
     def next_actions(self, state: RunState) -> list[dict]: ...
 
 
-def code_blocks(code: str) -> list[tuple[int, int]]:
-    """A0a: split solution code into blank-line-separated paragraph blocks -> (start,end) line
-    ranges (end exclusive). Deterministic; the unit of code-block ablation (an ML-pipeline
-    component: data prep / feature-eng / model / loss / ensembling tends to be one paragraph).
-    (Moved verbatim from `engine/ablation.py::AblationMixin._segment_blocks`, which now delegates
-    here, so the ablation and the simplify nomination below cut the same blocks.)"""
-    lines = code.splitlines()
-    blocks: list[tuple[int, int]] = []
-    i, n = 0, len(lines)
-    while i < n:
-        if lines[i].strip() == "":
-            i += 1
-            continue
-        j = i
-        while j < n and lines[j].strip() != "":
-            j += 1
-        blocks.append((i, j))
-        i = j
-    return blocks
+def _semantic_dump(code: str) -> Optional[str]:
+    """What the interpreter would RUN of `code`, as an AST dump with every bare constant statement
+    (a docstring, a stray string or number) and every `pass` removed, or None when it does not parse.
+    Two programs with one dump differ only in what executes nothing."""
+    import ast
+
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return None
+    for owner in list(ast.walk(tree)):
+        for field in ("body", "orelse", "finalbody"):
+            body = getattr(owner, field, None)
+            if not isinstance(body, list):
+                continue
+            kept = [stmt for stmt in body
+                    if not isinstance(stmt, ast.Pass)
+                    and not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant))]
+            if len(kept) != len(body):
+                setattr(owner, field, kept)
+    return ast.dump(tree, include_attributes=False)
 
 
-def _removes_something(code: str, blocks: int) -> set[int]:
-    """The blocks of `code` with at least one line that is not a comment — the ones whose removal
-    removes something. A comment-only paragraph's probe re-ran the identical program, so its "no
-    worse" measured nothing, and a node cut from it would take the tie as a simplification that
-    simplified nothing. When the cut does not match the record's count, nothing is excluded."""
+@functools.lru_cache(maxsize=64)
+def _removes_something(code: str, blocks: int) -> frozenset:
+    """The blocks of `code` whose removal changes what RUNS — the only cuts that simplify anything.
+
+    A comment-only paragraph's probe re-ran the identical program, and so did a docstring's (the
+    module docstring an LLM-written solution usually opens with): its "no worse" measured nothing,
+    and a node cut from it would take the tie as a simplification that simplified nothing (critic
+    2026-09-27, driven: a module-docstring block nominated, its cut's AST the parent's minus the
+    docstring). Decided on the program with the block removed, compared by `_semantic_dump`; a
+    program that does not parse falls back to "has a line that is not a comment".
+
+    A record whose block count is not what `code` segments into describes other code — a
+    hand-edited row, a segmentation that changed — and nominates NOTHING (it used to nominate every
+    index it named, blocks the code does not have)."""
     spans = code_blocks(code or "")
     if len(spans) != blocks:
-        return set(range(blocks))
+        return frozenset()
     lines = (code or "").splitlines()
-    return {index for index, (start, end) in enumerate(spans)
-            if any(line.strip() and not line.strip().startswith("#") for line in lines[start:end])}
+    whole = _semantic_dump(code or "")
+    out = set()
+    for index, (start, end) in enumerate(spans):
+        if not any(line.strip() and not line.strip().startswith("#")
+                   for line in lines[start:end]):
+            continue
+        if whole is not None and _semantic_dump("\n".join(lines[:start] + lines[end:])) == whole:
+            continue
+        out.add(index)
+    return frozenset(out)
 
 
-def simplify_actions(state: RunState, node, *, refused=()) -> list[dict]:
+def simplify_actions(state: RunState, node, *, refused=(), spent=()) -> list[dict]:
     """THE SIMPLIFICATIONS A RECORDED ABLATION NOMINATES for `node` (doc 67 67.5), best first.
 
     One per pipeline block a CODE-BLOCK ablation of `node`'s CURRENT lifecycle ran without and
@@ -192,11 +213,21 @@ def simplify_actions(state: RunState, node, *, refused=()) -> list[dict]:
     its probe ran is not recorded (doc 67 §3).
 
     Never twice for one (lifecycle, block): a node whose `simplified` receipt names them — evaluated,
-    failed or deleted — spends it. `refused` is the engine's stamp of what it could not reserve in
-    this process (`policy.simplify_refused`), so a refused build yields the turn instead of being
+    failed or deleted — spends it. `spent` is the engine's stamp of those receipts off the WHOLE fold
+    (`policy.simplify_spent`): the Card lane hands the policy a view without tombstoned, gated or
+    discarded nodes (`search/card_selection.py::_effective_policy_state`), and a simplification it
+    hid spent nothing there, so the block was nominated again every turn (critic 2026-09-27,
+    driven: 1507 turns in 10 s). `refused` is the engine's stamp of what it declined to build in this
+    process (`policy.simplify_refused`), so a refused build yields the turn instead of being
     proposed again forever.
+
+    NOTHING on a host-graded run: its ablation probe reads the candidate's own stdout and never the
+    host's grade (`engine/ablation.py::_timed_ablation_probe` skips `_run_eval`'s host grading), so
+    a probe's gain is not on the objective's ruler — the self-report minus the host grade read as a
+    gain for every block (critic 2026-09-27, driven on an MLE-bench-shaped task).
     """
-    if node is None or getattr(node, "tombstoned", False) or node.id in state.aborted_nodes:
+    if (node is None or getattr(node, "tombstoned", False) or node.id in state.aborted_nodes
+            or state.host_grading):
         return []
     from looplab.core.fitness import is_usable_metric
     measured: dict[int, tuple] = {}
@@ -210,19 +241,24 @@ def simplify_actions(state: RunState, node, *, refused=()) -> list[dict]:
         if (not isinstance(ablation_id, str) or not ablation_id or not isinstance(signed, dict)
                 or isinstance(blocks, bool) or not isinstance(blocks, int)):
             continue
-        substantive = _removes_something(node.code, blocks)
+        substantive = _removes_something(node.code or "", blocks)
         for key, gain in signed.items():
-            if (not isinstance(key, str) or not key.isdigit() or int(key) >= blocks
+            # ASCII digits only: "²" is `isdigit()` and not `int()` — a hand-edited row raised out of
+            # every policy turn (critic 2026-09-27).
+            if (not isinstance(key, str) or not (key.isascii() and key.isdecimal())
                     or int(key) not in substantive):
                 continue
             measured[int(key)] = ((float(gain), ablation_id) if is_usable_metric(gain)
                                   else (None, ablation_id))
-    spent = {child.simplified["block"] for child in state.nodes.values()
+    taken = {child.simplified["block"] for child in state.nodes.values()
              if isinstance(child.simplified, dict) and child.simplified["parent_id"] == node.id
              and child.simplified["generation"] == node.attempt}
+    taken |= {key[2] for key in (spent or ())
+              if isinstance(key, tuple) and len(key) == 3
+              and key[0] == node.id and key[1] == node.attempt}
     refused = set(refused or ())
     nominated = [block for block, (gain, _aid) in measured.items()
-                 if gain is not None and gain >= 0.0 and block not in spent
+                 if gain is not None and gain >= 0.0 and block not in taken
                  and (node.id, node.attempt, block) not in refused]
     nominated.sort(key=lambda block: (-measured[block][0], block))
     return [{"kind": KIND_SIMPLIFY, "parent_id": node.id, "block": block,
@@ -537,7 +573,8 @@ class GreedyTree:
         # `simpler_tie` decides whether it stands). Off unless the engine stamps it; one per turn.
         if getattr(self, "simplify_ablated", False) and getattr(self, "ablation_capable", True):
             simplify = simplify_actions(state, best,
-                                        refused=getattr(self, "simplify_refused", ()))
+                                        refused=getattr(self, "simplify_refused", ()),
+                                        spent=getattr(self, "simplify_spent", ()))
             if simplify:
                 return [{**simplify[0], META_SCORES: _metric_scores(evaluated),
                          META_CHOSEN: best.id}]
@@ -1065,7 +1102,8 @@ def legal_actions(state: RunState, policy: SearchPolicy, *, max_nodes: int) -> l
             and getattr(policy, "ablation_capable", True)):
         actions.extend({key: value for key, value in action.items() if key != META_REASON}
                        for action in simplify_actions(
-                           state, best, refused=getattr(policy, "simplify_refused", ())))
+                           state, best, refused=getattr(policy, "simplify_refused", ()),
+                           spent=getattr(policy, "simplify_spent", ())))
     return actions
 
 

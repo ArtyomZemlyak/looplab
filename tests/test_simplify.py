@@ -48,16 +48,29 @@ def test_non_inferiority_is_the_superiority_rule_turned_around(candidate, incumb
 # ------------------------------------------------------------------ the fold's receipt
 
 def _log(store, *nodes, direction="min"):
-    """A log of crafted nodes: `(id, parents, metric, extra)` — `extra` goes into `node_created`."""
+    """A log of crafted nodes: `(id, parents, metric, extra)` — `extra` goes into `node_created`.
+    A node carrying a `simplified` receipt is given the code it names — its parent's code with that
+    block commented out — unless `extra` spells its own: the fold holds a receipt to its cut."""
+    from looplab.core.code_blocks import code_blocks, comment_block
+
     store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g",
                                  "direction": direction})
+    codes: dict = {}
     for node_id, parents, metric, extra in nodes:
         operator = extra.pop("operator", "draft" if not parents else "improve")
+        code = CODE
+        receipt = extra.get("simplified")
+        if isinstance(receipt, dict) and receipt.get("parent_id") in codes:
+            parent_code = codes[receipt["parent_id"]]
+            spans = code_blocks(parent_code)
+            if isinstance(receipt.get("block"), int) and 0 <= receipt["block"] < len(spans):
+                code = comment_block(parent_code, spans[receipt["block"]])
+        codes[node_id] = extra.get("code", code)
         store.append("node_created", {
             "node_id": node_id, "parent_ids": list(parents), "operator": operator,
             "idea": durable_idea_payload(Idea(operator=operator, params={"x": 0.5},
                                               rationale="r")),
-            "code": CODE, "files": {}, **extra})
+            "code": code, "files": {}, **extra})
         if metric is not None:
             store.append("node_evaluated", {"node_id": node_id, "generation": 0, "metric": metric,
                                             "violations": []})
@@ -151,16 +164,16 @@ def test_the_confirmation_spread_makes_a_near_tie_a_tie(tmp_path):
 def test_a_confirmed_mean_is_never_held_against_a_single_measurement(tmp_path):
     """The slot passes rank a MIXED pool; a cut is compared with its leader on one ruler or not at
     all."""
-    from looplab.events.replay_selection import simpler_first
+    from looplab.events.replay_selection import simpler_tie
 
     state = _state(tmp_path / "m", (0, [], 1.0, {}), (1, [0], 1.0, _receipt(0)))
     state.nodes[0].confirmed_mean, state.nodes[0].confirmed_std = 1.0, 0.1
     state.nodes[0].confirmed_seeds = 4
     ranked = [state.nodes[0], state.nodes[1]]
-    assert simpler_first(state, ranked) == ranked
+    assert simpler_tie(state, ranked[0], ranked) is ranked[0]
     state.nodes[1].confirmed_mean, state.nodes[1].confirmed_std = 1.0, 0.1
     state.nodes[1].confirmed_seeds = 4
-    assert [n.id for n in simpler_first(state, ranked)] == [1, 0]
+    assert simpler_tie(state, ranked[0], ranked) is ranked[1]
 
 
 def test_a_chain_is_held_to_the_leader_so_small_losses_do_not_add_up(tmp_path):
@@ -198,16 +211,23 @@ def test_the_holdout_stage_takes_a_simplification_graded_no_worse(tmp_path):
     assert select_best_node(state, pool).id == 0, "the unseen grade decides; no spread there"
 
 
-def test_the_extra_measurements_go_to_the_node_the_selector_would_crown(tmp_path):
-    """One holdout slot (MLE-bench grades the search champion alone) or one confirm slot: the
-    simplification that ties the leader gets it, or it could never win."""
-    from looplab.events.replay_selection import simpler_first
+def test_the_extra_measurement_is_an_extra_slot_never_a_better_nodes(tmp_path):
+    """The simplification that ties the leader is measured — or it could never win — in an EXTRA
+    slot at the end: every node of the pass's own top-k keeps its slot and its place, the leader
+    first (critic 2026-09-27, driven: moved to the front it took the only confirm slot, pushed a
+    tied runner-up out of a budget-limited pass, stood as the significance test's leader, and took a
+    holdout slot from a better node)."""
+    from looplab.events.replay_selection import simpler_slots
 
-    state = _state(tmp_path / "s", (0, [], 1.0, {}), (2, [], 1.5, {}), (1, [0], 1.0, _receipt(0)))
-    ranked = [state.nodes[0], state.nodes[1], state.nodes[2]]
-    assert [n.id for n in simpler_first(state, ranked)] == [1, 0, 2]
+    state = _state(tmp_path / "s", (0, [], 1.0, {}), (2, [], 1.5, {}), (3, [], 1.2, {}),
+                   (1, [0], 1.0, _receipt(0)))
+    ranked = [state.nodes[0], state.nodes[3], state.nodes[2], state.nodes[1]]
+    assert [n.id for n in simpler_slots(state, ranked, 1)] == [0, 1]
+    assert [n.id for n in simpler_slots(state, ranked, 2)] == [0, 3, 1]
+    assert [n.id for n in simpler_slots(state, ranked, 4)] == [0, 3, 2, 1], "already in: no dup"
     plain = [state.nodes[2], state.nodes[0]]
-    assert simpler_first(state, plain) == plain
+    assert simpler_slots(state, plain, 1) == [state.nodes[2]], "no tie, no extra slot"
+    assert simpler_slots(state, [], 3) == [] and simpler_slots(state, ranked, 0) == []
 
 
 # ------------------------------------------------------------------ the nomination
@@ -386,21 +406,31 @@ def test_off_nothing_is_nominated_and_nothing_is_built(tmp_path, monkeypatch):
 
 
 def test_a_refused_reservation_is_spent_for_the_process_and_said(tmp_path, monkeypatch, caplog):
-    engine = _crafted(tmp_path / "r", ablate_code_blocks=True, ablation_simplify=True)
-    _probed(engine, monkeypatch, 1.0, 1.5, None)
-    state = fold(engine.store.read_all())
-    action = engine.policy.next_actions(state)[0]
+    """A VERDICT on the proposal spends the nomination at once; a RACE (the world moved under the
+    reservation) is re-decided by the next turn, as an operator inject's is — three times, the
+    bound this branch carries because it `continue`s above the runaway guard (critic 2026-09-27)."""
+    from looplab.engine.ablation import _SIMPLIFY_RACE_RETRIES
 
-    def _refuse(*_a, refusal=None, **_k):
-        refusal.append("no_slot")
-        return None
+    for code, retries in (("card_contract", 0), ("no_slot", _SIMPLIFY_RACE_RETRIES)):
+        engine = _crafted(tmp_path / code, ablate_code_blocks=True, ablation_simplify=True)
+        _probed(engine, monkeypatch, 1.0, 1.5, None)
+        state = fold(engine.store.read_all())
+        action = engine.policy.next_actions(state)[0]
 
-    monkeypatch.setattr(engine, "_reserve_node_build", _refuse)
-    anyio.run(engine._simplify, action)
-    assert len(fold(engine.store.read_all()).nodes) == 1
-    assert engine.policy.simplify_refused == frozenset({(0, 0, 0)})
-    assert "was not built: no reservation (no_slot)" in caplog.text
-    assert engine.policy.next_actions(state)[0]["kind"] != KIND_SIMPLIFY, "the turn moves on"
+        def _refuse(*_a, refusal=None, code=code, **_k):
+            refusal.append(code)
+            return None
+
+        monkeypatch.setattr(engine, "_reserve_node_build", _refuse)
+        for _ in range(retries):
+            anyio.run(engine._simplify, action)
+            assert engine.policy.simplify_refused == frozenset(), code
+            assert engine.policy.next_actions(state)[0]["kind"] == KIND_SIMPLIFY, "retried"
+        anyio.run(engine._simplify, action)
+        assert len(fold(engine.store.read_all()).nodes) == 1
+        assert engine.policy.simplify_refused == frozenset({(0, 0, 0)}), code
+        assert f"was not built: no reservation ({code})" in caplog.text
+        assert engine.policy.next_actions(state)[0]["kind"] != KIND_SIMPLIFY, "the turn moves on"
 
 
 def _with_simplification(engine, metric=1.0):
@@ -416,30 +446,77 @@ def _with_simplification(engine, metric=1.0):
     return fold(engine.store.read_all())
 
 
-def test_one_holdout_slot_goes_to_the_simplification(tmp_path):
-    """MLE-bench grades the search champion alone: ranked by id, the tie's one slot went to the
-    parent, the holdout pool was the parent, and the simplification could never win."""
+def test_the_holdout_grades_the_tie_in_an_extra_slot_and_mlebench_its_champion(tmp_path):
+    """Top-k holdout slots keep the leader's; the tie gets one more. MLE-bench grades the search
+    champion alone — the node the selector would crown, the simplification that holds the tie —
+    or it could never win."""
     engine = _crafted(tmp_path / "h", holdout_top_k=1)
     state = _with_simplification(engine)
-    assert engine._holdout_topk(state) == [1]
+    assert engine._holdout_topk(state) == [0, 1]
     worse = _crafted(tmp_path / "w", holdout_top_k=1)
     assert worse._holdout_topk(_with_simplification(worse, metric=1.5)) == [0]
+    engine._host_grader = {"kind": "mlebench"}
+    assert engine._holdout_topk(state) == [1], "one private grade: the champion the tie crowns"
+    worse._host_grader = {"kind": "mlebench"}
+    assert worse._holdout_topk(fold(worse.store.read_all())) == [0]
 
 
-def test_one_confirm_slot_goes_to_the_simplification(tmp_path, monkeypatch):
-    """The selector ranks confirmed nodes among confirmed ones: an unconfirmed simplification
-    could never take a tie from a confirmed parent, so the slot goes to it first."""
-    engine = _crafted(tmp_path / "c", confirm_top_k=1, confirm_seeds=2)
-    state = _with_simplification(engine)
+def _confirm(engine, monkeypatch, seeds):
+    """Drive the real confirm phase with `seeds[node_id]` as each node's confirm seeds (None =
+    a failed seed); return which node each seed ran for and the certificate."""
     confirmed = []
 
     async def _seed(nd, s, objective=None):
         confirmed.append(nd.id)
-        return 1.0
+        values = seeds[nd.id]
+        value = values[len([c for c in confirmed if c == nd.id]) - 1]
+        engine.store.append("confirm_eval", {"node_id": nd.id, "generation": nd.attempt,
+                                             "seed": s, "eval_seconds": 1.0, "metric": value})
+        return value
 
     monkeypatch.setattr(engine, "_run_confirm_seed", _seed)
-    anyio.run(engine._confirm_phase, state)
-    assert confirmed and set(confirmed) == {1}, confirmed
+    anyio.run(engine._confirm_phase, fold(engine.store.read_all()))
+    [certificate] = [e.data for e in engine.store.read_all() if e.type == "best_confirmed"]
+    return confirmed, certificate
+
+
+def test_one_confirm_slot_keeps_the_leader_and_the_tie_gets_one_more(tmp_path, monkeypatch):
+    """The selector ranks confirmed nodes among confirmed ones, so the simplification is confirmed
+    too — in an extra slot, after the leader."""
+    engine = _crafted(tmp_path / "c", confirm_top_k=1, confirm_seeds=2)
+    _with_simplification(engine)
+    confirmed, certificate = _confirm(engine, monkeypatch, {0: [1.0, 1.0], 1: [1.0, 1.0]})
+    assert confirmed == [0, 0, 1, 1], confirmed
+
+
+def test_a_cut_that_fails_every_seed_is_never_certified(tmp_path, monkeypatch):
+    """With every seed of the only other slot failed, the certificate keeps the SEARCH's leader —
+    it named the cut when the cut stood first (critic 2026-09-27, driven: `CHAMPION = node 1`)."""
+    engine = _crafted(tmp_path / "f", confirm_top_k=1, confirm_seeds=2)
+    _with_simplification(engine)
+    _confirmed, certificate = _confirm(engine, monkeypatch, {0: [None, None], 1: [None, None]})
+    assert certificate["node_id"] == 0 and certificate["significant"] is False
+
+
+def test_the_significance_test_is_against_the_search_leader(tmp_path, monkeypatch):
+    """`significant` says whether the confirm winner beat the node the SEARCH ranked first; with
+    the cut standing first it was measured against the cut instead (critic 2026-09-27, driven)."""
+    engine = _crafted(tmp_path / "g", confirm_top_k=3, confirm_seeds=2)
+    _with_simplification(engine)
+    engine.store.append("node_created", {
+        "node_id": 2, "parent_ids": [], "operator": "draft",
+        "idea": durable_idea_payload(Idea(operator="draft", params={"x": 0.1, "y": 0.1},
+                                          rationale="r")),
+        "code": "print(2)\n", "files": {}})
+    engine.store.append("node_evaluated", {"node_id": 2, "generation": 0, "metric": 1.0,
+                                           "violations": []})
+    # Three nodes tied at 1.0 (min): the leader (node 0), its cut (node 1) and a runner-up (node 2).
+    # Confirmed, the runner-up (~0.50) beats the LEADER (~1.01) by far more than one SE — but not
+    # the noisy cut (~0.55), which the old order stood first.
+    confirmed, certificate = _confirm(engine, monkeypatch, {
+        0: [1.0, 1.02], 1: [0.5, 0.6], 2: [0.49, 0.51]})
+    assert confirmed[:2] == [0, 0], "the search leader is confirmed first"
+    assert certificate["node_id"] == 2 and certificate["significant"] is True, certificate
 
 
 def test_the_flag_ships_off_resumes_off_and_is_off_at_every_constructor():
@@ -489,3 +566,419 @@ def test_a_real_run_simplifies_its_champion_and_crowns_the_simplification(tmp_pa
     # Its own ablation nominated nothing: the block left behind is a comment, and nothing it holds
     # can be removed without breaking the run.
     assert len(simplified) == 1
+
+
+# ------------------------------------------------------------------ the critic's pass (2026-09-27)
+
+def _abl(block_impacts, *, generation=0, blocks=3, aid="a" * 32):
+    return ("ablate", {"parent_id": 0, "generation": generation, "ablation_id": aid,
+                       "mode": "code_blocks", "blocks": blocks, "impacts": {},
+                       "signed_impacts": block_impacts})
+
+
+def test_a_simplification_the_card_view_hides_still_spends_its_block(tmp_path):
+    """HIGH (driven: 1507 turns in 10 s). The Card lane hands the policy a view without tombstoned,
+    gated or discarded nodes; a simplification it hid spent nothing there, `_simplify` re-checked on
+    the whole fold, found it spent and returned silently — every turn. The engine now stamps the
+    spent set off the WHOLE fold on every selection turn."""
+    from looplab.search.card_selection import _effective_policy_state
+
+    engine = _crafted(tmp_path / "e", ablation_simplify=True)
+    for kind, data in (_abl({"0": 0.0}),):
+        engine.store.append(kind, data)
+    _with_simplification(engine)
+    engine.store.append("node_tombstoned", {"node_ids": [1]})
+    state = fold(engine.store.read_all())
+    view = _effective_policy_state(state)
+    assert 1 not in view.nodes
+    assert [a["block"] for a in simplify_actions(view, view.nodes[0])] == [0], (
+        "the view alone would nominate the block again")
+    engine._select_actions(state)
+    assert engine.policy.simplify_spent == frozenset({(0, 0, 0)}), "stamped off the whole fold"
+    assert simplify_actions(view, view.nodes[0], spent=engine.policy.simplify_spent) == []
+    assert all(a.get("kind") != KIND_SIMPLIFY for a in engine.policy.next_actions(view))
+
+
+def test_every_way_simplify_declines_is_a_stamped_refusal(tmp_path, monkeypatch):
+    """A nomination `_simplify` will not build — spent, refused, superseded — is refused for the
+    process, never returned from silently; and a refused one is never built, whoever asks."""
+    engine = _crafted(tmp_path / "r", ablate_code_blocks=True, ablation_simplify=True)
+    _probed(engine, monkeypatch, 1.0, 1.5, None)
+    action = engine.policy.next_actions(fold(engine.store.read_all()))[0]
+    engine._simplify_refused.add((0, 0, 0))
+    anyio.run(engine._simplify, action)
+    assert len(fold(engine.store.read_all()).nodes) == 1, "a refused nomination is never built"
+    engine._simplify_refused.clear()
+    engine._stamp_simplify()
+    _with_simplification(engine)                          # the block is spent by another build
+    anyio.run(engine._simplify, action)
+    assert engine.policy.simplify_refused == frozenset({(0, 0, 0)}), "said, not skipped"
+    assert len(fold(engine.store.read_all()).nodes) == 2
+
+
+def test_the_tolerance_is_the_leaders_own_se():
+    """HIGH (driven: a cut at 3.0 ± 5 over a leader at 1.0, minimized). SE_diff grows with the CUT's
+    noise; the band is capped at the leader's SE, as the verifier's tie band is."""
+    from looplab.core.fitness import one_se_non_inferior
+
+    assert not one_se_non_inferior(3.0, 1.0, 5.0, 2, "min", 0.1, 2), "noise buys no band"
+    assert one_se_non_inferior(1.05, 1.0, 0.1, 4, "min", 0.1, 4)
+    assert not one_se_non_inferior(1.06, 1.0, 0.1, 4, "min", 0.1, 4)
+    assert not one_se_non_inferior(1.01, 1.0, 0.5, 4, "min", 0.0, 0), "no leader spread: exact"
+    assert one_se_non_inferior(0.95, 1.0, 0.5, 4, "max", 0.1, 4)
+    assert not one_se_non_inferior(0.94, 1.0, 0.5, 4, "max", 0.1, 4)
+
+
+def _confirmed(state, **means):
+    for nid, (mean, std, seeds) in means.items():
+        node = state.nodes[int(nid[1:])]
+        node.confirmed_mean, node.confirmed_std, node.confirmed_seeds = mean, std, seeds
+    return state
+
+
+def test_a_cut_some_pool_node_beats_by_more_than_one_se_is_never_taken(tmp_path):
+    """HIGH (driven). The leader was crowned over a better node — by a confirm certificate, or by
+    the verifier inside its CI tie band — and a cut non-inferior to the LEADER was still
+    significantly worse than that node: the tie rule crossed a boundary no selector rung may."""
+    from looplab.events.replay_selection import simpler_tie
+
+    state = _confirmed(_state(tmp_path / "b", (0, [], 1.0, {}), (2, [], 0.9, {}),
+                              (1, [0], 1.04, _receipt(0))),
+                       n0=(1.0, 0.1, 4), n1=(1.04, 0.1, 4), n2=(0.9, 0.01, 4))
+    pool = [state.nodes[0], state.nodes[1], state.nodes[2]]
+    assert simpler_tie(state, state.nodes[0], pool) is state.nodes[0]
+    state.nodes[2].confirmed_mean = 1.0                  # no longer significantly better
+    assert simpler_tie(state, state.nodes[0], pool) is state.nodes[1]
+
+
+def test_the_holdout_stage_compares_a_cut_whatever_its_confirmation(tmp_path):
+    """The one-ruler skip is the SEARCH stage's (a confirmed mean beside one measurement); on the
+    holdout stage every leader has one unseen score, confirmed or not."""
+    from looplab.events.replay_selection import simpler_tie
+
+    state = _confirmed(_state(tmp_path / "h", (0, [], 1.0, {}), (1, [0], 1.0, _receipt(0))),
+                       n0=(1.0, 0.1, 4))
+    state.nodes[0].holdout_metric = state.nodes[1].holdout_metric = 0.7
+    pool = [state.nodes[0], state.nodes[1]]
+    assert simpler_tie(state, state.nodes[0], pool, holdout=True) is state.nodes[1]
+    assert simpler_tie(state, state.nodes[0], pool) is state.nodes[0], "search stage: two rulers"
+
+
+def test_among_cuts_of_one_depth_the_better_then_the_lower_id(tmp_path):
+    from looplab.events.replay_selection import simpler_tie
+
+    state = _confirmed(_state(tmp_path / "d", (0, [], 1.0, {}), (1, [0], 1.0, _receipt(0)),
+                              (2, [0], 0.99, _receipt(0, block=1))),
+                       n0=(1.0, 0.1, 4), n1=(1.0, 0.1, 4), n2=(0.99, 0.1, 4))
+    pool = list(state.nodes.values())
+    assert simpler_tie(state, state.nodes[0], pool) is state.nodes[2], "the better value"
+    state.nodes[2].confirmed_mean = 1.0
+    assert simpler_tie(state, state.nodes[0], pool) is state.nodes[1], "then the lower id"
+
+
+def test_a_cut_outside_the_pool_is_never_crowned(tmp_path):
+    """The selector's pool is the eligible population (an infeasible cut is not in it): a cut is
+    taken only from the pool it is handed (driven: an infeasible cut became champion)."""
+    from looplab.events.replay_selection import simpler_tie
+
+    state = _state(tmp_path / "p", (0, [], 1.0, {}), (1, [0], 1.0, _receipt(0)))
+    assert simpler_tie(state, state.nodes[0], [state.nodes[0]]) is state.nodes[0]
+    infeasible = _state(tmp_path / "i", (0, [], 1.0, {}), (1, [0], None, _receipt(0)), extra=[
+        ("node_evaluated", {"node_id": 1, "generation": 0, "metric": 1.0,
+                            "violations": ["mem > 1GB"]})])
+    assert infeasible.best_node_id == 0
+
+
+def test_the_verifier_needs_its_flag(tmp_path):
+    from looplab.events.replay_selection import select_best_node
+
+    state = _state(tmp_path / "v", (0, [], 1.0, {}), (1, [0], 1.0, _receipt(0)))
+    state.nodes[0].verifier_score, state.nodes[1].verifier_score = 0.9, 0.4
+    assert state.select_verifier_tiebreak is False
+    assert select_best_node(state, [state.nodes[0], state.nodes[1]]).id == 1, "flag off: no veto"
+
+
+def test_a_receipt_is_the_cut_its_parent_had_or_nothing(tmp_path):
+    """The fold held a receipt to its SHAPE: a row with other code took the tie as a
+    simplification (driven: `code is the cut: False | champion: 1`). It is now the exact cut —
+    the parent's code with that block commented out — and the parent's files, from ONE parent."""
+    forged = _state(tmp_path / "f", (0, [], 1.0, {}),
+                    (1, [0], 1.0, {**_receipt(0), "code": "print('anything')\n"}))
+    assert forged.nodes[1].simplified is None and forged.best_node_id == 0
+    files = _state(tmp_path / "x", (0, [], 1.0, {}),
+                   (1, [0], 1.0, {**_receipt(0), "files": {"helper.py": "X = 1\n"}}))
+    assert files.nodes[1].simplified is None
+    out_of_range = _state(tmp_path / "o", (0, [], 1.0, {}), (1, [0], 1.0, _receipt(0, block=7)))
+    assert out_of_range.nodes[1].simplified is None
+    two = _state(tmp_path / "t", (0, [], 1.0, {}), (2, [], 1.0, {}),
+                 (1, [0, 2], 1.0, {**_receipt(0), "parent_generations": {"0": 0, "2": 0}}))
+    assert two.nodes[1].simplified is None, "exactly one parent"
+    good = _state(tmp_path / "g", (0, [], 1.0, {}), (1, [0], 1.0, _receipt(0)))
+    assert good.nodes[1].simplified is not None and good.best_node_id == 1
+
+
+def test_a_record_that_does_not_describe_the_code_nominates_nothing(tmp_path):
+    """A block count the code does not segment into named other code — it nominated every index,
+    blocks the program does not have — and a hand-edited key the policy could not read raised out
+    of every turn ("²" is `isdigit()`, not `int()`); a huge count took seconds a turn."""
+    import time
+
+    mismatch = _ablated(tmp_path / "m", ("a" * 32, "code_blocks", {"0": 0.0, "3": 0.0},
+                                         {"blocks": 4}))
+    assert simplify_actions(mismatch, mismatch.nodes[0]) == []
+    junk = _ablated(tmp_path / "j", ("a" * 32, "code_blocks", {"²": 0.0, "1": 0.0}, {}))
+    assert [a["block"] for a in simplify_actions(junk, junk.nodes[0])] == [1]
+    huge = _ablated(tmp_path / "h", ("a" * 32, "code_blocks", {"0": 0.0}, {"blocks": 10 ** 7}))
+    started = time.monotonic()
+    assert simplify_actions(huge, huge.nodes[0]) == []
+    assert time.monotonic() - started < 0.5
+
+
+def test_a_later_pass_that_broke_the_run_withdraws_an_earlier_gain(tmp_path):
+    state = _ablated(tmp_path / "w", ("a" * 32, "code_blocks", {"0": 0.1, "1": 0.2}, {}),
+                     ("b" * 32, "code_blocks", {"0": None}, {}))
+    assert [a["block"] for a in simplify_actions(state, state.nodes[0])] == [1]
+
+
+def test_a_receipt_spends_its_block_in_its_own_lifecycle_only(tmp_path):
+    """The champion was reset and probed again: a cut of its OLD lifecycle spends nothing of the
+    new one's."""
+    from looplab.events.eventstore import EventStore
+
+    root = tmp_path / "l"
+    _state(root, (0, [], 1.0, {}), (1, [0], 1.0, _receipt(0)), extra=[_abl({"0": 0.0})])
+    store = EventStore(root / "events.jsonl")
+    idea = durable_idea_payload(Idea(operator="draft", params={"x": 0.5}, rationale="r"))
+    store.append("node_reset", {"node_id": 0, "generation": 0})
+    store.append("node_created", {"node_id": 0, "generation": 1, "parent_ids": [],
+                                  "operator": "draft", "idea": idea, "code": CODE, "files": {}})
+    store.append("node_evaluated", {"node_id": 0, "generation": 1, "metric": 1.0,
+                                    "violations": []})
+    kind, data = _abl({"0": 0.0}, generation=1, aid="b" * 32)
+    store.append(kind, data)
+    state = fold(store.read_all())
+    assert state.nodes[1].simplified["generation"] == 0 and state.nodes[0].attempt == 1
+    assert [a["block"] for a in simplify_actions(state, state.nodes[0])] == [0]
+
+
+def test_a_deleted_or_aborted_champion_nominates_nothing(tmp_path):
+    for kind, data in (("node_tombstoned", {"node_ids": [0]}), ("node_abort", {"node_id": 0})):
+        state = _ablated(tmp_path / kind, ("a" * 32, "code_blocks", {"0": 0.0}, {}))
+        from looplab.events.eventstore import EventStore
+        EventStore(tmp_path / kind / "events.jsonl").append(kind, data)
+        state = fold(EventStore(tmp_path / kind / "events.jsonl").read_all())
+        assert simplify_actions(state, state.nodes[0]) == [], kind
+
+
+def test_a_block_that_runs_nothing_is_not_nominated():
+    """A docstring, a bare constant or a `pass` paragraph: its probe re-ran the program that runs,
+    and a cut of it "simplifies" nothing (driven: a module docstring nominated)."""
+    from looplab.search.policy import _removes_something
+
+    code = '"""A solution."""\n\nimport os\n\n42\n\npass\n\nx = 1\n\n# note\n'
+    assert _removes_something(code, 6) == frozenset({1, 4})
+    assert _removes_something("def f(:\n\nx = 1\n\n# c\n", 3) == frozenset({0, 1}), (
+        "code that does not parse: the comment rule")
+    assert _removes_something(code, 5) == frozenset(), "a record for other code: nothing"
+
+
+def test_a_host_graded_run_nominates_nothing(tmp_path):
+    """Its probe reads the candidate's own stdout, never the host's grade: the self-report minus
+    the host grade read as a gain for every block (driven)."""
+    state = _ablated(tmp_path / "hg", ("a" * 32, "code_blocks", {"0": 0.0}, {}))
+    assert simplify_actions(state, state.nodes[0])
+    state.host_grading = {"kind": "mlebench"}
+    assert simplify_actions(state, state.nodes[0]) == []
+
+
+def test_a_due_simplification_is_not_replaced_by_an_unpinned_card():
+    """The Card lane let any eligible Card replace it, so it was built only on an empty board
+    (driven: one ready Card -> `[('improve', 0, 'card-1')]`)."""
+    from looplab.search.card_selection import _protected_due_action
+
+    action = {"kind": KIND_SIMPLIFY, "parent_id": 0, "block": 2}
+    assert _protected_due_action([action]) == ("simplify", (0,))
+    assert _protected_due_action([action, {"kind": "draft"}]) is None
+    assert _protected_due_action([{"kind": KIND_SIMPLIFY, "parent_id": True}]) is None
+
+
+def test_an_operators_own_pin_applies_the_switch(tmp_path):
+    """`set_strategy` records the pin per top-level field (`_pinned: ["operators"]`), the grant
+    is looked up per knob — so the operator's own `operators.simplify` was silently not applied."""
+    engine = make_engine(tmp_path / "o")
+    engine._apply_strategy({"source": "operator", "_pinned": ["operators"],
+                            "operators": {"simplify": True}})
+    assert engine._ablation_simplify is True and engine.policy.simplify_ablated is True
+    strategist = make_engine(tmp_path / "s")
+    strategist._apply_strategy({"source": "strategist", "_pinned": ["operators"],
+                                "operators": {"simplify": True}})
+    assert strategist._ablation_simplify is False, "a merged record keeps each knob's own grant"
+
+
+def test_the_agent_lane_offers_a_simplification_only_where_ablation_can_run(tmp_path):
+    state = _ablated(tmp_path / "a", ("a" * 32, "code_blocks", {"0": 0.0}, {}))
+    policy = GreedyTree(n_seeds=1, max_nodes=10)
+    policy.simplify_ablated = True
+    assert any(a["kind"] == KIND_SIMPLIFY for a in legal_actions(state, policy, max_nodes=10))
+    policy.ablation_capable = False
+    assert not any(a["kind"] == KIND_SIMPLIFY for a in legal_actions(state, policy, max_nodes=10))
+
+
+def test_the_pilot_menu_names_each_block_and_recommends_the_policys(monkeypatch):
+    from looplab.agents import agent as agent_mod
+    from looplab.agents.unified_agent import UnifiedAgent
+    from looplab.core.models import RunState
+
+    seen: dict = {}
+
+    def fake_loop(client, tools, messages, emit_spec, **opts):
+        seen.update(messages=messages)
+        return opts["fallback"](messages)
+
+    monkeypatch.setattr(agent_mod, "drive_tool_loop", fake_loop)
+    agent = UnifiedAgent(researcher=object(), developer=object(), pilot_client=object())
+    legal = [{"kind": KIND_SIMPLIFY, "parent_id": 0, "block": 0},
+             {"kind": KIND_SIMPLIFY, "parent_id": 0, "block": 2}]
+    agent.choose_action(RunState(goal="g"), legal, dict(legal[1]), brief="b")
+    menu = seen["messages"][1]["content"]
+    assert "[0] simplify parent=0 block=0" in menu and "[1] simplify parent=0 block=2" in menu
+    assert "Policy recommends index 1" in menu
+
+
+def test_the_simplify_node_is_the_parents_program_files_included(tmp_path, monkeypatch):
+    """The node carries the parent's helper files — and the probe that nominated it ran with them,
+    as the parent's own eval does (a probe without them crashed on the first import and measured
+    every block of a multi-file node "essential")."""
+    files = {"helper.py": "VALUE = 1\n"}
+    engine = _crafted(tmp_path / "f", ablate_code_blocks=True, ablation_simplify=True)
+    kind, data = "node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": durable_idea_payload(Idea(operator="draft", params={"x": 0.5, "y": 0.5},
+                                          rationale="r")),
+        "code": CODE, "files": files, "generation": 0}
+    # re-create node 0 with files on a fresh run
+    engine = make_engine(tmp_path / "files", policy=GreedyTree(n_seeds=1, max_nodes=12,
+                                                               ablate_every=1, enable_merge=False),
+                         ablate_code_blocks=True, ablation_simplify=True)
+    engine.store.append("run_started", {"run_id": "files", "task_id": "toy", "goal": "g",
+                                        "direction": "min", **engine._run_start_pinned_values()})
+    data.pop("generation")
+    engine.store.append(kind, data)
+    engine.store.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": 1.0,
+                                           "violations": []})
+    seen_files = []
+    probes = iter([1.0, 1.5, None])
+
+    async def _probe(source, workdir, parent_id, generation):
+        from pathlib import Path
+        seen_files.append(sorted(p.name for p in Path(workdir).iterdir()))
+        m = next(probes)
+        return SimpleNamespace(metric=m, exit_code=0 if m is not None else 1,
+                               timed_out=False), 1.0, True
+
+    monkeypatch.setattr(engine, "_timed_ablation_probe", _probe)
+    monkeypatch.setattr(engine, "_build_refine_block_child", lambda *a, **k: None)
+    anyio.run(engine._ablate, 0)
+    assert seen_files and all("helper.py" in names for names in seen_files), seen_files
+    action = engine.policy.next_actions(fold(engine.store.read_all()))[0]
+    anyio.run(engine._simplify, action)
+    child = fold(engine.store.read_all()).nodes[1]
+    assert child.files == files and child.simplified is not None
+
+
+def test_a_parent_reset_during_the_build_supersedes_it(tmp_path, monkeypatch):
+    engine = _crafted(tmp_path / "s", ablate_code_blocks=True, ablation_simplify=True)
+    _probed(engine, monkeypatch, 1.0, 1.5, None)
+    action = engine.policy.next_actions(fold(engine.store.read_all()))[0]
+    real = engine._reserve_node_build
+
+    def _reserve_then_reset(*args, **kwargs):
+        reservation = real(*args, **kwargs)
+        engine.store.append("node_reset", {"node_id": 0, "generation": 0,
+                                           "from_stage": "eval"})
+        return reservation
+
+    monkeypatch.setattr(engine, "_reserve_node_build", _reserve_then_reset)
+    anyio.run(engine._simplify, action)
+    state = fold(engine.store.read_all())
+    built = [n for n in state.nodes.values() if n.operator == "simplify"]
+    assert not built or all(n.simplified is None for n in built), "no cut of a moved lifecycle"
+    failed = [e.data for e in engine.store.read_all() if e.type == "node_failed"]
+    assert failed and failed[-1]["reason"] == "superseded", failed
+
+
+def test_a_simplify_node_counts_toward_the_card_budget_of_a_fallback_batch():
+    """`card_next_actions` bounds a wide policy fallback by the remaining Card budget: a simplify
+    creates a node, so it is counted like one."""
+    import inspect
+
+    from looplab.search import card_selection
+
+    assert '"simplify"' in inspect.getsource(card_selection.card_next_actions)
+
+
+def test_a_reset_simplification_is_re_derived_never_rebuilt_by_a_developer(tmp_path, monkeypatch):
+    """A propose/implement reset re-derives the same cut and receipt — the Developer rebuild it got
+    paid a model call and landed a row without the receipt, so the block was nominated again."""
+    engine = _crafted(tmp_path / "rr", ablation_simplify=True)
+    state = _with_simplification(engine)
+    engine.store.append("node_reset", {"node_id": 1, "generation": 0, "from_stage": "implement"})
+    monkeypatch.setattr(engine, "_implement_result",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("Developer asked")))
+    state = fold(engine.store.read_all())
+    engine._rerun_node(state.nodes[1], state)
+    after = fold(engine.store.read_all()).nodes[1]
+    assert after.attempt == 1 and after.rerun_from is None
+    assert after.code == "# [ablated] import os\n\nx = 1\n\nprint(x)\n"
+    assert after.simplified == {"parent_id": 0, "generation": 0, "block": 0,
+                                "ablation_id": "a" * 32}
+    # A cut whose parent lifecycle moved re-derives nothing: it fails, superseded.
+    moved = _crafted(tmp_path / "mv", ablation_simplify=True)
+    _with_simplification(moved)
+    moved.store.append("node_reset", {"node_id": 1, "generation": 0, "from_stage": "implement"})
+    moved.store.append("node_reset", {"node_id": 0, "generation": 0, "from_stage": "eval"})
+    state = fold(moved.store.read_all())
+    moved._rerun_node(state.nodes[1], state)
+    failed = [e.data for e in moved.store.read_all() if e.type == "node_failed"]
+    assert failed and failed[-1]["node_id"] == 1 and failed[-1]["reason"] == "superseded"
+
+
+def test_the_endgame_reserve_passes_a_simplification():
+    from looplab.engine.plan import endgame_actions
+
+    state = SimpleNamespace(nodes={i: None for i in range(9)}, best=lambda: None)
+    plan = {"endgame_start": 5, "phases": [{"kinds": ["merge", "sweep"]}]}
+    action = {"kind": KIND_SIMPLIFY, "parent_id": 0, "block": 1}
+    assert endgame_actions(state, plan, [action]) == [action]
+
+
+def test_a_single_measurement_never_beats_a_confirmed_cut(tmp_path):
+    """`_significantly_beaten` holds the cut to nodes on ITS ruler: the slot passes rank a MIXED
+    pool, and a single number is never held against a confirmed mean, either way."""
+    from looplab.events.replay_selection import simpler_tie
+
+    state = _confirmed(_state(tmp_path / "m", (0, [], 1.0, {}), (2, [], 0.5, {}),
+                              (1, [0], 1.0, _receipt(0))),
+                       n0=(1.0, 0.1, 4), n1=(1.0, 0.1, 4))
+    pool = [state.nodes[0], state.nodes[1], state.nodes[2]]
+    assert state.nodes[2].confirmed_mean is None and state.nodes[2].metric == 0.5
+    assert simpler_tie(state, state.nodes[0], pool) is state.nodes[1]
+
+
+def test_the_lifecycle_check_after_the_reservation_names_the_move(tmp_path, monkeypatch):
+    engine = _crafted(tmp_path / "n", ablate_code_blocks=True, ablation_simplify=True)
+    _probed(engine, monkeypatch, 1.0, 1.5, None)
+    action = engine.policy.next_actions(fold(engine.store.read_all()))[0]
+    real = engine._reserve_node_build
+
+    def _reserve_then_reset(*args, **kwargs):
+        reservation = real(*args, **kwargs)
+        engine.store.append("node_reset", {"node_id": 0, "generation": 0, "from_stage": "eval"})
+        return reservation
+
+    monkeypatch.setattr(engine, "_reserve_node_build", _reserve_then_reset)
+    anyio.run(engine._simplify, action)
+    [failed] = [e.data for e in engine.store.read_all() if e.type == "node_failed"]
+    assert failed["error"] == "parent lifecycle changed while building", failed
+    assert not any(e.type == "node_created" and e.data.get("operator") == "simplify"
+                   for e in engine.store.read_all()), "nothing was emitted for a moved lifecycle"

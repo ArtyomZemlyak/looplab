@@ -22,6 +22,7 @@ from typing import Iterable, Optional
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, finite_metric,
                                   is_usable_metric,
                                   verifier_evidence_digest)
+from looplab.core.code_blocks import code_blocks, comment_block
 from looplab.core.headroom import normalized_reference
 from looplab.core.jsonutil import bounded_int, valid_digest_ref
 from looplab.core.models import (Event, Idea, Node, NodeStatus, RunState, Trial,
@@ -366,6 +367,15 @@ def _simplification_receipt(d: dict, parent_ids: list, st: RunState) -> Optional
     built_from = (recorded.get(str(parent_id)) if isinstance(recorded, dict)
                   else st.nodes[parent_id].attempt if parent_id in st.nodes else None)
     if built_from != generation:
+        return None
+    # …and the node IS the cut it names (critic 2026-09-27, driven: a row with other code and a
+    # well-formed receipt took the tie as a simplification). The parent's code with block #`block`
+    # commented out — the probe's own pair (`core/code_blocks.py`) — and the parent's files; what the
+    # build writes, byte for byte, so only a row that says what it is carries the receipt.
+    parent = st.nodes.get(parent_id)
+    spans = code_blocks(parent.code or "") if parent is not None else []
+    if (block >= len(spans) or d.get("code") != comment_block(parent.code, spans[block])
+            or (d.get("files") or {}) != (parent.files or {})):
         return None
     return {"parent_id": parent_id, "generation": generation, "block": block,
             "ablation_id": ablation_id[:64]}

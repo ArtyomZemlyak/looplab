@@ -191,8 +191,15 @@ def one_se_non_inferior(
     to plain "not worse" (equal counts), which on a noisy metric is an exact tie. The spread is the
     CONFIRMATION's, never the eval noise floor's: the floor is what makes a champion's margin
     checkable, and an instrument that moved the champion could not judge it
-    (`core/models.py::RunState.eval_noise_floor`)."""
-    se = standard_error_difference(std, n, incumbent_std, incumbent_n)
+    (`core/models.py::RunState.eval_noise_floor`).
+
+    CAPPED AT THE INCUMBENT'S OWN SE, the verifier tie band's rule
+    (`SearchFitness._statistically_tied`): SE_diff grows with the CANDIDATE's noise, so a cut
+    confirmed on two wild seeds bought itself a band wide enough to take the crown — a mean of 3.0
+    (std 5, 2 seeds) over a leader at 1.0 on a minimized metric (critic 2026-09-27, driven). An
+    incumbent with no usable spread leaves only the exact comparison."""
+    se = min(standard_error_difference(std, n, incumbent_std, incumbent_n),
+             standard_error_difference(incumbent_std, incumbent_n, 0.0, 0))
     if direction == "min":
         return candidate <= incumbent + se
     return candidate >= incumbent - se

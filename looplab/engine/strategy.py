@@ -632,29 +632,43 @@ class StrategyCadenceMixin:
         # not in _strategy_core, so it never affects change-detection; it survives fold as plain data.
         def may(k):
             return self._strategy_may(strat, k)
+
+        # THE OPERATOR'S OWN `operators` DICT. A `set_strategy` pin is recorded per TOP-LEVEL field
+        # (`_pinned: ["operators"]`), while each knob inside is granted under its governance name
+        # (`ablation_simplify`, `ablate_every`, …) — so the operator's own pin of a knob no role
+        # holds a grant for (`operators.simplify`, doc 67 67.5) was silently not applied (critic
+        # 2026-09-27, driven). On a record the OPERATOR wrote with `operators` pinned, that dict is
+        # exactly the pin (`_maybe_apply_strategy` overlays it whole), so every knob in it is the
+        # operator's; on a Strategist-merged record the dict mixes both authors, and each knob stays
+        # gated by its own grant.
+        operator_ops = (strat.get("source") == "operator"
+                        and "operators" in set(strat.get("_pinned") or []))
+
+        def may_op(k):
+            return operator_ops or may(k)
         if may("novelty_stance") and strat.get("novelty_stance") in NOVELTY_STANCES:
             self._novelty_stance = strat["novelty_stance"]   # Strategist's novelty dial (slice 2)
         card_scoring = validate_card_scoring(strat.get("card_scoring"))
         if card_scoring is not None and may("card_scoring"):
             self._card_scoring = card_scoring
         ops = strat.get("operators") or {}
-        if "ablate_every" in ops and may("ablate_every"):
+        if "ablate_every" in ops and may_op("ablate_every"):
             self._ablate_every = int(ops["ablate_every"])
-        if "merge_mode" in ops and may("merge_mode"):
+        if "merge_mode" in ops and may_op("merge_mode"):
             self._merge_mode = ops["merge_mode"]
-        if "complexity_cue" in ops and may("complexity_cue"):
+        if "complexity_cue" in ops and may_op("complexity_cue"):
             self._complexity_cue = bool(ops["complexity_cue"])
-        if "ablate_code_blocks" in ops and may("ablate_code_blocks"):
+        if "ablate_code_blocks" in ops and may_op("ablate_code_blocks"):
             self._ablate_code_blocks = bool(ops["ablate_code_blocks"])
         # doc 67 67.5: whether a no-worse ablation probe nominates a `simplify` node. No role holds
         # this grant by default (a new mechanism, off until an arm measures it): the operator grants
         # it in `agent_control` to let the Strategist switch it.
-        if "simplify" in ops and may("ablation_simplify"):
+        if "simplify" in ops and may_op("ablation_simplify"):
             self._ablation_simplify = bool(ops["simplify"])
             self._stamp_simplify()
-        if "prefer_sweep" in ops and may("prefer_sweep"):
+        if "prefer_sweep" in ops and may_op("prefer_sweep"):
             self._prefer_sweep = bool(ops["prefer_sweep"])
-        if "endgame_sweep" in ops and may("endgame_sweep"):
+        if "endgame_sweep" in ops and may_op("endgame_sweep"):
             self._endgame_sweep = bool(ops["endgame_sweep"])   # doc 52 row 18: the reserve's sweep
         # Resource budgets the Strategist may retune live (gated by the governance matrix). self.timeout
         # is read fresh per eval and self._eval_parallel rebuilds the CapacityLimiter each batch, so a

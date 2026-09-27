@@ -20,16 +20,17 @@ from uuid import uuid4
 
 import anyio
 
+from looplab.core.code_blocks import code_blocks, comment_block
 from looplab.core.containment import contain
 from looplab.core.fitness import is_usable_metric
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import Idea, durable_idea_payload
-from looplab.engine.card_reservation import scored_anchor
+from looplab.engine.card_reservation import RESERVATION_RACES, scored_anchor
 # Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
 from looplab.engine.shared import engine_fold as fold
-from looplab.events.types import EV_ABLATE
+from looplab.events.types import EV_ABLATE, EV_NODE_BUILDING, EV_NODE_FAILED
 from looplab.runtime.sandbox import GpuPinUnenforceable
-from looplab.search.policy import code_blocks, simplify_actions
+from looplab.search.policy import simplify_actions
 
 
 # A BOUNDED wait for a probe's eval resource, per probe — the noise floor's bound
@@ -41,6 +42,12 @@ from looplab.search.policy import code_blocks, simplify_actions
 _ABLATION_RESOURCE_TICKS = 120
 
 _log = logging.getLogger(__name__)
+
+# How many reservation RACES one simplify nomination may lose before it is spent for the process
+# (doc 67 67.5). A race is the world moving under the reservation, and the next turn re-decides it —
+# the inject path's answer — but the simplify branch `continue`s above the create lane's runaway
+# guard, so its retries carry their own bound (`AblationMixin._simplify`).
+_SIMPLIFY_RACE_RETRIES = 3
 
 
 def _signed_gain(probe_metric: float, base: float, direction: str) -> float:
@@ -416,13 +423,23 @@ class AblationMixin:
         self._emit_hypothesis_ranked(node_id, 0)
         self._emit_foresight_selected(node_id, 0)
 
-    def _stamp_simplify(self) -> None:
+    def _stamp_simplify(self, state=None) -> None:
         """Tell the policy whether it may nominate simplifications (doc 67 67.5,
-        `Settings.ablation_simplify`) and which ones this process could not reserve — the
-        `ablation_capable` pattern: facts the fold does not carry, stamped on the policy at launch,
-        on every policy rebuild and whenever they change, read through `getattr`."""
+        `Settings.ablation_simplify`) and which ones this process declined to build — the
+        `ablation_capable` pattern: facts the policy's view does not carry, stamped on the policy at
+        launch, on every policy rebuild and whenever they change, read through `getattr`.
+
+        With `state` — the WHOLE fold, once per selection turn (`orchestrator.py::_select_actions`)
+        — also which (parent, lifecycle, block) a `simplified` receipt already spent: the Card lane
+        hands the policy a view without tombstoned, gated or discarded nodes, where a hidden
+        simplification spends nothing (`search/policy.py::simplify_actions`)."""
         self.policy.simplify_ablated = bool(self._ablation_simplify)
         self.policy.simplify_refused = frozenset(self._simplify_refused)
+        if state is not None and self._ablation_simplify:
+            self.policy.simplify_spent = frozenset(
+                (receipt["parent_id"], receipt["generation"], receipt["block"])
+                for receipt in (node.simplified for node in state.nodes.values())
+                if isinstance(receipt, dict))
 
     async def _simplify(self, action: dict) -> None:
         """Build the ONE `simplify` child a recorded code-block ablation nominated (doc 67 67.5).
@@ -436,15 +453,26 @@ class AblationMixin:
 
         Re-checked against a fresh fold (`search/policy.py::simplify_actions`, the policy's own
         rule), so a lifecycle a reset replaced, or a block another simplification already spent,
-        builds nothing. A reservation this process cannot make is stamped refused on the policy
-        (`_stamp_simplify`), so the turn goes to the next action instead of proposing it again."""
+        builds nothing. EVERY way it declines to build is a stamped refusal (`_refuse_simplify`), so
+        the policy never proposes that nomination again in this process: a silent return here, on
+        a nomination the policy's view kept making, spun the loop (critic 2026-09-27, driven: 1507
+        turns in 10 s under the Card lane). The one exception is a reservation RACE
+        (`card_reservation.py::RESERVATION_RACES`): the world moved under the reservation and the
+        next turn re-decides it, as it does for an operator's inject — `_SIMPLIFY_RACE_RETRIES`
+        times, because this branch `continue`s above the create lane's runaway guard and so carries
+        its own bound: every turn it takes spends a nomination or one of its retries."""
         state = fold(self.store.read_all())
         parent_id, block = action.get("parent_id"), action.get("block")
-        parent = state.nodes.get(parent_id) if isinstance(parent_id, int) else None
+        parent = (state.nodes.get(parent_id)
+                  if isinstance(parent_id, int) and not isinstance(parent_id, bool) else None)
+        if parent is None:
+            return      # no node the policy could nominate for again: it nominates from the fold's
         nominated = next((a for a in simplify_actions(state, parent,
                                                       refused=self._simplify_refused)
                           if a["block"] == block), None)
-        if parent is None or nominated is None:
+        if nominated is None:
+            self._refuse_simplify(parent_id, parent.attempt, block,
+                                  "not a nomination on the whole fold (spent, refused or superseded)")
             return
         generation, ablation_id = parent.attempt, nominated["ablation_id"]
         blocks = self._segment_blocks(parent.code)
@@ -468,8 +496,15 @@ class AblationMixin:
             idea, scored_against=anchor_id, scored_against_attempt=anchor_attempt,
             source="engine", refusal=refusal)
         if reservation is None:
+            code = refusal[0] if refusal else None
+            key = (parent_id, generation, block)
+            if code in RESERVATION_RACES and self._simplify_races.get(key, 0) < _SIMPLIFY_RACE_RETRIES:
+                self._simplify_races[key] = self._simplify_races.get(key, 0) + 1
+                _log.info("simplify: node %s without block #%s lost a reservation race (%s); "
+                          "the next turn re-decides it", parent_id, block, code)
+                return
             self._refuse_simplify(parent_id, generation, block,
-                                  f"no reservation ({refusal[0] if refusal else 'refused'})")
+                                  f"no reservation ({code or 'refused'})")
             return
         node_id = reservation.node_id
         if not self._ablation_parent_current(parent_id, generation):
@@ -491,6 +526,43 @@ class AblationMixin:
                 error="simplify node creation was rejected during replay", reason="superseded")
             self._refuse_simplify(parent_id, generation, block, "its node_created was rejected")
 
+    def _rebuild_simplification(self, node) -> None:
+        """A `node_reset` of a `simplify` node from "propose" or "implement" (doc 67 67.5): its
+        program is its receipt — the parent's code with one block commented out, and the parent's
+        files — so it is RE-DERIVED here and no Developer is asked. The Developer rebuild it used to
+        get paid a model call, and the row it landed carried no receipt, so the block it had spent
+        was nominated again (critic 2026-09-27). A receipt whose parent lifecycle no longer stands,
+        or whose block that code no longer has, rebuilds nothing: the node fails `superseded`, as a
+        first build over a moved parent does. Its own node's rows only (invariant 1: this runs in
+        the rerun's build worker)."""
+        state = fold(self.store.read_all())
+        current = state.nodes.get(node.id)
+        if (current is None or current.attempt != node.attempt or current.tombstoned
+                or node.id in state.aborted_nodes):
+            return
+        receipt = current.simplified
+        parents = list(current.parent_ids)
+        parent = state.nodes.get(parents[0]) if len(parents) == 1 else None
+        spans = code_blocks(parent.code or "") if parent is not None else []
+        if (not isinstance(receipt, dict) or parent is None or receipt["parent_id"] != parent.id
+                or receipt["generation"] != parent.attempt or parent.tombstoned
+                or parent.id in state.aborted_nodes or not 0 <= receipt["block"] < len(spans)):
+            self.store.append(EV_NODE_FAILED, {
+                "node_id": current.id, "generation": current.attempt,
+                "error": "a simplification of a parent lifecycle that no longer stands cannot be "
+                         "re-derived", "reason": "superseded", "eval_seconds": 0.0})
+            return
+        self.store.append(EV_NODE_BUILDING, {
+            "node_id": current.id, "generation": current.attempt, "operator": current.operator,
+            "parent_ids": parents,
+            **({"card_id": current.idea.card_id} if current.idea.card_id else {})})
+        self._emit_node_created(
+            node_id=current.id, parent_ids=parents, operator="simplify",
+            idea=durable_idea_payload(current.idea),
+            code=comment_block(parent.code, spans[receipt["block"]]), files=dict(parent.files),
+            eval_start_boundary=True, generation=current.attempt,
+            parent_generations={str(parent.id): parent.attempt}, simplified=dict(receipt))
+
     def _refuse_simplify(self, parent_id: int, generation: int, block: int, why: str) -> None:
         """Spend one nomination for this process (see `_simplify`) and SAY so: a nomination the run
         could not build must not read as one it never made."""
@@ -501,18 +573,16 @@ class AblationMixin:
 
     @staticmethod
     def _segment_blocks(code: str) -> list[tuple[int, int]]:
-        """A0a: the unit of code-block ablation, `search/policy.py::code_blocks` — ONE spelling, which
-        the simplify nomination reads too (doc 67 67.5); kept as this seam because tests patch it."""
+        """A0a: the unit of code-block ablation, `core/code_blocks.py::code_blocks` — ONE spelling,
+        which the simplify nomination and the fold's receipt check read too (doc 67 67.5); kept as
+        this seam because tests patch it."""
         return code_blocks(code)
 
     @staticmethod
     def _comment_block(code: str, block: tuple[int, int]) -> str:
-        """Neutralize one block by commenting its lines out (the ablation), keeping the rest intact."""
-        s, e = block
-        lines = code.splitlines()
-        for k in range(s, e):
-            lines[k] = "# [ablated] " + lines[k]
-        return "\n".join(lines) + "\n"
+        """Neutralize one block by commenting its lines out (the ablation), keeping the rest intact —
+        `core/code_blocks.py::comment_block`, the cut the fold checks a `simplified` receipt against."""
+        return comment_block(code, block)
 
     @in_llm_lane("build")
     async def _ablate_code(self, parent_id: int, generation: int, ablation_id: str) -> None:
@@ -547,6 +617,12 @@ class AblationMixin:
                 ablated = self._comment_block(code, blk)
                 workdir = (self.run_dir / "ablate"
                            / f"node_{parent_id}_g{generation}_{ablation_id[:8]}_block_{idx}")
+                # The parent's helper files, as its own eval has them (task assets still win, so
+                # they are written after): a probe without them crashed on the first import of one,
+                # and measured every block of a multi-file node "essential" — and the `simplify` node
+                # a probe nominates is exactly this program, files included (doc 67 67.5, critic
+                # 2026-09-27).
+                self._write_node_files(parent, workdir)
                 self._write_assets(workdir)
                 res, seconds, current = await self._timed_ablation_probe(
                     ablated, workdir, parent_id, generation)

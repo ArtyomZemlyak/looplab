@@ -125,7 +125,11 @@ def endgame_actions(state, plan: Optional[dict], actions: list[dict], *,
     when the turn's actions are evaluations / the finish, the actions are returned untouched."""
     if not in_endgame(plan, len(state.nodes)) or not actions:
         return actions
-    if any(a.get("kind") == "evaluate" for a in actions):
+    # An evaluation passes, and so does a SIMPLIFICATION of the champion (doc 67 67.5): it proposes
+    # nothing and pays no model — the champion's own program, one measured block commented out — so
+    # it is the reserve's purpose, polishing the champion, and bounded by the blocks a probe
+    # measured. Replaced by the sequence below, it vanished with no receipt (critic 2026-09-27).
+    if any(a.get("kind") in ("evaluate", "simplify") for a in actions):
         return actions
     best = state.best()
     best_id = best.id if best is not None else None

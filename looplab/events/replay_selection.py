@@ -21,7 +21,8 @@ dispatch table.
 from __future__ import annotations
 
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, SearchFitness, is_usable_metric,
-                                  one_se_non_inferior, verifier_evidence_digest)
+                                  one_se_better, one_se_non_inferior,
+                                  verifier_evidence_digest)
 from looplab.core.models import (Event, Node, NodeStatus, RunState,
                                  coerce_node_id as _coerce_node_id, row_objective)
 from looplab.events.replay_ctx import (_MISSING, _FoldCtx, _event_generation, _generation_matches,
@@ -353,6 +354,30 @@ def _verifier_prefers(st: RunState, leader: Node, other: Node) -> bool:
     return usable and float(a) > float(b)
 
 
+def _significantly_beaten(st: RunState, candidate: Node, pool, value, holdout: bool) -> bool:
+    """Whether some node of `pool` beats `candidate` by the run's >1-SE rule
+    (`core/fitness.py::one_se_better`) on the candidate's own ruler — a confirmed mean against
+    confirmed means with the confirmation spreads, a single number against single numbers exactly,
+    the holdout's one score each. A cut judged only against the node it is taking the tie from
+    could be significantly worse than another candidate the leader itself was chosen over — by a
+    confirm certificate, or by the verifier inside its CI tie band — and the tie rule would then
+    cross the significant-difference boundary no selector rung may (critic 2026-09-27, driven)."""
+    for other in pool:
+        if other is candidate or not is_usable_metric(value(other)):
+            continue
+        if not holdout and (other.confirmed_mean is None) != (candidate.confirmed_mean is None):
+            continue
+        spread = (not holdout and other.confirmed_mean is not None
+                  and candidate.confirmed_mean is not None)
+        if one_se_better(float(value(other)), float(value(candidate)),
+                         other.confirmed_std if spread else 0.0,
+                         other.confirmed_seeds if spread else 0, st.direction,
+                         candidate.confirmed_std if spread else 0.0,
+                         candidate.confirmed_seeds if spread else 0):
+            return True
+    return False
+
+
 def simpler_tie(st: RunState, leader: Node | None, pool, *, holdout: bool = False) -> Node | None:
     """"ON A TIE, SIMPLER" (doc 67 67.5): the most simplified node cut from `leader` that is in `pool`
     and NON-INFERIOR to it (`core/fitness.py::one_se_non_inferior`), or `leader` itself.
@@ -368,8 +393,11 @@ def simpler_tie(st: RunState, leader: Node | None, pool, *, holdout: bool = Fals
     confirmed, exact "not worse" when neither is, and not at all across the two — a confirmed mean
     is never held against a single measurement (the selector's pool never mixes them; the slot
     passes' can); on the holdout stage, `holdout_metric` with no spread (one unseen-partition score
-    each). A simplification the calibrated verifier
-    scored below the leader is not a tie (`_verifier_prefers`).
+    each). The tolerance is capped at the leader's own SE (`one_se_non_inferior`), and a cut some
+    pool node beats by the >1-SE rule is never taken (`_significantly_beaten`). A simplification the
+    calibrated verifier scored below the leader is not a tie (`_verifier_prefers`) — where it scored
+    both: it scores the selector's exact tie groups, so a tie within the spread is decided by
+    simplicity alone.
 
     Inert — `leader` — on every log without a receipt: every log before 67.5, and every run with
     `Settings.ablation_simplify` off."""
@@ -409,7 +437,8 @@ def simpler_tie(st: RunState, leader: Node | None, pool, *, holdout: bool = Fals
                 candidate.confirmed_std if spread else 0.0,
                 candidate.confirmed_seeds if spread else 0, st.direction,
                 leader.confirmed_std if spread else 0.0, leader.confirmed_seeds if spread else 0)
-            if not held or _verifier_prefers(st, leader, candidate):
+            if (not held or _verifier_prefers(st, leader, candidate)
+                    or _significantly_beaten(st, candidate, members.values(), value, holdout)):
                 continue
             key = (depth + 1, sign * float(value(candidate)), -candidate.id)
             if chosen_key is None or key > chosen_key:
@@ -417,18 +446,24 @@ def simpler_tie(st: RunState, leader: Node | None, pool, *, holdout: bool = Fals
     return chosen
 
 
-def simpler_first(st: RunState, ranked: list) -> list:
-    """`ranked` with its head's `simpler_tie` moved to the front — for the passes that choose who
-    gets an EXTRA measurement (the holdout slots, the confirm seeds), so the node the selector would
-    crown is the one measured: with one slot (MLE-bench grades the search champion alone) the
-    simpler tie would otherwise never be graded, and could never win. Every other order is kept."""
+def simpler_slots(st: RunState, ranked: list, k: int) -> list:
+    """The first `k` of `ranked` — the pass's own order, its leader first — and the head's
+    `simpler_tie` in an EXTRA slot when it is not among them: for the passes that choose who gets
+    an extra measurement (the holdout slots, the confirm seeds), so the node the selector would
+    crown is measured, and could win the tie it measured.
+
+    An extra slot, never a taken one (critic 2026-09-27, driven): moved to the FRONT, the cut
+    took the only confirm slot and was certified when every seed failed, pushed a tied runner-up
+    out of a budget-limited pass, stood as the pass's leader in the significance test, and took a
+    holdout slot from a better node. Every node of `ranked[:k]` keeps its slot and its place."""
     ranked = list(ranked)
-    if not ranked:
-        return ranked
+    picked = ranked[:max(0, k)]
+    if not picked:
+        return picked
     head = simpler_tie(st, ranked[0], ranked)
-    if head is ranked[0]:
-        return ranked
-    return [head] + [node for node in ranked if node is not head]
+    if head is not ranked[0] and head not in picked:
+        picked.append(head)
+    return picked
 
 
 def select_best_node(st: RunState, pool, *, best_confirmed: int | None = None,

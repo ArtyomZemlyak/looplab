@@ -1182,9 +1182,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # strategy.py::_apply_strategy). The flag is read via getattr so any policy object is safe.
         self._ablation_capable: bool = not (bool(self._repo_spec) or bool(self._eval_spec))
         self.policy.ablation_capable = self._ablation_capable
-        # doc 67 67.5: the simplifications this process could not reserve, and the policy's stamp of
-        # them beside `ablation_simplify` (`ablation.py::AblationMixin._stamp_simplify`).
+        # doc 67 67.5: the simplifications this process declined to build, the reservation races
+        # each has lost, and the policy's stamp of them beside `ablation_simplify`
+        # (`ablation.py::AblationMixin._stamp_simplify`, `_simplify`).
         self._simplify_refused: set = set()
+        self._simplify_races: dict = {}
         self._stamp_simplify()
         # Fail loudly: a repo task with no trusted eval AND no onboarder would silently
         # evaluate every node via the empty solution.py path. Require one or the other.
@@ -3429,6 +3431,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
 
     def _select_actions(self, state: RunState) -> list[dict]:
         """Apply the explicit macro-selection authority order for one fresh fold."""
+        # doc 67 67.5: what the WHOLE fold's simplifications spent, before any lane narrows the view.
+        self._stamp_simplify(state)
         # Receipt-backed Card selection is the narrowest authority and therefore wins when both opt-in
         # selectors are enabled. The default false flag takes the exact historical branches below.
         forced = exploit_forced_action(

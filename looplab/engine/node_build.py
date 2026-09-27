@@ -371,8 +371,11 @@ class NodeBuildMixin:
         def _summ(a: Optional[dict]) -> Optional[dict]:
             if not a:
                 return None
+            # …and a simplification's BLOCK (doc 67 67.5): two of them from one champion are two
+            # different actions, and without it the durable record could not say which was chosen.
             return {"kind": a.get("kind"), "parent_id": a.get("parent_id"),
-                    "parent_ids": a.get("parent_ids"), "node_id": a.get("node_id")}
+                    "parent_ids": a.get("parent_ids"), "node_id": a.get("node_id"),
+                    **({"block": a["block"]} if a.get("kind") == "simplify" else {})}
 
         self.store.append(EV_AGENT_DECISION, {
             "at_node": len(state.nodes),
@@ -659,8 +662,9 @@ class NodeBuildMixin:
                            card_build_generation=_OMIT, eval_start_boundary=_OMIT,
                            materialize_aborted_intent=_OMIT, model_arm=_OMIT,
                            simplified=_OMIT, expected_last_seq=_OMIT) -> None:
-        """The single `node_created` emitter for all four creation sites (`_create_node`,
-        `_create_injected_node`, `_ablate`, `_ablate_code`). Optional keys default to the
+        """The single `node_created` emitter for every creation site (`_create_node`,
+        `_create_injected_node`, `_ablate`, `_ablate_code`, and doc 67 67.5's `_simplify` and
+        `_rebuild_simplification` — the two that pass `simplified`). Optional keys default to the
         `_OMIT` sentinel and are LEFT OUT of the payload when not passed — never None-filled —
         so omitted compatibility fields retain their historical shape (key set AND key order).
         All current creation sites intentionally opt into the additive ``eval_start_boundary``
@@ -1911,6 +1915,11 @@ class NodeBuildMixin:
                 "node_id": node.id, "generation": generation,
                 "error": "parent is missing or aborted", "reason": "parent_unavailable",
                 "eval_seconds": 0.0})
+            return
+        if node.operator == "simplify":
+            # doc 67 67.5: a simplification's program is its receipt, re-derived — never a
+            # Developer's rebuild, which paid a model call and landed a row without the receipt.
+            self._rebuild_simplification(node)
             return
         replacement_card = stage == "propose" and node.operator != "merge"
         with self.tracer.span(

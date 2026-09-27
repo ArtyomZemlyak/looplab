@@ -221,6 +221,7 @@ _LAYOUT = {
     "preflight": "agents",    # the pre-run LLM endpoint/credential reachability check
     "findings": "trust",      # one trust-finding shape + the gate namespaces (doc 25 CT-10)
     "fitness": "core",
+    "code_blocks": "core",  # the code-block ablation's unit + cut (doc 67 67.5), pure so the fold checks it
     "idea_report": "core",
     "eval_stages": "engine",
     "eventstore": "events",
