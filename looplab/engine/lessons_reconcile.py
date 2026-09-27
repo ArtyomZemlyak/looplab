@@ -14,6 +14,8 @@ engine.memory, events, core and stdlib (the memory/agent deps stay lazy, method-
 imports)."""
 from __future__ import annotations
 
+import json
+
 from pathlib import Path
 from typing import Optional
 
@@ -419,7 +421,11 @@ class LessonReconcileMixin:
             # that re-reads the file inside the lock and matches rows by IDENTITY (`_is_stale`, see
             # its comment), never by line number, so `stale_idx` survives only as a boolean gate
             # alongside the stale_pairs/reflect_stale derivation below.
-            rows: list = read_jsonl_lenient(path, keep_bad=True)
+            # …decoded by the locked read's own decoder, `json` (`claims.load_claim_source_path`),
+            # so the two reads admit ONE set of rows: `orjson` reads NaN and deep nesting
+            # differently, and a row only one of them reads was judged stale and paid for here while
+            # the retirement never saw it — or the other way round (critic 2026-09-27, driven).
+            rows: list = read_jsonl_lenient(path, keep_bad=True, loads=json.loads)
         except OSError:
             self._reconcile_sig_hash = None
             return state

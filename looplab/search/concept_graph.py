@@ -492,8 +492,14 @@ def _normalize_concept_id(raw) -> str:
 _PLACEHOLDER_WORDS = frozenset({"placeholder", "tbd", "tba", "todo", "xxx"})
 _TEMPLATE_WORDS = _PLACEHOLDER_WORDS | frozenset({
     "axis", "short", "slug", "family", "method", "variant", "concept", "id", "name", "example",
-    "none", "null", "unknown", "na", "n", "a"})
+    "none", "null", "unknown", "na", "n", "a",
+    # a template's own fillers and the metasyntactic names a writer reaches for (critic 2026-09-27:
+    # `your-axis/your-slug`, `my-axis/my-slug` and `foo/bar` passed)
+    "your", "my", "foo", "bar", "baz", "qux"})
 _SEGMENT_WORD_SPLIT = re.compile(r"[-_.]+")
+# A number NAMES nothing: a word's trailing digits are dropped (`axis1` is `axis`) and a word of
+# digits alone with them (`axis/slug-1` is `axis/slug`) — critic 2026-09-27, both passed.
+_TRAILING_DIGITS = re.compile(r"\d+$")
 
 
 def model_concept_id(raw, *, axis_required: bool = False) -> str:
@@ -506,7 +512,8 @@ def model_concept_id(raw, *, axis_required: bool = False) -> str:
     if not cid:
         return ""
     segments = cid.split("/")
-    words = [[w for w in _SEGMENT_WORD_SPLIT.split(seg) if w] for seg in segments]
+    words = [[bare for w in _SEGMENT_WORD_SPLIT.split(seg) if (bare := _TRAILING_DIGITS.sub("", w))]
+             for seg in segments]
     if (any(w in _PLACEHOLDER_WORDS for ws in words for w in ws)
             or all(w in _TEMPLATE_WORDS for ws in words for w in ws)
             or (axis_required and len(segments) < 2)):

@@ -151,12 +151,9 @@ def _report_context(state: RunState) -> str:
     # THE CHAMPION'S OWN CAVEATS (doc 69 69.16): the engine's receipt on the number this report
     # leads with (`engine/champion_caveats.py::champion_metric_caveats`, the one derivation the run
     # row, the reviewer bundle and the git export read). Unread here, a real run's report called
-    # every number "directly comparable" beside `mixed_comparability`. A slug this build words
-    # nothing for is named as it is, never dropped; the retarget is the Objective line above.
-    for slug in champion_metric_caveats(state):
-        if slug != CHAMPION_CAVEAT_RETARGETED_OBJECTIVE:
-            flags.append(_CHAMPION_CAVEAT_FLAGS.get(
-                slug, f"the engine records the champion caveat {slug!r}"))
+    # every number "directly comparable" beside `mixed_comparability`. The retarget is the
+    # Objective line above.
+    flags += _champion_caveat_clauses(state, objective_line=True)
     if flags:
         lines.append("Trust flags: " + "; ".join(flags) + ".")
     if state.research:
@@ -178,9 +175,14 @@ _CHAMPION_CAVEAT_FLAGS = {
     CHAMPION_CAVEAT_TRUST_FLAGGED: (
         "the champion carries a high-precision reward-hack or leakage signal this run's trust_gate "
         "did not enforce"),
+    # Either source the engine raises it from (critic 2026-09-27, driven): the committed code
+    # (`repair_verify.py::declared_param_overrides`) or the configuration the evaluation resolved
+    # (`runtime/applied_params.py`) — a clause naming the code alone was false for the second.
     CHAMPION_CAVEAT_PARAMS_OVERRIDDEN: (
-        "the champion's own code assigns a different value to a parameter its experiment declares, "
-        "so its params are not the configuration that produced the number"),
+        "the champion's own code, or the configuration its evaluation resolved, assigns a different "
+        "value to a parameter its experiment declares (or two of its own carriers disagree), so its "
+        "declared params are not the configuration that produced the number — the metric itself "
+        "was measured normally; what is in question is what it measures"),
     CHAMPION_CAVEAT_MIXED_COMPARABILITY: (
         "this run's nodes were NOT all measured against the same evaluation (their comparability "
         "keys, source trees or evaluation protocols provably differ): the champion won a mixed "
@@ -189,6 +191,23 @@ _CHAMPION_CAVEAT_FLAGS = {
         "the champion is a mean-merge: its params are the average of its parents' and no "
         "experiment ever trained that configuration"),
 }
+
+
+def _champion_caveat_clauses(state: RunState, *, objective_line: bool) -> list[str]:
+    """One clause per champion caveat (`engine/champion_caveats.py::champion_metric_caveats`); a slug
+    this build words nothing for is named as it is, never dropped. The retarget is said by the
+    Objective line where the text has one (`objective_line`), and here where it has none."""
+    out: list[str] = []
+    for slug in champion_metric_caveats(state):
+        if slug == CHAMPION_CAVEAT_RETARGETED_OBJECTIVE:
+            if not objective_line:
+                out.append(f"the champion's metric is the declared extra metric "
+                           f"{getattr(state, 'objective_key', None)!r}, which an operator retarget "
+                           "made the objective — not the task's own metric")
+            continue
+        out.append(_CHAMPION_CAVEAT_FLAGS.get(
+            slug, f"the engine records the champion caveat {slug!r}"))
+    return out
 
 
 def _g(v: Optional[float]) -> str:
@@ -291,6 +310,10 @@ def _deterministic_report(state: "RunState", message: str) -> dict:
         headline=headline,
         champion_summary=champion,
         verdict=f"(report generation failed: {message})",
+        # The champion's own caveats, as the paid report's context carries them (doc 69 69.16): an
+        # empty list here read as "no caveats" beside a `mixed_comparability` champion, on exactly
+        # the runs that end on the budget ceiling (critic 2026-09-27, driven).
+        caveats=_champion_caveat_clauses(state, objective_line=False)[:32],
     ).model_dump(mode="json")
     # `summary` is not a field of `_ReportOut` — it is the LEGACY single-field shape that
     # `sanitize_report_payload` still reads and that older logs and finalization receipts render.

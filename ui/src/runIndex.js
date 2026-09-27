@@ -144,8 +144,9 @@ export function bestMetricCaveatNotice(run = {}) {
         ? 'The node this number comes from carries a high-precision reward-hacking or leakage '
           + 'signal. trust_gate is not enforcing, so it was selected as this run’s best anyway.'
         : slug === CHAMPION_CAVEAT_PARAMS_OVERRIDDEN
-          ? 'The node this number comes from ships code that assigns a different value to a '
-            + 'parameter its own experiment record declares, so the declared configuration is not '
+          ? 'The node this number comes from ships code — or ran under a resolved configuration — '
+            + 'that assigns a different value to a parameter its own experiment record declares, or '
+            + 'two of its own carriers disagree, so the declared configuration is not '
             + 'the one this result was produced under. The run selected on it anyway — the metric '
             + 'itself was measured normally; what is in question is what it is a measurement of.'
           : slug === CHAMPION_CAVEAT_MIXED_COMPARABILITY

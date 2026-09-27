@@ -185,7 +185,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `trust_gate_changed` | folded | The run's trust gate was changed, by a named source (last write wins). | `source`, `trust_gate` | — |
 | `trust_scan` | diagnostic | Which trust detectors ran over one node's code, how many findings they made, over what digest. | — | `code_digest`, `detectors`, `evidence_version`, `findings`, `generation`, `node_id` |
 | `verifier_group_scored` | folded | One verifier round over a GROUP of nodes, keyed on the contract and evidence digests. | `contract`, `members`, `requested_samples`, `v` | — |
-| `workspace_changed` | folded | The workspace differs from the one last recorded: the run's own at its start, or the previous row's `now` (one row per change). | `now`, `was` | — |
+| `workspace_changed` | folded | A re-entry's workspace fingerprint differs from the last recorded (the run's start, or the previous row's `now`). | `now`, `was` | — |
 | `workspace_seeded` | diagnostic | One node's workspace was seeded: what was materialized, and the bytes the seed copied from the editable tree(s). | `materialized`, `node_id` | `workspace_bytes` |
 
 <!-- /generated -->

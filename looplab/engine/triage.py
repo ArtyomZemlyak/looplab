@@ -97,11 +97,21 @@ def _dir_fingerprint(path) -> str:
     if p.is_file():
         st = p.stat()
         return f"file:{st.st_size}:{st.st_mtime_ns}"
+    from fnmatch import fnmatch
+
+    from looplab.engine.workspace_seed import IGNORE_NAMES
     h = hashlib.sha256()
     for f in sorted(p.rglob("*")):
-        if f.is_file() and ".git" not in f.parts:
+        rel = f.relative_to(p)
+        # What no node is ever seeded with (`workspace_seed.IGNORE_NAMES`: `.git`, the bytecode
+        # caches, `.venv`, `node_modules`) cannot change what a node runs on, so it does not move
+        # this either: a `.pyc` an import rewrote read as a workspace change on every re-entry of a
+        # non-git editable (critic 2026-09-27, driven).
+        if any(fnmatch(part, pattern) for part in rel.parts for pattern in IGNORE_NAMES):
+            continue
+        if f.is_file():
             st = f.stat()
-            h.update(f.relative_to(p).as_posix().encode())
+            h.update(rel.as_posix().encode())
             h.update(f"{st.st_size}:{st.st_mtime_ns}".encode())
     return "hash:" + h.hexdigest()[:16]
 

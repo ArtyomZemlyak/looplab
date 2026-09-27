@@ -323,6 +323,16 @@ def test_cli_builds_a_read_model_for_a_run_that_never_finalized(tmp_path):
     after = CliRunner().invoke(app, ["readmodel", str(run_dir), "--check"])
     assert after.exit_code == 1 and "status=stale" in after.stdout
 
+    # A sidecar a previous build wrote says so, and names the rebuild (critic 2026-09-27: the
+    # superseded-schema line was pinned nowhere).
+    with sqlite3.connect(str(db)) as con:
+        con.execute(f"UPDATE {WATERMARK_TABLE} SET schema_version = ?",
+                    (READMODEL_SCHEMA_VERSION - 1,))
+    older = CliRunner().invoke(app, ["readmodel", str(run_dir), "--check"])
+    assert older.exit_code == 1 and "status=stale" in older.stdout
+    assert (f"covers=unknown (a schema-v{READMODEL_SCHEMA_VERSION - 1} watermark this build "
+            "superseded; `looplab readmodel` rebuilds it)") in older.stdout
+
 
 def test_cli_writes_no_event_and_the_engine_still_folds_the_log(tmp_path):
     """Invariant #1 and #4 in one drive: the sidecar appends nothing and changes no folded state."""

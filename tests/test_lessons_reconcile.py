@@ -753,6 +753,25 @@ def test_the_reconcile_rewrite_bounds_what_it_writes_as_the_append_funnel_does(t
     assert len(load_claim_source_path(mem / "lessons.jsonl", research=False)) == len(rows)
 
 
+def test_the_scan_decodes_with_the_locked_reads_decoder(tmp_path, monkeypatch):
+    """A row only `orjson` reads — nesting past `json`'s depth, under `orjson`'s — was judged stale by
+    the pre-lock scan (an `orjson` read) and paid for, while the locked read (`json`) could not see
+    it to retire (critic 2026-09-27, driven). One decoder for both reads. MUTATION: scan with
+    `orjson` -> the row is paid for."""
+    import orjson
+
+    mem = tmp_path / "mem"
+    eng = _engine(tmp_path, reflection_priors=True, memory_dir=str(mem), comparative_lessons=True)
+    line = orjson.dumps(_STALE_PAIR_ROW)[:-1] + b',"note":' + b"[" * 1010 + b"]" * 1010 + b"}"
+    assert orjson.loads(line)["statement"] == _STALE_PAIR_ROW["statement"], "orjson reads it"
+    (mem / "lessons.jsonl").parent.mkdir(parents=True, exist_ok=True)
+    (mem / "lessons.jsonl").write_bytes(line + b"\n")
+    client = FakeClient("P1 [BAD] this change regressed the metric\n")
+    monkeypatch.setattr(eng, "_reflect_client", lambda: client)
+    eng.lessons.reconcile_lessons(_flipped_state())
+    assert client.prompts == [], "a row the retirement cannot read was paid for"
+
+
 def test_a_stale_row_the_lesson_fence_refuses_for_another_reason_is_not_judged(tmp_path,
                                                                                 monkeypatch):
     """The scan's fence is the LESSON store's (`research=False`), whatever makes the row fail it — an

@@ -96,6 +96,26 @@ def _declared_reference(task):
     return normalized_reference(dump(mode="json", exclude_none=True)) if callable(dump) else None
 
 
+def workspace_moved(last, now) -> bool:
+    """Did a workspace source move between two recorded fingerprints (`workspace.py::
+    WorkspaceSeeder.workspace_fingerprint`)? One added or removed, or one whose two fingerprints are
+    of ONE kind and differ. Two of different kinds say nothing about the source — a `git rev-parse`
+    that timed out once fell to the stat hash (`triage.py::_dir_fingerprint`) and read as a change,
+    and the next entry's git answer as a change back, with nothing changed (critic 2026-09-27,
+    driven) — except `absent`, which is a state of the source, not a way of reading it."""
+    if not (isinstance(last, dict) and isinstance(now, dict)):
+        return last != now
+    for key in set(last) | set(now):
+        was, is_ = last.get(key), now.get(key)
+        if was == is_:
+            continue
+        if not (isinstance(was, str) and isinstance(is_, str)) or "absent" in (was, is_):
+            return True
+        if was.split(":", 1)[0] == is_.split(":", 1)[0]:
+            return True
+    return False
+
+
 class SetupPhaseMixin:
     """The one-time preflight — `run_started`, provenance, profiling, the leakage stop — and its
     resume-time drift records."""
@@ -340,7 +360,7 @@ class SetupPhaseMixin:
             # the previous row's `now`, or the run's own fingerprint before any.
             last = state.workspace_now if isinstance(state.workspace_now, dict) else state.workspace
             now = self._workspace_fingerprint()
-            if now != last:
+            if workspace_moved(last, now):
                 self.store.append(EV_WORKSPACE_CHANGED, {"was": last, "now": now})
         # P0-5 environment drift: on ANY resume where an env was pinned at run start, flag a Python/
         # library change — a run continued after an upgrade is no longer bit-reproducible, so record it

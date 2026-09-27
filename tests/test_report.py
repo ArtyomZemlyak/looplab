@@ -185,6 +185,43 @@ def test_the_report_names_the_champion_s_own_caveats(tmp_path, monkeypatch):
     assert "retargeted_objective" not in flagged
 
 
+def test_every_champion_caveat_is_worded_for_what_it_is_and_the_fallback_report_carries_them(
+        tmp_path, monkeypatch):
+    """Critic 2026-09-27 on 69.16 (driven): only the `mixed_comparability` clause was pinned — four
+    others could be unmapped or inverted ("was measured: its evaluation succeeded") with every test
+    green; the `params_overridden` clause named the champion's CODE alone, false when the engine
+    raised it from the configuration the evaluation resolved; and the report every budget-ceiling
+    run falls back to (`_deterministic_report`) still published `caveats: []`."""
+    from looplab.serve import report as report_mod
+    from looplab.serve.report import _deterministic_report
+
+    st = RunState(run_id="r", task_id="t", direction="max")
+    st.nodes[0] = Node(id=0, operator="draft", idea=Idea(operator="draft", params={"x": 1.0}),
+                       status=NodeStatus.evaluated, metric=0.9)
+    st.best_node_id = 0
+    every = ["salvaged", "trust_flagged", "params_overridden", "mixed_comparability",
+             "merged_coordinates", "retargeted_objective"]
+    monkeypatch.setattr(report_mod, "champion_metric_caveats", lambda state: list(every))
+    context = _report_context(st)
+    for phrase in ("metric was NOT measured: its evaluation failed and the run's own declared "
+                   "reader recovered the number",
+                   "high-precision reward-hack or leakage signal this run's trust_gate did not "
+                   "enforce",
+                   "the champion's own code, or the configuration its evaluation resolved, assigns "
+                   "a different value", "the metric itself was measured normally",
+                   "the champion won a mixed field", "the champion is a mean-merge"):
+        assert phrase in context, phrase
+    assert "retarget" not in context.split("Trust flags:", 1)[1], "the Objective line says it"
+
+    st.objective_key = "filtered"
+    fallback = _deterministic_report(st, "LLM spend ceiling reached")["caveats"]
+    assert len(fallback) == len(every), fallback
+    assert fallback[-1].startswith("the champion's metric is the declared extra metric 'filtered'")
+    assert any("mixed field" in clause for clause in fallback)
+    monkeypatch.setattr(report_mod, "champion_metric_caveats", lambda state: [])
+    assert _deterministic_report(st, "LLM spend ceiling reached")["caveats"] == []
+
+
 def test_report_generated_folds_latest_wins():
     evs = [
         Event(seq=0, type="run_started", data={"run_id": "r", "task_id": "t", "direction": "min"}),

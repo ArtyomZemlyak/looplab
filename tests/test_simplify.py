@@ -1050,6 +1050,27 @@ def test_one_walk_decides_which_blocks_pay_a_dump(monkeypatch):
     assert len(dumps) == 2, "the program, and the one block that could run nothing"
 
 
+def test_the_walk_spares_the_dump_for_multi_line_statements_and_pays_it_where_a_string_is_cut(
+        monkeypatch):
+    """The dump count on shapes the first count test did not hold (critic 2026-09-27: a mutant of
+    the walk survived it): a statement that starts on a block's SECOND code line and spans lines,
+    three hundred times over, costs no dump — and a docstring broken by a blank line, whose token
+    each of its two blocks cuts, costs one each."""
+    from looplab.core.code_blocks import code_blocks
+    from looplab.search import policy as policy_mod
+
+    body = "".join(f'"note {i}"\nx{i} = ({i} +\n      1)\n\n' for i in range(300))
+    # …and a string that spans lines INSIDE its one block cuts no edge: no dump for it either.
+    big = '"""Title.\n\nBody."""\n\n' + body + 's = """one\ntwo"""\n'
+    dumps: list = []
+    real = policy_mod._semantic_dump
+    monkeypatch.setattr(policy_mod, "_semantic_dump", lambda code: dumps.append(1) or real(code))
+    policy_mod._removes_something.cache_clear()
+    removed = policy_mod._removes_something(big, len(code_blocks(big)))
+    assert removed == frozenset(range(303)), "every block's removal changes what runs or parses"
+    assert len(dumps) == 3, "the program, and the two blocks the docstring's token spans"
+
+
 def test_a_host_graded_run_nominates_nothing(tmp_path):
     """Its probe reads the candidate's own stdout, never the host's grade: the self-report minus
     the host grade read as a gain for every block (driven)."""
@@ -1603,6 +1624,10 @@ _BREAKS = "\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
     ("an else header with a space", "x = int('1')\nif x:\n    y = 2\n\nelse :\n    pass\n\nprint(y)\n", 1),
     ("an else header with a comment", "x = int('1')\nif x:\n    y = 2\n\nelse:  # note\n    pass\n"
                                       "\nprint(y)\n", 1),
+    # A block whose edge CUTS a token that spans lines: the `'''` it opens swallows a copy of its
+    # own statement, which is code again once the block is gone (critic 2026-09-27, driven).
+    ("a string its block opens swallows a copy of its statement",
+     "x = 1\n'''\n\nx = 1  # '''\nprint(x)\n", 0),
 ])
 def test_the_fast_path_is_the_per_block_rule(label, code, runs_nothing):
     """LOW (critic 2026-09-27, driven: 335 of 40,000 random programs). An `else:`/`finally:` header

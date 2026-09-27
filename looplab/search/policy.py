@@ -197,6 +197,19 @@ def _load_bearing_starts(code: str) -> Optional[frozenset]:
         return None
 
 
+def _multiline_token_spans(code: str) -> Optional[tuple]:
+    """The (first, last) 1-based lines of every token that spans lines — a triple-quoted string, an
+    f-string broken across lines — or None when the tokenizer refuses `code`."""
+    import io
+    import tokenize
+    try:
+        return tuple((tok.start[0], tok.end[0])
+                     for tok in tokenize.generate_tokens(io.StringIO(code).readline)
+                     if tok.start[0] != tok.end[0])
+    except (tokenize.TokenError, SyntaxError, ValueError, RecursionError, MemoryError):
+        return None
+
+
 # Line breaks `str.splitlines` honours and the tokenizer does not (a form feed opens a "page" in
 # hand-kept Python). `_load_bearing_starts` numbers lines as the tokenizer does and
 # `_removes_something`'s blocks as `splitlines` does, so on a program holding one the two
@@ -227,18 +240,25 @@ def _removes_something(code: str, blocks: int) -> frozenset:
     # dump per block cost O(blocks × size) on the event-loop thread — 13.7 s for a 2,001-line,
     # 401-block champion (critic 2026-09-27, driven) — for the same answer: a block holding the
     # first line of a statement that runs something changes the dump (or the parse) wherever it
-    # is removed from (`_load_bearing_starts`). Every other block pays the dump, so the answer is
-    # the per-block rule's by construction, not by a generator's sample of it.
-    starts = (_load_bearing_starts(code or "")
+    # is removed from (`_load_bearing_starts`) — WHEN what is left tokenizes as it did. A block
+    # whose edge cuts a token that spans lines does not meet that: `x = 1` then a `'''` opening a
+    # string that swallows a copy of `x = 1` from the next block, and with the block gone the copy
+    # is code again and the dump is the parent's (critic 2026-09-27, driven). Such a block, and
+    # every other one, pays the dump — so the fast path's answer is the per-block rule's.
+    tokens = (_multiline_token_spans(code or "")
               if whole is not None and _SPLITLINES_ONLY_BREAKS.isdisjoint(code or "") else None)
+    starts = _load_bearing_starts(code or "") if tokens is not None else None
     out = set()
     for index, (start, end) in enumerate(spans):
         code_lines = [k for k in range(start, end)
                       if lines[k].strip() and not lines[k].strip().startswith("#")]
         if not code_lines:
             continue
+        cut = starts is None or any(first <= end and last > start
+                                    and not (start < first and last <= end)
+                                    for first, last in tokens)
         if (whole is not None
-                and (starts is None or not any(k + 1 in starts for k in code_lines))
+                and (cut or not any(k + 1 in starts for k in code_lines))
                 and _semantic_dump("\n".join(lines[:start] + lines[end:])) == whole):
             continue
         out.add(index)

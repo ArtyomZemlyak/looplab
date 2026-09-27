@@ -640,6 +640,11 @@ def test_the_clause_is_kept_for_any_key_and_touches_nothing_else():
         full = "the body of a long lesson " * 10 + retargeted_lesson_note(key)
         assert keep_retarget_clause(full, full[:40]).endswith(retargeted_lesson_note(key)), key
         assert keep_retarget_clause(full, full) == full, "a cut that kept it gains no second one"
+        # A cut that stopped INSIDE the clause — the CLI's 100-character lines land there — keeps
+        # no piece of it beside the whole (critic 2026-09-27). MUTATION: append beside the piece.
+        body = full[:len(full) - len(retargeted_lesson_note(key))]
+        for stop in (len(body) + 1, len(body) + 4, len(body) + 12, len(full) - 1):
+            assert keep_retarget_clause(full, full[:stop]) == full, (key, stop)
 
 
 def test_the_steward_the_context_pack_and_the_strategist_keep_the_clause(tmp_path):
@@ -1214,6 +1219,12 @@ def test_every_cut_of_a_retargeted_claim_keeps_its_clause(tmp_path):
     tool = CrossRunTools(tmp_path).execute("cross_run_claims", {})
     contested = [x for x in tool.splitlines() if "contradicts=" in x]
     assert contested and all("ranked by" in x.partition("contradicts=")[2] for x in contested)
+    # …and the search tool's hits, whose `contradicts` is the same cut at another site (critic
+    # 2026-09-27: removing its `keep_retarget_clause` failed no test).
+    search = CrossRunTools(tmp_path).execute("cross_run_search",
+                                             {"query": "mnr hard negatives margin"})
+    hits = [x for x in search.splitlines() if "contradicts=" in x]
+    assert hits and all("ranked by" in x.partition("contradicts=")[2] for x in hits)
     pack = build_context_pack(claims_for_memory(tmp_path))
     assert [s for c in pack["claims"] for s in c["contradicts"]], "precondition: a contradiction"
     assert all("ranked by" in s for c in pack["claims"] for s in c["contradicts"])
@@ -1299,6 +1310,17 @@ def test_the_skill_card_the_crate_and_the_research_rows_name_the_ruler(tmp_path)
                 if x.strip()]
         claims = [r for r in rows if r.get("record_kind") == "claim"]
         assert claims and all(r.get("objective_key") == key for r in claims), (label, rows)
+    # …and through the finalize writer that hands it the run's objective (critic 2026-09-27:
+    # dropping `objective_key=` at `lessons.py::LessonMemory.store_research_claims` failed no test).
+    for st, key in ((state, "filtered"), (plain, None)):
+        st.research = [{"claims": [dict(claim)]}]
+        writer = _toy_engine(tmp_path / f"finalize_{key}", memory_dir=str(tmp_path / f"fin_{key}"))
+        writer.lessons.store_research_claims(st)
+        rows = [orjson.loads(x) for x in
+                (tmp_path / f"fin_{key}" / "research_claims.jsonl").read_bytes().splitlines()
+                if x.strip()]
+        claims = [r for r in rows if r.get("record_kind") == "claim"]
+        assert claims and all(r.get("objective_key") == key for r in claims), (key, rows)
 
 
 def test_a_retargeted_lessons_id_and_a_long_keys_clause_are_pinned():

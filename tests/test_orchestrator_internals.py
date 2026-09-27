@@ -147,9 +147,58 @@ def test_every_workspace_change_is_recorded_and_the_rows_chain(tmp_path):
             f'import json; print(json.dumps({{"metric": {metric}}}))\n', encoding="utf-8")
         enter()
     enter()                                             # nothing changed since the last row
+    # …nor does a file no node is ever seeded with: an import rewrote the bytecode cache of a
+    # non-git editable, and that read as a change on every re-entry (critic 2026-09-27, driven).
+    (repo / "__pycache__").mkdir()
+    (repo / "__pycache__" / "run.cpython-311.pyc").write_bytes(b"\x00" * 16)
+    (repo / "node_modules").mkdir()
+    (repo / "node_modules" / "x.js").write_text("1\n", encoding="utf-8")
+    enter()
     first, second = rows()
     assert first["was"] == start and first["now"] != start
     assert second["was"] == first["now"] and second["now"] != first["now"]
+
+
+def test_a_re_entry_that_reads_the_workspace_another_way_writes_no_row(tmp_path, monkeypatch):
+    """At the re-entry itself, not only the rule: an editable read as git on one entry and by its
+    stat hash on the next (a `rev-parse` that timed out) records nothing (critic 2026-09-27).
+    MUTATION: compare the raw fingerprints at the call site -> a row."""
+    from looplab.events.eventstore import EventStore
+
+    repo = _repo(tmp_path, 'import json; print(json.dumps({"metric": 1.0}))\n')
+    t = RepoTask(id="w", direction="max", editable_path=str(repo), edit_surface=["*.txt"],
+                 eval=EvalSpec(command=[sys.executable, "run.py"], metric=_M))
+    run_dir = tmp_path / "run"
+
+    def enter():
+        r, d = t.build_roles()
+        return anyio.run(Engine(run_dir, task=t, researcher=r, developer=d,
+                                sandbox=SubprocessSandbox(),
+                                policy=GreedyTree(n_seeds=1, max_nodes=1)).run)
+
+    start = enter().workspace
+    assert all(v.startswith("hash:") for v in start.values()), start
+    monkeypatch.setattr(Engine, "_workspace_fingerprint",
+                        lambda self: {key: "git:" + "0" * 40 for key in start})
+    enter()
+    assert not [e for e in EventStore(run_dir / "events.jsonl").read_all()
+                if e.type == "workspace_changed"]
+
+
+def test_two_ways_of_reading_one_source_are_not_a_change():
+    """A `git rev-parse` that timed out once falls to the stat hash, and the chain read git→hash as
+    a change and hash→git as another, with nothing changed (critic 2026-09-27, driven). Only two
+    fingerprints of one kind are compared; a source added, removed or gone is a change whatever
+    the kinds. MUTATION: compare the raw values -> the flip reads as a change."""
+    from looplab.engine.setup_phase import workspace_moved
+
+    git, hashed = {"editable:.": "git:abc"}, {"editable:.": "hash:0123"}
+    assert not workspace_moved(git, hashed) and not workspace_moved(hashed, git)
+    assert workspace_moved(git, {"editable:.": "git:def"})
+    assert workspace_moved(hashed, {"editable:.": "hash:4567"})
+    assert workspace_moved(git, {"editable:.": "absent"}) and workspace_moved({"editable:.": "absent"}, hashed)
+    assert workspace_moved(git, {**git, "data:x": "dir:1:2"}) and workspace_moved({**git, "data:x": "dir:1:2"}, git)
+    assert not workspace_moved(git, dict(git))
 
 
 # --------------------------------------------------------------------------- gap-safe node-id alloc

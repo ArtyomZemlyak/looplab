@@ -234,7 +234,19 @@ def keep_retarget_clause(full: str, cut: str) -> str:
         return cut
     # The key inside it is shared free text: bounded and redacted like the text it rides on.
     clause = " " + cross_run_text(match.group(0), max_chars=400, single_line=True, entropy=True)
-    return cut if clause in cut else cut + clause
+    if clause in cut:
+        return cut
+    # A cut that stopped INSIDE the clause kept a piece of it, and the clause went on beside the
+    # piece (critic 2026-09-27: a CLI line cut at 100 characters lands inside the ~95-character
+    # clause). The piece goes — from the clause's opening, or the part of the opening that made it.
+    opening = " [ranked by "
+    at = cut.rfind(opening)
+    if at != -1:
+        cut = cut[:at]
+    else:
+        cut = next((cut[:-k] for k in range(len(opening) - 1, 0, -1)
+                    if cut.endswith(opening[:k])), cut)
+    return cut + clause
 
 
 def cross_run_identity_text(value, *, max_chars: int) -> str:
