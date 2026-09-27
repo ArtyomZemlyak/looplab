@@ -439,3 +439,89 @@ def test_the_drain_reads_the_folds_own_requeue_rule(tmp_path):
     legacy = fold(store.read_all())
     assert legacy.holdout_evaluated_ids == [1] and legacy.holdout_epoch_aware is False
     assert not _lift_requeues(legacy), "an unstamped disclosure's rotation re-queues nothing"
+
+
+@pytest.mark.parametrize("why,row,pinned,stage,kept", [
+    ("a pinned run: the private grade moved no rows", _PRIVATE, True, "score", ["train"]),
+    ("an unpinned host split: the search epoch re-carves it all the same", _PRIVATE, False,
+     None, []),
+    ("a burning disclosure re-carves a pinned run", {}, True, None, []),
+])
+def test_a_reset_keeps_its_stages_only_where_its_rotation_moves_no_rows(tmp_path, why, row,
+                                                                         pinned, stage, kept):
+    """LOW (critic 2026-09-27, driven). The stage rule read the burn alone and the re-queue read the
+    rows: on an unpinned host split the reset node kept its `train` from the old carve while the
+    other incumbent was re-queued for a full retrain on the new one. One rule for both
+    (`events/replay.py::_rotation_moves_rows`)."""
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append("run_started", {"run_id": "hg", "task_id": "t", "goal": "g", "direction": "max",
+                                 "holdout_fraction": 0.25,
+                                 **({"split_salt": "disclosure"} if pinned else {})})
+    store.append("host_grading", {"predictions": "predictions.json", "scorer": "accuracy"})
+    for nid in (0, 1):
+        store.append("node_created", {"node_id": nid, "parent_ids": [], "operator": "draft",
+                                      "idea": {"operator": "draft", "params": {},
+                                               "rationale": "r"}, "code": f"print({nid})"})
+        for name in ("train", "score"):
+            store.append("stage_finished", {"node_id": nid, "generation": 0, "name": name,
+                                            "status": "ok", "exit_code": 0, "seconds": 100.0})
+        store.append("node_evaluated", {"node_id": nid, "generation": 0, "metric": 0.4 + nid,
+                                        "violations": []})
+    store.append("holdout_evaluated", {"node_id": 0, "generation": 0, "metric": 0.6, "gap": -0.1,
+                                       "n_holdout": 3, "search_epoch": 0, **row})
+    store.append("run_finished", {"reason": "done"})
+    store.append("node_reset", {"node_id": 0, "generation": 0, "from_stage": "score"})
+    state = fold(store.read_all())
+    node = state.nodes[0]
+    assert node.rerun_stage == stage and [s["name"] for s in node.stages] == kept, why
+    assert state.nodes[1].status.value == ("evaluated" if kept else "pending"), (
+        f"{why}: the other incumbent is re-queued exactly when the rows move")
+
+
+@pytest.mark.parametrize("fraction,refused", [(0.25, True), (0.0, False)])
+def test_a_drain_is_refused_where_lifting_a_legacy_disclosure_re_carves_the_split(
+        tmp_path, fraction, refused):
+    """LOW (critic 2026-09-27, driven). A LEGACY unstamped disclosure on an unpinned host split,
+    the run paused with a node owed: lifting the pause rotates WITHOUT re-queuing — so
+    `_lift_requeues` let the drain through — and the search-epoch salt re-carves the split all the
+    same, so the drained node was scored on other rows than every incumbent. With no host split
+    nothing moves and nothing is refused."""
+    from looplab.engine.run_boundary import classify_prior_run, drain_only_refusal
+
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append("run_started", {"run_id": "hg", "task_id": "t", "goal": "g", "direction": "max",
+                                 "holdout_fraction": fraction})
+    store.append("host_grading", {"predictions": "predictions.json", "scorer": "accuracy"})
+    for nid, metric in ((0, 0.4), (1, 0.5)):
+        store.append("node_created", {"node_id": nid, "parent_ids": [], "operator": "draft",
+                                      "idea": {"operator": "draft", "params": {},
+                                               "rationale": "r"}, "code": f"print({nid})"})
+        store.append("node_evaluated", {"node_id": nid, "generation": 0, "metric": metric,
+                                        "violations": []})
+    store.append("node_reset", {"node_id": 0, "from_stage": "eval", "generation": 0})
+    store.append("holdout_evaluated", {"node_id": 1, "generation": 0, "metric": 0.6, "gap": -0.1,
+                                       "n_holdout": 3})              # no search_epoch: legacy
+    store.append("pause", {})
+    events = store.read_all()
+    state = fold(events)
+    kind = classify_prior_run(state, events)
+    assert kind == "paused" and state.holdout_epoch_aware is False
+    answer = drain_only_refusal(state, kind, events)
+    if refused:
+        assert answer is not None and answer[0] == 2 and "re-carves" in answer[1], answer
+    else:
+        assert answer is None or "re-carves" not in answer[1], answer
+
+
+def test_a_reset_of_the_only_disclosure_moves_no_salt_an_unpinned_log_did_not(tmp_path):
+    """MEDIUM (critic 2026-09-27, M-1) — what a key-less log still folds to. A reset of the only
+    disclosed node now re-carves a 68.3c-PINNED run where the 68.3c fold did not; the pin never
+    shipped before this rule, so no released log carries it. Every released log is UNPINNED, and
+    there the salt is the search epoch: the reset moves it exactly as every earlier fold did."""
+    store = _disclosed(tmp_path, {"protocol": "holdout_select"}, pinned=False,
+                       then=("run_finished",))
+    store.append("node_reset", {"node_id": 1, "from_stage": "eval", "generation": 0})
+    state = fold(store.read_all())
+    assert state.split_salt_disclosure is False
+    assert state.split_salt == state.search_epoch == 1
+    assert _requeued(state) == {0: ("pending", 1), 1: ("pending", 1)}

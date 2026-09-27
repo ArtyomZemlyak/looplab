@@ -22,7 +22,7 @@ from typing import Iterable, Optional
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, finite_metric,
                                   is_usable_metric,
                                   verifier_evidence_digest)
-from looplab.core.code_blocks import code_blocks, comment_block
+from looplab.core.code_blocks import code_blocks, comment_block, cut_identity
 from looplab.core.headroom import normalized_reference
 from looplab.core.jsonutil import bounded_int, valid_digest_ref
 from looplab.core.models import (Event, Idea, Node, NodeStatus, RunState, Trial,
@@ -452,6 +452,7 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         else None
     )
     try:
+        receipt = _simplification_receipt(d, parent_ids, st)
         n = Node(
             id=nid,
             parent_ids=parent_ids,
@@ -475,8 +476,11 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             forked_from=d.get("forked_from"),
             research_origin=d.get("research_origin"),   # 💡 proposed just after a deep-research memo
             model_arm=str(d.get("model_arm") or "")[:64],  # doc 52 row 19: the routed model arm
-            # doc 67 67.5: the node's parent with one block commented out, or None.
-            simplified=_simplification_receipt(d, parent_ids, st),
+            # doc 67 67.5: the node's parent with one block commented out, or None — and the cut it
+            # certified, which an inline repair of this node does not un-spend.
+            simplified=receipt,
+            simplified_cut=(cut_identity(d["code"], d.get("files") or {})
+                            if receipt is not None else None),
             footprint_finalized=d.get("footprint_finalized") is True,
             speculative=speculative,
             card_build_generation=card_build_generation,
@@ -1123,6 +1127,17 @@ def _host_split(st: RunState) -> bool:
     return st.holdout_fraction is None or float(st.holdout_fraction) > 0
 
 
+def _rotation_moves_rows(st: RunState) -> bool:
+    """Whether the next epoch rotation MOVES the rows the search is scored on, read before it
+    consumes the disclosure: a disclosure that burned the engine's hidden partition (doc 68 68.3d),
+    or any rotation on a host split the search epoch salts (a log older than the 68.3c pin). The
+    one rule both halves of a reset ask — whether to re-queue the incumbents
+    (`_rotate_search_epoch`) and whether the reset node may keep its earlier stages
+    (`_on_node_reset`): the node kept its `train` from the old carve while every other incumbent
+    was re-queued for a full retrain on the new one (critic 2026-09-27, driven)."""
+    return st.holdout_partition_disclosed or (not st.split_salt_disclosure and _host_split(st))
+
+
 def _rotate_search_epoch(st: RunState, *, requeue_partition_scores: bool,
                          fresh_node_ids: set[int] | None = None) -> None:
     """Advance one epoch and invalidate every value bound to the disclosed partition."""
@@ -1134,6 +1149,10 @@ def _rotate_search_epoch(st: RunState, *, requeue_partition_scores: bool,
     # re-queue every earlier fold performed — a champion flip on a log older than 68.3d, and a
     # disclosure never consumed on a new one (critic 2026-09-27, driven). The flag is set only by a
     # disclosure and cleared only below, so it is exactly "an unconsumed disclosure burned it".
+    # Where the list and the flag part — that reset — a 68.3c-PINNED log now re-carves where the
+    # 68.3c fold did not (critic 2026-09-27, M-1): the pin never shipped before this rule, so only
+    # pre-release logs of the same series fold differently, and an unpinned log's salt is its
+    # search epoch, which every rotation advances either way.
     burned = st.holdout_partition_disclosed
     if burned:
         # A disclosure is being consumed: the one rotation that re-carves the host split
@@ -1143,8 +1162,7 @@ def _rotate_search_epoch(st: RunState, *, requeue_partition_scores: bool,
     # burning disclosure, or on a log older than the 68.3c pin, whose split is salted by the search
     # epoch this rotation just advanced. After a private grade on MLE-bench every leader was
     # re-evaluated on a re-carved search split for nothing (critic 2026-09-26).
-    requeue_partition_scores = requeue_partition_scores and (
-        burned or (not st.split_salt_disclosure and _host_split(st)))
+    requeue_partition_scores = requeue_partition_scores and _rotation_moves_rows(st)
     st.holdout_evaluated_ids.clear()
     st.holdout_epoch_aware = False   # the disclosure is consumed; the new epoch has none yet
     st.holdout_partition_disclosed = False
@@ -1539,13 +1557,14 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             # previous fold pass built (the fold re-enters on every read).
             n.stages = [({**prior, "repairs": 0} if isinstance(prior, dict) else prior)
                         for prior in n.stages]
-            if holdout_was_disclosed and st.holdout_partition_disclosed:
+            if holdout_was_disclosed and _rotation_moves_rows(st):
                 # Stage reuse can retain a model trained on the old search complement. A disclosed
                 # partition forces a full freshly-materialized eval in the next epoch; source code
                 # survives, but no old stage artifact or workdir checkpoint may be reused. Only a
-                # disclosure that BURNED the partition (doc 68 68.3d): after a private grade or a
-                # withheld scorer the split does not move, and the "re-score, then pause" drain from
-                # `score` retrained the model for nothing (critic 2026-09-27, driven).
+                # disclosure whose rotation MOVES the rows (doc 68 68.3d): after a private grade or
+                # a withheld scorer on a pinned run the split does not move, and the "re-score, then
+                # pause" drain from `score` retrained the model for nothing (critic 2026-09-27,
+                # driven) — but on a split the search epoch salts it moves all the same.
                 n.rerun_stage = None
                 n.stages = []
         _clear_build_marker(st, d, n.id)

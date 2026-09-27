@@ -181,6 +181,19 @@ def _lift_requeues(prior) -> bool:
         or (_host_split(prior) and not getattr(prior, "split_salt_disclosure", False))))
 
 
+def _lift_moves_rows(prior) -> bool:
+    """Whether the rotation a lift over a DISCLOSED holdout performs moves the rows the host scores
+    the search on, re-queued or not: a disclosure that burned the partition, or any rotation on a
+    split the search epoch salts (a log older than doc 68 68.3c) — the fold's
+    `events/replay.py::_rotation_moves_rows`, on a host split. `_lift_requeues` answers only for an
+    epoch-aware disclosure; a legacy unstamped one on such a split rotates WITHOUT re-queuing and
+    still re-carves, so the drained node was scored on other rows than every incumbent (critic
+    2026-09-27, driven: a paused run's lift, which `_lift_recarves` — finished only — never saw)."""
+    return _host_split(prior) and bool(
+        getattr(prior, "holdout_partition_disclosed", True)
+        or not getattr(prior, "split_salt_disclosure", False))
+
+
 def _split_salt(prior) -> int:
     """`RunState.split_salt`, read off a folded state or a test double that carries only the epoch."""
     salt = getattr(prior, "split_salt", None)
@@ -228,7 +241,8 @@ def drain_only_refusal(prior, prior_kind: str, prior_events=None) -> Optional[tu
       lifted only to be put back (exit 0) — a `node_reset` re-opens a finished run itself;
     * a holdout was disclosed and lifting a pause or a finish would rotate the epoch, re-queuing
       every evaluated node (exit 2) — not after an MLE-bench private grade or a withheld scorer,
-      which disclose none of the rows the search is scored on (`_lift_requeues`, doc 68 68.3d);
+      which disclose none of the rows the search is scored on (`_lift_requeues`, doc 68 68.3d) —
+      or re-carving the host split without re-queuing anyone (`_lift_moves_rows`, exit 2);
     * owed nodes the epoch rotation RE-QUEUED rather than anyone reset — one reset after a
       disclosure re-opens every incumbent, and a drain would retrain each of them from scratch
       without having said so (exit 2);
@@ -268,6 +282,13 @@ def drain_only_refusal(prior, prior_kind: str, prior_events=None) -> Optional[tu
                    + " opens a new search epoch and re-queues every evaluated node for "
                    "re-evaluation on the newly hidden rows, which --drain-only will not buy on its "
                    "own; resume without --drain-only if that is the intent")
+    if prior_kind in ("paused", "finished") and prior.holdout_evaluated_ids and _lift_moves_rows(prior):
+        return 2, ("a holdout was disclosed on this host-graded run: lifting its "
+                   + ("pause" if prior_kind == "paused" else "finish")
+                   + " opens a new search epoch that re-carves the split the host scores the "
+                   f"search on, without re-queuing anyone: node(s) {', '.join(map(str, owed or rebuild))} "
+                   "would be scored on other rows than every incumbent they are ranked against. "
+                   "--drain-only will not mix the two; a plain `looplab resume` would")
     if prior_kind == "finished" and _lift_recarves(prior):
         return 2, ("this host-graded run is finished, and lifting a finish opens a new search epoch, "
                    "which on a run started before doc 68 68.3c re-carves the split the host scores "

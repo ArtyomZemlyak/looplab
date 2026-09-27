@@ -1183,10 +1183,13 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   never over a node that beats it by more than one SE, the deepest such cut first, on the search
   pick and on the holdout pick alike — while it IS STILL the parent's program minus that block, so
   a re-measurement of the same program (an epoch re-queue, an eval-type reset) keeps the tie
-  (`core/code_blocks.py::still_cut_of`). The confirm and holdout passes measure it in an EXTRA slot
-  after their own top-k — the confirm pass decides that slot on the single measurements it cannot
-  move, and pays for it only inside the budget (MLE-bench's one private grade goes to the would-be
-  champion). The endgame reserve takes it after the ensemble and once per champion. Never
+  (`core/code_blocks.py::still_cut_of`). A block stays SPENT while a node is that cut or was built
+  as it — an inline repair rewrites a crashed cut in place, and the block is not nominated again
+  (`core/code_blocks.py::cut_spent`, off the fold's record of the cut it certified). The confirm and
+  holdout passes measure it in an EXTRA slot after their own top-k — the confirm pass decides that
+  slot on the single measurements it cannot move (no verifier: its own confirmations clear that
+  score), and pays for it only inside the budget (MLE-bench's one private grade goes to the
+  would-be champion). The endgame reserve takes it after the ensemble and once per champion. Never
   nominated on a host-graded run, whose probe the host does not grade. Without that rule an equal
   simplification never became the champion: the champion only grew.
 - **merge / ensemble** — recombine two parents: a param mean, or a code-recombination ensemble

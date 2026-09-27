@@ -403,7 +403,8 @@ def simpler_tie(st: RunState, leader: Node | None, pool, *, holdout: bool = Fals
     simplicity alone.
 
     `raw` compares the SINGLE measurements (`metric`, exactly, whatever is confirmed) — the ruler a
-    pass that is about to confirm ranks on (`simpler_slots`), and one the pass itself cannot move.
+    pass that is about to confirm ranks on (`simpler_slots`), and one the pass itself cannot move:
+    the verifier, whose score the pass's confirmations clear, is not consulted on it.
 
     Inert — `leader` — on every log without a receipt: every log before 67.5, and every run with
     `Settings.ablation_simplify` off."""
@@ -445,7 +446,11 @@ def simpler_tie(st: RunState, leader: Node | None, pool, *, holdout: bool = Fals
                 candidate.confirmed_std if spread else 0.0,
                 candidate.confirmed_seeds if spread else 0, st.direction,
                 leader.confirmed_std if spread else 0.0, leader.confirmed_seeds if spread else 0)
-            if (not held or _verifier_prefers(st, leader, candidate)
+            # Not on the raw ruler: the leader's own `node_confirmed` moves its verifier evidence
+            # and clears its score, so a re-entered confirm pass granted the cut a slot its first
+            # entry denied (critic 2026-09-27, driven) — an EXTRA measurement, which the selector,
+            # verifier included, then judges.
+            if (not held or (not raw and _verifier_prefers(st, leader, candidate))
                     or _significantly_beaten(st, candidate, members.values(), value, single)):
                 continue
             key = (depth + 1, sign * float(value(candidate)), -candidate.id)

@@ -28,7 +28,7 @@ import math
 from typing import Callable, Optional, Protocol
 
 from looplab.core.code_blocks import code_blocks  # noqa: F401 — moved to core; re-exported (doc 67 67.5)
-from looplab.core.code_blocks import still_cut_of
+from looplab.core.code_blocks import cut_spent
 from looplab.core.errors import ConfigRefusal
 from looplab.core.models import NodeStatus, RunState
 
@@ -205,6 +205,19 @@ def _inert_lines(code: str) -> Optional[frozenset]:
 _SPLITLINES_ONLY_BREAKS = frozenset("\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029")
 
 
+def _clause_header(line: str) -> bool:
+    """An `else:` / `finally:` header — the one code line no statement covers whose clause can run
+    nothing: `else:\n    pass` in its own paragraph is a line outside `_inert_lines`, and removing
+    it leaves the dump unchanged (critic 2026-09-27, driven: the fast path nominated a cut that ran
+    the same program). Such a block pays the dump, which decides; `elif`/`except`/`case` headers
+    test something, so a block holding one changes what runs wherever it is removed from."""
+    head = line.strip()
+    for keyword in ("else", "finally"):
+        if head.startswith(keyword) and head[len(keyword):].lstrip().startswith(":"):
+            return True
+    return False
+
+
 @functools.lru_cache(maxsize=64)
 def _removes_something(code: str, blocks: int) -> frozenset:
     """The blocks of `code` whose removal changes what RUNS — the only cuts that simplify anything.
@@ -228,6 +241,9 @@ def _removes_something(code: str, blocks: int) -> frozenset:
     # dump per block cost O(blocks × size) on the event-loop thread — 13.7 s for a 2,001-line,
     # 401-block champion (critic 2026-09-27, driven) — for the same answer: a code line of a
     # statement that runs something changes the dump (or the parse) wherever it is removed from.
+    # (An `else:`/`finally:` header belongs to no statement and is the one exception —
+    # `_clause_header`.) A program of nothing but inert paragraphs still pays one dump per
+    # block: the rule is exact, and only a parse can say a removal left a body empty.
     inert = (_inert_lines(code or "")
              if whole is not None and _SPLITLINES_ONLY_BREAKS.isdisjoint(code or "") else None)
     out = set()
@@ -237,7 +253,8 @@ def _removes_something(code: str, blocks: int) -> frozenset:
         if not code_lines:
             continue
         if (whole is not None
-                and (inert is None or all(k + 1 in inert for k in code_lines))
+                and (inert is None
+                     or all(k + 1 in inert or _clause_header(lines[k]) for k in code_lines))
                 and _semantic_dump("\n".join(lines[:start] + lines[end:])) == whole):
             continue
         out.add(index)
@@ -298,9 +315,11 @@ def simplify_actions(state: RunState, node, *, refused=(), spent=()) -> list[dic
                                   else (None, ablation_id))
     # A block is taken by a cut that IS STILL this program minus that block — across an epoch
     # re-queue of the same code too, which a receipt-generation test did not see: a re-ablation of
-    # the re-measured parent nominated the cut a node already was (`core/code_blocks.py::still_cut_of`).
+    # the re-measured parent nominated the cut a node already was — or that was BUILT as it and an
+    # inline repair rewrote since: the nomination would build the program that just crashed
+    # (`core/code_blocks.py::cut_spent`).
     taken = {child.simplified["block"] for child in state.nodes.values()
-             if isinstance(child.simplified, dict) and still_cut_of(node, child)}
+             if isinstance(child.simplified, dict) and cut_spent(node, child)}
     taken |= {key[2] for key in (spent or ())
               if isinstance(key, tuple) and len(key) == 3
               and key[0] == node.id and key[1] == node.attempt}

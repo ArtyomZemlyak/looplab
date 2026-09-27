@@ -1240,15 +1240,37 @@ def test_a_reset_simplification_is_re_derived_never_rebuilt_by_a_developer(tmp_p
     assert after.code == "# [ablated] import os\n\nx = 1\n\nprint(x)\n"
     assert after.simplified == {"parent_id": 0, "generation": 0, "block": 0,
                                 "ablation_id": "a" * 32}
-    # A cut whose parent lifecycle moved re-derives nothing: it fails, superseded.
-    moved = _crafted(tmp_path / "mv", ablation_simplify=True)
-    _with_simplification(moved)
-    moved.store.append("node_reset", {"node_id": 1, "generation": 0, "from_stage": "implement"})
-    moved.store.append("node_reset", {"node_id": 0, "generation": 0, "from_stage": "eval"})
-    state = fold(moved.store.read_all())
-    moved._rerun_node(state.nodes[1], state)
-    failed = [e.data for e in moved.store.read_all() if e.type == "node_failed"]
-    assert failed and failed[-1]["node_id"] == 1 and failed[-1]["reason"] == "superseded"
+    # A parent re-measured on the SAME program still gives that cut: re-derived, naming the
+    # parent's current lifecycle — it failed `superseded` on the receipt's generation (critic
+    # 2026-09-27, NIT).
+    same = _crafted(tmp_path / "same", ablation_simplify=True)
+    _with_simplification(same)
+    same.store.append("node_reset", {"node_id": 1, "generation": 0, "from_stage": "implement"})
+    same.store.append("node_reset", {"node_id": 0, "generation": 0, "from_stage": "eval"})
+    state = fold(same.store.read_all())
+    same._rerun_node(state.nodes[1], state)
+    after = fold(same.store.read_all()).nodes[1]
+    assert [e for e in same.store.read_all() if e.type == "node_failed"] == []
+    assert after.code == "# [ablated] import os\n\nx = 1\n\nprint(x)\n"
+    assert after.simplified["generation"] == 1 and after.parent_generations == {"0": 1}
+    # A parent whose program CHANGED, or that a reset emptied, gives another cut or none: nothing
+    # is re-derived, it fails, superseded.
+    idea = durable_idea_payload(Idea(operator="draft", params={"x": 0.5, "y": 0.5}, rationale="r"))
+    for label, rebuilt in (("changed", CODE.replace("x = 1", "x = 2")), ("emptied", None)):
+        moved = _crafted(tmp_path / label, ablation_simplify=True)
+        _with_simplification(moved)
+        moved.store.append("node_reset", {"node_id": 1, "generation": 0,
+                                          "from_stage": "implement"})
+        moved.store.append("node_reset", {"node_id": 0, "generation": 0,
+                                          "from_stage": "implement"})
+        if rebuilt is not None:
+            moved.store.append("node_created", {"node_id": 0, "generation": 1, "parent_ids": [],
+                                                "operator": "draft", "idea": idea,
+                                                "code": rebuilt})
+        state = fold(moved.store.read_all())
+        moved._rerun_node(state.nodes[1], state)
+        failed = [e.data for e in moved.store.read_all() if e.type == "node_failed"]
+        assert failed and failed[-1]["node_id"] == 1 and failed[-1]["reason"] == "superseded", label
 
 
 def test_a_re_derived_simplification_carries_its_parents_files(tmp_path):
@@ -1399,3 +1421,328 @@ def test_the_pilots_decision_record_names_the_block_it_chose(tmp_path, monkeypat
     assert chosen and chosen[0]["kind"] == KIND_SIMPLIFY and chosen[0]["block"] == 1, chosen
     [decision] = [e.data for e in engine.store.read_all() if e.type == "agent_decision"]
     assert decision["chosen"]["kind"] == KIND_SIMPLIFY and decision["chosen"]["block"] == 1
+
+
+# ------------------------------------------------------------------ a repaired cut (critic 2026-09-27)
+
+_REPAIRED = "# [ablated] import os\n\nx = 1\n\nprint(x)\nimport sys\n"
+
+
+def _repaired(node_id=1, **extra):
+    return [("node_repaired", {"node_id": node_id, "generation": 0, "attempt": 1, **extra}),
+            ("node_evaluated", {"node_id": node_id, "generation": 0, "metric": 1.2,
+                                "violations": []})]
+
+
+def test_a_repaired_cut_still_spends_its_block(tmp_path):
+    """HIGH (critic 2026-09-27, driven). The inline repair (`node_repaired`, the default crash path)
+    rewrites a pending cut in place, so it is no longer its parent minus the block — and with
+    `still_cut_of` as the whole `taken` rule the block was free again: the next turn nominated it
+    and the engine built the program that had just crashed, once per repair while the parent stayed
+    champion. The cut the fold certified at the build (`Node.simplified_cut`) keeps it spent."""
+    from looplab.core.code_blocks import built_as_cut_of, still_cut_of
+
+    state = _state(tmp_path, (0, [], 1.0, {}), (1, [0], None, _receipt(0)),
+                   extra=[_abl({"0": 0.0}), *_repaired(code=_REPAIRED)])
+    parent, cut = state.nodes[0], state.nodes[1]
+    assert cut.code == _REPAIRED and cut.simplified is not None
+    assert not still_cut_of(parent, cut) and built_as_cut_of(parent, cut)
+    assert simplify_actions(state, parent) == []
+    policy = GreedyTree(n_seeds=1, max_nodes=10)
+    policy.simplify_ablated = True
+    assert KIND_SIMPLIFY not in [a["kind"] for a in policy.next_actions(state)]
+
+
+def test_a_repaired_cut_is_never_built_again_by_the_engine(tmp_path, monkeypatch):
+    """The engine half: the spent stamp keeps the block (the Card lane's view reads it) and
+    `_simplify` re-checks on the whole fold, so no second node with the crashed program lands."""
+    engine = _crafted(tmp_path / "e", ablate_code_blocks=True, ablation_simplify=True)
+    _probed(engine, monkeypatch, 1.0, 1.5, None)
+    state = fold(engine.store.read_all())
+    action = engine.policy.next_actions(state)[0]
+    assert (action["kind"], action["block"]) == (KIND_SIMPLIFY, 0)
+    anyio.run(engine._simplify, action)
+    first_cut = fold(engine.store.read_all()).nodes[1].code
+    for etype, data in _repaired(code=first_cut + "import sys\n"):
+        engine.store.append(etype, data)
+    state = fold(engine.store.read_all())
+    engine._stamp_simplify(state)
+    assert engine.policy.simplify_spent == frozenset({(0, 0, 0)})
+    assert simplify_actions(state, state.nodes[0]) == []
+    anyio.run(engine._simplify, action)
+    assert sorted(fold(engine.store.read_all()).nodes) == [0, 1]
+
+
+def test_a_repair_that_converged_on_the_new_programs_cut_is_that_cut(tmp_path):
+    """The other half of `cut_spent`: the parent was re-developed and its new program minus the
+    block IS what the repaired cut became (the same crash, the same fix, in both) — the tree
+    already has that program, though the cut was BUILT as another."""
+    from looplab.core.code_blocks import built_as_cut_of, still_cut_of
+    from looplab.events.eventstore import EventStore
+
+    _state(tmp_path, (0, [], 1.0, {}), (1, [0], None, _receipt(0)), extra=_repaired(code=_REPAIRED))
+    store = EventStore(tmp_path / "events.jsonl")
+    idea = durable_idea_payload(Idea(operator="draft", params={"x": 0.5}, rationale="r"))
+    store.append("node_reset", {"node_id": 0, "generation": 0, "from_stage": "implement"})
+    store.append("node_created", {"node_id": 0, "generation": 1, "parent_ids": [],
+                                  "operator": "draft", "idea": idea,
+                                  "code": CODE + "import sys\n", "files": {}})
+    store.append("node_evaluated", {"node_id": 0, "generation": 1, "metric": 1.0,
+                                    "violations": []})
+    kind, data = _abl({"0": 0.0}, generation=1, aid="b" * 32)
+    store.append(kind, data)
+    state = fold(store.read_all())
+    parent, cut = state.nodes[0], state.nodes[1]
+    assert still_cut_of(parent, cut) and not built_as_cut_of(parent, cut)
+    assert simplify_actions(state, parent) == []
+
+
+def test_a_repaired_cut_of_another_program_spends_nothing_of_this_one(tmp_path):
+    """What the cut was built as is compared to the cut THIS program gives: a parent re-developed
+    to another program, one with other files, or another node with the same code is not the
+    program the repaired cut was cut from."""
+    from looplab.events.eventstore import EventStore
+
+    idea = durable_idea_payload(Idea(operator="draft", params={"x": 0.5}, rationale="r"))
+    for label, code, files in (("code", CODE.replace("x = 1", "x = 2"), {}),
+                               ("files", CODE, {"helper.py": "VALUE = 2\n"})):
+        root = tmp_path / label
+        _state(root, (0, [], 1.0, {}), (1, [0], None, _receipt(0)),
+               extra=_repaired(code=_REPAIRED))
+        store = EventStore(root / "events.jsonl")
+        store.append("node_reset", {"node_id": 0, "generation": 0, "from_stage": "implement"})
+        store.append("node_created", {"node_id": 0, "generation": 1, "parent_ids": [],
+                                      "operator": "draft", "idea": idea, "code": code,
+                                      "files": files})
+        store.append("node_evaluated", {"node_id": 0, "generation": 1, "metric": 1.0,
+                                        "violations": []})
+        kind, data = _abl({"0": 0.0}, generation=1, aid="b" * 32)
+        store.append(kind, data)
+        state = fold(store.read_all())
+        assert [a["block"] for a in simplify_actions(state, state.nodes[0])] == [0], label
+    state = _state(tmp_path / "twin", (0, [], 1.0, {}), (1, [0], None, _receipt(0)),
+                   (2, [], 1.0, {}),
+                   extra=[*_repaired(code=_REPAIRED),
+                          ("ablate", {"parent_id": 2, "generation": 0, "ablation_id": "c" * 32,
+                                      "mode": "code_blocks", "blocks": 3, "impacts": {},
+                                      "signed_impacts": {"0": 0.0}})])
+    assert state.nodes[2].code == state.nodes[0].code
+    assert [a["block"] for a in simplify_actions(state, state.nodes[2])] == [0]
+
+
+def test_a_repair_of_the_cuts_files_alone_still_spends_its_block(tmp_path):
+    """A repair can rewrite only the helper files: the cut's code is still the parent's minus the
+    block, its files are not the parent's, and it was built as that cut all the same."""
+    from looplab.core.code_blocks import built_as_cut_of, still_cut_of
+
+    files = {"helper.py": "VALUE = 1\n"}
+    state = _state(tmp_path, (0, [], 1.0, {"files": files}),
+                   (1, [0], None, {**_receipt(0), "files": dict(files)}),
+                   extra=[_abl({"0": 0.0}), *_repaired(files={"helper.py": "VALUE = 3\n"})])
+    parent, cut = state.nodes[0], state.nodes[1]
+    assert cut.files == {"helper.py": "VALUE = 3\n"} and cut.code == _cut_of_parent(parent)
+    assert not still_cut_of(parent, cut) and built_as_cut_of(parent, cut)
+    assert simplify_actions(state, parent) == []
+
+
+def _cut_of_parent(parent, block=0):
+    from looplab.core.code_blocks import cut_of
+    return cut_of(parent.code, block)
+
+
+def test_the_certified_cut_is_fold_internal_and_hashes_any_text(tmp_path):
+    """`Node.simplified_cut` is the fold's record, not a public field: a node's dump — every DTO
+    and snapshot — does not move. And its hash is total: a lone surrogate hashes."""
+    from looplab.core.code_blocks import cut_identity
+
+    state = _state(tmp_path, (0, [], 1.0, {}), (1, [0], 1.0, _receipt(0)), (2, [0], 1.0, {}))
+    assert state.nodes[1].simplified_cut == cut_identity(state.nodes[1].code, {})
+    assert state.nodes[2].simplified_cut is None
+    assert "simplified_cut" not in state.nodes[1].model_dump()
+    assert len(cut_identity("x = '\ud800'\n", {"a.py": "\udfff"})) == 64
+
+
+# ------------------------------------------------------------------ the critic's pass over fe811509
+
+def _exact_rule(code):
+    """`_removes_something` as the per-block rule states it — one dump per block, no fast path."""
+    from looplab.core.code_blocks import code_blocks
+    from looplab.search.policy import _semantic_dump
+
+    spans, lines, whole = code_blocks(code), code.splitlines(), _semantic_dump(code)
+    out = set()
+    for index, (start, end) in enumerate(spans):
+        if not any(ln.strip() and not ln.strip().startswith("#") for ln in lines[start:end]):
+            continue
+        if (whole is not None
+                and _semantic_dump("\n".join(lines[:start] + lines[end:])) == whole):
+            continue
+        out.add(index)
+    return frozenset(out)
+
+
+_BREAKS = "\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
+
+
+@pytest.mark.parametrize("label, code, runs_nothing", [
+    ("an else over a pass", "x = int('1')\nif x:\n    y = 2\n\nelse:\n    pass\n\nprint(y)\n", 1),
+    ("a finally over a pass", "try:\n    a = 1\nexcept ValueError:\n    a = 2\n\n"
+                              "finally:\n    pass\n\nprint(a)\n", 1),
+    ("a for-else over a docstring", "for i in range(3):\n    z = i\n\nelse:\n    'nothing'\n", 1),
+    ("a three-line module docstring", '"""Solution.\nTrains a model.\n"""\n\nimport os\n\n'
+                                      'x = 1\n\nprint(x)\n', 0),
+    ("a string in a finally body", "import os\n\ntry:\n    x = 1\nfinally:\n    y = 2\n\n"
+                                   "    'nothing runs here'\n\nprint(x)\n", 2),
+    *[(f"a docstring holding {ch!r}", f'"""a{ch}b"""\n\n"""doc"""\n\nx = 1\n', 1)
+      for ch in _BREAKS],
+])
+def test_the_fast_path_is_the_per_block_rule(label, code, runs_nothing):
+    """LOW (critic 2026-09-27, driven: 335 of 40,000 random programs). An `else:`/`finally:` header
+    is a line no statement covers, so the fast path read a paragraph `else:\\n    pass` as changing
+    what runs — and nominated a cut that ran the same program. The fast path is only allowed to
+    SKIP a dump the per-block rule would not change the answer of: a multi-line docstring's every
+    line, a `finally` body, and every line break only `splitlines` honours (the numberings part)."""
+    from looplab.core.code_blocks import code_blocks
+    from looplab.search.policy import _removes_something
+
+    answer = _removes_something.__wrapped__(code, len(code_blocks(code)))
+    assert answer == _exact_rule(code), label
+    assert runs_nothing not in answer, f"{label}: block {runs_nothing} runs nothing"
+
+
+def test_the_raw_slot_never_reads_the_verifier_the_pass_itself_clears(tmp_path):
+    """LOW (critic 2026-09-27, driven). `simpler_tie(raw=True)` consulted `_verifier_prefers`, and
+    the leader's own `node_confirmed` moves its verifier evidence — clearing its score — so a
+    re-entered pass granted the cut the slot its first entry denied. The raw ruler reads the single
+    measurements alone; the selector, verifier included, judges what the slot buys."""
+    from looplab.core.code_blocks import code_blocks, comment_block
+    from looplab.core.fitness import verifier_evidence_digest
+    from looplab.events.eventstore import EventStore
+    from looplab.events.replay_selection import simpler_slots, simpler_tie
+
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min",
+                                 "select_verifier": True})
+    idea = durable_idea_payload(Idea(operator="draft", params={"x": 0.5}, rationale="r"))
+    for nid, code in ((0, CODE), (1, "print(1)\n")):
+        store.append("node_created", {"node_id": nid, "parent_ids": [], "operator": "draft",
+                                      "idea": idea, "code": code, "files": {}})
+    store.append("node_created", {
+        "node_id": 2, "parent_ids": [0], "operator": "simplify", "idea": idea,
+        "code": comment_block(CODE, code_blocks(CODE)[0]), "files": {},
+        "parent_generations": {"0": 0},
+        "simplified": {"parent_id": 0, "generation": 0, "block": 0, "ablation_id": "a" * 32}})
+    for nid in (0, 1, 2):
+        store.append("node_evaluated", {"node_id": nid, "generation": 0, "metric": 1.0,
+                                        "violations": []})
+    state = fold(store.read_all())
+    for nid, score in ((0, 0.9), (2, 0.2)):
+        store.append("node_verified", {"node_id": nid, "generation": 0, "score": score,
+                                       "evidence_digest": verifier_evidence_digest(
+                                           "min", state.nodes[nid])})
+
+    def slots(st):
+        ranked = sorted(st.breedable_nodes(), key=lambda n: (n.metric, n.id))
+        return [n.id for n in simpler_slots(st, ranked, 2, raw=True)]
+
+    first = fold(store.read_all())
+    assert first.nodes[0].verifier_score == 0.9 and slots(first) == [0, 1, 2]
+    assert simpler_tie(first, first.nodes[0], [first.nodes[0], first.nodes[2]]) is first.nodes[0], (
+        "the selector still hears the verifier")
+    store.append("node_confirmed", {"node_id": 0, "generation": 0, "mean": 1.0, "std": 0.01,
+                                    "seeds": 2})
+    again = fold(store.read_all())
+    assert again.nodes[0].verifier_score is None and slots(again) == [0, 1, 2]
+
+
+def test_the_holdout_slots_decide_the_tie_on_the_robust_ruler(tmp_path):
+    """`simpler_slots` passes its ruler through (critic 2026-09-27, N4): the holdout slots rank on
+    the confirmations, where the cut ties, while one measurement each says it lost."""
+    from looplab.events.replay_selection import simpler_slots
+
+    state = _confirmed(_state(tmp_path, (0, [], 1.0, {}), (1, [0], 1.05, _receipt(0))),
+                       n0=(1.0, 0.1, 4), n1=(1.02, 0.1, 4))
+    ranked = [state.nodes[0], state.nodes[1]]
+    assert [n.id for n in simpler_slots(state, ranked, 1)] == [0, 1]
+    assert [n.id for n in simpler_slots(state, ranked, 1, raw=True)] == [0]
+
+
+def test_the_reserves_one_cut_counts_from_its_start_and_of_its_champion(tmp_path):
+    """The once-per-champion rule counts a cut of THE champion made IN the reserve — its first slot
+    included — and nothing else (critic 2026-09-27, N5/N6/N17)."""
+    from looplab.engine.plan import endgame_actions
+
+    action = {"kind": KIND_SIMPLIFY, "parent_id": 0, "block": 1}
+    plan = {"endgame_start": 2, "phases": [{"kinds": ["sweep"]}]}
+    at_start = _state(tmp_path / "s", (0, [], 1.0, {}), (1, [], 2.0, {}),
+                      (2, [0], 1.1, _receipt(0)))
+    assert [a["kind"] for a in endgame_actions(at_start, plan, [action])] == ["improve"]
+    before = _state(tmp_path / "b", (0, [], 1.0, {}), (1, [0], 1.1, _receipt(0)),
+                    (2, [], 2.0, {}))
+    assert before.best_node_id == 0 and endgame_actions(before, plan, [action]) == [action]
+    other = _state(tmp_path / "o", (0, [], 1.0, {}), (1, [], 2.0, {}),
+                   (2, [1], 2.1, _receipt(1)))
+    assert other.best_node_id == 0 and endgame_actions(other, plan, [action]) == [action]
+
+
+@pytest.mark.parametrize("phases", [[1], {"x": 1}, [{"kinds": 5}], "merge"])
+def test_a_malformed_plan_never_costs_a_card_its_slot(tmp_path, phases):
+    """The reserve's kinds are read before the kept-Card return now (the simplify rule needs them),
+    so they are read totally: a last phase that is not a dict raised where a Card kept its slot
+    (critic 2026-09-27, NIT)."""
+    from looplab.engine.plan import endgame_actions
+    from looplab.search.card_selection import META_CARD_ID
+
+    state = _state(tmp_path, (0, [], 1.0, {}), (1, [], 2.0, {}))
+    card = {"kind": "improve", "parent_id": 0, META_CARD_ID: "c"}
+    assert endgame_actions(state, {"endgame_start": 0, "phases": phases}, [card]) == [card]
+
+
+def test_the_spent_stamp_names_the_parents_lifecycle_now(tmp_path):
+    """The Card lane's view hides the cut, so the stamp is all that spends its block — keyed on the
+    parent's CURRENT lifecycle: the parent was re-measured on the same program (attempt 0 → 1) and
+    re-ablated, and a stamp keyed on the receipt's generation spent nothing of it (critic
+    2026-09-27, N7)."""
+    engine = _crafted(tmp_path / "n7", ablation_simplify=True)
+    _with_simplification(engine)
+    engine.store.append("node_reset", {"node_id": 0, "generation": 0, "from_stage": "eval"})
+    engine.store.append("node_evaluated", {"node_id": 0, "generation": 1, "metric": 1.0,
+                                           "violations": []})
+    kind, data = _abl({"0": 0.0}, generation=1, aid="b" * 32)
+    engine.store.append(kind, data)
+    state = fold(engine.store.read_all())
+    engine._stamp_simplify(state)
+    assert engine.policy.simplify_spent == frozenset({(0, 1, 0)})
+    view = state.model_copy(update={"nodes": {k: v for k, v in state.nodes.items() if k != 1}})
+    assert simplify_actions(view, view.nodes[0]) != [], "precondition: hidden, it spends nothing"
+    assert simplify_actions(view, view.nodes[0], spent=engine.policy.simplify_spent) == []
+
+
+def test_a_spent_budget_still_confirms_the_top_two(tmp_path, monkeypatch):
+    """The confirm pass's floor, on the line the extra slot's budget rule edited: on a SPENT eval
+    budget it still confirms the top TWO of its own top-k — enough for a demotion decision (critic
+    2026-09-27, N15)."""
+    engine = make_engine(tmp_path / "c", policy=GreedyTree(n_seeds=1, max_nodes=12),
+                         confirm_top_k=3, confirm_seeds=2, max_eval_seconds=1.0)
+    engine.store.append("run_started", {"run_id": "c", "task_id": "toy", "goal": "g",
+                                        "direction": "min", **engine._run_start_pinned_values()})
+    for nid, metric in ((0, 1.0), (1, 1.1), (2, 1.2)):
+        engine.store.append("node_created", {
+            "node_id": nid, "parent_ids": [], "operator": "draft",
+            "idea": durable_idea_payload(Idea(operator="draft", params={"x": 0.1 * nid},
+                                              rationale="r")),
+            "code": f"print({nid})\n"})
+        engine.store.append("node_evaluated", {"node_id": nid, "generation": 0, "metric": metric,
+                                               "violations": [], "eval_seconds": 100.0})
+    ran: list = []
+
+    async def _seed(nd, s, objective=None):
+        ran.append(nd.id)
+        engine.store.append("confirm_eval", {"node_id": nd.id, "generation": nd.attempt,
+                                             "seed": s, "eval_seconds": 1.0,
+                                             "metric": 1.0 + nd.id})
+        return 1.0 + nd.id
+
+    monkeypatch.setattr(engine, "_run_confirm_seed", _seed)
+    anyio.run(engine._confirm_phase, fold(engine.store.read_all()))
+    assert sorted(set(ran)) == [0, 1], ran

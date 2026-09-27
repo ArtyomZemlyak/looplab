@@ -20,7 +20,8 @@ from uuid import uuid4
 
 import anyio
 
-from looplab.core.code_blocks import code_blocks, comment_block, still_cut_of
+from looplab.core.code_blocks import (built_as_cut_of, code_blocks, comment_block,
+                                     cut_spent)
 from looplab.core.containment import contain
 from looplab.core.fitness import is_usable_metric
 from looplab.core.llm_broker import in_llm_lane
@@ -437,12 +438,13 @@ class AblationMixin:
         self.policy.simplify_refused = frozenset(self._simplify_refused)
         if state is not None and self._ablation_simplify:
             # Keyed on the parent's CURRENT lifecycle for every cut that is still its program minus
-            # that block — the policy's own `taken` rule (`core/code_blocks.py::still_cut_of`).
+            # that block, or was built as it — the policy's own `taken` rule
+            # (`core/code_blocks.py::cut_spent`).
             self.policy.simplify_spent = frozenset(
                 (parent.id, parent.attempt, node.simplified["block"])
                 for node in state.nodes.values() if isinstance(node.simplified, dict)
                 for parent in (state.nodes.get(node.simplified["parent_id"]),)
-                if parent is not None and still_cut_of(parent, node))
+                if parent is not None and cut_spent(parent, node))
 
     async def _simplify(self, action: dict) -> None:
         """Build the ONE `simplify` child a recorded code-block ablation nominated (doc 67 67.5).
@@ -540,10 +542,11 @@ class AblationMixin:
         program is its receipt — the parent's code with one block commented out, and the parent's
         files — so it is RE-DERIVED here and no Developer is asked. The Developer rebuild it used to
         get paid a model call, and the row it landed carried no receipt, so the block it had spent
-        was nominated again (critic 2026-09-27). A receipt whose parent lifecycle no longer stands,
-        or whose block that code no longer has, rebuilds nothing: the node fails `superseded`, as a
-        first build over a moved parent does. Its own node's rows only (invariant 1: this runs in
-        the rerun's build worker)."""
+        was nominated again (critic 2026-09-27). A receipt whose parent's program no longer gives
+        the cut it was built as — a changed program, or one a reset emptied — rebuilds nothing: the
+        node fails `superseded`, as a first build over a moved parent does. A re-derived cut names
+        the parent's CURRENT lifecycle. Its own node's rows only (invariant 1: this runs in the
+        rerun's build worker)."""
         state = fold(self.store.read_all())
         current = state.nodes.get(node.id)
         if (current is None or current.attempt != node.attempt or current.tombstoned
@@ -553,13 +556,18 @@ class AblationMixin:
         parents = list(current.parent_ids)
         parent = state.nodes.get(parents[0]) if len(parents) == 1 else None
         spans = code_blocks(parent.code or "") if parent is not None else []
+        # The parent's CURRENT program still gives the cut this node was built as — not its
+        # lifecycle: a re-measurement of the same program moves the attempt and not the cut, and
+        # failing the reset there `superseded` threw away a cut that was still exactly the
+        # parent minus its block (critic 2026-09-27, NIT) — the policy's own rule for what a cut
+        # of this program is (`core/code_blocks.py::built_as_cut_of`).
         if (not isinstance(receipt, dict) or parent is None or receipt["parent_id"] != parent.id
-                or receipt["generation"] != parent.attempt or parent.tombstoned
+                or not built_as_cut_of(parent, current) or parent.tombstoned
                 or parent.id in state.aborted_nodes or not 0 <= receipt["block"] < len(spans)):
             self.store.append(EV_NODE_FAILED, {
                 "node_id": current.id, "generation": current.attempt,
-                "error": "a simplification of a parent lifecycle that no longer stands cannot be "
-                         "re-derived", "reason": "superseded", "eval_seconds": 0.0})
+                "error": "a simplification whose parent's program no longer gives its cut cannot "
+                         "be re-derived", "reason": "superseded", "eval_seconds": 0.0})
             return
         self.store.append(EV_NODE_BUILDING, {
             "node_id": current.id, "generation": current.attempt, "operator": current.operator,
@@ -570,7 +578,8 @@ class AblationMixin:
             idea=durable_idea_payload(current.idea),
             code=comment_block(parent.code, spans[receipt["block"]]), files=dict(parent.files),
             eval_start_boundary=True, generation=current.attempt,
-            parent_generations={str(parent.id): parent.attempt}, simplified=dict(receipt))
+            parent_generations={str(parent.id): parent.attempt},
+            simplified={**receipt, "generation": parent.attempt})
 
     def _refuse_simplify(self, parent_id: int, generation: int, block: int, why: str) -> None:
         """Spend one nomination for this process (see `_simplify`) and SAY so: a nomination the run

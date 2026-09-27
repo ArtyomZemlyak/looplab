@@ -2405,7 +2405,13 @@ class RunCommandService:
         and the rule asked of the stale read saw no drain pause and spawned the plain `resume` it
         exists to refuse, while the record said the command waits (critic 2026-09-27, driven). Once
         no engine holds the lock nothing else can write the log's search half, so this read is the
-        one the decision is about."""
+        one the decision is about.
+
+        In `_admit` (moved here verbatim when that phase met its size ceiling): No engine, and the
+        run sits on a drain's own pause: the intent waits for the search that follows, exactly as
+        the monitor's re-spawn rung settles it — this ladder is also where a command whose worker
+        died is re-driven, and a plain `resume` here lifted the pause the drain was asked to leave
+        (doc 68 68.3b)."""
         observation = self._observe(rd)
         if self._postcondition(rd, record, observation):
             self._succeeded(rd, path, record)
@@ -4031,11 +4037,7 @@ class RunCommandService:
                     return None, record
             elif spec.engine_policy is not EnginePolicy.NO_SPAWN and liveness is False:
                 if self._settled_without_an_engine(rd, path, record):
-                    # No engine, and the run sits on a drain's own pause: the intent waits for the
-                    # search that follows, exactly as the monitor's re-spawn rung settles it — this
-                    # ladder is also where a command whose worker died is re-driven, and a plain
-                    # `resume` here lifted the pause the drain was asked to leave (doc 68 68.3b).
-                    return None, record
+                    return None, record      # served, or left for the search (see the helper)
                 spawned_now = False
                 pid = LAUNCH_IN_FLIGHT
                 if not self._recent_spawn_claim(rd):

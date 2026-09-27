@@ -1838,9 +1838,16 @@ class Node(BaseModel):
     # no worse without (`engine/ablation.py::AblationMixin._simplify`). `{"parent_id", "generation",
     # "block", "ablation_id"}`, or None. Written only by that build, folded only when it names the
     # node's one parent at the lifecycle the node was built from (`events/replay.py::
-    # _simplification_receipt`), and read by exactly one decision: "on a tie, simpler"
-    # (`events/replay_selection.py::simpler_tie`). A node's operator is not the fact — a receipt is.
+    # _simplification_receipt`), and read by two decisions: "on a tie, simpler"
+    # (`events/replay_selection.py::simpler_tie`) and which block a nomination has already spent
+    # (`core/code_blocks.py::cut_spent`). A node's operator is not the fact — a receipt is.
     simplified: Optional[dict] = None
+    # Fold-internal beside it: the identity of the cut that receipt certified AT THE BUILD — its
+    # program and files hashed (`core/code_blocks.py::cut_identity`) — so "this block was already
+    # cut" survives an inline repair that rewrites the node in place (`node_repaired`), which the
+    # node's current code cannot answer (`core/code_blocks.py::built_as_cut_of`). Excluded from dumps
+    # like `footprint_finalized`: the `node_created` row is the durable authority.
+    simplified_cut: Optional[str] = Field(default=None, exclude=True)
     # docs/BACKLOG.md §0.1 row 17: the LLM VALUE ESTIMATE for this branch, in [0, 1] — 0 "this
     # lineage is spent", 1 "it still has a lot left" — computed live by `engine/value_estimate.py`
     # and frozen here, because an LLM output cannot live in the deterministic fold (the same reason

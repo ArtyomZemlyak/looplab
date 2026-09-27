@@ -135,7 +135,14 @@ def endgame_actions(state, plan: Optional[dict], actions: list[dict], *,
     start = int(plan["endgame_start"])
     breedable = rank_by_metric(state, state.breedable_nodes())
     merged_in_reserve = any(n.operator == "merge" and n.id >= start for n in state.nodes.values())
-    kinds = (plan.get("phases") or [{}])[-1].get("kinds") or list(ENDGAME_KINDS)
+    # Total over any `phases` the fold kept: read before the kept-Card return below since the
+    # simplify rule needs it, a last phase that is not a dict raised where a Card kept its slot
+    # (critic 2026-09-27, NIT).
+    phases = plan.get("phases")
+    last = phases[-1] if isinstance(phases, list) and phases else {}
+    kinds = last.get("kinds") if isinstance(last, dict) else None
+    if not isinstance(kinds, (list, tuple)) or not kinds:
+        kinds = list(ENDGAME_KINDS)
     ensemble_owed = "merge" in kinds and not merged_in_reserve and len(breedable) >= 2
     # A SIMPLIFICATION of the champion passes too (doc 67 67.5): it proposes nothing and pays no
     # model — the champion's own program, one measured block commented out — so it is the reserve's
