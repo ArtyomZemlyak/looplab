@@ -59,6 +59,16 @@ from looplab.trust.cross_run import (
     sanitize_cross_run_projection,
 )
 
+def _contradicting(raw) -> list[str]:
+    """A claim's `contradicts` statements, bounded like every claim list (4 × 300 chars) — each
+    keeping the retarget clause the cut took off its end (doc 68 68.2): the contradiction of a
+    retargeted run's claim read as one on the task's own metric (critic 2026-09-27, driven)."""
+    values = [value for value in raw[:4] if isinstance(value, str)] if isinstance(
+        raw, (list, tuple)) else []
+    return [keep_retarget_clause(value, cut) for value in values
+            for cut in _string_list([value], maximum=1, item_maximum=300)]
+
+
 # --------------------------------------------------------------------------- #
 # Step 5 (§21.20.5): a BOUNDED context pack for a proposing agent — evidence AND counter-arguments.
 # --------------------------------------------------------------------------- #
@@ -183,7 +193,7 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
                 # Structured polarity contradictions are assertion-level counter-evidence,
                 # not entries in ``oppose``. Keep their bounded text or a mixed claim renders as 1↑/0↓
                 # with no visible reason for the disagreement.
-                "contradicts": _string_list(c.get("contradicts"), maximum=4, item_maximum=300),
+                "contradicts": _contradicting(c.get("contradicts")),
                 "runs": [_identity_text(value, 500) for value in c.get("runs", [])[:6]],
                 "scopes": [_identity_text(value, _MAX_DECISION_SCOPE)
                            for value in c.get("scopes", [])[:6]]}
@@ -517,7 +527,7 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
         docs.append(_retrieval_doc("claim", c["statement"], {
             "epistemic": c["epistemic"], "n_support": c["n_support"],
             "n_oppose": c["n_oppose"], "n_unverified": c.get("n_unverified", 0),
-            "contradicts": _string_list(c.get("contradicts"), maximum=4, item_maximum=300),
+            "contradicts": _contradicting(c.get("contradicts")),
             "maturity": c.get("maturity"), "claim_uid": c.get("claim_uid", ""),
             "decision_fresh": c.get("decision_fresh"),
             "metric": c.get("metric", ""), "scopes": c.get("scopes", []),
@@ -809,7 +819,7 @@ def render_context_pack(pack: dict) -> str:
         # A retargeted lesson's clause survives the cut (doc 68 68.2, `keep_retarget_clause`).
         statement = keep_retarget_clause(c.get("statement"), _safe_text(c.get("statement"), 120))
         contradicts = "; ".join(
-            repr(_safe_text(value, 160))
+            repr(keep_retarget_clause(value, _safe_text(value, 160)))
             for value in (c.get("contradicts") or [])[:3])
         maturity = str(c.get("maturity") or "machine-proposed")
         policy = ""

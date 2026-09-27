@@ -717,8 +717,10 @@ class CrossRunTools:
         def _claim_line(c):
             refs = (c.get("support") or [])[:4] + (c.get("oppose") or [])[:4]
             evidence = "[" + ", ".join(repr(_safe_text(ref, 120)) for ref in refs) + "]"
+            # A contradicting claim of a retargeted run keeps its clause too (doc 68 68.2).
             contradicts = "; ".join(
-                repr(_safe_text(statement, 180)) for statement in (c.get("contradicts") or [])[:3])
+                repr(keep_retarget_clause(statement, _safe_text(statement, 180)))
+                for statement in (c.get("contradicts") or [])[:3])
             maturity = _safe_text(c.get("maturity"), 40)
             freshness = ""
             if maturity.startswith("operator-"):
@@ -939,7 +941,7 @@ class CrossRunTools:
         for h in hits:
             if h["kind"] == "claim":
                 contradicts = "; ".join(
-                    repr(_safe_text(statement, 180))
+                    repr(keep_retarget_clause(statement, _safe_text(statement, 180)))
                     for statement in (h.get("contradicts") or [])[:3])
                 maturity = _safe_text(h.get("maturity"), 40)
                 freshness = ""

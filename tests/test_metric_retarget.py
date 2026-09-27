@@ -1172,3 +1172,146 @@ def test_a_row_spelling_the_runs_direction_in_capitals_is_applied():
     The fold reads it the way the server writes it; a real flip is still ignored whole."""
     assert fold(_rows(_retarget(direction=" MAX "))).objective_key == "filtered"
     assert fold(_rows(_retarget(direction="min"))).objective_key is None
+
+
+# ------------------------------------------------------------------ the critic's pass over 2ceb65b7
+
+_CLAUSE_BODY = " ".join(["the hard negatives stayed apart under the margin"] * 5)
+
+
+def _seed_retargeted_claims(d):
+    import orjson
+
+    from looplab.trust.cross_run import retargeted_lesson_note
+
+    clause = retargeted_lesson_note("filtered")
+    rows = [{"statement": f"mnr {verb} {_CLAUSE_BODY}{clause}", "outcome": outcome,
+             "evidence": [i + 1], "run_id": f"r{i}", "task_id": "t", "direction": "max",
+             "objective_key": "filtered"}
+            for i, (verb, outcome) in enumerate((("helps", "supported"), ("helps", "tested"),
+                                                  ("hurts", "supported")))]
+    (d / "lessons.jsonl").write_bytes(b"\n".join(orjson.dumps(r) for r in rows) + b"\n")
+
+
+def test_every_cut_of_a_retargeted_claim_keeps_its_clause(tmp_path):
+    """LOW (critic 2026-09-27, driven): the operator CLIs cut a claim at 100 characters and the
+    `contradicts` lists at 160-300, and the clause at the end of a retargeted claim went with the
+    cut — the claim read as one on the task's own metric."""
+    from typer.testing import CliRunner
+
+    from looplab.cli import app
+    from looplab.engine.claims import claims_for_memory
+    from looplab.engine.claims_retrieval import build_context_pack, render_context_pack
+    from looplab.tools.cross_run_tools import CrossRunTools
+
+    _seed_retargeted_claims(tmp_path)
+    runner = CliRunner()
+    for argv in (["claims", str(tmp_path)], ["atlas", str(tmp_path)],
+                 ["cross-run-search", str(tmp_path), "mnr hard negatives margin"]):
+        lines = [x for x in runner.invoke(app, argv).output.splitlines()
+                 if "mnr helps" in x or "mnr hurts" in x]
+        assert lines and all("ranked by 'filtered'" in x for x in lines), (argv[0], lines)
+    tool = CrossRunTools(tmp_path).execute("cross_run_claims", {})
+    contested = [x for x in tool.splitlines() if "contradicts=" in x]
+    assert contested and all("ranked by" in x.partition("contradicts=")[2] for x in contested)
+    pack = build_context_pack(claims_for_memory(tmp_path))
+    assert [s for c in pack["claims"] for s in c["contradicts"]], "precondition: a contradiction"
+    assert all("ranked by" in s for c in pack["claims"] for s in c["contradicts"])
+    rendered = [x for x in render_context_pack(pack).splitlines() if "contradicts=" in x]
+    assert rendered and all("ranked by" in x.partition("contradicts=")[2] for x in rendered)
+
+
+def test_the_clause_is_not_what_a_claim_claims(tmp_path):
+    """LOW (critic 2026-09-27, driven). The claim analyzer read the clause's words as the claim's —
+    its "not" flipped a supported positive claim to opposing — and a retargeted claim's metric was
+    its fingerprint's task metric. Its identity is its statement without the clause, qualified by
+    the objective it was ranked on."""
+    import orjson
+
+    from looplab.engine.claim_key import claim_signature
+    from looplab.engine.claims import claims_for_memory
+    from looplab.trust.cross_run import retargeted_lesson_note, strip_retarget_clause
+
+    body = "raising the contrastive margin improves recall on the validation split"
+    clause = retargeted_lesson_note("filtered")
+    plain, marked = (claim_signature(s, scope="t", metric="m") for s in (body, body + clause))
+    assert (marked["polarity"], marked["negated"], marked["subject"]) == (
+        plain["polarity"], plain["negated"], plain["subject"]) == (1, False, plain["subject"])
+    assert strip_retarget_clause(body + clause) == body and strip_retarget_clause(body) == body
+    fp = ["kind:repo", "dir:max", "metric:recall"]
+    rows = [{"statement": body, "outcome": "supported", "evidence": [1], "run_id": "P",
+             "task_id": "t", "fingerprint": fp},
+            {"statement": body + clause, "outcome": "supported", "evidence": [2], "run_id": "R",
+             "task_id": "t", "fingerprint": fp, "objective_key": "filtered"}]
+    (tmp_path / "lessons.jsonl").write_bytes(b"\n".join(orjson.dumps(r) for r in rows) + b"\n")
+    claims = {c["metric"]: c for c in claims_for_memory(tmp_path)}
+    assert set(claims) == {"recall", "filtered"}
+    assert all(c["polarity"] == 1 and c["epistemic"] == "supported" for c in claims.values())
+
+
+def test_a_prior_receipt_records_the_claim_not_the_clause(tmp_path):
+    """LOW (critic 2026-09-27, driven): the receipt statement carried the clause, whose words
+    doubled a short lesson's tokens — a proposal quoting it verbatim was not counted as citing it,
+    and `filter_useless` quarantined every short retargeted lesson after eight showings."""
+    from looplab.events.prior_citations import cites
+    from looplab.trust.cross_run import retargeted_lesson_note, strip_retarget_clause
+
+    statement = "warmup stabilizes the contrastive loss"
+    shown = statement + retargeted_lesson_note("filtered")
+    proposal = "Following the prior: warmup stabilizes the contrastive loss early on."
+    assert not cites(shown, proposal), "precondition: the clause's words dilute the citation"
+    assert cites(strip_retarget_clause(shown), proposal)
+
+
+def test_the_skill_card_the_crate_and_the_research_rows_name_the_ruler(tmp_path):
+    """LOW (critic 2026-09-27, driven): the auto-skill card (to the SHARED skills store) and the
+    RO-Crate root printed the objective's number with no ruler, and a retargeted run's research
+    claims were written like a plain run's. Each says which metric it is now — and a run without a
+    retarget writes what it always wrote."""
+    import orjson
+    from types import SimpleNamespace
+
+    from looplab.engine.bundle import bundle_summary, crate_metadata
+    from looplab.engine.claims import record_research_claims
+
+    state = fold(_rows(_retarget(goal="maximize filtered recall")))
+    assert state.objective_key == "filtered"
+    eng = _toy_engine(tmp_path, memory_dir=str(tmp_path / "mem"))
+    card = SimpleNamespace(statement="raise the margin", best_delta=0.15, seed_statement="")
+    body = eng.lessons.distill_skill_body(state, card, [state.nodes[1], state.nodes[0]])
+    assert "RANKED BY 'filtered'" in body
+    plain = fold(_rows(_retarget(goal="maximize filtered recall"))[:-1])
+    assert plain.objective_key is None
+    assert "RANKED BY" not in eng.lessons.distill_skill_body(plain, card, [plain.nodes[0]])
+    for st, expected in ((state, "filtered"), (plain, None)):
+        summary = bundle_summary(tmp_path, st, [])
+        root = [e for e in crate_metadata(tmp_path, [], summary)["@graph"]
+                if e.get("@id") == "./"][0]
+        assert root.get("looplab:objective_key") == expected
+    claim = {"statement": "a wider margin helps", "verdict": "supported", "node_ids": [1],
+             "urls": []}
+    for label, key in (("r", "filtered"), ("p", None)):
+        mem = tmp_path / f"research_{label}"
+        mem.mkdir()
+        record_research_claims(mem, run_id=label, task_id="t", claims=[dict(claim)],
+                               direction="max", objective_key=key)
+        rows = [orjson.loads(x) for x in (mem / "research_claims.jsonl").read_bytes().splitlines()
+                if x.strip()]
+        claims = [r for r in rows if r.get("record_kind") == "claim"]
+        assert claims and all(r.get("objective_key") == key for r in claims), (label, rows)
+
+
+def test_a_retargeted_lessons_id_and_a_long_keys_clause_are_pinned():
+    """Two survivors of the critic's pass over 2ceb65b7 (mutants 6 and 7): the objective's part of a
+    lesson's id was never pinned — only "differs from the plain twin" was, which a bare
+    concatenation also satisfies — and no test used an objective key past 24 characters, so the
+    clause pattern's bound could shrink to one no real key fits."""
+    from looplab.engine.lesson_hygiene import lesson_id
+    from looplab.trust.cross_run import keep_retarget_clause, retargeted_lesson_note
+
+    row = {"statement": "warmup stabilizes the loss", "task_id": "t"}
+    assert lesson_id(row) == "les-4cbc48579f78cff514968895", "a plain lesson's id never moved"
+    assert lesson_id({**row, "objective_key": "filtered"}) == "les-6d0cf38ffa368e992b783b3b"
+    key = "recall_at_10_on_the_held_out_filtered_split_" + "x" * 60
+    full = "a statement long enough to be cut" + retargeted_lesson_note(key)
+    assert keep_retarget_clause(full, full[:20]).endswith(retargeted_lesson_note(key))

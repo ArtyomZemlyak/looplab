@@ -259,3 +259,28 @@ def test_the_engine_sink_redacts_nested_statements(tmp_path):
                                              "source": {"note": secret}})
     row = [e.data for e in eng.store.read_all() if e.type == EV_MEMORY_READ][-1]
     assert secret not in json.dumps(row)
+
+
+def test_the_prior_receipt_records_a_retargeted_lesson_without_its_clause(tmp_path):
+    """The receipt half of the critic's L3 (2026-09-27; mutant L3 survived the direct test): the
+    prior SHOWS a retargeted lesson with its clause, and its RECEIPT — what the citation instrument
+    joins a proposal to — records the claim alone, so quoting the lesson counts as citing it."""
+    from looplab.events.prior_citations import cites
+    from looplab.trust.cross_run import retargeted_lesson_note
+
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    clause = retargeted_lesson_note("filtered")
+    row = {"statement": "warmup stabilizes the contrastive loss" + clause, "outcome": "supported",
+           "task_id": "toy_quadratic", "direction": "min", "role": "researcher",
+           "confidence": 0.7, "evidence_count": 2, "fingerprint": ["kind:quadratic", "dir:min"],
+           "run_id": "other-run", "objective_key": "filtered"}
+    (mem / "lessons.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    eng = make_engine(tmp_path / "run", n_seeds=1, max_nodes=1, reflection_priors=True,
+                      memory_dir=str(mem))
+    text, receipt = eng.lessons._pick_role_prior(eng.lessons._scan_prior_context(None, None),
+                                                 "researcher")
+    assert clause.strip() in text, "the prompt still says which metric ranked it"
+    [shown] = receipt["rows"]
+    assert shown["statement"] == "warmup stabilizes the contrastive loss"
+    assert cites(shown["statement"], "As the prior says, warmup stabilizes the contrastive loss.")

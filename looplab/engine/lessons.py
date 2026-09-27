@@ -956,4 +956,5 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
                                task_id=final.task_id, claims=claims,
                                direction=final.direction, claims_total=claims_total,
                                claims_receipt_known=claims_receipt_known,
-                               evidence_complete=evidence_complete)
+                               evidence_complete=evidence_complete,
+                               objective_key=getattr(final, "objective_key", None))

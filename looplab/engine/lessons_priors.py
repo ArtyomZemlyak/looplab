@@ -27,7 +27,8 @@ from pathlib import Path
 from typing import Optional
 
 from looplab.core.memory_window import read_memory_jsonl_window
-from looplab.trust.cross_run import LessonScope, cross_run_text, scope_terms
+from looplab.trust.cross_run import (LessonScope, cross_run_text, scope_terms,
+                                     strip_retarget_clause)
 # The retarget clause's two helpers moved to `trust/cross_run.py` (2026-09-27) so the agent-facing
 # memory readers in `tools/` apply the same one; re-exported here under their first home.
 from looplab.trust.cross_run import (  # noqa: F401 — re-exported
@@ -567,8 +568,13 @@ class LessonPriorsMixin:
             outcome = cross_run_text(
                 o.get("outcome", "?"), max_chars=40, single_line=True, entropy=True).strip()
             picked.append(f"{stmt} [{outcome}{dtxt}]")   # store is shared/free-text
+            # The RECEIPT keeps what the lesson claims — not the clause shown after it, whose words
+            # doubled a short lesson's tokens, so a proposal quoting it verbatim was not counted as
+            # citing it and `filter_useless` quarantined every retargeted lesson after eight
+            # showings (`events/prior_citations.py`; critic 2026-09-27, driven).
             receipt["rows"].append({
-                "id": lesson_id(o), "statement": stmt[:160], "outcome": outcome,
+                "id": lesson_id(o), "statement": strip_retarget_clause(stmt)[:160],
+                "outcome": outcome,
                 "task_id": str(o.get("task_id") or "")[:200], "run_id": str(o.get("run_id") or "")[:200],
                 "sim": round(float(sim_v), 4) if isinstance(sim_v, (int, float)) else None,
             })

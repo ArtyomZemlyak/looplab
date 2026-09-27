@@ -348,9 +348,18 @@ def test_the_cli_refuses_champions_ranked_by_different_objectives(tmp_path):
     # "nolog ranks its champion by the task's own metric").
     nolog = tmp_path / "nolog"
     nolog.mkdir()
-    unknown = CliRunner().invoke(app, ["comparability", str(retargeted), str(nolog)])
-    assert unknown.exit_code == 4, unknown.output
-    assert "nolog ranks its champion" not in unknown.output, unknown.output
+    # …and so has an EMPTY log, and one that crowned nothing (critic 2026-09-27, N1, driven: exit
+    # 3 and "emptylog ranks its champion by the task's own metric"). Both orders of every pair:
+    # only one order was pinned (mutant 8).
+    empty = tmp_path / "emptylog"
+    empty.mkdir()
+    (empty / "events.jsonl").write_bytes(b"")
+    headless = _log(tmp_path, "headless", [])
+    for other in (nolog, empty, headless):
+        for pair in ((retargeted, other), (other, retargeted)):
+            unknown = CliRunner().invoke(app, ["comparability", *map(str, pair)])
+            assert unknown.exit_code == 4, (other.name, unknown.output)
+            assert f"{other.name} ranks its champion" not in unknown.output, unknown.output
 
 
 def test_the_case_library_elects_a_champion_within_one_evaluation_only(tmp_path):

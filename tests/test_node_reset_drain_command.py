@@ -660,6 +660,37 @@ def test_a_drain_that_exits_between_the_read_and_the_probe_is_read_after_it(tmp_
     assert driver.calls[spawns:] == [], "nothing was started"
 
 
+def test_an_intent_the_drain_served_in_that_window_reads_served_not_deferred(tmp_path):
+    """The other half of the re-read (critic 2026-09-27, mutant 5, which 190 tests survived): the
+    drain SERVED the intent — a budget extension it applies — then paused and exited between the
+    read and the probe. The re-read's postcondition settles it as served; without that half the
+    rule saw only the drain's pause and recorded it as waiting for a search it never needed."""
+    rd, driver, client = _draining(tmp_path)
+    svc = client.app.state.looplab.commands
+    store = EventStore(rd / "events.jsonl")
+    real_state = svc._engine_state
+    exited: list = []
+
+    def _state(rd_):
+        if not exited and any(e.type == "budget_extend" and e.data.get("_command_id")
+                              for e in store.read_all()):
+            exited.append(True)          # the drain: it applies the extension, pauses and exits
+            _real_ack(rd, drain=True)
+            store.append("pause", {"reason": "drain-only resume: done", "drain_only": True})
+            driver.alive = False
+            return False
+        return real_state(rd_)
+
+    svc._engine_state = _state
+    spawns = len(driver.calls)
+    driver.on_spawn = lambda: setattr(driver, "alive", True)          # any child: a plain search
+    settled = _terminal(client, _post(client, "budget_extend", {"max_eval_seconds": 1e6},
+                                      "served-race").json())
+    assert exited and settled["status"] == "succeeded", settled
+    assert settled.get("deferred_to_next_search") is not True, settled
+    assert driver.calls[spawns:] == [], "nothing was started"
+
+
 def test_the_monitors_rung_reads_the_log_again_once_no_engine_is_found(tmp_path):
     """The monitor's re-spawn rung asked the rule of the log it read before its own lock probe too
     (critic 2026-09-27, second pass): a drain another command started pauses, acks and exits

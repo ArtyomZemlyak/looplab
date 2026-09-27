@@ -116,14 +116,9 @@ def _readonly_uri(path: Path) -> str:
     return "file:" + urllib.parse.quote(str(path)) + "?mode=ro"
 
 
-def read_watermark(db_path: str | os.PathLike) -> Optional[ReadModelWatermark]:
-    """The watermark *db_path* carries, or None for every shape this reader cannot trust.
-
-    None covers: no file, not a SQLite database, no watermark table (a read model written before
-    2026-08-14), a row count other than exactly one, a non-numeric/non-text column, and a schema
-    version this build does not implement. Callers treat None as "not current" — never as "current
-    by default".
-    """
+def _read_any_watermark(db_path: str | os.PathLike) -> Optional[ReadModelWatermark]:
+    """The watermark row *db_path* carries, of ANY schema version, or None for every other
+    shape (`read_watermark` lists them); `read_watermark` and `superseded_schema_version` gate it."""
     p = Path(db_path)
     if not p.is_file():
         return None
@@ -148,16 +143,39 @@ def read_watermark(db_path: str | os.PathLike) -> Optional[ReadModelWatermark]:
             event_count=int(event_count), digest=str(digest), built_at=float(built_at))
     except (TypeError, ValueError):
         return None
-    if wm.schema_version != READMODEL_SCHEMA_VERSION or not wm.digest:
+    return wm
+
+
+def read_watermark(db_path: str | os.PathLike) -> Optional[ReadModelWatermark]:
+    """The watermark *db_path* carries, or None for every shape this reader cannot trust.
+
+    None covers: no file, not a SQLite database, no watermark table (a read model written before
+    2026-08-14), a row count other than exactly one, a non-numeric/non-text column, and a schema
+    version this build does not implement. Callers treat None as "not current" — never as "current
+    by default".
+    """
+    wm = _read_any_watermark(db_path)
+    if wm is None or wm.schema_version != READMODEL_SCHEMA_VERSION or not wm.digest:
         return None
     return wm
+
+
+def superseded_schema_version(db_path: str | os.PathLike) -> Optional[int]:
+    """The schema version of a well-formed watermark THIS build superseded (1 ..
+    `READMODEL_SCHEMA_VERSION - 1`), or None. Such a file says what it covered, under a schema a
+    rebuild replaces: `stale`, the status that names the refresh that helps — `unknown` said nothing
+    `looplab readmodel` would fix (critic 2026-09-27, N4: every v1 sidecar after the v2 bump)."""
+    wm = _read_any_watermark(db_path)
+    if wm is None or not wm.digest or not 0 < wm.schema_version < READMODEL_SCHEMA_VERSION:
+        return None
+    return wm.schema_version
 
 
 def readmodel_status(db_path: str | os.PathLike, events: Sequence[Event]) -> str:
     """`current` / `stale` / `unknown` for *db_path* against *events*. Never guesses `current`."""
     stored = read_watermark(db_path)
     if stored is None:
-        return STATUS_UNKNOWN
+        return STATUS_STALE if superseded_schema_version(db_path) is not None else STATUS_UNKNOWN
     want = coverage_watermark(events)
     if want is None:
         return STATUS_UNKNOWN

@@ -155,6 +155,38 @@ def test_a_retargeted_run_writes_the_ledger_on_the_tasks_own_scale():
     assert run_contrast(retargeted)["nodes"] == 4, "an unranked node measured the task metric"
 
 
+def test_a_retargeted_pool_keeps_out_what_the_plain_one_does():
+    """The retargeted pool is `evaluated_nodes()` filtered by hand (critic 2026-09-27, mutants 1-3):
+    an infeasible node, an aborted one and a tombstoned one each measured the task metric, and each
+    must stay out of the shared ledger exactly as `feasible_nodes()` keeps it out of a plain run's."""
+    from looplab.core.models import Event
+    from looplab.events.replay import fold
+
+    def run(*extra):
+        rows = [("run_started", {"run_id": "r", "task_id": "t", "goal": "maximize recall",
+                                 "direction": "max"})]
+        for nid, task, violations in [(0, 0.90, []), (1, 0.88, []), (4, 0.99, [
+                {"name": "budget", "value": 9, "max": 5}]), (5, 0.99, []), (6, 0.99, [])]:
+            rows.append(("node_created", {"node_id": nid, "parent_ids": [], "operator": "draft",
+                                          "idea": {"operator": "draft", "params": {},
+                                                   "rationale": "r"},
+                                          "code": f"print({nid})", "files": {"k.pyx": str(nid)}}))
+            rows.append(("node_evaluated", {
+                "node_id": nid, "generation": 0, "metric": task, "violations": violations,
+                "extra_metrics": {"filtered": 0.1}, "extra_metrics_provenance": {
+                    "filtered": "declared"}}))
+        rows.append(("node_abort", {"node_id": 5}))
+        rows.append(("node_tombstoned", {"node_ids": [6]}))
+        rows.extend(extra)
+        return fold([Event(seq=i, ts=float(i), type=t, data=d) for i, (t, d) in enumerate(rows)])
+
+    plain, retargeted = run(), run(("metric_retarget", {"key": "filtered"}))
+    assert retargeted.objective_key == "filtered" and 5 in retargeted.aborted_nodes
+    assert retargeted.nodes[6].tombstoned and not retargeted.nodes[4].feasible
+    assert run_contrast(retargeted) == run_contrast(plain)
+    assert run_contrast(retargeted)["nodes"] == 2
+
+
 # ------------------------------------------------------------------ the shared ledger's read side
 def _row(task, regimes, **extra):
     # Every ledger writer stamps the run's objective, and the reader now refuses a row without one

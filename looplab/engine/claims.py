@@ -576,7 +576,8 @@ def load_claim_decisions(memory_dir) -> dict:
 def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
                            direction: str, run_uid: str = "", claims_total: Optional[int] = None,
                            claims_receipt_known: Optional[bool] = None,
-                           evidence_complete: Optional[bool] = None) -> int:
+                           evidence_complete: Optional[bool] = None,
+                           objective_key: Optional[str] = None) -> int:
     """Replace one run's v3 D8 claims in ``research_claims.jsonl`` under the required store lock.
 
     Rows carry version/record kind, run/task identity, direction/metric identity, statement,
@@ -635,6 +636,10 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
                "verification": {"verdict": verdict, "method": method, "note": note}}
         if ruid:
             row["run_uid"] = ruid
+        if isinstance(objective_key, str) and objective_key:
+            # The ruler a retargeted run ranked its evidence on (doc 68 68.2), as its lessons carry
+            # it; the claim's metric identity reads it (`claims_health.py::_metric_identity`).
+            row["objective_key"] = _identity_text(objective_key, 200)
         raw_refs = c.get("node_refs")
         if _valid_research_node_refs(raw_refs, node_ids) and raw_refs is not None:
             row["node_refs"] = [
@@ -872,6 +877,7 @@ from looplab.engine.claims_retrieval import (  # noqa: F401,E402
     _claim_claim_source_summary,
     _claim_research_source_summary,
     _classify_intent,
+    _contradicting,
     _eligible,
     _json_digest,
     _lexical_relevance,

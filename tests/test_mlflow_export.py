@@ -353,6 +353,11 @@ def test_the_mirror_follows_the_objective_a_retarget_puts_in_force(tmp_path, mon
     store.append("metric_retarget", {"key": None})
     tracker.sync()
     assert record["tags"]["looplab.objective_key"] == "", "back on the task's own metric"
+    # …and a node mirrored after the undo SAYS so: once any objective was in force, "" is a ruler
+    # ("the task's own"), not the absence of one (critic 2026-09-27, mutant 4).
+    declared(store, 2, 2.0, 1.0)
+    tracker.sync()
+    assert record["run_tags"]["node-2"]["looplab.objective_key"] == ""
 
 
 def test_a_node_finishing_out_of_order_says_which_ruler_it_was_published_on(

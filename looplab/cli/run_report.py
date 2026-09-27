@@ -760,7 +760,10 @@ def echo_comparability(run_dirs) -> int:
         best = state.best()
         record = record_of(best) if best is not None else None
         objective = state.objective_key
-        rows.append((run_dir.name, best, record, objective, True))
+        # KNOWN only with a champion: an empty log or one that crowned nothing ranks nothing, so
+        # "ranks its champion by the task's own metric" was a claim about no champion (critic
+        # 2026-09-27, N1, driven) — a pair with it is the evaluation's UNKNOWN, as a missing log is.
+        rows.append((run_dir.name, best, record, objective, best is not None))
         # THE TASK'S OWN NUMBER, and the objective beside it when an operator retarget chose another
         # (doc 68 68.2, critic 2026-09-27, driven): `robust_metric` is then the declared extra
         # metric's, and it was printed bare beside a plain run's task metric under "SAME evaluation".

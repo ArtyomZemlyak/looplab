@@ -259,6 +259,19 @@ def test_a_corrupt_or_ambiguous_watermark_fails_closed(tmp_path):
                     (READMODEL_SCHEMA_VERSION + 1,))
     assert readmodel_status(other_version, events) == STATUS_UNKNOWN
 
+    # A schema this build SUPERSEDED is a watermark that says what it covered and is behind by
+    # construction: `stale`, which names the rebuild that helps (critic 2026-09-27, N4: every v1
+    # sidecar read `unknown` after the v2 bump). A FUTURE one, or a version 0, stays `unknown`.
+    from looplab.events.readmodel import STATUS_STALE, superseded_schema_version
+    for version, status in ((READMODEL_SCHEMA_VERSION - 1, STATUS_STALE), (0, STATUS_UNKNOWN)):
+        older = tmp_path / f"v{version}.sqlite"
+        build_readmodel(events, older)
+        with sqlite3.connect(str(older)) as con:
+            con.execute(f"UPDATE {WATERMARK_TABLE} SET schema_version = ?", (version,))
+        assert readmodel_status(older, events) == status, version
+        assert superseded_schema_version(older) == (version if status == STATUS_STALE else None)
+    assert superseded_schema_version(other_version) is None
+
     blank_digest = tmp_path / "blank.sqlite"
     build_readmodel(events, blank_digest)
     with sqlite3.connect(str(blank_digest)) as con:

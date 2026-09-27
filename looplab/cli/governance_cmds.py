@@ -27,6 +27,7 @@ from looplab.engine.governance_health import GovernanceLedgerUnavailable
 from looplab.events.eventstore import EventStoreLockError
 from looplab.cli import _make_llm_client, app
 from looplab.core.llm import apply_llm_model_override
+from looplab.trust.cross_run import keep_retarget_clause as _kc   # doc 68 68.2's clause
 
 
 def _governance_cli_error(exc: GovernanceLedgerUnavailable | EventStoreLockError):
@@ -812,7 +813,7 @@ def cross_run_search_cmd(
         )
     for h in r["results"]:
         if h["kind"] == "claim":
-            typer.echo(f"  claim [{h['epistemic']} {h['n_support']}↑/{h['n_oppose']}↓] {h['text'][:100]}")
+            typer.echo(f"  claim [{h['epistemic']} {h['n_support']}↑/{h['n_oppose']}↓] {_kc(h['text'], h['text'][:100])}")
         else:
             count = f"×{h['n_runs']}" if source_complete else f"retained in at least {h['n_runs']} run(s)"
             typer.echo(f"  concept {count}  {h['text']}")
@@ -893,7 +894,7 @@ def atlas_cmd(
     if atlas["contradictions"]:
         typer.echo("Mixed-evidence claim records (support and opposition references):")
         for c in atlas["contradictions"]:
-            typer.echo(f"  ⚖ [{c['n_support']}↑/{c['n_oppose']}↓] {c['statement'][:100]}")
+            typer.echo(f"  ⚖ [{c['n_support']}↑/{c['n_oppose']}↓] {_kc(c['statement'], c['statement'][:100])}")
     projection_omitted = (
         int(atlas.get("explored_omitted", 0) or 0),
         int(atlas.get("thin_coverage_omitted", 0) or 0),
@@ -1095,4 +1096,4 @@ def claims_cmd(
                "✓ support-only  ✗ opposition-only  ⚖ mixed evidence  · insufficient evidence")
     for c in claims[: max(0, top)]:
         typer.echo(f"  {_mark.get(c['epistemic'], '?')}{_maturity_label(c)} "
-                   f"[{c['n_support']}↑/{c['n_oppose']}↓] {c['statement'][:100]}")
+                   f"[{c['n_support']}↑/{c['n_oppose']}↓] {_kc(c['statement'], c['statement'][:100])}")

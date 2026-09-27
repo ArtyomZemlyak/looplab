@@ -181,6 +181,9 @@ def crate_metadata(out_dir: Path, members, summary: dict) -> dict:
             "hasPart": [{"@id": rel} for rel, _ in members],
             "looplab:task_id": summary.get("task_id"), "looplab:champion": summary.get("champion"),
             "looplab:best_metric": summary.get("best_metric"),
+            # WHICH metric that is, as `summary.json` says it (doc 68 68.2; critic 2026-09-27).
+            **({"looplab:objective_key": summary["objective_key"]}
+               if summary.get("objective_key") else {}),
             "looplab:mislead_gap": (summary.get("mislead_gap") or {}).get("gap") if summary.get("mislead_gap") else None,
             "looplab:seeds": summary.get("seeds")}
     descriptor = {"@id": RO_CRATE_METADATA, "@type": "CreativeWork",

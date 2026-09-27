@@ -34,7 +34,8 @@ from looplab.core.run_reset import (
     RunResetFenceError, RunResetStorageError, assert_run_reset_write_allowed)
 from looplab.events.eventstore import EventStore
 from looplab.events.readmodel import (
-    STATUS_CURRENT, coverage_watermark, publish_readmodel, read_watermark, readmodel_status)
+    STATUS_CURRENT, coverage_watermark, publish_readmodel, read_watermark, readmodel_status,
+    superseded_schema_version)
 from looplab.events.replay import fold
 from looplab.events.types import EV_BUDGET
 from looplab.engine.comparability import record_of as comparability_record_of
@@ -560,10 +561,14 @@ def readmodel(
     if check:
         status = readmodel_status(path, events)
         stored = read_watermark(path)
+        superseded = superseded_schema_version(path) if stored is None else None
         typer.echo(f"readmodel={path}")
         typer.echo(f"status={status}")
         typer.echo("covers=" + (f"seq<={stored.covered_seq} events={stored.event_count}"
-                                if stored is not None else "unknown (no usable watermark)"))
+                                if stored is not None else
+                                f"unknown (a schema-v{superseded} watermark this build superseded; "
+                                "`looplab readmodel` rebuilds it)" if superseded is not None else
+                                "unknown (no usable watermark)"))
         typer.echo("log=" + (f"seq<={want.covered_seq} events={want.event_count}"
                              if want is not None else "unknown"))
         if status != STATUS_CURRENT:

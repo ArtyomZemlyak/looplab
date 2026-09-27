@@ -196,6 +196,18 @@ _RETARGET_CLAUSE_RE = re.compile(
     r"an operator-retargeted objective, not the task's own metric\]$")
 
 
+def strip_retarget_clause(text):
+    """`text` without the retarget clause it ENDS with (doc 68 68.2), for a reader that analyses
+    what a statement CLAIMS (`engine/claim_key.py`): the clause's words — the "not" of "not the
+    task's own metric" among them — are not the claim's content, and read as content they turned a
+    supported positive claim into an opposing one (critic 2026-09-27, driven). The ruler the clause
+    names is the claim's METRIC (`engine/claims_health.py::_metric_identity`). Anything else, and
+    every statement without the clause, unchanged."""
+    if not isinstance(text, str):
+        return text
+    return _RETARGET_CLAUSE_RE.sub("", text)
+
+
 def keep_retarget_clause(full: str, cut: str) -> str:
     """`cut` — a bounded rendering of the statement `full` — with the retarget clause `full` ENDS
     with re-attached when the cut took it (doc 68 68.2). `cut` unchanged for every statement that

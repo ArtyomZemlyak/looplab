@@ -851,7 +851,11 @@ class LessonDistillMixin:
         fall back to a code-free evidence summary when there's no client / no code."""
         ev_txt = "\n".join(f"- #{n.id} {n.operator} metric={n.metric} params={n.idea.params}: "
                            f"{' '.join((n.idea.rationale or '').split())[:120]}" for n in ev[:4])
-        base = (f"Verified on task `{final.task_id}` (best Δ={h.best_delta:+.4g}).\n\n"
+        # A retargeted run's numbers are its OBJECTIVE's (doc 68 68.2): the card goes to the shared
+        # skills store, read beside the task's own metric (critic 2026-09-27). "" on every other run.
+        from looplab.core.models import retarget_note
+        ruler = retarget_note(getattr(final, "objective_key", None))
+        base = (f"Verified on task `{final.task_id}` (best Δ={h.best_delta:+.4g}{ruler}).\n\n"
                 f"Evidence:\n{ev_txt}\n\nApply when the task matches this technique's preconditions; "
                 "re-validate with the eval before trusting it.")
         client = self._e._reflect_client()
@@ -883,7 +887,7 @@ class LessonDistillMixin:
                                 answer_desc="a short reusable skill card: technique + minimal snippet + when to use",
                                 **judge_evidence_kwargs(self._e))
                    or "").strip()
-            return (f"{out[:1800]}\n\n_Verified on `{final.task_id}` (Δ={h.best_delta:+.4g})._"
+            return (f"{out[:1800]}\n\n_Verified on `{final.task_id}` (Δ={h.best_delta:+.4g}{ruler})._"
                     if out else base)
         except BudgetExceeded:  # a hard budget stop must propagate, never degrade (core/containment.py)
             raise

@@ -11,14 +11,14 @@
 // dishonest surface those three exist to prevent, and only a render can tell the difference.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { fileURLToPath } from 'node:url'
-import { createServer } from 'vite'
 // React comes through Node's own resolution, not `vite.ssrLoadModule('react')`: react is CJS and
 // loading it as an inlined SSR module leaves it evaluating `module.exports` with no `module` in
 // scope. Vite externalizes bare node_modules deps for SSR anyway, so the component below resolves
 // the same instance this file imports.
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
+
+import { sharedVite } from './_mount.js'
 
 // Mirrors the real `/api/runs` rows measured against runs/ on 2026-08-06: whole-id concept keys with
 // {count, best_metric}, a majority of untagged runs, two tasks with opposite directions, and the
@@ -50,11 +50,10 @@ const RUNS = [
   { run_id: 'live-nosignal', task_id: 'toy_quadratic', direction: 'min', concepts: {} },
 ]
 
+// One server for the file, a fresh module runner per render (`_mount.js::sharedVite`, the ui/
+// house rule): a server per test re-transforms the whole graph each time (critic 2026-09-27, N3).
 async function render(props) {
-  const vite = await createServer({
-    root: fileURLToPath(new URL('..', import.meta.url)),
-    configFile: false, appType: 'custom', logLevel: 'silent', server: { middlewareMode: true },
-  })
+  const vite = await sharedVite()
   try {
     const { default: PortfolioConcepts } = await vite.ssrLoadModule('/src/PortfolioConcepts.jsx')
     assert.equal(typeof PortfolioConcepts, 'function')
@@ -198,10 +197,7 @@ test('a retargeted concept names the objective beside its best, in its title and
     assert.match(row.slice(0, 600), /↑ 0\.4500 \(filtered\)/)
     assert.match(row.slice(0, 600), /ranked by filtered, an operator retarget, not the task&#x27;s own metric/)
 
-    const vite = await createServer({
-      root: fileURLToPath(new URL('..', import.meta.url)),
-      configFile: false, appType: 'custom', logLevel: 'silent', server: { middlewareMode: true },
-    })
+    const vite = await sharedVite()
     try {
       const [{ ConceptDetail }, model] = await Promise.all([
         vite.ssrLoadModule('/src/PortfolioConcepts.jsx'), vite.ssrLoadModule('/src/conceptForest.js'),

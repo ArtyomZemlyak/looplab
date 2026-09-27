@@ -26,6 +26,7 @@ import hashlib
 import re
 
 from looplab.core.text import WORD_RE, normalize_text
+from looplab.trust.cross_run import strip_retarget_clause
 
 CLAIM_KEY_VERSION = 3
 
@@ -114,7 +115,9 @@ def _analyze(statement: str) -> tuple:
     ("Hurts is a supported negative-effect claim, not a refuted positive"). `polarity` (net stance) is kept
     for the contradiction pairing; `relation_sign`/`negated` enter the merge_key so null != harm never merge.
     """
-    low = normalize_text(statement)
+    # What the statement CLAIMS: a retargeted run's lesson ends with the clause naming its ruler,
+    # whose words are not the claim's (`trust/cross_run.py::strip_retarget_clause`).
+    low = normalize_text(strip_retarget_clause(statement))
     words = WORD_RE.findall(low)
     stems = [_stem(w) for w in words]
     # Preserve the historical rule that short alphabetic tokens are not claim content, while numeric

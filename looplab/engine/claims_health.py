@@ -984,6 +984,12 @@ def _source_guarded_epistemic(support, oppose, claim_source: dict) -> str:
 
 def _metric_identity(row: dict) -> str:
     """Best available metric *name* for structured identity (never a numeric score)."""
+    # A retargeted run's lesson speaks of its OBJECTIVE (doc 68 68.2), not of the task metric its
+    # fingerprint names: its claim said `metric: recall` for a claim ranked by `filtered` (critic
+    # 2026-09-27, driven).
+    objective = row.get("objective_key")
+    if isinstance(objective, str) and objective.strip():
+        return _identity_text(objective, _MAX_DECISION_METRIC)
     for key in ("metric_name", "metric_key", "objective_metric", "metric"):
         value = row.get(key)
         if isinstance(value, str) and value.strip():
