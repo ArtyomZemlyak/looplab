@@ -1421,6 +1421,37 @@ def _open_build_card_ids(state) -> list[str]:
             if i >= done and i not in ahead and isinstance(r, dict)]
 
 
+def _halted_as(state) -> str:
+    """How a halted run reads to the operator refused a `--drain-builds` on it."""
+    if state.finished:
+        return "finished"
+    if state.stop_requested:
+        return "being finalized"
+    return "paused" + (f" ({state.pause_reason})" if state.pause_reason else "")
+
+
+def _drain_not_standing(events, seq: int) -> str:
+    """Why the drain `looplab stop --drain-builds` appended at `seq` does not stand, or `""` while it
+    does — read by the same predicate the engine drains by (`speculation.py::_pause_drains_builds`)."""
+    from looplab.engine.speculation import SpeculationMixin
+
+    state = fold(events)
+    if SpeculationMixin._pause_drains_builds(state):
+        return ""
+    if state.finished or state.stop_requested:
+        return f"the run is {_halted_as(state)}"
+    # The pause that took effect says which: an EARLIER one means this row never did.
+    if isinstance(state.pause_event_seq, int) and state.pause_event_seq < seq:
+        return ("the run was already halted when this stop landed, so the pause that took effect "
+                "is an earlier one")
+    later = next((e for e in events if e.type == EV_PAUSE and e.seq > seq), None)
+    if later is not None:
+        reason = later.data.get("reason") if isinstance(later.data, dict) else None
+        return ("a later pause cancelled it"
+                + (f" ({reason})" if isinstance(reason, str) and reason.strip() else ""))
+    return "the stop no longer stands"
+
+
 def stop_lifted(state) -> str:
     """Why the stop no longer stands, or `""` while it does — as far as the LOG can say. A pause that a
     later `resume` lifted, or a resume request no engine has served yet (the server's post-exit waiter
@@ -1673,7 +1704,9 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
          drain_builds: bool = typer.Option(
              False, "--drain-builds",
              help="let every build already running finish and COMMIT its node (evaluated after "
-                  "`looplab resume`) instead of discarding it; nothing new is started")):
+                  "`looplab resume`) instead of discarding it; nothing new is started. Refused on a "
+                  "run that is already halted; a later pause (a plain stop, an engine auto-pause) "
+                  "cancels it")):
     """STOP a run: freeze it WITHOUT finalizing — no end-of-run report/lessons/cost roll-up. A running
     engine stops STARTING work on its next iteration, lets every evaluation already running finish,
     then exits; an attempt that FAILS while the stop is pending buys no repair or triage and stays
@@ -1682,8 +1715,11 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
     `--wait` blocks until the engine has exited — "stop after the current node". `--drain-builds`
     also keeps every Card build already running: it finishes and commits its node before the engine
     exits, instead of being closed `run_is_stopping` and discarded (measured on MiniOneRec inf13:
-    each restart threw away up to an hour of Developer work per build in flight). The run is
-    resumable (`looplab resume`) or you can `finalize` it later."""
+    each restart threw away up to an hour of Developer work per build in flight). A drain rides only
+    the stop that halts the run, so the flag is refused on a run already paused, finished or being
+    finalized; any later pause — a plain `looplab stop`, an engine auto-pause such as a provider
+    outage — cancels it, and the builds still running are then closed as a plain stop closes them.
+    The run is resumable (`looplab resume`) or you can `finalize` it later."""
     # A DIRECT PYTHON CALL (`looplab.cli.stop(rd)`, the compatibility surface `finalize` documents)
     # leaves Typer's OptionInfo defaults in place, and an OptionInfo is truthy: only a real `True`
     # waits, so an old caller keeps the old non-blocking behaviour.
@@ -1699,6 +1735,18 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
         raise typer.BadParameter("--timeout only applies with --wait")
     # `healthy=True`: fail closed on a mid-file corruption before appending (P0-4).
     store = _require_run_dir(run_dir, healthy=True)
+    if draining:
+        # REFUSED BEFORE ANYTHING IS APPENDED too (critic review 2026-09-27). A drain rides only the
+        # pause that TAKES EFFECT (`replay.py::_on_pause`), so on a run that is already halted the
+        # flag was silently dropped while this command went on to promise "builds already running
+        # will finish and commit first". Whatever halted the run decides what its builds become.
+        already = fold(store.read_all())
+        if already.halted:
+            raise typer.BadParameter(
+                f"--drain-builds: {run_dir} is already {_halted_as(already)}. A drain can only ride "
+                "the stop that halts a running run; the pause that already stands decides what "
+                "happens to the builds in flight. Nothing was appended — `looplab stop` without the "
+                "flag records a plain stop.")
     # NAMED, like `finalize`'s `run_abort {reason: "finalized"}` below. The E2E sweep of 2026-09-23
     # stopped a live run with this command and the run's own exit summary then said "the `pause` row
     # names no reason — nobody can say why" (`events/stop_account.py`) — about a stop an operator
@@ -1706,9 +1754,19 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
     # `RunState.pause_reason`; nothing decides on it (`classify_prior_run` is pinned not to read it).
     # `drain_builds` rides the pause row only when asked for, so a plain stop writes the exact row it
     # always did; the fold reads it only while this pause stands (`RunState.pause_drain_builds`).
-    store.append(EV_PAUSE, ({"reason": "operator stop (`looplab stop --drain-builds`)",
-                             "drain_builds": True} if draining
-                            else {"reason": "operator stop (`looplab stop`)"}))
+    stop_row = store.append(EV_PAUSE, ({"reason": "operator stop (`looplab stop --drain-builds`)",
+                                        "drain_builds": True} if draining
+                                       else {"reason": "operator stop (`looplab stop`)"}))
+    if draining:
+        # …AND VERIFIED AFTER IT, because the refusal above reads the log one append earlier: an
+        # engine auto-pause landing in between halts the run first, and this row then changes
+        # nothing. The stop is recorded either way; the promise is only made when it holds.
+        why = _drain_not_standing(store.read_all(), stop_row.seq)
+        if why:
+            typer.echo(f"stopped {run_dir} (frozen, not finalized), but --drain-builds did NOT take "
+                       f"effect: {why}. Builds already running are closed as a plain stop closes "
+                       "them.", err=True)
+            raise typer.Exit(code=1)
     typer.echo(f"stopped {run_dir} (frozen, not finalized) — `looplab resume` to continue, "
                "`looplab finalize` to wrap it up"
                + ("; builds already running will finish and commit first" if draining else ""))
@@ -1780,10 +1838,24 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
                    "will be honoured")
         raise typer.Exit(code=1)
     if outcome == "timeout":
+        # THE BUILDS TOO (critic review 2026-09-27): under a drain they are what the engine is most
+        # likely still waiting on, and a line naming only evaluations sent the operator looking for a
+        # node that was not running.
+        open_builds = _open_build_card_ids(current()) if draining else []
         typer.echo(f"gave up after {limit:g}s: the engine on {run_dir} still holds its lock. The stop "
-                   "is recorded; the engine exits once its running evaluation(s) finish")
+                   "is recorded; the engine exits once its running evaluation(s) finish"
+                   + (" and the Card build(s) it is draining commit or close"
+                      + (f" (still open: {', '.join(open_builds)})" if open_builds else "")
+                      if draining else ""))
         raise typer.Exit(code=1)
     after = current()
+    if draining:
+        cancelled = _drain_not_standing(store.read_all(), stop_row.seq)
+        if cancelled:
+            # A drain a later pause ended (a plain stop, an engine auto-pause): the builds still
+            # running then were closed the plain stop's way, and the per-Card lines say so.
+            typer.echo(f"the drain did not hold to the end: {cancelled} — builds still running "
+                       "then were closed as a plain stop closes them")
     if building and seen["alive"]:
         # Only a node minted AFTER the stop was recorded is this drain's commit; an older node of
         # the same Card is an earlier build.

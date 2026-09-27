@@ -2523,9 +2523,11 @@ class RunState(BaseModel):
     pause_reason: Optional[str] = None
     # The operator's `looplab stop --drain-builds`: while THIS pause stands, builds already running
     # finish and COMMIT instead of being closed `run_is_stopping` and thrown away; nothing new is
-    # elected. Set with `pause_reason`, under the same guard; read only through
-    # `speculation.py::_pause_drains_builds`, which also requires `paused` (so a lifted pause needs no
-    # clearing site). Hidden: no dump, snapshot or wire payload changes.
+    # elected. STARTED only by the operator's node-less pause that takes effect (the guard that sets
+    # `pause_reason`); CANCELLED by any later pause row that does not carry it — an engine auto-pause
+    # or a plain stop (`replay.py::_on_pause`). Read only through `speculation.py::_pause_drains_builds`,
+    # which also requires `paused` (so a lifted pause needs no clearing site). Hidden: no dump,
+    # snapshot or wire payload changes.
     pause_drain_builds: bool = Field(default=False, exclude=True)
     stop_requested: Optional[str] = None       # `run_abort`: reason; loop -> run_finished + break
     # Seq of the latest finalize intent. A request newer than the accepted finish still needs a new

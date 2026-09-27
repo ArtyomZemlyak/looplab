@@ -10,15 +10,32 @@ on an idle GPU. Now the close is NAMED (`skipped_reason: unreconciled_after_rest
 close does not bar the Card; a second close of any kind still does, so a Card that keeps killing the
 process cannot loop. The engine-level half (the real election re-elects it) is
 `tests/test_card_speculation_engine.py::test_recovery_head_with_an_unreconciled_attempt_is_quarantined_not_reissued`.
+
+PROVEN, NOT INFERRED (critic review of the first cut, same day). "No live producer, no result, a
+receipt present" is also what THIS process's own attempt looks like once its producer released with
+no result stored, and a name that lets a Card off its bar must not be handed to a give-up the Card
+may own. The tag is now written only when the receipt's seq is at or below the tail the engine saw
+when it STARTED (`speculation.py::_attempt_predates_this_process`); the last two tests below drive
+the same receipt through both processes.
 """
 from __future__ import annotations
 
+import pytest
+
 from looplab.engine.speculation import (
-    CARD_BUILD_SKIP_REASONS, UNRECONCILED_AFTER_RESTART, SpeculationMixin,
+    CARD_BUILD_SKIP_REASONS, UNRECONCILED_AFTER_RESTART, CardSession, SpeculationMixin,
 )
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
-from looplab.events.types import EV_CARD_BUILD_DONE, EV_CARD_BUILD_REQUESTED
+from looplab.events.types import (EV_CARD_BUILD_ATTEMPTED, EV_CARD_BUILD_DONE,
+                                  EV_CARD_BUILD_REQUESTED)
+from tests.test_card_speculation_engine import (  # noqa: F401  (autouse receipt fixture)
+    _add_ready_draft,
+    _admit_unit_speculation_receipt,
+    _engine,
+    _request,
+    _start,
+)
 
 
 def _log(tmp_path, closes):
@@ -74,3 +91,67 @@ def test_a_stale_close_is_not_a_give_up_whatever_its_reason(tmp_path):
 
 def test_the_reason_is_registered_and_the_coarse_vocabulary_is_unchanged():
     assert UNRECONCILED_AFTER_RESTART in CARD_BUILD_SKIP_REASONS
+
+
+# ------------------------------------------------- whose receipt it is, driven through the engine
+
+class _ClosingTaskGroup:
+    """A task group already tearing down: `start_soon` refuses. The one way a live process keeps its
+    OWN attempt receipt with no producer running and no result stored — `_start_request_producer`
+    rolls its in-memory marker back and leaves the durable receipt (its "ACCEPTED asymmetry")."""
+
+    def start_soon(self, *_args, **_kwargs):
+        raise RuntimeError("the task group is closing")
+
+
+def _attempted_at_teardown(run_dir):
+    """Engine A elects card-7 and writes its attempt receipt through the real producer start, whose
+    spawn is then refused at teardown: a receipt, no producer, no result — in A's own process."""
+    engine, producer = _engine(run_dir)
+    _start(engine)
+    _add_ready_draft(engine)
+    key = engine._request_key(_request(engine))
+    session = CardSession(max_eval_seconds=None, wall_deadline=None,
+                          task_group=_ClosingTaskGroup())
+    with pytest.raises(RuntimeError, match="closing"):
+        engine._start_request_producer(fold(engine.store.read_all()), session)
+    receipts = [e for e in engine.store.read_all() if e.type == EV_CARD_BUILD_ATTEMPTED]
+    assert len(receipts) == 1 and not engine._spec_build_inflight and not engine._spec_builds, (
+        "precondition: a receipt of A's own, nothing running and nothing stored")
+    return engine, producer, key
+
+
+def _closes(engine):
+    return [e.data for e in engine.store.read_all() if e.type == EV_CARD_BUILD_DONE]
+
+
+def test_this_processs_own_unreconciled_attempt_closes_bare_and_bars_the_card(tmp_path):
+    """The receipt is A's own, so the quarantine is an in-process give-up: bare `producer_failed`,
+    exactly the close every quarantine wrote before the name existed, and the Card is barred.
+    MUTATION: name every quarantine close (the first cut's inference) and this close carries
+    `unreconciled_after_restart`, letting the Card off a bar its own give-up earned."""
+    engine, producer, key = _attempted_at_teardown(tmp_path / "own")
+    assert engine._serve_card_builds() is True
+    assert _closes(engine) == [{"card_id": key[0], "generation": key[1],
+                                "skipped": "producer_failed"}], _closes(engine)
+    assert producer.calls == 0, "the quarantine never re-issues the possibly-charged work"
+    assert engine._card_requires_serial_fallback(key[0]) is True
+
+
+def test_a_restarted_engine_names_the_close_of_the_attempt_an_earlier_process_made(tmp_path):
+    """The SAME receipt, served by the process that replaced A: its engine-start boundary
+    (`_enter_run`, what `looplab resume` runs) is past the receipt, so the close is proven a restart's
+    and the Card stays electable. MUTATION: never name the close and the Card is barred for a kill."""
+    _dead, producer, key = _attempted_at_teardown(tmp_path / "restart")
+    restarted, _unused = _engine(tmp_path / "restart", producer=producer)
+    restarted._enter_run()
+    assert restarted._serve_card_builds() is True
+    assert _closes(restarted) == [{"card_id": key[0], "generation": key[1],
+                                   "skipped": "producer_failed",
+                                   "skipped_reason": UNRECONCILED_AFTER_RESTART}], _closes(restarted)
+    assert producer.calls == 0
+    assert restarted._card_requires_serial_fallback(key[0]) is False
+    # …and the proof is the boundary, not the order of calls: it was noted at engine start, before
+    # this process served anything, and it sits at or above the dead process's receipt.
+    receipt = next(e for e in restarted.store.read_all() if e.type == EV_CARD_BUILD_ATTEMPTED)
+    assert restarted._spec_entry_seq is not None and receipt.seq <= restarted._spec_entry_seq

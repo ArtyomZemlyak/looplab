@@ -1678,11 +1678,18 @@ class EvaluateMixin:
         `confirm_phase.py::_pace_confirm_refusal` uses for its own auto-pause, so a run that is
         already paused/finished/stopping — or a batch of siblings all hitting the same dead
         endpoint — collects exactly one.
+
+        EXCEPT A RUN THAT IS ONLY DRAINING ITS BUILDS (`looplab stop --drain-builds`, critic review
+        2026-09-27): there this row is not redundant, it CANCELS the drain (`replay.py::_on_pause`),
+        so the builds still running against the dead endpoint are closed `stale` as a plain stop
+        closes them instead of each ending in a `producer_failed` that bars its Card. The first such
+        row ends the drain, and every sibling after it finds the run plainly paused.
         """
-        if self._run_halt_intent():
+        from looplab.engine.speculation import auto_pause_is_redundant
+        if auto_pause_is_redundant(fold(self.store.read_all())):
             return
         async with self._write_lock:
-            if self._run_halt_intent():
+            if auto_pause_is_redundant(fold(self.store.read_all())):
                 return
             self.store.append(EV_PAUSE, {
                 "reason": f"auto-paused: {what}. Every other node reaches the same endpoint; fix it "
@@ -2631,6 +2638,7 @@ class EvaluateMixin:
         exists on the path where the event log may be exactly what is broken, and raising here would
         re-enter the failure mode it was written to contain, one frame further out.
         """
+        from looplab.engine.speculation import auto_pause_is_redundant
         from looplab.events.types import EV_PAUSE
 
         detail = self._crash_detail(exc)
@@ -2672,7 +2680,9 @@ class EvaluateMixin:
                     # lifecycle that raised rather than about whichever one is current.
                     _self_closed = (node is not None and node.attempt == generation
                                     and node.status is not NodeStatus.pending)
-                    if not _self_closed and not state.halted:
+                    # Not the bare `halted`: under a drain-builds pause this row is what CANCELS the
+                    # drain (`speculation.py::auto_pause_is_redundant`, critic review 2026-09-27).
+                    if not _self_closed and not auto_pause_is_redundant(state):
                         self.store.append(EV_PAUSE, {
                             "reason": "engine_error",
                             "detail": self._redact(

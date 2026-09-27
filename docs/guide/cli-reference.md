@@ -429,9 +429,24 @@ nothing new is elected, and a request no producer is running for is closed as be
 an abort. With `--wait` it also names the builds it is waiting on and says, per Card, whether it
 committed a node.
 
+The drain is bounded by what it can still commit. A build the eval-seconds budget no longer admits,
+or one no node slot can take, is closed (`eval_budget_exhausted` / `run_is_stopping`) rather than
+committed or waited on; a build whose request is already closed is not waited for; and a spend ceiling
+the run is about to stop on turns the drain into a plain stop.
+
+A drain rides only the stop that **halts** the run: on a run already paused, finished or being
+finalized the flag is refused (exit `2`, nothing appended), and if the engine pauses the run in the
+instant before the stop lands, the stop is recorded but the command says the drain did not take effect
+(exit `1`). **Any later pause cancels a drain** — a plain `looplab stop`, or an engine auto-pause
+such as a provider outage, whose builds would otherwise run on against a dead endpoint and fail in a
+way that bars their Cards. The builds still running are then closed as a plain stop closes them, and
+`--wait` says the drain did not hold to the end.
+
 A build that a KILLED engine left behind (no drain) is quarantined `producer_failed` on resume,
-named `skipped_reason: unreconciled_after_restart`; one such close leaves the Card speculatively
-electable, a second close of any kind sends it to the serial lane as before.
+named `skipped_reason: unreconciled_after_restart` — only when its attempt receipt predates the
+resuming engine's start, so a give-up of the engine's own process is never mistaken for a restart;
+one such close leaves the Card speculatively electable, a second close of any kind sends it to the
+serial lane as before.
 
 ```bash
 looplab stop RUN_DIR [--wait [--timeout SECONDS]] [--drain-builds]
@@ -441,8 +456,8 @@ looplab stop RUN_DIR [--wait [--timeout SECONDS]] [--drain-builds]
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run directory to stop |
 | `--wait` | off | Block until the engine has exited (it releases `engine.lock` after its running evaluations land), printing which node(s) it is waiting on every 30 s and how each ended |
-| `--timeout SECONDS` | `0` (no limit) | With `--wait`: give up after this long, exit `1`; the stop itself stays recorded and is still honoured. Refused (exit `2`, nothing appended) without `--wait`, or when negative or not finite (`nan` would never be reached) |
-| `--drain-builds` | off | Let every Card build already running finish and commit its node before the engine exits, instead of discarding it |
+| `--timeout SECONDS` | `0` (no limit) | With `--wait`: give up after this long, exit `1`; the stop itself stays recorded and is still honoured, and the message names the builds a drain is still waiting on. Refused (exit `2`, nothing appended) without `--wait`, or when negative or not finite (`nan` would never be reached) |
+| `--drain-builds` | off | Let every Card build already running finish and commit its node before the engine exits, instead of discarding it. Refused (exit `2`, nothing appended) on a run already halted; cancelled by any later pause |
 
 `--wait` exits `0` once the engine is gone — the lock has to stay free for a second, so a
 `looplab resume` already waiting on it, which takes it straight back and lifts the stop, is waited on

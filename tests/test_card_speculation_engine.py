@@ -776,10 +776,16 @@ def test_recovery_head_with_an_unreconciled_attempt_is_quarantined_not_reissued(
     """The durable request identifies LOGICAL work; it cannot say whether a provider already accepted
     and billed a call for it. A head carrying an attempt receipt that no live producer owns is
     therefore ambiguous: restarting a producer would buy the same Developer/Researcher work twice with
-    nothing in the log to show for the first purchase."""
+    nothing in the log to show for the first purchase.
+
+    Each dead process is replaced by a FRESH engine entering through `_enter_run`, as a real resume
+    does: the restart name is proven by the receipt's seq against that engine's start boundary, and
+    an in-process receipt is the other half, driven in
+    `tests/test_a_restart_close_leaves_its_card_electable.py`."""
     from looplab.events.types import EV_CARD_BUILD_ATTEMPTED
 
-    engine, producer = _engine(tmp_path / "attempt-quarantine")
+    run_dir = tmp_path / "attempt-quarantine"
+    engine, producer = _engine(run_dir)
     _start(engine)
     _add_ready_draft(engine)
     request = _request(engine)
@@ -796,6 +802,15 @@ def test_recovery_head_with_an_unreconciled_attempt_is_quarantined_not_reissued(
         "card_id": key[0], "generation": key[1], "index": state.card_builds_done,
     })
 
+    def _restarted():
+        """The process that replaces the dead one: a fresh Engine over the same log, entered through
+        the real engine-start boundary (`_enter_run`) — which is what proves the receipt it finds is
+        an EARLIER process's and not its own (`_attempt_predates_this_process`)."""
+        replacement, _unused = _engine(run_dir, producer=producer)
+        replacement._enter_run()
+        return replacement
+
+    engine = _restarted()
     assert engine._serve_card_builds() is True
     events = engine.store.read_all()
     done = [event for event in events if event.type == EV_CARD_BUILD_DONE]
@@ -819,7 +834,13 @@ def test_recovery_head_with_an_unreconciled_attempt_is_quarantined_not_reissued(
         "card_id": key[0], "generation": key[1],
         "index": engine._request_position(state, engine._request_key(again)),
     })
+    engine = _restarted()
     assert engine._serve_card_builds() is True
+    second = [event for event in engine.store.read_all() if event.type == EV_CARD_BUILD_DONE][-1]
+    # Proven a restart's again (the receipt predates this third process) — and still barred: two
+    # closes, whatever their names.
+    assert second.data.get("skipped") == "producer_failed"
+    assert second.data.get("skipped_reason") == "unreconciled_after_restart"
     assert producer.calls == 0
     assert engine._card_requires_serial_fallback(key[0]) is True
 
