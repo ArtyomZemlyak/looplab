@@ -525,6 +525,32 @@ def test_the_web_route_pins_the_seed_it_showed(web):
         assert any(w.startswith(f"seeded from run src1 #{champion.id}") for w in body["warnings"])
 
 
+def test_one_declaration_in_two_spellings_is_not_different_when_one_side_is_unreadable(isolated):
+    """LOW (critic 2026-09-26, driven): with one side no adapter reads, the fallback compared THIS
+    side's adapter dump with the source's RAW snapshot, and a composable `cmd:{…}` declaration read
+    as no reader and no command — an identical evaluation came out `different`, with invented
+    facets. Both sides are compared in the composable schema's one spelling now. And the cause is
+    the field the adapter refused (M21: pydantic's first line, "1 validation error for RepoTask",
+    names nothing)."""
+    runs, repo = isolated / "runs", isolated / "repo"
+    repo.mkdir()
+    as_written = {"direction": "min", "repo": str(repo),
+                  "cmd": {"command": ["python", "score.py"],
+                          "metric": {"reader": "stdout_json", "key": "loss"}}}
+    broken = {**as_written, "cmd": {**as_written["cmd"], "timeout": "soon"}}
+    src = _declared_source(runs, "prior", broken)
+    seed = resolve_seed(str(src), runs / "new")
+    verdict, note = seed_verdict(seed, dict(as_written), direction="min", eval_env={},
+                                 holdout_fraction=0.25)
+    assert verdict == "unknown", note
+    assert "metric reader" not in note and "eval command" not in note, note
+    assert "could not be read as a task (eval.timeout: " in note, note
+    # The same spelling on a side that differs in its command is still PROVEN different.
+    other = {**as_written, "cmd": {**as_written["cmd"], "command": ["python", "other.py"]}}
+    verdict, note = seed_verdict(seed, other, direction="min", eval_env={}, holdout_fraction=0.25)
+    assert verdict == "different" and "eval command" in note, note
+
+
 def test_a_proven_difference_survives_a_source_declaration_no_adapter_reads(isolated, tmp_path):
     """LOW (critic 2026-09-26, driven): a dataset source whose data was gone could not be read as a
     task, and a `different` the raw declarations prove read `unknown`. The raw contract still
@@ -577,19 +603,24 @@ def test_an_unknown_home_is_not_a_run(isolated):
 
 
 def test_a_frozen_seed_is_a_seed_row_or_refused():
-    """What a Replay's child appends verbatim (`frozen_seed_payload`) has the shape `seed_intent`
-    builds, or the child refuses before it writes anything."""
+    """What a Replay's child appends verbatim (`frozen_seed_payload`) has every key it appends, or
+    the child refuses before it writes anything. `code: null` IS a seed row (critic 2026-09-26, HIGH,
+    driven): the import writes `snode.code or None`, and a repo node's code is empty — its edits
+    travel in `files` — so refusing it stranded every repo-task Replay after the archive."""
     from looplab.engine.seed_from_run import frozen_seed_payload
 
     row = {"idea": {"operator": "draft", "params": {}, "rationale": "r"}, "code": "print(1)\n",
            "files": {}, "deleted": [], "parent_id": None,
            "origin": {"seed_from_run": True, "run_dir": "/runs/src", "node_id": 2}}
     assert frozen_seed_payload(json.dumps(row).encode()) == row
+    repo_row = {**row, "code": None, "files": {"train.py": "print(2)\n"}}
+    assert frozen_seed_payload(json.dumps(repo_row).encode()) == repo_row
+    missing = [{k: v for k, v in row.items() if k != key} for key in row if key != "origin"]
     for bad in (b"\xff", b"{", b"null", b"[]",
                 {**row, "origin": {**row["origin"], "seed_from_run": False}},
                 {**row, "origin": {**row["origin"], "node_id": True}},
-                {**row, "idea": "draft"}, {**row, "code": None}, {**row, "files": []},
-                {**row, "deleted": {}}, {**row, "parent_id": 0}):
+                {**row, "idea": "draft"}, {**row, "code": 7}, {**row, "files": []},
+                {**row, "deleted": {}}, {**row, "parent_id": 0}, *missing):
         raw = bad if isinstance(bad, bytes) else json.dumps(bad).encode()
         with pytest.raises(ConfigRefusal, match="frozen seed"):
             frozen_seed_payload(raw)

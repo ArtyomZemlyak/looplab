@@ -3714,9 +3714,11 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # THE SEED, added 2026-09-26 (doc 67 67.2). Not a treatment the rows above describe — a launch
     # fact, blank by default — and pinned for a different reason: a snapshot written before the field
     # existed must read it BLANK, not from the environment `settings_from_snapshot` otherwise fills a
-    # missing key from. Without the row a Replay of any older run, on a server whose environment
-    # carried `LOOPLAB_SEED_FROM_RUN`, re-seeded a run that was never seeded (critic 2026-09-26,
-    # driven). `""` is every such run's truth.
+    # missing key from. Without the row every surface reading an older run's recorded settings (the
+    # config GET, the per-run panel, a Replay's frozen `effective_config`), on a server whose
+    # environment carried `LOOPLAB_SEED_FROM_RUN`, named a seed the run was never born with (critic
+    # 2026-09-26, driven). A Replay no longer turns on it — it re-seeds only from the log's own first
+    # row (`serve/reset_route.py::_freeze_birth_seed`). `""` is every such run's truth.
     "seed_from_run": "",
     # THE JUDGES' PROMPT TRUTHS, added 2026-09-23 defaulting ON (review 2026-09-22, Q-1). (a) holds.
     # (b) is the two rows above's DIFFERENT-PROMPT ground: ON, the pilot, the triage judge and the

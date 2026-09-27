@@ -17,8 +17,10 @@ verdict `seed_verdict` returns: `same`, `different` (with the sentence naming wh
 before its first creation turn, so the seed is evaluated under THIS run's protocol: the source's
 metric rides the receipt as provenance and is never this run's number. An existing run directory is
 never seeded and nothing is resolved for it: the setting is recorded in `config.snapshot.json` — as
-the canonical `<run dir>#<node>` it resolved to (`SeedSource.canonical_spec`), so a Replay of the run
-seeds the same node — and is inert on every later `run` or `resume` of it.
+the canonical `<run dir>#<node>` it resolved to (`SeedSource.canonical_spec`), the spec an operator
+reads and may clear — and is inert on every later `run` or `resume` of it. A Replay does not resolve
+that spec again: it re-seeds from the log's own first row, frozen before the archive
+(`serve/reset_route.py::_freeze_birth_seed`, `frozen_seed_payload`).
 
 A CONTROL INTENT, NOT A DOMAIN EVENT. The CLI appends only what the UI may (invariant 1), and an
 inject appended before the engine starts is the tested pattern
@@ -310,7 +312,37 @@ def _canonical_task(task) -> tuple[Optional[dict], str]:
     try:
         return validate_task(dict(task), existing_run=True).model_dump(mode="json"), ""
     except Exception as exc:  # noqa: BLE001 — a declaration no adapter reads is UNKNOWN, never a difference
-        return None, (str(exc).strip().splitlines() or [type(exc).__name__])[0][:200]
+        return None, _refusal_cause(exc)
+
+
+def _refusal_cause(exc: Exception) -> str:
+    """WHY an adapter refused a declaration, in one bounded line. A pydantic refusal's first line is
+    only its count ("1 validation error for DatasetTask"), which names no cause (critic 2026-09-26),
+    so its first error is named instead: where, and what."""
+    errors = getattr(exc, "errors", None)
+    if callable(errors):
+        try:
+            first = (errors() or [None])[0]
+        except (TypeError, ValueError, IndexError):  # an `errors` that is not pydantic's: fall back
+            first = None
+        if isinstance(first, dict) and first.get("msg"):
+            where = ".".join(str(part) for part in first.get("loc") or ())
+            return ((f"{where}: " if where else "") + str(first["msg"]).strip())[:200]
+    return (str(exc).strip().splitlines() or [type(exc).__name__])[0][:200]
+
+
+def _normalized_declaration(task) -> Optional[dict]:
+    """A declaration in the composable schema's canonical SPELLING (`adapters/task_schema.py::
+    normalize_task`) — `cmd:`/`reader:` converge on `eval.command`/`eval.metric.kind` — without an
+    adapter's validation, so a side no adapter reads can still be compared; None when it is not a
+    task at all."""
+    if not isinstance(task, dict):
+        return None
+    from looplab.adapters.task_schema import normalize_task
+    try:
+        return normalize_task(dict(task))
+    except Exception:  # noqa: BLE001 — a declaration that is not a task says nothing, it is UNKNOWN
+        return None
 
 
 def _task_snapshot(run_dir: Path) -> Optional[dict]:
@@ -348,13 +380,19 @@ def seed_verdict(seed: SeedSource, task: dict, *, direction: Optional[str], eval
     notes, facets = [], []
     if mine is None or theirs is None:
         # A side no adapter reads — the source's dataset moved, say — still DECLARES what it read
-        # and ran: the raw contract decides `different` on its own facets (critic 2026-09-26: a
+        # and ran: the declared contract decides `different` on its own facets (critic 2026-09-26: a
         # proven difference read `unknown` once the source's data was gone), and `same` is never
-        # claimed from a declaration half read.
-        this, other = contract_from_task(mine or task), contract_from_task(theirs or raw_theirs)
-        verdict = "different" if comparable(this, other) is False else "unknown"
-        if verdict == "different":
-            notes.append(contract_notice(this, other, other_run_id=name))
+        # claimed from a declaration half read. BOTH sides in ONE spelling, the composable schema's
+        # (critic 2026-09-26, driven): an adapter's dump beside a raw `cmd:{…}`/`reader:` snapshot
+        # read as an empty reader and command, and an identical declaration came out `different`
+        # with invented facets. A side that is not a task at all decides nothing.
+        this_decl, other_decl = _normalized_declaration(task), _normalized_declaration(raw_theirs)
+        verdict = "unknown"
+        if this_decl is not None and other_decl is not None:
+            this, other = contract_from_task(this_decl), contract_from_task(other_decl)
+            if comparable(this, other) is False:
+                verdict = "different"
+                notes.append(contract_notice(this, other, other_run_id=name))
         notes.append(("This run's task" if mine is None else f"Run {name}'s task snapshot")
                      + f" could not be read as a task ({why_mine or why_theirs}), so the two "
                      "declarations cannot be compared in full.")
@@ -451,6 +489,19 @@ def birth_seed_row(events) -> Optional[dict]:
     return dict(data)
 
 
+def birth_seed_row_at(run_dir) -> Optional[dict]:
+    """`birth_seed_row` of the run at `run_dir`, reading only its log's FIRST record — or None, also
+    for a log whose first record cannot be read: a Replay stays usable on a damaged log, which is
+    often why it is replayed."""
+    from looplab.core.models import Event
+    from looplab.events.eventstore import iter_event_jsonl
+    try:
+        first = next(iter(iter_event_jsonl(Path(run_dir) / "events.jsonl")), None)
+        return birth_seed_row([Event(**first)] if isinstance(first, dict) else [])
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def recorded_seed_spec(events) -> str:
     """The canonical spec a run was BORN seeded from, read off its own log, or "". A later `looplab
     run` of the same directory — whatever it passes — records this and nothing else in
@@ -461,20 +512,30 @@ def recorded_seed_spec(events) -> str:
 
 def frozen_seed_payload(raw: bytes) -> dict:
     """The seed row a Replay froze for its `looplab run` child (`serve/reset_route.py::
-    _prepare_receipt`), checked for the shape `seed_intent` builds; `ConfigRefusal` otherwise. The
-    child appends it VERBATIM rather than resolving a source by path again: the run is re-seeded
-    with the node it was born with even when the source has since been deleted, moved or replayed
-    into different nodes under the same ids (critic 2026-09-26)."""
+    _freeze_birth_seed`), checked for the shape a seed row carries — every key the child appends,
+    `code` a string or null (`events/node_import.py::node_import_payload` writes `snode.code or
+    None`, and a repo node's code IS empty: its edits travel in `files`); `ConfigRefusal`
+    otherwise. The child appends it VERBATIM rather than resolving a source by path again: the run
+    is re-seeded with the node it was born with even when the source has since been deleted, moved
+    or replayed into different nodes under the same ids (critic 2026-09-26). The server asks this
+    same question of the row BEFORE it commits a Replay, so a row the child would refuse is a 409
+    on an intact run, never a stranded archive (critic 2026-09-26, driven: every repo-task seed)."""
     try:
         data = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
         raise ConfigRefusal(f"the Replay's frozen seed is unreadable: {exc}") from exc
     if (not isinstance(data, dict) or not seed_row_spec(data)
-            or not isinstance(data.get("idea"), dict) or not isinstance(data.get("code"), str)
-            or not isinstance(data.get("files"), dict) or not isinstance(data.get("deleted"), list)
-            or data.get("parent_id") is not None):
+            or not all(key in data for key in _SEED_ROW_KEYS)
+            or not isinstance(data["idea"], dict)
+            or not (data["code"] is None or isinstance(data["code"], str))
+            or not isinstance(data["files"], dict) or not isinstance(data["deleted"], list)
+            or data["parent_id"] is not None):
         raise ConfigRefusal("the Replay's frozen seed is not a seed row")
     return data
+
+
+# Every key the Replay child appends off a frozen seed (`cli/run_cmds.py::_open_and_drive`).
+_SEED_ROW_KEYS = ("idea", "code", "files", "deleted", "origin", "parent_id")
 
 
 def seed_ignored_note(spec: Optional[str]) -> str:

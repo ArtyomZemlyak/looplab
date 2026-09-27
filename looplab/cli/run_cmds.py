@@ -707,10 +707,16 @@ def _refuse_held_out_labels_inside_the_workspace(task, out) -> None:
 def _frozen_seed() -> Optional[dict]:
     """The seed row a Replay froze for this child (`core/run_reset.py::RUN_RESET_SEED_ENV`), or None
     outside a Replay. Read only beside the Replay's own operation id, so a stray variable in an
-    operator's shell cannot seed an ordinary `looplab run`."""
+    operator's shell cannot seed an ordinary `looplab run`.
+
+    CONSUMED: the variable is removed from this process's environment as it is read (critic
+    2026-09-26, driven). Every eval this engine launches inherits `os.environ`
+    (`runtime/sandbox.py::run_argv`), and it carries the operation id too — which the reset fence
+    reads for this child's whole life, so it stays — so a `looplab run` a candidate started from its
+    eval was seeded with the Replay's row."""
     from looplab.core.errors import ConfigRefusal
     from looplab.core.run_reset import RUN_RESET_OPERATION_ENV, RUN_RESET_SEED_ENV
-    path = os.environ.get(RUN_RESET_SEED_ENV)
+    path = os.environ.pop(RUN_RESET_SEED_ENV, None)
     if not path or not os.environ.get(RUN_RESET_OPERATION_ENV):
         return None
     try:
@@ -1148,8 +1154,9 @@ def run(
     out = run_out
     if seed is not None:
         # The champion pick against the direction Genesis (or the file) settled, then the setting
-        # recorded as what it resolved to — `config.snapshot.json` then names the exact node, and a
-        # Replay of this run seeds that node again rather than whatever the source ranks by then.
+        # recorded as what it resolved to — `config.snapshot.json` then names the exact node, which
+        # is what an operator reads (and clears, to Replay the run unseeded). A Replay does not
+        # resolve it again: it re-seeds from the log's own first row (`_frozen_seed`).
         check_seed_direction(seed, getattr(task, "direction", None))
         settings.seed_from_run = seed.canonical_spec
     _report_submit_notes(task, task_dict, out, settings, planned=genesis and goal is not None)

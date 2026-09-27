@@ -2950,10 +2950,12 @@ def build_router(srv) -> APIRouter:
                                      "evaluate under a different environment")
 
         # The seed is a fact of the run's BIRTH (`engine/seed_from_run.py::recorded_seed_spec`), and
-        # this snapshot is what a Replay re-seeds from — so the one per-run edit is CLEARING it (a
-        # Replay then relaunches unseeded). A different value would re-seed the replacement from a run
-        # this one was never launched from, and was a way past the launch route's confinement: a PUT of
-        # any string, then Replay (critic 2026-09-26, HIGH, driven).
+        # this snapshot says whether a Replay re-seeds from that birth row — so the per-run edits are
+        # CLEARING it (a Replay then relaunches unseeded) and putting BACK the spec the run was born
+        # with, which a mistaken clear otherwise lost for good (critic 2026-09-26: even the exact
+        # born-with spec was a 422). Any other value names a run this one was never launched from, and
+        # was a way past the launch route's confinement: a PUT of any string, then Replay (critic
+        # 2026-09-26, HIGH, driven).
         if "seed_from_run" in incoming:
             # Stored STRIPPED, and `null` is a clear like `""` (critic 2026-09-26: `null` was a 422,
             # the one spelling of "off" an API client would reach for, and a padded value was
@@ -2961,10 +2963,13 @@ def build_router(srv) -> APIRouter:
             wanted = str(incoming["seed_from_run"] or "").strip()
             incoming = {**incoming, "seed_from_run": wanted}
             if wanted and wanted != str(updated.get("seed_from_run") or "").strip():
-                raise HTTPException(422, "seed_from_run can't be changed per-run after launch — it "
-                                         "records the run this one was seeded from, which a Replay "
-                                         "seeds again. Clear it to Replay this run unseeded, or start "
-                                         "a NEW run to seed from a different one")
+                from looplab.engine.seed_from_run import birth_seed_row_at, seed_row_spec
+                if wanted != seed_row_spec(birth_seed_row_at(rd)):
+                    raise HTTPException(422, "seed_from_run can't be changed per-run after launch — "
+                                             "it records the run this one was seeded from, which a "
+                                             "Replay seeds again. Clear it to Replay this run "
+                                             "unseeded, put back the spec it was born with, or start "
+                                             "a NEW run to seed from a different one")
 
         changed = {}
         for key, value in incoming.items():

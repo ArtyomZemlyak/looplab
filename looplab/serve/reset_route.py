@@ -131,7 +131,16 @@ def _receipt_http_error(operation_id: str, exc: BaseException) -> HTTPException:
     })
 
 
-def _read_bounded_regular(path: Path, limit: int, *, code: str, label: str) -> bytes:
+# What a refused read means for the run: before the operation is committed nothing was touched; once
+# it is (`_frozen_launch` reads its frozen inputs after the receipt and the fence are durable, and
+# on a retry after the archive) the operation is what stands, so the sentence says that instead of
+# claiming an archive that may already have happened (critic 2026-09-26).
+_UNCOMMITTED_READ = "Replay did not archive or restart the run."
+_COMMITTED_READ = "The Replay operation stands; retry this exact operation, do not submit a new one."
+
+
+def _read_bounded_regular(path: Path, limit: int, *, code: str, label: str,
+                          consequence: str = _UNCOMMITTED_READ) -> bytes:
     try:
         info = path.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
@@ -141,17 +150,17 @@ def _read_bounded_regular(path: Path, limit: int, *, code: str, label: str) -> b
     except FileNotFoundError as exc:
         raise HTTPException(409, {
             "code": code,
-            "message": f"Replay {label} is missing; Replay did not archive or restart the run.",
+            "message": f"Replay {label} is missing; {consequence}",
         }) from exc
     except (OSError, ValueError) as exc:
         raise HTTPException(503, {
             "code": code,
-            "message": f"Replay {label} cannot be read safely; Replay did not archive or restart the run.",
+            "message": f"Replay {label} cannot be read safely; {consequence}",
         }) from exc
     if len(data) > limit:
         raise HTTPException(409, {
             "code": code,
-            "message": f"Replay {label} exceeds its safety limit; Replay did not archive or restart the run.",
+            "message": f"Replay {label} exceeds its safety limit; {consequence}",
         })
     return data
 
@@ -196,7 +205,8 @@ def _frozen_launch(
         ) -> tuple[list[str], dict[str, str], dict[str, Any]]:
     stage = rd / record["task_stage"]
     task_bytes = _read_bounded_regular(
-        stage, _TASK_MAX_BYTES, code="reset_frozen_inputs_unavailable", label="task snapshot")
+        stage, _TASK_MAX_BYTES, code="reset_frozen_inputs_unavailable", label="task snapshot",
+        consequence=_COMMITTED_READ)
     if hashlib.sha256(task_bytes).hexdigest() != record["task_digest"]:
         _pending(record, "The task snapshot changed after Replay was committed.")
     try:
@@ -236,10 +246,17 @@ def _frozen_launch(
         # appends it verbatim, so no source is resolved by path again.
         seed_stage = rd / record["seed_stage"]
         seed_bytes = _read_bounded_regular(
-            seed_stage, _TASK_MAX_BYTES, code="reset_frozen_inputs_unavailable", label="seed row")
+            seed_stage, _SEED_MAX_BYTES, code="reset_frozen_inputs_unavailable", label="seed row",
+            consequence=_COMMITTED_READ)
         if hashlib.sha256(seed_bytes).hexdigest() != record["seed_digest"]:
             _pending(record, "The frozen seed row changed after Replay was committed.")
         env[RUN_RESET_SEED_ENV] = str(seed_stage)
+    else:
+        # BLANKED, never merely left unset (critic 2026-09-26, driven): `_spawn_engine` starts from
+        # the server's own environment, so a stray `LOOPLAB_RESET_SEED_ROW` there reached a child
+        # that carries the operation id below, and a never-seeded run — or one whose seed the
+        # operator cleared — came back seeded.
+        env[RUN_RESET_SEED_ENV] = ""
     return spawn_args, env, launch_settings
 
 
@@ -417,16 +434,10 @@ def _prepare_receipt(
 
 def _birth_seed_row(rd: Path) -> Optional[dict]:
     """The seed row this run was born with (its seq-0 `inject_node` marked `seed_from_run`), or None
-    — also for a log whose FIRST record cannot be read: a Replay stays usable on a damaged log,
-    which is often why it is replayed, and only the first line is read."""
-    from looplab.core.models import Event
-    from looplab.engine.seed_from_run import birth_seed_row
-    from looplab.events.eventstore import iter_event_jsonl
-    try:
-        first = next(iter(iter_event_jsonl(rd / "events.jsonl")), None)
-        return birth_seed_row([Event(**first)] if isinstance(first, dict) else [])
-    except (OSError, ValueError, TypeError):
-        return None
+    — also for a log whose FIRST record cannot be read (`engine/seed_from_run.py::birth_seed_row_at`,
+    the one reading the per-run config edit shares)."""
+    from looplab.engine.seed_from_run import birth_seed_row_at
+    return birth_seed_row_at(rd)
 
 
 def _freeze_birth_seed(rd: Path, record: dict[str, Any], effective_config: dict,
@@ -448,7 +459,27 @@ def _freeze_birth_seed(rd: Path, record: dict[str, Any], effective_config: dict,
     if row is None or not wanted:
         return
     seed_stage = rd / f".looplab-reset-seed-{record['id']}.json"
-    seed_bytes = json.dumps(row, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    seed_bytes = _seed_stage_bytes(row)
+    # THE CHILD'S OWN QUESTIONS, asked HERE, before anything is committed (critic 2026-09-26, driven
+    # twice): the child refused a code-less repo seed (`code: null`) and `_frozen_launch` refused a
+    # staged copy over its bound — both only after the receipt and the writer fence were durable,
+    # which stranded the run archived (every retry 425) or wedged it `prepared` (every retry, the
+    # config PUT, `resume` and deletion refused). Refused now, the run is untouched.
+    from looplab.core.errors import ConfigRefusal
+    from looplab.engine.seed_from_run import frozen_seed_payload
+    try:
+        if len(seed_bytes) > _SEED_MAX_BYTES:
+            raise ConfigRefusal(f"the seed row is {len(seed_bytes)} bytes, over the "
+                                f"{_SEED_MAX_BYTES}-byte bound a Replay stages")
+        frozen_seed_payload(seed_bytes)
+    except ConfigRefusal as exc:
+        _discard_unpublished_task_stage(task_stage)
+        raise HTTPException(409, {
+            "code": "replay_seed_unusable",
+            "message": f"Replay cannot re-seed this run from the row it was born with ({exc}); "
+                       "Replay did not archive or restart the run.",
+            "remediation": "Clear the run's seed_from_run to Replay it unseeded.",
+        }) from exc
     try:
         strict_atomic_write_bytes(seed_stage, seed_bytes)
     except OSError as exc:
@@ -461,6 +492,23 @@ def _freeze_birth_seed(rd: Path, record: dict[str, Any], effective_config: dict,
         }) from exc
     record["seed_stage"] = seed_stage.name
     record["seed_digest"] = hashlib.sha256(seed_bytes).hexdigest()
+
+
+# The bound a staged seed row is held to, at the freeze and again at the launch: ONE constant, so a
+# row the freeze admits the launch cannot refuse (critic 2026-09-26).
+_SEED_MAX_BYTES = _TASK_MAX_BYTES
+
+
+def _seed_stage_bytes(row: dict) -> bytes:
+    """The birth row as the child will read it. Unescaped (`ensure_ascii=False`): the default
+    escaping tripled a Cyrillic row, and a 6.7 MB birth row staged at 19.4 MB, past the bound
+    (critic 2026-09-26, driven). A lone surrogate, which UTF-8 cannot carry unescaped, keeps the
+    escaped spelling — it reads back as the same row."""
+    try:
+        return json.dumps(row, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError:
+        return json.dumps(row, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def _flush_reset_cost_evidence(srv, rd: Path) -> None:

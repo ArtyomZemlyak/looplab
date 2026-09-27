@@ -245,7 +245,8 @@ seed_verdict`), comparing the two tasks as their adapters dump them: `same` only
 the same evaluation in every field but the goal, the task id and the direction; `different` when
 the evaluation contract (command, reader or paths) or the direction differs, named; `unknown`
 otherwise — any other declared difference (stages, the eval `env`, a timeout), a differing or
-unrecorded `eval_env` or `holdout_fraction`, or a task no adapter reads, each named. PATH is a run
+unrecorded `eval_env` or `holdout_fraction`, or a task no adapter reads whose declared evaluation
+does not already differ, each named. PATH is a run
 directory, or a sibling run's id under the new run's runs root; a trailing `#<integer>` names the
 node when the text before it is a run; a blank value is off. A bad source is refused (exit `2`)
 before the run directory is created and before Genesis runs: no run there, a corrupt log, no
@@ -259,7 +260,9 @@ seed from the launch alone — never a saved default — and answers a bad one a
 (`ready: false`, `status: 422`, `invalid_seed`). A Replay re-seeds from the row the run was born
 with, frozen before anything is archived and appended verbatim — never resolved by path again, so a
 source deleted or Replayed since changes nothing; a per-run config edit may clear the seed (the
-Replay then starts unseeded), never change it.
+Replay then starts unseeded), never change it. A birth row the Replay could not re-seed from (one its
+own child would refuse, or one over the staging bound) is refused with `409 replay_seed_unusable`
+before anything is archived; clearing the seed Replays the run unseeded.
 
 **Exit codes.** `run` and `resume` share them, because a wrapper, a CI step or an `&&` chain reads
 the status and nothing else:
