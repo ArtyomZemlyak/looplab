@@ -85,7 +85,7 @@ def _unreadable_log_row(rd, stt) -> dict:
         "source_integrity": integrity_wire({"complete": False, "unreadable": True}),
         "best_metric": None, "best_confirmed": None, "best_metric_caveats": [],
         "mislead_gap": None, "trajectory": None, "best_metric_comparability": None,
-        "headroom": None,
+        "headroom": None, "objective_key": None,
         "stop_reason": None, "resume_pending": False, "seeded_from": [], "themes": {},
         "concepts": {}, "mtime": stt.st_mtime, "created": stt.st_ctime,
     }

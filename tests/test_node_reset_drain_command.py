@@ -544,6 +544,10 @@ def test_a_command_the_drain_never_acked_waits_for_the_search_and_starts_nothing
             _time.sleep(0.01)
         assert len(driver.calls) > spawns, "a pause that is not the drain's changes nothing"
         assert "--drain-only" not in driver.calls[-1][0]
+        # The search it started serves the fork, and the command settles — its monitor must not
+        # outlive the test, polling (and sleeping) into whatever runs next.
+        _real_ack(rd, drain=False)
+        assert _terminal(client, sent)["status"] == "succeeded"
 
 
 def test_a_folded_intent_a_drain_deferred_is_not_said_to_wait(tmp_path):
