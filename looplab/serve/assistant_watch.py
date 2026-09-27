@@ -1419,6 +1419,11 @@ class WatchService:
                        "finished": bool(row.get("finished")),
                        "engine_running": row.get("engine_running"),
                        "nodes": row.get("nodes"), "best_metric": row.get("best_metric"),
+                       # WHICH metric that best is, only under an operator retarget (doc 68 68.2)
+                       # — every other observation keeps its bytes under the preamble's cap.
+                       **({"objective_key": row["objective_key"]}
+                          if isinstance(row.get("objective_key"), str) and row["objective_key"]
+                          else {}),
                        "states": sorted(states)}
         if not states.intersection(trigger.get("until") or ()):
             attempts = int(record.get("attempts", 0)) + 1

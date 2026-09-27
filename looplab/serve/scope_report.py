@@ -21,6 +21,7 @@ from looplab.core.advisory_payloads import sanitize_report_payload
 from looplab.core.pathsafe import WINDOWS_RESERVED
 from looplab.core.comparison import canonical_comparison_contract, finite_measurement
 from looplab.core.fitness import format_metric
+from looplab.core.models import retarget_note
 from looplab.core.redact import redact_persisted_text
 from looplab.serve.llm_context import BOSS_EVIDENCE_LABEL
 
@@ -193,8 +194,16 @@ def _safe_brief(value: object) -> dict | None:
     # to silently flip the sort order.
     if contract is not None and direction and contract["direction"] != direction:
         contract = None
-    measurement = _safe_comparison_measurement(value.get("comparison_measurement"), contract)
+    # The objective an operator retarget ranked the run by (doc 68 68.2), kept only when present so
+    # every other run's projection is byte-identical — and never beside a contracted receipt:
+    # `scope_generate.py::run_brief` withholds one under a retarget, and a brief naming an objective
+    # is refused one here too (fail closed: that champion's numbers are not the contract's metric).
+    objective = (_text(value["objective_key"], 256, single_line=True)
+                 if isinstance(value.get("objective_key"), str) else "")
+    measurement = (None if objective else
+                   _safe_comparison_measurement(value.get("comparison_measurement"), contract))
     return {
+        **({"objective_key": objective} if objective else {}),
         "run_id": run_id,
         "label": _text(value.get("label"), 300, single_line=True),
         "task_id": _text(value.get("task_id"), _MAX_ID_CHARS, single_line=True),
@@ -252,6 +261,9 @@ def _comparison_projection(briefs: list[dict]) -> tuple[list[dict], list[dict]]:
                     "metric": legacy_metric,
                     "direction": brief.get("direction") or None,
                     "comparison_status": "no_valid_comparison_measurement",
+                    # …and WHICH metric, when an operator retarget made it another (doc 68 68.2).
+                    **({"objective_key": brief["objective_key"]}
+                       if brief.get("objective_key") else {}),
                 })
             continue
         group = cohorts.setdefault(contract["contract_id"], (contract, [], [], []))
@@ -496,7 +508,8 @@ def run_brief_line(b: dict, full: bool = False) -> str:
     out = [f"### run {b['run_id']}" + (f" ({b['label']})" if b.get("label") else "")]
     out.append(f"task={b.get('task_id')} · model={b.get('model') or '?'} · policy={b.get('policy') or '?'} "
                f"· best={_fmt_metric(b.get('best_metric'))} ({b.get('direction') or '?'}) "
-               f"· {b.get('phase') or ''} · {b.get('nodes')} nodes")
+               f"· {b.get('phase') or ''} · {b.get('nodes')} nodes"
+               + retarget_note(b.get("objective_key")))
     contract = canonical_comparison_contract(b.get("comparison_contract"))
     out.append(
         "comparison_contract=" + (contract["contract_id"] if contract else "uncontracted"))
@@ -608,7 +621,8 @@ def _deterministic(scope_label: str, briefs: list, coverage: dict | None = None)
                  f"{n_rep} with reports",
         verdict="(model unavailable — deterministic metrics rollup)",
         learnings=[f"{b['run_id']}: best {_fmt_metric(b.get('best_metric'))} "
-                   f"({b.get('model') or '?'}, {b.get('policy') or '?'})" for b in briefs[:12]],
+                   f"({b.get('model') or '?'}, {b.get('policy') or '?'})"
+                   + retarget_note(b.get("objective_key")) for b in briefs[:12]],
         caveats=["Generated without an LLM — only metrics/config, no synthesis."],
     ).model_dump()
     return _sanitize_content(raw, briefs, coverage or {
@@ -654,6 +668,7 @@ class _CrossRunTools:
                 return "\n".join(
                     f"{b['run_id']}: model={b.get('model') or '?'} policy={b.get('policy') or '?'} "
                     f"best={_fmt_metric(b.get('best_metric'))} ({b.get('direction') or '?'}) {b.get('phase') or ''}"
+                    + retarget_note(b.get("objective_key"))
                     for b in self._briefs.values()) or "(no runs)"
             if name == "read_run":
                 b = self._briefs.get(str(args.get("run_id")))

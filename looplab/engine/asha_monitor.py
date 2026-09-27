@@ -8,6 +8,9 @@ enough completed siblings must retain metric observations at exactly the same re
 early point is never treated as comparable to a finished endpoint merely because both contain the
 objective metric.
 
+Under an operator `metric_retarget` (doc 68 68.2) the kill is DISARMED: the curve is the task
+metric's, the ranking the declared extra metric's, and no stage prints that one mid-training.
+
 The rank itself is advisory: each rank-state transition records a fold-IGNORED `EV_ASHA_RANK`
 diagnostic event, so its thread-schedule-dependent position cannot directly alter
 lifecycle/champion/replay. The raw diagnostic may still advise a later Researcher prompt when
@@ -890,9 +893,14 @@ class AshaMonitorMixin:
                 # recovers resets the streak to 0 and is never considered). Reuses the monitor's
                 # kill_signal + cancel; `_evaluate` writes the single terminal
                 # (reason=asha_underperforming).
+                # …and never under an operator RETARGET (doc 68 68.2, critic 2026-09-27): the live
+                # curve is the TASK metric's (its reader is the task's), and the run ranks every
+                # node by a declared extra metric no stage prints mid-training — a kill here would
+                # stop compute over a number nothing selects on. The rank above stays: advisory.
                 if (kill_signal is not None and comparable_under is True
                         and under_streak > _ASHA_GRACE_TICKS
-                        and getattr(self, "_asha_live_kill", False)):
+                        and getattr(self, "_asha_live_kill", False)
+                        and getattr(state, "objective_key", None) is None):
                     # never promote a finished endpoint into a fake peer at the live
                     # resource. Without explicit same-resource curve evidence this is unreachable.
                     #

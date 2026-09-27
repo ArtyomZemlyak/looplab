@@ -240,8 +240,13 @@ def test_no_group_is_a_god_module_again():
     `inspect_cmds.py` keeps the contract (the decorator, the signature, the docstring the CLI
     reference is written against) and none of the arithmetic: 1194 -> 1154 lines, and the cap comes
     down with it a second time, to 1175.
+
+    A THIRD TIME: the objective clause and the cross-objective refusal `comparability` owed a
+    retargeted run (doc 68 68.2, critic 2026-09-27) arrived against five lines of headroom, and the
+    command's rendering and pairwise walk moved to `run_report.py::echo_comparability` — the command
+    keeps its decorator, signature and docstring: 1170 -> 1130 lines, and the cap down to 1150.
     """
-    caps = {"inspect_cmds": 1175}
+    caps = {"inspect_cmds": 1150}
     for module_name in GROUPS:
         lines = len((_CLI / f"{module_name}.py").read_text(encoding="utf-8").splitlines())
         assert lines < caps.get(module_name, 1100), f"{module_name} is back to {lines} lines"

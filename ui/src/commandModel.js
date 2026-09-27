@@ -244,13 +244,14 @@ export function commandFeedback(record, labels = {}) {
   if (status === 'succeeded' && record?.drain_superseded === true) return {
     kind: 'success', terminal: true, status,
     message: labels.superseded || labels.success || 'Command completed' }
-  // A DRAIN was running and did not serve this intent: it is recorded and its queue waits for the
-  // search that follows — not "applied" (`_succeeded`: `deferred_to_next_search`). And the mirror:
-  // a plain command a drain served, after which the run pauses instead of searching on.
+  // A DRAIN did not serve this intent — it ran beside the drain, or reached the run on the drain's
+  // own pause: it is recorded and its queue waits for the search that follows — not "applied"
+  // (`_succeeded`: `deferred_to_next_search`). And the mirror: a plain command a drain served,
+  // after which the run pauses instead of searching on.
   if (status === 'succeeded' && record?.deferred_to_next_search === true) return {
     kind: 'success', terminal: true, status,
-    message: labels.deferred || `${labels.requested || 'Command'} recorded — a drain is running and `
-      + 'does not serve it; the next search will (resume the run when the drain has paused)' }
+    message: labels.deferred || `${labels.requested || 'Command'} recorded — a drain does not `
+      + 'serve it; the next search will (resume the run once the drain has paused)' }
   if (status === 'succeeded' && record?.served_by_drain === true) return {
     kind: 'success', terminal: true, status,
     message: labels.servedByDrain || `${labels.success || 'Command completed'} — by a drain; the `

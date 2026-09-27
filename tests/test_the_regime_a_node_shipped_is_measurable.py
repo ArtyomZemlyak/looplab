@@ -119,6 +119,39 @@ def test_the_row_names_the_task_it_is_about():
     assert got["nodes"] == 2 and got["best"] == REGIME_COMPILED
 
 
+def test_a_retargeted_run_writes_the_ledger_on_the_tasks_own_scale():
+    """MEDIUM (critic 2026-09-27, driven): the ledger is pooled across every run of the task, and
+    under an operator `metric_retarget` (doc 68 68.2) `metric` is the declared extra metric's — the
+    row was written in another ruler's units with no key, and a later plain run's prior read those
+    medians as this task's. The row is the task's own numbers, byte for byte what the same run
+    unretargeted writes."""
+    from looplab.core.models import Event
+    from looplab.events.replay import fold
+
+    def run(*extra):
+        rows = [("run_started", {"run_id": "r", "task_id": "t", "goal": "maximize recall",
+                                 "direction": "max"})]
+        for nid, task, filtered, files in [(0, 0.90, 0.10, {"k.pyx": "x"}),
+                                           (1, 0.88, 0.12, {"k.pyx": "y"}),
+                                           (2, 0.30, 0.45, {"solver.py": "print(1)"}),
+                                           (3, 0.28, 0.40, {"solver.py": "print(2)"})]:
+            rows.append(("node_created", {"node_id": nid, "parent_ids": [], "operator": "draft",
+                                          "idea": {"operator": "draft", "params": {},
+                                                   "rationale": "r"},
+                                          "code": f"print({nid})", "files": files}))
+            rows.append(("node_evaluated", {
+                "node_id": nid, "generation": 0, "metric": task, "violations": [],
+                "extra_metrics": {"filtered": filtered},
+                "extra_metrics_provenance": {"filtered": "declared"}}))
+        rows.extend(extra)
+        return fold([Event(seq=i, ts=float(i), type=t, data=d) for i, (t, d) in enumerate(rows)])
+
+    retargeted = run(("metric_retarget", {"key": "filtered"}))
+    assert retargeted.objective_key == "filtered"
+    assert run_contrast(retargeted) == run_contrast(run())
+    assert run_contrast(retargeted)["regimes"][REGIME_COMPILED]["median"] == 0.89
+
+
 # ------------------------------------------------------------------ the shared ledger's read side
 def _row(task, regimes, **extra):
     # Every ledger writer stamps the run's objective, and the reader now refuses a row without one

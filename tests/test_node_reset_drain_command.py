@@ -550,6 +550,85 @@ def test_a_command_the_drain_never_acked_waits_for_the_search_and_starts_nothing
         assert _terminal(client, sent)["status"] == "succeeded"
 
 
+def test_a_finalize_that_rode_on_the_drain_starts_the_engine_that_finalizes(tmp_path):
+    """HIGH (critic 2026-09-27, driven): a finalize admitted after the drain's last ack pass rode
+    on it, and when the drain exited the monitor settled it `deferred_to_next_search` — but its
+    postcondition is the FINISH, which no search writes. Nothing was started, the run kept its
+    pending finalize, and the `resume` the UI offered next was refused `finalize_in_progress`. Only
+    an `engine_ack` command waits for the search; a finalize starts the engine that finalizes."""
+    from looplab.events.replay import fold
+
+    rd, driver, client = _draining(tmp_path)
+    store = EventStore(rd / "events.jsonl")
+    store.append("pause", {"reason": "drain-only resume: done", "drain_only": True})
+    sent = _executing(client, _post(client, "run_abort", {"reason": "finalized"}, "fin").json())
+    assert sent["status"] == "executing" and not sent.get("spawned_by_command"), sent
+    spawns = len(driver.calls)
+    # What `looplab resume` does with a pending `run_abort`: it finalizes, and exits.
+    driver.on_spawn = lambda: store.append("run_finished", {"reason": "aborted"})
+    driver.alive = False                                           # the drain exits, never acking
+    settled = _terminal(client, sent)
+    assert settled["status"] == "succeeded", settled
+    assert "deferred_to_next_search" not in settled, settled
+    started = driver.calls[spawns:]
+    assert len(started) == 1 and "--drain-only" not in started[0][0], started
+    assert fold(store.read_all()).finished is True
+
+
+def test_a_command_re_driven_after_its_worker_died_still_waits_for_the_search(
+        tmp_path, monkeypatch):
+    """MEDIUM (critic 2026-09-27, driven): the deferral was asked by the monitor's re-spawn only.
+    A command that rode on the drain and lost its worker (a server restart) is re-driven through
+    ADMISSION when it is next read, and admission's spawn ladder started the plain `resume` the rule
+    exists to refuse — lifting the drain's pause and running the search."""
+    rd, driver, client = _draining(tmp_path)
+    svc = client.app.state.looplab.commands
+    real_monitor = svc._monitor
+    monkeypatch.setattr(svc, "_monitor", lambda *a, **k: None)     # the worker dies after admission
+    sent = _executing(client, _post(client, "fork", {"from_node_id": 1, "generation": 0},
+                                    "rode").json())
+    assert sent["status"] == "executing" and not sent.get("spawned_by_command"), sent
+    EventStore(rd / "events.jsonl").append("pause", {
+        "reason": "drain-only resume: done", "drain_only": True})
+    driver.alive = False                                           # the drain exits, unwatched
+    monkeypatch.setattr(svc, "_monitor", real_monitor)
+    spawns = len(driver.calls)
+    driver.on_spawn = lambda: setattr(driver, "alive", True)       # any child: a plain search
+    settled = _terminal(client, client.get(f"/api/runs/demo/commands/{sent['id']}").json())
+    assert settled["status"] == "succeeded", settled
+    assert settled.get("deferred_to_next_search") is True, settled
+    assert len(driver.calls) == spawns, driver.calls[spawns:]
+
+
+@pytest.mark.parametrize("event_type,data,waits", [
+    ("fork", {"from_node_id": 1, "generation": 0}, True),
+    ("run_abort", {"reason": "finalized"}, False),
+])
+def test_a_command_admitted_after_the_drain_exited_is_decided_by_the_log(
+        tmp_path, event_type, data, waits):
+    """LOW (critic 2026-09-27, driven): a fork admitted onto the drain's pause a moment AFTER the
+    drain exited started a plain `resume` at admission, while the same fork a moment BEFORE settled
+    `deferred_to_next_search` — which of the two it was is a race the operator cannot see. The log
+    decides now: on a drain's own pause an ack command waits for the search, and a finalize still
+    starts the engine that finalizes."""
+    rd, driver, client = _draining(tmp_path)
+    store = EventStore(rd / "events.jsonl")
+    store.append("pause", {"reason": "drain-only resume: done", "drain_only": True})
+    driver.alive = False                                           # the drain has already exited
+    spawns = len(driver.calls)
+    driver.on_spawn = (lambda: store.append("run_finished", {"reason": "aborted"})) \
+        if event_type == "run_abort" else (lambda: setattr(driver, "alive", True))
+    settled = _terminal(client, _post(client, event_type, data, f"after-{event_type}").json())
+    assert settled["status"] == "succeeded", settled
+    assert settled.get("deferred_to_next_search", False) is waits, settled
+    started = driver.calls[spawns:]
+    if waits:
+        assert started == [], started
+        assert _post(client, "pause", {}, "stop").status_code == 200, "the stop gets in"
+    else:
+        assert len(started) == 1 and "--drain-only" not in started[0][0], started
+
+
 def test_a_folded_intent_a_drain_deferred_is_not_said_to_wait(tmp_path):
     """`deferred_to_next_search` is an ENGINE-ACK command's account (critic 2026-09-27, mutant D6):
     an intent whose postcondition is its own fold was applied the moment it folded, whatever a drain
@@ -582,14 +661,21 @@ def test_what_waits_for_the_next_search_is_a_stated_rule():
             return self.paused
 
     rule = RunCommandService._left_for_the_next_search
-    rode = {"event_type": "fork"}
+    ack = {"postcondition": "engine_ack"}
+    rode = {"event_type": "fork", **ack}
     assert rule(rode, _Observation(True)) is True
     assert rule(rode, _Observation(False)) is False
     assert rule({**rode, "spawned_by_command": True}, _Observation(True)) is False
-    assert rule({"event_type": "node_reset", "drain_only": True}, _Observation(True)) is False
-    assert rule({"event_type": "node_reset"}, _Observation(True)) is True, "a plain reset rode on it"
+    assert rule({"event_type": "node_reset", "drain_only": True, **ack}, _Observation(True)) is False
+    assert rule({"event_type": "node_reset", **ack}, _Observation(True)) is True, \
+        "a plain reset rode on it"
     for kind in DRAIN_LEFT_FOR_THE_SEARCH:
-        assert rule({"event_type": kind}, _Observation(True)) is False, kind
+        assert rule({"event_type": kind, **ack}, _Observation(True)) is False, kind
+    # Only an ACK waits for a search: a finalize's postcondition is the finish no search writes
+    # (critic 2026-09-27), and a record whose postcondition is anything else never defers.
+    assert rule({"event_type": "run_abort", "postcondition": "finished_and_stopped"},
+                _Observation(True)) is False
+    assert rule({"event_type": "fork"}, _Observation(True)) is False
 
 
 def test_the_drains_pause_is_read_off_the_latest_row_that_moves_the_run(tmp_path):

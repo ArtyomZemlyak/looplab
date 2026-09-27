@@ -209,6 +209,13 @@ def test_an_undo_restores_the_goal_its_retargets_restated():
     # A restatement that changed nothing restores nothing: the undo row carries no goal.
     same = fold(_rows(_retarget(goal="maximize recall"), _retarget(None)))
     assert same.goal == "maximize recall" and "goal" not in same.objective_history[-1]
+    # An EMPTY launch goal is restored too — it was read as "nothing to restore" and the restated
+    # goal stayed (critic 2026-09-27, second pass) — and `task_goal` names it throughout.
+    empty = fold(_rows(_retarget(goal="maximize filtered recall"), started={"goal": ""}))
+    assert empty.goal == "maximize filtered recall" and empty.task_goal() == ""
+    undone = fold(_rows(_retarget(goal="maximize filtered recall"), _retarget(None),
+                        started={"goal": ""}))
+    assert undone.goal == "" and undone.objective_history[-1]["goal"] == "", undone.goal
 
 
 def test_verifier_scores_and_the_confirmed_ruler_stop_standing():
@@ -535,6 +542,36 @@ def test_a_case_is_stored_on_the_task_scale_beside_the_objective_that_chose_it(t
     assert case["metric"] == 0.7 and "objective_key" not in case
 
 
+def test_a_retargeted_case_names_the_tasks_goal_and_says_what_ranked_it(tmp_path):
+    """MEDIUM (critic 2026-09-27, driven): the case put the task's number beside the goal a retarget
+    RESTATED — `kb_search` handed a later run "metric=0.5 … measured on this goal: maximize filtered
+    recall", where 0.5 was the task's recall. The case names the task's own goal (the one its number
+    was measured on, and the one the scope gate and fingerprint key on), and the hit says which
+    objective chose that champion."""
+    import json
+
+    from looplab.tools.knowledge_tools import KnowledgeTools
+
+    restated = fold(_rows(_retarget(goal="maximize filtered recall")))
+    assert restated.goal == "maximize filtered recall"
+    assert restated.task_goal() == "maximize recall"
+    assert fold(_rows()).task_goal() == "maximize recall"
+    mem = tmp_path / "mem"
+    eng = _toy_engine(tmp_path, memory_dir=str(mem))
+    eng.lessons.store_case(restated)
+    [case] = [json.loads(line) for line in (mem / "cases.jsonl").read_text().splitlines()
+              if line.strip()]
+    assert case["goal"] == "maximize recall", case
+    assert case["fingerprint"] == eng.lessons.task_fingerprint(
+        fold(_rows()), restated.best()), "keyed on the task's goal, as a plain run of it is"
+    kt = KnowledgeTools(None, cases_path=str(mem / "cases.jsonl"))
+    kt.bind_state(fold(_rows(started={"run_id": "later", "run_uid": "later-uid"})))
+    [(_rid, _src, payload)] = kt._records()
+    assert ("metric=0.5 (the task's own metric; that run's champion was ranked by 'filtered', "
+            "an operator retarget)") in payload["text"], payload["text"]
+    assert payload["text"].endswith("measured on this goal: maximize recall"), payload["text"]
+
+
 def test_a_concept_capsule_is_on_the_task_scale(tmp_path):
     from types import SimpleNamespace
 
@@ -736,6 +773,9 @@ def test_the_portfolio_facts_are_on_the_task_scale_and_name_the_objective():
         0: 0.6, 1: 0.5, 2: 0.7, 3: 0.4}
     plain = run_facts(fold(_rows()), metric="recall")
     assert "objective_key" not in plain and plain["best"] == {"node_id": 2, "metric": 0.7}
+    # The passport is the TASK's: a goal a retarget restated does not re-key it (critic 2026-09-27).
+    restated = run_facts(fold(_rows(_retarget(goal="maximize filtered recall"))), metric="recall")
+    assert restated["scope"] == plain["scope"], (restated["scope"], plain["scope"])
 
 
 def test_an_mlflow_export_tags_the_objective(monkeypatch):
@@ -786,3 +826,235 @@ def test_the_cross_run_index_line_names_the_objective(tmp_path):
     rows = sorted(line.strip() for line in result.output.splitlines()[1:] if line.strip())
     assert [row.split("best=")[1] for row in rows] == [
         "0.5  (champion ranked by 'filtered', an operator retarget)", "0.7"], rows
+
+
+def test_the_paid_scope_report_says_which_metric_a_retargeted_best_is():
+    """MEDIUM (critic 2026-09-27, driven): the cross-run scope report handed the model a retargeted
+    run's best — the declared extra metric's value — as `best=0.45 (max)` beside other runs' task
+    metrics. The brief names the objective (only when one is in force), every line the model reads
+    carries the clause, and a contracted receipt is withheld: every phase of that champion is the
+    objective's number, not the one the contract declares."""
+    from types import SimpleNamespace
+
+    from looplab.serve import scope_report
+    from looplab.serve.scope_generate import run_brief
+
+    contract = {"schema": 1, "dataset_lineage": "dataset:v1",
+                "split_or_candidate_pool_lineage": "validation", "evaluator_uid": "eval",
+                "evaluator_version": "1", "population": "all", "filter": "none",
+                "metric_uid": "recall", "unit": "points", "direction": "max",
+                "aggregation": "mean", "cutoff": "none", "measurement_phase": "search",
+                "uncertainty_protocol": "none", "constraints_digest": "none"}
+    assert scope_report.canonical_comparison_contract(contract) is not None
+    srv = SimpleNamespace(phase=lambda st, finalize_incomplete=False: "finished")
+
+    def brief(events, task_doc=None):
+        return run_brief(srv, "r", {}, SimpleNamespace(
+            events=tuple(events), config_doc={"llm_model": "m", "policy": "greedy"},
+            task_doc=task_doc))
+
+    retargeted, plain = brief(_rows(_retarget())), brief(_rows())
+    assert retargeted["objective_key"] == "filtered" and retargeted["best_metric"] == 0.45
+    assert "objective_key" not in plain, "every other run's brief is byte-identical"
+    clause = "RANKED BY 'filtered' (an operator retarget), not the task's own metric"
+    assert clause in scope_report.run_brief_line(retargeted)
+    assert "RANKED BY" not in scope_report.run_brief_line(plain)
+    tools = scope_report._CrossRunTools([retargeted])
+    assert clause in tools.execute("list_runs", {})
+    assert clause in tools.execute("read_run", {"run_id": "r"})
+    assert clause in scope_report._deterministic("s", [retargeted])["learnings"][0]
+    _groups, observations = scope_report._comparison_projection(
+        [scope_report._safe_brief(retargeted)])
+    assert observations[0]["objective_key"] == "filtered", observations
+
+    contracted = brief(_rows(_retarget()), task_doc={"comparison_contract": contract})
+    assert contracted["comparison_measurement"] is None and contracted["best_metric"] is None
+    live = brief(_rows(), task_doc={"comparison_contract": contract})
+    assert live["comparison_measurement"]["value"] == 0.7, "the plain run's receipt is untouched"
+    assert scope_report._safe_brief(live)["comparison_measurement"] is not None
+    # …and a brief that names an objective is refused a receipt at the projection too.
+    forged = scope_report._safe_brief({**live, "objective_key": "filtered"})
+    assert forged["comparison_measurement"] is None and forged["objective_key"] == "filtered"
+
+
+def test_the_run_artifacts_say_which_metric_the_champion_is(tmp_path):
+    """LOW (critic 2026-09-27, driven): tree.html, the exported notebook, the reviewer bundle and
+    the assistant's run context printed a retargeted champion's metric bare — the declared extra
+    metric's value, read as the task's. Each names the objective under a retarget, and a run without
+    one renders exactly as it did."""
+    import json
+
+    from typer.testing import CliRunner
+
+    from looplab.cli import app
+    from looplab.engine.bundle import bundle_summary
+    from looplab.events.htmlview import render_html
+    from looplab.serve.llm_context import _node_context
+
+    retargeted, plain = fold(_rows(_retarget())), fold(_rows())
+    clause = "RANKED BY &#x27;filtered&#x27; (an operator retarget)"
+    html_r, html_p = render_html(retargeted), render_html(plain)
+    assert clause in html_r and "<th>metric (filtered)</th>" in html_r, html_r
+    assert "RANKED BY" not in html_p and "<th>metric</th>" in html_p
+
+    rd = _server_run(tmp_path, _retarget(), name="nb")
+    out = tmp_path / "nb.ipynb"
+    result = CliRunner().invoke(app, ["export-notebook", str(rd), "--out", str(out)])
+    assert result.exit_code == 0, result.output
+    header = "".join(json.loads(out.read_text())["cells"][0]["source"])
+    assert ("**Best metric:** 0.45 · RANKED BY 'filtered' (an operator retarget), not the "
+            "task's own metric") in header, header
+
+    assert bundle_summary(tmp_path, retargeted, [])["objective_key"] == "filtered"
+    assert bundle_summary(tmp_path, plain, [])["objective_key"] is None
+
+    context = _node_context(retargeted, 1)
+    assert "Ranked by: 'filtered' — an operator `metric_retarget`" in context, context
+    assert "Ranked by" not in _node_context(plain, 1)
+
+
+def test_the_agent_facing_memory_readers_keep_the_clause_a_cut_took(tmp_path):
+    """LOW (critic 2026-09-27, driven): the prior re-attached the retarget clause a long statement's
+    cut took, but the agent's own pulls — `recall_notes`, `search_lessons` and the cross-run claim
+    stream — cut the same text and dropped it, so a lesson learned while ranking by `filtered` read
+    as one about the task's own metric. Each keeps it now, redacted like the text it rides on, and
+    a row without a retarget renders exactly as it did."""
+    import json
+
+    from looplab.tools.cross_run_tools import CrossRunTools
+    from looplab.tools.memory_tools import MemoryTools
+    from looplab.trust.cross_run import keep_retarget_clause, retargeted_lesson_note
+
+    clause = retargeted_lesson_note("filtered")
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    head = {"task_id": "t", "run_id": "earlier", "direction": "max", "fingerprint": ["t"]}
+    note = "LONGNOTE " + _long("the margin won because the negatives were hard", 12) + clause
+    stmt = "LONGLESSON " + _long("a wider margin separates hard negatives", 12) + clause
+    (mem / "meta_notes.jsonl").write_text(json.dumps(
+        {**head, "note": note, "objective_key": "filtered"}) + "\n")
+    (mem / "lessons.jsonl").write_text(json.dumps(
+        {**head, "statement": stmt, "outcome": "supported", "confidence": 0.7,
+         "role": "researcher", "objective_key": "filtered"}) + "\n" + json.dumps(
+        {**head, "run_id": "plain", "statement": "PLAINLESSON " + _long("margin", 90),
+         "outcome": "supported", "confidence": 0.7, "role": "researcher"}) + "\n")
+    tools = MemoryTools(str(mem))
+    tools.bind_state(fold(_rows(started={"run_id": "later", "run_uid": "later-uid"})))
+    notes = tools.execute("recall_notes", {"query": "margin"})
+    assert clause.strip() in notes, notes
+    lessons = tools.execute("search_lessons", {"query": "margin"})
+    [retargeted] = [line for line in lessons.splitlines() if "LONGLESSON" in line]
+    [plain] = [line for line in lessons.splitlines() if "PLAINLESSON" in line]
+    assert clause.strip() in retargeted and "ranked by" not in plain, lessons
+
+    claims = CrossRunTools(str(mem))
+    claims.bind_state(fold(_rows(started={"run_id": "later", "run_uid": "later-uid"})))
+    rendered = claims.execute("cross_run_claims", {"query": "margin"})
+    assert "LONGLESSON" in rendered and clause.strip() in rendered, rendered
+
+    # The re-attached clause is REDACTED like the text it rides on — a credential-shaped key is
+    # shared free text too — through both the row-stamped and the text-only path.
+    from looplab.trust.cross_run import with_retarget_clause
+
+    secret = "sk-proj-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"
+    assert secret not in with_retarget_clause("cut", {"objective_key": secret})
+    assert "[ranked by" in with_retarget_clause("cut", {"objective_key": secret})
+    assert secret not in keep_retarget_clause("full" + retargeted_lesson_note(secret), "fu")
+
+
+def test_a_meta_note_that_already_says_the_clause_says_it_once(tmp_path):
+    """The reflection note's clause is added only when the note does not already carry it: a model
+    that echoed the retarget clause back (it reads the run's lessons, which carry it) would
+    otherwise store it twice — and the prior renderer would then keep both (critic 2026-09-27,
+    mutant G)."""
+    import json
+
+    from looplab.engine.lessons_priors import retargeted_lesson_note
+
+    clause = retargeted_lesson_note("filtered")
+    mem = tmp_path / "mem"
+    eng = _toy_engine(tmp_path, *_rows(_retarget(), ("run_finished", {
+        "reason": "done", "finalization_required": True})),
+        memory_dir=str(mem), reflection_priors=True)
+    eng._causal_meta_note = lambda *_args: "the margin won" + clause
+    eng._reflect_lessons = lambda *_args: []
+    eng._comparative_lessons_on = False
+    eng._write_reflection_note(fold(eng.store.read_all()))
+    [note] = [json.loads(line) for line in (mem / "meta_notes.jsonl").read_text().splitlines()
+              if line.strip()]
+    assert note["note"] == "the margin won" + clause, note["note"]
+
+
+def test_the_structured_projections_name_the_objective(tmp_path):
+    """LOW (critic 2026-09-27, read): three projections carried a retargeted run's metric with no
+    key — the readmodel's `nodes.metric`, `/prov`'s `ll:metric` and export-git's `Looplab-Metric`.
+    Each names the objective beside it now (the readmodel in a table of its own, so `nodes` keeps
+    its columns), and a run with no retarget projects exactly as it did."""
+    import sqlite3
+
+    from looplab.events.git_export import fast_import_stream
+    from looplab.events.readmodel import build_readmodel
+
+    for events, key in ((_rows(_retarget()), "filtered"), (_rows(), None)):
+        db = tmp_path / f"rm-{key}.sqlite"
+        build_readmodel(events, db)
+        con = sqlite3.connect(str(db))
+        try:
+            assert con.execute("SELECT key FROM objective").fetchall() == [(key,)]
+            assert [c[1] for c in con.execute("PRAGMA table_info(nodes)")][:4] == [
+                "id", "parent_ids", "operator", "metric"]
+        finally:
+            con.close()
+        stream = fast_import_stream(events, fold(events)).stream.decode()
+        if key:
+            assert "Looplab-Objective: filtered" in stream
+            assert "Looplab-Task-Metric: 0.5" in stream, "node 1's task metric beside its 0.45"
+        else:
+            assert "Looplab-Objective" not in stream and "Looplab-Task-Metric" not in stream
+
+    _server_run(tmp_path / "srv", _retarget())
+    _server_run(tmp_path / "srv", name="plain")
+    client = _client_over(tmp_path / "srv")
+    doc = client.get("/api/runs/demo/prov").json()
+    entity = next(v for v in doc["entity"].values() if v.get("ll:node_id") == 1)
+    assert entity["ll:objective_key"] == "filtered" and entity["ll:task_metric"] == 0.5, entity
+    assert entity["ll:metric"] == 0.45
+    plain = client.get("/api/runs/plain/prov").json()
+    assert not any("ll:objective_key" in v for v in plain["entity"].values())
+
+
+def test_a_paraphrase_merge_never_folds_two_objectives_together(monkeypatch):
+    """NIT (critic 2026-09-27, read): the paraphrase merge buckets by (task, role), and the newest
+    member's fields win — so a model that called a retargeted run's lesson a paraphrase of a plain
+    one dropped the `objective_key` (or stamped it on the other's evidence) and summed the counts
+    across two rulers. A retargeted lesson is bucketed with its objective; a plain one is not."""
+    import looplab.search.hybrid_merge as hm
+    from looplab.engine.memory import _agentic_merge_lessons
+    from looplab.engine.lessons_priors import retargeted_lesson_note
+
+    seen = []
+
+    def consolidate(texts, client, **kw):
+        seen.append(list(texts))
+        return [{"members": list(range(len(texts))), "merged": "raise the margin"}]
+
+    monkeypatch.setattr(hm, "consolidate", consolidate)
+    rows = [
+        {"statement": "raise the margin", "outcome": "supported", "task_id": "t", "run_id": "P"},
+        {"statement": "increase the margin" + retargeted_lesson_note("filtered"),
+         "outcome": "supported", "task_id": "t", "run_id": "R", "objective_key": "filtered"},
+        {"statement": "bump the margin", "outcome": "supported", "task_id": "t", "run_id": "Q"},
+    ]
+    out = _agentic_merge_lessons(rows, client=object())
+    assert sorted(map(len, seen)) == [2], "only the two task-metric lessons were ever a candidate"
+    retargeted = [row for row in out if row.get("objective_key") == "filtered"]
+    assert len(out) == 2 and len(retargeted) == 1, out
+    assert retargeted[0]["statement"].startswith("increase the margin")
+
+
+def test_a_legacy_row_spelling_the_runs_direction_in_capitals_is_applied():
+    """NIT (critic 2026-09-27): the server appends the direction in the fold's spelling since the
+    first pass, but a row an earlier build wrote as "MAX" was read as a flip and ignored. The fold
+    reads it the way the server writes it; a real flip is still ignored whole."""
+    assert fold(_rows(_retarget(direction=" MAX "))).objective_key == "filtered"
+    assert fold(_rows(_retarget(direction="min"))).objective_key is None

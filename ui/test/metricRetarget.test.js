@@ -251,3 +251,47 @@ test('a retargeted run ranks apart from the task-metric runs, and the pair is re
     assert.equal(COMPARABILITY_REFUSAL_SHORT.objective, 'ranked metrics differ')
     assert.equal(bestMetricCaveatLabel('retargeted_objective'), 'retargeted objective')
   })
+
+test('the best column under a retarget reads the champion\'s own records', async () => {
+  // Mutants K and M (critic 2026-09-27): the `best #N` column is a DIFFERENT node's record. Under a
+  // retarget its ★ cell is the champion's declared metric — a salvage of the champion's TASK
+  // metric says nothing about it — and the task-metric row holds the champion's task metric, never
+  // its objective value.
+  const salvaged = [{ name: 'metric_salvaged', salvage: { reader: 'stdout_json' } }]
+  const focus = { ...node(0, { filtered: 0.3 }, { filtered: 'declared' }), metric: 0.3,
+    task_metric: 0.6 }
+  const champ = { ...node(1, { filtered: 0.45 }, { filtered: 'declared' }), metric: 0.45,
+    task_metric: 0.71, violations: salvaged }
+  const state = run([focus, champ], { ...RETARGETED, best_node_id: 1 })
+  const el = await render(state)
+  const rowsOf = [...el.querySelectorAll('tr')]
+  const star = rowsOf.find(tr => tr.textContent.includes('★'))
+  const bestCell = star.querySelectorAll('td')[3]
+  assert.equal(bestCell.textContent.trim(), '0.45', 'no task-metric salvage caveat on the declared value')
+  const task = rowsOf.find(tr => tr.textContent.includes("task's own metric"))
+  assert.equal(task.querySelectorAll('td')[3].textContent.trim(), '0.71',
+    "the champion's task metric, not its 0.45 on `filtered`")
+  // …and without a retarget the same salvaged champion IS caveated on the ★ row.
+  const plain = await render(run([{ ...focus, metric: 0.6 }, { ...champ, metric: 0.71 }],
+    { best_node_id: 1 }))
+  const plainStar = [...plain.querySelectorAll('tr')].find(tr => tr.textContent.includes('★'))
+  assert.match(plainStar.querySelectorAll('td')[3].textContent, /salvaged/)
+})
+
+test('the chart, the caveat and the compare row name the objective a retarget ranked by',
+  async () => {
+    const { trajectoryTitle } = await import('../src/crossRunRank.js')
+    const { bestMetricCaveatNotice } = await import('../src/runIndex.js')
+    const group = { taskId: 't', direction: 'max', partition: '', split: null }
+    assert.equal(trajectoryTitle(group), 'Running best · t · higher is better')
+    assert.equal(trajectoryTitle({ ...group, objective: 'filtered' }),
+      'Running best · t · higher is better · ranked by filtered')
+    const notice = bestMetricCaveatNotice({ best_metric_caveats: ['retargeted_objective'],
+      objective_key: 'filtered' })
+    assert.match(notice, /An operator retarget made a declared extra metric \(“filtered”\)/)
+    assert.doesNotMatch(notice, /has no sentence for/)
+    const { compareObjective } = await import('../src/portfolioModel.js')
+    assert.equal(compareObjective({ direction: 'max' }), 'max')
+    assert.equal(compareObjective({ direction: 'max', objective_key: 'filtered' }),
+      'max · ranked by filtered (an operator retarget)')
+  })

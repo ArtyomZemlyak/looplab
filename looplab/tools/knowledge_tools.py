@@ -429,8 +429,16 @@ class KnowledgeTools:
                 # meta-note beside it does not, so they go first and the goal — the discriminator
                 # that says WHICH problem this was measured on, which matters because `repo_task` is
                 # one task id over several repos — goes last, where a clip can take it.
+                # A RETARGETED run's case (doc 68 68.2): its number is the task's own metric, and
+                # its champion was chosen by another — said beside the number, only then, so every
+                # other case renders byte for byte as it did (critic 2026-09-27).
+                ranked = c.get("objective_key")
+                ranked = (f" (the task's own metric; that run's champion was ranked by "
+                          f"{redact_persisted_text(ranked, max_chars=256, single_line=True)!r}, "
+                          "an operator retarget)"
+                          if isinstance(ranked, str) and ranked else "")
                 text = (f"PAST CASE ({c.get('task_id')}, objective={c.get('direction')}) "
-                        f"metric={c.get('metric')}, run {c.get('run_id') or 'unknown'}:\n"
+                        f"metric={c.get('metric')}{ranked}, run {c.get('run_id') or 'unknown'}:\n"
                         f"params={params}\n"
                         f"why: {rationale}\n"
                         f"measured on this goal: {goal}")

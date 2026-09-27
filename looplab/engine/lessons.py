@@ -101,9 +101,11 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
         return RunState(task_id=self._e.task.id, goal=getattr(self._e.task, "goal", ""),
                         direction=getattr(self._e.task, "direction", "min"))
 
-    def task_fingerprint(self, final: RunState, best=None) -> list[str]:
+    def task_fingerprint(self, final: RunState, best=None, *, goal: str | None = None) -> list[str]:
         """M2: content fingerprint of this task so cross-run transfer reaches SIMILAR tasks, not only
-        the exact same task_id. Built from kind/direction/metric/goal keywords + the winner's params."""
+        the exact same task_id. Built from kind/direction/metric/goal keywords + the winner's params.
+        `goal` overrides the run's current one — a record on the TASK's scale passes
+        `RunState.task_goal()`, the goal before an operator retarget restated it (doc 68 68.2)."""
         from looplab.engine.memory import task_fingerprint
         # NOTE: the winner's param NAMES are outcome-derived, so this fingerprint shifts when a new
         # node wins / the run extends — i.e. it is a fuzzy RETRIEVAL key, not an immutable scope identity.
@@ -112,7 +114,8 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
         # deliberately NOT changed here, since it would re-key every existing lesson/case store.
         pnames = list((best.idea.params or {}).keys()) if best is not None and best.idea else []
         return task_fingerprint(getattr(self._e.task, "kind", ""), final.direction,
-                                final.goal or getattr(self._e.task, "goal", ""),
+                                (final.goal if goal is None else goal)
+                                or getattr(self._e.task, "goal", ""),
                                 metric=str(getattr(self._e.task, "metric", "") or ""),
                                 param_names=pnames,
                                 universal=bool(getattr(self._e, "_fingerprint_universal", False)))
@@ -634,9 +637,12 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
             return
         case = {
             "task_id": final.task_id,
-            "goal": final.goal,
+            # …and so is the GOAL it names: the task's own, not one a retarget restated — the case's
+            # number was measured on it, and it is what the scope gate and the fingerprint key on
+            # (`RunState.task_goal`, critic 2026-09-27; `final.goal` on every other run).
+            "goal": final.task_goal(),
             "direction": final.direction,
-            "fingerprint": self.task_fingerprint(final, best),
+            "fingerprint": self.task_fingerprint(final, best, goal=final.task_goal()),
             "params": best.idea.params,
             "metric": task_scale,
             **({"objective_key": objective} if objective else {}),
@@ -796,7 +802,8 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
             capsule = build_concept_capsule(
                 run_id=run_id, run_uid=getattr(final, "run_uid", ""),
                 task_id=final.task_id, direction=direction,
-                concepts=concepts, fingerprint=self.task_fingerprint(final, best),
+                concepts=concepts,
+                fingerprint=self.task_fingerprint(final, best, goal=final.task_goal()),
                 best_metric=(task_scale_metric(best, getattr(final, "objective_key", None))
                              if best is not None else None),
                 concept_outcomes=outcomes,

@@ -42,7 +42,9 @@ INDEX_CACHE_SCHEMA_VERSION = 3
 # Version 2 excludes proposer-authored concept claims from the portfolio evidence projection.
 # Version 3 records every measurement on the TASK's scale and names an operator retarget's objective
 # (doc 68 68.2): a retargeted run's facts carried a declared extra metric's values under the task
-# metric's name (critic 2026-09-27).
+# metric's name (critic 2026-09-27) — and its passport is keyed on the task's own goal
+# (`RunState.task_goal`), never the one a retarget restated (same critic, second pass; v3 had not
+# shipped, so the two are one version).
 INDEX_PROJECTOR_VERSION = 3
 _DIGEST_CHUNK_BYTES = 1024 * 1024
 # A task snapshot carries only adapter identity/config metadata. Bounding it independently prevents a
@@ -153,9 +155,10 @@ def run_facts(state: RunState, *, kind: str = "", metric: str = "", universal: b
     emitted in node-id order, all sets sorted. This is `ExecutionAttempt`/`Measurement` in lean JSON form."""
     best = state.best()
     objective = getattr(state, "objective_key", None)
-    # The passport derives ONLY from the immutable task (no winner params) — see scope_profile.
-    scope = scope_profile(task_id=state.task_id, kind=kind, direction=state.direction, goal=state.goal,
-                          metric=metric, universal=universal)
+    # The passport derives ONLY from the immutable task (no winner params) — see scope_profile — so
+    # its goal is the TASK's, never one an operator retarget restated (doc 68 68.2).
+    scope = scope_profile(task_id=state.task_id, kind=kind, direction=state.direction,
+                          goal=state.task_goal(), metric=metric, universal=universal)
     attempts = []
     # NOTE: these attempts are folded LATEST-generation facts — a `node_reset` (.1 -> reset -> .9)
     # collapses to one attempt at .9, and concept labels are raw (no concept_uid/taxonomy). Immutable

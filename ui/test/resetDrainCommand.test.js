@@ -75,7 +75,7 @@ test('a command a drain deferred, and a reset a drain served, say so rather than
   const deferred = commandFeedback({ status: 'succeeded', deferred_to_next_search: true },
     { requested: 'Fork', success: 'Fork applied' })
   assert.equal(deferred.kind, 'success')
-  assert.match(deferred.message, /^Fork recorded — a drain is running and does not serve it; the next search will/)
+  assert.match(deferred.message, /^Fork recorded — a drain does not serve it; the next search will/)
   assert.doesNotMatch(deferred.message, /applied/)
   const served = commandFeedback({ status: 'succeeded', served_by_drain: true },
     { success: 'Reset applied', servedByDrain: 'Reset applied — by the drain' })

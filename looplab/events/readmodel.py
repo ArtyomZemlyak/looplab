@@ -206,6 +206,13 @@ def build_readmodel(events: Iterable[Event], db_path: str | os.PathLike) -> RunS
                     _tri(rep.get("fell_back")),
                 ),
             )
+        # WHICH METRIC `nodes.metric` is (doc 68 68.2, critic 2026-09-27): one row, the declared
+        # extra metric an operator `metric_retarget` ranked the run by, NULL for the task's own — an
+        # `ORDER BY metric` over two runs' sidecars compares two rulers unless it can ask. Its own
+        # table so `SELECT * FROM nodes` keeps the columns every existing consumer reads.
+        cur.execute("DROP TABLE IF EXISTS objective")
+        cur.execute("CREATE TABLE objective(key TEXT)")
+        cur.execute("INSERT INTO objective VALUES (?)", (st.objective_key,))
         # Same transaction as the rows above: a watermark committed separately could survive a
         # rebuild whose rows did not, which is the one failure this artefact must not have.
         cur.execute(f"DROP TABLE IF EXISTS {WATERMARK_TABLE}")

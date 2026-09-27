@@ -553,6 +553,13 @@ def _receipts(node, ctx: _Context) -> list:
         notes.append(f"awaiting a rebuild from '{node.rerun_from}'")
     out = [("Looplab-Status", status + (f" ({'; '.join(notes)})" if notes else "")),
            ("Looplab-Metric", _metric_text(node.metric))]
+    objective = getattr(ctx.state, "objective_key", None)
+    if isinstance(objective, str) and objective:
+        # Under an operator retarget (doc 68 68.2) `Looplab-Metric` is a declared extra metric's
+        # value: the commit names it and carries the task's own beside it (critic 2026-09-27). No
+        # trailer on any other run, whose stream is byte-identical.
+        out += [("Looplab-Objective", objective),
+                ("Looplab-Task-Metric", _metric_text(getattr(node, "task_metric", None)))]
     if node.metric is not None:
         rows = node.violations if isinstance(node.violations, list) else []
         names = sorted({str(r["name"]) for r in rows if isinstance(r, dict) and r.get("name")})

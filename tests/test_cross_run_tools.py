@@ -1507,3 +1507,30 @@ def test_a_different_run_that_shares_this_runs_name_is_not_excluded_as_self(tmp_
     assert "data/hard-neg" in slugs, slugs
     card = t.execute("concept_card", {"slug": "data/hard-neg"})
     assert card.count("'run_local'") == 1, card
+
+
+def test_the_concept_card_keeps_a_retargeted_lessons_clause(tmp_path):
+    """Doc 68 68.2 (critic 2026-09-27): a lesson a retargeted run learned carries, at its END, which
+    metric that run ranked by — and the card's 200-character cut took it, so the lesson read as one
+    about the task's own metric. The card re-attaches it from the row's stamp; a plain lesson is
+    rendered as it always was."""
+    from looplab.trust.cross_run import retargeted_lesson_note
+
+    clause = retargeted_lesson_note("filtered")
+    long_statement = ("r-drop " + " ".join(["regularization kept the hard negatives apart"] * 8)
+                      + clause)
+    assert len(long_statement) > 200 + len(clause)
+    _seed(tmp_path, lessons=[
+        {**_lesson(long_statement, "supported", [1], run_id="a"), "objective_key": "filtered"},
+        _lesson("r-drop " + " ".join(["plain task metric lesson"] * 12), "supported", [2],
+                run_id="b"),
+    ], capsules=[
+        _cap_scoped("a", "t", concepts=["regularization/r-drop"], fingerprint=["kind:dataset"]),
+        _cap_scoped("b", "t", concepts=["regularization/r-drop"], fingerprint=["kind:dataset"]),
+    ])
+    out = _bind(CrossRunTools(tmp_path)).execute("concept_card", {"slug": "regularization/r-drop"})
+    assert "what runs noted:" in out, out
+    [retargeted] = [line for line in out.splitlines() if "hard negatives apart" in line]
+    [plain] = [line for line in out.splitlines() if "plain task metric lesson" in line]
+    assert clause.strip() in retargeted, retargeted
+    assert "ranked by" not in plain

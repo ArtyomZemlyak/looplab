@@ -347,9 +347,18 @@ def _agentic_merge_lessons(rows: list[dict], *, client, embed=None,
     # Researcher lesson into a Developer one (or vice versa), which `_verdict_base` below would then
     # collapse to a single role, breaking the §role-split routing. Untagged (shared) rows form their
     # own bucket and stay shared.
+    # …and NOT across OBJECTIVES (doc 68 68.2, critic 2026-09-27): a lesson a retargeted run learned
+    # ranked by a declared extra metric; merged with a task-metric paraphrase, the newest row's fields
+    # won — dropping `objective_key` or stamping it on the other's evidence — and the counts summed
+    # across two rulers. Only a retargeted row's bucket grows the key, so every other bucket (and the
+    # merge memo keyed on it) is the one it always was.
     by_task: dict[object, list[int]] = {}
     for i, o in enumerate(rows):
-        by_task.setdefault((o.get("task_id"), o.get("role")), []).append(i)
+        objective = o.get("objective_key")
+        bucket = (o.get("task_id"), o.get("role"))
+        if isinstance(objective, str) and objective:
+            bucket += (objective,)
+        by_task.setdefault(bucket, []).append(i)
     keep: list[tuple[int, dict]] = []                          # (earliest original index, row)
     try:
         for _tid, idxs in by_task.items():

@@ -1,4 +1,6 @@
-"""The RENDERING half of the run-diagnostic commands (`timings`, `tokens`).
+"""The RENDERING half of the run-diagnostic commands (`timings`, `tokens`, and since 2026-09-27
+`comparability`'s per-run lines and pairwise walk — moved for the same cap, see
+`echo_comparability`).
 
 Extracted 2026-09-07 because `inspect_cmds.py` crossed the line cap
 `tests/test_cli_command_groups.py::test_no_group_is_a_god_module_again` holds it to, and that guard
@@ -723,3 +725,85 @@ def echo_edit_types(state) -> None:
                        f"(deleted at {example['deleted_between']})")
     if not cycling:
         typer.echo("  none — no line this run added had been deleted by its own ancestry.")
+
+
+def _ranked_by(objective) -> str:
+    """How `looplab comparability` names the objective a run's champion was ranked by."""
+    return "the task's own metric" if objective is None else repr(objective)
+
+
+def echo_comparability(run_dirs) -> int:
+    """`looplab comparability`'s rendering and pairwise walk; returns the exit code (0 / 3 / 4).
+
+    Moved here VERBATIM from the command (2026-09-27) for `inspect_cmds.py`'s line cap
+    (`tests/test_cli_command_groups.py::test_no_group_is_a_god_module_again`), when the retarget's
+    objective clause and pair refusal would have taken the file past it; the command keeps the
+    decorator, the signature and the docstring the CLI reference is written against.
+    """
+    from looplab.core.models import task_scale_metric
+    from looplab.engine.comparability import (
+        DIFFERENT, SAME, UNKNOWN, comparability_notice, comparability_status, record_of)
+    from looplab.events.replay import fold
+
+    rows = []
+    for run_dir in run_dirs:
+        events = run_dir / "events.jsonl"
+        if not events.exists():
+            typer.echo(f"{run_dir.name}: no event log — nothing to read a key from.")
+            rows.append((run_dir.name, None, None, None))
+            continue
+        state = fold(EventStore(events).read_all())
+        best = state.best()
+        record = record_of(best) if best is not None else None
+        objective = state.objective_key
+        rows.append((run_dir.name, best, record, objective))
+        # THE TASK'S OWN NUMBER, and the objective beside it when an operator retarget chose another
+        # (doc 68 68.2, critic 2026-09-27, driven): `robust_metric` is then the declared extra
+        # metric's, and it was printed bare beside a plain run's task metric under "SAME evaluation".
+        shown = "—" if best is None else task_scale_metric(best, objective)
+        ranked = ("" if best is None or objective is None else
+                  f" (champion ranked by {objective!r} = {best.robust_metric}, an operator "
+                  "retarget)")
+        if record is None:
+            # NAME THE FIX, not just the state. `not_declared` is the state every run on this box is
+            # in, so an operator reading this line needs the one edit that changes it — the same rule
+            # `metric_subject.UNBOUND_MESSAGES` follows for the subject side.
+            typer.echo(f"{run_dir.name}: metric={shown}{ranked} "
+                       "comparability=UNKNOWN (no key recorded; declare `eval.inputs` on the task, "
+                       "or a `comparison_contract`, so what this number was measured against is on "
+                       "the record).")
+        else:
+            keys = ", ".join(f"{name}={value}" for name, value in sorted(record["keys"].items()))
+            typer.echo(f"{run_dir.name}: metric={shown}{ranked} "
+                       f"authority={record['authority']} {keys}")
+
+    if len(rows) < 2:
+        return 0
+    # PAIRWISE, and every pair is stated. A single "these runs are comparable" verdict would hide
+    # which pair failed, and on a portfolio the operator's next question is always WHICH.
+    worst = SAME
+    for index, (name, _best, record, objective) in enumerate(rows):
+        for other_name, _other_best, other_record, other_objective in rows[index + 1:]:
+            if objective != other_objective:
+                # Asked BEFORE the evaluation: a champion another objective chose is not a target
+                # for this one's, however much of the measurement the two share — the same refusal
+                # the run list makes (`ui/src/runIndex.js::metricIncomparability`, `objective`).
+                worst = DIFFERENT
+                typer.echo(f"  {name} vs {other_name}: DIFFERENT — NOT COMPARABLE: {name} ranks "
+                           f"its champion by {_ranked_by(objective)} and {other_name} by "
+                           f"{_ranked_by(other_objective)} (an operator `metric_retarget`), so "
+                           "each champion was chosen on its own ruler and neither is a target for "
+                           "the other.")
+                continue
+            status = comparability_status(record, other_record)
+            if status == SAME:
+                typer.echo(f"  {name} vs {other_name}: SAME evaluation — ranking these is a fact.")
+                continue
+            worst = DIFFERENT if (status == DIFFERENT or worst == DIFFERENT) else UNKNOWN
+            typer.echo(f"  {name} vs {other_name}: {status.upper()} — "
+                       + comparability_notice(record, other_record, other_run_id=other_name))
+    if worst == DIFFERENT:
+        return 3
+    if worst == UNKNOWN:
+        return 4
+    return 0

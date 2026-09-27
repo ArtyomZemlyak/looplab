@@ -737,12 +737,15 @@ Exit codes are the answer, so a script cannot ignore them:
 | exit | verdict | meaning |
 |---|---|---|
 | `0` | `SAME` | the runs recorded the same key at an authority that may certify it (`measured` — the eval's declared `eval.inputs` bound to their content digests; or `declared` — an operator-written `comparison_contract`). Ranking them is a fact |
-| `3` | `DIFFERENT` | provably different keys, different source trees (`substrate`), or different evaluation protocols (profile, scorer, fingerprint) — the per-run lines can print identical keys, and the pair line names what refused. **Refused.** Each value is still printed — it is true of its own measurement — but the ordering between them never was |
+| `3` | `DIFFERENT` | provably different keys, different source trees (`substrate`), or different evaluation protocols (profile, scorer, fingerprint) — the per-run lines can print identical keys, and the pair line names what refused — or champions ranked by different objectives (an operator `metric_retarget`, doc 68 68.2). **Refused.** Each value is still printed — it is true of its own measurement — but the ordering between them never was |
 | `4` | `UNKNOWN` | at least one recorded no key, or they agree only at the `inferred` authority (two task files that merely look alike). **Not an assent**: a caller that asked for a ranking did not get one |
 
 Every run directory written before 2026-08-20 answers `UNKNOWN`, and that is the honest answer rather
 than a gap to be papered over — see [Tasks → `eval.inputs`](tasks.md) for the two ways to make it
 decidable, and for the inversion (`unknown` is never `same`) that the whole mechanism turns on.
+
+A retargeted run's line prints its champion's number on the TASK's own metric, with the objective
+that ranked it beside it (`metric=0.5 (champion ranked by 'filtered' = 0.45, an operator retarget)`).
 
 Read-only: it folds each log and prints. It writes nothing and touches no memory store.
 

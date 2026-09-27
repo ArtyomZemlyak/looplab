@@ -49,10 +49,10 @@ from looplab.cli import (
 # rendering, so this module keeps only the command's contract.
 from looplab.cli.workspace_bytes import (DEFAULT_ENTRY_BUDGET, EntryBudget, measure_run,
                                          render_workspace_bytes, seed_claims)
-from looplab.cli.run_report import (echo_card_and_build_tables, echo_containments,
-                                    echo_edit_types, echo_reconciliation, echo_run_opening,
-                                    echo_section, echo_spend_around_champion, minutes,
-                                    output_fingerprint, span_category, span_seconds,
+from looplab.cli.run_report import (echo_card_and_build_tables, echo_comparability,
+                                    echo_containments, echo_edit_types, echo_reconciliation,
+                                    echo_run_opening, echo_section, echo_spend_around_champion,
+                                    minutes, output_fingerprint, span_category, span_seconds,
                                     stage_identity_rows)
 
 
@@ -1008,8 +1008,10 @@ def comparability(
                   `declared`: an operator-written `ComparisonContract`). Ranking them is a fact.
       DIFFERENT — they recorded provably different keys, ran on different source trees, or were
                   measured under different evaluation protocols (profile, scorer, fingerprint) —
-                  the pair line names which. **REFUSED**, exit 3. The values are each true of their
-                  own measurement; the ordering between them never was.
+                  the pair line names which — or they rank their champions by DIFFERENT OBJECTIVES
+                  (an operator `metric_retarget`, doc 68 68.2: each champion was chosen on its own
+                  ruler, whatever the evaluation shared). **REFUSED**, exit 3. The values are each
+                  true of their own measurement; the ordering between them never was.
       UNKNOWN   — at least one recorded no key, or they agree only at the `inferred` authority
                   (two task files that merely look alike, which is exactly what the four values
                   above are). NOT an assent. Exit 4, because a caller that wanted a ranking did not
@@ -1017,53 +1019,11 @@ def comparability(
 
     Read-only: it folds each log and prints. It writes nothing and touches no memory store.
     """
-    from looplab.engine.comparability import (
-        DIFFERENT, SAME, UNKNOWN, comparability_notice, comparability_status, record_of)
-
-    rows = []
-    for run_dir in run_dirs:
-        events = run_dir / "events.jsonl"
-        if not events.exists():
-            typer.echo(f"{run_dir.name}: no event log — nothing to read a key from.")
-            rows.append((run_dir.name, None, None))
-            continue
-        state = fold(EventStore(events).read_all())
-        best = state.best()
-        record = record_of(best) if best is not None else None
-        rows.append((run_dir.name, best, record))
-        if record is None:
-            # NAME THE FIX, not just the state. `not_declared` is the state every run on this box is
-            # in, so an operator reading this line needs the one edit that changes it — the same rule
-            # `metric_subject.UNBOUND_MESSAGES` follows for the subject side.
-            typer.echo(f"{run_dir.name}: metric="
-                       f"{'—' if best is None else best.robust_metric} "
-                       "comparability=UNKNOWN (no key recorded; declare `eval.inputs` on the task, "
-                       "or a `comparison_contract`, so what this number was measured against is on "
-                       "the record).")
-        else:
-            keys = ", ".join(f"{name}={value}" for name, value in sorted(record["keys"].items()))
-            typer.echo(f"{run_dir.name}: metric="
-                       f"{'—' if best is None else best.robust_metric} "
-                       f"authority={record['authority']} {keys}")
-
-    if len(rows) < 2:
-        return
-    # PAIRWISE, and every pair is stated. A single "these runs are comparable" verdict would hide
-    # which pair failed, and on a portfolio the operator's next question is always WHICH.
-    worst = SAME
-    for index, (name, _best, record) in enumerate(rows):
-        for other_name, _other_best, other_record in rows[index + 1:]:
-            status = comparability_status(record, other_record)
-            if status == SAME:
-                typer.echo(f"  {name} vs {other_name}: SAME evaluation — ranking these is a fact.")
-                continue
-            worst = DIFFERENT if (status == DIFFERENT or worst == DIFFERENT) else UNKNOWN
-            typer.echo(f"  {name} vs {other_name}: {status.upper()} — "
-                       + comparability_notice(record, other_record, other_run_id=other_name))
-    if worst == DIFFERENT:
-        raise typer.Exit(3)
-    if worst == UNKNOWN:
-        raise typer.Exit(4)
+    # The rendering and the pairwise walk are `cli/run_report.py::echo_comparability` (moved there
+    # 2026-09-27 for this file's line cap, the third extraction the guard's docstring records).
+    code = echo_comparability(run_dirs)
+    if code:
+        raise typer.Exit(code)
 
 
 @app.command(name="edit-types")

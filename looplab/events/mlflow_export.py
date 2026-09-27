@@ -172,6 +172,7 @@ class LiveTracker:
         self._parent = None             # the MLflow run, opened by the first sync that can NAME it
         self._logged: set[int] = set()  # node ids already mirrored
         self._best: Optional[float] = None
+        self._objective: Optional[str] = None   # the objective the parent is tagged with (68.2)
         self.failures = 0
 
     # -- internals -----------------------------------------------------------------------------
@@ -198,6 +199,22 @@ class LiveTracker:
             "looplab.autologged": "true",   # says this run was MIRRORED live, not exported after
             **_objective_tag(state),
         })
+        self._objective = _objective_tag(state).get("looplab.objective_key")
+
+    def _follow_objective(self, mlflow, state) -> None:
+        """An operator `metric_retarget` LANDED MID-MIRROR (doc 68 68.2, critic 2026-09-27): the tag
+        was written once, at open, so a later retarget — or its undo — left the parent naming the
+        wrong ruler. The tag follows the objective in force (`""` once it is the task's own metric
+        again), `looplab.objective_changed_after_node` names the last node published on the old one,
+        and the running best restarts: the `best_metric` series held a task-metric best against the
+        objective's values, a comparison across two rulers."""
+        objective = _objective_tag(state).get("looplab.objective_key")
+        if objective == self._objective:
+            return
+        mlflow.set_tags({"looplab.objective_key": objective or "",
+                         "looplab.objective_changed_after_node": str(max(self._logged, default=-1))})
+        self._objective = objective
+        self._best = None
 
     def _log_node(self, mlflow, state, node) -> None:
         direction = (state.direction or "min").lower()
@@ -256,6 +273,7 @@ class LiveTracker:
             self._open_parent(mlflow, state)
             if self._parent is None:
                 return 0                       # the log has not named the run yet; try again later
+            self._follow_objective(mlflow, state)
             published = 0
             for node in state.evaluated_nodes():
                 if node.id in self._logged:

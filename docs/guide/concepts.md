@@ -410,9 +410,11 @@ inject, a strategy, a confirm) is acked `deferred` and its command settles `succ
 `deferred_to_next_search`: its durable queue waits for the search that follows, and it neither holds
 the run's one in-flight driver command (which refused every stop) nor starts that search itself. The
 drain's own pause is marked `drain_only` and followed by one last ack pass over what it never folded,
-and a command admitted after that pass — onto a run a drain paused — settles the same way on the
-server (`serve/command_observation.py::CommandObservation.drain_paused`): it never respawns the run
-as a search.
+and a command admitted after that pass — onto a run a drain paused, whether the drain has exited yet
+or not, and a command re-driven after its worker died alike — settles the same way on the server
+(`serve/command_observation.py::CommandObservation.drain_paused`): it never starts the run as a
+search. Only an `engine_ack` command waits so: a finalize's postcondition is the finish itself, which
+no search that follows writes, so it starts the engine that finalizes.
 
 A `metric_retarget` (`{"key": "<extra metric>", "goal": "…"}`, doc 68 68.2) makes a DECLARED extra
 metric — one an `eval.metrics` reader recorded, never a number the candidate printed for itself — the
@@ -440,7 +442,18 @@ reflection note append which metric ranked the run and stamp `objective_key`; th
 apart from the task-metric runs, and every foreign-run listing, the CLI result, the report and an
 MLflow export (`looplab.objective_key`) say it. Inside the run, a reader that
 holds a node beside a fresh measurement of the task's metric — ASHA's sibling finals, the noise
-floor's `search_metric` — reads the task's scale too (`core/models.py::task_measurement`).
+floor's `search_metric` — reads the task's scale too (`core/models.py::task_measurement`), and the
+ASHA kill is disarmed: the live curve is the task metric's, and nothing ranks by it any more. The
+regime ledger (`regime_contrast.jsonl`) is written on the task's scale; a case names the task's own
+goal (`RunState.task_goal`), and so does the index passport; `looplab comparability` prints the task
+number and REFUSES (exit 3) a pair ranked by different objectives; and the scope report's briefs,
+tree.html, the notebook, the reviewer bundle, the assistant's context, the TUI, a standing watch,
+`/prov`, the export-git trailers (`Looplab-Objective`), the readmodel's `objective` table,
+`export-sft` rows and the live MLflow mirror (which follows a retarget that lands while it runs) name
+the objective beside the number. A lesson's clause is re-attached wherever a cut would take it — the
+prior, the agent's memory pulls, the cross-run claim/atlas/search/concept-card lines
+(`trust/cross_run.py::with_retarget_clause`, `keep_retarget_clause`) — and a paraphrase merge never
+folds two objectives together.
 
 An idempotency key is scoped to one payload. A retry with the same key and payload returns the same
 command, so a lost HTTP response cannot append the control event or start the engine twice; the same

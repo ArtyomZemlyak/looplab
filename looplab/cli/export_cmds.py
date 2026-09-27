@@ -155,7 +155,8 @@ def export_notebook(
         typer.echo("no champion/best node to export"); raise typer.Exit(1)
     nb = champion_notebook(state.goal, champ.code, params=champ.idea.params,
                            metric=champ.robust_metric,
-                           task_id=state.task_id, run_id=state.run_id)
+                           task_id=state.task_id, run_id=state.run_id,
+                           objective_key=state.objective_key)
     dest = out or (run_dir / "champion.ipynb")
     atomic_write_text(dest, json.dumps(nb, indent=1))
     typer.echo(f"wrote {dest}")
@@ -445,11 +446,21 @@ def export_sft(
                        # (`core/idea_report.py`): a `different` node's metric is not the outcome of
                        # the idea a `propose` turn wrote, and a consumer must be able to tell.
                        "idea_implemented": idea_report_of(node, state.nodes)[0]}
+            if state.objective_key:
+                # Under an operator retarget (doc 68 68.2) `metric` is the declared extra metric's —
+                # what the run ranked by — and the task's own number rides beside it, so a corpus
+                # pooled across runs of the task can put every row on one ruler (critic 2026-09-27).
+                outcome["task_metric"] = node.task_metric
         if only_successful:
             # THE GROUNDING IS THE POINT, so the filter is the outcome and not the absence of an
             # error: a node that failed for an unrelated reason after a good proposal is still a
             # turn nobody should train on as if it had worked.
-            if node is None or node.metric is None or not node.feasible:
+            # A node an operator retarget left unranked (no value on the declared metric) still
+            # MEASURED the task's own (doc 68 68.2): that is an outcome, and the row carries it.
+            measured = node is not None and (
+                node.metric is not None
+                or (state.objective_key is not None and node.task_metric is not None))
+            if not measured or not node.feasible:
                 skipped_ungrounded += 1
                 continue
             # A PROPOSAL whose build ran something else is not grounded by that build's metric: the
@@ -466,6 +477,9 @@ def export_sft(
             "run_id": state.run_id,
             "task_id": state.task_id,
             "direction": state.direction,
+            # WHICH metric `outcome.metric` is, only when an operator retarget made it a declared
+            # extra metric — every other run's rows are byte-identical.
+            **({"objective_key": state.objective_key} if state.objective_key else {}),
             # Carried, not dropped: a reader must be able to tell a complete retained projection
             # from a truncated one, which is the same rule `hydrate_inputs` stamps it for.
             **({"input_partial": True} if attributes.get("input_partial") else {}),
@@ -481,7 +495,8 @@ def export_sft(
         typer.echo(f"  {skipped_ungrounded} turn(s) dropped by --only-successful: their node "
                    "produced no usable metric, was flagged infeasible, or (for a proposal) built "
                    "something else than the idea proposed")
-    grounded = sum(1 for row in rows if row["outcome"]["metric"] is not None)
+    grounded = sum(1 for row in rows if row["outcome"]["metric"] is not None
+                   or row["outcome"].get("task_metric") is not None)
     typer.echo(f"  {grounded} of {len(rows)} turn(s) are joined to a node that produced a metric; "
                "the rest carry the outcome they have (a failure, or no node at all — a run-level "
                "turn such as the Strategist's).")

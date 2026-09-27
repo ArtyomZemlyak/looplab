@@ -25,7 +25,7 @@ import { COMPARABILITY_REFUSAL_TEXT, bestMetricCaveatLabel, metricComparable,
 } from './runIndex.js'
 import {
   GROUP_DEFINITION, crossRunGroups, groupClaim, groupTally, rankCoverage, splitClaims, splitLabel,
-  trajectoryClaim, trajectoryOverlay, unrankedRowTitle,
+  trajectoryClaim, trajectoryOverlay, trajectoryTitle, unrankedRowTitle,
 } from './crossRunRank.js'
 import VirtualTimeline from './VirtualTimeline.jsx'
 import { timelineEventKey } from './timelineModel.js'
@@ -2634,7 +2634,7 @@ export function CrossRunPanel({ state, onClose }) {
         const overlay = trajectoryOverlay(group)
         return <div key={`${group.key}:trajectory`} className="xr-trajectory" style={{ marginTop: 12 }}>
           {overlay.drawn > 0 && <MultiTrajectory runs={overlay.runs}
-            title={`Running best · ${group.taskId} · ${group.direction === 'min' ? 'lower is better' : 'higher is better'}${group.partition ? ` · evaluation ${group.partition}` : ''}${group.objective ? ` · ranked by ${group.objective}` : ''}${group.split ? ` · ${splitLabel(group.split)}` : ''}`} />}
+            title={trajectoryTitle(group)} />}
           <div className="muted" style={{ fontSize: 11 }}>{trajectoryClaim(group, overlay)}</div>
         </div>
       })}

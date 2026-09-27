@@ -720,6 +720,17 @@ export function trajectoryOverlay(group, { limit = MAX_OVERLAY_RUNS } = {}) {
   }
 }
 
+// THE CHART'S TITLE: the one axis every drawn line shares, named in full — the task, the direction,
+// the evaluation partition, the OBJECTIVE when an operator retarget ranked the group by a declared
+// extra metric (doc 68 68.2: the values are that metric's, not the task's own), and a split caveat.
+// Hoisted out of `panels.jsx` (critic 2026-09-27) so a test can hold the objective clause to it.
+export function trajectoryTitle(group) {
+  return `Running best · ${group.taskId} · ${group.direction === 'min' ? 'lower is better' : 'higher is better'}`
+    + (group.partition ? ` · evaluation ${group.partition}` : '')
+    + (group.objective ? ` · ranked by ${group.objective}` : '')
+    + (group.split ? ` · ${splitLabel(group.split)}` : '')
+}
+
 // THE SENTENCE under the chart, in the model for the reason `groupClaim` is: the counts ARE the
 // claim, and a render that could drop one to save a line would be publishing a tidier overlay than
 // the group has.

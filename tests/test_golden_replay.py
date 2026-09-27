@@ -50,13 +50,17 @@ the diff that justified it:
 * 2026-09-26 — `RunState.objective_key` + `RunState.objective_history` (`core/models.py`, doc 68
   68.2: the objective an operator `metric_retarget` put in force, and every accepted retarget). The
   diff was 2 insertions and 0 deletions — `"objective_key": null` and `"objective_history": []`, what
-  a log with no retarget folds to — and no shared leaf changed (`Node.task_metric` is excluded from
-  the dump).
+  a log with no retarget folds to — and no shared leaf changed (`Node.task_metric` was then excluded
+  from the dump; see the 2026-09-27 row that published it).
 * 2026-09-27 — `Node.simplified` (`core/models.py`, doc 67 67.5: the receipt of a node cut from its
   parent with one pipeline block commented out). The diff was 8 insertions and 0 deletions — one
   `"simplified": null` per node — and no shared leaf changed: no node in this log carries a receipt,
   so "on a tie, simpler" (`events/replay_selection.py::simpler_tie`) is inert and the champion is
   the one it was.
+* 2026-09-27 — `Node.task_metric` PUBLISHED (`core/models.py`, doc 68 68.2, critic 2026-09-27: no
+  surface could show a node's task metric under a retarget). The diff was 8 insertions and 0
+  deletions — one `"task_metric"` per evaluated node, equal to its `metric` because this log has no
+  retarget — and no shared leaf changed.
 """
 from __future__ import annotations
 

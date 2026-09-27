@@ -294,6 +294,54 @@ def test_the_mirror_publishes_each_node_as_it_lands_and_never_twice(tmp_path, mo
     assert [n for n, _ in record["runs"]].count("node-0") == 1
 
 
+def test_the_mirror_follows_the_objective_a_retarget_puts_in_force(tmp_path, monkeypatch):
+    """Doc 68 68.2 (critic 2026-09-27, driven): the parent was tagged with the objective ONCE, at
+    open — a run already retargeted then was tagged, but a retarget (or its undo) that landed while
+    the mirror followed left the tag naming the wrong ruler, and the running best compared the
+    objective's values against a task-metric best. The tag follows the objective in force, names
+    where it changed, and the `best_metric` series restarts on the new ruler."""
+    import sys
+
+    from looplab.events.mlflow_export import LiveTracker
+
+    def declared(store, nid, metric, filtered):
+        store.append("node_created", {"node_id": nid, "parent_ids": [], "operator": "draft",
+                                      "idea": {"operator": "draft", "params": {"x": float(nid)},
+                                               "rationale": ""}, "code": f"# node {nid}"})
+        store.append("node_evaluated", {"node_id": nid, "metric": metric,
+                                        "extra_metrics": {"filtered": filtered},
+                                        "extra_metrics_provenance": {"filtered": "declared"}})
+
+    # Opened on a run ALREADY retargeted: the parent says so from its first tag.
+    record: dict = {}
+    monkeypatch.setitem(sys.modules, "mlflow", _fake_mlflow(record))
+    rd = tmp_path / "already"
+    store = _run_log(rd, nodes=())
+    declared(store, 0, 1.0, 9.0)
+    store.append("metric_retarget", {"key": "filtered"})
+    LiveTracker(rd, tracking_uri="file:/mlruns").sync()
+    assert record["tags"]["looplab.objective_key"] == "filtered"
+
+    # A retarget that lands WHILE the mirror follows.
+    record = {}
+    monkeypatch.setitem(sys.modules, "mlflow", _fake_mlflow(record))
+    rd = tmp_path / "mid"
+    store = _run_log(rd, nodes=())
+    declared(store, 0, 1.0, 9.0)
+    tracker = LiveTracker(rd, tracking_uri="file:/mlruns")
+    assert tracker.sync() == 1 and "looplab.objective_key" not in record["tags"]
+    store.append("metric_retarget", {"key": "filtered"})
+    declared(store, 1, 5.0, 3.0)                 # min: 3.0 on `filtered`, worse than 1.0 on the task
+    assert tracker.sync() == 1
+    assert record["tags"]["looplab.objective_key"] == "filtered"
+    assert record["tags"]["looplab.objective_changed_after_node"] == "0"
+    assert ("best_metric", 3.0, 1) in record["metrics"], (
+        "the running best restarts on the new ruler, never held at the task metric's 1.0")
+    store.append("metric_retarget", {"key": None})
+    tracker.sync()
+    assert record["tags"]["looplab.objective_key"] == "", "back on the task's own metric"
+
+
 def test_the_mirror_closes_with_the_champion_and_redacts_its_code(tmp_path, monkeypatch):
     """The second egress of node code in this module. It goes through the export's own
     `_log_solution`, so a credential a repo-mode Developer echoed into the solution is masked here

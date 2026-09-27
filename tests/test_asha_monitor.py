@@ -391,7 +391,7 @@ class _AshaStub(AshaMonitorMixin):
         return self._cadence
 
 
-def _fake_state(finals, self_id=0, tails=None, curves=None):
+def _fake_state(finals, self_id=0, tails=None, curves=None, objective_key=None):
     idea = Idea(operator="draft", params={}, rationale="asha test")
     nodes = {
         self_id: Node(id=self_id, operator="draft", idea=idea, status=NodeStatus.pending),
@@ -402,11 +402,12 @@ def _fake_state(finals, self_id=0, tails=None, curves=None):
             operator="draft",
             idea=idea,
             metric=m,
+            task_metric=m,                  # the task's own number, as every terminal folds it
             status=NodeStatus.evaluated,
             stdout_tail=(tails[i - 1] if tails else ""),
             resource_curve=(curves[i - 1] if curves else None),   # the same-rung comparable source
         )
-    return RunState(nodes=nodes)
+    return RunState(nodes=nodes, objective_key=objective_key)
 
 
 # Wall-clock ceiling for "the loop produced what this test is waiting for". Bounds only the FAILURE
@@ -418,9 +419,11 @@ _LOOP_SETTLE_TIMEOUT_S = 15.0
 
 
 def _run_loop(stub, workdir, spec, direction, kill_signal, monkeypatch, finals, *,
-              tails=None, curves=None, log_snapshot=None, window=0.12, until=None):
+              tails=None, curves=None, log_snapshot=None, window=0.12, until=None,
+              objective_key=None):
     monkeypatch.setattr(
-        "looplab.engine.orchestrator.fold", lambda events: _fake_state(finals, tails=tails, curves=curves))
+        "looplab.engine.orchestrator.fold",
+        lambda events: _fake_state(finals, tails=tails, curves=curves, objective_key=objective_key))
 
     async def drive():
         cancel = threading.Event()
@@ -615,6 +618,34 @@ def test_loop_opt_in_kill_requires_comparable_resource_evidence(tmp_path, monkey
               until=lambda s: bool(on.get("kill")))
     assert on.get("kill") is True
     assert on.get("terminal_reason") == "asha_underperforming"
+
+
+def test_a_retargeted_run_never_kills_on_the_task_metrics_curve(tmp_path, monkeypatch):
+    """MEDIUM (critic 2026-09-27): under an operator `metric_retarget` (doc 68 68.2) the live curve
+    is the TASK metric's and every node is ranked by a declared extra metric no stage prints
+    mid-training — a kill would stop compute over a number nothing selects on. The same run, the
+    same curve and the same confident `stop` verdict kill without a retarget, and never with one;
+    the rank stays, as advice."""
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    (wd / "train.log").write_text('{"recall": 0.01, "step": 1}\n', encoding="utf-8")
+    spec = {"kind": "stdout_json", "key": "recall", "resource_key": "step"}
+    curves = [[[1.0, 0.05], [8.0, 0.80]], [[1.0, 0.07], [8.0, 0.70]], [[1.0, 0.09], [8.0, 0.60]]]
+    verdict = {"status": "stop", "reason": "flat at 1% while peers were at 5-9%",
+               "confidence": 0.95}
+
+    plain, plain_judge = {}, _JudgeClient(verdict)
+    _run_loop(_AshaStub(kill=True, min_siblings=3, cadence=0.01, judge=plain_judge), wd, spec,
+              "max", plain, monkeypatch, finals=[0.8, 0.7, 0.6], curves=curves, window=0.2,
+              until=lambda s: bool(plain.get("kill")))
+    assert plain.get("kill") is True, "the control: without a retarget this run IS killed"
+
+    retargeted, judge = {}, _JudgeClient(verdict)
+    stub = _AshaStub(kill=True, min_siblings=3, cadence=0.01, judge=judge)
+    _run_loop(stub, wd, spec, "max", retargeted, monkeypatch, finals=[0.8, 0.7, 0.6],
+              curves=curves, window=0.4, objective_key="filtered")
+    assert retargeted.get("kill") is not True and judge.calls == 0, (retargeted, judge.calls)
+    assert [d for event, d in stub.store.events if event == EV_ASHA_RANK], "the rank is still said"
 
 
 def test_loop_endpoint_warning_cannot_kill_without_same_resource_or_with_old_attempt_log(

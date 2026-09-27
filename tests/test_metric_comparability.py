@@ -299,6 +299,51 @@ def test_the_cli_refuses_a_cross_key_ranking_and_exits_nonzero(tmp_path):
         "thing this command may never do is let silence read as yes")
 
 
+def test_the_cli_refuses_champions_ranked_by_different_objectives(tmp_path):
+    """MEDIUM (critic 2026-09-27, driven): an operator `metric_retarget` (doc 68 68.2) ranked one
+    run's champion by a declared extra metric, and this command printed that metric's value bare
+    beside a plain run's task metric under "SAME evaluation — ranking these is a fact". Each run now
+    shows its champion's TASK number with the objective beside it, and a pair ranked by different
+    objectives is refused whatever the evaluation shared; the same objective on both is decided by
+    the evaluation exactly as before."""
+    from typer.testing import CliRunner
+
+    from looplab.cli import app
+    from looplab.events.eventstore import EventStore
+
+    key = {"version": 1, "authority": "measured", "keys": {"measured": "1111111111111111"}}
+
+    def run(name, *, retarget):
+        rd = _log(tmp_path, name, [])
+        store = EventStore(rd / "events.jsonl")
+        for node_id, task, filtered in ((0, 0.60, 0.30), (1, 0.50, 0.45)):
+            store.append("node_created", {"node_id": node_id, "parent_ids": [],
+                                          "operator": "draft", "code": "pass\n",
+                                          "idea": {"operator": "draft", "params": {},
+                                                   "rationale": "seed"}})
+            store.append("node_evaluated", {
+                "node_id": node_id, "generation": 0, "metric": task, "violations": [],
+                "extra_metrics": {"filtered": filtered},
+                "extra_metrics_provenance": {"filtered": "declared"},
+                "metric_provenance": {"comparability": dict(key)}})
+        if retarget:
+            store.append("metric_retarget", {"key": "filtered"})
+        return rd
+
+    retargeted, plain = run("retargeted", retarget=True), run("plain", retarget=False)
+    refused = CliRunner().invoke(app, ["comparability", str(retargeted), str(plain)])
+    assert refused.exit_code == 3, refused.output
+    assert "retargeted: metric=0.5 (champion ranked by 'filtered' = 0.45" in refused.output, \
+        refused.output
+    assert "plain: metric=0.6 authority=measured" in refused.output, refused.output
+    assert "SAME evaluation" not in refused.output
+    assert "ranks its champion by 'filtered' and plain by the task's own metric" in refused.output
+
+    both = CliRunner().invoke(app, ["comparability", str(retargeted),
+                                    str(run("retargeted2", retarget=True))])
+    assert both.exit_code == 0 and "SAME evaluation" in both.output, both.output
+
+
 def test_the_case_library_elects_a_champion_within_one_evaluation_only(tmp_path):
     """THE WARM START — the memory tier whose whole job is handing a PREVIOUS run's number to the
     NEXT one. `_add_locked` grouped on `(task_id, direction)` alone, so a case measured on one test

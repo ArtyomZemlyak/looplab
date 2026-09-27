@@ -46,8 +46,10 @@ function BestMetric({ best }) {
   const value = Number.isInteger(best.value) ? String(best.value) : best.value.toFixed(4)
   return <span className="pc-metric"
     title={`best ${best.direction === 'min' ? 'lowest' : 'highest'} robust metric across `
-      + `${best.runs} run(s) of task ${best.taskId}`}>
-    {best.direction === 'min' ? '↓' : '↑'} {value}
+      + `${best.runs} run(s) of task ${best.taskId}`
+      + (best.objective ? ` — ranked by ${best.objective}, an operator retarget, not the task's `
+        + 'own metric' : '')}>
+    {best.direction === 'min' ? '↓' : '↑'} {value}{best.objective ? ` (${best.objective})` : ''}
   </span>
 }
 
@@ -162,7 +164,9 @@ function ConceptDetail({ forest, cooccurrence, id, runsById, onOpenRun, onClose,
           : 'not shown'}</dd>
         <p className="muted">{node.best
           ? `Best robust metric below this concept, over ${node.best.runs} run(s) of `
-            + `${node.best.taskId} (${node.best.direction}).`
+            + `${node.best.taskId} (${node.best.direction})`
+            + (node.best.objective ? ` — ranked by ${node.best.objective}, an operator retarget, `
+              + 'not the task’s own metric.' : '.')
           : 'The runs under this concept do not share one task and one objective direction, or none '
             + 'of them scored. A single number here would compare two different objectives.'}</p>
       </div>

@@ -26,7 +26,8 @@ from looplab.core.atomicio import file_identity
 from looplab.core.text import normalize_text
 from looplab.tools._base import RESULT_CAP, RowCountTooLarge, fn_spec, jsonl_row_count
 from looplab.trust.cross_run import (
-    LessonScope, cross_run_text, scope_terms, valid_live_direction)
+    LessonScope, cross_run_text, keep_retarget_clause, scope_terms, valid_live_direction,
+    with_retarget_clause)
 
 _LOG = logging.getLogger(__name__)
 _TOOL_NAMES = frozenset({
@@ -724,9 +725,12 @@ class CrossRunTools:
                 value = {True: "current", False: "stale-evidence", None: "unknown"}.get(
                     c.get("decision_fresh"), "unknown")
                 freshness = f"; decision_freshness={value}"
+            # A claim keyed on a retargeted run's lesson ends with that lesson's retarget clause
+            # (doc 68 68.2), which the 240-char cut took (critic 2026-09-27): re-attached.
+            statement = keep_retarget_clause(c["statement"], _safe_text(c["statement"], 240))
             return (f"[{mark.get(c['epistemic'], '?')}: {c['n_support']} for / "
                     f"{c['n_oppose']} against] "
-                    f"UNTRUSTED_MEMORY={_safe_text(c['statement'], 240)!r}; "
+                    f"UNTRUSTED_MEMORY={statement!r}; "
                     f"UNTRUSTED_MEMORY_EVIDENCE={evidence}; maturity={maturity!r}"
                     + freshness
                     + (f"; contradicts={contradicts}" if contradicts else ""))
@@ -777,7 +781,8 @@ class CrossRunTools:
                                      for x in atlas["thin_coverage"][:8]))
         if atlas["contradictions"]:
             lines.append("Mixed-evidence claim records: "
-                         + "; ".join(f"UNTRUSTED_MEMORY={_safe_text(c.get('statement'), 160)!r}"
+                         + "; ".join("UNTRUSTED_MEMORY=" + repr(keep_retarget_clause(
+                                         c.get("statement"), _safe_text(c.get("statement"), 160)))
                                      for c in atlas["contradictions"][:4]))
         projection_omitted = (
             int(atlas.get("explored_omitted", 0) or 0),
@@ -942,8 +947,9 @@ class CrossRunTools:
                     value = {True: "current", False: "stale-evidence", None: "unknown"}.get(
                         h.get("decision_fresh"), "unknown")
                     freshness = f"; maturity={maturity}; decision_freshness={value}"
+                claim_text = keep_retarget_clause(h["text"], _safe_text(h["text"], 160))
                 lines.append(f"[claim {h['epistemic']}: {h['n_support']}↑/{h['n_oppose']}↓; "
-                             f"score={h.get('score')}] UNTRUSTED_MEMORY={_safe_text(h['text'], 160)!r}"
+                             f"score={h.get('score')}] UNTRUSTED_MEMORY={claim_text!r}"
                              + freshness
                              + (f"; contradicts={contradicts}" if contradicts else ""))
             else:
@@ -1435,8 +1441,9 @@ class CrossRunTools:
             lines.append("  what runs noted:")
             for lz in notes[:3]:
                 out = _safe_text(str(lz.get("outcome") or "noted"), 20)
-                lines.append(f"    [{out}] "
-                             f"UNTRUSTED_MEMORY={_safe_text(lz.get('statement'), 200)!r}")
+                # A retargeted run's lesson keeps the clause its cut would take (doc 68 68.2).
+                lines.append(f"    [{out}] UNTRUSTED_MEMORY="
+                             f"{with_retarget_clause(_safe_text(lz.get('statement'), 200), lz)!r}")
 
         lines.append("  (No authored prose/paper overview yet — this card is assembled from cross-run "
                      "evidence; deep-research summarization is future work.)")

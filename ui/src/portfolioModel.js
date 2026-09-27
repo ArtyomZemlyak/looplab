@@ -1,6 +1,6 @@
 // The ranking rungs live in `runIndex.js` and are asked from there, never restated here —
 // see `comparableRunRanking` for what restating them cost.
-import { metricComparable, metricIncomparability, sourceIncomplete } from './runIndex.js'
+import { metricComparable, metricIncomparability, runObjective, sourceIncomplete } from './runIndex.js'
 
 const CONTROL = /[\u0000-\u001f\u007f]/
 const CONTROL_GLOBAL = /[\u0000-\u001f\u007f]/g
@@ -25,6 +25,14 @@ export const COMPARE_COLUMNS = Object.freeze([
   ['supertask', 'Super-task'],
   ['updated', 'Updated'],
 ])
+
+// The compare view's OBJECTIVE cell: the direction and — when an operator retarget ranked the run by
+// a declared extra metric (doc 68 68.2) — WHICH metric, since the `best` cell is then that metric's
+// value, not the task's own (critic 2026-09-27).
+export function compareObjective(run = {}) {
+  const objective = runObjective(run)
+  return (run.direction || '—') + (objective ? ` · ranked by ${objective} (an operator retarget)` : '')
+}
 
 export const DEFAULT_COMPARE_COLUMNS = Object.freeze([
   'status', 'task', 'best', 'objective', 'nodes', 'eval', 'cost', 'trust', 'champion',

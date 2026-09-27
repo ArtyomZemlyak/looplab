@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import html
 
-from looplab.core.models import NodeStatus, RunState
+from looplab.core.models import NodeStatus, RunState, retarget_note
 
 
 # How deep the nested <li> rendering will follow a parent chain. `traceview._tree` was made
@@ -107,12 +107,20 @@ def render_html(state: RunState, trace_view: dict | None = None) -> str:
             f"</tr>"
         )
     best = state.best()
+    # Under an operator retarget (doc 68 68.2) every metric on this page is the declared extra
+    # metric's, not the task's own: the Best line and the column say so (critic 2026-09-27), and a
+    # run with no retarget renders byte for byte as it did.
+    objective = getattr(state, "objective_key", None)
     if best:
         bm = best.robust_metric
         bm_s = "—" if bm is None else f"{bm:.6g}"
-        best_line = f"<b>Best:</b> node {best.id} — metric {bm_s} — params {html.escape(str(best.idea.params))}"
+        best_line = (f"<b>Best:</b> node {best.id} — metric {bm_s} — params "
+                     f"{html.escape(str(best.idea.params))}"
+                     + html.escape(retarget_note(objective)))
     else:
         best_line = "<b>Best:</b> (none yet)"
+    metric_header = ("metric" if not (isinstance(objective, str) and objective)
+                     else f"metric ({html.escape(objective)})")
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>LoopLab — {html.escape(state.run_id)}</title>
 <style>
@@ -129,7 +137,7 @@ def render_html(state: RunState, trace_view: dict | None = None) -> str:
  finished: {state.finished}</p>
 <p>{best_line}</p>
 <table>
- <thead><tr><th>node</th><th>parents</th><th>operator</th><th>params</th><th>status</th><th>metric</th><th>eval</th><th>agent</th><th>trace</th></tr></thead>
+ <thead><tr><th>node</th><th>parents</th><th>operator</th><th>params</th><th>status</th><th>{metric_header}</th><th>eval</th><th>agent</th><th>trace</th></tr></thead>
  <tbody>{''.join(rows)}</tbody>
 </table>
 </body></html>

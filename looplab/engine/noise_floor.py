@@ -10,7 +10,11 @@ field's "overfitting" is that it was evaluation noise. This phase re-evaluates O
 `Settings.eval_noise_seeds` repeats and records the spread: the metrics, the mean, the sample std,
 the range, and `sem` — the SAME quantity `one_se_better` compares a margin against
 (`core/fitness.py::standard_error_difference(std, n, 0.0, 0)`), so the >1-SE rule and the
-Mislead gap are on the floor's scale by construction rather than by a reader's arithmetic.
+Mislead gap are on the floor's scale by construction rather than by a reader's arithmetic — the
+TASK metric's scale: the repeats measure what the eval prints, so under an operator
+`metric_retarget` (doc 68 68.2) the floor is the task metric's noise while the >1-SE rule selects on
+the declared extra metric, and the row's `search_metric` is the node's task number beside its
+repeats (`core/models.py::task_measurement`). Nothing reads the floor to decide either way.
 
 WHAT IT IS NOT. It is not confirmation, even though both run seeds:
 

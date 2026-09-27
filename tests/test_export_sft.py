@@ -155,3 +155,42 @@ def test_a_proposal_is_not_grounded_by_a_build_that_ran_something_else(tmp_path)
     rows = _rows(rd / "sft.jsonl")
     assert [row["op"] for row in rows] == ["implement"]
     assert rows[0]["outcome"]["idea_implemented"] == "different"
+
+
+def test_a_retargeted_runs_rows_say_which_metric_their_outcome_is(tmp_path):
+    """Doc 68 68.2 (critic 2026-09-27): under an operator `metric_retarget` a row's `outcome.metric`
+    is the declared extra metric's value — what the run ranked by — and a corpus pooled across runs
+    of the task read it as the task's own. The row names the objective and carries the task's number
+    beside it; a run without a retarget exports byte for byte as it did (the first test pins that)."""
+    rd = tmp_path / "run"
+    rd.mkdir()
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    store.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                  "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+    store.append("node_evaluated", {"node_id": 0, "metric": 0.25,
+                                    "extra_metrics": {"latency": 3.5},
+                                    "extra_metrics_provenance": {"latency": "declared"}})
+    store.append("metric_retarget", {"key": "latency"})
+    (rd / "spans.jsonl").write_text(json.dumps(_span(
+        "s1", node_id=0, messages=[{"role": "user", "content": "propose"}])) + "\n",
+        encoding="utf-8")
+    result = CliRunner().invoke(app, ["export-sft", str(rd)])
+    assert result.exit_code == 0, result.output
+    [row] = _rows(rd / "sft.jsonl")
+    assert row["objective_key"] == "latency"
+    assert row["outcome"]["metric"] == 3.5 and row["outcome"]["task_metric"] == 0.25, row
+    # A node the retarget left UNRANKED (no `latency`) still measured the task's own metric: it is an
+    # outcome, and `--only-successful` keeps it rather than reading it as a failure.
+    store.append("node_created", {"node_id": 1, "parent_ids": [0], "operator": "improve",
+                                  "idea": {"operator": "improve", "params": {}, "rationale": ""}})
+    store.append("node_evaluated", {"node_id": 1, "metric": 0.2})
+    (rd / "spans.jsonl").write_text("".join(json.dumps(_span(
+        sid, node_id=nid, messages=[{"role": "user", "content": "propose"}])) + "\n"
+        for sid, nid in (("s1", 0), ("s2", 1))), encoding="utf-8")
+    result = CliRunner().invoke(app, ["export-sft", str(rd), "--only-successful"])
+    assert result.exit_code == 0, result.output
+    unranked = [r for r in _rows(rd / "sft.jsonl") if r["outcome"]["node_id"] == 1]
+    assert unranked and unranked[0]["outcome"]["metric"] is None, unranked
+    assert unranked[0]["outcome"]["task_metric"] == 0.2
+    assert "2 of 2 turn(s) are joined to a node that produced a metric" in result.output

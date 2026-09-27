@@ -1809,6 +1809,29 @@ def test_status_panel_survives_rich_markup_in_goal_and_stop_reason():
     assert "strip" in out and "aborted" in out     # goal + stop_reason rendered (escaped), not crashed
 
 
+def test_a_retargeted_runs_best_says_which_metric_it_is():
+    """Doc 68 68.2 (critic 2026-09-27): under an operator retarget the best is a declared extra
+    metric's value, and the dashboard and the status panel printed it bare, as the task's own. Both
+    name the key — escaped like every other operator-authored string here — and a run with no
+    retarget draws exactly as it did."""
+    console = _render_console()
+    console.print(tui.status_panel("demo", {
+        "phase": "finished", "finished": True, "best_node_id": 0, "objective_key": "fil[/b]tered",
+        "nodes": {"0": {"metric": 0.45}},
+    }))
+    out = console.file.getvalue()
+    assert "ranked by 'fil[/b]tered', an operator retarget" in out, out
+    plain = _render_console()
+    plain.print(tui.status_panel("demo", {"phase": "finished", "finished": True,
+                                          "best_node_id": 0, "nodes": {"0": {"metric": 0.45}}}))
+    assert "ranked by" not in plain.file.getvalue()
+    board = _render_console()
+    tui.draw_dashboard(board, [{"run_id": "demo", "phase": "search", "nodes": 3,
+                                "best_metric": 0.45, "objective_key": "filtered", "task_id": "t",
+                                "mtime": 0}], base="http://x", live=False)
+    assert "(filtered)" in board.file.getvalue()
+
+
 # ------------------------------------------------------- the screen renderers are not on the class
 # (doc 25 SC-15's remaining half.) These five used to be `Tui` methods reading `self.console`,
 # `self.api.base` and `self._interactive()`, so nothing could draw a screen without the whole REPL.

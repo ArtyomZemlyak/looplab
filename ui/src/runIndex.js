@@ -162,7 +162,13 @@ export function bestMetricCaveatNotice(run = {}) {
                 + 'averaged their weights and scored the average. Nobody chose the configuration '
                 + 'this result is filed under, so it sits at coordinates no run ever occupied. The '
                 + 'metric itself was measured normally, and the run selected on it.'
-              : `The server reports a caveat this view has no sentence for: “${slug}”.`))
+              : slug === CHAMPION_CAVEAT_RETARGETED_OBJECTIVE
+                // Doc 68 68.2: the row names the key (`objective_key`), so the sentence does too.
+                ? `An operator retarget made a declared extra metric${runObjective(run)
+                  ? ` (“${runObjective(run)}”)` : ''} this run’s objective: its best metric is `
+                  + 'that metric’s value, not the task’s own, and every node was ranked by it. It '
+                  + 'is a different ruler from any run ranked by the task’s own metric.'
+                : `The server reports a caveat this view has no sentence for: “${slug}”.`))
   return sentences.join(' ')
 }
 

@@ -146,6 +146,25 @@ def test_an_unmet_condition_backs_off_instead_of_polling_and_spends_nothing(tmp_
         "every poll must record what it SAW — this is the 'does not go dark' property")
 
 
+def test_the_observation_names_the_objective_a_retarget_ranked_by(tmp_path):
+    """Doc 68 68.2 (critic 2026-09-27): the observation carried a retargeted run's best bare — a
+    declared extra metric's value, read as the task's own by the model it wakes. It names the key,
+    only then, so every other observation keeps its bytes under the preamble's cap."""
+    store = _store(tmp_path)
+    rows = {"demo": {"phase": "search", "engine_running": True, "finished": False,
+                     "best_metric": 0.45, "objective_key": "filtered"},
+            "plain": {"phase": "search", "engine_running": True, "finished": False,
+                      "best_metric": 0.7, "objective_key": None}}
+    svc = _service(store, rows=rows, turns=[])
+    retargeted = store.arm(session="s1", instruction="tell me when it finishes",
+                           trigger={"kind": "run_state", "run": "demo", "until": ["finished"]})
+    plain = store.arm(session="s2", instruction="tell me when it finishes",
+                      trigger={"kind": "run_state", "run": "plain", "until": ["finished"]})
+    svc.tick(now=time.time())
+    assert store.get(retargeted["id"])["last_observation"]["objective_key"] == "filtered"
+    assert "objective_key" not in store.get(plain["id"])["last_observation"]
+
+
 # ------------------------------------------------------------------ waiting on a status
 def test_the_watch_fires_when_the_server_observes_the_state_and_then_retires(tmp_path):
     store = _store(tmp_path)

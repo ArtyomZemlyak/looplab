@@ -28,6 +28,10 @@ from typing import Optional
 
 from looplab.core.memory_window import read_memory_jsonl_window
 from looplab.trust.cross_run import LessonScope, cross_run_text, scope_terms
+# The retarget clause's two helpers moved to `trust/cross_run.py` (2026-09-27) so the agent-facing
+# memory readers in `tools/` apply the same one; re-exported here under their first home.
+from looplab.trust.cross_run import (  # noqa: F401 — re-exported
+    retargeted_lesson_note, with_retarget_clause)
 
 # Which ROLE a cross-run lesson is for, so the two contexts stay separate (the Researcher gets only
 # R&D / "what technique to try" lessons, the Developer only its own "what code change fixed a crash"
@@ -63,29 +67,6 @@ CASE_PARAMS_CHARS = 1_200
 #: (exact match), the priors block reaching `card_build`/`plan`/`stages`/`inline_repair`, and top-5
 #: ranking, which that lesson WON. It was destroyed in the last inch.
 LESSON_STATEMENT_CHARS = 400
-
-
-def retargeted_lesson_note(objective: str) -> str:
-    """The clause a lesson from an operator-RETARGETED run carries (doc 68 68.2): every number that
-    run ranked on was a declared extra metric's, and a later run of the task reads the lesson beside
-    its own task metric. `lessons.py::append_lessons` appends it to the statement (so every reader of
-    the store sees it) and the prior renderer below re-attaches it when a long statement's cut took
-    it — it rides at the END, where a cut lands, because a shared PREFIX would make every retargeted
-    lesson one `prompt_slot_key` family and spend one slot for all of them."""
-    return f" [ranked by {objective!r}, an operator-retargeted objective, not the task's own metric]"
-
-
-def with_retarget_clause(text: str, row: dict) -> str:
-    """`text` (a rendered, cut statement or note of the shared-store `row`) with the row's
-    `retargeted_lesson_note` re-attached when the cut took it off the end. The row's key is shared
-    free text, so it is bounded and redacted like the text it rides on. `text` unchanged for every row
-    without an `objective_key`, which is every row written before 2026-09-27."""
-    objective = row.get("objective_key") if isinstance(row, dict) else None
-    if not (isinstance(objective, str) and objective.strip()):
-        return text
-    clause = retargeted_lesson_note(
-        cross_run_text(objective, max_chars=300, single_line=True, entropy=True).strip())
-    return text if clause in text else text + clause
 
 
 def _memoized_embed(embed):

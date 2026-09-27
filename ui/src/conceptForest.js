@@ -21,7 +21,7 @@
 // runs over the exact array the list is showing, which is also what makes the scope shared by
 // CONSTRUCTION rather than by two code paths agreeing to filter the same way.
 import { conceptMap, normalizeConceptId } from './conceptId.js'
-import { metricComparable } from './runIndex.js'
+import { metricComparable, runObjective } from './runIndex.js'
 import { UNTAGGED } from './conceptShelf.js'
 
 export { UNTAGGED }
@@ -251,7 +251,11 @@ export function nodeBest(node, runsById) {
     value = value == null ? metric : pickBetter(value, metric, direction)
   }
   if (value == null) return null
-  return { value, direction, taskId: contributing[0].task_id, runs: contributing.length }
+  // …and ONE objective (`metricComparable` refuses a mix): when an operator retarget ranked every
+  // contributing run by a declared extra metric (doc 68 68.2), the value is that metric's and the
+  // render names it — unnamed it read as the task's own (critic 2026-09-27). '' otherwise.
+  return { value, direction, taskId: contributing[0].task_id, runs: contributing.length,
+    objective: runObjective(contributing[0]) }
 }
 
 // Ids that differ ONLY in `-` vs `_` — the disagreement this corpus actually contains

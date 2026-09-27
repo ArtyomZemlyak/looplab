@@ -2380,11 +2380,20 @@ class RunCommandService:
         of 6 fired as the drain's rescored node landed).
 
         Only a command this service did NOT start an engine for (it rode on the engine alive when it
-        was admitted), never a drain-requested reset (its own drain serves it), never an intent that
-        asks for the search itself (`engine/run_boundary.py::DRAIN_LEFT_FOR_THE_SEARCH`), and only
-        while the run sits on the drain's own pause (`CommandObservation.drain_paused`)."""
+        was admitted, or it is admitted onto the drain's pause after the drain exited — which of the
+        two is a race the operator cannot see, so the log decides, not the process), never a
+        drain-requested reset (its own drain serves it), never an intent that asks for the search
+        itself (`engine/run_boundary.py::DRAIN_LEFT_FOR_THE_SEARCH`), only an `engine_ack` command —
+        a search's ack is what it waits for; a finalize's postcondition is the FINISH, which no
+        search that follows will write, so it starts the engine that finalizes (critic 2026-09-27,
+        driven: settled `deferred`, a finalize started nothing, and the `resume` the UI then offered
+        was refused `finalize_in_progress`) — and only while the run sits on the drain's own pause
+        (`CommandObservation.drain_paused`). Asked by the monitor's re-spawn AND by admission's
+        spawn ladder, a crash re-drive included: asked by the monitor alone, a command whose worker
+        died was re-driven into the plain `resume` the rule exists to refuse (same pass)."""
         from looplab.engine.run_boundary import DRAIN_LEFT_FOR_THE_SEARCH
         return (not record.get("spawned_by_command") and record.get("drain_only") is not True
+                and record.get("postcondition") == "engine_ack"
                 and record.get("event_type") not in DRAIN_LEFT_FOR_THE_SEARCH
                 and observation.drain_paused())
 
@@ -4000,6 +4009,13 @@ class RunCommandService:
                 if not self._try_restart_claim(rd, path, record):
                     return None, record
             elif spec.engine_policy is not EnginePolicy.NO_SPAWN and liveness is False:
+                if self._left_for_the_next_search(record, observation):
+                    # No engine, and the run sits on a drain's own pause: the intent waits for the
+                    # search that follows, exactly as the monitor's re-spawn rung settles it — this
+                    # ladder is also where a command whose worker died is re-driven, and a plain
+                    # `resume` here lifted the pause the drain was asked to leave (doc 68 68.3b).
+                    self._succeeded(rd, path, record, deferred=True)
+                    return None, record
                 spawned_now = False
                 pid = LAUNCH_IN_FLIGHT
                 if not self._recent_spawn_claim(rd):

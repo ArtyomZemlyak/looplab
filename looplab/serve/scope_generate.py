@@ -201,23 +201,33 @@ def run_brief(srv, run_id: str, labels: dict, source: FrozenScopeSource) -> dict
             source.task_doc.get("comparison_contract"))
     if task_contract is not None and task_contract["direction"] != st.direction:
         task_contract = None
-    measurement = comparison_measurement(task_contract, best)
+    # UNDER AN OPERATOR RETARGET (doc 68 68.2, critic 2026-09-27, driven) the champion was chosen on
+    # a declared extra metric and every phase of it — the search value, the confirmation (re-measured
+    # on the new key) — is that metric's, not the one a contract declares: the contracted receipt is
+    # unavailable rather than a number on another ruler, and the brief names the objective.
+    objective = st.objective_key
+    measurement = comparison_measurement(task_contract, best) if objective is None else None
     # An explicit phase contract never falls back to the generic search metric.  Legacy runs
     # without a contract retain an unranked observation, while opted-in runs with missing/non-
     # finite phase evidence publish no measurement at all.
     best_metric = (measurement["value"] if measurement is not None else
                    finite_measurement(best.metric) if task_contract is None and best else None)
-    return {"run_id": run_id, "label": labels.get(run_id), "task_id": st.task_id,
-            "goal": st.goal, "direction": st.direction,
-            "model": cfg.get("llm_model"), "policy": cfg.get("policy"),
-            "best_metric": best_metric,
-            "phase": srv.phase(st, finalize_incomplete=finalize_incomplete),
-            "nodes": len(st.nodes),
-            "report": st.report if isinstance(st.report, dict) else None,
-            "comparison_contract": task_contract,
-            # this single bounded receipt is the only cross-run numeric evidence.
-            # Scope projection must copy it atomically; phase/source/uncertainty are inseparable.
-            "comparison_measurement": measurement}
+    brief = {"run_id": run_id, "label": labels.get(run_id), "task_id": st.task_id,
+             "goal": st.goal, "direction": st.direction,
+             "model": cfg.get("llm_model"), "policy": cfg.get("policy"),
+             "best_metric": best_metric,
+             "phase": srv.phase(st, finalize_incomplete=finalize_incomplete),
+             "nodes": len(st.nodes),
+             "report": st.report if isinstance(st.report, dict) else None,
+             "comparison_contract": task_contract,
+             # this single bounded receipt is the only cross-run numeric evidence.
+             # Scope projection must copy it atomically; phase/source/uncertainty are inseparable.
+             "comparison_measurement": measurement}
+    if objective is not None:
+        # Only when one is in force, so every other run's brief — and the prompt it becomes — is
+        # byte-identical.
+        brief["objective_key"] = objective
+    return brief
 
 
 def scope_drill(srv, frozen_runs: dict, run_id: str, node_id: int) -> str:

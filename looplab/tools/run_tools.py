@@ -18,7 +18,8 @@ from looplab.events import digest
 from looplab.core.advisory_payloads import (MAX_RESEARCH_CLAIMS, VERDICT_UNVERIFIED,
                                             memo_verification_view, verdict_tally)
 from looplab.core.models import (NodeStatus, RunState, card_lineage_brief,
-                                 extra_metric_channel)
+                                 extra_metric_channel,
+                                 retarget_note)  # noqa: F401 — re-exported: its first home
 from looplab.core.param_carriers import node_params_brief
 from looplab.tools._base import RESULT_CAP, clip, fit_rows, fn_spec
 from looplab.tools._runcache import RunStateCache
@@ -1180,16 +1181,6 @@ class RunTools:
             missing.append(("summary", _MEMO_SUMMARY_LABEL))
         receipt = self._memo_elsewhere(missing)
         return body + (f"\n{receipt}" if receipt else "")
-
-
-def retarget_note(objective_key) -> str:
-    """The clause a foreign run's listing row carries when an operator RETARGETED it (doc 68 68.2):
-    its best is a DECLARED extra metric's value, not the task's own, and printed bare it read as the
-    task's (critic 2026-09-27, driven: "retargeted: best=0.7" beside task-metric siblings). "" for
-    every run without a retarget, so those rows are byte-identical."""
-    if not (isinstance(objective_key, str) and objective_key):
-        return ""
-    return f" · RANKED BY {objective_key!r} (an operator retarget), not the task's own metric"
 
 
 class ForeignRunReader:

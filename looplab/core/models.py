@@ -292,10 +292,24 @@ def task_scale_metric(node, objective_key) -> Optional[float]:
     return node.task_metric
 
 
+def retarget_note(objective_key) -> str:
+    """The clause a number carries when an operator RETARGETED its run (doc 68 68.2): the best is a
+    DECLARED extra metric's value, not the task's own, and printed bare it read as the task's
+    (critic 2026-09-27, driven: "retargeted: best=0.7" beside task-metric siblings). "" for every
+    run without a retarget, so those surfaces are byte-identical. Here, not in `tools/`, since the
+    second pass: the tree view and the notebook export (`events/`) print a champion too, and may
+    import nothing above `core`; `tools/run_tools.py` re-exports it under its first home."""
+    if not (isinstance(objective_key, str) and objective_key):
+        return ""
+    return f" · RANKED BY {objective_key!r} (an operator retarget), not the task's own metric"
+
+
 def task_measurement(node, objective_key) -> Optional[float]:
-    """`task_scale_metric`'s twin for a reader INSIDE the run holding a node beside a fresh
-    measurement of the task metric (a live ASHA sample, the eval noise floor's repeats): `metric` when
-    no retarget is in force — exactly what those readers always read — else `task_metric`."""
+    """`task_scale_metric`'s twin for a reader holding a node's SINGLE measurement — beside a fresh
+    measurement of the task metric inside the run (a live ASHA sample, the eval noise floor's
+    repeats), or per node in the shared regime ledger (`engine/regime_contrast.py::run_contrast`):
+    `metric` when no retarget is in force — exactly what those readers always read — else
+    `task_metric`."""
     if objective_key is None:
         return node.metric
     return node.task_metric
@@ -2894,6 +2908,18 @@ class RunState(BaseModel):
 
     def best(self) -> Optional[Node]:
         return self.nodes.get(self.best_node_id) if self.best_node_id is not None else None
+
+    def task_goal(self) -> str:
+        """The goal as the TASK stated it — before any operator `metric_retarget` restated it (doc
+        68 68.2): the first restatement's `previous_goal`, else `goal`. A number on the task's scale
+        handed to another run (a case, a concept capsule) was measured on this goal, not on the
+        restated one (critic 2026-09-27, driven: a case read "metric=0.5 … measured on this goal:
+        maximize filtered recall" where 0.5 was the task's recall). `goal` on every run no retarget
+        restated, byte for byte."""
+        for row in self.objective_history:
+            if isinstance(row, dict) and isinstance(row.get("previous_goal"), str):
+                return row["previous_goal"]
+        return self.goal
 
     def research_cards(self) -> list["Card"]:
         """Canonical (non-merged-away) Card work items on the research board.

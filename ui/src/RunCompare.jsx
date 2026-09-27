@@ -1,7 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { distinctMetricFormatter, get, fmt, fmtAgo, fmtCost, fmtElapsedSeconds, normalizeRunGeneration, runApiPath } from './util.js'
 import { effectiveRunStatus, metricIncomparabilityText } from './runIndex.js'
-import { comparableRunRanking, COMPARE_COLUMNS, configDifferences } from './portfolioModel.js'
+import { comparableRunRanking, COMPARE_COLUMNS, compareObjective, configDifferences } from './portfolioModel.js'
 import { deadlineRequest } from './requestDeadline.js'
 import { hashWithRunRouteState } from './runRouteState.js'
 
@@ -117,7 +117,7 @@ const valueFor = (id, run, detail, names, formatMetric) => {
   if (id === 'status') return effectiveRunStatus(run)
   if (id === 'task') return run.task_id || '—'
   if (id === 'best') return formatMetric(run.best_confirmed ?? run.best_metric)
-  if (id === 'objective') return run.direction || '—'
+  if (id === 'objective') return compareObjective(run)
   if (id === 'nodes') return run.nodes ?? '—'
   if (id === 'eval') return fmtElapsedSeconds(state?.total_eval_seconds)
   if (id === 'cost') return state?.llm_cost?.cost == null ? '—' : fmtCost(state.llm_cost)

@@ -1720,6 +1720,10 @@ def _on_metric_retarget(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> Non
         return
     key = key.strip() if isinstance(key, str) else None
     direction = d.get("direction")
+    if isinstance(direction, str):
+        # Read in the spelling `serve/control_validation.py` normalizes to before appending, so a
+        # row an earlier build wrote as "MAX" is the run's own max, never a flip (critic 2026-09-27).
+        direction = direction.strip().lower()
     if direction is not None and direction != st.direction:
         return
     if st.host_grading or st.holdout_evaluated_ids or key == st.objective_key:
@@ -1731,17 +1735,19 @@ def _on_metric_retarget(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> Non
         # that restated it — the earliest restatement's `previous_goal` since the last undo. A
         # restated goal kept over the task metric's numbers read "Goal: maximize filtered recall …
         # Best so far: 0.7" with no "Ranked by" line (critic 2026-09-27, driven). Kept when no
-        # retarget restated one.
+        # retarget restated one. An EMPTY launch goal is a goal to restore too (critic 2026-09-27,
+        # second pass: it was read as "nothing to restore" and the restated one stayed).
         for row in reversed(st.objective_history):
             if row.get("key") is None:
                 break
-            if "previous_goal" in row:
+            if isinstance(row.get("previous_goal"), str):
                 goal = row["previous_goal"]
         goal = goal if goal != st.goal else None
     st.objective_history.append({"seq": e.seq, "key": key, "previous": st.objective_key,
-                                 **({"goal": goal, "previous_goal": st.goal} if goal else {})})
+                                 **({"goal": goal, "previous_goal": st.goal}
+                                    if goal is not None else {})})
     st.objective_key = key
-    if goal:
+    if goal is not None:
         # The RESTATED goal is the run's goal from here on — every prompt and report reads
         # `st.goal` — and the one it replaces is kept in the history row; the launch record itself
         # stays `run_started.goal`, which the incident edited in place.

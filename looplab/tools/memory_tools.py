@@ -16,7 +16,7 @@ from looplab.core.memory_window import (
     read_memory_jsonl_window,
 )
 from looplab.core.redact import redact_persisted_text
-from looplab.trust.cross_run import LessonScope, scope_terms
+from looplab.trust.cross_run import LessonScope, scope_terms, with_retarget_clause
 _LOG = logging.getLogger(__name__)
 _TOOL_NAMES = frozenset({"search_lessons", "recall_notes"})
 _TOOL_UNAVAILABLE = "(memory tool unavailable)"
@@ -305,9 +305,12 @@ class MemoryTools:
             {"id": "note-" + hashlib.sha256(str(row.get("note")).encode("utf-8")).hexdigest()[:24],
              "statement": _safe_text(row.get("note"), 160)}
             for row in matched]
+        # A retargeted run's note keeps the clause its cut would take (doc 68 68.2, critic
+        # 2026-09-27): it rides at the END of the note, where `_NOTE_CHARS` lands.
         lines = [
             f"UNTRUSTED_TASK={_safe_text(row.get('task_id'), _TASK_ID_CHARS)!r}; "
-            f"UNTRUSTED_MEMORY_NOTE={_safe_text(row.get('note'), _NOTE_CHARS)!r}"
+            "UNTRUSTED_MEMORY_NOTE="
+            f"{with_retarget_clause(_safe_text(row.get('note'), _NOTE_CHARS), row)!r}"
             for row in matched
         ]
         return _bounded_result(header, lines)
@@ -361,7 +364,8 @@ class MemoryTools:
             provenance = f"; traceable_sources={min(traceable, count)}/{count}"
         return (
             f"UNTRUSTED_OUTCOME={_safe_text(row.get('outcome'), _OUTCOME_CHARS)!r}; "
-            f"UNTRUSTED_MEMORY={_safe_text(row.get('statement'), _STATEMENT_CHARS)!r}; "
+            "UNTRUSTED_MEMORY="
+            f"{with_retarget_clause(_safe_text(row.get('statement'), _STATEMENT_CHARS), row)!r}; "
             f"{count} agreeing recorded observation{plural}{confidence}{provenance}; "
             "not independent verification"
         )

@@ -2722,6 +2722,11 @@ def build_router(srv) -> APIRouter:
             ent[e] = {"prov:label": f"solution node {n.id} · generation {generation}",
                       "ll:node_id": n.id, "ll:generation": generation,
                       "ll:metric": n.robust_metric,
+                      # Under an operator retarget (doc 68 68.2) `ll:metric` is a declared extra
+                      # metric's: the entity names it and carries the task's own number beside it
+                      # (critic 2026-09-27). Absent on every other run, whose document is unchanged.
+                      **({"ll:objective_key": st.objective_key, "ll:task_metric": n.task_metric}
+                         if st.objective_key else {}),
                       "ll:status": n.status, "ll:operator": n.operator, "ll:feasible": n.feasible,
                       "ll:is_best": n.id == st.best_node_id}
             act[a] = {"prov:label": f"{n.operator} experiment · node {n.id} · generation {generation}",

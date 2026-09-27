@@ -81,6 +81,13 @@ def _node_context(st, nid: Optional[int]) -> str:
     best = st.best()
     lines = [f"Run goal: {st.goal or st.task_id}", f"Optimization direction: {st.direction}",
              f"Nodes so far: {len(st.nodes)} ({len(st.evaluated_nodes())} evaluated)."]
+    objective = getattr(st, "objective_key", None)
+    if isinstance(objective, str) and objective:
+        # Under an operator retarget (doc 68 68.2) every `metric` below is a declared extra metric's
+        # value, and bare it read as the task's own (critic 2026-09-27). Only then, so every other
+        # run's context is byte-identical.
+        lines.append(f"Ranked by: {objective!r} — an operator `metric_retarget`: every metric= "
+                     "below is that declared metric's value, not the task's own.")
     if best is not None:
         lines.append(f"Best node #{best.id}: metric={best.metric} "
                      f"params={best.idea.params} operator={best.operator}")

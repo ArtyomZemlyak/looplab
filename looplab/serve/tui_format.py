@@ -269,8 +269,13 @@ def runs_table(runs: list):
         glyph, colour, label = phase_meta(r)
         best = r.get("best_confirmed")
         best = r.get("best_metric") if best is None else best
+        # Under an operator retarget (doc 68 68.2) the best is a declared extra metric's value: the
+        # cell names it rather than read as the task's own (critic 2026-09-27).
+        objective = r.get("objective_key")
+        ranked = (f" [dim]({_esc(objective)})[/dim]"
+                  if isinstance(objective, str) and objective else "")
         t.add_row(str(i), _esc(r.get("run_id", "?")), f"[{colour}]{glyph} {_esc(label)}[/{colour}]",
-                  str(r.get("nodes", 0)), fmt_metric(best),
+                  str(r.get("nodes", 0)), fmt_metric(best) + ranked,
                   _esc((r.get("task_id") or r.get("goal") or "—")[:28]), fmt_ago(r.get("mtime")))
     return t
 
@@ -291,7 +296,11 @@ def status_panel(run_id: str, state: dict):
         f"[{colour}]{glyph} {_esc(label)}[/{colour}]"
         + (f"   direction={state.get('direction')}" if state.get("direction") else ""),
         f"nodes: [bold]{len(nodes)}[/bold] total · {ok} scored · {running} in flight",
-        f"best:  [bold]{fmt_metric(best)}[/bold]" + (f"  (node {best_id})" if best_id is not None else ""),
+        f"best:  [bold]{fmt_metric(best)}[/bold]" + (f"  (node {best_id})" if best_id is not None else "")
+        # repr FIRST, then escaped: an escape inside a repr is doubled, and the markup survives it.
+        + (f"  ranked by {_esc(repr(state['objective_key']))}, an operator retarget — not the "
+           "task's own metric" if isinstance(state.get("objective_key"), str)
+           and state["objective_key"] else ""),
     ]
     if state.get("goal"):
         lines.append(f"goal:  {_esc(state['goal'])}")

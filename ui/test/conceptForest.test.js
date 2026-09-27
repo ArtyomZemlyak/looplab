@@ -132,7 +132,25 @@ test('a best metric appears only when the contributing runs share one objective'
     run('b', { 'model/gbm': tag(1, 0.95) }),
   ])
   assert.deepEqual(forest.nodes['model/gbm'].best,
-    { value: 0.95, direction: 'max', taskId: 'blob_classification', runs: 2 })
+    { value: 0.95, direction: 'max', taskId: 'blob_classification', runs: 2, objective: '' })
+})
+
+test('runs an operator retarget ranked by one declared metric name it beside their best', () => {
+  // Doc 68 68.2 (critic 2026-09-27): `metricComparable` admits runs retargeted to the SAME key —
+  // one ruler — and their best is that declared metric's value, which unnamed read as the task's.
+  const retargeted = { objective_key: 'filtered' }
+  const forest = buildConceptForest([
+    run('a', { 'model/gbm': tag(2, 0.40) }, retargeted),
+    run('b', { 'model/gbm': tag(1, 0.45) }, retargeted),
+  ])
+  assert.equal(forest.nodes['model/gbm'].best.objective, 'filtered')
+  assert.equal(forest.nodes['model/gbm'].best.value, 0.45)
+  // …and a retargeted run beside a plain one is two rulers: no number at all.
+  const mixed = buildConceptForest([
+    run('a', { 'model/gbm': tag(2, 0.40) }, retargeted),
+    run('b', { 'model/gbm': tag(1, 0.95) }),
+  ])
+  assert.equal(mixed.nodes['model/gbm'].best, null)
 })
 
 test('two objectives in one subtree yield NO metric, not a mixed one', () => {

@@ -7,6 +7,7 @@ legacy rows written before durable sanitizers existed.
 from __future__ import annotations
 
 import math
+import re
 from itertools import islice
 
 from looplab.core.redact import (
@@ -155,6 +156,52 @@ def cross_run_text(value, *, max_chars: int, single_line: bool = True,
     # collapsed. Cross-run fields are prompt/API labels, so enforce the single-line contract after the
     # marker is added as well.
     return " ".join(text.split()) if single_line else text
+
+
+def retargeted_lesson_note(objective: str) -> str:
+    """The clause a lesson from an operator-RETARGETED run carries (doc 68 68.2): every number that
+    run ranked on was a declared extra metric's, and a later run of the task reads the lesson beside
+    its own task metric. `engine/lessons.py::append_lessons` appends it to the statement, and every
+    renderer that cuts a statement for a model re-attaches it when the cut took it — the prior
+    (`engine/lessons_priors.py`), the agent's memory pulls (`tools/memory_tools.py`) and the
+    cross-run claim, atlas, search and concept-card lines (`tools/cross_run_tools.py`, through
+    `keep_retarget_clause` where a claim holds only the text). It rides at the END, where a cut
+    lands, because a shared PREFIX would make every retargeted lesson one `prompt_slot_key` family
+    and spend one slot for all of them. Here, beside `cross_run_text`, since the critic's second pass
+    (2026-09-27): the readers in `tools/` reach `engine/` only through its leaves."""
+    return f" [ranked by {objective!r}, an operator-retargeted objective, not the task's own metric]"
+
+
+def with_retarget_clause(text: str, row: dict) -> str:
+    """`text` (a rendered, cut statement or note of the shared-store `row`) with the row's
+    `retargeted_lesson_note` re-attached when the cut took it off the end. The row's key is shared
+    free text, so it is bounded and redacted like the text it rides on. `text` unchanged for every row
+    without an `objective_key`, which is every row written before 2026-09-27."""
+    objective = row.get("objective_key") if isinstance(row, dict) else None
+    if not (isinstance(objective, str) and objective.strip()):
+        return text
+    clause = retargeted_lesson_note(
+        cross_run_text(objective, max_chars=300, single_line=True, entropy=True).strip())
+    return text if clause in text else text + clause
+
+
+# The clause's own shape, for a reader that holds only the TEXT a statement became — a cross-run
+# CLAIM is keyed on the lesson statement the clause was appended to, and carries no `objective_key`.
+_RETARGET_CLAUSE_RE = re.compile(
+    r" \[ranked by (?:'[^'\]]{1,320}'|\"[^\"\]]{1,320}\"), an operator-retargeted objective, "
+    r"not the task's own metric\]$")
+
+
+def keep_retarget_clause(full: str, cut: str) -> str:
+    """`cut` — a bounded rendering of the statement `full` — with the retarget clause `full` ENDS
+    with re-attached when the cut took it (doc 68 68.2). `cut` unchanged for every statement that
+    carries none."""
+    match = _RETARGET_CLAUSE_RE.search(full) if isinstance(full, str) else None
+    if match is None:
+        return cut
+    # The key inside it is shared free text: bounded and redacted like the text it rides on.
+    clause = " " + cross_run_text(match.group(0), max_chars=400, single_line=True, entropy=True)
+    return cut if clause in cut else cut + clause
 
 
 def cross_run_identity_text(value, *, max_chars: int) -> str:

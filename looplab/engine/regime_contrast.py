@@ -39,6 +39,7 @@ import statistics
 from typing import Optional
 
 from looplab.core.fitness import is_better
+from looplab.core.models import task_measurement
 from looplab.core.run_identity import run_ref
 
 # THE REGIMES, in the order a reader should think about them: what the node COMPILED, if anything.
@@ -156,8 +157,15 @@ def run_contrast(state) -> Optional[dict]:
     "on `edge_expansion`, compiled beat plain 6x over 65 nodes" is a measurement another task can
     weigh.
     """
-    nodes = [n for n in getattr(state, "feasible_nodes", lambda: [])() if n.metric is not None]
-    rows = [(node_regime(getattr(n, "files", None)), n.metric) for n in nodes]
+    # ON THE TASK'S OWN SCALE (doc 68 68.2, critic 2026-09-27, driven): the ledger is pooled across
+    # every run of the task, and under an operator retarget `metric` is the declared extra metric's —
+    # a retargeted run's regimes were written in another ruler's units, with no key, and pooled into
+    # every later run's `here` beside plain runs' medians. The task's number is the node's own single
+    # measurement: exactly `metric`, byte for byte, on every run no retarget touched.
+    objective_key = getattr(state, "objective_key", None)
+    measured = [(n, task_measurement(n, objective_key))
+                for n in getattr(state, "feasible_nodes", lambda: [])()]
+    rows = [(node_regime(getattr(n, "files", None)), m) for n, m in measured if m is not None]
     if not rows:
         return None
     stamp = {"task_id": getattr(state, "task_id", ""),
