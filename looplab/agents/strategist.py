@@ -359,6 +359,10 @@ def validate_strategy(strat: Optional[Strategy], ctx: StrategyContext) -> Option
             clean["complexity_cue"] = ops["complexity_cue"]
         if isinstance(ops.get("ablate_code_blocks"), bool):
             clean["ablate_code_blocks"] = ops["ablate_code_blocks"]
+        # doc 67 67.5: a code-block ablation's no-worse probe nominates a `simplify` node
+        # (`search/policy.py::simplify_actions`); applied only under the `ablation_simplify` grant.
+        if isinstance(ops.get("simplify"), bool):
+            clean["simplify"] = ops["simplify"]
         # Intra-node sweep bias: a hint that nudges the Researcher toward a sweep. The Strategist
         # only sets the flag — it never creates a sweep itself (the Researcher decides whether/how
         # to build the grid), preserving the "Researcher is the decision-maker" division.

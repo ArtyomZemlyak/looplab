@@ -2211,7 +2211,7 @@ def card_next_actions(
     if fallback:
         # An optional/custom policy can return a wide creation batch. Never let that fallback overrun
         # the L3 effective budget in one iteration.
-        creates = {"draft", "improve", "debug", "merge", "ablate"}
+        creates = {"draft", "improve", "debug", "merge", "ablate", "simplify"}
         bounded: list[Action] = []
         claimed = 0
         for action in fallback:

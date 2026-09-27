@@ -12,6 +12,7 @@ events, core, `runtime.sandbox` (the `GpuPinUnenforceable` a probe launch can re
 import `noise_floor.py` has for the same reason) and stdlib."""
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from typing import Optional
@@ -28,6 +29,7 @@ from looplab.engine.card_reservation import scored_anchor
 from looplab.engine.shared import engine_fold as fold
 from looplab.events.types import EV_ABLATE
 from looplab.runtime.sandbox import GpuPinUnenforceable
+from looplab.search.policy import code_blocks, simplify_actions
 
 
 # A BOUNDED wait for a probe's eval resource, per probe — the noise floor's bound
@@ -37,6 +39,8 @@ from looplab.runtime.sandbox import GpuPinUnenforceable
 # would freeze the run loop behind it. A probe that does not get its device inside the bound
 # ABSTAINS (see `_timed_ablation_probe`), and the pass stops at the first abstention.
 _ABLATION_RESOURCE_TICKS = 120
+
+_log = logging.getLogger(__name__)
 
 
 def _signed_gain(probe_metric: float, base: float, direction: str) -> float:
@@ -412,24 +416,94 @@ class AblationMixin:
         self._emit_hypothesis_ranked(node_id, 0)
         self._emit_foresight_selected(node_id, 0)
 
+    def _stamp_simplify(self) -> None:
+        """Tell the policy whether it may nominate simplifications (doc 67 67.5,
+        `Settings.ablation_simplify`) and which ones this process could not reserve — the
+        `ablation_capable` pattern: facts the fold does not carry, stamped on the policy at launch,
+        on every policy rebuild and whenever they change, read through `getattr`."""
+        self.policy.simplify_ablated = bool(self._ablation_simplify)
+        self.policy.simplify_refused = frozenset(self._simplify_refused)
+
+    async def _simplify(self, action: dict) -> None:
+        """Build the ONE `simplify` child a recorded code-block ablation nominated (doc 67 67.5).
+
+        The node IS the program the probe ran: the parent's code with pipeline block #`block`
+        commented out, re-derived from the parent's own code by the same deterministic pair the
+        probe used (`_segment_blocks`, `_comment_block`) — so no Developer is asked, no model is
+        paid, and the directive steering a Developer has nothing to steer (the parent was built
+        under it). It is reserved and evaluated the ordinary way: the probe only NOMINATED it, and
+        whether it stands is the selector's named rule (`events/replay_selection.py::simpler_tie`).
+
+        Re-checked against a fresh fold (`search/policy.py::simplify_actions`, the policy's own
+        rule), so a lifecycle a reset replaced, or a block another simplification already spent,
+        builds nothing. A reservation this process cannot make is stamped refused on the policy
+        (`_stamp_simplify`), so the turn goes to the next action instead of proposing it again."""
+        state = fold(self.store.read_all())
+        parent_id, block = action.get("parent_id"), action.get("block")
+        parent = state.nodes.get(parent_id) if isinstance(parent_id, int) else None
+        nominated = next((a for a in simplify_actions(state, parent,
+                                                      refused=self._simplify_refused)
+                          if a["block"] == block), None)
+        if parent is None or nominated is None:
+            return
+        generation, ablation_id = parent.attempt, nominated["ablation_id"]
+        blocks = self._segment_blocks(parent.code)
+        if not 0 <= block < len(blocks):
+            self._refuse_simplify(parent_id, generation, block, "the parent's code has no such block")
+            return
+        start, end = blocks[block]
+        removed = "\n".join(parent.code.splitlines()[start:end])[:300]
+        idea = Idea(operator="simplify", params=dict(parent.idea.params),
+                    hypothesis=f"Node {parent_id} without its pipeline block #{block}",
+                    rationale=(f"simplify: a code-block ablation ({ablation_id[:8]}) measured node "
+                               f"{parent_id} no worse without pipeline block #{block}; this is that "
+                               f"program, the block commented out. Block:\n{removed}"),
+                    footprint=parent.idea.footprint,
+                    concept_mode="delta", concepts_added=[], concepts_removed=[])
+        anchor_id, anchor_attempt = scored_anchor(state)
+        refusal: list = []
+        reservation = self._reserve_node_build(
+            {"kind": "simplify", "parent_id": parent_id,
+             "parent_generations": {str(parent_id): generation}},
+            idea, scored_against=anchor_id, scored_against_attempt=anchor_attempt,
+            source="engine", refusal=refusal)
+        if reservation is None:
+            self._refuse_simplify(parent_id, generation, block,
+                                  f"no reservation ({refusal[0] if refusal else 'refused'})")
+            return
+        node_id = reservation.node_id
+        if not self._ablation_parent_current(parent_id, generation):
+            self._fail_reserved_build(
+                node_id=node_id, card_id=reservation.card_id, generation=0,
+                error="parent lifecycle changed while building", reason="superseded")
+            return
+        self._emit_node_created(
+            node_id=node_id, parent_ids=[parent_id], operator="simplify",
+            idea=durable_idea_payload(reservation.idea), code=self._comment_block(
+                parent.code, blocks[block]),
+            files=dict(parent.files), eval_start_boundary=True,
+            parent_generations={str(parent_id): generation},
+            simplified={"parent_id": parent_id, "generation": generation, "block": block,
+                        "ablation_id": ablation_id})
+        if node_id not in fold(self.store.read_all()).nodes:
+            self._fail_reserved_build(
+                node_id=node_id, card_id=reservation.card_id, generation=0,
+                error="simplify node creation was rejected during replay", reason="superseded")
+            self._refuse_simplify(parent_id, generation, block, "its node_created was rejected")
+
+    def _refuse_simplify(self, parent_id: int, generation: int, block: int, why: str) -> None:
+        """Spend one nomination for this process (see `_simplify`) and SAY so: a nomination the run
+        could not build must not read as one it never made."""
+        self._simplify_refused.add((parent_id, generation, block))
+        self._stamp_simplify()
+        _log.warning("simplify: node %s (lifecycle %s) without block #%s was not built: %s",
+                     parent_id, generation, block, why)
+
     @staticmethod
     def _segment_blocks(code: str) -> list[tuple[int, int]]:
-        """A0a: split solution code into blank-line-separated paragraph blocks -> (start,end) line
-        ranges (end exclusive). Deterministic; the unit of code-block ablation (an ML-pipeline
-        component: data prep / feature-eng / model / loss / ensembling tends to be one paragraph)."""
-        lines = code.splitlines()
-        blocks: list[tuple[int, int]] = []
-        i, n = 0, len(lines)
-        while i < n:
-            if lines[i].strip() == "":
-                i += 1
-                continue
-            j = i
-            while j < n and lines[j].strip() != "":
-                j += 1
-            blocks.append((i, j))
-            i = j
-        return blocks
+        """A0a: the unit of code-block ablation, `search/policy.py::code_blocks` — ONE spelling, which
+        the simplify nomination reads too (doc 67 67.5); kept as this seam because tests patch it."""
+        return code_blocks(code)
 
     @staticmethod
     def _comment_block(code: str, block: tuple[int, int]) -> str:

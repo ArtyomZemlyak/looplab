@@ -246,6 +246,13 @@
           "help": "A0a: ablate generated pipeline code blocks (MLE-STAR), not just numeric params."
         },
         {
+          "key": "ablation_simplify",
+          "label": "Ablation simplifies the champion",
+          "type": "bool",
+          "default": false,
+          "help": "A code-block ablation probe that measured the objective no worse without a pipeline block nominates that program as a node, built with no model call and evaluated as usual; on a tie with the node it was cut from, the simpler one is the champion. Spends a node and an evaluation per nomination."
+        },
+        {
           "key": "ablation_probe_hint",
           "label": "Ablation refiner sees its probes",
           "type": "bool",

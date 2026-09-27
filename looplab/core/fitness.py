@@ -172,6 +172,32 @@ def one_se_better(
     return candidate > incumbent + se
 
 
+def one_se_non_inferior(
+    candidate: float,
+    incumbent: float,
+    std: float,
+    n: int,
+    direction: str = "min",
+    incumbent_std: float = 0.0,
+    incumbent_n: int = 0,
+) -> bool:
+    """True if `candidate` is NOT WORSE than `incumbent` by more than 1 SE of the *difference* —
+    NON-INFERIORITY, the mirror of `one_se_better` (superiority) over the same SE_diff =
+    sqrt(SE_cand^2 + SE_inc^2) (doc 67 67.5).
+
+    The acceptance rule of "on a tie, simpler" (`events/replay_selection.py::simpler_tie`): a
+    simplification that measured within one SE below the node it was cut from is as good as it, and
+    simpler. Non-inferiority NEEDS a spread — with no usable variance on either side it falls back
+    to plain "not worse" (equal counts), which on a noisy metric is an exact tie. The spread is the
+    CONFIRMATION's, never the eval noise floor's: the floor is what makes a champion's margin
+    checkable, and an instrument that moved the champion could not judge it
+    (`core/models.py::RunState.eval_noise_floor`)."""
+    se = standard_error_difference(std, n, incumbent_std, incumbent_n)
+    if direction == "min":
+        return candidate <= incumbent + se
+    return candidate >= incumbent - se
+
+
 # R1-c: the neutral verifier "score" for an unscored node (the §12 verifier's own `unclear` midpoint).
 # In a metric-tie, a node scored ABOVE this beats an unscored node and one scored BELOW loses to it —
 # so an unverified contender is treated as "no signal", neither promoted nor penalized past the midpoint.

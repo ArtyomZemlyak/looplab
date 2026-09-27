@@ -200,6 +200,9 @@ class EngineKnobs:
     _localize_faults = Knob("localize_faults")
     _feature_engineering = Knob("feature_engineering")
     _ablate_code_blocks = Knob("ablate_code_blocks")
+    # doc 67 67.5: a code-block ablation's no-worse probe nominates a `simplify` child, and the
+    # policy is told so (`engine/ablation.py::AblationMixin._stamp_simplify`).
+    _ablation_simplify = Knob("ablation_simplify", bool)
     # --- trust and novelty
     proxy_kill_fraction = Knob("proxy_kill_fraction")
     reward_hack_detect = Knob("reward_hack_detect")

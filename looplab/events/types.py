@@ -1897,7 +1897,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "attempt", "card_build_generation", "deleted", "eval_start_boundary",
             "footprint_finalized", "forked_from", "generation", "materialize_aborted_intent",
             "model_arm", "origin", "parent_generations", "research_origin", "seed",
-            "speculative"
+            "simplified", "speculative"
         ),
     ),
     "node_eval_started": PayloadContract(

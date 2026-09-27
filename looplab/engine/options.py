@@ -270,6 +270,10 @@ class EngineOptions:
     localize_faults: bool = False        # C1: surface fault-localized files for repo tasks
     feature_engineering: bool = False    # I1: CV-gated feature-engineering directive
     ablate_code_blocks: bool = False     # A0a: ablate pipeline code blocks, not just params
+    # doc 67 67.5 (2026-09-27): a code-block ablation's no-worse probe nominates a `simplify` node
+    # (`Settings.ablation_simplify`). OFF on both surfaces — a new mechanism, off until an arm
+    # measures it — so no divergence-table row.
+    ablation_simplify: bool = False
     proxy_kill_fraction: float = 0.0
     reward_hack_detect: bool = True      # B5: flag suspicious wins
     trust_gate: str = "audit"            # T2: audit|gate|block — what a hack/leak flag does to selection

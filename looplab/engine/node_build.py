@@ -658,7 +658,7 @@ class NodeBuildMixin:
                            footprint_finalized=_OMIT, speculative=_OMIT,
                            card_build_generation=_OMIT, eval_start_boundary=_OMIT,
                            materialize_aborted_intent=_OMIT, model_arm=_OMIT,
-                           expected_last_seq=_OMIT) -> None:
+                           simplified=_OMIT, expected_last_seq=_OMIT) -> None:
         """The single `node_created` emitter for all four creation sites (`_create_node`,
         `_create_injected_node`, `_ablate`, `_ablate_code`). Optional keys default to the
         `_OMIT` sentinel and are LEFT OUT of the payload when not passed — never None-filled —
@@ -681,7 +681,9 @@ class NodeBuildMixin:
                      ("speculative", speculative),
                      ("card_build_generation", card_build_generation),
                      ("eval_start_boundary", eval_start_boundary),
-                     ("materialize_aborted_intent", materialize_aborted_intent)):
+                     ("materialize_aborted_intent", materialize_aborted_intent),
+                     # doc 67 67.5: `AblationMixin._simplify`'s receipt, and nobody else's.
+                     ("simplified", simplified)):
             if v is not _OMIT:
                 data[k] = v
         append_kwargs = (

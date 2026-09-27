@@ -100,7 +100,11 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 229
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 230
+    # 229 -> 230 on 2026-09-27: `ablation_simplify` (doc 67 67.5) -- a code-block ablation's no-worse
+    # probe nominates the program it ran as a node. A ROW on the SPEND ground, OFF by default.
+    # Verified by INTERSECTION: 229 keys common to the previous keyset plus exactly that one, none
+    # removed.
     # 228 -> 229 on 2026-09-26: `seed_from_run` (doc 67 67.2) -- a new run seeded from a prior
     # run's node. A ROW on the LAUNCH ground. Verified by INTERSECTION: 228 keys common to the
     # previous keyset plus exactly that one, none removed.
@@ -468,7 +472,8 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # 261 -> 262 on 2026-09-26: `brief_node_frontier` (a curated row, so both counts move).
     # 262 -> 263 on 2026-09-26: `noise_floor_mid_search` (a curated row, so both counts move).
     # 263 -> 264 on 2026-09-26: `seed_from_run` (a curated row, so both counts move).
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 264
+    # 264 -> 265 on 2026-09-27: `ablation_simplify` (a curated row, so both counts move).
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 265
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

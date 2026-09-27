@@ -21,7 +21,7 @@ dispatch table.
 from __future__ import annotations
 
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, SearchFitness, is_usable_metric,
-                                  verifier_evidence_digest)
+                                  one_se_non_inferior, verifier_evidence_digest)
 from looplab.core.models import (Event, Node, NodeStatus, RunState,
                                  coerce_node_id as _coerce_node_id, row_objective)
 from looplab.events.replay_ctx import (_MISSING, _FoldCtx, _event_generation, _generation_matches,
@@ -343,6 +343,94 @@ def _apply_trust_gate(st: RunState) -> set:
     return flagged
 
 
+def _verifier_prefers(st: RunState, leader: Node, other: Node) -> bool:
+    """Whether the calibrated verifier scored `leader` SOUNDER than `other`: both scored, the
+    selector's verifier tie-break on (R1-c). Soundness breaks a metric tie before simplicity does."""
+    if not st.select_verifier_tiebreak:
+        return False
+    a, b = leader.verifier_score, other.verifier_score
+    usable = all(is_usable_metric(v) and 0.0 <= float(v) <= 1.0 for v in (a, b))
+    return usable and float(a) > float(b)
+
+
+def simpler_tie(st: RunState, leader: Node | None, pool, *, holdout: bool = False) -> Node | None:
+    """"ON A TIE, SIMPLER" (doc 67 67.5): the most simplified node cut from `leader` that is in `pool`
+    and NON-INFERIOR to it (`core/fitness.py::one_se_non_inferior`), or `leader` itself.
+
+    "Cut from" is a chain of `simplified` receipts (`core/models.py::Node.simplified`), each naming
+    its parent at the lifecycle it was built from — a child cut from a lifecycle a `node_reset` has
+    since replaced is not simpler than what stands there now. Among the candidates: the DEEPEST
+    first (the most removed), then the better value, then the lower id. Without this rule a
+    simplification that measured exactly as well as its parent never became the champion, so "the
+    champion only grows" would have survived its nomination (doc 67 §3).
+
+    Compared on `leader`'s own ruler: `robust_metric` with the CONFIRMATION's spread when both are
+    confirmed, exact "not worse" when neither is, and not at all across the two — a confirmed mean
+    is never held against a single measurement (the selector's pool never mixes them; the slot
+    passes' can); on the holdout stage, `holdout_metric` with no spread (one unseen-partition score
+    each). A simplification the calibrated verifier
+    scored below the leader is not a tie (`_verifier_prefers`).
+
+    Inert — `leader` — on every log without a receipt: every log before 67.5, and every run with
+    `Settings.ablation_simplify` off."""
+    if leader is None:
+        return None
+    children: dict[int, list[Node]] = {}
+    for node in st.nodes.values():
+        receipt = node.simplified
+        if isinstance(receipt, dict):
+            children.setdefault(receipt["parent_id"], []).append(node)
+    if not children:
+        return leader
+    value = (lambda n: n.holdout_metric) if holdout else (lambda n: n.robust_metric)
+    anchor = value(leader)
+    if not is_usable_metric(anchor):
+        return leader
+    members = {node.id: node for node in pool}
+    sign = 1.0 if st.direction == "max" else -1.0
+    chosen, chosen_key = leader, None
+    frontier, seen = [(leader, 0)], {leader.id}
+    while frontier:
+        parent, depth = frontier.pop()
+        for child in children.get(parent.id, ()):
+            if child.id in seen or child.simplified["generation"] != parent.attempt:
+                continue
+            seen.add(child.id)
+            frontier.append((child, depth + 1))
+            candidate = members.get(child.id)
+            if candidate is None or not is_usable_metric(value(candidate)):
+                continue
+            if not holdout and (candidate.confirmed_mean is None) != (leader.confirmed_mean is None):
+                continue      # a confirmed mean beside one measurement: two rulers, no comparison
+            spread = (not holdout and candidate.confirmed_mean is not None
+                      and leader.confirmed_mean is not None)
+            held = one_se_non_inferior(
+                float(value(candidate)), float(anchor),
+                candidate.confirmed_std if spread else 0.0,
+                candidate.confirmed_seeds if spread else 0, st.direction,
+                leader.confirmed_std if spread else 0.0, leader.confirmed_seeds if spread else 0)
+            if not held or _verifier_prefers(st, leader, candidate):
+                continue
+            key = (depth + 1, sign * float(value(candidate)), -candidate.id)
+            if chosen_key is None or key > chosen_key:
+                chosen, chosen_key = candidate, key
+    return chosen
+
+
+def simpler_first(st: RunState, ranked: list) -> list:
+    """`ranked` with its head's `simpler_tie` moved to the front — for the passes that choose who
+    gets an EXTRA measurement (the holdout slots, the confirm seeds), so the node the selector would
+    crown is the one measured: with one slot (MLE-bench grades the search champion alone) the
+    simpler tie would otherwise never be graded, and could never win. Every other order is kept."""
+    ranked = list(ranked)
+    if not ranked:
+        return ranked
+    head = simpler_tie(st, ranked[0], ranked)
+    if head is ranked[0]:
+        return ranked
+    return [head] + [node for node in ranked if node is not head]
+
+
 def select_best_node(st: RunState, pool, *, best_confirmed: int | None = None,
                      best_confirmed_significant: bool = True) -> Node | None:
     """THE SELECTOR: the node `_select_best` crowns out of `pool` — the mean-based pick, then the
@@ -376,6 +464,7 @@ def select_best_node(st: RunState, pool, *, best_confirmed: int | None = None,
     evaluated = list(pool)
     members = {n.id for n in evaluated}
     chosen: Node | None = None
+    candidates: list[Node] = []
     if evaluated:
         # If any node has been confirmed (multi-seed), the final answer must be the
         # robust winner: rank confirmed nodes by confirmed_mean. With no confirmations
@@ -406,6 +495,12 @@ def select_best_node(st: RunState, pool, *, best_confirmed: int | None = None,
             and (best_confirmed_significant or not st.verifier_ci_tie)):
         chosen = st.nodes[best_confirmed]
 
+    # ON A TIE, SIMPLER (doc 67 67.5): a simplification of the pick that is not worse than it, by
+    # the named non-inferiority rule, takes its place — after the confirm certificate, whose winner
+    # is a mean that a tie inside its own spread did not separate. Inert without a receipt.
+    if chosen is not None:
+        chosen = simpler_tie(st, chosen, candidates)
+
     # D1 holdout-gated promotion: when the run recorded holdout_select, the champion is the best
     # node ON THE HOLDOUT PARTITION among those that were holdout-scored (the val-top-k — so the
     # search metric still decides WHO gets a holdout eval, but the unseen signal decides who WINS).
@@ -425,6 +520,8 @@ def select_best_node(st: RunState, pool, *, best_confirmed: int | None = None,
             # (default) the holdout exact-tie pick is the final word — R1-d's CI widening is effective on the
             # champion only when holdout_select is OFF.
             chosen = fit.best_holdout(hpool)
+            # The same rule on the holdout's own ruler: a simplification graded no worse wins.
+            chosen = simpler_tie(st, chosen, hpool, holdout=True)
 
     # An explicit human approval of a real non-best node is a selection decision, not a global latch
     # that authorizes publication of some OTHER algorithmic best. Honor it last. (An approval of a

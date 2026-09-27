@@ -646,6 +646,12 @@ class StrategyCadenceMixin:
             self._complexity_cue = bool(ops["complexity_cue"])
         if "ablate_code_blocks" in ops and may("ablate_code_blocks"):
             self._ablate_code_blocks = bool(ops["ablate_code_blocks"])
+        # doc 67 67.5: whether a no-worse ablation probe nominates a `simplify` node. No role holds
+        # this grant by default (a new mechanism, off until an arm measures it): the operator grants
+        # it in `agent_control` to let the Strategist switch it.
+        if "simplify" in ops and may("ablation_simplify"):
+            self._ablation_simplify = bool(ops["simplify"])
+            self._stamp_simplify()
         if "prefer_sweep" in ops and may("prefer_sweep"):
             self._prefer_sweep = bool(ops["prefer_sweep"])
         if "endgame_sweep" in ops and may("endgame_sweep"):
@@ -754,6 +760,7 @@ class StrategyCadenceMixin:
                     mcts_value_weight=self._mcts_value_weight,
                     model_arms=self._model_arms), **pp})
                 self.policy.ablation_capable = getattr(self, "_ablation_capable", True)  # re-stamp: a repo/eval-spec run must not propose ablate (see orchestrator init)
+                self._stamp_simplify()   # doc 67 67.5: the same re-stamp for the simplify nominations
                 self._base_max_nodes = getattr(self.policy, "max_nodes", self.max_nodes)  # new base for the live override
                 # A3 BOHB = ASHA racing + the surrogate proposer. make_policy only builds the racing
                 # half; wire the surrogate now so a mid-run switch to bohb isn't bare ASHA.

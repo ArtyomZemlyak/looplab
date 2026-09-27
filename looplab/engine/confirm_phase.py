@@ -26,6 +26,7 @@ from looplab.core.models import NodeStatus, RunState, objective_value
 from looplab.engine import comparability
 # Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
 from looplab.engine.shared import engine_fold as fold
+from looplab.events.replay_selection import simpler_first
 from looplab.events.types import (EV_BEST_CONFIRMED, EV_CONFIRM_DONE, EV_CONFIRM_EVAL,
                                   EV_NODE_CONFIRMED, EV_PAUSE, EV_SPEC_DRIFT)
 from looplab.runtime.sandbox import GpuPinUnenforceable
@@ -325,6 +326,10 @@ class ConfirmPhaseMixin:
         objective = state.objective_key
         evaluated = sorted(state.breedable_nodes(), key=lambda n: (n.metric, n.id),
                            reverse=(state.direction == "max"))
+        # "On a tie, simpler" (doc 67 67.5) puts the leader's non-inferior simplification FIRST, so
+        # it is confirmed — the selector ranks confirmed nodes among confirmed ones, and an
+        # unconfirmed simplification could never take the tie it measured.
+        evaluated = simpler_first(state, evaluated)
         topk = evaluated[: self.confirm_top_k]
         # Snapshot EVERY extant lifecycle, not only top-k: a reset of an unconfirmed/pending node
         # while this pass runs still changes the candidate epoch and must invalidate completion.

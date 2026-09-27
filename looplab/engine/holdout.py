@@ -318,8 +318,11 @@ class HoldoutGrader:
         # holdout override would pick a winner from a pool that excluded the sound node — the very node the
         # mean pick chose). Byte-identical to `selection_key` when the flag is off. The pool base
         # (feasible_nodes + flagged) is a different-but-agreeing spelling of the same eligibility.
+        from looplab.events.replay_selection import simpler_first
         fit = SearchFitness(state.direction, verifier_tiebreak=state.select_verifier_tiebreak)
-        pool = fit.rank_promotion(promotion_eligible_nodes(state))
+        # "On a tie, simpler" moves who is FIRST (doc 67 67.5): the node the selector would crown gets
+        # the slot, or a one-slot protocol never grades the simplification that could win.
+        pool = simpler_first(state, fit.rank_promotion(promotion_eligible_nodes(state)))
         if self._e._host_grader is not None and self._e._host_grader.get("kind") == "mlebench":
             # ONE private grade, by protocol: the search champion alone. Grading the top-k and
             # letting `holdout_select` pick among them is the test-selection the split exists to

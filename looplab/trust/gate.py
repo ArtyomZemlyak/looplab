@@ -12,6 +12,9 @@ from __future__ import annotations
 # fold-derived Card ledger holds a `supported` verdict to it, and `events/` may import only `core`.
 # Re-exported here as the SAME object, so `trust.gate.one_se_better` — its readers' spelling — keeps
 # resolving (and `standard_error_difference`, which this module has always carried).
-from looplab.core.fitness import one_se_better, standard_error_difference  # noqa: F401 — re-exported
+from looplab.core.fitness import (  # noqa: F401 — re-exported
+    one_se_better, one_se_non_inferior, standard_error_difference)
 
-__all__ = ["one_se_better", "standard_error_difference"]
+# `one_se_non_inferior` is the same rule turned around (doc 67 67.5): NOT WORSE by more than one SE —
+# the acceptance rule of "on a tie, simpler" (`events/replay_selection.py::simpler_tie`).
+__all__ = ["one_se_better", "one_se_non_inferior", "standard_error_difference"]

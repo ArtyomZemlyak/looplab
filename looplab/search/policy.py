@@ -13,6 +13,7 @@ Action kinds:
     {"kind": "merge",   "parent_ids": [int, int]}
     {"kind": "evaluate","node_id": int}
     {"kind": "ablate",  "parent_id": int}
+    {"kind": "simplify","parent_id": int, "block": int, "ablation_id": str}   # doc 67 67.5
 
 Actions may additionally carry underscore-prefixed meta keys (annotations for the
 engine's event log, not part of the action proper): `_scores` (per-candidate
@@ -41,6 +42,12 @@ KIND_DEBUG = "debug"
 KIND_MERGE = "merge"
 KIND_EVALUATE = "evaluate"
 KIND_ABLATE = "ablate"
+# doc 67 67.5: the parent with ONE pipeline block commented out, nominated by a recorded code-block
+# ablation that measured the objective no worse without it (`simplify_actions`). An ablation probe is
+# off-tree, so before this a component the champion did not need was measured, recorded and kept:
+# the champion only grew. Emitted only when the engine stamps `simplify_ablated` on the policy
+# (`Settings.ablation_simplify`, OFF by default: a new mechanism, off until an arm measures it).
+KIND_SIMPLIFY = "simplify"
 # PART IV D7 (§21.8, §21.13): capability-EXPANSION — an improve proposal made under action-space LOCK-IN,
 # where the directive is "build a capability the run never had" rather than tweak the saturated lever.
 # Stamped as its OWN operator (vs a plain `improve`) so `operator_yields` MEASURES whether expanding pays
@@ -134,6 +141,95 @@ _ASHA_MAX_FAILED_PROMOTIONS = 2
 
 class SearchPolicy(Protocol):
     def next_actions(self, state: RunState) -> list[dict]: ...
+
+
+def code_blocks(code: str) -> list[tuple[int, int]]:
+    """A0a: split solution code into blank-line-separated paragraph blocks -> (start,end) line
+    ranges (end exclusive). Deterministic; the unit of code-block ablation (an ML-pipeline
+    component: data prep / feature-eng / model / loss / ensembling tends to be one paragraph).
+    (Moved verbatim from `engine/ablation.py::AblationMixin._segment_blocks`, which now delegates
+    here, so the ablation and the simplify nomination below cut the same blocks.)"""
+    lines = code.splitlines()
+    blocks: list[tuple[int, int]] = []
+    i, n = 0, len(lines)
+    while i < n:
+        if lines[i].strip() == "":
+            i += 1
+            continue
+        j = i
+        while j < n and lines[j].strip() != "":
+            j += 1
+        blocks.append((i, j))
+        i = j
+    return blocks
+
+
+def _removes_something(code: str, blocks: int) -> set[int]:
+    """The blocks of `code` with at least one line that is not a comment — the ones whose removal
+    removes something. A comment-only paragraph's probe re-ran the identical program, so its "no
+    worse" measured nothing, and a node cut from it would take the tie as a simplification that
+    simplified nothing. When the cut does not match the record's count, nothing is excluded."""
+    spans = code_blocks(code or "")
+    if len(spans) != blocks:
+        return set(range(blocks))
+    lines = (code or "").splitlines()
+    return {index for index, (start, end) in enumerate(spans)
+            if any(line.strip() and not line.strip().startswith("#") for line in lines[start:end])}
+
+
+def simplify_actions(state: RunState, node, *, refused=()) -> list[dict]:
+    """THE SIMPLIFICATIONS A RECORDED ABLATION NOMINATES for `node` (doc 67 67.5), best first.
+
+    One per pipeline block a CODE-BLOCK ablation of `node`'s CURRENT lifecycle ran without and
+    measured the objective NO WORSE than `node`'s (`ablate.signed_impacts[block] >= 0`, signed by the
+    run's direction: `engine/ablation.py::_signed_gain`), and that has a line that is not a comment
+    (`_removes_something`) — the nomination rule is lenient on purpose,
+    because a probe is one off-tree measurement: the node it nominates is built and evaluated the
+    ordinary way, and only the selector's named rule (`events/replay_selection.py::simpler_tie`)
+    decides whether it stands. A later pass of the same lifecycle speaks last for a block it
+    measured (a block that broke the run then — `None` — is no longer nominated). A PARAMETER
+    ablation nominates nothing: a parameter set to 0.0 is not a component removed, and the program
+    its probe ran is not recorded (doc 67 §3).
+
+    Never twice for one (lifecycle, block): a node whose `simplified` receipt names them — evaluated,
+    failed or deleted — spends it. `refused` is the engine's stamp of what it could not reserve in
+    this process (`policy.simplify_refused`), so a refused build yields the turn instead of being
+    proposed again forever.
+    """
+    if node is None or getattr(node, "tombstoned", False) or node.id in state.aborted_nodes:
+        return []
+    from looplab.core.fitness import is_usable_metric
+    measured: dict[int, tuple] = {}
+    for record in state.ablations:
+        if (not isinstance(record, dict) or record.get("parent_id") != node.id
+                or record.get("generation") != node.attempt
+                or record.get("mode") != "code_blocks" or record.get("superseded") is True):
+            continue
+        ablation_id, signed, blocks = (record.get("ablation_id"), record.get("signed_impacts"),
+                                       record.get("blocks"))
+        if (not isinstance(ablation_id, str) or not ablation_id or not isinstance(signed, dict)
+                or isinstance(blocks, bool) or not isinstance(blocks, int)):
+            continue
+        substantive = _removes_something(node.code, blocks)
+        for key, gain in signed.items():
+            if (not isinstance(key, str) or not key.isdigit() or int(key) >= blocks
+                    or int(key) not in substantive):
+                continue
+            measured[int(key)] = ((float(gain), ablation_id) if is_usable_metric(gain)
+                                  else (None, ablation_id))
+    spent = {child.simplified["block"] for child in state.nodes.values()
+             if isinstance(child.simplified, dict) and child.simplified["parent_id"] == node.id
+             and child.simplified["generation"] == node.attempt}
+    refused = set(refused or ())
+    nominated = [block for block, (gain, _aid) in measured.items()
+                 if gain is not None and gain >= 0.0 and block not in spent
+                 and (node.id, node.attempt, block) not in refused]
+    nominated.sort(key=lambda block: (-measured[block][0], block))
+    return [{"kind": KIND_SIMPLIFY, "parent_id": node.id, "block": block,
+             "ablation_id": measured[block][1],
+             META_REASON: (f"simplify: node {node.id} measured no worse without pipeline block "
+                           f"#{block} ({measured[block][0]:+.6g})")}
+            for block in nominated]
 
 
 def _metric_scores(nodes) -> dict[int, float]:
@@ -436,6 +532,15 @@ class GreedyTree:
             return [{"kind": KIND_DRAFT}]
 
         evaluated = state.breedable_nodes()   # never breed from constraint-violating nodes (#5)
+        # doc 67 67.5: a recorded ablation of the champion measured it no worse without a pipeline
+        # block — build that simplification before breeding anything else from the champion (its
+        # `simpler_tie` decides whether it stands). Off unless the engine stamps it; one per turn.
+        if getattr(self, "simplify_ablated", False) and getattr(self, "ablation_capable", True):
+            simplify = simplify_actions(state, best,
+                                        refused=getattr(self, "simplify_refused", ()))
+            if simplify:
+                return [{**simplify[0], META_SCORES: _metric_scores(evaluated),
+                         META_CHOSEN: best.id}]
         # D7: `expand` is an improve-VARIANT (an improve proposal under lock-in) -> count it as improve for
         # the cadence, so the capability-expansion lever doesn't undercount refinement effort. No expand
         # nodes exist unless the flag is on, so this is byte-identical on a default run.
@@ -955,6 +1060,12 @@ def legal_actions(state: RunState, policy: SearchPolicy, *, max_nodes: int) -> l
     if (best is not None and len(best.idea.params) >= 2
             and getattr(policy, "ablation_capable", True)):
         actions.append({"kind": KIND_ABLATE, "parent_id": best.id})
+    # doc 67 67.5: the champion's recorded simplifications, where the engine enabled them.
+    if (best is not None and getattr(policy, "simplify_ablated", False)
+            and getattr(policy, "ablation_capable", True)):
+        actions.extend({key: value for key, value in action.items() if key != META_REASON}
+                       for action in simplify_actions(
+                           state, best, refused=getattr(policy, "simplify_refused", ())))
     return actions
 
 

@@ -1796,6 +1796,14 @@ class Node(BaseModel):
     # doc 52 row 19: the model ARM the bandit routed this build to (`search/policy.py::META_MODEL`);
     # "" for a build that was not routed, which the yield fold reads as the default arm.
     model_arm: str = ""
+    # THE SIMPLIFICATION RECEIPT (doc 67 67.5): this node IS its parent's lifecycle with ONE
+    # pipeline block commented out — the program a code-block ablation probe measured the objective
+    # no worse without (`engine/ablation.py::AblationMixin._simplify`). `{"parent_id", "generation",
+    # "block", "ablation_id"}`, or None. Written only by that build, folded only when it names the
+    # node's one parent at the lifecycle the node was built from (`events/replay.py::
+    # _simplification_receipt`), and read by exactly one decision: "on a tie, simpler"
+    # (`events/replay_selection.py::simpler_tie`). A node's operator is not the fact — a receipt is.
+    simplified: Optional[dict] = None
     # docs/BACKLOG.md §0.1 row 17: the LLM VALUE ESTIMATE for this branch, in [0, 1] — 0 "this
     # lineage is spent", 1 "it still has a lot left" — computed live by `engine/value_estimate.py`
     # and frozen here, because an LLM output cannot live in the deterministic fold (the same reason

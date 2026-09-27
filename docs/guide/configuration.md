@@ -885,6 +885,7 @@ never touches.
 |---|---|---|---|
 | `ablate_every` | `LOOPLAB_ABLATE_EVERY` | `0` | Ablation-driven refinement every N improves (0 = off; greedy only) |
 | `ablate_code_blocks` | `LOOPLAB_ABLATE_CODE_BLOCKS` | `false` | Treat each pipeline code block as an ablation unit (MLE-STAR) |
+| `ablation_simplify` | `LOOPLAB_ABLATION_SIMPLIFY` | `false` | THE CHAMPION CAN BE SIMPLIFIED (doc 67 67.5): a code-block ablation's probe that measured the objective no worse without a pipeline block nominates a `simplify` node — the parent's program with that block commented out, exactly what the probe ran — built with no model call and evaluated the ordinary way; the selector takes it over the node it was cut from "on a tie, simpler" (non-inferiority within one SE of the difference, the confirmation's spread when both are confirmed, else "not worse"; `events/replay_selection.py::simpler_tie`). Spends a node and an evaluation per nomination, so OFF by default and for a resumed pre-field run (`LEGACY_CONFIG_SNAPSHOT_DEFAULTS`). Code-block ablation only. The Strategist's `operators.simplify` applies only under an `agent_control` grant no role holds by default |
 | `ablation_probe_hint` | `LOOPLAB_ABLATION_PROBE_HINT` | `true` | THE ABLATION REFINER SEES ITS PROBES (doc 67 67.4, 2026-09-26): a parameter ablation re-runs the champion once per parameter with that one set to 0.0, records each probe's SIGNED gain (`ablate.signed_impacts`, positive = better without it), then asks the Researcher to refine the highest-impact parameter through the same `propose` call a normal proposal makes. ON: that one call's prompt carries the probes, signed (`engine/ablation.py::ablation_probe_note`, the `_ablation_probe_hint` cue, cleared after the call). Param ablation only — the code-block refine makes no Researcher call. No extra call and nothing moves a metric or a champion, but it changes a prompt, so `false` is the historical prompt byte for byte and a run launched before the field resumes with it OFF (`LEGACY_CONFIG_SNAPSHOT_DEFAULTS`) |
 | `merge_mode` | `LOOPLAB_MERGE_MODE` | `auto` | `auto` (ensemble when the Developer writes code, else mean) · `mean` (param mean) · `ensemble` (code recombination) |
 | `endgame_reserve_frac` | `LOOPLAB_ENDGAME_RESERVE_FRAC` | `0.2` | The plan's endgame reserve: this fraction of `max_nodes` is kept for the top-2 ensemble (once) and champion sweeps proposed by the k-NN surrogate, and the dispatcher honours it — no new breadth inside the reserve. `0` = no plan (the historical dispatch); a resumed pre-plan run keeps `0` |
@@ -951,7 +952,8 @@ is **enforced at runtime** (`_agent_may`) at every **agent** seam, so removing a
 truly locks it — not just a UI hint: the Strategist's whole applied control surface (`policy`,
 `policy_params`, `ablate_every`, `merge_mode`, `complexity_cue`, `ablate_code_blocks`, `prefer_sweep`, `endgame_sweep`,
 `novelty_stance`, `developer`, `fidelity`, `timeout`, `eval_parallel`, `llm_parallel`,
-`llm_lane_limits`, `card_scoring`) is gated in
+`llm_lane_limits`, `card_scoring`, and `operators.simplify` under the `ablation_simplify` key, which
+no role holds by default) is gated in
 `_apply_strategy`. Old snapshots that have only `max_parallel`/`parallel_build` grants remain valid;
 an explicit canonical entry takes precedence, including an empty allow-list that revokes the grant.
 A `budget_extend`, by contrast, is a **human control intent** — the boss action-builder can only

@@ -899,6 +899,22 @@ class Settings(BaseSettings):
     # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row). Read through ONE reader, the engine knob
     # `_ablation_probe_hint`. It moves no metric, champion, selection or violation.
     ablation_probe_hint: bool = True
+    # THE CHAMPION CAN BE SIMPLIFIED (doc 67 67.5, 2026-09-27). A code-block ablation
+    # (`ablate_code_blocks`, `ablate_every` > 0) re-runs the champion once per pipeline block with
+    # that block commented out; the probes are off-tree, so a block the champion did not need was
+    # measured, recorded and kept — the champion only grew. ON: a probe that measured the objective
+    # NO WORSE without a block nominates a `simplify` node — the parent's program with that block
+    # commented out, exactly what the probe ran — built with no model call and evaluated the
+    # ordinary way (`search/policy.py::simplify_actions`, `engine/ablation.py::_simplify`). Whether
+    # it stands is the selector's named rule, "on a tie, simpler" (non-inferiority within one SE of
+    # the difference: `core/fitness.py::one_se_non_inferior`, `events/replay_selection.py::
+    # simpler_tie`), which reads only the nodes' own receipts and so is inert without this flag.
+    # It SPENDS — a node and its evaluation per nomination — so it defaults OFF at every
+    # constructor and a pre-field snapshot resumes OFF; a new mechanism, off until an arm measures
+    # it (doc 67 §8.2). Code-block ablation only: a parameter set to 0.0 is not a component
+    # removed. The Strategist may switch it (`operators.simplify`) only under an `agent_control`
+    # grant no role holds by default. Read through ONE reader, the engine knob `_ablation_simplify`.
+    ablation_simplify: bool = False
     # A0b: real merge/ensembling. "mean" = legacy mean-param merge; "ensemble" = the Developer
     # writes a code-recombination ensemble over the two parents' solutions (verified: agent-proposed
     # ensembling 37.9%->43.9%). "auto" (default) = ensemble whenever the Developer actually
@@ -3711,6 +3727,11 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # at every commit before this one; `tests/test_noise_floor_mid_search.py` holds that `false`
     # measures at the end, as before.
     "noise_floor_mid_search": False,
+    # THE CHAMPION CAN BE SIMPLIFIED, added 2026-09-27 defaulting OFF (doc 67 67.5), on the spend
+    # ground (the mid-search noise floor's row above): ON, an ablation buys a node and its
+    # evaluation that the original launch never did. `False` is every such run's truth;
+    # `tests/test_simplify.py` holds that off nominates nothing.
+    "ablation_simplify": False,
     # THE SEED, added 2026-09-26 (doc 67 67.2). Not a treatment the rows above describe — a launch
     # fact, blank by default — and pinned for a different reason: a snapshot written before the field
     # existed must read it BLANK, not from the environment `settings_from_snapshot` otherwise fills a

@@ -442,10 +442,13 @@ class UnifiedAgent(WrapsDeveloper):
             return {"index": default_idx, "rationale": "policy recommendation (no pilot model)"}
         # Single-parent actions render exactly as before (" parent=N"); merges now show what they
         # merge (" parents=N,M") instead of a bare "[i] merge" the pilot had to choose blind.
+        # A `simplify` (doc 67 67.5, only offered under `ablation_simplify`) names its block too: two
+        # of one parent otherwise read as the same line.
         menu = "\n".join(
             f"  [{i}] {a.get('kind')}"
             + (f" parent={_parents(a)[0]}" if len(_parents(a)) == 1 else "")
             + (" parents=" + ",".join(str(p) for p in _parents(a)) if len(_parents(a)) > 1 else "")
+            + (f" block={a.get('block')}" if a.get("kind") == "simplify" else "")
             for i, a in enumerate(legal))
         rec = ("\nPolicy recommends index "
                f"{default_idx}: {legal[default_idx].get('kind')}.") if recommended is not None else ""

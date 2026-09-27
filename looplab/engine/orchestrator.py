@@ -1182,6 +1182,10 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # strategy.py::_apply_strategy). The flag is read via getattr so any policy object is safe.
         self._ablation_capable: bool = not (bool(self._repo_spec) or bool(self._eval_spec))
         self.policy.ablation_capable = self._ablation_capable
+        # doc 67 67.5: the simplifications this process could not reserve, and the policy's stamp of
+        # them beside `ablation_simplify` (`ablation.py::AblationMixin._stamp_simplify`).
+        self._simplify_refused: set = set()
+        self._stamp_simplify()
         # Fail loudly: a repo task with no trusted eval AND no onboarder would silently
         # evaluate every node via the empty solution.py path. Require one or the other.
         if self._repo_spec and not self._eval_spec and onboarder is None:
@@ -2078,6 +2082,16 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                                           {"scores": a["_scores"], "chosen": a.get("_chosen"),
                                            "reason": a.get("_reason")})
                     await self._ablate(a["parent_id"])
+                continue
+            # doc 67 67.5: a recorded ablation's no-worse probe, built as the node it measured.
+            simplifies = [a for a in actions if a["kind"] == "simplify"]
+            if simplifies:
+                for a in simplifies:
+                    if "_scores" in a:
+                        self.store.append(EV_POLICY_DECISION,
+                                          {"scores": a["_scores"], "chosen": a.get("_chosen"),
+                                           "reason": a.get("_reason")})
+                    await self._simplify(a)
                 continue
 
             evals = [a for a in actions if a["kind"] == "evaluate"]

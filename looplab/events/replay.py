@@ -345,6 +345,32 @@ def _on_node_building(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.building = marker
     st.buildings[nid] = marker
 
+def _simplification_receipt(d: dict, parent_ids: list, st: RunState) -> Optional[dict]:
+    """The `simplified` receipt of a `node_created` row, NORMALIZED, or None (doc 67 67.5).
+
+    Held to what the build that writes it promises, so a hand-edited or foreign row cannot make a
+    node "simpler" than one it was not cut from: the `simplify` operator, exactly one parent, and a
+    receipt naming THAT parent at the lifecycle this node was built from (`parent_generations`, or
+    the parent's current attempt on a row that carries none — the same boundary
+    `_parent_generation_map_matches` just proved). Total: any other shape is no receipt."""
+    raw = d.get("simplified")
+    if not isinstance(raw, dict) or d.get("operator") != "simplify" or len(parent_ids) != 1:
+        return None
+    parent_id = parent_ids[0]
+    block, generation, ablation_id = raw.get("block"), raw.get("generation"), raw.get("ablation_id")
+    ints = all(isinstance(v, int) and not isinstance(v, bool) and v >= 0
+               for v in (block, generation, raw.get("parent_id")))
+    if not ints or raw.get("parent_id") != parent_id or not isinstance(ablation_id, str):
+        return None
+    recorded = d.get("parent_generations")
+    built_from = (recorded.get(str(parent_id)) if isinstance(recorded, dict)
+                  else st.nodes[parent_id].attempt if parent_id in st.nodes else None)
+    if built_from != generation:
+        return None
+    return {"parent_id": parent_id, "generation": generation, "block": block,
+            "ablation_id": ablation_id[:64]}
+
+
 def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Don't let a duplicate node_created RESURRECT a settled node (invariant #2 "first terminal
     # wins"): if the id already exists AND is in a TERMINAL state (evaluated/failed), skip the event.
@@ -439,6 +465,8 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             forked_from=d.get("forked_from"),
             research_origin=d.get("research_origin"),   # 💡 proposed just after a deep-research memo
             model_arm=str(d.get("model_arm") or "")[:64],  # doc 52 row 19: the routed model arm
+            # doc 67 67.5: the node's parent with one block commented out, or None.
+            simplified=_simplification_receipt(d, parent_ids, st),
             footprint_finalized=d.get("footprint_finalized") is True,
             speculative=speculative,
             card_build_generation=card_build_generation,
