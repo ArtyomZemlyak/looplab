@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 from functools import lru_cache
-from typing import Mapping, Optional
+from typing import Collection, Mapping, Optional
 
 IDEA_REPORT_NAME = "looplab_idea_report.json"
 IDEA_IMPLEMENTED = ("as_proposed", "partly", "different", "not_implemented")
@@ -153,9 +153,82 @@ def rebuild_note(idea, state) -> str:
             "approach: report idea_implemented: not_implemented and say why in built_instead.")
 
 
-def card_substitution_brief(card, nodes: Mapping) -> str:
+def surpassed_by(node_id: int, nodes: Mapping, *, direction: str,
+                 excluded: Collection[int] = frozenset(),
+                 aborted: Collection[int] = frozenset()) -> list[int]:
+    """The later builds ON `node_id` that BEAT it — ascending node ids, possibly [].
+
+    A node counts when it descends from `node_id` (on the `parent_ids` chain, any depth) and:
+    (1) it is not an experiment of `node_id`'s own card — another card's (or a card-less node's; a
+    node of the same card on it would be that card's own rebuild, which the return already covers);
+    (2) it TESTED ITS OWN IDEA — its own report is not a substitution (`idea_not_tested`: no report,
+    `as_proposed` and `partly` all count, the ledger's one reading of "tested"); (3) its number
+    counts toward the run's best under the champion's own exclusions (evaluated, not tombstoned,
+    `core/fitness.py::counts_toward_best` over `excluded` = the trust gate's set and `aborted` = the
+    operator's); and (4) its `metric` BEAT `node_id`'s in the run's `direction` (`is_better`; the
+    raw metric, the scalar the card ledger orders by). A node with no usable metric of its own is
+    surpassed by nothing. Pure over `nodes`; O(nodes).
+
+    WHAT IT ANSWERS: has the run moved PAST a substituted build, so that its card should wait for
+    the Researcher instead of going back to the automatic Card lane (`events/card_ledger.py::
+    _apply_card_returns`)? Measured 2026-09-27 on MiniOneRec inf13: card-2's node 2 (1.3726,
+    reported `different`) was returned and selection-ready although node 5 — card-6, built on node 2
+    `as_proposed` — had tested card-2's very claim and beaten it (4.1658, seq 8866); a rebuild would
+    pay a Developer build for a solved idea and tell it "THIS IDEA HAS NOT BEEN TESTED YET"
+    (`rebuild_note`). Nothing in the log says two cards make the SAME claim (different beliefs and
+    directions, never merged), so the answer is a structural proxy, and "BEAT", not "built on", is
+    deliberate (critic review 2026-09-26 of an earlier cut of this rule): under greedy selection the
+    best node is built on at once, so "any evaluated descendant" blocks a best-scoring substitute at
+    its first child whatever that child tested — inf13's node 3 (card-5, 1.2382, seq 1849) would
+    have, before card-6 existed. In a Card-driven run every build is reserved under a native card
+    (`engine/card_reservation.py::_reserve_node_build`), so a card-less descendant is a legacy or
+    non-Card run's node. THE TRADE-OFF, both ways: a descendant that tested the same claim and LOST (a
+    refuted claim, or one its build broke) does not block, so the card comes back and its one
+    rebuild may re-test a claim the run already answered — bounded, because that rebuild spends the
+    card's forgiveness; and an unrelated descendant that happens to win does block, leaving the idea
+    to the Researcher, whose board row names the nodes (`card_substitution_brief`)."""
+    from looplab.core.fitness import counts_toward_best, is_better, is_usable_metric
+
+    root = nodes.get(node_id)
+    baseline = getattr(root, "metric", None)
+    if root is None or not is_usable_metric(baseline):
+        return []
+    own_card = getattr(getattr(root, "idea", None), "card_id", None)
+    children: dict[int, list[int]] = {}
+    for nid, n in nodes.items():
+        for pid in getattr(n, "parent_ids", None) or ():
+            children.setdefault(pid, []).append(nid)
+    found: list[int] = []
+    seen = {node_id}
+    stack = list(children.get(node_id, ()))
+    while stack:
+        nid = stack.pop()
+        if nid in seen:
+            continue
+        seen.add(nid)
+        stack.extend(children.get(nid, ()))
+        n = nodes.get(nid)
+        status = getattr(getattr(n, "status", None), "value", getattr(n, "status", None))
+        if (n is not None and status == "evaluated" and not getattr(n, "tombstoned", False)
+                and (own_card is None
+                     or getattr(getattr(n, "idea", None), "card_id", None) != own_card)
+                and counts_toward_best(n, excluded, aborted)
+                and is_usable_metric(n.metric) and is_better(direction, n.metric, baseline)
+                and not idea_not_tested(n, nodes)):
+            found.append(nid)
+    return sorted(found)
+
+
+def card_substitution_brief(card, nodes: Mapping, *, direction: str,
+                            excluded: Collection[int] = frozenset(),
+                            aborted: Collection[int] = frozenset()) -> str:
     """One clause for a board row — "" for a Card no build ever substituted, else what the board must
     not launder: which nodes built something else, and what that means for the Card now.
+
+    `direction` / `excluded` / `aborted` are the run's — the three the card ledger judged the return
+    with (`RunState.card_substitution_brief` passes them). A card whose one substitution stayed in
+    its evidence because later builds on it beat it (`surpassed_by`) says so and names them, so the
+    Researcher, the one role that reads claims, can tell whether one of them tested this idea.
 
     Ends with a space when non-empty so a row can splice it in front of its next field unchanged."""
     ids = [nid for nid in (getattr(card, "substituted_nodes", None) or []) if isinstance(nid, int)]
@@ -165,11 +238,20 @@ def card_substitution_brief(card, nodes: Mapping) -> str:
     for nid in ids[:3]:
         _value, built = idea_report_of(nodes.get(nid), nodes)
         parts.append(f"node {nid} built " + (f"instead: {built[:120]}" if built else "something else"))
-    counted = [nid for nid in (getattr(card, "evidence", None) or []) if nid not in ids]
+    evidence = list(getattr(card, "evidence", None) or [])
+    counted = [nid for nid in evidence if nid not in ids]
+    # The shape a WITHHELD return leaves a card in (`events/card_ledger.py::_apply_card_returns`):
+    # its one forgiven node is this substitution, and it is still the card's whole evidence.
+    later = (surpassed_by(ids[0], nodes, direction=direction, excluded=excluded, aborted=aborted)
+             if evidence == ids and len(ids) == 1 and not getattr(card, "discarded_nodes", None)
+             else [])
     if counted:
         tail = "not counted in this card's verdict"
-    elif not getattr(card, "evidence", None):
+    elif not evidence:
         tail = "this card's idea is UNTESTED and back on the board"
+    elif later:
+        tail = (f"not returned: node(s) {later[:4]} built on node {ids[0]} and beat it; its idea "
+                "was never tested — propose it again only if none of those tested it")
     else:
         tail = "built as something else twice, so retired — its idea was never tested"
     return f"NOT TESTED by {'; '.join(parts)} — {tail}. "

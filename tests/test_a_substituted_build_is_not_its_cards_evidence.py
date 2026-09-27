@@ -8,7 +8,8 @@ the single pass, scored 1.373x on node 0's idea — and the board read card-2 `s
 report already existed (`core/idea_report.py`); nothing that decides a verdict read it.
 
 These drive the real engine and read the real fold and board, and pin the bound that keeps the
-return from looping: ONE return per card, as for a never-run discard.
+return from looping: ONE return per card, as for a never-run discard — and the return that is
+withheld (section 7): a substitution a later build on it has beaten, unless a rebuild is under way.
 """
 from __future__ import annotations
 
@@ -24,8 +25,10 @@ from looplab.serve.public_cards import public_cards
 from tests.test_card_speculation_engine import (  # noqa: F401 — the receipt fixture is autouse
     _add_ready_draft,
     _admit_unit_speculation_receipt,
+    _build_result,
     _commit_speculative_node,
     _engine,
+    _request,
     _start,
 )
 
@@ -448,3 +451,262 @@ def test_the_deprecated_hypotheses_rows_list_only_the_nodes_that_tested_the_card
     state = TestClient(make_app(tmp_path)).get("/api/runs/subrun/state").json()["state"]
     assert state["cards"]["card-2"]["evidence"] == sorted([first, second])
     assert state["hypotheses"]["card-2"]["evidence"] == []
+
+
+# ------------------------------------------------------------ (7) a substitution a later build beat
+#
+# Measured 2026-09-27 on MiniOneRec inf13: card-2's node 2 (1.3726, `different`) was returned and
+# selection-ready although node 5 — card-6, built on node 2 `as_proposed` — had tested card-2's very
+# claim and beaten it (4.1658). `_apply_card_returns` now keeps such a card off the automatic lane
+# (`core/idea_report.py::surpassed_by`), except over a rebuild already under way. The toy run below
+# MINIMIZES, so a later build "beats" the substitution with a LOWER metric.
+
+def _child(engine, parent: int, files: dict, *, card_id: str, metric=None) -> int:
+    """A later build that took `parent`'s code as its base, filed under ANOTHER card — inf13's node
+    5 (card-6, an improve on node 2). Its id comes from the engine's own allocator, so it never lands
+    on an id a claim has reserved."""
+    events = engine.store.read_all()
+    node_id = engine._node_id_ceiling(events, fold(events))
+    engine.store.append("node_created", {
+        "node_id": node_id, "parent_ids": [parent], "operator": "improve",
+        "idea": {"operator": "improve", "params": {"x": 0.5}, "rationale": "a later idea",
+                 "card_id": card_id},
+        "files": dict(files)})
+    if metric is not None:
+        _evaluate(engine, node_id, metric)
+    return node_id
+
+
+def _row(state, card_id: str) -> str:
+    return next(line for line in _board(state)[2].splitlines() if f"CARD_ID={card_id}" in line)
+
+
+def test_a_substitution_another_cards_build_on_it_beat_is_not_returned(tmp_path):
+    """The inf13 shape end to end: returned while nothing beat it, kept off the board once a later
+    build that tested its own idea did — verdict `open`, and the row names the nodes."""
+    engine, producer = _setup(tmp_path, "inf13-beaten")
+    sub = _build(engine, producer, "card-2", _report("different"), x=0.3)
+    _evaluate(engine, sub, 0.9)
+    running = _child(engine, sub, _report("as_proposed", ""), card_id="card-6")
+    # a later build still running has measured nothing: the card is returned, as before
+    card = fold(engine.store.read_all()).cards["card-2"]
+    assert card.evidence == [] and card.selection_ready is True
+    _evaluate(engine, running, 0.7)                                   # it tested its idea and WON
+
+    state = fold(engine.store.read_all())
+    card = state.cards["card-2"]
+    assert card.substituted_nodes == [sub] and card.evidence == [sub]
+    assert card.verdict == "open" and card.best_delta is None        # never tested, never supported
+    assert card.status == "failed" and card.status_nodes == [sub]
+    assert card.selection_ready is False and "work_terminal" in card.selection_blockers
+    assert "card-2" not in [c.id for c in cs.eligible_cards(state, engine.policy)]
+    claimable, attempted, _prompt = _board(state)
+    assert "card-2" not in claimable and "card-2" in attempted
+    row = _row(state, "card-2")
+    assert "VERDICT=open" in row
+    assert (f"NOT TESTED by node {sub} built instead: {_INSTEAD} — not returned: node(s) "
+            f"[{running}] built on node {sub} and beat it; its idea was never tested — propose it "
+            "again only if none of those tested it." in row)
+    assert "UNTESTED and back on the board" not in row
+    # …and no Developer build is bought for it: nothing else on this board is electable.
+    assert engine._request_card_build() is False
+    # The winner's own card is untouched by any of this.
+    assert state.cards["card-6"].evidence == [running]
+    assert state.cards["card-6"].substituted_nodes == []
+
+
+def test_a_later_build_that_did_not_beat_the_substitution_leaves_the_card_returned(tmp_path):
+    """inf13 seq 1849: node 3 — card-5's unrelated improve on node 2 — scored 1.2382 against node 2's
+    1.3726. "Any evaluated descendant" would have taken card-2 off the board there, before card-6
+    (the card that did test its claim) existed; only a descendant that BEAT the substitution does.
+    A winner that is itself a substitution tested nothing, so it does not block either."""
+    engine, producer = _setup(tmp_path, "not-beaten")
+    sub = _build(engine, producer, "card-2", _report("different"), x=0.3)
+    _evaluate(engine, sub, 0.9)
+    _child(engine, sub, _report("as_proposed", ""), card_id="card-5", metric=1.2)       # lost
+    _child(engine, sub, _report("different", "its own substitute"), card_id="card-7",
+           metric=0.1)                                                                  # not a test
+    state = fold(engine.store.read_all())
+    card = state.cards["card-2"]
+    assert card.evidence == [] and card.selection_ready is True
+    assert "card-2" in [c.id for c in cs.eligible_cards(state, engine.policy)]
+    assert "UNTESTED and back on the board" in _row(state, "card-2")
+
+
+def test_a_rebuild_in_flight_when_a_later_build_beats_the_substitution_is_committed(tmp_path):
+    """The critic's in-flight defect, driven through the real request, producer, claim and gate. A
+    speculative rebuild has no node until `_claim_requested_card_build` commits it, and the claim
+    gives the build up unless the card is still selected. A later build beating the substitution
+    WHILE the rebuild was in hand would have withdrawn the return (`work_terminal`) and closed the
+    finished, paid build `stale:not_selected_now`; the open request counts as the rebuild instead."""
+    import anyio
+
+    engine, producer = _setup(tmp_path, "in-flight")
+    sub = _build(engine, producer, "card-2", _report("different"), x=0.3)
+    _evaluate(engine, sub, 0.9)
+    request = _request(engine)                                   # the rebuild is elected…
+    assert request["card_id"] == "card-2"
+    producer.last_files = _report("as_proposed", "")
+    result = _build_result(engine, request)                      # …and built; it has no node yet
+    assert result.success is True
+    beat = _child(engine, sub, _report("as_proposed", ""), card_id="card-6", metric=0.7)
+
+    state = fold(engine.store.read_all())
+    card = state.cards["card-2"]
+    assert card.evidence == [] and card.substituted_nodes == [sub]
+    assert card.selection_ready is True and state.card_status_now(card) == "building"
+
+    engine._ensure_speculation_state()
+    engine._spec_builds[result.key] = result
+    assert engine._serve_card_builds() is True
+    state = fold(engine.store.read_all())
+    rebuild = max(state.nodes)
+    assert rebuild not in (sub, beat) and state.nodes[rebuild].idea.card_id == "card-2"
+    assert state.card_build_outcomes[-1] == "committed"            # not `stale`
+    assert state.nodes[rebuild].status is NodeStatus.pending
+    assert state.cards["card-2"].evidence == [rebuild]
+    assert anyio.run(engine._drop_stale_speculation) is False      # and the real gate keeps it
+    assert fold(engine.store.read_all()).nodes[rebuild].status is NodeStatus.pending
+
+    # When it lands, the rebuild decides the card; the forgiven node rejoins beside it, as before.
+    _evaluate(engine, rebuild, 0.8)
+    card = fold(engine.store.read_all()).cards["card-2"]
+    assert card.evidence == sorted([sub, rebuild]) and card.verdict != "open"
+
+
+def test_a_request_that_closed_without_a_node_is_judged_again(tmp_path):
+    """Only a build ANSWERING the card holds the return. Once its request closes with nothing built,
+    nothing of the run's is in flight for it, and the card is judged as it would have been."""
+    engine, producer = _setup(tmp_path, "closed")
+    sub = _build(engine, producer, "card-2", _report("different"), x=0.3)
+    _evaluate(engine, sub, 0.9)
+    request = _request(engine)
+    _child(engine, sub, _report("as_proposed", ""), card_id="card-6", metric=0.7)
+    assert fold(engine.store.read_all()).cards["card-2"].evidence == []
+    assert engine._append_card_build_done(request, skipped="stale",
+                                          skipped_reason="not_selected_now") is True
+    card = fold(engine.store.read_all()).cards["card-2"]
+    assert card.evidence == [sub] and card.selection_ready is False
+
+
+def test_a_claimed_rebuild_is_a_rebuild_too(tmp_path):
+    """The serial lane claims the card (`node_building` names it) before its Developer call; a later
+    build beating the substitution during that call does not take the card back either."""
+    from looplab.search.card_selection import card_action
+
+    engine, producer = _setup(tmp_path, "claimed")
+    sub = _build(engine, producer, "card-2", _report("different"), x=0.3)
+    _evaluate(engine, sub, 0.9)
+    card = fold(engine.store.read_all()).cards["card-2"]
+    reservation = engine._claim_existing_card_build(card_action(card))
+    assert reservation is not None and reservation.card_id == "card-2"
+    _child(engine, sub, _report("as_proposed", ""), card_id="card-6", metric=0.7)
+    card = fold(engine.store.read_all()).cards["card-2"]
+    assert card.evidence == [] and card.status == "building"
+    assert card.status_nodes == [reservation.node_id]
+
+
+def test_a_request_for_a_card_since_merged_away_is_not_the_survivors_rebuild(tmp_path):
+    """A request is committed under its OWN card id: `_claim_requested_card_build` looks the card up
+    by it, and a card merged into another is folded out of `cards`. So card-2's open request, once
+    card-2 is merged into card-9, can never land on card-9 — it is no rebuild of card-9's, and does
+    not hold card-9's return (markers are different: a reserved node links into the survivor)."""
+    engine, producer = _setup(tmp_path, "merged")
+    sub = _build(engine, producer, "card-2", _report("different"), x=0.3)
+    _evaluate(engine, sub, 0.9)
+    assert _request(engine)["card_id"] == "card-2"
+    _add_ready_draft(engine, "card-9", x=0.4)
+    engine.store.append("card_merged", {"canonical": "card-9", "aliases": ["card-2"],
+                                        "statement": "queued proposal card-9 improves the objective"})
+    _child(engine, sub, _report("as_proposed", ""), card_id="card-6", metric=0.7)
+    state = fold(engine.store.read_all())
+    assert "card-2" not in state.cards and state.open_card_build_request_ids() == {"card-2"}
+    card = state.cards["card-9"]
+    assert card.substituted_nodes == [sub] and card.evidence == [sub]
+
+
+def test_the_substituted_nodes_own_open_request_is_not_a_rebuild(tmp_path):
+    """The one open request that is NOT a rebuild: the substituted build's own, whose
+    `card_build_done` has not landed (committed, then stopped before the close). Counting it would
+    hold the return for a card nothing is rebuilding."""
+    engine, producer = _setup(tmp_path, "own-request")
+    _add_ready_draft(engine, "card-2", x=0.3)
+    producer.last_files = _report("different")
+    request = _request(engine)
+    outcome, sub = engine._claim_requested_card_build(request, _build_result(engine, request))
+    assert outcome == "created"                                  # committed; the request is open
+    _evaluate(engine, sub, 0.9)
+    state = fold(engine.store.read_all())
+    assert state.open_card_build_request_ids() == {"card-2"} and sub not in state.speculative_nodes
+    assert state.cards["card-2"].evidence == []                   # returned: nothing beat it yet
+    _child(engine, sub, _report("as_proposed", ""), card_id="card-6", metric=0.7)
+    card = fold(engine.store.read_all()).cards["card-2"]
+    assert card.substituted_nodes == [sub] and card.evidence == [sub]
+
+
+def test_what_surpasses_a_substitution_is_a_statable_rule():
+    """`core/idea_report.py::surpassed_by` over inf13's shape: node 2 (1.37, card-2, substituted) and
+    what was later built on it, one row per clause of the rule."""
+    from looplab.core.idea_report import surpassed_by
+    from looplab.core.models import Idea, Node
+
+    def node(i, metric, parents=(), *, card, files=None, status=NodeStatus.evaluated, **kw):
+        op = "improve" if parents else "draft"
+        return Node(id=i, operator=op, parent_ids=list(parents), status=status, metric=metric,
+                    files=dict(files or {}), idea=Idea(operator=op, params={}, card_id=card), **kw)
+
+    nodes = {
+        2: node(2, 1.37, card="card-2", files=_report("different")),
+        3: node(3, 1.24, [2], card="card-5"),                    # lost to it
+        5: node(5, 4.17, [2], card="card-6"),                    # beat it (as proposed, no report)
+        7: node(7, 1.33, [2], card="card-7"),                    # lost to it…
+        10: node(10, 1.66, [7], card="card-11"),                 # …and ITS child beat it
+        11: node(11, 9.0, [2], card="card-12", files=_report("different", "its own substitute")),
+        12: node(12, 9.0, [2], card="card-2"),                   # the same card: its own rebuild
+        13: node(13, 9.0, [2], card="card-13", tombstoned=True),
+        14: node(14, None, [2], card="card-14", status=NodeStatus.pending),
+        15: node(15, 9.0, [2], card="card-15", feasible=False),
+        16: node(16, 9.0, [], card="card-16"),                   # not built on it at all
+    }
+    assert surpassed_by(2, nodes, direction="max") == [5, 10]
+    assert surpassed_by(2, nodes, direction="min") == [3, 7]
+    # `partly` still exercised its claim, so it counts; only a substitution does not
+    nodes[5].files = _report("partly", "the MLP half only")
+    assert surpassed_by(2, nodes, direction="max") == [5, 10]
+    # the champion's own exclusions: a trust-flagged or an aborted number beat nothing
+    assert surpassed_by(2, nodes, direction="max", excluded={5}, aborted={10}) == []
+    # a substitution that produced no number is surpassed by nothing
+    nodes[2] = node(2, None, card="card-2", files=_report("different"), status=NodeStatus.failed)
+    assert surpassed_by(2, nodes, direction="max") == []
+
+
+def test_the_withheld_return_is_a_function_of_the_log(tmp_path):
+    """Replay determinism, driven over a log that has all three moments — the return, a rebuild
+    request that holds it while a later build wins, and that request closing with no node. The
+    engine's own read and a fresh read of the file fold to the same Cards, and folding every PREFIX
+    of the log keeps the card returned up to the close and takes it off the board exactly there."""
+    from looplab.events.eventstore import EventStore
+
+    engine, producer = _setup(tmp_path, "replay")
+    sub = _build(engine, producer, "card-2", _report("different"), x=0.3)
+    _evaluate(engine, sub, 0.9)
+    request = _request(engine)
+    _child(engine, sub, _report("as_proposed", ""), card_id="card-6", metric=0.7)
+    assert engine._append_card_build_done(request, skipped="stale",
+                                          skipped_reason="not_selected_now") is True
+
+    events = engine.store.read_all()
+    live = fold(events)
+    again = fold(EventStore(engine.store.path).read_all())
+    assert ([(cid, c.model_dump(mode="json")) for cid, c in live.cards.items()]
+            == [(cid, c.model_dump(mode="json")) for cid, c in again.cards.items()])
+
+    returned_at = next(i for i, e in enumerate(events)
+                       if e.type == "node_evaluated" and e.data["node_id"] == sub)
+    closed_at = next(i for i, e in enumerate(events)
+                     if e.type == "card_build_done" and e.data.get("skipped") == "stale")
+    for cut in range(returned_at + 1, len(events) + 1):
+        card = fold(events[:cut]).cards["card-2"]
+        want = [sub] if cut > closed_at else []
+        assert card.evidence == want, (cut, events[cut - 1].type, card.evidence)
+        assert card.selection_ready is (cut <= closed_at), (cut, events[cut - 1].type)

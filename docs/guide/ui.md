@@ -433,8 +433,22 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   card are its two builds, and the card reads Failed with its verdict still `open`. A returned card
   keeps its forgiven node out of `evidence` while its rebuild is in flight, so the speculative
   freshness gate does not discard the rebuild; a substitution that is itself infeasible or
-  trust-excluded is never returned, so no card leaves Gated. The card pane's attempt list labels a
-  substituted node `not a test` rather than `evidence` or `reserved`. Unknown future
+  trust-excluded is never returned, so no card leaves Gated. Since 2026-09-27 neither is a
+  substitution that a later build ON it has beaten: when a descendant of the substituted node —
+  another card's experiment, which tested its own idea (its own report is not a substitution) and
+  counts under the champion's exclusions — scored better than it in the run's direction, the card
+  stays in Failed with its verdict `open`, and the Researcher's board row says why: "not returned:
+  node(s) [5, 10] built on node 2 and beat it" (MiniOneRec inf13's card-2, whose claim card-6's
+  node 5 had since tested and beaten, 4.17x against 1.37x), so it is re-proposed only if none of
+  those tested it. Nothing in the log says two cards make the same claim, so this is a proxy, and
+  the trade-off runs both ways: a descendant that tested the same claim and LOST does not block
+  (the card's one rebuild may re-test it), while an unrelated descendant that WON does. A rebuild
+  already under way — an open `card_build_requested` for the card, or a `node_building` claim — is
+  never taken back when such a descendant lands (its claim would otherwise discard the finished,
+  paid build); a request that closes without a node lets the rule judge again
+  (`events/card_ledger.py::_apply_card_returns`, `core/idea_report.py::surpassed_by`). The card
+  pane's attempt list labels a substituted node `not a test` rather than `evidence` or
+  `reserved`. Unknown future
   statuses remain visible rather than being hidden. Cards expose receipt
   completeness, selection readiness/blockers, lineage and evidence-node links. Operator controls can
   edit display text, pin the 1-based visible priority, pin a configured GPU request, deliberately

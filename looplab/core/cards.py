@@ -1382,9 +1382,11 @@ class Card(BaseModel):
     # unlike a discard they keep their metric, their node budget slot and any champion title; what
     # they lose is the claim to have tested THIS card: they never count in its verdict, and a single
     # one that is the card's whole evidence is taken out of `evidence` so the untested idea returns
-    # (never a gated one). The once-per-card bound counts these WITH `discarded_nodes`
-    # (`card_ledger.py::_apply_card_returns`): at two forgiven nodes they all stay in `evidence` and
-    # the card retires (`failed`, verdict `open`); a mixed set keeps them there too.
+    # (never a gated one, nor — with no rebuild under way — one a later build on it has beaten:
+    # `core/idea_report.py::surpassed_by`). The once-per-card bound counts these WITH
+    # `discarded_nodes` (`card_ledger.py::_apply_card_returns`): at two forgiven nodes they all
+    # stay in `evidence` and the card retires (`failed`, verdict `open`); a mixed set keeps them
+    # there too.
     substituted_nodes: list[int] = Field(default_factory=list)
     best_delta: Optional[float] = None                  # best improvement-over-parent among evidence (audit)
     # --- The RESEARCH-DIRECTION facet's own identity (DERIVED; `events/card_ledger.py`).
