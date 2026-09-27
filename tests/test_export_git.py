@@ -857,14 +857,24 @@ def test_a_git_failure_exits_1_says_why_and_leaves_nothing_behind(tmp_path, monk
     assert result.exit_code == 1, result.output
     assert "git fast-import failed: fatal:" in result.stderr and "crash report" not in result.stderr
     assert not repo.exists() and _leftovers(tmp_path) == []
-    # fast-import accepts a tree `fsck --strict` refuses: that is a failed export too.
-    monkeypatch.setattr(git_export, "fast_import_stream", stream(
-        b"commit refs/tags/node-0\nmark :1\ncommitter X <x@y> 0 +0000\ndata 2\nx\ndeleteall\n"
-        b'M 100644 inline ".git./config"\ndata 2\nx\n\ndone\n'))
-    result = _export(rd, repo)
-    assert result.exit_code == 1 and "git fsck --strict failed: error" in result.stderr
-    assert "hasDotgit" in result.stderr
-    assert not repo.exists() and _leftovers(tmp_path) == []
+    # A tree `fsck --strict` refuses is a failed export too, whichever of the two refuses it: git
+    # 2.55's fast-import refuses `.git./config` itself ("invalid path"), where 2.43's accepted it
+    # and only fsck said `hasDotgit` (CI, 2026-09-27) — so the property pinned is the fail-closed
+    # SET, and the `.gitmodules` stream (a blob fast-import never parses) keeps the fsck half driven.
+    gitmodules = b'[submodule "../../x"]\n\tpath = x\n\turl = https://example.com/x\n'
+    for tree, fsck_says in ((b'M 100644 inline ".git./config"\ndata 2\nx\n', "hasDotgit"),
+                            (b"M 100644 inline .gitmodules\ndata %d\n%s" % (len(gitmodules),
+                                                                          gitmodules),
+                             "gitmodulesName")):
+        monkeypatch.setattr(git_export, "fast_import_stream", stream(
+            b"commit refs/tags/node-0\nmark :1\ncommitter X <x@y> 0 +0000\ndata 2\nx\n"
+            b"deleteall\n" + tree + b"\ndone\n"))
+        result = _export(rd, repo)
+        assert result.exit_code == 1, result.output
+        refused_at_fsck = "git fsck --strict failed: error" in result.stderr
+        assert (refused_at_fsck and fsck_says in result.stderr) or (
+            "git fast-import failed: fatal:" in result.stderr), result.stderr
+        assert not repo.exists() and _leftovers(tmp_path) == []
     # …and nothing half-built refuses the re-run.
     monkeypatch.undo()
     assert _export(rd, repo).exit_code == 0

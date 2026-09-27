@@ -47,7 +47,10 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // constraining anything, which is exactly what the header above says happened to the old
     // numbers. The structural gates are the closures, not this line.
     // 2026-09-22: measured 561,807 B JS gzip (was 504 KiB, +44.6 KiB over) / 52,031 B CSS.
-    js: { gzip: 556 * KIB },
+    // 2026-09-27: measured 569,426 B JS gzip (was 556 KiB, +82 B over). The bytes bought: the ruler a number was measured with (doc 68 68.1) and the retargeted-objective surfaces (68.2), the drain command's "re-score, then pause" (68.3b), seed_from_run (67.2), the substituted-build Card readers and the command-settlement copy —
+    // all of it route-local lazy code; every forbidden reachability proof below still holds, and
+    // master (ed47c64b) measured 566,615 B locally and in CI alike, byte for byte.
+    js: { gzip: 557 * KIB },
     css: { gzip: 52 * KIB },
   },
   individual: {
@@ -74,7 +77,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // a hook's interface is its 17 returned names, which minification keeps in the return AND the
       // destructure: +704 B raw / +286 B gzip in the OwnerChrome chunk, measured slice by slice (the
       // two model slices beside it measured +11 / -15 B).
-      limits: { js: { gzip: 211 * KIB }, css: { gzip: 40 * KIB } },
+      // 2026-09-27: measured 217,216 B JS (was 211 KiB, +1,152 B over; master alone was +84 B):
+      // the same features as the total above, through the shared OwnerChrome/RunList closure.
+      limits: { js: { gzip: 213 * KIB }, css: { gzip: 40 * KIB } },
     },
     {
       name: 'Run compare increment',
@@ -104,14 +109,18 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // CSS after the virtual span-tree contract; 348 KiB leaves 1,019 B without weakening its lazy
       // boundary, incremental-route limits, or forbidden owner/public reachability checks.
       // 2026-09-22: measured 388,537 B JS (was 348 KiB, +31.4 KiB) / 44,969 B CSS (was 43 KiB).
-      limits: { js: { gzip: 381 * KIB }, css: { gzip: 45 * KIB } },
+      // 2026-09-27: measured 393,548 B JS (was 381 KiB, +3,404 B over; master alone +993 B): the
+      // Inspector's ruler and drain controls, the comparability refusal copy, the Card readers.
+      limits: { js: { gzip: 385 * KIB }, css: { gzip: 45 * KIB } },
     },
     {
       name: 'valid review DAG route',
       roots: [entry, named('RunView'), source('src/Dag.jsx'), source('src/ConceptChipBar.jsx')],
       // Measured 243,665 B after the same fail-closed memo projection; retain roughly 1 KiB headroom.
       // 2026-09-22: measured 259,910 B JS (was 239 KiB, +14.8 KiB) / 41,000 B CSS (was 39 KiB).
-      limits: { js: { gzip: 255 * KIB }, css: { gzip: 41 * KIB } },
+      // 2026-09-27: measured 263,037 B JS (was 255 KiB, +1,917 B over; master alone +627 B): the
+      // shared RunView half of the same features.
+      limits: { js: { gzip: 258 * KIB }, css: { gzip: 41 * KIB } },
     },
     {
       name: 'owner Concepts route',
@@ -124,7 +133,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-09-22: measured 255,694 B JS (was 233 KiB, +16.7 KiB) / 42,442 B CSS (was 40 KiB).
       // 2026-09-23: measured 257,268 B JS (was 251 KiB, +244 B over): the same OwnerChrome growth
       // as the owner List route above (UI-06's composer hook).
-      limits: { js: { gzip: 252 * KIB }, css: { gzip: 42 * KIB } },
+      // 2026-09-27: measured 259,110 B JS (was 252 KiB, +1,062 B over; master alone +42 B): the
+      // Concepts detail's objective ruler plus the shared RunView/OwnerChrome growth above.
+      limits: { js: { gzip: 254 * KIB }, css: { gzip: 42 * KIB } },
     },
     {
       name: 'panel-hub increment',
@@ -177,7 +188,10 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // panel and claim-ledger interaction budgets above.
       baselineRoots: [entry],
       // 2026-09-22: measured 88,273 B (was 80 KiB, +6.2 KiB).
-      limits: { js: { gzip: 87 * KIB } },
+      // 2026-09-27: measured 89,469 B (was 87 KiB, +381 B over; master alone +171 B): `vendor-flow`
+      // itself is byte-identical to master's; the +210 B is the shared `run-support` chunk it
+      // statically imports (the run models the features above extended).
+      limits: { js: { gzip: 88 * KIB } },
     },
   ],
   forbidden: [
