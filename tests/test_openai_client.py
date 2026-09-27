@@ -1246,3 +1246,53 @@ def test_trailing_prose_after_a_leaked_tool_call_is_not_discarded():
     assert "Before the call." in clean
     assert "After the call — this is the actual answer." in clean
     assert "invoke name=" not in clean                        # the markup itself is still stripped
+
+
+# ------------------------------------------------ doc 69 69.33: no pydantic warning flood
+
+def _pydantic_warnings(caught):
+    return [w for w in caught if "PydanticSerialization" in str(w.message)
+            or "serializer warnings" in str(w.message)]
+
+
+def test_a_gateway_shaped_response_serializes_without_a_warning(monkeypatch):
+    """The SDK builds responses unvalidated, so a gateway's `content` list, an unknown
+    `finish_reason` or tool arguments as an object reached `model_dump()` — one serializer warning
+    per call, each embedding its value so none were folded: 95 % of a real run's stderr (doc 69
+    69.33). The body is the same dict; the warning is gone."""
+    import warnings
+
+    import looplab.core.llm as llm
+    from openai.types.chat import ChatCompletion
+
+    resp = ChatCompletion.construct(
+        id="x", created=0, model="m", object="chat.completion",
+        choices=[{"index": 0, "finish_reason": "eos",
+                  "message": {"role": "assistant", "content": ["a", "list"],
+                              "tool_calls": [{"id": "t", "type": "function",
+                                              "function": {"name": "f", "arguments": {"a": 1}}}]}}],
+        usage={"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5})
+    c = llm.OpenAICompatibleClient("m", base_url="http://x/v1", stream=False)
+    monkeypatch.setattr(c, "_bounded_create", lambda kwargs, join_s, **_kw: resp)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        body = c._nonstream_bounded({"model": "m", "messages": []})
+        usage = llm._stream_usage(resp.usage.model_construct(prompt_tokens="3", completion_tokens=2,
+                                                             total_tokens=5))
+        msg = _accum([_chunk(tool_calls=[_tc(index=0, id=7, name="f", args='{"x":1}')]),
+                      _chunk(finish="tool_calls")])
+    assert _pydantic_warnings(caught) == [], [str(w.message)[:120] for w in caught]
+    assert body["choices"][0]["message"]["content"] == ["a", "list"], "the same dict as before"
+    assert usage["prompt_tokens"] == "3" and msg["tool_calls"][0]["function"]["name"] == "f"
+
+
+def test_a_duck_typed_sdk_object_is_dumped_as_it_always_was():
+    """`_sdk_dump` asks for `warnings=False` and falls back for a `model_dump` that takes no keyword
+    (the test doubles the streaming-cost tests build, a non-pydantic provider shim)."""
+    import types
+
+    import looplab.core.llm as llm
+
+    assert llm._sdk_dump(types.SimpleNamespace(model_dump=lambda: {"a": 1})) == {"a": 1}
+    assert llm._stream_usage(types.SimpleNamespace(model_dump=lambda: {"total_tokens": 6})) == {
+        "total_tokens": 6}

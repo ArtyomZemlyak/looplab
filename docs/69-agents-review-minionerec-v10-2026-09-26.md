@@ -380,7 +380,7 @@ UnseenRecall@20=0.03328)» уйдёт в межпрогонные claims как 
 - **69.30** OPEN[inject-autostarts-stopped-run] inject на остановленный прогон поднимает движок (§7). proof:`present:EV_INJECT_NODE: (EnginePolicy.ENSURE_RUNNING@looplab/serve/control_validation.py`
 - **69.31** OPEN[canary-never-reused-across-nodes] прошедшая канарейка привязана к id узла (§7). proof:`present:coerce_node_id(d) == node_id@looplab/engine/eval_canary.py`
 - **69.32** OPEN[provider-cache-hits-invisible] нормализованный usage теряет поля кэша провайдера (§7). proof:absent:cached_tokens@looplab/core/llm.py
-- **69.33** OPEN[pydantic-warning-flood] сериализация ответа шлюза сыплет предупреждения pydantic в stderr (§7). proof:`present:self._bounded_create(kwargs, join_s).model_dump()@looplab/core/llm.py`
+- **69.33** *Закрыто 2026-09-27: здесь стоял `pydantic-warning-flood`. SDK строит ответ без валидации (`model_construct`), и ответ шлюза в форме, которой модели не объявляют (`content` списком, `finish_reason` вне Literal, аргументы инструмента объектом), при каждом `model_dump()` давал предупреждение сериализатора с самим значением в тексте — фильтр «один раз на место» их не складывал. Все три дампа ответа SDK (не-потоковый ответ, `usage` потока, дельта вызова инструмента) идут через `core/llm.py::_sdk_dump` — `model_dump(warnings=False)`, словарь тот же; ключевым словом, а не `warnings.catch_warnings()`, который меняет глобальное состояние под потоками движка; объект без этого ключа (дубль теста, шим провайдера) выгружается как прежде (`tests/test_openai_client.py`).*
 
 **Среда (§8)**
 - **69.34** *Закрыто 2026-09-27: здесь стоял `threads-sized-from-affinity-not-quota`. Бюджет CPU

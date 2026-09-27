@@ -777,12 +777,30 @@ def _envelope_is_truncated(body: Optional[dict]) -> bool:
     return bool(choices) and (choices[0] or {}).get("finish_reason") == STREAM_TRUNCATED_FINISH_REASON
 
 
+def _sdk_dump(value) -> dict:
+    """`value.model_dump()` for an SDK response object, WITHOUT pydantic's serializer warnings.
+
+    The SDK builds its response models UNVALIDATED (`model_construct`), so a gateway answering in a
+    shape the models do not declare — `content` as a list, a `finish_reason` outside the Literal,
+    tool arguments as an object — keeps that value, and every `model_dump()` of it printed a
+    `PydanticSerializationUnexpectedValue` warning whose text embeds the value, so Python's
+    once-per-location filter never folded two of them: 95 % of a real run's stderr (doc 69 69.33).
+    The dict is the same either way; only the warning goes. `warnings=` is a KEYWORD, not a
+    `warnings.catch_warnings()` block, because that one mutates process-global state under the
+    engine's threads. A duck-typed object whose `model_dump` takes no keyword (a test double, a
+    non-pydantic provider shim) is dumped as it always was."""
+    try:
+        return value.model_dump(warnings=False)
+    except TypeError:
+        return value.model_dump()
+
+
 def _stream_usage(value) -> dict:
     """Best-effort mapping extraction for an SDK streaming usage object."""
     if isinstance(value, dict):
         return value
     try:
-        dumped = value.model_dump()
+        dumped = _sdk_dump(value)
     except Exception:  # noqa: BLE001 - malformed optional telemetry is not a transport failure
         return {}
     return dumped if isinstance(dumped, dict) else {}
@@ -1357,7 +1375,7 @@ class OpenAICompatibleClient:
         at the explicit wall guard or the historical timeout+header window, then serialize it."""
         join_s = (self.wall_timeout if self.wall_timeout is not None
                   else self.timeout + self.header_timeout + 10)
-        return self._bounded_create(kwargs, join_s).model_dump()
+        return _sdk_dump(self._bounded_create(kwargs, join_s))
 
     def _pool_teardown_is_safe_locked(self) -> bool:
         """May this wedged call tear down the SHARED client? Caller holds `_inflight_lock`.
@@ -1551,7 +1569,7 @@ class OpenAICompatibleClient:
                 if r:
                     reasoning.append(r)
                 for tc in (getattr(d, "tool_calls", None) or []):
-                    tcd = tc.model_dump()               # reuse the tested index-merge logic (_tool_call_slot)
+                    tcd = _sdk_dump(tc)                 # reuse the tested index-merge logic (_tool_call_slot)
                     idx = _tool_call_slot(tcs, tcd)     # provider-omitted `index` must not collapse calls
                     slot = tcs.setdefault(idx, {"id": None, "type": "function",
                                                 "function": {"name": "", "arguments": []}})
