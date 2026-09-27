@@ -376,7 +376,17 @@ UnseenRecall@20=0.03328)» уйдёт в межпрогонные claims как 
 
 **Пропускная способность и пульт (§7)**
 - **69.28** OPEN[ready-dispatch-waits-for-cadence] сессия выдачи до каденса открывается только при заявке на сборку (§7). proof:`present:is not None or speculative_state.buildings)@looplab/engine/orchestrator.py`
-- **69.29** OPEN[stale-card-build-runs-to-completion] продюсер сборки не прерывается, когда его заявку закрыли как устаревшую (§7). proof:`present:worker, abandon_on_cancel=False, limiter=limiter)@looplab/engine/speculation.py`
+- **69.29** *Закрыто 2026-09-27 коммитом `0e7bdab4` (док 68, 68.7): здесь стоял
+  `stale-card-build-runs-to-completion`. Закрытие заявки теперь останавливает её живую сборку:
+  `engine/speculation.py::_append_card_build_done` (и сеть под другими путями закрытия —
+  `_discard_orphaned_spec_results`) взводит токен сборки, который её фазы читают через
+  `agents/tool_loop.py::phase_cancel_scope`: `agents/agent.py::run_phase` не начинает новую фазу и
+  отдаёт токен циклу как `cancel_check` (граница хода, обрыв идущей генерации). Сброс Card с живой
+  сборкой закрывает её заявку сразу (`card_dropped`). `abandon_on_cancel=False`, на который
+  указывал маркер, оставлен намеренно: воркер по-прежнему дожидаются — остановка кооперативная, и
+  дожидаться теперь секунды. Не сделано из предложенного в §7: сборка Card, которую выбор просто
+  перестал предпочитать (`not_selected_now`), не отменяется (её результат держится для
+  переизбрания), и AUTO-глубина из отношения длительностей сборки и оценки.*
 - **69.30** OPEN[inject-autostarts-stopped-run] inject на остановленный прогон поднимает движок (§7). proof:`present:EV_INJECT_NODE: (EnginePolicy.ENSURE_RUNNING@looplab/serve/control_validation.py`
 - **69.31** OPEN[canary-never-reused-across-nodes] прошедшая канарейка привязана к id узла (§7). proof:`present:coerce_node_id(d) == node_id@looplab/engine/eval_canary.py`
 - **69.32** OPEN[provider-cache-hits-invisible] нормализованный usage теряет поля кэша провайдера (§7). proof:absent:cached_tokens@looplab/core/llm.py
