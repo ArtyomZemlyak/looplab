@@ -226,6 +226,23 @@ def test_the_receipt_is_fold_ignored_so_no_selection_can_move(clean_scanned_run)
     assert with_rows.reward_hacks == [] and with_rows.best_node_id == without.best_node_id
 
 
+def test_a_real_repo_task_lists_no_workdir_audit_it_cannot_run(tmp_path):
+    """Critic 2026-09-27 (driven): `examples/repo_task.json` protects a file and places no asset —
+    every repo task does, `RepoTask.assets()` is `{}` — so the audit compares nothing, and the
+    receipt still listed it among the detectors that looked. The engine as constructed; no field is
+    set by hand."""
+    from pathlib import Path
+
+    from looplab.adapters.tasks import load_task
+
+    task = load_task(Path(__file__).resolve().parents[1] / "examples" / "repo_task.json")
+    engine = make_engine(tmp_path / "run", task=task, n_seeds=1, max_nodes=1, workdir_audit=True,
+                         reward_hack_detect=True)
+    assert engine._repo_spec.get("protected_names") and not engine._assets
+    names = engine._trust_scan_detectors("print(1)\n")
+    assert TRUST_DETECTOR_REWARD_HACK in names and TRUST_DETECTOR_WORKDIR_AUDIT not in names
+
+
 def test_the_detector_list_is_the_scan_s_own_decision_not_a_second_copy(tmp_path):
     """The receipt's claim is "these detectors looked", and the only way that claim can be true is
     if the scan branches on the SAME value. Both directions, driven rather than pinned: the names
@@ -234,20 +251,26 @@ def test_the_detector_list_is_the_scan_s_own_decision_not_a_second_copy(tmp_path
     both = make_engine(tmp_path / "both", n_seeds=1, max_nodes=1,
                        code_leakage_detect=True, critic_check=True, reward_hack_detect=True,
                        workdir_audit=True)
-    # The workdir audit compares the workdir against the protected names and the assets; with
-    # neither it compares an empty set, and it is not named among the detectors that looked (doc 69
-    # 69.18: "9/9 clean" on a repo task with nothing protected). The toy task places none.
+    # The workdir audit compares the workdir against the baselines the engine PLACED; with none it
+    # compares an empty set, and it is not named among the detectors that looked (doc 69 69.18:
+    # "9/9 clean" on a repo task with nothing protected). The toy task places none — and a
+    # protected name with no asset is no baseline either: `_audit_workdir_writes` skips it as
+    # un-judgeable, and a repo task's `protect:` list is exactly that (critic 2026-09-27, driven).
     assert not both._audited_names()
     assert TRUST_DETECTOR_WORKDIR_AUDIT not in both._trust_scan_detectors(_LEAKY_SOLUTION)
-    for field, value in (("_assets", {"train.csv": "a,b\n"}),
-                         ("_repo_spec", {"protected_names": ["score.py"]})):
-        setattr(both, field, value)
+    full = {TRUST_DETECTOR_REWARD_HACK, TRUST_DETECTOR_WORKDIR_AUDIT,
+            TRUST_DETECTOR_CODE_LEAKAGE, TRUST_DETECTOR_CRITIC}
+    for assets, spec, listed in (({"train.csv": "a,b\n"}, {}, True),
+                                 ({}, {"protected_names": ["score.py"]}, False),
+                                 ({"score.py": "x = 1\n"}, {"protected_names": ["score.py"]}, True)):
+        both._assets, both._repo_spec = assets, spec
         names = both._trust_scan_detectors(_LEAKY_SOLUTION)
-        assert set(names) == {TRUST_DETECTOR_REWARD_HACK, TRUST_DETECTOR_WORKDIR_AUDIT,
-                              TRUST_DETECTOR_CODE_LEAKAGE, TRUST_DETECTOR_CRITIC}, field
+        assert set(names) == (full if listed else full - {TRUST_DETECTOR_WORKDIR_AUDIT}), (assets, spec)
         assert list(names) == [name for name in TRUST_DETECTORS if name in set(names)], (
             "order is the contract")
-        setattr(both, field, {})
+        assert bool(both._audit_workdir_writes(tmp_path / "empty_wd", both._audited_names())) is listed, (
+            "listed exactly when the audit has something to compare — here, a deleted baseline")
+    both._assets, both._repo_spec = {}, {}
 
     # Every OTHER detector must be named OFF explicitly: since 2026-08-23 `reward_hack_detect`
     # defaults ON (and `workdir_audit` always did), so a test that names only the one it wants would

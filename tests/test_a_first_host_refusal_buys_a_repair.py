@@ -277,10 +277,11 @@ _REJECT = {"action": "reject_idea", "rationale": "the idea cannot meet the gate"
 
 def _run(tmp_path, results, *, pipeline=_HOST_PIPELINE, verdicts=(_REJECT,), deferral=True,
          lead=False, account=False, champion=1.37, cap=None, reasons=None, dev=None,
-         direction="max"):
+         direction="max", retargets=()):
     """One node's evaluation through the real attempt loop. A CHAMPION (node 0, metric `champion`) is
     seeded by default, because the value gate defers nothing without one; `champion=None` seeds
-    none and the node under test is then node 0."""
+    none and the node under test is then node 0. `retargets` are operator `metric_retarget` keys
+    appended in order after it, over a declared extra metric `filtered` the champion recorded."""
     judge = _SeqJudge(list(verdicts))
     dev = dev or _RecDev(_GOOD, tail=_GOOD + "# repaired\n")
     eng = _engine(tmp_path / "run", dev=dev, judge=judge)
@@ -305,8 +306,13 @@ def _run(tmp_path, results, *, pipeline=_HOST_PIPELINE, verdicts=(_REJECT,), def
     if champion is not None:          # an evaluated champion the would-be number is held against
         eng.store.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
                                           "idea": idea, "code": _GOOD})
-        eng.store.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": champion})
+        eng.store.append("node_evaluated", {
+            "node_id": 0, "generation": 0, "metric": champion,
+            **({"extra_metrics": {"filtered": 0.3},
+                "extra_metrics_provenance": {"filtered": "declared"}} if retargets else {})})
         nid = 1
+    for key in retargets:
+        eng.store.append("metric_retarget", {"key": key})
     eng.store.append("node_created", {"node_id": nid, "parent_ids": [], "operator": "draft",
                                       "idea": idea, "code": _GOOD})
 
@@ -390,6 +396,25 @@ def test_no_champion_no_deferral(tmp_path):
     assert nid == 0 and not _rows(events, "node_repaired") and not dev.errors
     (failed,) = _rows(events, "node_failed")
     assert failed["reason"] == "idea_rejected" and failed["triage_action"] == "reject_idea"
+
+
+def test_under_a_retarget_the_would_be_number_has_no_champion_to_beat(tmp_path):
+    """Critic 2026-09-27 (driven): the would-be number is on the TASK's scale (the host scorer's
+    `would_be_key`), and under an operator retarget `best()` ranks by the declared objective — the
+    gate held a speedup of 4.27 against a recall of 0.3 and bought a repair. Beating the champion's
+    task-scale 2.5 is no evidence either, on a scale the run is no longer ranked by. MUTATION: read
+    the champion as before -> held; read its task-scale number -> held."""
+    events, _judge, dev, nid = _run(tmp_path, [_refused(would_be=4.27), _passed()], champion=2.5,
+                                    retargets=("filtered",))
+    assert nid == 1 and not _rows(events, "node_repaired") and not dev.errors
+    (failed,) = _rows(events, "node_failed")
+    assert failed["reason"] == "idea_rejected" and failed["triage_action"] == "reject_idea"
+    # …and a retarget UNDONE restores the gate, on the task's own number again.
+    events, *_ = _run(tmp_path / "undone", [_refused(would_be=4.27), _passed()], champion=2.5,
+                      retargets=("filtered", None))
+    (repaired,) = _rows(events, "node_repaired")
+    assert repaired["judge_deferred"] == {**_HELD_WORDS, "would_be": 4.27, "champion_metric": 2.5,
+                                          "champion_node_id": 0}
 
 
 def test_no_declared_would_be_number_no_deferral(tmp_path):

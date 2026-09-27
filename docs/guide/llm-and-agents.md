@@ -576,7 +576,8 @@ one triage call per attempt.
 2026-09-26). When the operator's host scorer refuses a candidate through its declared contract
 (`cmd.host_scorer.expect`) for the FIRST time in a node's lifecycle, the task declares
 `host_scorer.would_be_key`, the refused candidate's would-be number beats the current champion (a run
-with no champion yet defers nothing), and the repair
+with no champion yet defers nothing, and neither does one under an operator `metric_retarget`: the
+would-be number is on the task's scale, the champion is ranked on the objective's), and the repair
 cap leaves room for another judged attempt, a `reject_idea` is **held** for one repair: the repair's
 prompt shows the verdict and the judge's words, the next judged attempt decides (`reject_idea`
 included), and if the chain ends first — the Developer declaring it stuck, a dead provider, a floor,

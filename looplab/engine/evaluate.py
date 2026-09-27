@@ -771,7 +771,16 @@ def _held_reject_from_log(repair_log, *, enabled: bool) -> Optional[str]:
 def _champion(state) -> tuple[Optional[float], Optional[int]]:
     """The folded champion as the value gate reads it: `(metric, node id)` off `RunState.best()`, or
     `(None, None)` when there is none yet — the pair `deferred_triage_verdict` is asked with and
-    records on the row it holds (`DeferredVerdict.as_row`)."""
+    records on the row it holds (`DeferredVerdict.as_row`).
+
+    UNDER AN OPERATOR RETARGET there is none to hold against (critic 2026-09-27, driven): the would-be
+    number is read off the host scorer's `would_be_key` — the TASK's scale — while `best()` ranks by
+    the declared objective (doc 68 68.2), so the gate held a speedup against a recall. The champion's
+    own task-scale number would not do either: beating it on a scale the run is no longer ranked by is
+    no evidence the candidate is worth a repair on the one it is. No comparison, no deferral — the
+    rule's own "no champion" case, and a retarget undone (`key: null`) restores the gate."""
+    if isinstance(getattr(state, "objective_key", None), str):
+        return None, None
     best = state.best() if state is not None and hasattr(state, "best") else None
     metric = getattr(best, "metric", None) if best is not None else None
     if not isinstance(metric, (int, float)) or isinstance(metric, bool):
@@ -1705,10 +1714,18 @@ class EvaluateMixin:
         return getattr(self.developer, "inner", self.developer)
 
     def _audited_names(self) -> set:
-        """What the workdir audit compares a candidate's workdir against: the task's protected names
-        and the assets the engine placed there — one derivation, read by the detector list the
-        receipt reports AND by the scan (doc 69 69.18)."""
+        """The protected set a candidate is scanned against: the task's protected names and the
+        assets the engine placed there — handed to the static reward-hack scan and to the workdir
+        audit alike (doc 69 69.18)."""
         return set(self._repo_spec.get("protected_names", [])) | set(self._assets)
+
+    def _audit_baselines(self) -> set:
+        """What the workdir audit can actually COMPARE: the names in `_audited_names()` the engine
+        placed a baseline for. `_audit_workdir_writes` skips every other one as un-judgeable, so a
+        protected name with no asset — every repo task's `protect:` list, since `RepoTask.assets()`
+        is `{}` — compares nothing, and must not list the audit among the detectors that looked
+        (critic 2026-09-27, driven on `examples/repo_task.json`)."""
+        return {name for name in self._audited_names() if self._assets.get(name) is not None}
 
     def _trust_scan_detectors(self, scan_src: str) -> tuple[str, ...]:
         """WHICH detectors this engine will run over one node's surface, in `TRUST_DETECTORS` order.
@@ -1728,10 +1745,11 @@ class EvaluateMixin:
             names.append(TRUST_DETECTOR_REWARD_HACK)
             if self._exploit_suite is not None:
                 names.append(TRUST_DETECTOR_EXPLOIT_SUITE)
-            # …and only over something to compare: with no protected name and no asset the audit
-            # compares an EMPTY set, and the receipt listed it beside the detectors that looked —
-            # "9/9 clean" on a repo task with nothing protected (doc 69 69.18).
-            if self._workdir_audit and self._audited_names():
+            # …and only over something to compare: with no placed baseline the audit compares an
+            # EMPTY set, and the receipt listed it beside the detectors that looked — "9/9 clean" on
+            # a repo task with nothing protected (doc 69 69.18), or with a `protect:` list and no
+            # asset, which is every repo task (`_audit_baselines`).
+            if self._workdir_audit and self._audit_baselines():
                 names.append(TRUST_DETECTOR_WORKDIR_AUDIT)
         if self._code_leakage_detect and scan_src:
             names.append(TRUST_DETECTOR_CODE_LEAKAGE)
