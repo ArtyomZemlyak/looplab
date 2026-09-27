@@ -112,7 +112,6 @@
         "generation": 0,
         "detectors": [
           "reward_hack",
-          "workdir_audit",
           "code_leakage",
           "critic"
         ],
@@ -1149,7 +1148,6 @@
         "generation": 0,
         "detectors": [
           "reward_hack",
-          "workdir_audit",
           "code_leakage",
           "critic"
         ],
@@ -1285,7 +1283,6 @@
         "generation": 0,
         "detectors": [
           "reward_hack",
-          "workdir_audit",
           "code_leakage",
           "critic"
         ],
@@ -1421,7 +1418,6 @@
         "generation": 0,
         "detectors": [
           "reward_hack",
-          "workdir_audit",
           "code_leakage",
           "critic"
         ],
@@ -1543,7 +1539,6 @@
         "generation": 0,
         "detectors": [
           "reward_hack",
-          "workdir_audit",
           "code_leakage",
           "critic"
         ],
@@ -1705,7 +1700,6 @@
         "generation": 0,
         "detectors": [
           "reward_hack",
-          "workdir_audit",
           "code_leakage",
           "critic"
         ],
@@ -1805,7 +1799,6 @@
         "generation": 0,
         "detectors": [
           "reward_hack",
-          "workdir_audit",
           "code_leakage",
           "critic"
         ],
