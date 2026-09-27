@@ -155,7 +155,8 @@ def task_fingerprint(kind: str, direction: str, goal: str, metric: str = "",
     return sorted(toks)
 
 
-def bound_fingerprint(tokens) -> list[str]:
+def bound_fingerprint(tokens, *, max_tokens: int = _MAX_SOURCE_FINGERPRINT,
+                      max_chars: int = _MAX_SOURCE_ID) -> list[str]:
     """The sorted fingerprint, BOUNDED to what `claims_health._valid_claim_source_row` accepts (doc 69
     69.14). One the reader already accepts is returned byte for byte as it always was; one it would
     refuse loses every token past `_MAX_SOURCE_ID` (a cut would mint a token no task has), keeps the
@@ -164,12 +165,12 @@ def bound_fingerprint(tokens) -> list[str]:
     says so (`bound_lesson_fingerprint`), since its overlap with another task's moved in a direction
     nobody measured."""
     out = sorted(tokens)
-    if len(out) <= _MAX_SOURCE_FINGERPRINT and all(len(t) <= _MAX_SOURCE_ID for t in out):
+    if len(out) <= max_tokens and all(len(t) <= max_chars for t in out):
         return out
-    fitting = [t for t in out if len(t) <= _MAX_SOURCE_ID]
+    fitting = [t for t in out if len(t) <= max_chars]
     facets = [t for t in fitting if t.startswith(_FINGERPRINT_FACETS)]
     rest = [t for t in fitting if not t.startswith(_FINGERPRINT_FACETS)]
-    return sorted(facets + rest[:max(0, _MAX_SOURCE_FINGERPRINT - len(facets))])
+    return sorted(facets + rest[:max(0, max_tokens - len(facets))])
 
 
 def bound_lesson_fingerprint(row) -> bool:
@@ -552,6 +553,38 @@ def next_auto_skill_status(prior_status: str, different: bool) -> str:
     return "promoted" if different else "candidate"
 
 
+# How many confirming task ids a card keeps (its `confirmed_tasks:`), newest last — the same six
+# its `fingerprints:` history keeps (`tools/skills.py::SKILL_FINGERPRINT_FAMILIES`).
+_SKILL_TASKS_KEPT = 6
+
+
+def _one_line_json(value) -> str:
+    """`value` as JSON on ONE physical line, for the `source_task:` / `confirmed_tasks:` scalars.
+
+    json.dumps escapes CR/LF and ASCII controls, but deliberately leaves these three
+    Unicode line separators intact under ensure_ascii=False.  Escape them explicitly so
+    the audit scalar is one logical AND physical line for non-Python frontmatter readers."""
+    text = json.dumps(value, ensure_ascii=False)
+    for separator, escape in (("\u0085", r"\u0085"), ("\u2028", r"\u2028"),
+                              ("\u2029", r"\u2029")):
+        text = text.replace(separator, escape)
+    return text
+
+
+def _stored_skill_tasks(metadata: dict) -> list[str]:
+    """The task ids a card records as having confirmed it (`confirmed_tasks:`), failing closed on
+    drift; a card written before the list says only its last writer's (`source_task:`)."""
+    raw = metadata.get("confirmed_tasks")
+    try:
+        value = json.loads(raw if raw is not None else "[" + str(metadata.get("source_task", "")) + "]")
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if (not isinstance(value, list) or len(value) > _SKILL_TASKS_KEPT
+            or not all(isinstance(t, str) and 0 < len(t) <= 1024 for t in value)):
+        return []
+    return value
+
+
 def _skill_contradiction(metadata: dict, lesson_rows: list[dict]) -> Optional[dict]:
     """The newest lesson row that REVERSES this card's claim, or None.
 
@@ -582,15 +615,23 @@ def _skill_contradiction(metadata: dict, lesson_rows: list[dict]) -> Optional[di
     if newest is None or str(newest.get("outcome", "")) not in _NEGATIVE:
         return None
     if status == "promoted":
-        # A CUT fingerprint cannot place the row in the card's family (doc 69 69.14,
-        # `trust/cross_run.py::lesson_fingerprint_complete`): its overlap moved with the cut.
         from looplab.trust.cross_run import lesson_fingerprint_complete
-        if not lesson_fingerprint_complete(newest):
-            return None
         stored = _stored_skill_fingerprints(metadata.get("fingerprints", ""))
         row_fp = newest.get("fingerprint")
         row_fp = [t for t in row_fp if isinstance(t, str)] if isinstance(row_fp, list) else []
-        if not any(fingerprint_similarity(row_fp, old) >= _SKILL_SAME_FAMILY for old in stored if old):
+        if lesson_fingerprint_complete(newest):
+            same = any(fingerprint_similarity(row_fp, old) >= _SKILL_SAME_FAMILY
+                       for old in stored if old)
+        else:
+            # A CUT fingerprint serves its own exact task only (doc 69 69.14,
+            # `trust/cross_run.py::lesson_fingerprint_complete`): its overlap with any other family
+            # moved with the cut. Its own task is its TASK ID, as the bound tools key it
+            # (`LessonScope`) — never two cut sets comparing equal, which two long goals sharing
+            # their first sorted words do. Refusing every cut row, the first cut of this rule, left
+            # a long-goal task unable to reverse a card even for itself (critic 2026-09-27, driven).
+            task = newest.get("task_id")
+            same = isinstance(task, str) and bool(task) and task in _stored_skill_tasks(metadata)
+        if not same:
             return None
     return newest
 
@@ -1104,6 +1145,18 @@ def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
     evidenced paraphrases to confirm one canonical technique without making fuzzy similarity an
     authority boundary."""
     try:
+        # THE READER'S FENCE, owned by the writer (the 69.14 rule, and the bug it named, one store
+        # over): `tools/skills.py::parse_skill_fingerprints` fails the WHOLE `fingerprints:` list
+        # closed on one family past its bounds, so a long-goal task's whole fingerprint (605 tokens,
+        # critic 2026-09-27, driven) made every family unreadable and the next write kept only its
+        # own. Past the fence it is stored — and compared — as `bound_fingerprint` cuts it to that
+        # fence, deterministically, so one task still compares equal to itself; inside it, as given.
+        from looplab.tools.skills import SKILL_FINGERPRINT_TOKEN_CHARS, SKILL_FINGERPRINT_TOKENS
+        fingerprint = [t for t in fingerprint if isinstance(t, str)]
+        if (len(fingerprint) > SKILL_FINGERPRINT_TOKENS
+                or any(len(t) > SKILL_FINGERPRINT_TOKEN_CHARS for t in fingerprint)):
+            fingerprint = bound_fingerprint(set(fingerprint), max_tokens=SKILL_FINGERPRINT_TOKENS,
+                                            max_chars=SKILL_FINGERPRINT_TOKEN_CHARS)
         d = Path(skills_dir)
         d.mkdir(parents=True, exist_ok=True)
         identity_source = str(identity_claim or statement)
@@ -1139,6 +1192,9 @@ def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
             # existing cooperating writers, nested after the directory identity-selection lock.
             locks.enter_context(interprocess_lock(Path(str(p) + ".lock"), required=True))
             status, fps = "candidate", [fingerprint]
+            # WHICH TASKS confirmed this claim, by id — the identity a lesson row with a CUT
+            # fingerprint is matched on (`_skill_contradiction`), bounded like the families.
+            tasks = [str(task_id)]
             carried: dict[str, str] = {}
             if p.exists():
                 head = p.read_text(encoding="utf-8")
@@ -1159,6 +1215,7 @@ def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
                     raw_fingerprints = metadata.get("fingerprints")
                     if raw_fingerprints is not None:
                         fps = _stored_skill_fingerprints(raw_fingerprints)
+                    tasks = _stored_skill_tasks(metadata) or tasks
                     prior_status = metadata.get("status", "").strip().lower()
                     different = any(
                         fingerprint_similarity(fingerprint, old) < 0.6 for old in fps if old)
@@ -1170,13 +1227,9 @@ def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
                                ("demotions", "demoted_by", "demoted_outcome") if metadata.get(key)}
                     if fingerprint not in fps:
                         fps = (fps + [fingerprint])[-6:]
-            source_task = json.dumps(str(task_id), ensure_ascii=False)
-            # json.dumps escapes CR/LF and ASCII controls, but deliberately leaves these three
-            # Unicode line separators intact under ensure_ascii=False.  Escape them explicitly so
-            # the audit scalar is one logical AND physical line for non-Python frontmatter readers.
-            for separator, escape in (("\u0085", r"\u0085"), ("\u2028", r"\u2028"),
-                                      ("\u2029", r"\u2029")):
-                source_task = source_task.replace(separator, escape)
+                    if str(task_id) not in tasks:
+                        tasks = (tasks + [str(task_id)])[-_SKILL_TASKS_KEPT:]
+            source_task = _one_line_json(str(task_id))
             classifier = (str(classifier_version).strip()
                           if re.fullmatch(r"[a-zA-Z0-9._/-]{1,80}", str(classifier_version or ""))
                           else "")
@@ -1199,6 +1252,7 @@ def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
                     # duplicate-key compatibility rule is last-one-wins).  JSON keeps it on one
                     # physical line while retaining the full Unicode identifier for audit.
                     f"source_task: {source_task}\n"
+                    f"confirmed_tasks: {_one_line_json(tasks)}\n"
                     f"fingerprints: {json.dumps(fps)}\n"
                     + "".join(f"{key}: {value}\n" for key, value in carried.items()
                               if re.fullmatch(r"[a-z_]+", key) and "\n" not in str(value))

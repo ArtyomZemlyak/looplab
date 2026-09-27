@@ -2579,6 +2579,10 @@ class RunState(BaseModel):
     # compares against it and records every new change, not only the run's first (doc 69 69.20).
     # Fold-internal, excluded from dumps like `simplified_cut`; None until a change is recorded.
     workspace_now: Optional[dict] = Field(default=None, exclude=True)
+    # …and, per source, the last reading recorded of each KIND (`git`, `hash`, `file`, …) across
+    # those rows, so a re-entry that reads a source another way is compared against the last reading
+    # of ITS kind (`engine/setup_phase.py::workspace_moved`, critic 2026-09-27). Fold-internal too.
+    workspace_seen: Optional[dict] = Field(default=None, exclude=True)
     # F18: folded like workspace_changed so the env-drift note is emitted ONCE, not re-appended on
     # every resume of an upgraded run (the emit is gated on `not state.env_changed`).
     env_changed: bool = False

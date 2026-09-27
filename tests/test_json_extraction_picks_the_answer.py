@@ -180,8 +180,8 @@ def test_an_object_that_answers_nothing_is_never_the_answer():
 def test_an_EMPTY_answer_typed_after_the_echo_still_answers():
     """`{}` and the schema's echo tie at (0, False), and "the first candidate wins ties" handed the
     echo — typed first — a win `_answers` then refused: "…Nothing to change: {}" RAISED where the
-    reply answered (critic 2026-09-27, driven). An answer outranks a non-answer at the same fit.
-    MUTATION: rank on the fit alone -> the first reply below raises again."""
+    reply answered (critic 2026-09-27, driven). The ECHO ranks below everything else at the same
+    fit. MUTATION: rank on the fit alone -> the first reply below raises again."""
     from looplab.core.parse import ParseError
 
     echo = json.dumps(_SCHEMA)
@@ -190,6 +190,109 @@ def test_an_EMPTY_answer_typed_after_the_echo_still_answers():
     # Two non-answers still answer nothing, whichever is typed first.
     with pytest.raises(ParseError):
         _extract_json(f'The schema is {echo}. Another shape: {{"kind": "x"}}', _SCHEMA)
+
+
+def test_an_empty_object_in_prose_never_outranks_the_model_s_own_object():
+    """The first cut of the rule above let ANY answer outrank ANY non-answer, and `{}` answers: a
+    `cfg = {}` in a snippet or a `"{}".format` placeholder after the model's own wrong-shaped object
+    then won, and validated into the all-default answer 69.17 is about — the report path published
+    an empty report as the model's (critic 2026-09-27, driven). Only the schema's own ECHO ranks
+    below `{}`; the model's wrong shape ties with it, wins as the first typed, and is refused, so
+    the caller's fallback decides. MUTATION: rank every non-answer below `{}` -> `{}` is returned."""
+    from looplab.core.parse import ParseError, _standing
+
+    for reply in ('{"title": "recall improved 12%", "body": "the champion wins"}\nNote: '
+                  '`cfg = {}` is the default.',
+                  '{"summary_line": "recall improved"}  (render with "{}".format(x))'):
+        with pytest.raises(ParseError):
+            _extract_json(reply, _SCHEMA)
+    # `{}` typed FIRST is still the first candidate, as it always was.
+    assert _extract_json('Defaults are {}. {"summary_line": "recall improved"}', _SCHEMA) == {}
+    # The echo test is every name a JSON-Schema keyword — one foreign name makes a wrong shape.
+    assert _standing({"type": "object", "title": "T", "properties": {}}, (0, False)) == 0
+    assert _standing({"title": "x", "body": "y"}, (0, False)) == 1
+    assert _standing({}, (0, False)) == 1 and _standing({"operator": "x"}, (0, True)) == 1
+
+
+def test_a_field_s_alias_is_its_own_spelling_never_drift():
+    """`_case_drifted` read `{"Operator": …}` as drift for a field whose ALIAS is `Operator`, sent it
+    to the repair — which keys by field name — and the value was lost: the default, or a ParseError
+    for a required field (critic 2026-09-27, driven; latent, no parse target has an alias today).
+    MUTATION: ignore aliases -> `d` / ParseError."""
+    from pydantic import Field
+
+    from looplab.core.parse import _case_drifted
+
+    class _Alias(BaseModel):
+        operator: str = Field(default="d", alias="Operator")
+
+    class _AliasReq(BaseModel):
+        operator: str = Field(alias="Operator")
+
+    class _Client:
+        model = "m"
+
+        def complete_tool(self, messages, json_schema, **kw):
+            raise RuntimeError("force the text path")
+
+        def complete_text(self, messages, **kw):
+            return '{"Operator": "improve"}'
+
+    msgs = [{"role": "user", "content": "go"}]
+    assert not _case_drifted({"Operator": "improve"}, _Alias)
+    assert _case_drifted({"OPERATOR": "improve"}, _Alias), "another case of the alias still drifts"
+    assert parse_structured(_Client(), msgs, _Alias, "baml").operator == "improve"
+    assert parse_structured(_Client(), msgs, _AliasReq, "baml").operator == "improve"
+
+
+def _parse_attrs(tmp_path, client, model):
+    """`parse_structured` under a real tracer; returns (answer, the structured_parse attributes)."""
+    from looplab.core.tracing import JsonlSpanExporter, Tracer
+
+    path = tmp_path / "spans.jsonl"
+    tracer = Tracer(JsonlSpanExporter(path))
+    with tracer.span("propose", kind="operation"):
+        answer = parse_structured(client, [{"role": "user", "content": "x"}], model)
+    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    return answer, next(r for r in rows if r.get("name") == "structured_parse")["attributes"]
+
+
+def test_an_exact_key_beside_its_case_variant_is_no_drift_and_no_repair(tmp_path):
+    """The exact field name present means the drift rule has nothing to rescue: plain validation
+    reads it, and the win is a CLEAN one on the span (`repaired: False`). MUTATION: drop the
+    exact-name check -> the same value, recorded `repaired: True` (critic 2026-09-27, e4-08)."""
+    class _Op(BaseModel):
+        operator: str = "d"
+
+    class _Both:
+        def complete_tool(self, messages, schema):
+            return {"operator": "a", "Operator": "b"}
+
+    answer, attrs = _parse_attrs(tmp_path, _Both(), _Op)
+    assert answer.operator == "a" and attrs["repaired"] is False and attrs["attempts"] == 1
+
+
+def test_a_drifted_key_whose_value_does_not_fit_is_dropped_not_fatal(tmp_path):
+    """`{"note": …, "N": "a few"}` for an int `n`: the drift sent it to the repair, the repair could
+    not coerce "a few", and the reply that parsed in ONE call before the drift rule cost a second
+    provider call and then the whole parse (critic 2026-09-27, driven). The plain validation the
+    drift skipped is the last rung: the junk key is dropped, `note` kept, and the span says the
+    answer was repaired. MUTATION: no fallback -> ParseError after two calls."""
+    class _Out(BaseModel):
+        note: str = ""
+        n: int = 0
+
+    class _Junk:
+        calls = 0
+
+        def complete_tool(self, messages, schema):
+            self.calls += 1
+            return {"note": "raise the margin", "N": "a few"}
+
+    client = _Junk()
+    answer, attrs = _parse_attrs(tmp_path, client, _Out)
+    assert (answer.note, answer.n) == ("raise the margin", 0)
+    assert client.calls == 1 and attrs["repaired"] is True
 
 
 def test_a_CASE_DRIFTED_answer_reaches_the_repair_end_to_end():

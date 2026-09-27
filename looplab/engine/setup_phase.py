@@ -96,13 +96,21 @@ def _declared_reference(task):
     return normalized_reference(dump(mode="json", exclude_none=True)) if callable(dump) else None
 
 
-def workspace_moved(last, now) -> bool:
-    """Did a workspace source move between two recorded fingerprints (`workspace.py::
-    WorkspaceSeeder.workspace_fingerprint`)? One added or removed, or one whose two fingerprints are
-    of ONE kind and differ. Two of different kinds say nothing about the source — a `git rev-parse`
-    that timed out once fell to the stat hash (`triage.py::_dir_fingerprint`) and read as a change,
-    and the next entry's git answer as a change back, with nothing changed (critic 2026-09-27,
-    driven) — except `absent`, which is a state of the source, not a way of reading it."""
+def workspace_moved(last, now, seen=None) -> bool:
+    """Did a workspace source move since the last recorded fingerprint (`workspace.py::
+    WorkspaceSeeder.workspace_fingerprint`)? One added or removed (or `absent`, a state of the
+    source rather than a way of reading it), or one whose reading differs from the last recorded
+    reading OF ITS KIND.
+
+    THE KIND IS WHO ANSWERS. `git:<sha>` and `hash:<stat digest>` are two ways of reading a source,
+    so two of different kinds say nothing about it on their own: a `git rev-parse` that timed out
+    once fell to the stat hash, and the next entry's git answer read as a change back with nothing
+    changed (critic 2026-09-27, driven). So the reading is compared against the last one recorded of
+    its own kind — `seen`, `{source: {kind: reading}}`, the run's start and every row's `now`
+    (`recorded_readings`). A source read a way it never was before has no such reading, and nothing
+    recorded can vouch for it: that is a move. The first cut of this rule compared only same-kind
+    pairs and recorded nothing across kinds, so a LASTING change of kind — a `git init` in a hash-
+    read editable, a `.git` removed — blinded the chain for good (critic 2026-09-27, driven)."""
     if not (isinstance(last, dict) and isinstance(now, dict)):
         return last != now
     for key in set(last) | set(now):
@@ -111,9 +119,28 @@ def workspace_moved(last, now) -> bool:
             continue
         if not (isinstance(was, str) and isinstance(is_, str)) or "absent" in (was, is_):
             return True
-        if was.split(":", 1)[0] == is_.split(":", 1)[0]:
+        kind = is_.split(":", 1)[0]
+        if was.split(":", 1)[0] == kind:
+            return True
+        prior = ((seen or {}).get(key) or {}).get(kind)
+        if prior != is_:                             # never read this way, or it moved since
             return True
     return False
+
+
+def recorded_readings(start, seen) -> dict:
+    """`{source: {kind: reading}}` over the run's own fingerprint (`run_started.workspace`) and every
+    `workspace_changed` row after it (`RunState.workspace_seen`, the later reading of a kind wins) —
+    what `workspace_moved` compares a re-entry's differently-read source against."""
+    out: dict = {}
+    for key, value in (start if isinstance(start, dict) else {}).items():
+        if isinstance(key, str) and isinstance(value, str) and ":" in value:
+            out.setdefault(key, {})[value.split(":", 1)[0]] = value
+    for key, kinds in (seen if isinstance(seen, dict) else {}).items():
+        if isinstance(key, str) and isinstance(kinds, dict):
+            out.setdefault(key, {}).update(
+                {k: v for k, v in kinds.items() if isinstance(k, str) and isinstance(v, str)})
+    return out
 
 
 class SetupPhaseMixin:
@@ -360,7 +387,8 @@ class SetupPhaseMixin:
             # the previous row's `now`, or the run's own fingerprint before any.
             last = state.workspace_now if isinstance(state.workspace_now, dict) else state.workspace
             now = self._workspace_fingerprint()
-            if workspace_moved(last, now):
+            if workspace_moved(last, now,
+                               recorded_readings(state.workspace, state.workspace_seen)):
                 self.store.append(EV_WORKSPACE_CHANGED, {"was": last, "now": now})
         # P0-5 environment drift: on ANY resume where an env was pinned at run start, flag a Python/
         # library change — a run continued after an upgrade is no longer bit-reproducible, so record it

@@ -282,9 +282,12 @@ Written durably, at cost, and consumed by no prompt and no decision:
   once-per-task dedup. Fresh configurations therefore do not schedule this paid run-end call;
   `task_facets_finalize` explicitly opts in without removing the manual/on-demand APIs.
 * **Auto-skill lifecycle metadata** — `claim_sha256` binds evidence to the complete normalized
-  technique, and `fingerprints` drive the cross-task promotion decision; `source_task` is audit
-  provenance only. None is returned to a reasoning role; `status` gates visibility and
-  `provenance` labels the skill read path as described above.
+  technique, and `fingerprints` drive the cross-task promotion decision (each family bounded by the
+  writer to the reader's own fence — 512 tokens of at most 1,024 characters — and cut
+  deterministically past it); `confirmed_tasks` (the last six task ids that confirmed the claim) is
+  what a lesson row with a CUT fingerprint is matched on when it reverses a promoted card, and
+  `source_task` is audit provenance only. None is returned to a reasoning role; `status` gates
+  visibility and `provenance` labels the skill read path as described above.
 
 The steward curation logs used to be listed here, as "proposal-only, a human review queue plus the
 paid-call idempotency ledger", and they do not belong: no prompt reads them, but three decisions do —
@@ -771,7 +774,8 @@ kind/direction/metric facets kept, the rest in sorted order) and record what the
 `fingerprint_omitted`. What a cut keeps moves its overlap with any other task in a direction nobody
 measured, so such a row serves its own task and never admits a foreign one
 (`trust/cross_run.py::lesson_fingerprint_complete`, read by the bound tools, the Researcher's
-cross-run pack and the auto-skill lifecycle). The task fingerprint itself is not bounded: a concept
+cross-run pack and the auto-skill lifecycle) — its own task being its TASK ID, never another cut
+set that happens to compare equal (two long goals sharing their first sorted words cut alike). The task fingerprint itself is not bounded: a concept
 capsule keeps its own receipt of what it cuts. Rows written before 69.14 are refused by every fenced
 reader and retired by nothing — the passive prompt prior applies no fence and does read them (a real
 run's store hid 29 of 77 rows this way).

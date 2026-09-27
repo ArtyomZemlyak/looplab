@@ -647,6 +647,32 @@ def test_the_clause_is_kept_for_any_key_and_touches_nothing_else():
             assert keep_retarget_clause(full, full[:stop]) == full, (key, stop)
 
 
+def test_a_body_that_quotes_a_clause_is_never_cut_at_the_quote():
+    """The clause-piece strip searched the whole cut for the clause's opening, so a lesson whose
+    BODY quotes an earlier clause was truncated at that quote — body text gone, and a rendered cut's
+    truncation receipt with it, so the line read as a complete statement (critic 2026-09-27,
+    driven) — and "the cut kept the clause" was read off the quote too. The piece is cut where the
+    clause STARTS in the statement, only off a raw prefix, and a cut keeps the clause only where it
+    ENDS with it. MUTATIONS: search with `rfind` or `find` -> the body is cut at the quote; `in`
+    for `endswith` -> no clause appended."""
+    from looplab.trust.cross_run import cross_run_text, keep_retarget_clause, retargeted_lesson_note
+
+    note = retargeted_lesson_note("filtered")
+    body = ("margin 0.3 helps; an older row said" + note + " and was reversed by three runs since, "
+            "so this one keeps going ")
+    full = body * 3 + note
+    for stop in (len(body) + 20, len(body) * 2 + 5, len(body) * 3 - 1):
+        assert keep_retarget_clause(full, full[:stop]) == full[:stop] + note, stop
+    rendered = cross_run_text(full, max_chars=100, single_line=True, entropy=True)
+    assert not full.startswith(rendered), "precondition: a rendered cut is no raw prefix"
+    assert keep_retarget_clause(full, rendered) == rendered + note, "the receipt stays"
+    # …also one that reaches past where the clause starts: only a raw prefix is cut there.
+    short = "margin 0.3 helps " * 3 + note
+    rendered = cross_run_text(short, max_chars=len(short) - 20, single_line=True, entropy=True)
+    assert len(rendered) > len(short) - len(note) and not short.startswith(rendered)
+    assert keep_retarget_clause(short, rendered) == rendered + note
+
+
 def test_the_steward_the_context_pack_and_the_strategist_keep_the_clause(tmp_path):
     """LOW (critic 2026-09-27, second pass, driven): the claim steward's 400-character cut, the
     proposal context pack's and the Strategist's mixed-evidence note's 120-character cuts took the

@@ -1200,12 +1200,14 @@ def test_a_model_concept_id_keeps_every_real_concept():
     from looplab.search.concept_graph import model_concept_id
     for cid in ("loss/method", "regularization/none", "features/id", "loss/contrastive/dcl",
                 "negatives/external-mining", "ensembling", "model/resnet-50", "layer2/block3",
-                "viz/bar-chart"):
+                "viz/bar-chart", "loss/l1-l2", "optimizer/sgd-v2", "model/x"):
         assert model_concept_id(cid) == cid
     assert model_concept_id("ensembling", axis_required=True) == ""
     for echo in ("axis/slug", "axis_name/short_slug", "axis/family/method/variant", "concept-id",
                  "placeholder", "data/placeholder-1", "n/a", "unknown", "", None, "bad!",
                  # a number or a filler names nothing (critic 2026-09-27: each of these passed)
                  "axis/slug-1", "axis1/slug1", "your-axis/your-slug", "my-axis/my-slug", "foo/bar",
-                 "123/456"):
+                 "123/456",
+                 # …nor a version tag or a one-letter filler (the next pass: each of these passed)
+                 "axis/slug-v2", "axis/slug-x", "concept/slug-2a"):
         assert model_concept_id(echo) == "", echo

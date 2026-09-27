@@ -209,9 +209,9 @@ def _extract_json(text: str, schema=None) -> dict:
     # end of the reply: measured at 0.63 s against 0.0002 s on a 197 KB reply with 16,001 braces,
     # per structured call on the text-parser path. `_JSON_CANDIDATE_CAP` never bounded that, because
     # it counts DECODED candidates and the cost is in the failed `raw_decode` attempts.
-    perfect = (len(required), bool(declared), True)
+    perfect = (len(required), bool(declared), 1)
     best: dict | None = None
-    best_rank = (-1, False, False)
+    best_rank = (-1, False, -1)
     seen = 0
     i = text.find("{")
     while i != -1:
@@ -224,12 +224,16 @@ def _extract_json(text: str, schema=None) -> dict:
             if not declared and not required:
                 return obj                      # no schema to judge by: the historical behaviour
             fit = _schema_fit(obj, required, declared)
-            # An ANSWER outranks a non-answer at the same fit, and that is the only tie it moves:
-            # `{}` (every field left to its default) and the schema's own echo both score (0, False),
-            # so "the first candidate wins ties" handed the echo — typed first — a win `_answers`
-            # then refused, and "…Nothing to change: {}" raised (critic 2026-09-27, driven). An
-            # object carrying a required or declared name answers by definition.
-            rank = (*fit, _answers(obj, fit))
+            # The schema's own ECHO ranks below everything else at the same fit, and that is the
+            # only tie this moves: `{}` (every field left to its default) and the echo both score
+            # (0, False), so "the first candidate wins ties" handed the echo — typed first — a win
+            # `_answers` then refused, and "…Nothing to change: {}" raised (critic 2026-09-27,
+            # driven). NOT "an answer outranks any non-answer", which was the first cut: an empty
+            # `{}` anywhere in the reply — a `cfg = {}` in a snippet, a `"{}".format` — then beat
+            # the model's own wrong-shaped object and validated into the all-default answer 69.17
+            # is about (critic 2026-09-27, driven); tied, the wrong shape wins as the first typed,
+            # and is refused below.
+            rank = (*fit, _standing(obj, fit))
             if rank > best_rank:                # strictly better only — the first candidate wins ties
                 best, best_rank = obj, rank
             if best_rank >= perfect:
@@ -240,7 +244,7 @@ def _extract_json(text: str, schema=None) -> dict:
         # Resume AFTER the object just decoded: a nested `{` inside it is not a second candidate.
         i = text.find("{", max(end, i + 1))
     if best is not None:
-        if best_rank[2]:
+        if _answers(best, best_rank[:2]):
             return best
         # THE BEST OF WHAT WAS READ ANSWERS NOTHING (doc 69 69.17): it carries names, and not one
         # the schema declares — the schema's own echo, an example of another shape. Returned, it
@@ -260,6 +264,32 @@ def _extract_json(text: str, schema=None) -> dict:
         except (ValueError, SyntaxError, MemoryError, RecursionError):
             pass
     raise ParseError("no JSON object found in text")
+
+
+# The names a JSON Schema document is written in (draft 2020-12 core + validation + the metadata a
+# pydantic `model_json_schema()` emits). An object made only of these, carrying none of the names
+# the schema declares, is the schema's own ECHO — the text path's hint pastes it — and the one
+# candidate `_extract_json` ranks below an empty object (`_standing`).
+_JSON_SCHEMA_KEYWORDS = frozenset({
+    "$schema", "$id", "$ref", "$defs", "$comment", "$anchor", "$dynamicRef", "$dynamicAnchor",
+    "$vocabulary", "definitions", "type", "title", "description", "properties", "required",
+    "additionalProperties", "unevaluatedProperties", "patternProperties", "propertyNames",
+    "minProperties", "maxProperties", "dependentRequired", "dependentSchemas", "items",
+    "prefixItems", "additionalItems", "unevaluatedItems", "contains", "minContains",
+    "maxContains", "minItems", "maxItems", "uniqueItems", "enum", "const", "default", "examples",
+    "anyOf", "allOf", "oneOf", "not", "if", "then", "else", "format", "pattern", "minLength",
+    "maxLength", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+    "readOnly", "writeOnly", "deprecated", "discriminator", "contentEncoding", "contentMediaType",
+})
+
+
+def _standing(obj: dict, fit: tuple[int, bool]) -> int:
+    """A candidate's rank among those of the same `_schema_fit`: 0 for the schema's own ECHO (a
+    non-empty object whose every name is a JSON-Schema keyword and none a declared one), 1 for any
+    other — an answer, `{}`, or a wrong-shaped object, which then tie and the first typed wins."""
+    if fit[0] or fit[1] or not obj:
+        return 1
+    return 0 if all(isinstance(k, str) and k in _JSON_SCHEMA_KEYWORDS for k in obj) else 1
 
 
 def _answers(obj: dict, fit: tuple[int, bool]) -> bool:
@@ -321,15 +351,23 @@ def _coerce_value(val, ann):
 
 def _case_drifted(obj, model) -> bool:
     """Whether a reply names a model field ONLY in another case (`{"Operator": …}` for `operator`,
-    with no `operator` key beside it) — the key `_coerce_to_model` reads and plain validation drops."""
+    with no `operator` key beside it) — the key `_coerce_to_model` reads and plain validation drops.
+
+    A field's ALIASES are its own spellings, never drift: `Field(alias="Operator")` validates
+    `{"Operator": …}` as it stands, and read as drift it was sent to the repair, which keys its
+    output by field NAME and so dropped the value it was meant to save (critic 2026-09-27)."""
     if not isinstance(obj, dict):
         return False
-    names = model.model_fields
-    folded = {n.lower(): n for n in names}
+    spellings = {name: {name} | {a for a in (field.alias, field.validation_alias)
+                                 if isinstance(a, str)}
+                 for name, field in model.model_fields.items()}
+    exact = set().union(*spellings.values())
+    folded = {spelling.lower(): name for name, accepted in spellings.items()
+              for spelling in accepted}
     for k in obj:
-        if isinstance(k, str) and k not in names:
-            n = folded.get(k.lower())
-            if n is not None and n not in obj:
+        if isinstance(k, str) and k not in exact:
+            name = folded.get(k.lower())
+            if name is not None and not (spellings[name] & obj.keys()):
                 return True
     return False
 
@@ -418,7 +456,8 @@ def _walk_parsers(client, messages, model, schema, order, obs) -> T:
             # stands, a model that ignores unknown keys DROPS that value and answers the field's
             # default as though the model had chosen it — the 69.17 shape, which the answer check's
             # case fold (critic 2026-09-27) would otherwise let through.
-            if not _case_drifted(obj, model):
+            drifted = _case_drifted(obj, model)
+            if not drifted:
                 try:
                     answer = model.model_validate(obj)
                     obs.set("parser_used", p).set("attempts", attempts).set("repaired", False)
@@ -428,7 +467,16 @@ def _walk_parsers(client, messages, model, schema, order, obs) -> T:
             # H2 schema-aligned repair: coerce common type/format drift, then re-validate. Only
             # if THAT fails do we fall through to the next parser — so a weak model's near-miss
             # (e.g. {"degree":"3"} or single-quoted keys) parses instead of crashing the run.
-            answer = model.model_validate(_coerce_to_model(obj, model))
+            try:
+                answer = model.model_validate(_coerce_to_model(obj, model))
+            except ValidationError:
+                if not drifted:
+                    raise
+                # The drifted VALUE does not fit its field (`{"N": "a few"}` for an int `n`): the
+                # plain validation the drift rule skipped, which drops that key and keeps every
+                # other field — what this reply parsed as before the rule, in one call, where
+                # refusing it cost a second provider call and then the parse (critic 2026-09-27).
+                answer = model.model_validate(obj)
             # `repaired` is the OTHER half of the H2 question and is not the same fact as which
             # parser won: a `tool_call` that only validated after coercion is a native FC that
             # nearly collapsed, and counting it as a clean win would hide precisely the signal

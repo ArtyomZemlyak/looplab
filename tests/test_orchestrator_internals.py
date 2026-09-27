@@ -159,12 +159,8 @@ def test_every_workspace_change_is_recorded_and_the_rows_chain(tmp_path):
     assert second["was"] == first["now"] and second["now"] != first["now"]
 
 
-def test_a_re_entry_that_reads_the_workspace_another_way_writes_no_row(tmp_path, monkeypatch):
-    """At the re-entry itself, not only the rule: an editable read as git on one entry and by its
-    stat hash on the next (a `rev-parse` that timed out) records nothing (critic 2026-09-27).
-    MUTATION: compare the raw fingerprints at the call site -> a row."""
-    from looplab.events.eventstore import EventStore
-
+def _workspace_entries(tmp_path):
+    """A non-git editable and a function that ENTERS the run once (start or resume)."""
     repo = _repo(tmp_path, 'import json; print(json.dumps({"metric": 1.0}))\n')
     t = RepoTask(id="w", direction="max", editable_path=str(repo), edit_surface=["*.txt"],
                  eval=EvalSpec(command=[sys.executable, "run.py"], metric=_M))
@@ -176,13 +172,55 @@ def test_a_re_entry_that_reads_the_workspace_another_way_writes_no_row(tmp_path,
                                 sandbox=SubprocessSandbox(),
                                 policy=GreedyTree(n_seeds=1, max_nodes=1)).run)
 
+    def rows():
+        from looplab.events.eventstore import EventStore
+        return [e.data for e in EventStore(run_dir / "events.jsonl").read_all()
+                if e.type == "workspace_changed"]
+
+    return enter, rows
+
+
+def test_a_lasting_change_of_kind_keeps_the_chain_alive(tmp_path, monkeypatch):
+    """A `git init` + commit in a hash-read editable is read as git from then on. The first cut of the
+    kind rule wrote nothing across kinds and compared every later git reading with the run's hash,
+    so the chain went silent for good — two real commits after it left no row (critic 2026-09-27,
+    driven). Now the first git reading is a move (nothing recorded vouches for it) and every later
+    one is compared with the last git reading. MUTATION: compare only same-kind pairs -> no rows."""
+    enter, rows = _workspace_entries(tmp_path)
     start = enter().workspace
     assert all(v.startswith("hash:") for v in start.values()), start
-    monkeypatch.setattr(Engine, "_workspace_fingerprint",
-                        lambda self: {key: "git:" + "0" * 40 for key in start})
-    enter()
-    assert not [e for e in EventStore(run_dir / "events.jsonl").read_all()
-                if e.type == "workspace_changed"]
+    for sha in ("1" * 40, "2" * 40, "2" * 40):
+        monkeypatch.setattr(Engine, "_workspace_fingerprint",
+                            lambda self, sha=sha: {key: "git:" + sha for key in start})
+        enter()
+    first, second = rows()
+    assert first["was"] == start and set(first["now"].values()) == {"git:" + "1" * 40}
+    assert second["was"] == first["now"] and set(second["now"].values()) == {"git:" + "2" * 40}
+
+
+def test_a_one_off_read_the_other_way_is_one_row_and_the_way_back_is_none(tmp_path, monkeypatch):
+    """A `git rev-parse` that timed out once falls to the stat hash: that entry has nothing to vouch
+    for its reading and records it; the next entry reads git again, and is compared with the LAST
+    GIT reading — the same, so nothing — where the raw rule wrote a second row for the flip back.
+    A later real commit is still a move, against the git reading it replaced."""
+    enter, rows = _workspace_entries(tmp_path)
+    a, b, c = ("git:" + ch * 40 for ch in "abc")
+    h = "hash:0123456789abcdef"
+    # The git reading the flip comes back to was recorded by a ROW (a -> b), not by the run's
+    # start: the look-back is the fold's, not the start's (MUTATION: seed it from the start only ->
+    # the flip back to b reads as a move against a).
+    readings = iter([a, b, h, b, c])
+    current = {}
+
+    def _fingerprint(self):
+        return {"editable:.": current["v"]}
+
+    monkeypatch.setattr(Engine, "_workspace_fingerprint", _fingerprint)
+    for _ in range(5):
+        current["v"] = next(readings)
+        enter()
+    assert [(r["was"]["editable:."], r["now"]["editable:."]) for r in rows()] == [
+        (a, b), (b, h), (h, c)]
 
 
 def test_a_task_edited_between_entries_is_recorded_and_the_rows_chain(tmp_path):
@@ -237,20 +275,66 @@ def test_a_task_edited_between_entries_is_recorded_and_the_rows_chain(tmp_path):
     assert not [e for e in legacy.read_all() if e.type == EV_TASK_CHANGED]
 
 
-def test_two_ways_of_reading_one_source_are_not_a_change():
-    """A `git rev-parse` that timed out once falls to the stat hash, and the chain read git→hash as
-    a change and hash→git as another, with nothing changed (critic 2026-09-27, driven). Only two
-    fingerprints of one kind are compared; a source added, removed or gone is a change whatever
-    the kinds. MUTATION: compare the raw values -> the flip reads as a change."""
-    from looplab.engine.setup_phase import workspace_moved
+def test_a_source_is_compared_with_the_last_reading_of_its_own_kind():
+    """`setup_phase.py::workspace_moved` as a truth table. Two readings of different kinds say
+    nothing about the source on their own, so a reading is compared with the last recorded one OF
+    ITS KIND; a source read a way it never was before is a move (nothing vouches for it); a source
+    added, removed or gone is a move whatever the kinds. MUTATIONS: compare the raw values -> the
+    flip back reads as a move; compare only same-kind pairs -> a new way of reading is silent."""
+    from looplab.engine.setup_phase import recorded_readings, workspace_moved
 
     git, hashed = {"editable:.": "git:abc"}, {"editable:.": "hash:0123"}
-    assert not workspace_moved(git, hashed) and not workspace_moved(hashed, git)
-    assert workspace_moved(git, {"editable:.": "git:def"})
-    assert workspace_moved(hashed, {"editable:.": "hash:4567"})
-    assert workspace_moved(git, {"editable:.": "absent"}) and workspace_moved({"editable:.": "absent"}, hashed)
+    both = recorded_readings(git, {"editable:.": {"hash": "hash:0123"}})
+    assert both == {"editable:.": {"git": "git:abc", "hash": "hash:0123"}}
+    assert not workspace_moved(hashed, git, both), "the flip back to the last git reading"
+    assert not workspace_moved(git, hashed, both), "…and to the last hash reading"
+    assert workspace_moved(hashed, {"editable:.": "git:def"}, both)
+    assert workspace_moved(git, {"editable:.": "hash:4567"}, both)
+    assert workspace_moved(git, hashed, recorded_readings(git, None)), "never read by hash before"
+    assert workspace_moved(hashed, git, recorded_readings(hashed, None)), "never read by git before"
+    assert workspace_moved(git, {"editable:.": "git:def"}, recorded_readings(git, None))
+    assert workspace_moved(git, {"editable:.": "absent"}, both)
+    assert workspace_moved({"editable:.": "absent"}, hashed, both)
     assert workspace_moved(git, {**git, "data:x": "dir:1:2"}) and workspace_moved({**git, "data:x": "dir:1:2"}, git)
     assert not workspace_moved(git, dict(git))
+    # A later row's reading of a kind replaces the run's own.
+    assert recorded_readings(git, {"editable:.": {"git": "git:new"}}) == {"editable:.": {"git": "git:new"}}
+    assert recorded_readings(None, None) == {} and recorded_readings({"editable:.": "absent"}, None) == {}
+
+
+def test_a_nested_cache_no_node_is_seeded_with_never_moves_the_stat_hash(tmp_path):
+    """The stat hash skips every path whose ANY part is a name no node is seeded with
+    (`workspace_seed.IGNORE_NAMES`), not only a top-level one. MUTATION: ask the first part only ->
+    a nested `pkg/__pycache__` rewrite moves the hash again (critic 2026-09-27, 0a-02)."""
+    from looplab.engine.triage import _dir_fingerprint
+
+    repo = tmp_path / "repo"
+    (repo / "pkg").mkdir(parents=True)
+    (repo / "pkg" / "mod.py").write_text("x = 1\n", encoding="utf-8")
+    before = _dir_fingerprint(repo)
+    assert before.startswith("hash:"), before
+    (repo / "pkg" / "__pycache__").mkdir()
+    (repo / "pkg" / "__pycache__" / "mod.cpython-311.pyc").write_bytes(b"\x00" * 16)
+    (repo / "pkg" / "sub" / "node_modules").mkdir(parents=True)
+    (repo / "pkg" / "sub" / "node_modules" / "x.js").write_text("1\n", encoding="utf-8")
+    assert _dir_fingerprint(repo) == before
+    (repo / "pkg" / "mod.py").write_text("x = 2  # and longer\n", encoding="utf-8")
+    assert _dir_fingerprint(repo) != before
+
+
+def test_the_fold_keeps_each_source_s_last_reading_per_kind():
+    from looplab.events.replay import fold
+    from looplab.events.eventstore import Event
+
+    def _row(seq, now):
+        return Event(seq=seq, ts=float(seq), type="workspace_changed", data={"was": {}, "now": now})
+
+    st = fold([_row(1, {"editable:.": "hash:1", "data:d": "dir:1:2"}),
+               _row(2, {"editable:.": "git:a"}), _row(3, {"editable:.": "git:b"})])
+    assert st.workspace_now == {"editable:.": "git:b"}
+    assert st.workspace_seen == {"editable:.": {"hash": "hash:1", "git": "git:b"},
+                                 "data:d": {"dir": "dir:1:2"}}
+    assert "workspace_seen" not in st.model_dump(), "fold-internal, like workspace_now"
 
 
 # --------------------------------------------------------------------------- gap-safe node-id alloc

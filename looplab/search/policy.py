@@ -199,12 +199,16 @@ def _load_bearing_starts(code: str) -> Optional[frozenset]:
 
 def _multiline_token_spans(code: str) -> Optional[tuple]:
     """The (first, last) 1-based lines of every token that spans lines — a triple-quoted string, an
-    f-string broken across lines — or None when the tokenizer refuses `code`."""
+    f-string broken across lines — or None when the tokenizer refuses `code`.
+
+    Read with UNIVERSAL newlines (`newline=None`), so a bare `\r` ends a line here as it does for
+    `str.splitlines` and `ast`: read as `readline` splits by default, it did not, and a triple-quoted
+    string holding one was numbered off by the lines it spans (critic 2026-09-27, driven)."""
     import io
     import tokenize
     try:
         return tuple((tok.start[0], tok.end[0])
-                     for tok in tokenize.generate_tokens(io.StringIO(code).readline)
+                     for tok in tokenize.generate_tokens(io.StringIO(code, newline=None).readline)
                      if tok.start[0] != tok.end[0])
     except (tokenize.TokenError, SyntaxError, ValueError, RecursionError, MemoryError):
         return None

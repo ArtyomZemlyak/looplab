@@ -68,6 +68,14 @@ def skill_tier(skill: Skill) -> str:
     return "global"
 
 
+# The bounds `parse_skill_fingerprints` holds a card's `fingerprints:` list to — named because the
+# WRITER must bound to them (`engine/memory.py::write_auto_skill`; the reader fails the whole list
+# closed on one family past them).
+SKILL_FINGERPRINT_FAMILIES = 6
+SKILL_FINGERPRINT_TOKENS = 512
+SKILL_FINGERPRINT_TOKEN_CHARS = 1024
+
+
 def parse_skill_fingerprints(raw) -> list[list[str]]:
     """Parse the bounded `fingerprints:` shape auto-skill frontmatter carries, failing closed on drift.
 
@@ -82,11 +90,11 @@ def parse_skill_fingerprints(raw) -> list[list[str]]:
         value = json.loads(raw) if isinstance(raw, str) else raw
     except (json.JSONDecodeError, TypeError):
         return []
-    if not isinstance(value, list) or len(value) > 6:
+    if not isinstance(value, list) or len(value) > SKILL_FINGERPRINT_FAMILIES:
         return []
     for fingerprint in value:
-        if (not isinstance(fingerprint, list) or len(fingerprint) > 512
-                or any(not isinstance(token, str) or len(token) > 1024
+        if (not isinstance(fingerprint, list) or len(fingerprint) > SKILL_FINGERPRINT_TOKENS
+                or any(not isinstance(token, str) or len(token) > SKILL_FINGERPRINT_TOKEN_CHARS
                        for token in fingerprint)):
             return []
     return value

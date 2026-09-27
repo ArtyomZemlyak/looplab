@@ -1269,3 +1269,128 @@ def test_the_memory_fingerprints_command_refuses_in_one_line_when_the_store_cann
     assert result.exit_code == REFUSAL_EXIT_CODE, result.output
     assert "not supported on this mount; nothing was written" in result.output
     assert "Traceback" not in result.output
+
+
+def test_an_auto_skill_card_never_stores_a_family_its_own_reader_refuses(tmp_path):
+    """Critic 2026-09-27 (driven): once `task_fingerprint` stopped being bounded, a long-goal task's
+    whole fingerprint (605 tokens) went into a card's `fingerprints:` list, and
+    `tools/skills.py::parse_skill_fingerprints` — past 512 tokens — failed the WHOLE list closed: no
+    family readable, and the next confirmation rewrote the history to its own one family. The writer
+    now cuts a fingerprint past that reader's fence deterministically, so the same task still
+    compares equal to itself. MUTATION: store the whole fingerprint -> 0 readable families."""
+    import json
+
+    from looplab.engine.memory import write_auto_skill
+    from looplab.tools.skills import (SKILL_FINGERPRINT_TOKENS, SkillLibrary,
+                                      parse_skill_fingerprints, parse_skill_frontmatter)
+
+    statement, body = "Using hard negatives mined from the teacher improves recall", "Mine them."
+    fp_a = task_fingerprint("dataset", "max", "classify spam emails quickly", metric="f1")
+    fp_b = task_fingerprint("repo", "min", "reduce latency of the ranking service", metric="p99")
+    long_goal = "maximize recall " + " ".join(f"word{i:04d}" for i in range(600))
+    fp_c = task_fingerprint("repo", "max", long_goal, metric="recall")
+    assert len(fp_c) > SKILL_FINGERPRINT_TOKENS
+    skills = tmp_path / "skills"
+    write_auto_skill(skills, statement, body, fp_a, "task-A")
+    write_auto_skill(skills, statement, body, fp_b, "task-B")
+    card = write_auto_skill(skills, statement, body, fp_c, "task-C")
+
+    def families():
+        return parse_skill_fingerprints(parse_skill_frontmatter(card.read_text())["fingerprints"])
+
+    stored = families()
+    assert [len(f) for f in stored] == [len(fp_a), len(fp_b), SKILL_FINGERPRINT_TOKENS]
+    assert {"kind:repo", "dir:max", "metric:recall"} <= set(stored[2])
+    assert [len(f) for f in next(iter(SkillLibrary(skills).skills.values())).fingerprints] == [
+        len(fp_a), len(fp_b), SKILL_FINGERPRINT_TOKENS]
+    # The same long task again is the SAME family: no fourth one, and the history survives.
+    write_auto_skill(skills, statement, body, fp_c, "task-C")
+    assert families() == stored
+    assert json.loads(parse_skill_frontmatter(card.read_text())["confirmed_tasks"]) == [
+        "task-A", "task-B", "task-C"]
+
+
+def test_a_cut_lesson_row_reverses_its_own_task_s_card_and_no_other(tmp_path):
+    """Critic 2026-09-27 (driven): refusing every row whose fingerprint was cut left a long-goal task
+    unable to reverse a promoted card even for ITSELF. A cut row serves its own exact task only, and
+    that task is its TASK ID — the card records the ids that confirmed it (`confirmed_tasks:`), as
+    the bound tools key a cut row (`LessonScope`); two cut sets comparing equal is not identity
+    (two long goals sharing their first sorted words cut alike). MUTATION: refuse every cut row ->
+    no demotion; compare the cut sets -> the foreign task demotes too."""
+    from looplab.engine.memory import (bound_lesson_fingerprint, reconcile_auto_skill_statuses,
+                                       write_auto_skill)
+    from looplab.tools.skills import parse_skill_frontmatter
+
+    statement, body = "Using hard negatives mined from the teacher improves recall", "Mine them."
+    shared = " ".join(f"alpha{i:03d}" for i in range(300))
+    fp_a = task_fingerprint("repo", "max", "maximize recall " + shared + " zeta", metric="recall")
+    fp_x = task_fingerprint("repo", "max", "maximize recall " + shared + " omega", metric="recall")
+    fp_b = task_fingerprint("dataset", "max", "classify spam emails quickly", metric="f1")
+
+    def _row(fp, task):
+        row = {"statement": statement, "outcome": "abandoned", "run_id": "r2", "task_id": task,
+               "direction": "max", "fingerprint": list(fp), "evidence": [1]}
+        bound_lesson_fingerprint(row)
+        return row
+
+    foreign, own = _row(fp_x, "task-X"), _row(fp_a, "task-A")
+    assert foreign["fingerprint"] == own["fingerprint"] and own["fingerprint_omitted"] > 0, (
+        "precondition: two different long goals whose cut sets are EQUAL")
+    skills = tmp_path / "skills"
+    write_auto_skill(skills, statement, body, fp_a, "task-A")
+    card = write_auto_skill(skills, statement, body, fp_b, "task-B")
+    assert parse_skill_frontmatter(card.read_text())["status"] == "promoted"
+
+    assert reconcile_auto_skill_statuses(skills, [foreign]) == []
+    assert parse_skill_frontmatter(card.read_text())["status"] == "promoted"
+    (receipt,) = reconcile_auto_skill_statuses(skills, [own])
+    assert (receipt["from"], receipt["to"]) == ("promoted", "demoted")
+
+
+def test_a_card_written_before_the_task_list_keeps_its_last_task(tmp_path):
+    """A card from before `confirmed_tasks:` names only its last writer (`source_task:`); that task
+    is what a cut row of it is matched on, and the next write carries it into the list."""
+    import json
+    import re
+
+    from looplab.engine.memory import _stored_skill_tasks, write_auto_skill
+    from looplab.tools.skills import parse_skill_frontmatter
+
+    card = write_auto_skill(tmp_path, "Keep the history", "body", ["kind:dataset"], "task-old")
+    text = re.sub(r"(?m)^confirmed_tasks: .*\n", "", card.read_text())
+    card.write_text(text)
+    assert _stored_skill_tasks(parse_skill_frontmatter(text)) == ["task-old"]
+    write_auto_skill(tmp_path, "Keep the history", "body", ["kind:dataset"], "task-new")
+    assert json.loads(parse_skill_frontmatter(card.read_text())["confirmed_tasks"]) == [
+        "task-old", "task-new"]
+    for forged in ('"task-a"', '{"a": 1}', json.dumps(["x"] * 7), json.dumps([""]), "[1]", "["):
+        assert _stored_skill_tasks({"confirmed_tasks": forged}) == [], forged
+
+
+def test_a_duplicated_token_is_never_counted_as_cut(tmp_path):
+    """`fingerprint_omitted` counts DISTINCT tokens the cut dropped; a fingerprint past the fence only
+    through repeats (a hand-edited or legacy row) loses nothing and reads as complete. MUTATION:
+    bound the list instead of its set -> a negative receipt (critic 2026-09-27, 32-25)."""
+    from looplab.engine.memory import bound_lesson_fingerprint
+    from looplab.trust.cross_run import lesson_fingerprint_complete
+
+    tokens = sorted([f"w{i:03d}" for i in range(150)] + ["kind:repo", "dir:max"])
+    row = {"statement": "s", "outcome": "supported", "fingerprint": tokens * 3}
+    assert bound_lesson_fingerprint(row)
+    assert row["fingerprint"] == tokens and row["fingerprint_omitted"] == 0
+    assert lesson_fingerprint_complete(row)
+
+
+def test_the_migration_counts_an_undecodable_line_as_a_row(tmp_path):
+    """A line that is not UTF-8 is a row the store holds and no reader can use: the survey counts it
+    as the fenced reader's census does. MUTATION: skip it before counting -> one row short
+    (critic 2026-09-27, 32-21)."""
+    import json
+
+    from looplab.engine.claims_health import rebound_lesson_fingerprints
+
+    store = tmp_path / "lessons.jsonl"
+    good = {"statement": "good", "outcome": "supported", "evidence": [1], "task_id": "t",
+            "run_id": "r", "fingerprint": ["kind:repo"]}
+    store.write_bytes(json.dumps(good).encode() + b"\n\xff\xfe not utf-8\n\n")
+    assert rebound_lesson_fingerprints(store, apply=False)["rows"] == 2

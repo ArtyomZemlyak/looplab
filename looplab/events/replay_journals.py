@@ -64,6 +64,14 @@ def _on_workspace_changed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
     now = d.get("now")
     if isinstance(now, dict):
         st.workspace_now = now                  # the latest recorded fingerprint (69.20)
+        # …and each source's latest reading per KIND, which a re-entry reading the source another
+        # way is compared against (`engine/setup_phase.py::workspace_moved`). Rebuilt, never mutated
+        # in place: the row's own dict is the event's data.
+        seen = {key: dict(kinds) for key, kinds in (st.workspace_seen or {}).items()}
+        for key, value in now.items():
+            if isinstance(key, str) and isinstance(value, str) and ":" in value:
+                seen.setdefault(key, {})[value.split(":", 1)[0]] = value
+        st.workspace_seen = seen
 
 
 def _on_env_changed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:

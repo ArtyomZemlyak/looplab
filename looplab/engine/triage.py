@@ -106,7 +106,10 @@ def _dir_fingerprint(path) -> str:
         # What no node is ever seeded with (`workspace_seed.IGNORE_NAMES`: `.git`, the bytecode
         # caches, `.venv`, `node_modules`) cannot change what a node runs on, so it does not move
         # this either: a `.pyc` an import rewrote read as a workspace change on every re-entry of a
-        # non-git editable (critic 2026-09-27, driven).
+        # non-git editable (critic 2026-09-27, driven). Every PART of the path is asked, so a nested
+        # `pkg/__pycache__` is skipped too. THE ONE-TIME PRICE, stated rather than versioned: a run
+        # started by a build before this rule, on such an editable, reads ONE change on its first
+        # re-entry here (its recorded hash covered those files — and moved on every rewrite anyway).
         if any(fnmatch(part, pattern) for part in rel.parts for pattern in IGNORE_NAMES):
             continue
         if f.is_file():

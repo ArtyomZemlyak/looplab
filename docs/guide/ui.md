@@ -1121,9 +1121,9 @@ number was measured; the third qualifies **what it is a number for**:
 - **`trust-flagged`** — the champion carries a high-precision reward-hack or leakage signal and this
   run's `trust_gate` is `audit`, which surfaces without enforcing. Under `gate`/`block` the node could
   not have been selected, so this pill and those rungs never coexist.
-- **`params overridden`** — the champion's own committed `.py` code assigns a **different** value to a
-  parameter its experiment record declares, so the declared configuration is not the one the result was
-  produced under. The metric itself was measured normally; what is in question is the recipe beside it.
+- **`params overridden`** — the champion's own committed code, or the configuration it resolved and
+  ran under, assigns a **different** value to a parameter its experiment record declares, so the
+  declared configuration is not the one the result was produced under. The metric itself was measured normally; what is in question is the recipe beside it.
   RE-DERIVED 2026-08-26 over all 45 event logs it is the only non-empty pill on this box, and it is no
   longer one run — **3 of the 42 champions carry it**, including both leading numbers here:
   `e5small-dr-unified-v2` node 1 (0.793426), `e5small-dr-unified-v4` node 13 (0.793411, declaring

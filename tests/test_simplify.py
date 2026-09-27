@@ -1627,7 +1627,10 @@ _BREAKS = "\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
     # A block whose edge CUTS a token that spans lines: the `'''` it opens swallows a copy of its
     # own statement, which is code again once the block is gone (critic 2026-09-27, driven).
     ("a string its block opens swallows a copy of its statement",
-     "x = 1\n'''\n\nx = 1  # '''\nprint(x)\n", 0),
+     "x = 1\n'''\n\nx = 1  # '''\nprint(x)\n", 0),    # …and the same with the string's two line breaks a bare CR each, which `splitlines` and `ast`
+    # break on and a default `readline` does not (critic 2026-09-27, driven).
+    ("a CR-broken string its block opens swallows a copy of its statement",
+     "x = 1\n'''\r\rx = 1  # '''\nprint(x)\n", 0),
 ])
 def test_the_fast_path_is_the_per_block_rule(label, code, runs_nothing):
     """LOW (critic 2026-09-27, driven: 335 of 40,000 random programs). An `else:`/`finally:` header

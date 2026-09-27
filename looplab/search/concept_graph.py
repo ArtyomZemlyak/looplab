@@ -498,8 +498,20 @@ _TEMPLATE_WORDS = _PLACEHOLDER_WORDS | frozenset({
     "your", "my", "foo", "bar", "baz", "qux"})
 _SEGMENT_WORD_SPLIT = re.compile(r"[-_.]+")
 # A number NAMES nothing: a word's trailing digits are dropped (`axis1` is `axis`) and a word of
-# digits alone with them (`axis/slug-1` is `axis/slug`) — critic 2026-09-27, both passed.
+# digits alone with them (`axis/slug-1` is `axis/slug`) — critic 2026-09-27, both passed. Nor does a
+# word with fewer than two LETTERS left — a template's version tag or one-letter filler (`axis/slug-v2`,
+# `axis/slug-x`, `concept/slug-2a` passed the next pass, critic 2026-09-27) — beside a word with
+# two, since a segment of single letters is all the id has to say.
 _TRAILING_DIGITS = re.compile(r"\d+$")
+
+
+def _naming_words(segment: str) -> list[str]:
+    """The words of one id segment that could NAME something: trailing digits dropped, and a word
+    with fewer than two letters left dropped beside one with more (`slug-v2` is `slug`; a segment of
+    single letters, `a` or `x`, keeps them — see `_TRAILING_DIGITS`)."""
+    bare = [b for w in _SEGMENT_WORD_SPLIT.split(segment) if (b := _TRAILING_DIGITS.sub("", w))]
+    named = [w for w in bare if sum(ch.isalpha() for ch in w) >= 2]
+    return named or bare
 
 
 def model_concept_id(raw, *, axis_required: bool = False) -> str:
@@ -512,8 +524,7 @@ def model_concept_id(raw, *, axis_required: bool = False) -> str:
     if not cid:
         return ""
     segments = cid.split("/")
-    words = [[bare for w in _SEGMENT_WORD_SPLIT.split(seg) if (bare := _TRAILING_DIGITS.sub("", w))]
-             for seg in segments]
+    words = [_naming_words(seg) for seg in segments]
     if (any(w in _PLACEHOLDER_WORDS for ws in words for w in ws)
             or all(w in _TEMPLATE_WORDS for ws in words for w in ws)
             or (axis_required and len(segments) < 2)):
