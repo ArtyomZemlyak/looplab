@@ -25,7 +25,7 @@ import stat
 from pathlib import Path
 from typing import Optional
 
-from looplab.core.models import RunState, classifier_verified_node_concepts
+from looplab.core.models import RunState, classifier_verified_node_concepts, task_scale_metric
 
 
 # Schema/mode version for the passport. `fp_mode` records the tokenizer generation in the record, so a
@@ -40,7 +40,10 @@ SCOPE_SCHEMA_VERSION = 1
 # A cache written before this contract existed is intentionally cold-started instead of being guessed at.
 INDEX_CACHE_SCHEMA_VERSION = 3
 # Version 2 excludes proposer-authored concept claims from the portfolio evidence projection.
-INDEX_PROJECTOR_VERSION = 2
+# Version 3 records every measurement on the TASK's scale and names an operator retarget's objective
+# (doc 68 68.2): a retargeted run's facts carried a declared extra metric's values under the task
+# metric's name (critic 2026-09-27).
+INDEX_PROJECTOR_VERSION = 3
 _DIGEST_CHUNK_BYTES = 1024 * 1024
 # A task snapshot carries only adapter identity/config metadata. Bounding it independently prevents a
 # malformed or hostile run directory from turning a portfolio refresh into an unbounded allocation.
@@ -149,6 +152,7 @@ def run_facts(state: RunState, *, kind: str = "", metric: str = "", universal: b
     `task.snapshot.json` (not carried on `RunState`); everything else is folded. Deterministic: attempts are
     emitted in node-id order, all sets sorted. This is `ExecutionAttempt`/`Measurement` in lean JSON form."""
     best = state.best()
+    objective = getattr(state, "objective_key", None)
     # The passport derives ONLY from the immutable task (no winner params) — see scope_profile.
     scope = scope_profile(task_id=state.task_id, kind=kind, direction=state.direction, goal=state.goal,
                           metric=metric, universal=universal)
@@ -175,7 +179,9 @@ def run_facts(state: RunState, *, kind: str = "", metric: str = "", universal: b
             "params": dict(getattr(idea, "params", {}) or {}) if idea is not None else {},
             # `.value` (a NodeStatus is a `str, Enum`) — `str(status)` would emit "NodeStatus.evaluated".
             "status": str(getattr(st, "value", None) or getattr(st, "name", None) or st or ""),
-            "metric": getattr(nd, "robust_metric", None),
+            # On the TASK's scale — the one the passport's `metric` names (doc 68 68.2): under an
+            # operator retarget `robust_metric` is a declared extra metric's.
+            "metric": task_scale_metric(nd, objective),
             "concepts": sorted(str(c) for c in concepts),
         })
     return {
@@ -183,7 +189,11 @@ def run_facts(state: RunState, *, kind: str = "", metric: str = "", universal: b
         "scope": scope,
         "n_attempts": len(attempts),
         "attempts": attempts,
-        "best": ({"node_id": best.id, "metric": best.robust_metric} if best is not None else None),
+        # The champion the run chose — by `objective_key` when an operator retargeted it — and what
+        # it measured on the task's scale.
+        "best": ({"node_id": best.id, "metric": task_scale_metric(best, objective)}
+                 if best is not None else None),
+        **({"objective_key": objective} if objective else {}),
     }
 
 

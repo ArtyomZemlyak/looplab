@@ -25,7 +25,7 @@ import orjson
 from looplab.core.llm import BudgetExceeded
 from looplab.core.atomicio import append_jsonl_bytes_locked
 from looplab.core.models import NodeStatus, RunState, safe_lesson_node_count
-from looplab.engine.lessons_priors import LESSON_ROLE_RESEARCHER
+from looplab.engine.lessons_priors import LESSON_ROLE_RESEARCHER, retargeted_lesson_note
 from looplab.events.eventstore import interprocess_lock, read_jsonl_lenient
 from looplab.events.types import (EV_LESSONS_DISTILLED, EV_LESSONS_STORE_UNAVAILABLE,
                                   EV_REFLECTION_NOTE, EV_SKILLS_PROMOTED)
@@ -316,12 +316,22 @@ class LessonDistillMixin:
                             else (not o.get("run_uid") and o.get("run_id") == final.run_id))
                         for o in read_jsonl_lenient(npath))
                     if not _dup:
+                        # WHICH METRIC "what won" was ranked by (doc 68 68.2), said like a lesson's
+                        # (`lessons_priors.py::retargeted_lesson_note`): under an operator retarget
+                        # the winner and its number are a declared extra metric's, and a later run
+                        # of the task reads this note beside its own task metric. Stamped too
+                        # (`objective_key`, additive; the readers ignore unknown keys).
+                        objective = getattr(final, "objective_key", None)
+                        if objective:
+                            clause = retargeted_lesson_note(objective)
+                            note = note if clause in note else note + clause
                         rec = {
                             "task_id": final.task_id,
                             "note": note,
                             "direction": final.direction,
                             "fingerprint": fp,
                             "run_id": final.run_id,
+                            **({"objective_key": objective} if objective else {}),
                         }
                         if run_uid:
                             rec["run_uid"] = run_uid

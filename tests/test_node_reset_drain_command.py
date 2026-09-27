@@ -396,6 +396,9 @@ def _draining(tmp_path):
     client, _srv = _client(tmp_path, driver, timeout=30.0, observation=60.0)
     drain = _terminal(client, _post(client, "node_reset", _reset(), "drain", drain_only=True).json())
     assert drain["status"] == "succeeded" and "drain_superseded" not in drain, drain
+    # The drain's OWN reset is what it was asked to serve, never a plain one it served on the side
+    # (the `served_by_drain` mirror is for the latter — critic 2026-09-27, mutant D7).
+    assert "served_by_drain" not in drain, drain
     return rd, driver, client
 
 
@@ -485,7 +488,125 @@ def test_a_drain_a_search_served_since_it_failed_is_not_retried_into_success(tmp
                                      drain_only=True).json())
     assert failed["status"] == "failed" and failed["error"]["retryable"] is True, failed
     _ack_marked(rd)                                  # a plain resume's search served the reset
-    assert client.get(f"/api/runs/demo/commands/{failed['id']}").json()["status"] == "failed"
+    read = client.get(f"/api/runs/demo/commands/{failed['id']}").json()
+    assert read["status"] == "failed"
+    # …and it SAYS so: `retryable: true` offered a button `/retry` then refused (critic 2026-09-27).
+    assert read["error"]["retryable"] is False and read["error"]["code"] == "command_intent_spent"
     retry = client.post(f"/api/runs/demo/commands/{failed['id']}/retry")
     assert retry.status_code == 409, retry.text
     assert retry.json()["detail"]["code"] == "command_intent_spent", retry.text
+
+
+def _executing(client, record):
+    import time as _time
+
+    deadline = _time.time() + 10
+    while _time.time() < deadline:
+        current = client.get(f"/api/runs/demo/commands/{record['id']}").json()
+        if current.get("event_seq") is not None:
+            return current
+        _time.sleep(0.01)
+    raise AssertionError(f"the intent was never appended: {current}")
+
+
+@pytest.mark.parametrize("drain_pause", [True, False])
+def test_a_command_the_drain_never_acked_waits_for_the_search_and_starts_nothing(
+        tmp_path, drain_pause):
+    """HIGH (critic 2026-09-27, driven: 5 fork trials of 6 fired as the drain's rescored node
+    landed). The drain acks at its loop heads, so a fork admitted after its LAST one — here, after
+    its own pause — sat `executing` until the drain exited, locking the operator's stop out, and then
+    its monitor started a plain `resume`, which lifted the drain's pause and ran the search. On the
+    drain's OWN pause (`drain_only`) such a command settles `deferred_to_next_search` and nothing is
+    started; on any other pause the monitor re-drives the command exactly as it always did."""
+    rd, driver, client = _draining(tmp_path)
+    EventStore(rd / "events.jsonl").append("pause", {
+        "reason": "drain-only resume: done", **({"drain_only": True} if drain_pause else {})})
+    driver.on_spawn = lambda: setattr(driver, "alive", True)       # a later child: a plain search
+    sent = _executing(client, _post(client, "fork", {"from_node_id": 1, "generation": 0},
+                                    "late").json())
+    assert sent["status"] == "executing", sent
+    spawns = len(driver.calls)
+    driver.alive = False                                           # the drain exits, never acking
+    if drain_pause:
+        settled = _terminal(client, sent)
+        assert settled["status"] == "succeeded", settled
+        assert settled.get("deferred_to_next_search") is True, settled
+        assert len(driver.calls) == spawns, "nothing started the search the drain was asked to leave"
+        stop = _post(client, "pause", {}, "stop")
+        assert stop.status_code == 200, stop.text
+        assert _terminal(client, stop.json())["status"] in ("succeeded", "noop")
+        assert len(driver.calls) == spawns
+    else:
+        import time as _time
+
+        deadline = _time.time() + 10
+        while _time.time() < deadline and len(driver.calls) == spawns:
+            _time.sleep(0.01)
+        assert len(driver.calls) > spawns, "a pause that is not the drain's changes nothing"
+        assert "--drain-only" not in driver.calls[-1][0]
+
+
+def test_a_folded_intent_a_drain_deferred_is_not_said_to_wait(tmp_path):
+    """`deferred_to_next_search` is an ENGINE-ACK command's account (critic 2026-09-27, mutant D6):
+    an intent whose postcondition is its own fold was applied the moment it folded, whatever a drain
+    later acked it as."""
+    rd, _driver, client = _draining(tmp_path)
+    sent = _terminal(client, _post(client, "hint", {"text": "look at node 1"}, "hint").json())
+    assert sent["status"] == "succeeded" and sent["postcondition"] != "engine_ack", sent
+    _real_ack(rd, drain=True)
+    acks = [e.data for e in EventStore(rd / "events.jsonl").read_all() if e.type == "command_ack"
+            and e.data.get("command_id") == sent["id"]]
+    assert acks and acks[-1].get("deferred") is True, acks
+    svc = client.app.state.looplab.commands
+    again = svc._succeeded(rd, svc._path(rd, sent["id"]), dict(sent))
+    assert "deferred_to_next_search" not in again, again
+
+
+def test_what_waits_for_the_next_search_is_a_stated_rule():
+    """`_left_for_the_next_search`'s truth table: only a command that RODE on the engine alive when
+    it was admitted (never one this service started an engine for), never the drain's own reset
+    (its drain serves it), never an intent asking for the search itself, and only on the drain's own
+    pause."""
+    from looplab.engine.run_boundary import DRAIN_LEFT_FOR_THE_SEARCH
+    from looplab.serve.run_commands import RunCommandService
+
+    class _Observation:
+        def __init__(self, paused):
+            self.paused = paused
+
+        def drain_paused(self):
+            return self.paused
+
+    rule = RunCommandService._left_for_the_next_search
+    rode = {"event_type": "fork"}
+    assert rule(rode, _Observation(True)) is True
+    assert rule(rode, _Observation(False)) is False
+    assert rule({**rode, "spawned_by_command": True}, _Observation(True)) is False
+    assert rule({"event_type": "node_reset", "drain_only": True}, _Observation(True)) is False
+    assert rule({"event_type": "node_reset"}, _Observation(True)) is True, "a plain reset rode on it"
+    for kind in DRAIN_LEFT_FOR_THE_SEARCH:
+        assert rule({"event_type": kind}, _Observation(True)) is False, kind
+
+
+def test_the_drains_pause_is_read_off_the_latest_row_that_moves_the_run(tmp_path):
+    """`drain_paused` reads the LATEST pause/resume/reopen/restart/finish row: a drain's pause the
+    run has since left is not one, and a row that moves nothing (a hint, a terminal) keeps it."""
+    rd, _driver, client = _draining(tmp_path)
+    svc = client.app.state.looplab.commands
+    store = EventStore(rd / "events.jsonl")
+
+    def paused():
+        return svc._observe(rd).drain_paused()
+
+    assert paused() is False, "the drain in `_draining` never paused"
+    store.append("pause", {"reason": "drain-only resume: done", "drain_only": True})
+    assert paused() is True
+    store.append("hint", {"text": "later"})
+    assert paused() is True, "a row that moves nothing keeps the drain's pause"
+    for mover in ("resume", "run_reopened", "restart", "run_finished"):
+        store.append(mover, {})
+        assert paused() is False, mover
+        store.append("pause", {"reason": "drain-only resume: done", "drain_only": True})
+        assert paused() is True
+    store.append("pause", {"reason": "operator"})
+    assert paused() is False, "an operator's pause after the drain's is not the drain's"

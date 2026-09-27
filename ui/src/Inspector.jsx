@@ -19,7 +19,7 @@ import {
   extraMetricSourceLabel, extraMetricIsBackfilled } from './extraMetrics.js'
 import { inspectorTabs } from './runRouteState.js'
 import { readOnlyLabel } from './runMode.js'
-import { currentRetarget, objectiveLabel, retargetableKeys } from './objectiveModel.js'
+import { currentRetarget, objectiveKey, objectiveLabel, retargetableKeys } from './objectiveModel.js'
 import { nodeAppliedParams, appliedParamsDivergences, appliedParamsChecked,
   appliedParamsNotice, appliedParamsConflicts,
   appliedParamsConflictNotice } from './runIndex.js'
@@ -2836,8 +2836,21 @@ export function Metrics({ n, detail, state, runId, onToast = null, canRetarget =
   // It carries the presence check that the old `bestChannel` did (it is false when the champion
   // holds no value for this key), so the two columns still cannot invent a caveat about an empty
   // cell.
+  // UNDER A RETARGET the ★ value IS the declared extra metric `objKey` (doc 68 68.2), so its source
+  // is that metric's own channel — and a value the score backfill RECONSTRUCTED is caveated here as
+  // on its own row, where the task metric's source used to label it `measured` (critic 2026-09-27).
+  const objKey = objectiveKey(state)
+  const starSource = objKey ? {
+    channel: n.extra_metrics?.[objKey] == null ? null : extraMetricChannel(n, objKey),
+    caveated: n.extra_metrics?.[objKey] == null ? false : extraMetricCaveated(n, objKey),
+    bestCaveated: (champ && champ.extra_metrics?.[objKey] != null)
+      ? extraMetricCaveated(champ, objKey) : false,
+  } : {}
   const rows = [
-    { k: 'objective', mine: n.confirmed_mean ?? n.metric, best: champ ? (champ.confirmed_mean ?? champ.metric) : null, star: true },
+    { k: 'objective', mine: n.confirmed_mean ?? n.metric, best: champ ? (champ.confirmed_mean ?? champ.metric) : null, star: true, ...starSource },
+    // …and the task's OWN number beside it, which the state carries (`Node.task_metric`) and no
+    // surface showed under a retarget (critic 2026-09-27): the line under the table promises it.
+    ...(objKey ? [{ k: "task's own metric", mine: n.task_metric, best: champ ? champ.task_metric : null }] : []),
     ...extraKeys.map(k => {
       const mine = n.extra_metrics?.[k]
       const best = champ?.extra_metrics?.[k]
@@ -2870,20 +2883,21 @@ export function Metrics({ n, detail, state, runId, onToast = null, canRetarget =
           {r.star && retarget && canRetarget && onToast && <button type="button" className="btn xs ghost"
             disabled={retargeting} title="Rank every node by the task's own metric again"
             onClick={() => doRetarget(null)}>rank by the task metric</button>}</td>
-        <td className="muted">{r.star
+        <td className="muted">{r.star && !objKey
           ? <span className={objectiveCaveated ? 'warn' : ''}
             title={objectiveSourceHelp(objective)}>{OBJECTIVE_SOURCE_LABEL[objective.channel]}</span>
           : r.channel
             ? <span className={r.caveated ? 'warn' : ''}
-              title={extraMetricSourceHelp(n, r.k)}>{extraMetricSourceLabel(n, r.k)}</span>
+              title={extraMetricSourceHelp(n, r.star ? objKey : r.k)}>
+              {extraMetricSourceLabel(n, r.star ? objKey : r.k)}</span>
             : null}</td>
         <td>{fmt(r.mine)}</td>
-        {showChamp && <td>{r.star && objectiveSourceCaveated(champObjective)
+        {showChamp && <td>{r.star && !objKey && objectiveSourceCaveated(champObjective)
           ? <span className="warn" title={objectiveSourceHelp(champObjective)}>
             {fmt(r.best)} · {OBJECTIVE_SOURCE_LABEL[champObjective.channel]}</span>
           : r.bestCaveated
-            ? <span className="warn" title={extraMetricSourceHelp(champ, r.k)}>
-              {fmt(r.best)} · {extraMetricSourceLabel(champ, r.k)}</span>
+            ? <span className="warn" title={extraMetricSourceHelp(champ, r.star ? objKey : r.k)}>
+              {fmt(r.best)} · {extraMetricSourceLabel(champ, r.star ? objKey : r.k)}</span>
             : fmt(r.best)}</td>}</tr>)}</tbody></table></DataTable>
     {/* The extras' footnote below exists because a tooltip is not discoverable — an operator
         scanning a table does not hover every cell. That argument is STRONGER for the ★ row, which
@@ -2895,7 +2909,7 @@ export function Metrics({ n, detail, state, runId, onToast = null, canRetarget =
       decision taken earlier was taken on that objective. Each node keeps its own task metric in the
       record.
     </div>}
-    {objectiveCaveated && <div className="muted">
+    {objectiveCaveated && !objKey && <div className="muted">
       The ★ objective is marked <b>{OBJECTIVE_SOURCE_LABEL[objective.channel]}</b>.{' '}
       {objectiveSourceHelp(objective)}
     </div>}

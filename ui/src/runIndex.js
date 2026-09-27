@@ -99,6 +99,9 @@ export const CHAMPION_CAVEAT_MIXED_COMPARABILITY = 'mixed_comparability'
 // a DECLARATION its own code contradicts, is simply absent) and is why the engine emits this
 // instead of that one rather than as well as it.
 export const CHAMPION_CAVEAT_MERGED_COORDINATES = 'merged_coordinates'
+// An operator `metric_retarget` (doc 68 68.2) made a declared extra metric the objective: the number is
+// that metric's (`objective_key` on the row names it), not the task's own — a different ruler.
+export const CHAMPION_CAVEAT_RETARGETED_OBJECTIVE = 'retargeted_objective'
 
 // ABSENT is `[]`, deliberately, and for the same reason `sourceIncomplete` defaults to false: a
 // legacy server that does not send the field must not paint every run with a caveat. And an EMPTY
@@ -121,6 +124,7 @@ const CAVEAT_LABEL = {
   [CHAMPION_CAVEAT_PARAMS_OVERRIDDEN]: 'params overridden',
   [CHAMPION_CAVEAT_MIXED_COMPARABILITY]: 'mixed comparability',
   [CHAMPION_CAVEAT_MERGED_COORDINATES]: 'merged coordinates',
+  [CHAMPION_CAVEAT_RETARGETED_OBJECTIVE]: 'retargeted objective',
 }
 export const bestMetricCaveatLabel = slug => CAVEAT_LABEL[slug] || String(slug || '')
 
@@ -870,6 +874,8 @@ const OBJECTIVE_REFUSAL_TEXT = {
   direction: 'these runs share one task, but one minimizes its metric where another maximizes it',
   direction_unrecorded: 'these runs share one task, but not every one of them records a min/max '
     + 'direction',
+  objective: 'these runs share one task and direction, but an operator retarget ranks one of them by '
+    + 'a declared extra metric the others are not ranked by',
 }
 
 // The SHORT form, for a control too narrow for a sentence (the run list's metric-sort option).
@@ -878,6 +884,7 @@ export const COMPARABILITY_REFUSAL_SHORT = {
   task_unrecorded: 'task not recorded',
   direction: 'directions differ',
   direction_unrecorded: 'direction not recorded',
+  objective: 'ranked metrics differ',
   substrate: 'source trees differ',
   profile: 'eval profiles differ',
   scorer: 'scorers differ',
@@ -926,13 +933,21 @@ export function metricComparable(runs = []) {
 // whose header, claim and coverage line were all false or blank (critic 2026-09-26, in jsdom).
 export const runTaskId = run => (typeof run?.task_id === 'string' ? run.task_id.trim() : '')
 
+// WHICH METRIC a run row's number is: `''` for the task's own, else the declared extra metric an
+// operator `metric_retarget` made the run's objective (doc 68 68.2). The ONE reading
+// `metricIncomparability` and `crossRunRank.js`'s bucket share, like `runTaskId` above.
+export const runObjective = run =>
+  (typeof run?.objective_key === 'string' && run.objective_key ? run.objective_key : '')
+
 const OBJECTIVE_DIRECTIONS = ['min', 'max']
 
 // WHY `metricComparable` refuses a set, or '' when it does not (or the set is empty). The OBJECTIVE
 // first, and said as what it is — 'task' (two task ids), 'task_unrecorded' (a row with none),
-// 'direction' (one task, min beside max), 'direction_unrecorded' (a row with no min/max) — each
-// PROVEN difference before the absence beside it; else the refusal of the first provably-different
-// pair (`pairRefusal`). The ONE reading every refusing surface words its sentence from.
+// 'direction' (one task, min beside max), 'direction_unrecorded' (a row with no min/max), 'objective'
+// (one ranked by a metric an operator retarget chose, doc 68 68.2 — `objective_key` on the row,
+// absent meaning the task's own) — each PROVEN difference before the absence beside it; else the
+// refusal of the first provably-different pair (`pairRefusal`). The ONE reading every refusing
+// surface words its sentence from.
 export function metricIncomparability(runs = []) {
   const rows = Array.isArray(runs) ? runs : []
   if (!rows.length) return ''
@@ -943,6 +958,7 @@ export function metricIncomparability(runs = []) {
     ? run.direction : '')))
   if ([...directions].filter(Boolean).length > 1) return 'direction'
   if (directions.has('')) return 'direction_unrecorded'
+  if (new Set(rows.map(runObjective)).size > 1) return 'objective'
   return firstRefusal(rows.map(comparabilityRecord).filter(Boolean))
 }
 

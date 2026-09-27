@@ -191,9 +191,16 @@ CHAMPION_CAVEAT_TRUST_FLAGGED = "trust_flagged"
 CHAMPION_CAVEAT_PARAMS_OVERRIDDEN = "params_overridden"
 CHAMPION_CAVEAT_MIXED_COMPARABILITY = "mixed_comparability"
 CHAMPION_CAVEAT_MERGED_COORDINATES = "merged_coordinates"
+# THE SIXTH, `retargeted_objective` (doc 68 68.2): an operator `metric_retarget` made a DECLARED extra
+# metric the objective, so the number this run publishes as its best is that metric's
+# (`RunState.objective_key` names it) and not the task's own. It doubts neither the measurement nor
+# its coordinates — it says which ruler, and a reader comparing it with another run's task metric was
+# comparing two (critic 2026-09-27, driven: a retargeted run ranked first in a cross-run group with
+# no caveat).
+CHAMPION_CAVEAT_RETARGETED_OBJECTIVE = "retargeted_objective"
 CHAMPION_CAVEATS = (CHAMPION_CAVEAT_SALVAGED, CHAMPION_CAVEAT_TRUST_FLAGGED,
                     CHAMPION_CAVEAT_PARAMS_OVERRIDDEN, CHAMPION_CAVEAT_MIXED_COMPARABILITY,
-                    CHAMPION_CAVEAT_MERGED_COORDINATES)
+                    CHAMPION_CAVEAT_MERGED_COORDINATES, CHAMPION_CAVEAT_RETARGETED_OBJECTIVE)
 
 
 def champion_metric_caveats(state) -> list[str]:
@@ -297,6 +304,11 @@ def champion_metric_caveats(state) -> list[str]:
     nodes = getattr(state, "nodes", None)
     if run_split_by_key(list(nodes.values()) if isinstance(nodes, dict) else (nodes or [])):
         out.append(CHAMPION_CAVEAT_MIXED_COMPARABILITY)
+
+    # THE RULER. A fact of the run's own record (`RunState.objective_key`, folded from the
+    # operator's `metric_retarget`), so every replay answers the same.
+    if isinstance(getattr(state, "objective_key", None), str) and state.objective_key:
+        out.append(CHAMPION_CAVEAT_RETARGETED_OBJECTIVE)
     return out
 
 

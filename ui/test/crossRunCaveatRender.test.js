@@ -102,3 +102,22 @@ test('NEGATIVE CONTROL, RENDERED: a measured leaderboard is byte-for-byte what i
   assert.doesNotMatch(doc.body.textContent, /recorded a caveat about/)
   assert.doesNotMatch(doc.body.textContent, /salvaged|trust-flagged/)
 })
+
+test('a RETARGETED run is its own group, named in its header, never ranked among task-metric runs',
+  async () => {
+    // doc 68 68.2 (critic 2026-09-27, driven): `rt` ranks by a declared extra metric an operator
+    // retarget chose, so its 0.95 is on another ruler than v6's and v2's task metric — before, it
+    // took #1 over both with no word said.
+    const doc = await panel([
+      run('v6', 0.9), run('v2', 0.2),
+      run('rt', 0.95, { objective_key: 'filtered', best_metric_caveats: ['retargeted_objective'] }),
+    ], undefined, 'retarget')
+    // The task-metric group keeps its own ranks, unshifted; `rt` is alone in the group after it.
+    assert.deepEqual([...doc.querySelectorAll('tbody tr:not(.xr-group)')].map(r => r.textContent),
+      ['#1v60.94finished', '#2v20.24finished', '#1rt0.95retargeted objective4finished'])
+    const header = [...doc.querySelectorAll('.notice b')].map(b => b.textContent)
+      .find(t => t.includes('ranked by filtered'))
+    assert.ok(header, 'the retargeted group names its metric in its header')
+    assert.match(header, /1 run/)
+    assert.match(doc.body.textContent, /retargeted objective/, 'and its number carries the caveat')
+  })

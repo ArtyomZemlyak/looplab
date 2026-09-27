@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from looplab.events import digest
-from looplab.tools.run_tools import ForeignRunReader
+from looplab.tools.run_tools import ForeignRunReader, retarget_note
 from looplab.tools._base import RESULT_CAP, fn_spec
 
 # A trace is a whole conversation, but the shared tool loop HEAD-truncates every tool result to
@@ -302,6 +302,8 @@ class MachineRunsTools(ForeignRunReader):
                 "best_metric": row["best_display_metric"],
                 "best_node_id": row["best_node_id"],
                 "engine_running": live, "finished": row["finished"],
+                # doc 68 68.2: which metric `best_metric` is — None, the task's own (additive).
+                "objective_key": row.get("objective_key"),
             })
         return out
 
@@ -331,6 +333,7 @@ class MachineRunsTools(ForeignRunReader):
             best = digest.fmt_num(r["best_metric"]) if r["best_metric"] is not None else "—"
             lines.append(f"{r['run_id']}: {str(r['goal'])[:70]} · best={best} ({r['direction']}) · "
                          f"{r['nodes']} nodes · {r['phase']}{live}"
+                         + retarget_note(r.get("objective_key"))
                          + self._partial_suffix(r["run_id"]))
         return f"{len(lines)} run(s):\n" + "\n".join(lines)
 
@@ -344,7 +347,8 @@ class MachineRunsTools(ForeignRunReader):
         head = (f"run {run_id} · goal: {st.goal or st.task_id} · direction={st.direction} · "
                 f"phase={'finished' if st.finished else ('live' if live else 'idle')} · "
                 f"{len(st.nodes)} nodes · best={digest.fmt_num(digest.node_metric(best)) if best else '—'}"
-                + (f" (#{best.id})" if best else ""))
+                + (f" (#{best.id})" if best else "")
+                + retarget_note(getattr(st, "objective_key", None)))
         self._reader.bind_state(st, None)
         listing = self._reader.execute("list_experiments",
                                        {"sort": sort or "best", "limit": int(limit or 8)})

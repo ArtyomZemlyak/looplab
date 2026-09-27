@@ -58,9 +58,15 @@ def _report_context(state: RunState) -> str:
     # omit-when-zero rule as the working set's headline.
     n_invalid = sum(1 for n in state.nodes.values() if metric_scored_invalid(n))
     dir_note = "lower is better" if direction == "min" else "higher is better"
+    objective = getattr(state, "objective_key", None)
     lines = [
         f"Goal: {state.goal or state.task_id}",
         f"Direction: {direction} ({dir_note})",
+        # doc 68 68.2: only under an operator retarget — every number below is then that metric's,
+        # and a report that did not say so published it as the task's own (critic 2026-09-27).
+        *([f"Objective: the declared extra metric {objective!r}, which an operator retarget made the "
+           "run's objective — every metric below is its value, not the task's own metric."]
+          if objective else []),
         f"Status: {'finished' if state.finished else 'running'}"
         + (f" ({state.stop_reason})" if state.stop_reason else ""),
         f"Nodes: {len(state.nodes)} — {len(state.evaluated_nodes())} evaluated, {n_fail} failed"

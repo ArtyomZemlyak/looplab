@@ -1209,7 +1209,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         return self.workspace.materialize(node, workdir)
 
     # ------------------------------------------------------------ loop control
-    def _ack_commands(self, events) -> None:
+    def _ack_commands(self, events, *, final_drain: bool = False) -> None:
         """Causally acknowledge every marked server command this engine has folded.
 
         The ack is replay-neutral diagnostics.  It names both command id and exact intent sequence,
@@ -1265,6 +1265,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             if command_id and identity not in acked:
                 if drain and event.type in DRAIN_LEFT_FOR_THE_SEARCH:
                     continue
+                if final_drain and event.type in DRAIN_SERVED_INTENTS:
+                    continue       # the drain's last pass serves nothing: the service decides
                 acked.add(identity)
                 pending.append((*identity, drain and event.type not in DRAIN_SERVED_INTENTS))
 
@@ -2371,7 +2373,17 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         async with self._write_lock:
             if self._run_halt_intent():
                 return "continue"          # the loop head's own stop / pause handling decides
-            self.store.append(EV_PAUSE, {"reason": reason})
+            # `drain_only` marks the pause as the DRAIN's own (doc 68 68.3b): the command service
+            # reads it to settle a command that rode on this engine and was never acked as waiting
+            # for the next search, instead of respawning one (`serve/run_commands.py::
+            # RunCommandService._left_for_the_next_search`).
+            self.store.append(EV_PAUSE, {"reason": reason, "drain_only": True})
+            # …and one LAST ack pass, after the pause: an intent this drain never folded — landed
+            # after its last loop head — is still acked `deferred` rather than left `executing` until
+            # the engine exits (critic 2026-09-27, driven: 5 fork trials of 6 fired as the rescored
+            # node landed). Only what a drain always defers; what it would have served, and what asks
+            # for the search itself, the service decides once this engine is gone.
+            self._ack_commands(self.store.read_all(), final_drain=True)
         return "break"
 
     async def _handle_no_actions(self, state, *, decision_seq) -> str:

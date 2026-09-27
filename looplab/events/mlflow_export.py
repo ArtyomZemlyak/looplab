@@ -32,6 +32,14 @@ POLL_S = 5.0                  # how often the follower re-reads the log's new by
 _MAX_CONSECUTIVE_FAILURES = 3  # after this many, the mirror gives up rather than spamming a dead URI
 
 
+def _objective_tag(state) -> dict:
+    """`looplab.objective_key` when an operator `metric_retarget` made a declared extra metric the
+    run's objective (doc 68 68.2): `best_metric` and every node's metric below are then that key's
+    values, not the task's own. Absent otherwise, so a plain run's tags are unchanged."""
+    objective = getattr(state, "objective_key", None)
+    return {"looplab.objective_key": objective} if isinstance(objective, str) and objective else {}
+
+
 def available() -> bool:
     try:
         import mlflow  # noqa: F401
@@ -62,6 +70,7 @@ def export_run(state: RunState, *, tracking_uri: str | None = None,
         mlflow.set_tags({
             "looplab.run_id": state.run_id, "looplab.task_id": state.task_id,
             "looplab.direction": state.direction, "looplab.goal": (state.goal or "")[:250],
+            **_objective_tag(state),
         })
         if best is not None:
             for k, v in (best.idea.params or {}).items():
@@ -187,6 +196,7 @@ class LiveTracker:
             "looplab.run_id": state.run_id, "looplab.task_id": state.task_id,
             "looplab.direction": state.direction, "looplab.goal": (state.goal or "")[:250],
             "looplab.autologged": "true",   # says this run was MIRRORED live, not exported after
+            **_objective_tag(state),
         })
 
     def _log_node(self, mlflow, state, node) -> None:

@@ -408,7 +408,11 @@ appended and again before every spawn). A drain engine acks every command intent
 command to start once the drain has paused; one it does not serve (`engine/run_boundary.py::DRAIN_SERVED_INTENTS` — a fork, an
 inject, a strategy, a confirm) is acked `deferred` and its command settles `succeeded` with
 `deferred_to_next_search`: its durable queue waits for the search that follows, and it neither holds
-the run's one in-flight driver command (which refused every stop) nor starts that search itself.
+the run's one in-flight driver command (which refused every stop) nor starts that search itself. The
+drain's own pause is marked `drain_only` and followed by one last ack pass over what it never folded,
+and a command admitted after that pass — onto a run a drain paused — settles the same way on the
+server (`serve/command_observation.py::CommandObservation.drain_paused`): it never respawns the run
+as a search.
 
 A `metric_retarget` (`{"key": "<extra metric>", "goal": "…"}`, doc 68 68.2) makes a DECLARED extra
 metric — one an `eval.metrics` reader recorded, never a number the candidate printed for itself — the
@@ -425,6 +429,18 @@ record, nothing appended) for a direction flip — the requested one, or a key t
 the other way — a run with a holdout (host-graded, one already scored, or a withheld scorer
 declared: its unseen number is the task's metric), the objective already in force, and a key no
 evaluated node recorded on the declared channel; the Metrics tab offers only what it would accept.
+`"key": null` with no `goal` also restores the goal the retargets since the last undo restated.
+
+What LEAVES a retargeted run is on the task's own scale or names its ruler, because a later run and
+every other run of the task read it beside the task's metric: a case, a concept capsule's outcomes,
+the portfolio index's facts (`looplab cross-run-index`), the runs row's headroom and an imported
+node's origin carry the TASK metric (`core/models.py::task_scale_metric`); a lesson and the run-end
+reflection note append which metric ranked the run and stamp `objective_key`; the runs row carries
+`objective_key` and the champion caveat `retargeted_objective`, the cross-run panel ranks such a run
+apart from the task-metric runs, and every foreign-run listing, the CLI result, the report and an
+MLflow export (`looplab.objective_key`) say it. Inside the run, a reader that
+holds a node beside a fresh measurement of the task's metric — ASHA's sibling finals, the noise
+floor's `search_metric` — reads the task's scale too (`core/models.py::task_measurement`).
 
 An idempotency key is scoped to one payload. A retry with the same key and payload returns the same
 command, so a lost HTTP response cannot append the control event or start the engine twice; the same

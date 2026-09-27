@@ -530,18 +530,57 @@ def test_a_drain_acks_what_it_serves_and_defers_the_rest_saying_so(tmp_path):
         eng = make_engine(tmp_path / f"run-{drain}", drain_only=drain)
         for event_type, data in intents.items():
             eng.store.append(event_type, {**data, "_command_id": f"{event_type}-cmd"})
-        # A resume asks for the search ITSELF: a drain leaves it for its command to start.
+        # A resume — and a reopen (critic 2026-09-27, mutant D4: acked as deferred, it settled
+        # `succeeded` and the search it asked for never started) — asks for the search ITSELF: a
+        # drain leaves it for its command to start.
         eng.store.append("resume", {"_command_id": "resume-cmd"})
+        eng.store.append("run_reopened", {"_command_id": "reopen-cmd"})
         eng._ack_commands(eng.store.read_all())
         acks = {e.data["command_id"]: e.data for e in eng.store.read_all()
                 if e.type == "command_ack"}
-        assert "resume" in DRAIN_LEFT_FOR_THE_SEARCH
-        assert set(acks) == {f"{t}-cmd" for t in intents} | ({"resume-cmd"} if not drain else set())
+        assert {"resume", "run_reopened"} <= DRAIN_LEFT_FOR_THE_SEARCH
+        assert set(acks) == {f"{t}-cmd" for t in intents} | (
+            {"resume-cmd", "reopen-cmd"} if not drain else set())
         for event_type in intents:
             ack = acks[f"{event_type}-cmd"]
             assert ack.get("drain_only") is (True if drain else None), (drain, ack)
             assert ack.get("deferred") is (True if drain and event_type not in served else None), (
                 drain, event_type, ack)
+
+
+def test_the_drains_pause_is_its_own_and_its_last_pass_defers_what_it_never_folded(
+        tmp_path, monkeypatch):
+    """HIGH (critic 2026-09-27, driven): the drain acked at its loop heads only, so an intent that
+    landed after its last one sat `executing` until the drain exited — locking the operator's stop
+    out — and its command's monitor then started a plain `resume`, lifting the drain's pause. The
+    drain's pause now says it is the DRAIN's (`drain_only`, which the command service reads), and one
+    last ack pass after it defers what a drain always defers. What it would have served (a reset)
+    and what asks for the search itself (a resume) it leaves for the service to decide."""
+    _isolated(monkeypatch, tmp_path)
+    rd, store = _finished_run(tmp_path)
+    _reset(store, 1)
+    real_append = EventStore.append
+    landed = []
+
+    def append(self, type, data, **kwargs):
+        if type == "pause" and (data or {}).get("drain_only") is True and not landed:
+            # After the drain's last loop head, before its pause: never folded by it.
+            landed.append(real_append(self, "fork", {"from_node_id": 0, "generation": 0,
+                                                     "_command_id": "late-fork"}, **kwargs))
+            real_append(self, "node_reset", {"node_id": 2, "from_stage": "eval", "generation": 0,
+                                             "_command_id": "late-reset"}, **kwargs)
+            real_append(self, "resume", {"_command_id": "late-resume"}, **kwargs)
+        return real_append(self, type, data, **kwargs)
+
+    monkeypatch.setattr(EventStore, "append", append)
+    out = _drain(rd)
+    assert out.exit_code == 0, out.output
+    events = EventStore(rd / "events.jsonl").read_all()
+    pause = [e.data for e in events if e.type == "pause"][-1]
+    assert pause.get("drain_only") is True and pause.get("reason") == DRAIN_ONLY_PAUSE_REASON
+    acks = {e.data["command_id"]: e.data for e in events if e.type == "command_ack"}
+    assert acks["late-fork"].get("deferred") is True and acks["late-fork"].get("drain_only") is True
+    assert "late-reset" not in acks and "late-resume" not in acks, sorted(acks)
 
 
 def test_an_ignored_terminal_measures_nothing(tmp_path):

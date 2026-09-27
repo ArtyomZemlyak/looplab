@@ -456,9 +456,14 @@ def seed_intent(seed: SeedSource, out: Path, task: dict, *, direction: Optional[
 def seed_summary(seed: SeedSource, verdict: str, note: str) -> str:
     """The one line `looplab run` prints when it seeds (and the web preflight shows)."""
     metric = seed.payload["origin"].get("metric")
+    objective = seed.payload["origin"].get("source_objective")
     note = str(note or "").strip()
     return (f"seeded from run {seed.run_dir.name} #{seed.node_id}"
             + (f" (its metric there: {metric})" if metric is not None else "")
+            # doc 68 68.2: a source an operator retargeted RANKS by another metric, so its champion
+            # is that metric's; the number above is its task metric (`node_import_payload`).
+            + (f" — that run ranks by {objective!r} (an operator retarget), so its champion is "
+               f"that metric's; the number is its task metric" if objective else "")
             + f" — evaluation contract: {verdict}. "
             + (note + ("" if note.endswith(".") else ".") + " " if note else "")
             + "It is evaluated here under this run's own protocol.")

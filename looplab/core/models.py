@@ -280,6 +280,27 @@ def row_objective(stamp) -> Optional[str]:
     return stamp if isinstance(stamp, str) and stamp else None
 
 
+def task_scale_metric(node, objective_key) -> Optional[float]:
+    """A node's number on the TASK's own scale, for a reader OUTSIDE the run — a cross-run store,
+    another run's row, the task's declared reference (doc 68 68.2). `robust_metric` when no retarget
+    is in force (every run but a retargeted one, byte for byte), else `task_metric`: under an operator
+    retarget `robust_metric` is the declared extra metric's, and a confirmation measured it, so the
+    task's number is the single measurement the terminal recorded. A retargeted run's champion is
+    still the one IT chose; this is what that champion measured on the ruler everyone shares."""
+    if objective_key is None:
+        return node.robust_metric
+    return node.task_metric
+
+
+def task_measurement(node, objective_key) -> Optional[float]:
+    """`task_scale_metric`'s twin for a reader INSIDE the run holding a node beside a fresh
+    measurement of the task metric (a live ASHA sample, the eval noise floor's repeats): `metric` when
+    no retarget is in force — exactly what those readers always read — else `task_metric`."""
+    if objective_key is None:
+        return node.metric
+    return node.task_metric
+
+
 def normalize_extra_metric_channels(value, *, max_items: int = 256) -> dict[str, str]:
     """Normalize the `extra_metrics` channel map to `{name: "declared"|"auto"}`.
 
@@ -1575,8 +1596,10 @@ class Node(BaseModel):
     # The TASK'S OWN metric as this lifecycle's terminal recorded it (doc 68 68.2). `metric` is the
     # OBJECTIVE's value — this one, unless an operator `metric_retarget` made a declared extra metric
     # the objective (`RunState.objective_key`). Kept so a retarget applies to terminals folded after
-    # it and can be undone; fold-internal, the durable source stays `node_evaluated.metric`.
-    task_metric: Optional[float] = Field(default=None, exclude=True)
+    # it and can be undone; the durable source stays `node_evaluated.metric`. PUBLISHED since
+    # 2026-09-27: excluded from the dump, no surface could show a node's task metric under a retarget
+    # — the Metrics tab's line promised it and the state carried none (critic 2026-09-27).
+    task_metric: Optional[float] = None
     status: NodeStatus = NodeStatus.pending
     # Fold-internal causal anchor for projections that must identify the FIRST accepted terminal of
     # this lifecycle. Excluded from every public model dump: the durable source remains the event log.

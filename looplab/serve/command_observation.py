@@ -32,13 +32,17 @@ from looplab.engine.finalize import incomplete_finalize_scope, is_guarded_abort
 from looplab.engine.run_lifecycle import launch_claim_is_fresh
 from looplab.events.eventstore import decode_event_record, event_sequence_continues
 from looplab.events.replay import fold
-from looplab.events.types import EV_CARD_DROPPED, EV_COMMAND_ACK, EV_RUN_ABORT, EV_RUN_FINISHED
+from looplab.events.types import (EV_CARD_DROPPED, EV_COMMAND_ACK, EV_PAUSE, EV_RESTART,
+                                  EV_RESUME, EV_RUN_ABORT, EV_RUN_FINISHED, EV_RUN_REOPENED)
 from looplab.serve._log_index import LogIndexCursor, PathLocks, validated_index_bound
 from looplab.serve.protocol import (CONTROL_EVENTS, ack_observed, engine_ack_observed,
                                     file_command_ack, file_deferred_ack, file_drain_ack)
 
 
 MAX_INDEXED_RUNS = 8
+# The rows that move a run between PAUSED and not (`drain_paused`): the latest of them says which
+# side of a pause the log is on.
+_PAUSE_BOUNDARIES = frozenset({EV_PAUSE, EV_RESUME, EV_RUN_REOPENED, EV_RESTART, EV_RUN_FINISHED})
 _PROBE_WINDOW_BYTES = 4 * 1024
 _PROBE_FULL_FILE_LIMIT = 3 * _PROBE_WINDOW_BYTES
 _DUPLICATE_INTENT = object()
@@ -84,6 +88,7 @@ class _Index(LogIndexCursor):
         default_factory=lambda: MappingProxyType({}))
     run_finishes: tuple[Event, ...] = ()
     latest_run_abort: Optional[Event] = None
+    latest_pause_boundary: Optional[Event] = None
     materialized_revision: Optional[str] = None
     materialized_events: Optional[tuple[Event, ...]] = None
     folded_revision: Optional[str] = None
@@ -173,6 +178,7 @@ def _apply_delta(index: _Index, events: list[Event]) -> None:
     deferred_acknowledgements: Optional[dict[str, tuple[object, ...]]] = None
     finishes: Optional[list[Event]] = None
     latest_abort = index.latest_run_abort
+    latest_boundary = index.latest_pause_boundary
     max_non_control = index.max_non_control_seq
 
     for event in events:
@@ -210,6 +216,8 @@ def _apply_delta(index: _Index, events: list[Event]) -> None:
             finishes.append(event)
         if event.type == EV_RUN_ABORT:
             latest_abort = event
+        if event.type in _PAUSE_BOUNDARIES:
+            latest_boundary = event
 
     if intents is not None:
         index.intents = MappingProxyType(intents)
@@ -222,6 +230,7 @@ def _apply_delta(index: _Index, events: list[Event]) -> None:
     if finishes is not None:
         index.run_finishes = tuple(finishes)
     index.latest_run_abort = latest_abort
+    index.latest_pause_boundary = latest_boundary
     index.max_non_control_seq = max_non_control
     index.event_chunks = index.event_chunks + (tuple(events),)
     index.event_count += len(events)
@@ -289,6 +298,7 @@ class CommandObservation:
     _deferred_acknowledgements: Mapping[str, tuple[object, ...]]
     _run_finishes: tuple[Event, ...]
     _latest_run_abort: Optional[Event]
+    _latest_pause_boundary: Optional[Event]
     _chunks: tuple[tuple[Event, ...], ...]
     _owner: "CommandObservationIndex" = field(repr=False, compare=False)
     _index: _Index = field(repr=False, compare=False)
@@ -311,6 +321,14 @@ class CommandObservation:
         """The same rule over the acks a DRAIN engine wrote: whether `record`'s intent was served
         as a drain (doc 68 68.3b), not merely served."""
         return engine_ack_observed(record, self._drain_acknowledgements)
+
+    def drain_paused(self) -> bool:
+        """Whether the run sits on a DRAIN's own pause (doc 68 68.3b): the latest row that moves it
+        between paused and not is a `pause` the drain wrote (`drain_only`), with no resume, reopen,
+        restart or finish after it."""
+        boundary = self._latest_pause_boundary
+        return (boundary is not None and boundary.type == EV_PAUSE
+                and (boundary.data or {}).get("drain_only") is True)
 
     def deferred_ack_observed(self, record: dict) -> bool:
         """Whether a DRAIN acked `record`'s intent WITHOUT serving it (`deferred`): the intent is
@@ -509,6 +527,7 @@ class CommandObservationIndex:
                     _deferred_acknowledgements=index.deferred_acknowledgements,
                     _run_finishes=index.run_finishes,
                     _latest_run_abort=index.latest_run_abort,
+                    _latest_pause_boundary=index.latest_pause_boundary,
                     _chunks=index.event_chunks,
                     _owner=self,
                     _index=index,

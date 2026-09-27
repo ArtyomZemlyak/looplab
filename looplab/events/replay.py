@@ -1189,7 +1189,9 @@ def _on_score_metrics_backfilled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx
     operator makes in `eval.metrics`, and asserting it retroactively would present a reconstruction
     as a measurement. The consequence is intended: a ranking surface declines to order an axis it
     cannot orient (`ui/src/panels.jsx::paretoFront`), so these values are readable everywhere and
-    decide nothing.
+    decide nothing — with ONE exception an operator makes on purpose: a `metric_retarget` (doc 68
+    68.2) onto a backfilled key ranks the run by it, reconstruction and all, and the ★ row then
+    carries the key's `backfilled` caveat (`ui/src/Inspector.jsx`, critic 2026-09-27).
 
     The CHANNEL is `declared`: an operator-owned reader spec is not what produced them, but neither
     is the candidate's stdout scrape — they were printed by the operator's own scoring program and
@@ -1695,6 +1697,18 @@ def _on_metric_retarget(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> Non
         return
     goal = d.get("goal")
     goal = goal.strip()[:4000] if isinstance(goal, str) and goal.strip() else None
+    if key is None and goal is None:
+        # UNDO: back to the task's own metric is back to the goal the run had BEFORE the retargets
+        # that restated it — the earliest restatement's `previous_goal` since the last undo. A
+        # restated goal kept over the task metric's numbers read "Goal: maximize filtered recall …
+        # Best so far: 0.7" with no "Ranked by" line (critic 2026-09-27, driven). Kept when no
+        # retarget restated one.
+        for row in reversed(st.objective_history):
+            if row.get("key") is None:
+                break
+            if "previous_goal" in row:
+                goal = row["previous_goal"]
+        goal = goal if goal != st.goal else None
     st.objective_history.append({"seq": e.seq, "key": key, "previous": st.objective_key,
                                  **({"goal": goal, "previous_goal": st.goal} if goal else {})})
     st.objective_key = key

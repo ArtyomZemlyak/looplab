@@ -712,6 +712,14 @@ def _normalize_metric_retarget(ctx: _ControlIntake) -> dict:
     key = None if data.get("key") is None else ctx.text("key", limit=256)
     state = ctx.state()
     direction = data.get("direction")
+    if direction is not None and not isinstance(direction, str):
+        raise HTTPException(400, "metric_retarget `direction` must be 'min' or 'max'")
+    # Read in the fold's spelling, and stored in it (`clean` below): "MAX" on a maximized run is the
+    # same direction, never a flip (critic 2026-09-27) — and stored as typed, the fold would IGNORE
+    # the row (`events/replay.py::_on_metric_retarget` compares exactly) under a `succeeded` command.
+    direction = direction.strip().lower() if direction is not None else None
+    if direction is not None and direction not in ("min", "max"):
+        raise HTTPException(400, "metric_retarget `direction` must be 'min' or 'max'")
     if direction is not None and direction != state.direction:
         raise HTTPException(409, {
             "code": "retarget_direction_flip",

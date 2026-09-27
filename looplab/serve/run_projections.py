@@ -20,6 +20,7 @@ from fastapi import HTTPException
 
 from looplab.core.atomicio import file_identity
 from looplab.core.headroom import headroom
+from looplab.core.models import task_scale_metric
 from looplab.core.pathsafe import is_reparse
 from looplab.core.run_deletion import (RUN_DELETION_FENCE_PREFIX, RunDeletionStorageError,
                                        load_run_deletion_fence, run_deletion_fence_path,
@@ -258,8 +259,18 @@ def run_summaries(srv, only=None) -> list:
                 # (`core/headroom.py::headroom`) — the one number that reads the same across TASKS.
                 # `None` for every task that declared no `reference_score`, and it is never a zero.
                 # Additive; a legacy client ignores it.
-                "headroom": headroom(best.robust_metric if best is not None else None,
+                # On the TASK's scale always (`core/models.py::task_scale_metric`): the declared
+                # baseline and target are the task metric's, and under an operator retarget the
+                # champion's `robust_metric` is the objective's (critic 2026-09-27, driven: 150 % of
+                # a gap the task metric had closed by half).
+                "headroom": headroom(task_scale_metric(best, st.objective_key)
+                                     if best is not None else None,
                                      st.reference_score, st.direction),
+                # WHICH METRIC `best_metric` and `trajectory` are (doc 68 68.2): the declared extra
+                # metric an operator retarget made the objective, or None — the task's own. The
+                # cross-run table partitions on it (`ui/src/crossRunRank.js::partitionKey`) and
+                # `best_metric_caveats` says `retargeted_objective`. Additive.
+                "objective_key": st.objective_key,
                 "stop_reason": st.stop_reason,
                 # Cached with the fold so liveness polling can cheaply decide whether the
                 # durable-resume reconciler is needed. Without this bit every dashboard poll

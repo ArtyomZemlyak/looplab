@@ -2370,7 +2370,25 @@ class RunCommandService:
         self._save(path, record)
         return record
 
-    def _succeeded(self, rd: Path, path: Path, record: dict) -> dict:
+    @staticmethod
+    def _left_for_the_next_search(record: dict, observation: CommandObservation) -> bool:
+        """A command that rode on a DRAIN and was not acked before the drain exited — admitted after
+        its last ack pass or after its own pause — waits for the search that follows, exactly as a
+        deferred ack says (doc 68 68.3b). Respawning here started a plain `resume`, which lifted the
+        pause the drain was asked to leave and ran the search, and held the run's one in-flight driver
+        command until then, so every `pause` answered 409 (critic 2026-09-27, driven: 5 fork trials
+        of 6 fired as the drain's rescored node landed).
+
+        Only a command this service did NOT start an engine for (it rode on the engine alive when it
+        was admitted), never a drain-requested reset (its own drain serves it), never an intent that
+        asks for the search itself (`engine/run_boundary.py::DRAIN_LEFT_FOR_THE_SEARCH`), and only
+        while the run sits on the drain's own pause (`CommandObservation.drain_paused`)."""
+        from looplab.engine.run_boundary import DRAIN_LEFT_FOR_THE_SEARCH
+        return (not record.get("spawned_by_command") and record.get("drain_only") is not True
+                and record.get("event_type") not in DRAIN_LEFT_FOR_THE_SEARCH
+                and observation.drain_paused())
+
+    def _succeeded(self, rd: Path, path: Path, record: dict, *, deferred: bool = False) -> dict:
         # Exact ack / terminal postcondition proves the spawned process passed its startup window.
         # Release only this command's lease so an immediate next command/finalize-resume is not held
         # behind a stale Popen claim; external/reset and other-command leases remain untouched.
@@ -2399,8 +2417,8 @@ class RunCommandService:
             # when it landed, or a launch another spawner had in flight. Said on the record, which
             # the UI reads, rather than reported as the drain it asked for (critic 2026-09-26).
             record = {**record, "drain_superseded": True}
-        elif record.get("postcondition") == "engine_ack" and observation.deferred_ack_observed(
-                record):
+        elif deferred or (record.get("postcondition") == "engine_ack"
+                          and observation.deferred_ack_observed(record)):
             # A DRAIN saw the intent and did not serve it (doc 68 68.3b): its queue waits for the
             # search that follows, and the record says so instead of "applied" (critic 2026-09-26,
             # third pass: left pending, it locked the operator's pause out for the whole drain).
@@ -2455,6 +2473,21 @@ class RunCommandService:
             updated = dict(record)
             updated["reconciled_from"] = status
             return self._succeeded(rd, path, updated)
+        if (not promotable and (record.get("error") or {}).get("retryable") is not False
+                and self._postcondition(rd, record, observation)):
+            # …and it SAYS it cannot be retried: `/retry` refuses it (`command_intent_spent`), so a
+            # record still reading `retryable: true` offered the operator a button that 409s
+            # (critic 2026-09-27).
+            updated = dict(record)
+            updated["error"] = _error(
+                "command_intent_spent",
+                "A resumed search already served this drain's reset, so nothing is left for a "
+                "drain to evaluate.",
+                "Submit a NEW command with a new idempotency key if the node must be rescored "
+                "again.", retryable=False)
+            updated["updated_at"] = time.time()
+            self._save(path, updated)
+            return updated
         if ((record.get("error") or {}).get("code") == ENGINE_START_UNCERTAIN
                 and not self._recent_spawn_claim(rd)):
             # GET remains observation-only: it does not restart anything. It merely makes the same
@@ -4158,6 +4191,9 @@ class RunCommandService:
                     retry_observation = self._observe(rd)
                     if self._postcondition(rd, record, retry_observation):
                         self._succeeded(rd, path, record)
+                        return
+                    if self._left_for_the_next_search(record, retry_observation):
+                        self._succeeded(rd, path, record, deferred=True)
                         return
                     retry_liveness = self._engine_state(rd)
                     if retry_liveness is None:

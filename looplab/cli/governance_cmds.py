@@ -345,8 +345,12 @@ def cross_run_index_cmd(
         sc = f["scope"]
         best = f["best"]
         bm = f"best={best['metric']:g}" if best and isinstance(best.get("metric"), (int, float)) else "best=—"
+        # doc 68 68.2: the number is the task metric's; the champion it belongs to was chosen by the
+        # declared extra metric an operator retarget made the run's objective.
+        ranked = (f"  (champion ranked by {f['objective_key']!r}, an operator retarget)"
+                  if f.get("objective_key") else "")
         typer.echo(f"  {f['run_id']:20s} [{sc['task_id']}/{sc['direction']}/{sc['metric'] or '—'}]  "
-                   f"{f['n_attempts']:2d} attempt(s)  {bm}")
+                   f"{f['n_attempts']:2d} attempt(s)  {bm}{ranked}")
 
 
 @app.command(name="concept-merge")

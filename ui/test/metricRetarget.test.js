@@ -191,3 +191,63 @@ test('under a retarget the star row names its key and the way back', async () =>
   assert.doesNotMatch(plain.textContent, /operator retarget/)
   assert.match(plain.textContent, /★ objective/)
 })
+
+// ------------------------------------------------------------------ the ruler, outside the run
+// A retargeted run's number is a DECLARED extra metric's, not the task's own (critic 2026-09-27,
+// driven: it ranked #1 in a group of task-metric runs with no caveat). Every surface that sets one
+// run's number beside another's says which ruler, and none orders the two together.
+
+test('the star row reads the key\'s own source, and the task metric sits beside it', async () => {
+  const n0 = { ...node(0, { filtered: 0.3 }, { filtered: 'declared' }), metric: 0.3, task_metric: 0.6 }
+  const rowsOf = el => [...el.querySelectorAll('tr')]
+  const retargeted = await render(run([n0], RETARGETED))
+  const star = rowsOf(retargeted).find(tr => tr.textContent.includes('★'))
+  assert.match(star.textContent, /declared/, 'the key\'s channel, not the task metric\'s source')
+  assert.doesNotMatch(star.textContent, /measured/)
+  const task = rowsOf(retargeted).find(tr => tr.textContent.includes("task's own metric"))
+  assert.ok(task, 'the task metric the state carries is shown')
+  assert.match(task.textContent, /0\.6/)
+  // A value the score backfill RECONSTRUCTED is caveated on the ★ row as on its own row.
+  const rebuilt = await render(run([{ ...n0, extra_metrics_backfill: { backfilled: true } }],
+    RETARGETED))
+  const rebuiltStar = rowsOf(rebuilt).find(tr => tr.textContent.includes('★'))
+  assert.match(rebuiltStar.textContent, /declared · reconstructed/)
+  assert.ok(rebuiltStar.querySelector('.warn'), 'caveated')
+  const plain = await render(run([{ ...n0, metric: 0.6 }]))
+  assert.ok(!rowsOf(plain).some(tr => tr.textContent.includes("task's own metric")),
+    'no retarget, no second row: the ★ row IS the task metric')
+  assert.match(rowsOf(plain).find(tr => tr.textContent.includes('★')).textContent, /measured/)
+})
+
+test('a retargeted run ranks apart from the task-metric runs, and the pair is refused by name',
+  async () => {
+    const { crossRunGroups } = await import('../src/crossRunRank.js')
+    const {
+      COMPARABILITY_REFUSAL_SHORT, bestMetricCaveatLabel, metricIncomparability,
+      metricIncomparabilityText, runObjective,
+    } = await import('../src/runIndex.js')
+    const row = (run_id, best_metric, extra = {}) => ({ run_id, task_id: 't', direction: 'max',
+      best_metric, best_confirmed: null, nodes: 4, finished: true, phase: 'finished', ...extra })
+    const plainA = row('a', 0.6), plainB = row('b', 0.5)
+    const retargeted = row('r', 0.9, { objective_key: 'filtered' })
+    const index = crossRunGroups([plainA, retargeted, plainB])
+    assert.deepEqual(index.groups.map(g => g.objective).sort(), ['', 'filtered'])
+    const task = index.groups.find(g => g.objective === '')
+    const ranked = index.groups.find(g => g.objective === 'filtered')
+    assert.equal(task.size, 2, 'the two task-metric runs are one group')
+    assert.equal(ranked.size, 1, 'the retargeted run is a group of its own')
+    assert.equal(task.partition, '', 'the partition still names only the evaluation')
+    assert.equal(ranked.partition, '')
+    assert.equal(runObjective(retargeted), 'filtered')
+    assert.equal(runObjective(plainA), '')
+    assert.equal(runObjective({ objective_key: 7 }), '')
+    assert.equal(metricIncomparability([plainA, retargeted]), 'objective')
+    assert.equal(metricIncomparability([plainA, plainB]), '')
+    assert.equal(metricIncomparability([retargeted, row('s', 0.8, { objective_key: 'filtered' })]),
+      '', 'two runs ranked by the same declared metric compare')
+    assert.equal(metricIncomparability([retargeted, row('s', 0.8, { objective_key: 'other' })]),
+      'objective')
+    assert.match(metricIncomparabilityText('objective'), /operator retarget ranks one of them/)
+    assert.equal(COMPARABILITY_REFUSAL_SHORT.objective, 'ranked metrics differ')
+    assert.equal(bestMetricCaveatLabel('retargeted_objective'), 'retargeted objective')
+  })

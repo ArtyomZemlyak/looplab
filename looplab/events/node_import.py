@@ -32,7 +32,7 @@ from looplab.core.concepts import (
     normalized_concept_renames,
     resolve_concept_set,
 )
-from looplab.core.models import durable_idea_payload
+from looplab.core.models import durable_idea_payload, task_scale_metric
 from looplab.core.pathsafe import WINDOWS_RESERVED
 
 # Why a name was refused: `not_text` (not a non-empty, bounded, printable string) or `escapes` (it
@@ -99,6 +99,14 @@ def node_import_payload(source_state, node_id: int, source_run_id: str) -> dict:
         # the receipt and its UI link then point at a different experiment than the one this
         # snapshot came from. `attempt` is the source node's lifecycle generation at import time; it
         # is additive, so older receipts simply carry no `source_attempt` and read exactly as before.
-        "origin": {"run_id": source_run_id, "node_id": node_id, "metric": snode.robust_metric,
-                   "source_attempt": getattr(snode, "attempt", 0)},
+        # The source's number on the TASK's scale (`core/models.py::task_scale_metric`): an operator
+        # retarget there made a declared extra metric its objective, and its objective value beside
+        # this run's task metric compared two rulers (critic 2026-09-27, driven: "its metric there:
+        # 0.7" was the objective's). The source's objective rides beside it, so the receipt says which
+        # champion this was. Additive: `source_objective` only on a retargeted source.
+        "origin": {"run_id": source_run_id, "node_id": node_id,
+                   "metric": task_scale_metric(snode, getattr(source_state, "objective_key", None)),
+                   "source_attempt": getattr(snode, "attempt", 0),
+                   **({"source_objective": source_state.objective_key}
+                      if getattr(source_state, "objective_key", None) else {})},
     }

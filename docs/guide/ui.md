@@ -190,9 +190,11 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
 - **Rank the run by another metric** (doc 68 68.2) — the Inspector's **Metrics** tab puts **rank by
   this** beside every extra metric an `eval.metrics` reader DECLARED (never a self-reported one, a
   key oriented the other way, or on a run with a holdout): the whole run is re-ranked on it as a
-  `metric_retarget` command, the ★ row then reads `objective · <key>`, a line under the table says
-  since when and on what every earlier decision was taken, and **rank by the task metric** undoes
-  it. Hidden on a historical or review view.
+  `metric_retarget` command, the ★ row then reads `objective · <key>` with that key's own source
+  (a reconstructed value caveated as on its own row), a **task's own metric** row sits beside it, a
+  line under the table says since when and on what every earlier decision was taken, and **rank by
+  the task metric** undoes it. Hidden on a historical or review view. Across runs, a retargeted run
+  is caveated `retargeted objective` and ranked apart from the runs ranked by the task's metric.
 - **Chat / boss** — an agentic run chat turns one message into a plan of ordered actions, with each
   action narrated in a durable feed (`chat.jsonl`). That feed is capped at **32 MiB** per run; past the
   cap further turns are refused with HTTP 413 so one long-lived conversation cannot fill the disk or
@@ -766,7 +768,10 @@ by (its runs' keys disagree at a stronger authority than the one it is grouped b
 disagrees after the split, are shown with every row and no rank, and say which refusal holds them there.
 Before 2026-09-26 such a partition was dropped whole: its rows were never drawn, and the panel said it had no
 observations for the task. The toolbar and the coverage line count **comparable groups** by one rule — two or
-more runs a ranking may order — and the toolbar says what a group is.
+more runs a ranking may order — and the toolbar says what a group is. A run an operator RETARGETED onto
+a declared extra metric (doc 68 68.2) is a group of its own beside its partition, its header says
+*ranked by `<key>`*, and `metricComparable` refuses to order it with a run ranked by another metric
+(`objective`: *ranked metrics differ*).
 
 Under the table, **one running-best overlay per comparable group** (since 2026-09-06, doc 52 row 26):
 each run's running best per evaluated experiment as a **step** line — it holds its value until the

@@ -254,4 +254,8 @@ def run_summary(state: RunState) -> dict:
         "best_node_id": (best.id if best is not None else None),
         "best_metric": (best.metric if best is not None else None),
         "best_display_metric": (digest.node_metric(best) if best is not None else None),
+        # WHICH METRIC both numbers above are (doc 68 68.2): the declared extra metric an operator
+        # retarget made the run's objective, or None — the task's own. Every listing says it
+        # (`tools/run_tools.py::retarget_note`), or a retargeted run's best read as the task's.
+        "objective_key": getattr(state, "objective_key", None),
     }

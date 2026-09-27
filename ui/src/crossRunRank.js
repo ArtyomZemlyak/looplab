@@ -77,7 +77,7 @@
 //     prefix-folded run is not drawn for the same reason it holds no rank.
 import {
   COMPARABILITY_REFUSAL_TEXT, COMPARABILITY_UNKNOWN, bestMetricCaveatNotice, bestMetricCaveats,
-  comparabilityRecord, metricIncomparability, metricIncomparabilityText, runTaskId,
+  comparabilityRecord, metricIncomparability, metricIncomparabilityText, runObjective, runTaskId,
   sourceIncomplete,
 } from './runIndex.js'
 
@@ -243,9 +243,15 @@ export function crossRunGroups(runs = [], { limit = MAX_GROUP_ROWS } = {}) {
     // an opaque digest string, and a separator two different partitions could both spell is a
     // key that merges two evaluations — which is the exact merge this partition exists to undo.
     const partition = partitionKey(run)
-    const key = `${taskId}\u0000${direction}\u0000${partition}`
+    // WHICH METRIC the number is (`runIndex.js::runObjective`, doc 68 68.2): a run an operator
+    // RETARGETED is ranked by a declared extra metric, on another ruler than every run ranked by the
+    // task's own, so it is a group of its own beside the partition — never folded INTO the partition,
+    // which names the evaluation the header prints (critic 2026-09-27, driven: a retargeted run
+    // ranked #1 in a group of task-metric runs). The predicate below refuses the mix too.
+    const objective = runObjective(run)
+    const key = `${taskId}\u0000${direction}\u0000${partition}\u0000${objective}`
     if (!buckets.has(key)) {
-      buckets.set(key, { key, taskId, direction, partition, members: [] })
+      buckets.set(key, { key, taskId, direction, partition, objective, members: [] })
     }
     buckets.get(key).members.push({ run, ...metric })
   }
@@ -431,6 +437,8 @@ function buildGroup(bucket, limit, { refusal = '' } = {}) {
     // with no account of why they are two would be a worse silence than the one this replaced.
     partition: bucket.partition || '',
     comparability: bucket.partition ? String(bucket.partition).split(':')[0] : COMPARABILITY_UNKNOWN,
+    // …and WHICH METRIC its numbers are (`runObjective`): `''` for the task's own.
+    objective: bucket.objective || '',
     // What further split this group from the rest of its partition — `{discriminator: value}`, a
     // value of '' meaning "recorded none" — or null for a partition that was never split (never
     // refused, or refused with nothing varying to split it by). Which of it is PROVEN, which only

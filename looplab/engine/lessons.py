@@ -42,6 +42,7 @@ from looplab.core.models import (
     RunState,
     latest_lesson_node_count,
     safe_lesson_node_count,
+    task_scale_metric,
     valid_concept_id,
 )
 from looplab.engine.cadence import at_creation_boundary
@@ -53,7 +54,7 @@ from looplab.engine.lessons_distill import (LessonDistillMixin, promoted_skill_k
 # re-imported so `from looplab.engine.lessons import LESSON_ROLE_*` (tests, cross-run tooling)
 # keeps resolving.
 from looplab.engine.lessons_priors import (  # noqa: F401
-    LESSON_ROLE_DEVELOPER, LESSON_ROLE_RESEARCHER, LessonPriorsMixin)
+    LESSON_ROLE_DEVELOPER, LESSON_ROLE_RESEARCHER, LessonPriorsMixin, retargeted_lesson_note)
 from looplab.engine.lessons_reconcile import LessonReconcileMixin
 from looplab.engine.memory import JsonlCaseLibrary
 # Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
@@ -139,6 +140,19 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
         # difference between "this finding is about `loss/contrastive`" and "the run that produced it
         # touched `loss/contrastive`". A lesson whose evidence is untagged records nothing and falls
         # back to run-level inheritance at READ time, where it is labelled as the weaker claim.
+        # WHICH METRIC a retargeted run's lessons speak of (doc 68 68.2): every number its rows quote
+        # is a declared extra metric's, and a lesson is read by later runs of the task beside their
+        # own task metric (critic 2026-09-27). Said in the statement a later run reads, and stamped
+        # (`objective_key`, additive; the readers ignore unknown keys).
+        objective = getattr(state, "objective_key", None) if state is not None else None
+        if objective:
+            note = retargeted_lesson_note(objective)
+            for lz in lessons:
+                if isinstance(lz, dict):
+                    lz.setdefault("objective_key", objective)
+                    statement = lz.get("statement")
+                    if isinstance(statement, str) and note not in statement:
+                        lz["statement"] = statement + note
         if state is not None:
             from looplab.engine.concept_shelf import state_concepts
             for lz in lessons:
@@ -603,13 +617,29 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
         # the rationale, and carries no concepts — they are tagged from the idea's text, so they
         # would tell the next run the UNBUILT idea won here. "" / unchanged for every other case.
         substituted = idea_not_tested(best, final.nodes)
+        # THE TASK'S SCALE, always (doc 68 68.2): a case is a previous run's number handed to the
+        # next one, and the election below compares it with every other case of the task. Under an
+        # operator retarget the champion's `robust_metric` is a declared extra metric's, and it was
+        # elected over — or replaced — a plain run's task metric, then handed to the next run as
+        # "the best known configuration" (critic 2026-09-27, driven). The champion is still the one
+        # the run chose; its number is what it measured on the task's own metric, and the retarget
+        # rides beside it (`objective_key`, additive: only on a retargeted run's case).
+        objective = getattr(final, "objective_key", None)
+        task_scale = task_scale_metric(best, objective)
+        if objective and task_scale is None:
+            # A retargeted champion whose terminal recorded no task metric (a hand-written or
+            # imported `node_evaluated` with none: the fold keeps it `evaluated` at `metric=None`)
+            # has no number on the scale a case is compared on — nothing to hand the next run, and
+            # the validity fence below would raise into finalize's retry on every pass.
+            return
         case = {
             "task_id": final.task_id,
             "goal": final.goal,
             "direction": final.direction,
             "fingerprint": self.task_fingerprint(final, best),
             "params": best.idea.params,
-            "metric": best.robust_metric,
+            "metric": task_scale,
+            **({"objective_key": objective} if objective else {}),
             "rationale": (best.idea.rationale or "") + idea_report_note(best, final.nodes)
             if substituted else best.idea.rationale,
             # Both fields are ADDITIVE and reader-defaulted (invariant 5): `valid_case_record` gates on
@@ -707,7 +737,9 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
                     continue
                 evidence_nodes_total += 1
                 evidence_nodes_incomplete += int(nd.id in materialization_receipts)
-                m = getattr(nd, "robust_metric", None)
+                # On the task's scale, like the case (doc 68 68.2): a concept's outcome is compared
+                # across runs.
+                m = task_scale_metric(nd, getattr(final, "objective_key", None))
                 # the valid retained subset of a partial classifier result remains positive
                 # evidence, but the producer-level denominator below permanently forbids absence/frequency
                 # inference. Authored/heuristic labels and deleted/aborted attempts never cross this wall.
@@ -765,7 +797,8 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
                 run_id=run_id, run_uid=getattr(final, "run_uid", ""),
                 task_id=final.task_id, direction=direction,
                 concepts=concepts, fingerprint=self.task_fingerprint(final, best),
-                best_metric=(best.robust_metric if best is not None else None),
+                best_metric=(task_scale_metric(best, getattr(final, "objective_key", None))
+                             if best is not None else None),
                 concept_outcomes=outcomes,
                 concept_evidence_nodes_total=evidence_nodes_total,
                 concept_evidence_nodes_incomplete=evidence_nodes_incomplete,

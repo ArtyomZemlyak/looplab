@@ -374,13 +374,18 @@ def sibling_final_metrics(state, node_id: int) -> list[float]:
     may stop fresh compute. Reuse the selector's eligibility boundary so ASHA cannot be stricter than
     the search policy merely because a discarded sibling retained an attractive metric.
     """
+    from looplab.core.models import task_measurement
     from looplab.events.replay import promotion_eligible_nodes
 
     out: list[float] = []
     for node in promotion_eligible_nodes(state):
         if node.id == node_id:
             continue
-        m = getattr(node, "metric", None)
+        # On the TASK's scale (doc 68 68.2): the live sample these are held against is read with the
+        # task metric's own reader, so under an operator retarget the siblings' OBJECTIVE values put
+        # a live 0.55 beating both siblings' task finals (0.50, 0.52) below [0.70, 0.72] (critic
+        # 2026-09-27, driven). Identical to `node.metric` on every run without a retarget.
+        m = task_measurement(node, getattr(state, "objective_key", None))
         if isinstance(m, bool) or not isinstance(m, (int, float)):
             continue
         m = float(m)

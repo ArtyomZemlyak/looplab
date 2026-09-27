@@ -1015,11 +1015,19 @@ def _print_result(state) -> None:
     if best is not None:
         m = best.robust_metric
         ms = f"{m:.6g}" if m is not None else "n/a"
-        typer.echo(f"BEST node {best.id}: metric={ms} params={best.idea.params}")
+        # doc 68 68.2: under an operator retarget the number is the DECLARED extra metric's, and the
+        # line says which — printed bare, it read as the task's own (critic 2026-09-27, driven).
+        objective = getattr(state, "objective_key", None)
+        ranked = (f" (objective: {objective!r}, an operator retarget — not the task's own metric)"
+                  if objective else "")
+        typer.echo(f"BEST node {best.id}: metric={ms}{ranked} params={best.idea.params}")
         # doc 67 67.14: only when the task declared a reference — a baseline to measure the gain
-        # from, and a target to read it as a share of (`core/headroom.py`).
+        # from, and a target to read it as a share of (`core/headroom.py`). On the TASK's scale,
+        # which is the reference's (`core/models.py::task_scale_metric`).
         from looplab.core.headroom import headroom, headroom_line
-        room = headroom(m, getattr(state, "reference_score", None), state.direction)
+        from looplab.core.models import task_scale_metric
+        room = headroom(task_scale_metric(best, objective),
+                        getattr(state, "reference_score", None), state.direction)
         if room is not None:
             typer.echo(headroom_line(room))
 

@@ -1182,6 +1182,16 @@ class RunTools:
         return body + (f"\n{receipt}" if receipt else "")
 
 
+def retarget_note(objective_key) -> str:
+    """The clause a foreign run's listing row carries when an operator RETARGETED it (doc 68 68.2):
+    its best is a DECLARED extra metric's value, not the task's own, and printed bare it read as the
+    task's (critic 2026-09-27, driven: "retargeted: best=0.7" beside task-metric siblings). "" for
+    every run without a retarget, so those rows are byte-identical."""
+    if not (isinstance(objective_key, str) and objective_key):
+        return ""
+    return f" · RANKED BY {objective_key!r} (an operator retarget), not the task's own metric"
+
+
 class ForeignRunReader:
     """The plumbing every provider that reads ANOTHER run shares (doc 25 TO-05).
 
@@ -1325,7 +1335,13 @@ class ForeignRunReader:
         # one does: a number read from a foreign run looks authoritative on its own, and by the time
         # the reader reaches the metric line the qualification has to already have been said.
         contract = self._contract_notice(str(run_id))
-        head = "\n".join(part for part in (note, contract) if part)
+        # …and so does WHICH METRIC the node's numbers are (doc 68 68.2): under an operator retarget
+        # there, a node's metric is a declared extra metric's value, not the task's own.
+        objective = getattr(st, "objective_key", None)
+        ranked = (f"(run {run_id} RANKS BY {objective!r}, an operator retarget: a node's metric "
+                  "there is that declared metric's value, not the task's own)"
+                  if isinstance(objective, str) and objective else "")
+        head = "\n".join(part for part in (note, contract, ranked) if part)
         return (f"{head}\n" if head else "") + prefix + self._reader.execute(tool, args)
 
 
@@ -1478,6 +1494,7 @@ class SiblingRunTools(ForeignRunReader):
             lines.append(f"{rid}: best={digest.fmt_num(best.metric) if best else '—'} "
                          f"({st.direction}) · {len(st.nodes)} nodes · {phase}"
                          + (f" · best=#{best.id}" if best else "")
+                         + retarget_note(getattr(st, "objective_key", None))
                          + self._partial_suffix(rid) + self._contract_suffix(rid))
         head = f"{len(lines)} sibling run(s) of task {self.task_id or '?'}:"
         return head + "\n" + "\n".join(lines) if lines else "(no sibling runs of this task)"
@@ -1609,6 +1626,7 @@ class AllRunsTools(ForeignRunReader):
                          f"best={digest.fmt_num(row['best_metric']) if best else '—'} "
                          f"({row['direction']}) · {row['nodes']} nodes · {phase}"
                          + (f" · best=#{row['best_node_id']}" if best else "")
+                         + retarget_note(row.get("objective_key"))
                          + self._partial_suffix(rid) + self._contract_suffix(rid))
         return (f"{len(lines)} run(s) under this configured run root (across all tasks):\n"
                 + "\n".join(lines)

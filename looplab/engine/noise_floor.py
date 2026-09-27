@@ -67,7 +67,7 @@ import anyio
 
 from looplab.core.containment import contain
 from looplab.core.fitness import standard_error_difference
-from looplab.core.models import RunState
+from looplab.core.models import RunState, task_measurement
 from looplab.engine.comparability import agreed_ruler, recorded_seed_rulers, result_ruler
 # Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
 from looplab.engine.shared import engine_fold as fold
@@ -347,8 +347,12 @@ class NoiseFloorMixin:
         # The ruler of each counted repeat, off the rows themselves, so a resumed pass names what
         # an earlier process ran (`comparability.py::recorded_seed_rulers`).
         rulers = recorded_seed_rulers(events, EV_EVAL_NOISE_SEED, nd.id, generation)
+        # The node's number on the ruler its repeats run on — the task metric's (doc 68 68.2): under
+        # an operator retarget `nd.metric` is the objective's, and the row held it beside task-metric
+        # repeats (critic 2026-09-27, driven: `search_metric: 0.45` over `metrics: [0.5, 0.5, 0.5]`).
         await self._append_noise_floor(
-            nd.id, generation, seeds, metrics, nd.metric,
+            nd.id, generation, seeds, metrics,
+            task_measurement(nd, getattr(state, "objective_key", None)),
             getattr(nd.idea, "eval_profile", None), reason,
             protocol=agreed_ruler(rulers, [s for s in seeds if recorded.get(s) is not None]),
             mid_search=mid_search)

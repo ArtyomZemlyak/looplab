@@ -2593,6 +2593,7 @@ export function CrossRunPanel({ state, onClose }) {
                 ? 'these runs recorded the same comparability key, and a pair of them is refused all the same: the key groups them, it does not make them one evaluation'
                 : 'these runs recorded the same comparability key, so their numbers were measured against the same declared evaluation inputs'}>evaluation {group.partition}</span>
               : <span className="warn" title="no run in this group records what its number was measured against; unknown is not the same as comparable">evaluation unrecorded</span>}
+            {group.objective && <>{' · '}<span className="warn" title="an operator retarget made this declared extra metric these runs' objective: their numbers are its values, not the task's own metric, so they are ranked apart from every run ranked by it">ranked by {group.objective}</span></>}
             {group.split && <>{' · '}<span className="warn" title={splitClaims(group).join(' ')}>{splitLabel(group.split)}</span></>}
             {group.outcome === 'refused' && <>{' · '}<span className="warn" title={unrankedRowTitle(group)}>not ranked</span></>}.</b>
           <span> {claim.claim}</span>
@@ -2633,7 +2634,7 @@ export function CrossRunPanel({ state, onClose }) {
         const overlay = trajectoryOverlay(group)
         return <div key={`${group.key}:trajectory`} className="xr-trajectory" style={{ marginTop: 12 }}>
           {overlay.drawn > 0 && <MultiTrajectory runs={overlay.runs}
-            title={`Running best · ${group.taskId} · ${group.direction === 'min' ? 'lower is better' : 'higher is better'}${group.partition ? ` · evaluation ${group.partition}` : ''}${group.split ? ` · ${splitLabel(group.split)}` : ''}`} />}
+            title={`Running best · ${group.taskId} · ${group.direction === 'min' ? 'lower is better' : 'higher is better'}${group.partition ? ` · evaluation ${group.partition}` : ''}${group.objective ? ` · ranked by ${group.objective}` : ''}${group.split ? ` · ${splitLabel(group.split)}` : ''}`} />}
           <div className="muted" style={{ fontSize: 11 }}>{trajectoryClaim(group, overlay)}</div>
         </div>
       })}
