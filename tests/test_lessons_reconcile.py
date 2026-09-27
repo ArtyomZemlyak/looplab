@@ -684,3 +684,82 @@ def test_a_reconciled_lesson_of_a_retargeted_run_carries_its_ruler(tmp_path, mon
     twin = {"statement": "a sharper step helps convergence on this ruler",
             "task_id": "toy_quadratic", "outcome": "abandoned", "run_id": "P"}
     assert lesson_id(fresh[0]) != lesson_id(twin)
+
+
+# --------------------------------------------------------------------------- #
+# doc 69 69.15 — the scan that judges staleness reads the set the retirement reads
+# --------------------------------------------------------------------------- #
+
+_STALE_PAIR_ROW = {
+    "task_id": "toy_quadratic", "run_id": "run_me", "source": "comparative",
+    "statement": "OLD STALE moving x helped by 5", "outcome": "supported",
+    "evidence": [1, 0], "delta": 5.0,
+    "evidence_sig": {"1": "evaluated:4.0", "0": "evaluated:9.0"},
+    "fingerprint": [], "kind": "quadratic",
+}
+
+
+def _flipped_state():
+    return _state([_node(0, metric=9.0, op="draft", params={"x": 1.0}, code="x=1\n"),
+                   _node(1, metric=6.0, parent_ids=[0], params={"x": 3.0}, code="x=3\n")])
+
+
+def test_a_stale_row_the_retirement_cannot_see_buys_no_re_derivation(tmp_path, monkeypatch):
+    """A real run's reconcile judged one of its lessons stale six times (1.2 M tokens) and retired
+    nothing: the row's fingerprint was over the reader's fence, so the locked rewrite — which reads
+    only rows `_valid_claim_source_row` admits — never saw it. The scan now reads that same set: a
+    row past the fence is not judged here, so nothing is paid for and nothing is written."""
+    from looplab.engine.memory import _MAX_SOURCE_FINGERPRINT
+
+    mem = tmp_path / "mem"
+    eng = _engine(tmp_path, reflection_priors=True, memory_dir=str(mem), comparative_lessons=True)
+    past = {**_STALE_PAIR_ROW,
+            "fingerprint": [f"w{i}" for i in range(_MAX_SOURCE_FINGERPRINT + 1)]}
+    _seed(mem, [past])
+    before = (mem / "lessons.jsonl").read_bytes()
+    client = FakeClient("P1 [BAD] this change regressed the metric\n")
+    monkeypatch.setattr(eng, "_reflect_client", lambda: client)
+    eng.lessons.reconcile_lessons(_flipped_state())
+    assert client.prompts == [], "a row the retirement cannot see was paid for"
+    assert (mem / "lessons.jsonl").read_bytes() == before
+    assert not [e for e in eng.store.read_all() if e.type == "lessons_reconciled"]
+    # …and the same row inside the fence is judged, paid for and retired, as it always was.
+    (mem / "lessons.jsonl").unlink()
+    _seed(mem, [_STALE_PAIR_ROW])
+    eng.lessons._reconcile_sig_hash = None
+    eng.lessons.reconcile_lessons(_flipped_state())
+    assert client.prompts and not any("OLD STALE" in r.get("statement", "") for r in _rows(mem))
+
+
+def test_nothing_retired_is_recorded_with_its_reason_and_its_spend(tmp_path, monkeypatch):
+    """When the stale rows are gone by the time the lock is taken (another writer rewrote the store
+    in between), the pass used to return silently: no receipt, and the pairs it PAID for left out
+    of the spend ledger, so the next cadence bought them again. Both are written now; nothing that
+    did not commit is claimed."""
+    import contextlib
+
+    import looplab.events.eventstore as eventstore
+    from looplab.engine.lessons_reconcile import RECONCILE_NOTHING_RETIRED
+
+    mem = tmp_path / "mem"
+    eng = _engine(tmp_path, reflection_priors=True, memory_dir=str(mem), comparative_lessons=True)
+    _seed(mem, [_STALE_PAIR_ROW])
+    monkeypatch.setattr(eng, "_reflect_client",
+                        lambda: FakeClient("P1 [BAD] this change regressed the metric\n"))
+    real_lock = eventstore.interprocess_lock
+
+    @contextlib.contextmanager
+    def raced(path, **kwargs):
+        (mem / "lessons.jsonl").write_text("", encoding="utf-8")   # the other writer got there first
+        with real_lock(path, **kwargs):
+            yield
+
+    monkeypatch.setattr(eventstore, "interprocess_lock", raced)
+    eng.lessons.reconcile_lessons(_flipped_state())
+    rec = [e.data for e in eng.store.read_all() if e.type == "lessons_reconciled"]
+    assert len(rec) == 1 and rec[0]["n_retired"] == 0 and rec[0]["n_added"] == 0
+    assert rec[0]["reason"] == RECONCILE_NOTHING_RETIRED
+    spends = [d for d in fold(eng.store.read_all()).lessons_distilled
+              if d.get("trigger") == "reconcile"]
+    assert len(spends) == 1 and spends[0]["pairs"] and spends[0]["count"] == 0
+    assert spends[0]["lessons"] == [] and _rows(mem) == []

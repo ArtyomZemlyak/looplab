@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-160 event types — 113 folded into `RunState`, 47 diagnostic; 1002 declared payload keys; 22 types whose whole payload is stored by the fold.
+160 event types — 113 folded into `RunState`, 47 diagnostic; 1003 declared payload keys; 22 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -110,7 +110,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `inject_failed` | diagnostic | An `inject_node` request that could not be materialized, with the reason. | `error`, `idx`, `reason` | — |
 | `inject_node` | folded · whole | An operator-authored node: its idea and code, or a branch of an existing (possibly foreign) node. | — | `code`, `deleted`, `files`, `forked_from`, `idea`, `origin`, `parent_generations`, `parent_id`, `parent_ids` |
 | `lessons_distilled` | folded · whole | The lessons one distillation pass drew from this run's node pairs. | `at_node`, `count`, `lessons`, `pairs`, `trigger` | — |
-| `lessons_reconciled` | diagnostic | A re-evaluation changed an outcome, so this run's lessons were re-derived. | `at_node`, `derivation`, `lessons`, `n_added`, `n_retired`, `pairs`, `reflect` | — |
+| `lessons_reconciled` | diagnostic | A re-evaluation changed an outcome, so this run's lessons were re-derived. | `at_node`, `derivation`, `lessons`, `n_added`, `n_retired`, `pairs`, `reflect` | `reason` |
 | `lessons_refreshed` | folded · whole | The cross-run lesson store was re-read at a node, and whether it changed. | `at_node` | `changed`, `chars`, `error`, `skipped` |
 | `lessons_store_unavailable` | diagnostic | The lesson store could not be read this cadence; the next one retries the same unread store. | `error`, `mode` | `count`, `phase` |
 | `literature_retrieved` | folded | The papers one deep-research pass READ, beside the memo it produced. | `at_node`, `items` | `memo_id` |

@@ -27,6 +27,10 @@ from looplab.events.eventstore import read_jsonl_lenient
 from looplab.engine.shared import engine_fold as fold
 from looplab.events.types import EV_LESSONS_DISTILLED, EV_LESSONS_RECONCILED
 
+# Why a reconcile that found stale lessons retired none (doc 69 69.15): they were no longer in
+# the store when the lock was taken.
+RECONCILE_NOTHING_RETIRED = "stale_rows_gone_under_lock"
+
 # "The node's number on the ruler in force" — `Node.metric`, which is what every signature read
 # before a lesson could name another ruler (`_metric_on_ruler`).
 _IN_FORCE = object()
@@ -424,6 +428,7 @@ class LessonReconcileMixin:
         stale_idx: set[int] = set()
         stale_pairs: list[tuple] = []
         reflect_stale = False
+        from looplab.engine.claims import _valid_claim_source_row
         for idx, o in enumerate(rows):
             # "THIS RUN'S LESSONS" IS AN INCARNATION, NOT A DIRECTORY NAME. Keyed on the name alone,
             # a lesson written by a PREVIOUS run of the same name could not match the new run's
@@ -434,6 +439,12 @@ class LessonReconcileMixin:
             # row that names no incarnation, which would otherwise become unreachable forever.
             if not row_belongs_to_run(o, run_uid=getattr(state, "run_uid", ""),
                                       run_id=state.run_id):
+                continue
+            # THE FENCE THE RETIREMENT READS (doc 69 69.15): the locked rewrite below retires only
+            # rows `load_claim_source_path` admits, so a row past `_valid_claim_source_row` judged
+            # stale HERE bought a paid re-derivation and retired nothing — six times on a real run
+            # (1.2 M tokens), for a lesson whose fingerprint was over the reader's bound.
+            if not _valid_claim_source_row(o, research=False):
                 continue
             if not self._lesson_evidence_stale(state, o):
                 continue
@@ -595,9 +606,10 @@ class LessonReconcileMixin:
             self._reconcile_sig_hash = None
             refuse_budget_stop(held_stop)
             return state
-        if not n_retired:
-            refuse_budget_stop(held_stop)
-            return state
+        # NOTHING RETIRED is said, not swallowed (doc 69 69.15): with the fence above the scan and
+        # the rewrite read one set, so this means the stale rows were gone when the lock was taken
+        # (another writer rewrote the store in between). What was paid for is still ledgered — else
+        # the next cadence buys the same pairs again — and the receipt names why nothing changed.
         fresh = committed_fresh
         if not fresh:
             pairs_used = []
@@ -608,10 +620,11 @@ class LessonReconcileMixin:
         # in the store; `count` says how many that was, and zero is a real answer.
         if spent_pairs_this_pass:
             from looplab.core.advisory_payloads import research_lesson_receipt
+            committed_comp = comp if n_retired else []
             self._e.store.append(EV_LESSONS_DISTILLED, {
-                "at_node": len(state.nodes), "trigger": "reconcile", "count": len(comp),
+                "at_node": len(state.nodes), "trigger": "reconcile", "count": len(committed_comp),
                 "pairs": [[pr["a"], pr["b"]] for pr in spent_pairs_this_pass],
-                "lessons": [research_lesson_receipt(lz, state) for lz in comp]})
+                "lessons": [research_lesson_receipt(lz, state) for lz in committed_comp]})
         # Audit sidecar (fold ignores it): what drifted and what replaced it.
         self._e.store.append(EV_LESSONS_RECONCILED, {
             "at_node": len(state.nodes), "n_retired": n_retired, "n_added": len(fresh),
@@ -620,6 +633,7 @@ class LessonReconcileMixin:
             "lessons": [{"statement": lz.get("statement", ""),
                          "outcome": lz.get("outcome", ""),
                          "claim_stance": lz.get("claim_stance")}
-                        for lz in fresh[:12] if isinstance(lz, dict)]})
+                        for lz in fresh[:12] if isinstance(lz, dict)],
+            **({} if n_retired else {"reason": RECONCILE_NOTHING_RETIRED})})
         refuse_budget_stop(held_stop)        # the retirement and its receipts have landed
         return fold(self._e.store.read_all())
