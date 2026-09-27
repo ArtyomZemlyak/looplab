@@ -148,11 +148,52 @@ def test_a_perfect_match_short_circuits():
 
 def test_the_candidate_scan_is_bounded():
     """A reply that opens more than the cap is prose ABOUT json, and the bound is on the work. It
-    degrades to the best of what it did read — never to an exception."""
-    reply = "".join('{"unrelated": %d}' % i for i in range(_JSON_CANDIDATE_CAP * 4))
-    reply += '{"operator": "late", "rationale": "r", "params": {}}'
-    got = _extract_json(reply, _SCHEMA)
-    assert isinstance(got, dict), "past the cap it still answers"
+    degrades to the best of what it did read — and when nothing it read answers the schema, that
+    best is REFUSED rather than returned (doc 69 69.17): `{"unrelated": 0}` validated into an
+    all-defaults answer the model never gave."""
+    from looplab.core.parse import ParseError
+
+    unrelated = "".join('{"unrelated": %d}' % i for i in range(_JSON_CANDIDATE_CAP * 4))
+    with pytest.raises(ParseError):
+        _extract_json(unrelated + '{"operator": "late", "rationale": "r", "params": {}}', _SCHEMA)
+    got = _extract_json('{"operator": "early"}' + unrelated, _SCHEMA)
+    assert got == {"operator": "early"}, "an answer among what it read still answers"
+
+
+def test_an_object_that_answers_nothing_is_never_the_answer():
+    """Doc 69 69.17: the best candidate was returned even when it carried not one of the schema's
+    names — the schema's own echo, alone in the reply, validated into an all-defaults object and
+    the report path published it as the model's. Refused now, on the strict walk and on the lenient
+    literal fallback alike; `{}` — every field left to its default — still answers, and a reply
+    with no schema is the historical walk, echo and all."""
+    from looplab.core.parse import ParseError
+
+    echo = json.dumps(_SCHEMA)
+    for reply in (f"The schema is {echo}.", "{'type': 'object', 'title': '_Answer'}"):
+        with pytest.raises(ParseError):
+            _extract_json(reply, _SCHEMA)
+    assert _extract_json("Nothing to change: {}", _SCHEMA) == {}
+    assert _extract_json(f"The schema is {echo}.")["type"] == "object"
+    assert _extract_json("{'operator': 'improve', 'bogus': 1,}", _SCHEMA)["operator"] == "improve"
+
+
+def test_a_reply_that_only_echoes_the_schema_is_not_an_answer_end_to_end():
+    """THE REAL PATH of 69.17: the text parser, the real hint, a client that only echoes the schema
+    it was handed. It raised nothing and returned an all-defaults `_Answer`; now every parser fails
+    and the caller's own fallback decides (`serve/report.py`'s deterministic report)."""
+    from looplab.core.parse import ParseError
+
+    class _Client:
+        model = "m"
+
+        def complete_tool(self, messages, json_schema, **kw):
+            raise RuntimeError("force the text path")
+
+        def complete_text(self, messages, **kw):
+            return "Sure. The schema you gave me is " + messages[-1]["content"].split("schema: ", 1)[1]
+
+    with pytest.raises(ParseError):
+        parse_structured(_Client(), [{"role": "user", "content": "go"}], _Answer, "baml")
 
 
 def test_nothing_json_at_all_still_raises_ParseError():

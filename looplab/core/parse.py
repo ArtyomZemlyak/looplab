@@ -228,18 +228,33 @@ def _extract_json(text: str, schema=None) -> dict:
         # Resume AFTER the object just decoded: a nested `{` inside it is not a second candidate.
         i = text.find("{", max(end, i + 1))
     if best is not None:
-        return best
+        if _answers(best, best_fit):
+            return best
+        # THE BEST OF WHAT WAS READ ANSWERS NOTHING (doc 69 69.17): it carries names, and not one
+        # the schema declares — the schema's own echo, an example of another shape. Returned, it
+        # validated into an object of all-default values, and the report path published an empty
+        # report as the model's; refused, the caller's next parser — and past that its own
+        # fallback — decides (`_walk_parsers`). An EMPTY object still answers, as it always did.
+        raise ParseError("no JSON object in the text answers the schema")
     # H2 schema-aligned lenient fallback: small models emit near-JSON (single quotes, trailing
     # commas, Python True/None). Try a Python-literal eval of the outermost {...} span before failing.
     s, e = text.find("{"), text.rfind("}")
     if s != -1 and e > s:
         try:
             obj = ast.literal_eval(text[s:e + 1])
-            if isinstance(obj, dict):
+            if isinstance(obj, dict) and (not (declared or required)
+                                          or _answers(obj, _schema_fit(obj, required, declared))):
                 return obj
         except (ValueError, SyntaxError, MemoryError, RecursionError):
             pass
     raise ParseError("no JSON object found in text")
+
+
+def _answers(obj: dict, fit: tuple[int, bool]) -> bool:
+    """Whether a decoded object is an ANSWER to the schema `fit` was scored against: it carries a
+    required or a declared name — or no name at all (`{}`, every field left to its default, which a
+    model may mean). An object whose every name is foreign is not (doc 69 69.17)."""
+    return bool(fit[0] or fit[1] or not obj)
 
 
 def _coerce_value(val, ann):
