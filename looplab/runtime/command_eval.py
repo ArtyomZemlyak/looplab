@@ -1890,15 +1890,21 @@ def eval_spec_time_budget(eval_spec: Optional[dict]) -> Optional[float]:
 EVAL_TIMEOUT_OVERRIDE_KEY = "eval_timeout"
 
 
-def eval_timeout_override(overrides) -> Optional[float]:
+def eval_timeout_override(overrides, *, clamp: bool = True) -> Optional[float]:
     """The operator's live per-eval budget off a folded `budget_overrides` map, or None.
 
     TOTAL over junk: the fold already refuses a non-finite/non-positive value, but a manually built
     or forward-version `RunState` reaches this too, and a poison ceiling must read as "no override",
-    never as a NaN deadline that is never reached. Capped at `sandbox.MAX_TIMEOUT_S` — the ceiling
-    every launch is clamped to anyway (`finite_timeout`), so a larger number would be announced to
-    the roles and then not run."""
-    from looplab.runtime.sandbox import MAX_TIMEOUT_S
+    never as a NaN deadline that is never reached. Capped at the launch ceiling IN FORCE
+    (`sandbox.launch_timeout_ceiling()` — the run's `Settings.max_launch_timeout_s`, 24 h unless
+    configured) — the ceiling every launch is clamped to anyway (`finite_timeout`), so a larger
+    number would be announced to the roles and then not run.
+
+    `clamp=False` is the number the operator ASKED for, for the one reader that has to say when the
+    two differ (`engine/width_settling.py::_apply_control_overrides`): the server refuses a value
+    above the run's RECORDED ceiling, so a clamp here means this engine was started before that
+    ceiling was raised, and only a restart applies it."""
+    from looplab.runtime.sandbox import launch_timeout_ceiling
     if not isinstance(overrides, dict):
         return None
     raw = overrides.get(EVAL_TIMEOUT_OVERRIDE_KEY)
@@ -1910,7 +1916,7 @@ def eval_timeout_override(overrides) -> Optional[float]:
         return None
     if not math.isfinite(value) or value <= 0:
         return None
-    return min(value, MAX_TIMEOUT_S)
+    return min(value, launch_timeout_ceiling()) if clamp else value
 
 
 def leashed_timeout(declared, budget: Optional[float], override: Optional[float]):

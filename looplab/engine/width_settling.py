@@ -54,6 +54,33 @@ from looplab.runtime.command_eval import eval_timeout_override
 
 _LOG = logging.getLogger(__name__)
 
+# (requested, applied) `eval_timeout` pairs `_report_eval_timeout_clamp` has already logged.
+# `_apply_control_overrides` runs every turn, and the operator needs the sentence once per value, not
+# once per turn. Module-level, not an Engine attribute: it is log hygiene that nothing decides on, and
+# one engine process drives one run.
+_EVAL_TIMEOUT_CLAMPS_REPORTED: set[tuple[float, float]] = set()
+
+
+def _report_eval_timeout_clamp(requested: float, applied: float) -> None:
+    """Say — once per value — that the operator's `budget_extend{eval_timeout}` is above the launch
+    ceiling THIS engine loaded, so its evaluations run under the ceiling instead.
+
+    The server refuses an `eval_timeout` above the run's RECORDED ceiling
+    (`serve/control_validation.py::_run_launch_ceiling`), so arriving here means the ceiling was raised
+    after this engine started (the per-run config was edited while it ran), or the event reached the
+    log past the server. Either way the fix is a restart, and a clamp nobody reports is exactly the
+    silent cut the ceiling is refused loudly at the server to avoid."""
+    key = (float(requested), float(applied))
+    if key in _EVAL_TIMEOUT_CLAMPS_REPORTED:
+        return
+    _EVAL_TIMEOUT_CLAMPS_REPORTED.add(key)
+    _LOG.warning(
+        "budget_extend eval_timeout=%.0f s is above this engine's launch ceiling of %.0f s "
+        "(max_launch_timeout_s as loaded when the engine started), so the evaluations it dispatches "
+        "run under %.0f s. The ceiling is read only at engine start: raise max_launch_timeout_s in "
+        "the run's config (at most 604800 s), then stop and resume the run to apply %.0f s.",
+        requested, applied, applied, requested)
+
 
 class CalibrationOverrideRefusal(ConfigRefusal, RuntimeError):
     """A live `budget_extend` on a speculation-CALIBRATION run: refused, as a deliberate refusal.
@@ -325,6 +352,12 @@ class WidthSettlingMixin:
         # new number while one already running keeps the leash it was dispatched with. Re-read off the
         # fold every turn like the siblings above, which is what makes a resume see the last value.
         self._eval_timeout_override = eval_timeout_override(_bo)
+        # Capped at the launch ceiling this engine installed at start (`max_launch_timeout_s`); a
+        # value the cap actually moved is REPORTED, never just applied (`_report_eval_timeout_clamp`).
+        _requested_eval_timeout = eval_timeout_override(_bo, clamp=False)
+        if (_requested_eval_timeout is not None and self._eval_timeout_override is not None
+                and _requested_eval_timeout > self._eval_timeout_override):
+            _report_eval_timeout_clamp(_requested_eval_timeout, self._eval_timeout_override)
         # Legacy first, canonical last: a modern command carrying both spellings is deterministic.
         # Live 0 settles to serial width 1; only launch-time Settings retain hardware/eval AUTO.
         for _key in ("max_parallel", "eval_parallel"):

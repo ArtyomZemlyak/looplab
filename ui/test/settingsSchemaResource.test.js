@@ -228,7 +228,10 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   A row because it changes a prompt; the Python half moved too.
   //   227 -> 228 (2026-09-26): `noise_floor_mid_search` — the noise floor measured once mid-search.
   //   A row because an operator must be able to move a spend they opted into; the Python half moved too.
-  assert.equal(Object.keys(schema.fieldByKey).length, 228)
+  //   228 -> 229 (2026-09-27): `max_launch_timeout_s` — the hard per-launch wall clock (24 h default,
+  //   up to 7 days). A row because it decides whether a multi-day training is killed at a day; the
+  //   Python half moved too.
+  assert.equal(Object.keys(schema.fieldByKey).length, 229)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

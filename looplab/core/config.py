@@ -22,6 +22,8 @@ from looplab.core.errors import ConfigRefusal
 # Single sources shared with the LLM resolver — see core/llm.py.
 from looplab.core.llm import AGENT_STAGE_KEYS, DEFAULT_HEADER_TIMEOUT_S
 from looplab.core.models import FAILURE_REASONS, REPAIRABLE_REASONS
+# The hard launch ceiling's range, shared with the runtime that enforces it (`max_launch_timeout_s`).
+from looplab.core.numeric import LAUNCH_TIMEOUT_DEFAULT_S, LAUNCH_TIMEOUT_LIMIT_S
 
 _LOG = logging.getLogger(__name__)
 
@@ -438,10 +440,12 @@ def _parser_names() -> tuple[str, ...]:
 class Settings(BaseSettings):
     """The engine settings schema (every knob a run accepts).
 
-    Timeout family — the six most often confused, each owned by a different subsystem (the family
+    Timeout family — the seven most often confused, each owned by a different subsystem (the family
     is larger: every `*timeout*` / `*_budget_s` field has its own row in docs/guide/configuration.md):
       - `timeout`:             per-eval wall-clock budget for ONE experiment's evaluation (engine/eval).
       - `max_eval_timeout`:    hard ceiling for a governed per-node Researcher timeout override.
+      - `max_launch_timeout_s`: the HARD ceiling every subprocess launch is clamped to (runtime/
+                               sandbox), 24 h unless raised, at most 7 days.
       - `llm_timeout`:         LLM request idle timeout — inter-token stall limit in stream mode
                                (core.llm OpenAICompatibleClient).
       - `llm_header_timeout`:  LLM first-byte (response-headers) window for stream attempts (core.llm).
@@ -722,7 +726,35 @@ class Settings(BaseSettings):
     # existing heavy/neural-net authoring example while staying well below the sandbox's defensive
     # 24-hour subprocess ceiling. This is operator-owned run config: agents may request less or more,
     # but the accepted action is always clamped here after the `agent_control.timeout` permission gate.
-    max_eval_timeout: float = Field(default=3600.0, gt=0, le=24 * 3600.0)
+    # Its bound stays the DEFAULT launch ceiling when `max_launch_timeout_s` below is raised
+    # (2026-09-27), deliberately: this clamps what a MODEL may ask for, and a model that reads
+    # candidate-authored evidence asking for a multi-day eval is a spend nobody consented to. The
+    # operator's own live `budget_extend{eval_timeout}` already LIFTS this clamp for the run it names
+    # (`engine/shared.py::effective_max_eval_timeout`), up to the raised launch ceiling — so a week is
+    # reachable for an agent exactly when the operator has said so, while a static bound that followed
+    # the per-run ceiling would be a cross-field rule every old snapshot then has to pass.
+    max_eval_timeout: float = Field(default=3600.0, gt=0, le=LAUNCH_TIMEOUT_DEFAULT_S)
+    # THE HARD PER-LAUNCH WALL-CLOCK CEILING (2026-09-27): every subprocess deadline — an eval stage,
+    # the protected score stage, a setup, a scorer — is clamped to this at the launch
+    # (`runtime/sandbox.py::finite_timeout`), and a `budget_extend{eval_timeout}` above it is REFUSED
+    # by the server (a 400 / a rejected command), never accepted and then cut. It was the literal
+    # `sandbox.MAX_TIMEOUT_S` (24 h) until long SFT evaluations needed one stage to train past a day.
+    # The default IS that literal, so a run that does not set this is unchanged; the range (24 h ..
+    # 7 days, `core/numeric.py`) can only LENGTHEN a launch.
+    #
+    # READ AT ENGINE START, never live: `cli/__init__.py::_engine` installs it process-wide
+    # (`runtime/sandbox.py::set_launch_timeout_ceiling`) from the Settings the run or resume loaded,
+    # and the server validates against the RUN's recorded value, resolved from `config.snapshot.json`
+    # the way the resume child resolves it (`serve/control_validation.py::_run_launch_ceiling`). So
+    # raising it on a live run is: edit the run's config (per-run Config panel, PUT
+    # /api/runs/<id>/config, or the snapshot), restart the engine (stop, then resume), then extend.
+    # NO `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row, deliberately: the default is the historical behaviour,
+    # so a pre-field snapshot resumes unchanged without one — and without one the
+    # `LOOPLAB_MAX_LAUNCH_TIMEOUT_S` env var reaches exactly those snapshots, the no-edit way to lift a
+    # run started before this field existed (the UI server hands its env to every engine it spawns and
+    # reads the same env when it resolves the snapshot).
+    max_launch_timeout_s: float = Field(default=LAUNCH_TIMEOUT_DEFAULT_S, ge=LAUNCH_TIMEOUT_DEFAULT_S,
+                                        le=LAUNCH_TIMEOUT_LIMIT_S)
     # Intra-node sweep: a sweep node runs a whole grid in one process, so it gets this multiple of
     # `timeout` as its wall-clock budget (solution.py path; RepoTasks use their per-profile timeout).
     sweep_timeout_mult: float = Field(default=8.0, ge=1)

@@ -375,7 +375,8 @@ of them:
   and a `full` on confirmation. Each profile's `overrides` are appended to `command` (and the profile
   timeout applies even in stage mode). Profile names must be non-empty, and each profile may contain
   only `overrides` (a list of argv strings) and `timeout` (a finite number greater than zero). The
-  effective runtime timeout is capped at 24 hours.
+  effective runtime timeout is capped at the run's `max_launch_timeout_s` (24 hours unless raised, at
+  most 7 days).
 
 So if the **agent's train stage and the scorer `cmd` need different arguments**, pick the pattern that fits:
 

@@ -2428,7 +2428,11 @@ class RepoTask(BaseModel):
         if self.eval is None or not self.eval.profiles:
             return ""
 
-        from looplab.runtime.sandbox import MAX_TIMEOUT_S, finite_timeout
+        # The ceiling IN FORCE, not the `MAX_TIMEOUT_S` default: a run that raised
+        # `max_launch_timeout_s` has it installed before its roles are built
+        # (`cli/__init__.py::_engine`), so the cap quoted here is the one `finite_timeout` applies
+        # below. Unraised, it is the same 86400 as ever, so the prompt's bytes do not move.
+        from looplab.runtime.sandbox import finite_timeout, launch_timeout_ceiling
 
         rows: list[str] = []
         for name, spec in self.eval.profiles.items():
@@ -2456,7 +2460,7 @@ class RepoTask(BaseModel):
                   "command and timeout, but is not a valid named profile: never invent one. A "
                   "profile changes only the declared eval argv/timeout, not the objective or your "
                   f"edit permissions. Reported timeouts are effective after the runtime cap of "
-                  f"{MAX_TIMEOUT_S:g} seconds.")
+                  f"{launch_timeout_ceiling():g} seconds.")
 
     def llm_roles(self, client: LLMClient, parser: str = "tool_call"):
         """When `params` is set: an LLM hyperparameter proposer over the bounds (framework
