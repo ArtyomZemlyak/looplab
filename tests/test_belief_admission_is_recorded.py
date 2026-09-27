@@ -100,7 +100,7 @@ def test_the_event_is_diagnostic_and_deliberately_not_background_appendable():
 def test_the_classification_site_actually_calls_it():
     # A receipt nobody writes is the defect one level up — the same shape as a health snapshot
     # nobody reads. AST, not a substring: a call named in a comment must not satisfy this.
-    src = pathlib.Path(inspect.getsourcefile(ResearchCadenceMixin)).read_text()
+    src = pathlib.Path(inspect.getsourcefile(ResearchCadenceMixin)).read_text(encoding="utf-8")
     tree = ast.parse(src)
     calls = [n for n in ast.walk(tree)
              if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)

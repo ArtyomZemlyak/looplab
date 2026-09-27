@@ -26,6 +26,7 @@ engine, and each test names the mutation that turns it red:
 """
 from __future__ import annotations
 
+import re
 import threading
 import time
 from pathlib import Path
@@ -625,6 +626,14 @@ def test_with_wait_and_no_engine_it_returns_at_once(tmp_path):
     assert "no engine was running" in out.output
 
 
+def _unboxed(text: str) -> str:
+    """A `typer.BadParameter` renders in a Rich panel wrapped to the terminal's width, so a phrase
+    can land across two box lines ("is │\n│ already") — at 80 columns CI failed all four cases
+    below, locally one. Colour codes and box-drawing characters removed and the whitespace
+    collapsed, the refusal reads whole at any width."""
+    return " ".join(re.sub(r"[\u2500-\u257f]", " ", re.sub(r"\x1b\[[0-9;]*m", "", text)).split())
+
+
 @pytest.mark.parametrize("halt", [
     (EV_PAUSE, {"reason": "operator stop (`looplab stop`)"}),
     (EV_PAUSE, _AUTO_PAUSE),
@@ -639,7 +648,8 @@ def test_the_flag_is_refused_on_a_run_already_halted_and_nothing_is_appended(tmp
     before = len(EventStore(rd / "events.jsonl").read_all())
     out = CliRunner().invoke(app, ["stop", str(rd), "--drain-builds"])
     assert out.exit_code == 2, out.output
-    assert "is already" in out.output and "Nothing was appended" in out.output
+    flat = _unboxed(out.output)
+    assert "is already" in flat and "Nothing was appended" in flat, flat
     assert len(EventStore(rd / "events.jsonl").read_all()) == before, "nothing may be appended"
     assert CliRunner().invoke(app, ["stop", str(rd)]).exit_code == 0, "a plain stop still records"
 

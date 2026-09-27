@@ -91,12 +91,15 @@ def test_the_task_interpreter_is_declared_or_read_off_the_task_s_own_commands(tm
 def test_a_bare_python_is_resolved_on_the_task_s_path_and_never_on_the_engine_s(tmp_path):
     envbin = tmp_path / "env" / "bin"
     envbin.mkdir(parents=True)
-    exe = envbin / "python3"
+    # What `shutil.which` finds for a bare `python3` on each platform: an executable file of that
+    # name on POSIX, one with a PATHEXT extension on Windows (where the extensionless file was
+    # never found, and the Windows leg failed here).
+    exe = envbin / ("python3.exe" if os.name == "nt" else "python3")
     exe.write_text("#!/bin/sh\n")
     exe.chmod(0o755)
     on_task_path = RepoTask(goal="g", editable_path=str(tmp_path),
                             eval={"command": ["python3", "run.py"], "env": {"PATH": str(envbin)}})
-    assert on_task_path.task_python() == str(exe)
+    assert os.path.normcase(on_task_path.task_python()) == os.path.normcase(str(exe))
     # No PATH declared: resolving `python3` on the ENGINE's PATH returns the engine's interpreter,
     # which is the very answer this exists to replace. Nothing is derived.
     assert RepoTask(goal="g", editable_path=str(tmp_path),
