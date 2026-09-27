@@ -332,7 +332,9 @@ class ConfirmPhaseMixin:
         # budget allows — the selector ranks confirmed nodes among confirmed ones, and an
         # unconfirmed simplification could never take the tie it measured (`simpler_slots`).
         leader = evaluated[0] if evaluated else None
-        topk = simpler_slots(state, evaluated, self.confirm_top_k)
+        # On the SINGLE measurements the pass ranks by (`raw`), which its own confirmations cannot
+        # move — the extra slot is the same on every entry of the pass (critic 2026-09-27).
+        topk = simpler_slots(state, evaluated, self.confirm_top_k, raw=True)
         # Snapshot EVERY extant lifecycle, not only top-k: a reset of an unconfirmed/pending node
         # while this pass runs still changes the candidate epoch and must invalidate completion.
         generations = {str(nd.id): nd.attempt for nd in state.nodes.values()
@@ -362,7 +364,10 @@ class ConfirmPhaseMixin:
         # queue time and keeps the budget contract exact even when an audited attempt is retryable.
         max_es = state.budget_overrides.get("max_eval_seconds", self.max_eval_seconds)
         spent = fold(self.store.read_all()).total_eval_seconds
-        must_confirm = min(2, len(topk))
+        # …over the pass's OWN top-k: the extra slot is confirmed when the budget allows, never
+        # past it (critic 2026-09-27, driven: with `confirm_top_k=1` the cut's seeds ran on a spent
+        # budget, 400 eval-seconds against 200).
+        must_confirm = min(2, len(evaluated[:max(0, self.confirm_top_k)]))
         for i, nd in enumerate(topk):
             if (not self._confirmation_snapshot_current(generations, objective)
                     or not self._confirmation_node_current(nd.id, nd.attempt)):

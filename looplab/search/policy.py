@@ -28,6 +28,7 @@ import math
 from typing import Callable, Optional, Protocol
 
 from looplab.core.code_blocks import code_blocks  # noqa: F401 — moved to core; re-exported (doc 67 67.5)
+from looplab.core.code_blocks import still_cut_of
 from looplab.core.errors import ConfigRefusal
 from looplab.core.models import NodeStatus, RunState
 
@@ -151,21 +152,57 @@ def _semantic_dump(code: str) -> Optional[str]:
     Two programs with one dump differ only in what executes nothing."""
     import ast
 
+    # The WHOLE of it contained, the dump included: `ast.dump` recurses, so a parseable program with
+    # a ~250-branch elif chain or a ~1000-term expression raised RecursionError out of every policy
+    # turn — and again on every resume (critic 2026-09-27, driven). A program this cannot dump
+    # falls back to the comment rule, as one that does not parse always did.
     try:
         tree = ast.parse(code)
+        for owner in list(ast.walk(tree)):
+            for field in ("body", "orelse", "finalbody"):
+                body = getattr(owner, field, None)
+                if not isinstance(body, list):
+                    continue
+                kept = [stmt for stmt in body if not _runs_nothing(stmt)]
+                if len(kept) != len(body):
+                    setattr(owner, field, kept)
+        return ast.dump(tree, include_attributes=False)
     except (SyntaxError, ValueError, RecursionError, MemoryError):
         return None
-    for owner in list(ast.walk(tree)):
-        for field in ("body", "orelse", "finalbody"):
-            body = getattr(owner, field, None)
-            if not isinstance(body, list):
-                continue
-            kept = [stmt for stmt in body
-                    if not isinstance(stmt, ast.Pass)
-                    and not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant))]
-            if len(kept) != len(body):
-                setattr(owner, field, kept)
-    return ast.dump(tree, include_attributes=False)
+
+
+def _runs_nothing(stmt) -> bool:
+    """A statement the interpreter runs nothing for: `pass`, or a bare constant (a docstring)."""
+    import ast
+    return isinstance(stmt, ast.Pass) or (isinstance(stmt, ast.Expr)
+                                          and isinstance(stmt.value, ast.Constant))
+
+
+def _inert_lines(code: str) -> Optional[frozenset]:
+    """The 1-based lines a statement that runs nothing (`_runs_nothing`) covers, from ONE parse — or
+    None when `code` does not parse. A block with a code line outside them changes what runs by
+    construction, so `_removes_something` asks the full dump only of the blocks inside them."""
+    import ast
+    try:
+        tree = ast.parse(code)
+        out: set = set()
+        for owner in ast.walk(tree):
+            for field in ("body", "orelse", "finalbody"):
+                body = getattr(owner, field, None)
+                if isinstance(body, list):
+                    for stmt in body:
+                        if _runs_nothing(stmt):
+                            out.update(range(stmt.lineno, (stmt.end_lineno or stmt.lineno) + 1))
+        return frozenset(out)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return None
+
+
+# Line breaks `str.splitlines` honours and the tokenizer does not (a form feed opens a "page" in
+# hand-kept Python). `_inert_lines` numbers lines as the tokenizer does and `_removes_something`'s
+# blocks as `splitlines` does, so on a program holding one the two numberings part; that program
+# takes the dump-per-block path, which needs no numbering.
+_SPLITLINES_ONLY_BREAKS = frozenset("\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029")
 
 
 @functools.lru_cache(maxsize=64)
@@ -187,12 +224,21 @@ def _removes_something(code: str, blocks: int) -> frozenset:
         return frozenset()
     lines = (code or "").splitlines()
     whole = _semantic_dump(code or "")
+    # ONE walk decides which blocks COULD run nothing; only those pay a full re-parse and dump. A
+    # dump per block cost O(blocks × size) on the event-loop thread — 13.7 s for a 2,001-line,
+    # 401-block champion (critic 2026-09-27, driven) — for the same answer: a code line of a
+    # statement that runs something changes the dump (or the parse) wherever it is removed from.
+    inert = (_inert_lines(code or "")
+             if whole is not None and _SPLITLINES_ONLY_BREAKS.isdisjoint(code or "") else None)
     out = set()
     for index, (start, end) in enumerate(spans):
-        if not any(line.strip() and not line.strip().startswith("#")
-                   for line in lines[start:end]):
+        code_lines = [k for k in range(start, end)
+                      if lines[k].strip() and not lines[k].strip().startswith("#")]
+        if not code_lines:
             continue
-        if whole is not None and _semantic_dump("\n".join(lines[:start] + lines[end:])) == whole:
+        if (whole is not None
+                and (inert is None or all(k + 1 in inert for k in code_lines))
+                and _semantic_dump("\n".join(lines[:start] + lines[end:])) == whole):
             continue
         out.add(index)
     return frozenset(out)
@@ -250,9 +296,11 @@ def simplify_actions(state: RunState, node, *, refused=(), spent=()) -> list[dic
                 continue
             measured[int(key)] = ((float(gain), ablation_id) if is_usable_metric(gain)
                                   else (None, ablation_id))
+    # A block is taken by a cut that IS STILL this program minus that block — across an epoch
+    # re-queue of the same code too, which a receipt-generation test did not see: a re-ablation of
+    # the re-measured parent nominated the cut a node already was (`core/code_blocks.py::still_cut_of`).
     taken = {child.simplified["block"] for child in state.nodes.values()
-             if isinstance(child.simplified, dict) and child.simplified["parent_id"] == node.id
-             and child.simplified["generation"] == node.attempt}
+             if isinstance(child.simplified, dict) and still_cut_of(node, child)}
     taken |= {key[2] for key in (spent or ())
               if isinstance(key, tuple) and len(key) == 3
               and key[0] == node.id and key[1] == node.attempt}

@@ -1176,8 +1176,12 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   The selector takes it over the node it was cut from **on a tie, simpler**: not worse by more than
   the leader's own SE (the confirmation's spread when both are confirmed, else plain "not worse"),
   never over a node that beats it by more than one SE, the deepest such cut first, on the search
-  pick and on the holdout pick alike. The confirm and holdout passes measure it in an EXTRA slot
-  after their own top-k (MLE-bench's one private grade goes to the would-be champion). Never
+  pick and on the holdout pick alike — while it IS STILL the parent's program minus that block, so
+  a re-measurement of the same program (an epoch re-queue, an eval-type reset) keeps the tie
+  (`core/code_blocks.py::still_cut_of`). The confirm and holdout passes measure it in an EXTRA slot
+  after their own top-k — the confirm pass decides that slot on the single measurements it cannot
+  move, and pays for it only inside the budget (MLE-bench's one private grade goes to the would-be
+  champion). The endgame reserve takes it after the ensemble and once per champion. Never
   nominated on a host-graded run, whose probe the host does not grade. Without that rule an equal
   simplification never became the champion: the champion only grew.
 - **merge / ensemble** — recombine two parents: a param mean, or a code-recombination ensemble

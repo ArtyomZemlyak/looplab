@@ -352,3 +352,90 @@ def test_a_burn_is_consumed_with_its_epoch(tmp_path):
     state = fold(store.read_all())
     assert state.search_epoch == 2 and state.split_salt == 1, "one burn, one re-carve"
     assert _requeued(state) == {0: ("evaluated", 1), 1: ("evaluated", 1)}
+
+
+@pytest.mark.parametrize("why,row,pinned,host,salt,kept", [
+    ("the engine's partition re-score (68.3c pin)", {}, True, True, 1, False),
+    ("an older withheld-scorer row, as it always did", {"protocol": "holdout_scorer"},
+     False, False, 1, False),
+    ("the private grade burned nothing", _PRIVATE, True, True, 0, True),
+])
+def test_a_reset_of_the_only_disclosed_node_still_consumes_what_it_burned(
+        tmp_path, why, row, pinned, host, salt, kept):
+    """HIGH (critic 2026-09-27, driven: the champion flipped on a pre-68.3d log). The reset of the
+    ONE disclosed node removed it from `holdout_evaluated_ids` before the rotation read that list,
+    so the burn read as nothing: the incumbents every earlier fold re-queued stood at their
+    disclosed-partition values, and on a pinned run the split was never re-carved. The burn is the
+    flag's, so the reset consumes it like any rotation."""
+    store = _disclosed(tmp_path, row, pinned=pinned, host=host, then=("run_finished",))
+    store.append("node_reset", {"node_id": 1, "from_stage": "eval", "generation": 0})
+    state = fold(store.read_all())
+    assert state.holdout_evaluated_ids == [] and state.search_epoch == 1, why
+    assert (state.nodes[0].status.value, state.nodes[0].attempt) == (
+        ("evaluated", 0) if kept else ("pending", 1)), why
+    assert state.split_salt == salt, why
+
+
+def test_a_rescore_after_a_disclosure_that_burned_nothing_reuses_its_stages(tmp_path):
+    """MEDIUM (critic 2026-09-27, driven): a reset from `score` — the drain's "re-score, then pause"
+    — after a withheld scorer or a private grade discarded the node's retained stages and retrained
+    the model, as if the search split had moved. Only a burning disclosure forces the retrain."""
+    for label, row, stage, kept in (("scorer", _SCORER, "score", ["train"]),
+                                    ("burned", {}, None, [])):
+        root = tmp_path / label
+        root.mkdir()
+        store = EventStore(root / "events.jsonl")
+        store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g",
+                                     "direction": "max"})
+        store.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                      "idea": {"operator": "draft", "params": {},
+                                               "rationale": "r"}, "code": "print(0)"})
+        for name in ("train", "score"):
+            store.append("stage_finished", {"node_id": 0, "generation": 0, "name": name,
+                                            "status": "ok", "exit_code": 0, "seconds": 100.0})
+        store.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": 1.0,
+                                        "violations": []})
+        store.append("holdout_evaluated", {"node_id": 0, "generation": 0, "metric": 0.9,
+                                           "gap": 0.1, "n_holdout": 3, "search_epoch": 0, **row})
+        store.append("run_finished", {"reason": "done"})
+        store.append("node_reset", {"node_id": 0, "generation": 0, "from_stage": "score"})
+        node = fold(store.read_all()).nodes[0]
+        assert node.rerun_stage == stage and [s["name"] for s in node.stages] == kept, label
+
+
+def test_a_null_metric_disclosure_still_burns(tmp_path):
+    """The burn is the DISCLOSURE's, not its number's: a holdout row whose metric did not parse still
+    scored the hidden rows (critic 2026-09-27, mutant MB3)."""
+    store = _disclosed(tmp_path, {"metric": None})
+    state = fold(store.read_all())
+    assert state.split_salt == 1 and _requeued(state) == _REQUEUED
+
+
+def test_the_drain_reads_the_folds_own_requeue_rule(tmp_path):
+    """`_lift_requeues` is the fold's rule, both halves (critic 2026-09-27, mutants N07/N10 and a
+    NIT): an UNPINNED host split re-queues on any reopen — a private grade's included, since the
+    search epoch salts its rows — and an unpinned FRACTION is the snapshot default, not zero; while
+    a LEGACY unstamped disclosure (no `search_epoch`) rotates without re-queuing (invariant 5b), so
+    its drain is not refused for it."""
+    from types import SimpleNamespace
+
+    from looplab.engine.run_boundary import _host_split, _lift_requeues
+
+    assert _host_split(SimpleNamespace(host_grading={"scorer": "a"}, holdout_fraction=None))
+    assert not _host_split(SimpleNamespace(host_grading={"scorer": "a"}, holdout_fraction=0.0))
+    unpinned = fold(_disclosed(tmp_path / "u", _PRIVATE, pinned=False,
+                               then=("run_finished",)).read_all())
+    assert unpinned.holdout_evaluated_ids == [1] and _lift_requeues(unpinned)
+    pinned = fold(_disclosed(tmp_path / "p", _PRIVATE, then=("run_finished",)).read_all())
+    assert not _lift_requeues(pinned)
+    root = tmp_path / "l"
+    root.mkdir()
+    store = EventStore(root / "events.jsonl")
+    for event in _disclosed(tmp_path / "shape", {}, then=("run_finished",)).read_all()[1:]:
+        data = dict(event.data)
+        if event.type == "holdout_evaluated":
+            data.pop("search_epoch")                   # a row older than the search epoch
+        store.append(event.type, data)
+    legacy = fold(store.read_all())
+    assert legacy.holdout_evaluated_ids == [1] and legacy.holdout_epoch_aware is False
+    assert not _lift_requeues(legacy), "an unstamped disclosure's rotation re-queues nothing"

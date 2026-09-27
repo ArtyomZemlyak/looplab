@@ -171,10 +171,14 @@ def _lift_requeues(prior) -> bool:
     """Whether lifting this run's pause or finish over its DISCLOSED holdout re-queues every
     evaluated node: when the disclosure scored the engine's own hidden partition (or a row too old
     to say — `RunState.holdout_partition_disclosed`), or on a host split the search epoch salts (a
-    log older than doc 68 68.3c). The fold's own rule (`events/replay.py::_rotate_search_epoch`); an
-    MLE-bench private grade or a withheld scorer re-queues nothing (doc 68 68.3d)."""
-    return bool(getattr(prior, "holdout_partition_disclosed", True)
-                or (_host_split(prior) and not getattr(prior, "split_salt_disclosure", False)))
+    log older than doc 68 68.3c) — and only for an epoch-aware disclosure, whose rotation is the one
+    that re-queues at all (`RunState.holdout_epoch_aware`; a legacy unstamped one rotates without
+    it, invariant 5b, and refusing its drain refused a drain that re-queues nothing — critic
+    2026-09-27). The fold's own rule (`events/replay.py::_rotate_search_epoch`); an MLE-bench
+    private grade or a withheld scorer re-queues nothing (doc 68 68.3d)."""
+    return bool(getattr(prior, "holdout_epoch_aware", True) and (
+        getattr(prior, "holdout_partition_disclosed", True)
+        or (_host_split(prior) and not getattr(prior, "split_salt_disclosure", False))))
 
 
 def _split_salt(prior) -> int:

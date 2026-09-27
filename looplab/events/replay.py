@@ -1128,8 +1128,13 @@ def _rotate_search_epoch(st: RunState, *, requeue_partition_scores: bool,
     """Advance one epoch and invalidate every value bound to the disclosed partition."""
     st.search_epoch += 1
     # A disclosure that scored the ENGINE's hidden partition burns it (doc 68 68.3d); the MLE-bench
-    # private grade and the withheld scorer burn nothing of it (`holdout_partition_disclosed`).
-    burned = bool(st.holdout_evaluated_ids) and st.holdout_partition_disclosed
+    # private grade and the withheld scorer burn nothing of it (`holdout_partition_disclosed`). Read
+    # off the flag ALONE, never off `holdout_evaluated_ids`: a `node_reset` of the only disclosed
+    # node removes it from that list before it rotates here, and reading the list then dropped the
+    # re-queue every earlier fold performed — a champion flip on a log older than 68.3d, and a
+    # disclosure never consumed on a new one (critic 2026-09-27, driven). The flag is set only by a
+    # disclosure and cleared only below, so it is exactly "an unconsumed disclosure burned it".
+    burned = st.holdout_partition_disclosed
     if burned:
         # A disclosure is being consumed: the one rotation that re-carves the host split
         # (`RunState.split_salt`, doc 68 68.3c). A plain reopen advances the search epoch alone.
@@ -1534,10 +1539,13 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             # previous fold pass built (the fold re-enters on every read).
             n.stages = [({**prior, "repairs": 0} if isinstance(prior, dict) else prior)
                         for prior in n.stages]
-            if holdout_was_disclosed:
+            if holdout_was_disclosed and st.holdout_partition_disclosed:
                 # Stage reuse can retain a model trained on the old search complement. A disclosed
                 # partition forces a full freshly-materialized eval in the next epoch; source code
-                # survives, but no old stage artifact or workdir checkpoint may be reused.
+                # survives, but no old stage artifact or workdir checkpoint may be reused. Only a
+                # disclosure that BURNED the partition (doc 68 68.3d): after a private grade or a
+                # withheld scorer the split does not move, and the "re-score, then pause" drain from
+                # `score` retrained the model for nothing (critic 2026-09-27, driven).
                 n.rerun_stage = None
                 n.stages = []
         _clear_build_marker(st, d, n.id)

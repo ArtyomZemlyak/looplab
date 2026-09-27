@@ -20,7 +20,7 @@ from uuid import uuid4
 
 import anyio
 
-from looplab.core.code_blocks import code_blocks, comment_block
+from looplab.core.code_blocks import code_blocks, comment_block, still_cut_of
 from looplab.core.containment import contain
 from looplab.core.fitness import is_usable_metric
 from looplab.core.llm_broker import in_llm_lane
@@ -436,10 +436,13 @@ class AblationMixin:
         self.policy.simplify_ablated = bool(self._ablation_simplify)
         self.policy.simplify_refused = frozenset(self._simplify_refused)
         if state is not None and self._ablation_simplify:
+            # Keyed on the parent's CURRENT lifecycle for every cut that is still its program minus
+            # that block — the policy's own `taken` rule (`core/code_blocks.py::still_cut_of`).
             self.policy.simplify_spent = frozenset(
-                (receipt["parent_id"], receipt["generation"], receipt["block"])
-                for receipt in (node.simplified for node in state.nodes.values())
-                if isinstance(receipt, dict))
+                (parent.id, parent.attempt, node.simplified["block"])
+                for node in state.nodes.values() if isinstance(node.simplified, dict)
+                for parent in (state.nodes.get(node.simplified["parent_id"]),)
+                if parent is not None and still_cut_of(parent, node))
 
     async def _simplify(self, action: dict) -> None:
         """Build the ONE `simplify` child a recorded code-block ablation nominated (doc 67 67.5).
@@ -498,8 +501,14 @@ class AblationMixin:
         if reservation is None:
             code = refusal[0] if refusal else None
             key = (parent_id, generation, block)
-            if code in RESERVATION_RACES and self._simplify_races.get(key, 0) < _SIMPLIFY_RACE_RETRIES:
-                self._simplify_races[key] = self._simplify_races.get(key, 0) + 1
+            # Counted at ONE node count: the bound exists for a loop turning without progress, and a
+            # node landing between two races is progress — three transient races hours apart spent
+            # the nomination for the rest of the process (critic 2026-09-27, NIT).
+            races, at = self._simplify_races.get(key, (0, None))
+            if at != len(state.nodes):
+                races = 0
+            if code in RESERVATION_RACES and races < _SIMPLIFY_RACE_RETRIES:
+                self._simplify_races[key] = (races + 1, len(state.nodes))
                 _log.info("simplify: node %s without block #%s lost a reservation race (%s); "
                           "the next turn re-decides it", parent_id, block, code)
                 return

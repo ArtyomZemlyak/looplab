@@ -20,6 +20,7 @@ dispatch table.
 """
 from __future__ import annotations
 
+from looplab.core.code_blocks import still_cut_of
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, SearchFitness, is_usable_metric,
                                   one_se_better, one_se_non_inferior,
                                   verifier_evidence_digest)
@@ -378,13 +379,15 @@ def _significantly_beaten(st: RunState, candidate: Node, pool, value, holdout: b
     return False
 
 
-def simpler_tie(st: RunState, leader: Node | None, pool, *, holdout: bool = False) -> Node | None:
+def simpler_tie(st: RunState, leader: Node | None, pool, *, holdout: bool = False,
+                raw: bool = False) -> Node | None:
     """"ON A TIE, SIMPLER" (doc 67 67.5): the most simplified node cut from `leader` that is in `pool`
     and NON-INFERIOR to it (`core/fitness.py::one_se_non_inferior`), or `leader` itself.
 
     "Cut from" is a chain of `simplified` receipts (`core/models.py::Node.simplified`), each naming
-    its parent at the lifecycle it was built from — a child cut from a lifecycle a `node_reset` has
-    since replaced is not simpler than what stands there now. Among the candidates: the DEEPEST
+    its parent — and a child counts while it IS STILL the parent's program with that block commented
+    out (`core/code_blocks.py::still_cut_of`): a re-measurement of the same program keeps it, a
+    rebuild that changed the parent's code does not. Among the candidates: the DEEPEST
     first (the most removed), then the better value, then the lower id. Without this rule a
     simplification that measured exactly as well as its parent never became the champion, so "the
     champion only grows" would have survived its nomination (doc 67 §3).
@@ -399,6 +402,9 @@ def simpler_tie(st: RunState, leader: Node | None, pool, *, holdout: bool = Fals
     both: it scores the selector's exact tie groups, so a tie within the spread is decided by
     simplicity alone.
 
+    `raw` compares the SINGLE measurements (`metric`, exactly, whatever is confirmed) — the ruler a
+    pass that is about to confirm ranks on (`simpler_slots`), and one the pass itself cannot move.
+
     Inert — `leader` — on every log without a receipt: every log before 67.5, and every run with
     `Settings.ablation_simplify` off."""
     if leader is None:
@@ -410,7 +416,9 @@ def simpler_tie(st: RunState, leader: Node | None, pool, *, holdout: bool = Fals
             children.setdefault(receipt["parent_id"], []).append(node)
     if not children:
         return leader
-    value = (lambda n: n.holdout_metric) if holdout else (lambda n: n.robust_metric)
+    value = ((lambda n: n.holdout_metric) if holdout
+             else (lambda n: n.metric) if raw else (lambda n: n.robust_metric))
+    single = holdout or raw           # one number each: no confirmation spread, no ruler mismatch
     anchor = value(leader)
     if not is_usable_metric(anchor):
         return leader
@@ -421,16 +429,16 @@ def simpler_tie(st: RunState, leader: Node | None, pool, *, holdout: bool = Fals
     while frontier:
         parent, depth = frontier.pop()
         for child in children.get(parent.id, ()):
-            if child.id in seen or child.simplified["generation"] != parent.attempt:
+            if child.id in seen or not still_cut_of(parent, child):
                 continue
             seen.add(child.id)
             frontier.append((child, depth + 1))
             candidate = members.get(child.id)
             if candidate is None or not is_usable_metric(value(candidate)):
                 continue
-            if not holdout and (candidate.confirmed_mean is None) != (leader.confirmed_mean is None):
+            if not single and (candidate.confirmed_mean is None) != (leader.confirmed_mean is None):
                 continue      # a confirmed mean beside one measurement: two rulers, no comparison
-            spread = (not holdout and candidate.confirmed_mean is not None
+            spread = (not single and candidate.confirmed_mean is not None
                       and leader.confirmed_mean is not None)
             held = one_se_non_inferior(
                 float(value(candidate)), float(anchor),
@@ -438,7 +446,7 @@ def simpler_tie(st: RunState, leader: Node | None, pool, *, holdout: bool = Fals
                 candidate.confirmed_seeds if spread else 0, st.direction,
                 leader.confirmed_std if spread else 0.0, leader.confirmed_seeds if spread else 0)
             if (not held or _verifier_prefers(st, leader, candidate)
-                    or _significantly_beaten(st, candidate, members.values(), value, holdout)):
+                    or _significantly_beaten(st, candidate, members.values(), value, single)):
                 continue
             key = (depth + 1, sign * float(value(candidate)), -candidate.id)
             if chosen_key is None or key > chosen_key:
@@ -446,7 +454,7 @@ def simpler_tie(st: RunState, leader: Node | None, pool, *, holdout: bool = Fals
     return chosen
 
 
-def simpler_slots(st: RunState, ranked: list, k: int) -> list:
+def simpler_slots(st: RunState, ranked: list, k: int, *, raw: bool = False) -> list:
     """The first `k` of `ranked` — the pass's own order, its leader first — and the head's
     `simpler_tie` in an EXTRA slot when it is not among them: for the passes that choose who gets
     an extra measurement (the holdout slots, the confirm seeds), so the node the selector would
@@ -455,12 +463,17 @@ def simpler_slots(st: RunState, ranked: list, k: int) -> list:
     An extra slot, never a taken one (critic 2026-09-27, driven): moved to the FRONT, the cut
     took the only confirm slot and was certified when every seed failed, pushed a tied runner-up
     out of a budget-limited pass, stood as the pass's leader in the significance test, and took a
-    holdout slot from a better node. Every node of `ranked[:k]` keeps its slot and its place."""
+    holdout slot from a better node. Every node of `ranked[:k]` keeps its slot and its place.
+
+    `raw` decides the extra slot on the single measurements (`simpler_tie(raw=True)`) — for the
+    confirm pass, whose own confirmations move the robust ruler: once the leader held a
+    `node_confirmed`, the cut was "two rulers" and lost its slot on every re-entry, so one refused
+    seed changed which node was confirmed and crowned (critic 2026-09-27, driven)."""
     ranked = list(ranked)
     picked = ranked[:max(0, k)]
     if not picked:
         return picked
-    head = simpler_tie(st, ranked[0], ranked)
+    head = simpler_tie(st, ranked[0], ranked, raw=raw)
     if head is not ranked[0] and head not in picked:
         picked.append(head)
     return picked

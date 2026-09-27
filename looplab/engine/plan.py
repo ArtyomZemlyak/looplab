@@ -125,28 +125,40 @@ def endgame_actions(state, plan: Optional[dict], actions: list[dict], *,
     when the turn's actions are evaluations / the finish, the actions are returned untouched."""
     if not in_endgame(plan, len(state.nodes)) or not actions:
         return actions
-    # An evaluation passes, and so does a SIMPLIFICATION of the champion (doc 67 67.5): it proposes
-    # nothing and pays no model — the champion's own program, one measured block commented out — so
-    # it is the reserve's purpose, polishing the champion, and bounded by the blocks a probe
-    # measured. Replaced by the sequence below, it vanished with no receipt (critic 2026-09-27).
-    if any(a.get("kind") in ("evaluate", "simplify") for a in actions):
+    if any(a.get("kind") == "evaluate" for a in actions):
         return actions
     best = state.best()
     best_id = best.id if best is not None else None
     from looplab.search.card_selection import META_CARD_ID
     from looplab.search.policy import (KIND_IMPROVE, KIND_MERGE, META_CHOSEN, META_REASON,
                                        pareto_front, rank_by_metric)
+    start = int(plan["endgame_start"])
+    breedable = rank_by_metric(state, state.breedable_nodes())
+    merged_in_reserve = any(n.operator == "merge" and n.id >= start for n in state.nodes.values())
+    kinds = (plan.get("phases") or [{}])[-1].get("kinds") or list(ENDGAME_KINDS)
+    ensemble_owed = "merge" in kinds and not merged_in_reserve and len(breedable) >= 2
+    # A SIMPLIFICATION of the champion passes too (doc 67 67.5): it proposes nothing and pays no
+    # model — the champion's own program, one measured block commented out — so it is the reserve's
+    # purpose, polishing the champion; replaced by the sequence below, it vanished with no receipt.
+    # But not ahead of the once-only ensemble, and ONE per champion in the reserve: a cut that
+    # measured worse leaves the champion where it was, and the next nominated block of the same
+    # program spent the next slot on the same question — five nominated blocks took a reserve of
+    # three and the ensemble and the sweeps never ran (critic 2026-09-27, driven). A cut that WON is
+    # the new champion, and may be simplified once in turn.
+    if any(a.get("kind") == "simplify" for a in actions):
+        cut_in_reserve = best is not None and any(
+            n.id >= start and isinstance(n.simplified, dict)
+            and n.simplified.get("parent_id") == best.id for n in state.nodes.values())
+        if not ensemble_owed and not cut_in_reserve:
+            return actions
+        actions = [a for a in actions if a.get("kind") != "simplify"]
     # A selected CARD that already is an endgame action keeps its slot (its proposal is paid for);
     # a plain policy create — an improve of the champion included — is replaced by the endgame's
     # own sequence below, the ensemble first and then the surrogate-proposed sweeps.
     kept = [a for a in actions if META_CARD_ID in a and _is_endgame_action(a, best_id)]
     if kept:
         return kept
-    start = int(plan["endgame_start"])
-    breedable = rank_by_metric(state, state.breedable_nodes())
-    merged_in_reserve = any(n.operator == "merge" and n.id >= start for n in state.nodes.values())
-    kinds = (plan.get("phases") or [{}])[-1].get("kinds") or list(ENDGAME_KINDS)
-    if "merge" in kinds and not merged_in_reserve and len(breedable) >= 2:
+    if ensemble_owed:
         # THE ONE PLACE SELECTION READS THE NON-DOMINATED FRONT (docs/BACKLOG.md §0.1 row 12). The
         # ensemble's two parents come from `pareto_front` rather than straight off the scalar
         # ranking: the top-2 by metric are frequently the same idea twice — an improve and its own
