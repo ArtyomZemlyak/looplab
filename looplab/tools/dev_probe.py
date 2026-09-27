@@ -976,7 +976,14 @@ class DevProbeTools:
         A declared interpreter that is missing is NOT silently swapped -- the result says so, since
         an answer about the engine's packages read as an answer about the task's is the defect."""
         declared = str((self.repo_spec or {}).get("task_python") or "").strip()
-        if not declared or os.path.normcase(os.path.abspath(declared)) == os.path.normcase(
+        if not declared:
+            # Said, not silent (doc 69 69.35): a task that names no interpreter — a shell-launched
+            # pipeline with no declared PATH — may run its code anywhere, and an answer about the
+            # engine's packages read as one about the task's is this method's whole defect.
+            return sys.executable, (f" [the task declares no interpreter, so this ran on the "
+                                    f"ENGINE's {sys.executable} -- its packages may not be your "
+                                    "task's]")
+        if os.path.normcase(os.path.abspath(declared)) == os.path.normcase(
                 os.path.abspath(sys.executable)):
             return sys.executable, ""
         if os.path.isfile(declared) and os.access(declared, os.X_OK):

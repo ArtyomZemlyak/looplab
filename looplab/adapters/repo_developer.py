@@ -1756,8 +1756,14 @@ class LLMRepoDeveloper:
             from looplab.tools.env_inspect import environment_fingerprint
             fp = environment_fingerprint(self._task_python(), self._repo_import_names())
             if fp and fp.get("packages"):
-                text = ("THE ENVIRONMENT YOUR CODE RUNS IN (measured on its own interpreter, not "
-                        f"assumed): {fp.get('python')} -- Python {fp.get('version')}. Installed "
+                # Measured on the ENGINE's interpreter when the task names none, and said so: the
+                # block claimed "its own interpreter" for a shell-launched task whose torch lived
+                # elsewhere (doc 69 69.35).
+                where = ("measured on its own interpreter, not assumed" if self._task_python() else
+                         "measured on the ENGINE's interpreter: the task declares none, so where "
+                         "your code runs may differ")
+                text = (f"THE ENVIRONMENT YOUR CODE RUNS IN ({where}): "
+                        f"{fp.get('python')} -- Python {fp.get('version')}. Installed "
                         "versions of the packages this repo imports: "
                         + ", ".join(fp["packages"]) + ". Write against THESE versions: an API you "
                         "remember from another release may have been renamed or removed here. When "

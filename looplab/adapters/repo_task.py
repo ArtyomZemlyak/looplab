@@ -34,6 +34,21 @@ from looplab.agents.roles import LLMResearcher
 _PY_ARGV0 = re.compile(r"^(python|pypy)[\d.]*(\.exe)?$", re.I)
 
 
+def _which_on(name: str, path: str) -> str:
+    """`shutil.which(name, path=path)`, answered only by a directory `path` NAMES — "" when `path` is
+    empty or the hit lies elsewhere: on Windows `which` searches the current directory first, and
+    that is the ENGINE's, never the task's (`RepoTask.task_python`)."""
+    import shutil
+    if not path:
+        return ""
+    found = shutil.which(name, path=path)
+    if not found:
+        return ""
+    found = os.path.abspath(found)
+    named = {os.path.normcase(os.path.abspath(d)) for d in path.split(os.pathsep) if d}
+    return found if os.path.normcase(os.path.dirname(found)) in named else ""
+
+
 # HOISTED ABOVE THE MODELS (2026-09-02), not because the placement reads better but because
 # `refuse_unknown_task_keys` is referenced by a decorator on `ReferenceSpec` below and a
 # decorator resolves its names at CLASS-DEFINITION time. Both helpers moved together: the
@@ -2399,6 +2414,13 @@ class RepoTask(BaseModel):
         method exists to replace. A task that names no interpreter keeps "" and the probe stays on
         `sys.executable`, byte-identical to before.
 
+        A pipeline launched through a SHELL (`bash run.sh`) names no interpreter as argv[0]; the python
+        it runs is whichever one the PATH it declares finds first, so that PATH is asked for `python3`,
+        then `python` (doc 69 69.35: the probe and the environment block described the ENGINE's
+        `/opt/conda` for such a task, whose torch lived elsewhere). Only a directory the declared PATH
+        NAMES answers (`_which_on`) — on Windows `shutil.which` looks in the current directory first,
+        which is the engine's.
+
         Not checked for existence: a task may build its env in `setup`. The probe checks at use and
         says so when the path is missing (`tools/dev_probe.py::DevProbeTools._interpreter`)."""
         ev = self.eval
@@ -2406,7 +2428,6 @@ class RepoTask(BaseModel):
             return ""
         if ev.python:
             return ev.python
-        import shutil
         declared = []
         for stage in ev.stages or ():
             if isinstance(stage, dict):
@@ -2422,11 +2443,14 @@ class RepoTask(BaseModel):
                 continue
             if os.path.isabs(argv0):
                 return argv0
-            path = str(env.get("PATH") or "")
-            if path:
-                found = shutil.which(argv0, path=path)
+            found = _which_on(argv0, str(env.get("PATH") or ""))
+            if found:
+                return found
+        for _argv, env in declared:
+            for name in ("python3", "python"):
+                found = _which_on(name, str(env.get("PATH") or ""))
                 if found:
-                    return os.path.abspath(found)
+                    return found
         return ""
 
     def _bounds(self) -> dict:
