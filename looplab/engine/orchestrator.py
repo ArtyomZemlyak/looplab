@@ -2082,6 +2082,20 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 state = fold(self.store.read_all())
             actions = self._select_actions(state)
             actions = self._plan_gate(state, actions)
+            # A NODE-CREATING OPERATOR REQUEST PARKED ON THE NODE BUDGET reaches this line only
+            # because other work was waiting beside it (`forced_requests.py::_park_for_node_budget`,
+            # doc 68 68.8): this turn EVALUATES what already exists — node 18 on v10, which sat
+            # pending for 20 minutes behind the park — and keeps the two guarantees the park's wait
+            # used to keep by never letting the loop get here. Nothing that mints a node may take the
+            # slot the request waits for (a slot that frees is the operator's, served at the next
+            # loop head), and the empty-action ladder below may not confirm, hold out or FINISH the
+            # run over a request still queued. With nothing to evaluate, it waits as it always did.
+            parked_request = self._parked_forced_request(state)
+            if parked_request is not None:
+                actions = [a for a in actions if a["kind"] == "evaluate"]
+                if not actions:
+                    await self._defer_for_node_budget(state)
+                    continue
             if not actions:
                 if await self._handle_no_actions(state, decision_seq=decision_seq) == "break":
                     break
@@ -2114,8 +2128,9 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             # on a toy-backend run of this shape it fired ONCE in a whole 12-node run, at node 0.
             # Production was gated on occupancy ZERO, which is exactly backwards, and it is why F1f's
             # fix — the outer loop now turns while evaluations burn — could reach the boundary and
-            # still find nothing to build.
-            if not creates:
+            # still find nothing to build. (Never beside a request parked on the node budget: the
+            # slot it waits for is not production's to take — see `parked_request` above.)
+            if not creates and parked_request is None:
                 creates = self._occupancy_paced_creates(state, evals)
 
             if creates:

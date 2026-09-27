@@ -681,6 +681,14 @@ receipt, and what each bucket means. The unknown bucket is stated first and deli
 written before 2026-08-19 has no receipts, and "no receipt" means *nobody can say whether anything
 looked*, never "clean". See [Evaluation rigor](concepts.md#trust-the-sandbox).
 
+A **`parked:`** line names every queued `inject_node` / `fork` / forced ablation that is waiting
+for a node slot — the node budget is spent, counting the slots open Card build requests already
+own — with the numbers and the remedy (`budget_extend add_nodes`), until the request is served. It
+reads the engine's `operator_request_parked` rows (`looplab/events/parked_requests.py`); the same
+fact is a `request_parked` item in the UI's attention inbox. An `inject_node` command reads
+`succeeded` as soon as the engine has *observed* it, so this is where "observed but waiting" shows
+(doc 68, item 68.8).
+
 ### The stop account
 
 `run`, `resume` and `inspect` all print a **`stop:`** line, and `inspect` adds a

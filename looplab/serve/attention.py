@@ -22,6 +22,7 @@ from looplab.core.models import Event, NodeStatus
 from looplab.core.models import BENIGN_TERMINAL_REASONS
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.engine.train_monitor import OVERRUN_BEYOND_BAR_KEYS
+from looplab.events.parked_requests import open_parked_requests
 from looplab.events.replay import fold
 from looplab.events.types import (
     EV_APPROVAL_REQUESTED,
@@ -71,6 +72,9 @@ ATTENTION_NEEDS_ACTION_KINDS = frozenset({
     # The action is time-critical in a way the others are not: the window closes when the wall
     # arrives, and after that there is nothing left to decide.
     "train_overrun",
+    # A queued operator request (inject / fork / forced ablation) waiting for a node slot: only the
+    # operator can extend the node budget, and until then the request does not run (doc 68 68.8).
+    "request_parked",
 })
 
 
@@ -557,6 +561,22 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
             "node_id": nid,
             "node_generation": gen,
         })
+
+    # A QUEUED OPERATOR REQUEST PARKED ON THE NODE BUDGET (doc 68 68.8). On `minionerec-backbones-v10`
+    # an inject waited 20 minutes for a node slot while its command read `succeeded` — the command's
+    # postcondition is the engine's ACK, which says the intent was observed, not that it will run.
+    # One item per request, anchored on the FIRST row of its parking episode so its id (and its one
+    # desktop notification) survives the numbers moving; gone once the request's receipt lands. The
+    # detail is the engine's own sentence, built from its reservation ledger and nothing a model
+    # wrote (`events/parked_requests.py::parked_request_detail`), so the client may show it.
+    for parked in open_parked_requests(rows, state):
+        item = _item(
+            run_id, generation, parked["anchor"], "request_parked", severity="action",
+            title="Operator request waiting for node budget",
+            detail=parked["detail"], browser=True, active=True,
+        )
+        if item:
+            items.append(item)
 
     # Developer-crash auto-pause is a system failure; an explicit operator pause has no node owner
     # and is intentionally quiet. The folded generation check prevents an old pause from alerting

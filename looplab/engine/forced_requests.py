@@ -34,8 +34,10 @@ from looplab.engine.shared import engine_fold as fold
 from looplab.engine.speculation import notify_producer
 from looplab.events.eventstore import retry_tail_cas
 from looplab.events.finalize_scope import incomplete_finalize_scope
+from looplab.events.parked_requests import (PARKED_IDENTITY_KEYS, PARKED_SIGNATURE_KEYS,
+                                             parked_request_detail)
 from looplab.events.types import (EV_ABLATE, EV_FORK_DONE, EV_FORK_UNFULFILLED, EV_INJECT_DONE,
-                                  EV_INJECT_FAILED)
+                                  EV_INJECT_FAILED, EV_OPERATOR_REQUEST_PARKED)
 
 # Poll geometry for a durable node-creating control head parked on an exhausted node budget
 # (`Engine._defer_for_node_budget`). Starts at the historical tick and doubles up to the ceiling, so
@@ -71,6 +73,148 @@ class ForcedRequestsMixin:
         await anyio.sleep(delay)
         self._budget_wait_s = min(delay * 2.0, _BUDGET_WAIT_MAX_S)
         return True
+
+    # ------------------------------------------------------------------ PARKED on the node budget
+    #
+    # THE DEFECT (doc 68 68.8, `minionerec-backbones-v10`, 2026-09-27). After a restart the engine
+    # served inject idx 12 (node 18 at 02:10:09) and the node budget was then spent (`max_nodes` 16
+    # plus three refunds: ids 0..18). Inject idx 13 parked in `_defer_for_node_budget`, which returned
+    # True — "served or deliberately left pending … the caller re-folds via continue" — and the run
+    # loop's `continue` sat ABOVE the speculation block, the cadences and the eval dispatch. So node 18,
+    # built and pending, was never evaluated: 20 minutes of idle GPUs until the operator's
+    # `budget_extend {add_nodes: 12}` (02:29:37). And nobody was told: every `inject_node` command
+    # read `succeeded` (its postcondition is the engine's ack), and nothing in the log, the UI or the
+    # CLI said a request was waiting for a slot.
+    #
+    # Now a parked head (1) is SAID once per episode, as a diagnostic row the attention feed and
+    # `looplab inspect` read (`events/parked_requests.py`), and (2) no longer holds the loop when
+    # anything else is waiting: `_serve_forced_requests` returns False WITHOUT the wait, the turn
+    # runs, and the run loop keeps a parked head's two guarantees itself — no node-creating action
+    # may take the slot it waits for, and the empty-action ladder may not finish the run over it
+    # (`orchestrator.py`, after `_plan_gate`). With nothing else to do it waits exactly as before.
+
+    def _node_creating_forced_head(self, state: RunState) -> Optional[dict]:
+        """The node-creating operator request `_serve_forced_requests` would serve next, as its
+        identity — `request` + `idx` for a fork or an inject (the queue position its done-receipt
+        stamps), `node_id` + `generation` for a forced ablation — or None.
+
+        None too for a head the serve path SPENDS instead of parking — a fork whose parent moved, an
+        inject the validator refuses — because such a head never waits for a slot. Mirrors
+        `_serve_forced_requests`' order and its two admission checks; pure (the validator is)."""
+        if len(state.fork_requests) > state.forks_done:
+            req = state.fork_requests[state.forks_done]
+            pid = req.get("from_node_id")
+            generation = req.get("generation")
+            current = state.nodes.get(pid)
+            servable = (current is not None and not current.tombstoned
+                        and pid not in state.aborted_nodes
+                        and (generation is None or current.attempt == generation))
+            return {"request": "fork", "idx": state.forks_done} if servable else None
+        if len(state.inject_requests) > state.injects_done:
+            try:
+                self._prepare_injected_node(state, state.inject_requests[state.injects_done])
+            except Exception:  # noqa: BLE001 - legacy/hand-authored event rows are untrusted; a refused head is spent, never parked
+                return None
+            return {"request": "inject", "idx": state.injects_done}
+        forced = self._pending_forced_ablation(state)
+        if forced is not None:
+            return {"request": "ablate", "node_id": forced["node_id"],
+                    "generation": forced["generation"]}
+        return None
+
+    def _parked_forced_request(self, state: RunState, *, events=None) -> Optional[dict]:
+        """The node-creating operator request that is WAITING FOR A NODE SLOT, with the numbers that
+        say why, or None (doc 68 68.8).
+
+        Parked means exactly what `_node_reservation_slots_remaining` answers below one — its three
+        terms are reported separately, because "19 of 19 reserved" and "18 reserved, 1 held by an
+        open Card build request" have different remedies (the second frees itself when that build
+        commits or is closed). Pure over the fold and the log's reservation ledger."""
+        head = self._node_creating_forced_head(state)
+        if head is None:
+            return None
+        if events is None:
+            events = self.store.read_all()
+        if self._node_reservation_slots_remaining(state, events=events) >= 1:
+            return None
+        parked = {
+            **head,
+            "reason": "node_budget",
+            "reserved": self._node_id_ceiling(events, state),
+            "held_by_card_requests": self._unmaterialized_card_reservations(state),
+            "limit": self._hard_node_reservation_limit(state),
+        }
+        parked["detail"] = parked_request_detail(parked)
+        return parked
+
+    def _note_parked_forced_request(self, parked: dict) -> bool:
+        """Say ONCE per parking episode that `parked` waits for a node slot; True when a row landed.
+
+        Deduplicated against the LOG, not a memo: the last `operator_request_parked` row for this
+        request's identity is looked up, and a new one is appended only when the numbers changed (a
+        Card build request opened or closed, the limit moved). So a multi-hour wait costs one row,
+        and a restart re-says nothing. MAIN TASK ONLY (the outer loop's serve and the Card session);
+        the row is DIAGNOSTIC, so no fold and no decision fence moves on it."""
+        events = self.store.read_all()
+        for event in reversed(events):
+            if event.type != EV_OPERATOR_REQUEST_PARKED:
+                continue
+            said = event.data or {}
+            if all(said.get(key) == parked.get(key) for key in PARKED_IDENTITY_KEYS):
+                if all(said.get(key) == parked.get(key) for key in PARKED_SIGNATURE_KEYS):
+                    return False
+                break
+        # Literal payloads, one per identity shape, so the payload-contract scan can check every key
+        # (`tests/test_event_payload_contract.py`); a spread would be a payload nothing verifies.
+        if parked.get("request") == "ablate":
+            self.store.append(EV_OPERATOR_REQUEST_PARKED, {
+                "request": "ablate", "node_id": parked.get("node_id"),
+                "generation": parked.get("generation"), "reason": parked.get("reason"),
+                "reserved": parked.get("reserved"),
+                "held_by_card_requests": parked.get("held_by_card_requests"),
+                "limit": parked.get("limit"), "detail": parked.get("detail")})
+        else:
+            self.store.append(EV_OPERATOR_REQUEST_PARKED, {
+                "request": parked.get("request"), "idx": parked.get("idx"),
+                "reason": parked.get("reason"), "reserved": parked.get("reserved"),
+                "held_by_card_requests": parked.get("held_by_card_requests"),
+                "limit": parked.get("limit"), "detail": parked.get("detail")})
+        _LOG.warning("operator request parked: %s", parked.get("detail"))
+        return True
+
+    def _work_beside_parked_request(self, state: RunState) -> bool:
+        """Is there work the rest of the turn can DO that a request parked on the node budget must
+        not starve (68.8)? None of it creates a node, so none of it can take the slot it waits for.
+
+        A pending node — to evaluate (node 18 on v10), to repair or to close; an evaluation burning
+        is one too, since a node stays pending until its terminal — or Card work a session serves:
+        an open build request (its producer, its commit into the slot it already owns), a finished
+        build or a finished run-ahead proposal waiting to be committed or staged. NOT a bare build
+        marker or a producer running for a request already closed: the turn could only wait for
+        those, which is what the park's own bounded wait already does."""
+        if state.pending_nodes():
+            return True
+        if not self._speculation_enabled():
+            return False
+        return bool(self._outstanding_requests(state)
+                    or getattr(self, "_spec_builds", None)
+                    or getattr(self, "_spec_raw_stage_result", None) is not None)
+
+    async def _park_for_node_budget(self, state: RunState) -> Optional[bool]:
+        """None when a node slot is free — serve the head. Otherwise the head is PARKED (68.8): it is
+        said, and then either the bounded wait is paid and True asks the caller to re-fold, or —
+        with other work waiting beside it — False lets the run loop fall through to that work."""
+        if self._node_reservation_slots_remaining(state) >= 1:
+            # Asked for its other half: with a slot free it resets the wait's backoff and returns at
+            # once, without sleeping.
+            await self._defer_for_node_budget(state)
+            return None
+        parked = self._parked_forced_request(state)
+        if parked is not None:
+            self._note_parked_forced_request(parked)
+        if self._work_beside_parked_request(state):
+            return False
+        return await self._defer_for_node_budget(state)
 
     @staticmethod
     def _pending_forced_ablation(state: RunState) -> Optional[dict]:
@@ -184,8 +328,10 @@ class ForcedRequestsMixin:
         # Operator-forced steering (Phase 5), one per iteration then re-fold. Each is gated on
         # the domain event it produces (fork_done / an ablate event / node_confirmed), so a
         # resume never repeats it — deterministic under replay. Returns True when a request was
-        # served OR deliberately left pending for node budget (the caller re-folds via `continue`);
-        # False lets the loop fall through. The pending branch performs its own bounded wait.
+        # served OR deliberately left pending for node budget with its bounded wait paid (the caller
+        # re-folds via `continue`); False lets the loop fall through — nothing was queued, or the head
+        # is PARKED on the node budget while other work waits beside it, which the turn must not
+        # starve (`_park_for_node_budget`, doc 68 68.8).
         if len(state.fork_requests) > state.forks_done:
             req = state.fork_requests[state.forks_done]
             pid = req.get("from_node_id")
@@ -199,8 +345,8 @@ class ForcedRequestsMixin:
             if served:
                 # A valid fork remains the durable queue head while the physical Node ceiling is full.
                 # Do not append fork_done: a later budget_extend must be able to serve this same intent.
-                if await self._defer_for_node_budget(state):
-                    return True
+                if (parked := await self._park_for_node_budget(state)) is not None:
+                    return parked
                 generation = current.attempt
                 # CLAIM THE REQUEST BEFORE THE PAID PRODUCER — the same at-most-once boundary
                 # `_claim_paid_finalize_step` states ("persist the boundary before dispatching a
@@ -254,8 +400,8 @@ class ForcedRequestsMixin:
                 return True
             # Unlike malformed input, temporary budget exhaustion is not a failed inject. Leave the
             # request unacknowledged so an additive budget extension can admit it exactly once.
-            if await self._defer_for_node_budget(state):
-                return True
+            if (parked := await self._park_for_node_budget(state)) is not None:
+                return parked
             reservation = self._reserve_and_claim_inject(state, prepared)
             if reservation is None:
                 return True
@@ -268,8 +414,8 @@ class ForcedRequestsMixin:
         if forced_ablate is not None:
             # Ablation probes culminate in one new refine_block Node. Avoid both the paid probes and a
             # false completion while that physical reservation has no budget slot.
-            if await self._defer_for_node_budget(state):
-                return True
+            if (parked := await self._park_for_node_budget(state)) is not None:
+                return parked
             await self._ablate(forced_ablate["node_id"],
                                expected_generation=forced_ablate["generation"])
             return True
@@ -582,6 +728,10 @@ class ForcedRequestsMixin:
         it through `_serve_forced_requests` exactly as before. Never while a paid RAW proposal is in
         flight: its receipt fence reads the node-id ceiling this reservation would move, and the run
         has already paid for that proposal.
+
+        It also SAYS, once per episode, that a queued node-creating request is parked on the node
+        budget (`_note_parked_forced_request`, 68.8): this session can hold the loop head for a whole
+        build, and the outer loop's own notice would come only after it.
         """
         if (getattr(self, "_pending_create_pause", None)
                 and not getattr(self, "_inject_lanes_inflight", 0)):
@@ -590,11 +740,14 @@ class ForcedRequestsMixin:
             self._drain_create_pause()
             session.progressed = True
             return True
+        state = self._session_state()
+        parked = self._parked_forced_request(state)
+        if parked is not None:
+            self._note_parked_forced_request(parked)
         busy = self._build_lanes_busy()
         if (busy == 0 or getattr(self, "_spec_raw_stage_inflight", False)
                 or busy >= max(1, int(self._llm_parallel))):
             return False
-        state = self._session_state()
         if (len(state.inject_requests) <= state.injects_done or state.halted
                 or self._session_gates(state, session).stopping
                 or self._node_reservation_slots_remaining(state) < 1):

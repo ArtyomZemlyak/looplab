@@ -74,8 +74,22 @@ test('an EMPTY or whitespace detail falls back rather than blanking the card', (
   assert.ok(normalizeRunAttention(row({ detail: '' })).detail.includes('projected to be killed'))
 })
 
-test('the allow-list holds exactly the engine-measured kind', () => {
-  assert.deepEqual([...MEASURED_DETAIL_KINDS], ['train_overrun'],
+test('the allow-list holds exactly the engine-measured kinds', () => {
+  // `request_parked` joined DELIBERATELY (doc 68 68.8): its sentence is
+  // `events/parked_requests.py::parked_request_detail`, built from the request's kind, its queue
+  // position and the engine's own slot counts — no model-authored text anywhere in it.
+  assert.deepEqual([...MEASURED_DETAIL_KINDS], ['train_overrun', 'request_parked'],
     'adding a kind here is a TRUST decision, not a formatting one — the test exists so it is made '
     + 'deliberately')
+})
+
+test('a parked operator request carries the engine sentence and asks for action', () => {
+  const sentence = 'inject #13 waits for a node slot: the node budget is spent (19 of 19 slots '
+    + 'taken — 19 node ids reserved). `budget_extend add_nodes` admits it now.'
+  const item = normalizeRunAttention(row({ kind: 'request_parked', severity: 'action', detail: sentence }))
+  assert.ok(item, 'the kind must be admitted: an unknown kind is DROPPED by the client gate')
+  assert.equal(item.detail, sentence)
+  assert.equal(item.needsAction, true, 'only the operator can extend the node budget')
+  assert.ok(normalizeRunAttention(row({ kind: 'request_parked', severity: 'action' }))
+    .detail.includes('budget_extend add_nodes'), 'an absent detail falls back to the copy row')
 })

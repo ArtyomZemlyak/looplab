@@ -1035,6 +1035,18 @@ EV_ASHA_VERDICT = "asha_verdict"
 # fold-ignored — the fork cursor already advanced, so this only makes the drop legible in the event
 # log, `looplab replay` and the trace; it never re-serves the request or changes selection.
 EV_FORK_UNFULFILLED = "fork_unfulfilled"
+# A queued node-creating operator request (a `fork`, an `inject_node`, a forced ablation) that is
+# WAITING FOR A NODE SLOT: the node budget (`max_nodes` + `add_nodes` + refunds) is spent, counting the
+# slots open Card build requests already own, and `budget_extend {add_nodes}` is what admits it (doc
+# 68 68.8). Measured on `minionerec-backbones-v10` (2026-09-27): inject idx 13 waited 20 minutes for a
+# slot while every `inject_node` command read `succeeded` (its postcondition is the engine's ack) —
+# nothing anywhere said it was parked, and the operator found out by reading the engine's code.
+# Appended by the MAIN task once per parking episode (a new row only when the request or its numbers
+# change), from the outer loop's forced-request serve and from the Card session, which can hold the
+# loop head for a whole build. DIAGNOSTIC / fold-ignored: the queue cursor and the budget are already
+# folded state, this only SAYS what they mean; `events/parked_requests.py` pairs each row with its
+# request's receipt, so a served request stops being reported (the attention feed, `looplab inspect`).
+EV_OPERATOR_REQUEST_PARKED = "operator_request_parked"
 # The SHARED cross-run lessons store (`memory_dir/lessons.jsonl`, `meta_notes.jsonl`) could not be
 # read or written — permissions, a full/quota'd/read-only network mount, a transient FS fault. That
 # store is a DIFFERENT filesystem from the run dir, so a run whose own events.jsonl appends succeed
@@ -1167,6 +1179,7 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_ASHA_RANK,
     EV_ASHA_VERDICT,
     EV_FORK_UNFULFILLED,
+    EV_OPERATOR_REQUEST_PARKED,
     EV_LESSONS_STORE_UNAVAILABLE,
     # EV_ENV_CHANGED moved to the FOLDED set (F18): it now sets a dedup flag (RunState.env_changed) so
     # the drift note is emitted once, not re-appended on every resume of an upgraded run.
@@ -1711,6 +1724,16 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         "A `fork` request the engine could not serve — recorded instead of silently dropped.",
         required=("from_node_id", "generation", "idx"),
         optional=(),
+    ),
+    "operator_request_parked": PayloadContract(
+        "A queued fork / inject / forced ablation waits for a node slot: the node budget is spent; "
+        "add_nodes admits it.",
+        # `request` is fork | inject | ablate; a fork or an inject is named by its queue position
+        # `idx`, a forced ablation by the lifecycle it ablates (`node_id` + `generation`).
+        # `reserved` = node ids already reserved, `held_by_card_requests` = future slots open Card
+        # build requests own, `limit` = the hard node ceiling; `detail` is the engine's own sentence.
+        required=("detail", "held_by_card_requests", "limit", "reason", "request", "reserved"),
+        optional=("generation", "idx", "node_id"),
     ),
     "full_retrain_charged": PayloadContract(
         "A repair that forced a full retrain, and the evaluation budget it spent.",
