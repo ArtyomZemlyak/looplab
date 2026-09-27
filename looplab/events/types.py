@@ -2051,8 +2051,14 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # authored from the fold-read side alone, so the three keys `build_plan` returns and nothing
         # folds were simply absent — and `stored_whole` is True, which makes them undocumented
         # fields of `RunState.plan`.
-        optional=("at_node", "endgame_start", "max_nodes", "phases", "reason", "reserve",
-                  "reserve_frac", "source"),
+        # The bounded stall episode (2026-09-27, `Settings.endgame_stall_nodes`): `endgame_end` (the
+        # exclusive end `in_endgame` reads) and `champion` (the node the stall was measured against)
+        # on a row that bounds one; `stall_champions` (the champions whose one episode is spent) on
+        # every row after the first episode; `reopen_cause` on a `reopened` row. All LOAD-BEARING:
+        # `replan` reads each back off the folded `state.plan`. A run that never enables the setting
+        # writes none of them.
+        optional=("at_node", "champion", "endgame_end", "endgame_start", "max_nodes", "phases",
+                  "reason", "reopen_cause", "reserve", "reserve_frac", "source", "stall_champions"),
         stored_whole=True,
     ),
     "policy_decision": PayloadContract(

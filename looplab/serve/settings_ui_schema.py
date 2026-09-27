@@ -29,7 +29,7 @@ SETTINGS_UI_SCHEMA_VERSION = 2
 # here reading as if 207 were derived while it is typed, which is the drift it warns about. The
 # unforgeable gate is `SETTINGS_UI_SCHEMA_KEYSET_REVISION` further down; this integer is the
 # human-readable half the docs sentence quotes, and `_load_schema` refuses when the two disagree.
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 236
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 237
 # On the KEYSET REVISION below: DERIVED, and deliberately no longer a hand-pinned review gate: a
 # bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
@@ -348,7 +348,13 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # exactly those two, none removed.
 # 235 -> 236 on 2026-09-29 (the merge of master into the branch): master's `external_harness`
 # (233 -> 234 there: an operator-visible choice of reasoning owner) beside the branch's two.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "87d20174dfe6b2007db9cb28119b8706d716f30968bbf56e2ac2a7f455c4fbd1"
+# 236 -> 237 on 2026-09-29 (the endgame fix rebased onto that master): `endgame_stall_nodes`,
+# beside `endgame_reserve_frac` — how many nodes a stall-triggered endgame spends before the plan
+# reopens (`engine/plan.py::replan`; 0 = the permanent stall endgame). A row because it decides
+# what the dispatcher builds for the rest of a stalled run, and it is the per-run lever an
+# operator sets to let a run out of a permanent endgame. RE-DERIVED by INTERSECTION over the
+# merged keyset: the 236 previous keys plus exactly that one, none removed.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "3ddaa2cd289ac22d88a0658a35023a625eaccccaf4ae7e7f936602605f3be5d8"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

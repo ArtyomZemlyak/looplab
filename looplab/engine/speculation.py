@@ -111,6 +111,11 @@ CARD_BUILD_SKIP_REASONS = (
     # receipt from a process that DIED (a restart, a kill), and no live producer owns it. See
     # `UNRECONCILED_AFTER_RESTART` for why this close alone does not bar the Card.
     "unreconciled_after_restart",
+    # The run's PLAN refuses the Card NOW (`engine/plan.py::endgame_refused_card_ids`): an endgame
+    # reserve began after it was elected — a request queued behind a busy producer, or one a restart
+    # found open — and no producer has started, so nothing was billed. Closed `stale` before the
+    # build is bought; the Card stays on the board and is electable again once the reserve ends.
+    "plan_refused",
 )
 
 # THE RESTART CLOSE, NAMED (2026-09-27, operator review of MiniOneRec inf13). A head whose attempt
@@ -2171,6 +2176,17 @@ class SpeculationMixin:
         excluded.update(self._producer_failed_card_ids(state))
         return excluded
 
+    @staticmethod
+    def _plan_refused_card_ids(state: RunState) -> set[str]:
+        """The Cards the run's PLAN refuses right now (`engine/plan.py::endgame_refused_card_ids`):
+        inside an endgame reserve, every Card whose action the gate would displace. The election,
+        the claim's re-election and both freshness questions carry it as
+        `SpeculativeSelectionContext.refused_card_ids` — NOT in `_election_excluded_card_ids`, whose
+        members `_reserved_speculative_slots` charges as reservations, which a refused Card is not.
+        A fresh mutable set, like its sibling, so a caller can `.discard` the one it is claiming."""
+        from looplab.engine.plan import endgame_refused_card_ids
+        return set(endgame_refused_card_ids(state, getattr(state, "plan", None)))
+
     def _card_requires_serial_fallback(self, card_id: object) -> bool:
         state = fold(self.store.read_all())
         return bool(
@@ -2212,6 +2228,11 @@ class SpeculationMixin:
                 excluded_card_ids=excluded,
                 ignored_pending_node_ids=self._acknowledged_pending_ids(state),
                 resource_envelope=self._resource_envelope(),
+                # THE PLAN'S REFUSALS, before a build is bought. This election never met the gate:
+                # on MiniOneRec inf13 it requested card-16 — the evolutionary crossover of node 12
+                # with its own parent 5, a pair node 13 had just failed on — inside an endgame whose
+                # gate refuses exactly that merge. Empty outside a reserve.
+                refused_card_ids=self._plan_refused_card_ids(state),
             ),
         )
         if not actions:
@@ -2285,6 +2306,12 @@ class SpeculationMixin:
         # must stay selectable even if a prior speculative attempt marked it producer-failed. Discard
         # AFTER the union so the claim wins over the serial-fallback exclusion for this one id.
         excluded.discard(card_id)
+        # The election's plan refusals too, and the SAME exemption: the build being claimed is
+        # already bought, and the plan refuses purchases — a reserve that began while this build ran
+        # must not throw the result away. Every OTHER refused Card stays out, so this re-election
+        # ranks exactly what the election ranked.
+        refused = self._plan_refused_card_ids(state)
+        refused.discard(card_id)
         selected_actions = speculative_card_actions(
             state,
             self.policy,
@@ -2294,6 +2321,7 @@ class SpeculationMixin:
                 excluded_card_ids=excluded,
                 ignored_pending_node_ids=self._acknowledged_pending_ids(state),
                 resource_envelope=self._resource_envelope(),
+                refused_card_ids=refused,
             ),
         )
         selected_action = next(
@@ -3132,6 +3160,11 @@ class SpeculationMixin:
         # superseded. `_reserved_speculative_slots` documents that `excluded_card_ids` also carries
         # producer-failed ids.
         excluded = self._election_excluded_card_ids(state)
+        # …and the election's plan refusals, so this counterfactual ranks what the election ranked:
+        # without them a refused Card could outrank a subject the election chose over it and
+        # supersede a build the plan admitted. The subject (and every sibling the query reopens) is
+        # exempt inside `_speculative_selection` — a committed build is never dropped for the plan.
+        refused = self._plan_refused_card_ids(state)
         ignored_pending = self._acknowledged_pending_ids(state)
         envelope = self._resource_envelope()
         for node in self._speculative_pending_nodes(state):
@@ -3152,6 +3185,7 @@ class SpeculationMixin:
                     ignored_pending_node_ids=ignored_pending,
                     resource_envelope=envelope,
                     consumed_inflight=eval_inflight,
+                    refused_card_ids=refused,
                 ),
             ):
                 continue
@@ -3260,6 +3294,14 @@ class SpeculationMixin:
                 self._spec_builds[key] = replace(reusable, reused=True)
                 return True
             self._discard_spec_result(reusable)
+        # THE PLAN IS ASKED BEFORE THE BUILD IS BOUGHT, here as at the election: a request elected
+        # before an endgame reserve began (queued behind a busy producer at width > 1, or found open
+        # by a restart) would otherwise start a paid build the gate refuses. No producer has run, so
+        # the close bills nothing and the Card stays on the board. A result already in hand (above)
+        # is kept: the plan refuses purchases, not builds.
+        if key[0] in self._plan_refused_card_ids(current):
+            return self._append_card_build_done(
+                head, skipped="stale", skipped_reason="plan_refused")
         roles = self._producer_pair_for(key, width)
         if roles is not None:
             # The build pool is sized for ONE producer (`novelty.py::_CARD_BUILD_THREADS`); a wider
@@ -3692,6 +3734,9 @@ class SpeculationMixin:
                             self._acknowledged_pending_ids(current)),
                         resource_envelope=self._resource_envelope(),
                         consumed_inflight=session.eval_inflight,
+                        # The drain's own question (`_drop_stale_speculation`), plan refusals
+                        # included; the subject itself is exempt, so the plan never stops a start.
+                        refused_card_ids=self._plan_refused_card_ids(current),
                     ),
                 )
                 if not fresh:
@@ -3870,7 +3915,13 @@ class SpeculationMixin:
                 ) - len(self._outstanding_requests(proposal_state))
                 < self._speculative_prefetch_ceiling()
             ):
-                raw_actions = speculative_raw_actions(
+                # The plan is asked BEFORE the Researcher is paid (`engine/plan.py::
+                # endgame_admitted`): inside an endgame reserve this lane re-derives the POLICY's
+                # action, which the gate would displace unless it is the reserve's own. A refused
+                # lane is empty, and the `else` below yields to the outer loop, whose gate builds the
+                # reserve's own action; outside a reserve the lane is unchanged.
+                from looplab.engine.plan import endgame_admitted
+                raw_actions = endgame_admitted(proposal_state, speculative_raw_actions(
                     proposal_state,
                     self.policy,
                     self._speculative_selection_node_limit(proposal_state),
@@ -3881,8 +3932,9 @@ class SpeculationMixin:
                         ignored_pending_node_ids=self._acknowledged_pending_ids(
                         proposal_state),
                         resource_envelope=self._resource_envelope(),
+                        refused_card_ids=self._plan_refused_card_ids(proposal_state),
                     ),
-                )
+                ), sweep=getattr(self, "_endgame_sweep", True))
                 roles = (self._producer_pair_for(
                     "raw", self._speculative_producer_width(proposal_state) if wide
                     else self._producer_capacity(proposal_state)) if raw_actions else None)

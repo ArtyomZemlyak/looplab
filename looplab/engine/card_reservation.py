@@ -2095,6 +2095,12 @@ class CardReservationMixin:
 
             try:
                 live = {card.id: card for card in eligible_cards(state, self.policy)}
+                # The plan's refusals, from THIS fold — the set both elections that feed this claim
+                # (`_select_actions`, `_occupancy_paced_creates`) excluded before ranking. Without it
+                # the revalidation ranks a refused Card the election never saw and reads a lane the
+                # gate kept as "selection moved"; empty outside an endgame reserve.
+                from looplab.engine.plan import endgame_refused_card_ids
+                refused = endgame_refused_card_ids(state, state.plan)
                 if ignored_pending_node_ids:
                     # ONE query, the same one the occupancy-paced turn asked, through the same
                     # production entry point the speculative producer uses. Not a second rule: the
@@ -2108,6 +2114,7 @@ class CardReservationMixin:
                             scoring=getattr(self, "_card_scoring", None),
                             ignored_pending_node_ids=ignored_pending_node_ids,
                             resource_envelope=self._resource_envelope(),
+                            refused_card_ids=refused,
                         ),
                     )
                 elif (forced := forced_card_actions(state, self.policy, max_nodes)) is not None:
@@ -2119,7 +2126,8 @@ class CardReservationMixin:
                     treatment = getattr(self, "_card_scoring", None)
                     current_ids = [
                         candidate.id for candidate in card_selection_set(
-                            state, self.policy, max_nodes, scoring=treatment)
+                            state, self.policy, max_nodes, scoring=treatment,
+                            refused_card_ids=refused)
                     ]
             except Exception:  # noqa: BLE001 — policy/Card hooks must never weaken the ownership boundary
                 return self._refuse_card_claim("the Card selector raised while revalidating the lane")

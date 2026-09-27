@@ -99,11 +99,16 @@ def test_plateau_due_truth_table():
 
 def test_stall_rung_counts_windows_of_the_stall_family_and_starts_at_a_node_count():
     """Interleaved drafts and an ablation do not count toward the stall, and `started_at` is the
-    node COUNT once the window filled — the unit a consumer's `at_node` mark is written in."""
+    node COUNT once the window filled — the unit a consumer's `at_node` mark is written in.
+
+    The stall family's nodes are built ON the leader (`parent_ids=[0]`): since 2026-09-27 an attempt
+    counts only when the champion is among its ancestors or its Card was scored against it
+    (`tests/test_endgame_admission.py` drives the attempts that do not)."""
     st = RunState()
     ops = ["draft", "improve", "draft", "improve", "improve", "ablate", "improve", "merge"]
     for i, op in enumerate(ops):
         st.nodes[i] = Node(id=i, operator=op, idea=Idea(operator=op),
+                           parent_ids=[] if op == "draft" or i == 0 else [0],
                            status=NodeStatus.evaluated, metric=0.5)
     st.best_node_id = 0
     assert improves_since_best(st) == 5

@@ -2622,15 +2622,24 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # short of the width. Spelled out rather than hard-coded to 1 because filling EVERY freed
         # slot from one turn is what keeps `boundary_owed`'s bool honest at width > 1.
         free = width - len(running) - len(queued)
+        # THE PLAN IS ASKED HERE TOO. This lane's creates reach `_handle_create_actions` without
+        # passing `_plan_gate` — the gate saw this turn's EVALUATE actions and handed them back
+        # untouched — so inside an endgame reserve it elected what the gate refuses and staged the
+        # policy's raw action for a paid proposal. The refused Cards leave the election (the claim
+        # revalidates with the same set) and the raw lane keeps only what the gate would admit.
+        from looplab.engine.plan import endgame_admitted, endgame_refused_card_ids
         context = SpeculativeSelectionContext(
             scoring=getattr(self, "_card_scoring", None),
             ignored_pending_node_ids=running,
             resource_envelope=self._resource_envelope(),
+            refused_card_ids=endgame_refused_card_ids(state, state.plan),
         )
         owned = speculative_card_actions(
             state, self.policy, self.policy.max_nodes, context=context)
-        lane = owned or speculative_raw_actions(
-            state, self.policy, self.policy.max_nodes, context=context)
+        lane = owned or endgame_admitted(
+            state, speculative_raw_actions(
+                state, self.policy, self.policy.max_nodes, context=context),
+            sweep=getattr(self, "_endgame_sweep", True))
         return [action for action in lane
                 if action.get("kind") in ("draft", "improve", "merge")][:free]
 
@@ -2894,7 +2903,16 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 # The mask is exactly the in-flight set, never `_acknowledged_pending_ids`' whole
                 # pending board: a pending Node NOT in flight is real work the consumer is about to
                 # admit, and hiding it would mint inventory against a slot that is already spoken for.
-                stageable = speculative_raw_actions(
+                #
+                # AND THE PLAN IS ASKED BEFORE ANYTHING IS PAID FOR. Inside an endgame reserve this
+                # turn's `creates` are the GATE's (its merge or its sweep), while this lane
+                # re-derives the POLICY's action — on MiniOneRec inf13 it staged a Researcher
+                # improve of node 12 (card-14, paid) that the gate then displaced with its own
+                # merge. `endgame_admitted` keeps only what the gate would let through as it is, so
+                # a refused lane is empty and the turn falls through to the serial path below,
+                # which builds the gate's own action; outside a reserve it is the lane unchanged.
+                from looplab.engine.plan import endgame_admitted, endgame_refused_card_ids
+                stageable = endgame_admitted(state, speculative_raw_actions(
                     state,
                     self.policy,
                     self.policy.max_nodes,
@@ -2902,8 +2920,9 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                         scoring=getattr(self, "_card_scoring", None),
                         ignored_pending_node_ids=self._running_eval_node_ids(),
                         resource_envelope=self._resource_envelope(),
+                        refused_card_ids=endgame_refused_card_ids(state, state.plan),
                     ),
-                )
+                ), sweep=getattr(self, "_endgame_sweep", True))
                 if stageable:
                     # WITH PREFETCH: author one work item at a time. The live depth is filled by the
                     # isolated steady-state proposer while eval runs; staging an unreserved wide seed
@@ -3472,9 +3491,13 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             from looplab.agents.strategist import stall_rung, strategist_stall_window
             rung, _started = stall_rung(
                 state, strategist_stall_window(getattr(self, "strategist", None)))
+            # `stall_nodes` bounds a stall-triggered endgame to that many nodes and reopens the plan
+            # after it (`Settings.endgame_stall_nodes`; 0 = the permanent endgame, byte for byte);
+            # `champion` is what an episode is measured against and closed on.
             row = replan(state.plan, max_nodes=max_nodes, n_seeds=n_seeds,
                          reserve_frac=self._endgame_reserve_frac, at_node=len(state.nodes),
-                         stall_rung=rung, endgame_sweep=self._endgame_sweep)
+                         stall_rung=rung, endgame_sweep=self._endgame_sweep,
+                         stall_nodes=self._endgame_stall_nodes, champion=state.best_node_id)
         if row is None:
             return False
         self.store.append(EV_PLAN, row)
@@ -3482,7 +3505,10 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
 
     def _plan_gate(self, state: RunState, actions: list[dict]) -> list[dict]:
         """The reserve the dispatcher honours (`engine/plan.py::endgame_actions`): inside the
-        endgame, breadth is replaced by the top-2 ensemble and champion sweeps."""
+        endgame, breadth is replaced by the top-2 ensemble and champion sweeps. What it keeps is
+        what `engine/plan.py::endgame_admits` admits — the one predicate the raw lanes ask before
+        they pay (`endgame_admitted`) and every Card election excludes by
+        (`endgame_refused_card_ids`), so no lane buys what this gate would then displace."""
         from looplab.engine.plan import endgame_actions
         if state.plan is None:
             return actions
@@ -3533,9 +3559,17 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             # this instruction was declined fourteen times in twenty-eight (doc 56 §108, §137).
             return forced
         if self.card_driven_selection:
+            # The plan's refusals leave the election before ranking (`engine/plan.py::
+            # endgame_refused_card_ids`; empty outside an endgame reserve), so the gate below keeps
+            # every Card this elects and `_claim_existing_card_builds` revalidates the same question.
+            # Passed only when there is a refusal, so every turn outside a reserve makes exactly the
+            # historical call (the seam tests pin its keywords).
+            from looplab.engine.plan import endgame_refused_card_ids
+            refused = endgame_refused_card_ids(state, state.plan)
             return card_next_actions(
                 state, self.policy, self.policy.max_nodes,
                 scoring=getattr(self, "_card_scoring", None),
+                **({"refused_card_ids": refused} if refused else {}),
             )
         if self.agent_drives_actions:
             return self._agent_next_actions(state)

@@ -394,6 +394,9 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         # …and the plan's endgame reserve (doc 52 row 18), ON in Settings (0.2) and 0 in the bare
         # library for the reason frozen in tests/test_options_divergence.py.
         endgame_reserve_frac=settings.endgame_reserve_frac,
+        # …and the stall episode's length (2026-09-27), 3 in Settings and 0 in the bare library on
+        # the same frozen ground.
+        endgame_stall_nodes=settings.endgame_stall_nodes,
         # …and the judges' evidence fence (review 2026-09-22, TAT-02), ON in Settings and OFF in
         # the bare library for the reason frozen in tests/test_options_divergence.py (a prompt flag).
         evidence_envelope=settings.evidence_envelope,

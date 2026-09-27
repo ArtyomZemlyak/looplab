@@ -15,18 +15,59 @@ The plan is a FOLDED event (`EV_PLAN`, `RunState.plan`) written by the main task
   (the top-2 ensemble, once) and `sweep` (a champion sweep for every remaining slot).
 * `endgame_actions` is the dispatcher's rule inside the reserve: pending evaluations and the
   finish are untouched; every other create is replaced by the endgame's own — the merge if it has
-  not been minted in the reserve yet and two breedable nodes exist (its two parents drawn from
-  `search/policy.py::pareto_front`, the run's non-dominated set over the primary metric plus every
-  authenticated, orientable extra metric — the metric leaders alone when no such axis exists, so
-  the pick is the historical top-2 on every run that records one objective), else an `improve` of
+  not been minted in the reserve yet and a partner qualifies (see below), else an `improve` of
   the champion stamped `_sweep`, whose idea `engine/node_build.py::_prepare_node_idea` asks the
   k-NN surrogate for (`search/surrogate.py`, bounds inferred from the run's own evaluated
   params; the LLM Researcher is its fallback below warm-up). A selected Card that already IS an
-  endgame action (a merge of two evaluated nodes, an improve of the champion) keeps its slot.
+  endgame action (an admissible merge of two evaluated nodes, an improve of the champion) keeps its
+  slot.
 * `replan` re-cuts on a live `max_nodes` change (the reserve follows the budget) and on a HARD
   stall — `stall_rung` at two windows, the same identity the Strategist's plateau consult keys on
   — by starting the endgame at the current node count: a search that has stalled for two windows
   spends what is left on recombination and refinement rather than more breadth.
+
+THE MERGE PARTNER (MiniOneRec inf13, 2026-09-27). The ensemble's two parents came from
+`search/policy.py::pareto_front` — the run's non-dominated set over the primary metric plus every
+authenticated, orientable extra metric, the metric leaders alone when no such axis exists — and on
+inf13 that was node 5 (4.166x) and node 12 (4.102x), node 12 being node 5's OWN CHILD: one idea
+twice, separated by noise. The merge (card-15 -> node 13) failed the recall gate at -0.262, and the
+same pair was minted again as card-16. `_EndgameView.merge_pick` therefore walks the partners in
+that order and takes the first that (1) is not an ancestor or descendant of the leader, over every
+`parent_ids` edge transitively, and (2) was never paired with it — neither as a merge NODE of any
+status, before or after the endgame start, nor as a live merge CARD, either order. No qualifying
+partner means no merge: the reserve falls through to the sweep. A selected merge Card is held to the
+same rule before it keeps its slot (`_is_endgame_action` accepted any merge, although this docstring
+promised "of two evaluated nodes"): two breedable parents, neither the other's ancestor, a pair no
+merge node holds, and the oldest live Card of its pair.
+
+ONE PREDICATE FOR EVERY LANE THAT BUYS (`endgame_admits`). The gate only ever saw the turn's
+SELECTED actions; the lanes that PAY never asked it. On inf13 the raw lane staged a Researcher
+improve of node 12 (card-14, a paid proposal) that the gate then displaced with its own merge, and the
+speculative election built the policy's crossover of 12 and 5 (card-16) while the gate would have
+refused it — the raw lane re-derives the policy's action from `speculative_raw_actions`, and a Card
+election reads `_election_excluded_card_ids`, and neither is the gate. `endgame_admits(state, plan,
+action)` answers "would the gate let this action through as it is?" — a Card's action when it is an
+endgame action, a raw action only when it IS the reserve's own next action, everything outside the
+reserve — and the engine asks it before the raw lanes stage (`orchestrator.py::_handle_create_actions`,
+`_occupancy_paced_creates`, `speculation.py::_card_phase_request_build`) and excludes the Cards it
+refuses from every election and from the claim and freshness questions that must agree with the
+election (`endgame_refused_card_ids`, carried as `SpeculativeSelectionContext.refused_card_ids`).
+A build already bought is never refused: evaluations are untouched, and a claimed or committed
+subject is exempt from the refusal the same way it is exempt from the in-flight exclusion.
+
+A BOUNDED STALL EPISODE (`Settings.endgame_stall_nodes`, product 3, 0 = the permanent endgame). A
+stall-triggered endgame used to run to the end of the budget: on inf13 (`max_nodes` 100000, the
+"unbounded" spelling) the row at node 12 reserved 99,988 nodes for merges and sweeps, forever. With
+`K > 0` the stall row carries `endgame_end = at_node + K` and the `champion` it was measured against;
+`in_endgame` is `start <= n < end` (a row without an end keeps the historical `n >= start`), and the
+next `replan` writes a `reopened` row — the ordinary cut, breadth again — once `n` reaches the end or
+the best node differs from `champion`. ONE episode per champion (`stall_champions` rides every later
+row), so a champion whose episode is spent is not re-stalled the next turn. A BUDGET RE-CUT CARRIES a
+live episode: the Card-mode ceiling subtracts pending build requests, so `max_nodes` flickers between
+99,998 and 100,000 whenever a request is open, and every flicker used to drop the stall start, re-start
+the endgame at the current node and owe the one-time merge again. A legacy stall row (written with
+`K = 0`, no `endgame_end`) is re-evaluated on the first turn with `K > 0`: reopened if the corrected
+stall rung is under two or the champion was crowned inside it, else bounded from its own start.
 
 Every function here is pure over folded state and the settings; the engine writes the row and
 reads it back through the fold, so a resume honours the same plan.
@@ -36,7 +77,11 @@ from __future__ import annotations
 from typing import Optional
 
 ENDGAME_KINDS = ("merge", "sweep")
-PLAN_REASONS = ("initial", "budget_changed", "stagnation")
+PLAN_REASONS = ("initial", "budget_changed", "stagnation", "reopened")
+# WHY a bounded stall episode closed — the `reopen_cause` of a `reopened` row. `stall_retracted` is
+# the migration's own: a legacy (unbounded) stall row whose stall does not hold under the corrected
+# `agents/strategist.py::stall_rung` (the attempts on the champion, not every id after it).
+REOPEN_CAUSES = ("champion_changed", "episode_spent", "stall_retracted")
 META_SWEEP = "_sweep"
 HARD_STALL_RUNGS = 2
 
@@ -79,20 +124,104 @@ def build_plan(*, max_nodes: int, n_seeds: int, reserve_frac: float, at_node: in
 
 
 def in_endgame(plan: Optional[dict], total_nodes: int) -> bool:
+    """Inside the reserve: `endgame_start <= n`, and `n < endgame_end` when the row bounds its
+    episode. A row without `endgame_end` — every row before bounded episodes, and every non-stall
+    row — keeps the historical open-ended reading."""
     if not isinstance(plan, dict):
         return False
     try:
-        return int(total_nodes) >= int(plan["endgame_start"])
+        n = int(total_nodes)
+        if n < int(plan["endgame_start"]):
+            return False
+        end = plan.get("endgame_end")
+        return end is None or n < int(end)
     except (KeyError, TypeError, ValueError):
         return False
 
 
+def _int_or_none(value) -> Optional[int]:
+    return value if type(value) is int else None
+
+
+def _stall_champions(plan: dict) -> list[int]:
+    """The champions whose one stall episode is spent, as the row carries them (defensive: a junk
+    entry is dropped, never guessed)."""
+    raw = plan.get("stall_champions")
+    out: list[int] = []
+    for value in (raw if isinstance(raw, list) else []):
+        if type(value) is int and value not in out:
+            out.append(value)
+    return out
+
+
+def _episode(plan: dict) -> Optional[tuple[int, int, Optional[int]]]:
+    """`(start, end, champion)` when the row bounds a stall episode, else None."""
+    end = plan.get("endgame_end")
+    if end is None:
+        return None
+    try:
+        return int(plan["endgame_start"]), int(end), _int_or_none(plan.get("champion"))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _with_spent(row: Optional[dict], spent: list[int]) -> Optional[dict]:
+    """Carry the spent-champion memory onto a re-cut row; a row before any episode stays the shape it
+    always was (no key), so a run that never stalls writes byte-identical plan rows."""
+    if row is not None and spent:
+        row["stall_champions"] = list(spent)
+    return row
+
+
+def _episode_row(cut: dict, *, start: int, end: int, champion: Optional[int], spent: list[int],
+                 reason: str) -> Optional[dict]:
+    """A plan row that bounds a stall episode to `[start, end)`. Its `reserve` (and the endgame
+    phase's `nodes`) is the episode's length, not the rest of the budget: the row describes what the
+    reserve will spend before the `reopened` row cuts the ordinary plan again."""
+    row = build_plan(**cut, reason=reason, endgame_start=start)
+    if row is None:
+        return None
+    reserve = max(1, min(int(end), row["max_nodes"]) - row["endgame_start"])
+    row["reserve"] = reserve
+    row["phases"][-1]["nodes"] = reserve
+    row["endgame_end"] = int(end)
+    row["champion"] = champion
+    row["stall_champions"] = list(spent)
+    return row
+
+
+def _reopened(cut: dict, spent: list[int], cause: str) -> Optional[dict]:
+    row = build_plan(**cut, reason="reopened")
+    if row is None:
+        return None
+    row["reopen_cause"] = cause if cause in REOPEN_CAUSES else "episode_spent"
+    return _with_spent(row, spent)
+
+
 def replan(plan: Optional[dict], *, max_nodes: int, n_seeds: int, reserve_frac: float,
-           at_node: int, stall_rung: int, endgame_sweep: bool = True) -> Optional[dict]:
-    """A re-cut plan when one is due, else None. Two triggers, in this order: the live node budget
-    moved (the reserve follows it), and a hard stall (`stall_rung >= HARD_STALL_RUNGS`) before the
-    endgame has begun — then the endgame starts NOW. A run already inside its endgame never
-    re-plans on a stall (there is nothing earlier to start)."""
+           at_node: int, stall_rung: int, endgame_sweep: bool = True, stall_nodes: int = 0,
+           champion: Optional[int] = None) -> Optional[dict]:
+    """A re-cut plan when one is due, else None.
+
+    `stall_nodes` 0 (the bare-library and legacy-snapshot value) is the historical rule byte for
+    byte: two triggers, in this order — the live node budget moved (the reserve follows it), and a
+    hard stall (`stall_rung >= HARD_STALL_RUNGS`) before the endgame has begun, which starts the
+    endgame NOW and for good. A run already inside its endgame never re-plans on a stall (there is
+    nothing earlier to start).
+
+    `stall_nodes` K > 0 bounds the stall's endgame to K nodes (the module docstring has the account),
+    in this order:
+
+    1. a row that bounds an episode is closed by its own terms — `reopened` once `at_node` reaches its
+       `endgame_end` or `champion` is not the one it was measured against — whatever K now is, so a
+       run whose operator turned the setting off mid-episode still leaves it; a budget change inside
+       a live episode CARRIES it (the flicker must not drop the stall start);
+    2. a LEGACY stall row (no `endgame_end`) is re-evaluated once: reopened when the corrected rung is
+       under two or the champion was crowned inside it, else bounded from its own start;
+    3. the budget re-cut, carrying the spent-champion memory;
+    4. a hard stall before the reserve starts ONE episode `[at_node, at_node + K)` for a champion
+       that has not had one.
+    """
     if not isinstance(plan, dict):
         return None
     try:
@@ -100,23 +229,345 @@ def replan(plan: Optional[dict], *, max_nodes: int, n_seeds: int, reserve_frac: 
         planned_start = int(plan.get("endgame_start"))
     except (TypeError, ValueError):
         return None
+    try:
+        stall_nodes = max(0, int(stall_nodes or 0))
+    except (TypeError, ValueError):
+        stall_nodes = 0
+    champion = _int_or_none(champion)
+    cut = {"max_nodes": max_nodes, "n_seeds": n_seeds, "reserve_frac": reserve_frac,
+           "at_node": at_node, "endgame_sweep": endgame_sweep}
+    spent = _stall_champions(plan)
+    episode = _episode(plan)
+    if episode is not None:
+        start, end, holder = episode
+        if champion != holder:
+            return _reopened(cut, spent, "champion_changed")
+        if at_node >= end:
+            return _reopened(cut, spent, "episode_spent")
+        if int(max_nodes) != planned_budget:
+            return _episode_row(cut, start=start, end=end, champion=holder, spent=spent,
+                                reason="budget_changed")
+        return None
+    if stall_nodes <= 0:
+        if int(max_nodes) != planned_budget:
+            return build_plan(max_nodes=max_nodes, n_seeds=n_seeds, reserve_frac=reserve_frac,
+                              at_node=at_node, reason="budget_changed", endgame_sweep=endgame_sweep)
+        if stall_rung >= HARD_STALL_RUNGS and at_node < planned_start and at_node > n_seeds:
+            return build_plan(max_nodes=max_nodes, n_seeds=n_seeds, reserve_frac=reserve_frac,
+                              at_node=at_node, reason="stagnation", endgame_sweep=endgame_sweep,
+                              endgame_start=at_node)
+        return None
+    if plan.get("reason") == "stagnation":
+        # THE MIGRATION: an unbounded stall row this setting did not write (inf13's, at node 12).
+        # Nothing on it names the champion the stall was measured against, so the stall is measured
+        # again, now, on the corrected count — and a champion whose id is at or past the row's start
+        # did not exist when it was written, so the stall it recorded was some other champion's.
+        if stall_rung < HARD_STALL_RUNGS or champion is None:
+            return _reopened(cut, spent, "stall_retracted")
+        if champion >= planned_start:
+            return _reopened(cut, spent, "champion_changed")
+        if champion in spent:
+            return _reopened(cut, spent, "episode_spent")
+        end = planned_start + stall_nodes
+        if at_node >= end:
+            return _reopened(cut, spent + [champion], "episode_spent")
+        return _episode_row(cut, start=planned_start, end=end, champion=champion,
+                            spent=spent + [champion], reason="stagnation")
     if int(max_nodes) != planned_budget:
-        return build_plan(max_nodes=max_nodes, n_seeds=n_seeds, reserve_frac=reserve_frac,
-                          at_node=at_node, reason="budget_changed", endgame_sweep=endgame_sweep)
-    if stall_rung >= HARD_STALL_RUNGS and at_node < planned_start and at_node > n_seeds:
-        return build_plan(max_nodes=max_nodes, n_seeds=n_seeds, reserve_frac=reserve_frac,
-                          at_node=at_node, reason="stagnation", endgame_sweep=endgame_sweep,
-                          endgame_start=at_node)
+        return _with_spent(build_plan(**cut, reason="budget_changed"), spent)
+    if (stall_rung >= HARD_STALL_RUNGS and n_seeds < at_node < planned_start
+            and champion is not None and champion not in spent):
+        return _episode_row(cut, start=at_node, end=at_node + stall_nodes, champion=champion,
+                            spent=spent + [champion], reason="stagnation")
     return None
 
 
-def _is_endgame_action(action: dict, best_id: Optional[int]) -> bool:
+# ----------------------------------------------------------------------------- the reserve's rule
+
+def _parent_pair(value) -> Optional[tuple[int, int]]:
+    """The two distinct integer parents of a merge, or None for any other shape."""
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    a, b = value
+    if type(a) is not int or type(b) is not int or a == b:
+        return None
+    return a, b
+
+
+def _action_identity(action: dict) -> tuple:
+    """What makes two actions the same WORK for the reserve: the kind, the parents (a merge is
+    symmetric in them) and whether it is the surrogate's sweep rather than the Researcher's refine."""
     kind = action.get("kind")
     if kind == "merge":
+        pair = _parent_pair(action.get("parent_ids"))
+        parents: tuple = tuple(sorted(pair)) if pair is not None else ("?",)
+    elif kind in ("improve", "ablate"):
+        parents = (action.get("parent_id"),)
+    else:
+        parents = ()
+    return kind, parents, bool(action.get(META_SWEEP))
+
+
+# The Card statuses that still own their work: not terminal, not dropped (`card_ledger.py`'s frozen
+# lifecycle lane). A `building` Card may not have its node folded yet, which is exactly why a live
+# merge CARD refuses its pair beside the merge NODES.
+_LIVE_CARD_STATUSES = frozenset({"proposed", "building", "coded", "running"})
+
+
+class _EndgameView:
+    """What the reserve reads off ONE fold, computed once however many questions are asked of it —
+    `endgame_refused_card_ids` asks one per Card on the board."""
+
+    def __init__(self, state, plan: dict):
+        from looplab.search.policy import rank_by_metric
+        self.state = state
+        self.plan = plan
+        self.best = state.best()
+        self.best_id = self.best.id if self.best is not None else None
+        self.breedable = rank_by_metric(state, state.breedable_nodes())
+        self.breedable_ids = {n.id for n in self.breedable}
+        self._ancestors: dict[int, frozenset[int]] = {}
+        self._own: dict[bool, Optional[dict]] = {}
+        # The last phase's kinds, total over whatever `phases` the fold kept: a last phase that is
+        # not a dict raised where a Card kept its slot (critic 2026-09-27, NIT).
+        phases = plan.get("phases")
+        last = phases[-1] if isinstance(phases, list) and phases else {}
+        kinds = last.get("kinds") if isinstance(last, dict) else None
+        self.kinds = list(kinds) if isinstance(kinds, (list, tuple)) and kinds else list(ENDGAME_KINDS)
+        # Every pair a merge NODE already holds, any status, before or after the reserve start. A
+        # merge of more than two parents holds every pair of them — conservative, and no engine
+        # path writes one.
+        self.merged_pairs: set[frozenset] = set()
+        for node in state.nodes.values():
+            if node.operator != "merge":
+                continue
+            parents = sorted({p for p in node.parent_ids if type(p) is int})
+            for i, a in enumerate(parents):
+                for b in parents[i + 1:]:
+                    self.merged_pairs.add(frozenset((a, b)))
+        # Every live merge CARD, by pair, oldest first (`cards_added` order; an unlisted id sorts last).
+        order = {row.get("id"): i for i, row in enumerate(getattr(state, "cards_added", None) or [])
+                 if isinstance(row, dict)}
+        live: dict[frozenset, list[str]] = {}
+        for card in state.cards.values():
+            if (card.operator != "merge" or card.merged_into is not None
+                    or card.dropped_reason is not None or card.status not in _LIVE_CARD_STATUSES):
+                continue
+            pair = _parent_pair(list(card.parent_ids or []))
+            if pair is not None:
+                live.setdefault(frozenset(pair), []).append(card.id)
+        self.live_merge_cards = {
+            pair: sorted(ids, key=lambda cid: (order.get(cid, len(order)), str(cid)))
+            for pair, ids in live.items()}
+
+    def ancestors(self, node_id: int) -> frozenset[int]:
+        """Every node reachable over `parent_ids` from `node_id`, transitively (cycle-safe)."""
+        cached = self._ancestors.get(node_id)
+        if cached is not None:
+            return cached
+        seen: set[int] = set()
+        stack = [node_id]
+        while stack:
+            node = self.state.nodes.get(stack.pop())
+            if node is None:
+                continue
+            for parent in node.parent_ids:
+                if type(parent) is int and parent not in seen:
+                    seen.add(parent)
+                    stack.append(parent)
+        seen.discard(node_id)
+        result = frozenset(seen)
+        self._ancestors[node_id] = result
+        return result
+
+    def related(self, a: int, b: int) -> bool:
+        """One of the two descends from the other — an ensemble of an idea and its own refinement."""
+        return a in self.ancestors(b) or b in self.ancestors(a)
+
+    def merge_admissible(self, pair: Optional[tuple[int, int]], *,
+                         card_id: Optional[str] = None) -> bool:
+        """May the reserve spend a slot merging `pair`? `card_id` names the Card asking (its own
+        live row is not a rival); None is the reserve's OWN merge, which any live Card of the pair
+        refuses."""
+        if pair is None:
+            return False
+        a, b = pair
+        if a not in self.breedable_ids or b not in self.breedable_ids:
+            return False                  # "of two evaluated nodes": both breedable
+        if self.related(a, b):
+            return False
+        key = frozenset(pair)
+        if key in self.merged_pairs:
+            return False
+        owners = self.live_merge_cards.get(key, [])
+        if card_id is None:
+            return not owners
+        # Two live Cards of one pair would refuse each other forever; the OLDEST keeps the pair, and
+        # a Card that is not itself a live owner (it could not be elected anyway) has a rival.
+        return not owners or owners[0] == card_id
+
+    def merge_pick(self) -> Optional[tuple]:
+        """`(leader, partner, historical, on_front)`: the leader and the first partner that passes
+        `merge_admissible`, walked in the historical order — the Pareto front's members after the
+        leader when the front has two or more, then the rest of the breedable ranking. `historical`
+        says the partner is the one the reserve always took (the reason string keeps its bytes);
+        `on_front` that the historical pair was the front's."""
+        from looplab.search.policy import pareto_front
+        if len(self.breedable) < 2:
+            return None
+        front = pareto_front(self.state, self.breedable)
+        if len(front) >= 2:
+            leader = front[0]
+            order = list(front[1:]) + [n for n in self.breedable if n not in front]
+        else:
+            leader = self.breedable[0]
+            order = list(self.breedable[1:])
+        for rank, partner in enumerate(order):
+            if partner.id == leader.id:
+                continue
+            if self.merge_admissible((leader.id, partner.id)):
+                return leader, partner, rank == 0, len(front) >= 2
+        return None
+
+    def simplify_passes(self) -> bool:
+        """doc 67 67.5: may a simplification of the champion take this turn as it is? Not while the
+        reserve's once-only ensemble is still owed (its own next action is a merge — the lineage and
+        pair rules decide whether a partner qualifies, as they do for the ensemble itself), and ONE
+        cut per champion in the reserve."""
+        start = int(self.plan["endgame_start"])
+        own = self.own(sweep=False)
+        ensemble_owed = own is not None and own.get("kind") == "merge"
+        cut_in_reserve = self.best is not None and any(
+            n.id >= start and isinstance(n.simplified, dict)
+            and n.simplified.get("parent_id") == self.best.id for n in self.state.nodes.values())
+        return not ensemble_owed and not cut_in_reserve
+
+    def card_is_endgame_action(self, action: dict) -> bool:
+        """A Card-owned action that already IS the reserve's kind of work: an improve of the
+        champion, or a merge `merge_admissible` passes for this Card."""
+        from looplab.search.card_selection import META_CARD_ID
+        kind = action.get("kind")
+        if kind == "improve":
+            return self.best_id is not None and action.get("parent_id") == self.best_id
+        if kind == "merge":
+            card_id = action.get(META_CARD_ID)
+            return self.merge_admissible(_parent_pair(action.get("parent_ids")),
+                                         card_id=card_id if isinstance(card_id, str) else "")
+        return False
+
+    def own(self, *, sweep: bool) -> Optional[dict]:
+        """The reserve's own next action — the ensemble while it is owed and a partner qualifies,
+        else the champion's sweep (or refine) — or None when there is no champion to spend it on."""
+        key = bool(sweep)
+        if key in self._own:
+            return self._own[key]
+        from looplab.search.policy import KIND_IMPROVE, KIND_MERGE, META_CHOSEN, META_REASON
+        action: Optional[dict] = None
+        start = int(self.plan["endgame_start"])
+        merged_in_reserve = any(n.operator == "merge" and n.id >= start
+                                for n in self.state.nodes.values())
+        kinds = self.kinds
+        pick = (self.merge_pick() if "merge" in kinds and not merged_in_reserve else None)
+        if pick is not None:
+            # THE ONE PLACE SELECTION READS THE NON-DOMINATED FRONT (docs/BACKLOG.md §0.1 row 12).
+            # The ensemble's two parents come from `pareto_front` rather than straight off the scalar
+            # ranking: the top-2 by metric are frequently the same idea twice — an improve and its
+            # own parent, separated by noise — and an ensemble of two near-identical models buys the
+            # run nothing it did not already have. The front's second member is the best node NOT
+            # dominated by the leader, i.e. one that pays for its lower metric with a declared
+            # objective the leader loses on, which is the recombination an endgame reserve exists to
+            # spend its slots on.
+            #
+            # INERT UNTIL A RUN RECORDS A REAL SECOND OBJECTIVE, by construction and not by a flag:
+            # with no authenticated, orientable extra metric the only axis is the primary metric,
+            # the front is the metric leader alone, `len(front) < 2`, and this falls through to the
+            # byte-identical top-2 ranking it always used. That is why there is no new setting here
+            # — a knob would imply the front is a policy choice, and it is a reading of what the
+            # record supports. The LINEAGE and PAIR rules (`merge_admissible`) walk past a partner
+            # that is the leader's own ancestor or descendant or was already paired with it; the
+            # reason keeps its historical bytes whenever the historical partner qualified.
+            leader, partner, historical, on_front = pick
+            if historical:
+                reason = ("endgame: ensemble of the Pareto front's top-2" if on_front
+                          else "endgame: ensemble of the top-2")
+            else:
+                reason = ("endgame: ensemble of the leader and its best partner outside its "
+                          "lineage that no merge has paired it with")
+            action = {"kind": KIND_MERGE, "parent_ids": [leader.id, partner.id],
+                      META_CHOSEN: leader.id, META_REASON: reason}
+        elif self.best is not None:
+            if sweep and "sweep" in kinds:
+                action = {"kind": KIND_IMPROVE, "parent_id": self.best.id, META_SWEEP: True,
+                          META_CHOSEN: self.best.id,
+                          META_REASON: "endgame: champion sweep (k-NN surrogate)"}
+            else:
+                action = {"kind": KIND_IMPROVE, "parent_id": self.best.id,
+                          META_CHOSEN: self.best.id, META_REASON: "endgame: refine the champion"}
+        self._own[key] = action
+        return action
+
+    def admits(self, action: dict, *, sweep: bool) -> bool:
+        """`endgame_admits` over this view (the caller has already asked `in_endgame`)."""
+        from looplab.search.card_selection import META_CARD_ID
+        if action.get("kind") == "evaluate":
+            return True
+        if action.get("kind") == "simplify":
+            return self.simplify_passes()
+        if META_CARD_ID in action and self.card_is_endgame_action(action):
+            return True
+        own = self.own(sweep=sweep)
+        if own is None:
+            return True                   # nothing of its own to spend: the gate hands the turn back
+        return META_CARD_ID not in action and _action_identity(action) == _action_identity(own)
+
+
+def endgame_admits(state, plan: Optional[dict], action: dict, *, sweep: bool = True) -> bool:
+    """Would the endgame gate let `action` through AS IT IS? The ONE predicate the gate, the raw
+    proposal lanes and every Card election share (see the module docstring).
+
+    Outside the reserve: yes. An evaluation: yes. A Card's action: when it already is an endgame
+    action (an improve of the champion, a merge `merge_admissible` passes). A raw action: only when
+    it is the reserve's own next action (`endgame_actions` replaces every other create with that one)
+    — which is why a raw lane that re-derives the POLICY's action must ask before it pays. When the
+    reserve has nothing of its own (no champion, no admissible merge) every action passes, as the
+    gate passes the turn through."""
+    if not isinstance(action, dict) or not in_endgame(plan, len(state.nodes)):
         return True
-    if kind == "improve" and best_id is not None and action.get("parent_id") == best_id:
-        return True
-    return False
+    return _EndgameView(state, plan).admits(action, sweep=sweep)
+
+
+def endgame_admitted(state, actions: list[dict], *, sweep: bool = True) -> list[dict]:
+    """The members of a raw lane the gate would let through as they are, asked BEFORE the lane
+    stages a Card for one — a paid Researcher proposal (inf13's card-14: an improve of a
+    non-champion, proposed, paid for, then displaced by the gate's own merge). Outside the reserve
+    the lane is returned whole, so every raw lane is byte-identical there."""
+    plan = getattr(state, "plan", None)
+    if not in_endgame(plan, len(state.nodes)):
+        return list(actions)
+    view = _EndgameView(state, plan)
+    return [action for action in actions
+            if not isinstance(action, dict) or view.admits(action, sweep=sweep)]
+
+
+def endgame_refused_card_ids(state, plan: Optional[dict]) -> frozenset[str]:
+    """The LIVE Cards on the board whose action the gate would refuse right now — what every election
+    excludes BEFORE ranking, so no build is bought that the gate then displaces. Only a Card that
+    still owns its work can be elected or claimed, so a terminal, dropped or merged-away one is never
+    named. Empty outside the reserve, so every lane is byte-identical there. The `sweep` switch
+    cannot move a Card's answer (it only shapes the reserve's own raw action), so none is asked."""
+    if not in_endgame(plan, len(state.nodes)):
+        return frozenset()
+    from looplab.search.card_selection import card_action
+    view = _EndgameView(state, plan)
+    refused: set[str] = set()
+    for card in state.cards.values():
+        if (card.status not in _LIVE_CARD_STATUSES or card.merged_into is not None
+                or card.dropped_reason is not None):
+            continue
+        action = card_action(card)
+        if action is not None and not view.admits(action, sweep=True):
+            refused.add(card.id)
+    return frozenset(refused)
 
 
 def endgame_actions(state, plan: Optional[dict], actions: list[dict], *,
@@ -127,23 +578,8 @@ def endgame_actions(state, plan: Optional[dict], actions: list[dict], *,
         return actions
     if any(a.get("kind") == "evaluate" for a in actions):
         return actions
-    best = state.best()
-    best_id = best.id if best is not None else None
     from looplab.search.card_selection import META_CARD_ID
-    from looplab.search.policy import (KIND_IMPROVE, KIND_MERGE, META_CHOSEN, META_REASON,
-                                       pareto_front, rank_by_metric)
-    start = int(plan["endgame_start"])
-    breedable = rank_by_metric(state, state.breedable_nodes())
-    merged_in_reserve = any(n.operator == "merge" and n.id >= start for n in state.nodes.values())
-    # Total over any `phases` the fold kept: read before the kept-Card return below since the
-    # simplify rule needs it, a last phase that is not a dict raised where a Card kept its slot
-    # (critic 2026-09-27, NIT).
-    phases = plan.get("phases")
-    last = phases[-1] if isinstance(phases, list) and phases else {}
-    kinds = last.get("kinds") if isinstance(last, dict) else None
-    if not isinstance(kinds, (list, tuple)) or not kinds:
-        kinds = list(ENDGAME_KINDS)
-    ensemble_owed = "merge" in kinds and not merged_in_reserve and len(breedable) >= 2
+    view = _EndgameView(state, plan)
     # A SIMPLIFICATION of the champion passes too (doc 67 67.5): it proposes nothing and pays no
     # model — the champion's own program, one measured block commented out — so it is the reserve's
     # purpose, polishing the champion; replaced by the sequence below, it vanished with no receipt.
@@ -151,44 +587,22 @@ def endgame_actions(state, plan: Optional[dict], actions: list[dict], *,
     # measured worse leaves the champion where it was, and the next nominated block of the same
     # program spent the next slot on the same question — five nominated blocks took a reserve of
     # three and the ensemble and the sweeps never ran (critic 2026-09-27, driven). A cut that WON is
-    # the new champion, and may be simplified once in turn.
+    # the new champion, and may be simplified once in turn. `simplify_passes` is the rule, asked
+    # by `admits` too, so the gate and the lanes read it the same way.
     if any(a.get("kind") == "simplify" for a in actions):
-        cut_in_reserve = best is not None and any(
-            n.id >= start and isinstance(n.simplified, dict)
-            and n.simplified.get("parent_id") == best.id for n in state.nodes.values())
-        if not ensemble_owed and not cut_in_reserve:
+        if view.simplify_passes():
             return actions
         actions = [a for a in actions if a.get("kind") != "simplify"]
+    own = view.own(sweep=sweep)
+    if own is None:
+        # Nothing of the reserve's own to spend (no champion, no admissible merge): a Card that is
+        # an endgame action still keeps its slot, and otherwise the turn passes through untouched.
+        kept = [a for a in actions if META_CARD_ID in a and view.card_is_endgame_action(a)]
+        return kept or actions
     # A selected CARD that already is an endgame action keeps its slot (its proposal is paid for);
     # a plain policy create — an improve of the champion included — is replaced by the endgame's
-    # own sequence below, the ensemble first and then the surrogate-proposed sweeps.
-    kept = [a for a in actions if META_CARD_ID in a and _is_endgame_action(a, best_id)]
-    if kept:
-        return kept
-    if ensemble_owed:
-        # THE ONE PLACE SELECTION READS THE NON-DOMINATED FRONT (docs/BACKLOG.md §0.1 row 12). The
-        # ensemble's two parents come from `pareto_front` rather than straight off the scalar
-        # ranking: the top-2 by metric are frequently the same idea twice — an improve and its own
-        # parent, separated by noise — and an ensemble of two near-identical models buys the run
-        # nothing it did not already have. The front's second member is the best node NOT dominated
-        # by the leader, i.e. one that pays for its lower metric with a declared objective the leader
-        # loses on, which is the recombination an endgame reserve exists to spend its slots on.
-        #
-        # INERT UNTIL A RUN RECORDS A REAL SECOND OBJECTIVE, by construction and not by a flag: with
-        # no authenticated, orientable extra metric the only axis is the primary metric, the front is
-        # the metric leader alone, `len(front) < 2`, and this falls through to the byte-identical
-        # top-2 ranking it always used. That is why there is no new setting here — a knob would
-        # imply the front is a policy choice, and it is a reading of what the record supports.
-        front = pareto_front(state, breedable)
-        parents = front[:2] if len(front) >= 2 else breedable[:2]
-        reason = ("endgame: ensemble of the Pareto front's top-2"
-                  if len(front) >= 2 else "endgame: ensemble of the top-2")
-        return [{"kind": KIND_MERGE, "parent_ids": [parents[0].id, parents[1].id],
-                 META_CHOSEN: parents[0].id, META_REASON: reason}]
-    if best is None:
-        return actions
-    if sweep and "sweep" in kinds:
-        return [{"kind": KIND_IMPROVE, "parent_id": best.id, META_SWEEP: True,
-                 META_CHOSEN: best.id, META_REASON: "endgame: champion sweep (k-NN surrogate)"}]
-    return [{"kind": KIND_IMPROVE, "parent_id": best.id, META_CHOSEN: best.id,
-             META_REASON: "endgame: refine the champion"}]
+    # own sequence, the ensemble first and then the surrogate-proposed sweeps. Asked through
+    # `admits`, the predicate every buying lane shares, so the gate and the lanes cannot disagree:
+    # with an action of its own, `admits` keeps exactly the Cards that are endgame actions.
+    kept = [a for a in actions if META_CARD_ID in a and view.admits(a, sweep=sweep)]
+    return kept or [own]

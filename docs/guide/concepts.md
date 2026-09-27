@@ -959,6 +959,27 @@ reserve for the ensemble alone (`operators.endgame_sweep: false`); the reserve i
 plan's and no role moves it. `0` disables the plan (a bare `Engine(...)` and every resumed pre-plan
 run keep the historical dispatch).
 
+**Whom the endgame merges, who may buy inside it, and when a stall endgame ends (2026-09-27).**
+MiniOneRec inf13 entered a stall endgame at node 12 of a 100,000-node budget and kept it for good;
+its ensemble paired the champion with the champion's own child, twice. Four rules now hold
+(`engine/plan.py`, `agents/strategist.py::stall_rung`):
+
+* the ensemble's partner is the best breedable node that is neither an ancestor nor a descendant of
+  the leader and was never merged with it — as a merge node of any status, or a live merge Card, in
+  either order; with none, the reserve sweeps. A selected merge Card keeps its slot on the same rule;
+* every lane that PAYS asks the gate's own predicate (`endgame_admits`) first: the raw proposal lanes
+  stage nothing the gate would displace, and each Card election, its claim and its freshness question
+  leave the Cards the gate refuses out of the ranking (`endgame_refused_card_ids`, never charged as a
+  reservation); a build already bought is never refused;
+* the stall counts only attempts ON the champion — built on it, or proposed by a Card scored against
+  it — because node ids are reserved at build start and "a higher id than the champion" counted
+  inf13's builds of ideas proposed against its previous champion;
+* a stall endgame lasts `endgame_stall_nodes` nodes (product 3; `0` = to the end of the budget, the
+  historical rule and what a pre-field snapshot resumes with), then a `reopened` plan row cuts the
+  ordinary plan again — sooner if a new champion is crowned. One episode per champion
+  (`stall_champions`), and a live-budget re-cut carries the episode instead of dropping its start. A
+  legacy unbounded stall row is re-evaluated on the first turn with the setting on.
+
 **An ensemble merge sees both parents.** `merge_mode=ensemble` used to seed the Developer with
 ONE parent's files and describe the other in 120 characters of rationale — a recombination that
 reads one lineage is an improve with a longer prompt. Since 2026-09-06 the Developer's

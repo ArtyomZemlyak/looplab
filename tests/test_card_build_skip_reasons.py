@@ -208,6 +208,10 @@ def test_a_head_with_no_producer_pair_is_released_producer_unavailable_never_pro
     doc 50 ES1-04). The retry and its bound are DRIVEN in `tests/test_card_speculation_engine.py`;
     this pins the slug's one emitter where the vocabulary is.
 
+    The function has a SECOND close since 2026-09-27, on the same ground: a head the run's plan now
+    refuses (`plan_refused`, `tests/test_endgame_election.py`) is closed before its producer starts,
+    so it too bills nothing and must not read `producer_failed`.
+
     MUTATION: restore `skipped="producer_failed"` there, or drop the reason."""
     tree = ast.parse(_SRC)
     fn = next(n for n in ast.walk(tree)
@@ -217,9 +221,9 @@ def test_a_head_with_no_producer_pair_is_released_producer_unavailable_never_pro
               and getattr(call.func, "attr", None) == "_append_card_build_done"
               for kw in call.keywords
               if kw.arg == "skipped" and isinstance(kw.value, ast.Constant)]
-    assert coarse == ["stale"], coarse
-    assert _kwarg_slugs().get("_start_request_producer") == {"producer_unavailable"}
-    assert "producer_unavailable" in CARD_BUILD_SKIP_REASONS
+    assert coarse == ["stale", "stale"], coarse
+    assert _kwarg_slugs().get("_start_request_producer") == {"plan_refused", "producer_unavailable"}
+    assert {"plan_refused", "producer_unavailable"} <= set(CARD_BUILD_SKIP_REASONS)
 
 
 def test_the_two_dead_shapes_are_not_ONE_word():
