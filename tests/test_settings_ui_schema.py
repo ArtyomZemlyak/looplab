@@ -100,7 +100,11 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 230
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 231
+    # 230 -> 231 on 2026-09-27 (the merge of master): `max_launch_timeout_s` -- the hard
+    # per-launch wall-clock ceiling (24 h default, up to 7 days), which was the literal
+    # `sandbox.MAX_TIMEOUT_S`. A ROW: it decides whether a multi-day training is killed at a day.
+    # Verified by INTERSECTION: 230 keys common to the previous keyset plus exactly that one.
     # 229 -> 230 on 2026-09-27: `ablation_simplify` (doc 67 67.5) -- a code-block ablation's no-worse
     # probe nominates the program it ran as a node. A ROW on the SPEND ground, OFF by default.
     # Verified by INTERSECTION: 229 keys common to the previous keyset plus exactly that one, none
@@ -473,7 +477,8 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # 262 -> 263 on 2026-09-26: `noise_floor_mid_search` (a curated row, so both counts move).
     # 263 -> 264 on 2026-09-26: `seed_from_run` (a curated row, so both counts move).
     # 264 -> 265 on 2026-09-27: `ablation_simplify` (a curated row, so both counts move).
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 265
+    # 265 -> 266 on 2026-09-27 (the merge of master): `max_launch_timeout_s` (a curated row).
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 266
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

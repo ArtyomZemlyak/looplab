@@ -1,5 +1,8 @@
 """Shared numeric primitives: the median, the numeric subset of a param dict, the IDW k-NN core,
-and the human SIZE grammar (`parse_mem_bytes` / `size_bytes_or_error`, see the block above them).
+the human SIZE grammar (`parse_mem_bytes` / `size_bytes_or_error`, see the block above them), and
+the RANGE of the hard per-launch wall-clock ceiling (`LAUNCH_TIMEOUT_DEFAULT_S` /
+`LAUNCH_TIMEOUT_LIMIT_S`, at the end) — the size grammar's shape one axis over: `Settings` refuses
+by it, `runtime/sandbox.py` enforces with it.
 
 Neither has anything to do with the event log, yet both lived in `events/digest.py` (doc 25 XP-12),
 and `runtime/proxy.py` imported `events` for the sole purpose of reaching a math function — the one
@@ -151,3 +154,19 @@ def parse_mem_bytes(spec) -> int | None:
         # above; this is the belt for anything `int()` still refuses.
         return None
     return n if n > 0 else None
+
+
+# THE HARD PER-LAUNCH WALL-CLOCK CEILING's RANGE (2026-09-27), in core for the size grammar's reason:
+# two layers must agree on it. `core/config.py::Settings.max_launch_timeout_s` REFUSES a ceiling
+# outside it, and `runtime/sandbox.py::set_launch_timeout_ceiling` installs the one every subprocess
+# deadline is then clamped to (`finite_timeout`, the universal choke point). The DEFAULT is the
+# historical constant (`sandbox.MAX_TIMEOUT_S` was a literal 24 h), so a run that sets nothing is
+# byte-identical; it is also the FLOOR, so a configured ceiling can only lengthen a launch, never cut
+# one that ran before — which is what lets a reader that cannot see the run's configuration (an
+# unreadable snapshot) fall back to it without ever announcing a budget the engine would cut.
+# The LIMIT is a week, the operator's own ask: a long SFT run's single eval stage trains past 24 h as
+# its data grows, and a week still bounds a fat-fingered or hostile value the way the 24 h literal did
+# — the clamp exists so one eval cannot wedge the loop forever, not to decide how long an operator's
+# training may be.
+LAUNCH_TIMEOUT_DEFAULT_S = 24 * 3600.0          # 86400 s
+LAUNCH_TIMEOUT_LIMIT_S = 7 * 24 * 3600.0        # 604800 s

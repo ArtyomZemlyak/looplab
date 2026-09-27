@@ -291,7 +291,14 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               `['ablation_simplify']` added and `[]` removed; `_EXPECTED_FIELD_COUNT` goes
 #               261 -> 262 and both pins are re-set. INERT for a calibration replicate: off on both
 #               surfaces, and the replicate never ablates.
-_EXPECTED_DIGEST = "sha256:37b48dd809e35ee404d9f3fa4ae4af43497545906fe3ea87dd635d1232e70178"
+#   2026-09-27  + max_launch_timeout_s (the merge of master: the hard per-launch wall-clock
+#               ceiling, until now the literal `runtime/sandbox.py::MAX_TIMEOUT_S`, made
+#               configurable up to 7 days). The 'field set changed too' branch: exactly
+#               `['max_launch_timeout_s']` added and `[]` removed; `_EXPECTED_FIELD_COUNT` goes
+#               262 -> 263 and both pins are re-set. INERT for a calibration replicate: its
+#               default is the literal it replaces (86400), the profile ships that default,
+#               and no toy evaluation comes near a day.
+_EXPECTED_DIGEST = "sha256:9b9630f67d2c46e0ceef3837d43017c46e8939a1bdcafcc98fa9a2966ca31fb6"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -786,7 +793,8 @@ _EXPECTED_DIGEST = "sha256:37b48dd809e35ee404d9f3fa4ae4af43497545906fe3ea87dd635
 #   2026-09-26  + noise_floor_mid_search (doc 67 67.1a): 259 -> 260; see the digest history above.
 #   2026-09-26  + seed_from_run (doc 67 67.2): 260 -> 261; see the digest history above.
 #   2026-09-27  + ablation_simplify (doc 67 67.5): 261 -> 262; see the digest history above.
-_EXPECTED_FIELD_COUNT = 262
+#   2026-09-27  + max_launch_timeout_s (the merge of master): 262 -> 263; see above.
+_EXPECTED_FIELD_COUNT = 263
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

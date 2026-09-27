@@ -29,7 +29,9 @@ from typing import Optional, Protocol
 
 from looplab.core.atomicio import atomic_write_text
 from looplab.core.errors import BudgetExceeded, ConfigRefusal
+from looplab.core.hardware import usable_cpu_count
 from looplab.core.numeric import parse_mem_bytes  # noqa: F401 (re-export; moved to core, CORE-05)
+from looplab.core.numeric import LAUNCH_TIMEOUT_DEFAULT_S, LAUNCH_TIMEOUT_LIMIT_S
 from looplab.core.jsonutil import surrogate_safe
 from looplab.runtime.read_fence import (FENCE_DIR_ENV, WORKDIR_ENV, prepend_pythonpath,
                                         reassert as _reassert_fence)
@@ -86,8 +88,51 @@ def git_subprocess_env() -> dict[str, str]:
 
 # A sane wall-clock ceiling for any single subprocess run. A "timeout" larger than this is a
 # misconfiguration, not an intent, so it is clamped rather than trusted — one eval must not be able
-# to wedge the loop for a week (or forever) on a fat-fingered/hostile value.
-MAX_TIMEOUT_S = 24 * 3600.0    # 24 hours
+# to wedge the loop forever on a fat-fingered/hostile value.
+#
+# CONFIGURABLE since 2026-09-27, and only UPWARD. `MAX_TIMEOUT_S` stays the DEFAULT (and the floor);
+# the ceiling IN FORCE is `launch_timeout_ceiling()`, which `set_launch_timeout_ceiling` installs from
+# the run's `Settings.max_launch_timeout_s` in `cli/__init__.py::_engine` — the funnel every run,
+# resume and finalize (and so every UI spawn) goes through, before a role or a sandbox is built — at
+# most `LAUNCH_TIMEOUT_LIMIT_S`, a week (`core/numeric.py` holds the range, because `Settings` refuses
+# by it). PROCESS-WIDE on purpose, the shape `core/tracing.py::set_llm_capture` has: one engine
+# process drives one run, and every clamp that reads it — `finite_timeout` in `run_argv` and the
+# Docker tier, the eval/stage builders, `command_eval.eval_timeout_override` — is reached from code
+# that holds no Settings, so a per-call ceiling threaded through them would be one more argument each
+# call site could forget. The UI server installs none: it validates `budget_extend{eval_timeout}`
+# against the RUN's recorded value (`serve/control_validation.py::_run_launch_ceiling`), the same
+# value the run's engine installs here, so a request above it is refused rather than cut.
+MAX_TIMEOUT_S = LAUNCH_TIMEOUT_DEFAULT_S    # 24 hours — the default ceiling, never lowered
+_launch_timeout_ceiling_s = MAX_TIMEOUT_S
+
+
+def launch_timeout_ceiling() -> float:
+    """The wall-clock ceiling, in seconds, every subprocess deadline in THIS process is clamped to:
+    `MAX_TIMEOUT_S` unless `set_launch_timeout_ceiling` installed a longer one."""
+    return _launch_timeout_ceiling_s
+
+
+def set_launch_timeout_ceiling(seconds) -> float:
+    """Install the process-wide launch ceiling (see `MAX_TIMEOUT_S` above) and return it.
+
+    REFUSES a value outside `[LAUNCH_TIMEOUT_DEFAULT_S, LAUNCH_TIMEOUT_LIMIT_S]` with a
+    `ConfigRefusal` instead of clamping it: `Settings.max_launch_timeout_s` already refuses that
+    range at load, so a value arriving here outside it came from a direct library caller, and quietly
+    narrowing it would be exactly the silent cut this ceiling is kept loud to prevent."""
+    import math
+    try:
+        if isinstance(seconds, bool):
+            raise TypeError("bool")
+        value = float(seconds)
+    except (TypeError, ValueError, OverflowError):
+        value = float("nan")
+    if not (math.isfinite(value) and LAUNCH_TIMEOUT_DEFAULT_S <= value <= LAUNCH_TIMEOUT_LIMIT_S):
+        raise ConfigRefusal(
+            f"max_launch_timeout_s must be a number of seconds in [{LAUNCH_TIMEOUT_DEFAULT_S:.0f}, "
+            f"{LAUNCH_TIMEOUT_LIMIT_S:.0f}] (24 hours to 7 days); got {seconds!r}")
+    global _launch_timeout_ceiling_s
+    _launch_timeout_ceiling_s = value
+    return value
 
 _DOCKER_NVIDIA_RUNTIME_CACHE: Optional[bool] = None
 
@@ -178,12 +223,13 @@ def docker_gpu_env(env: Optional[dict], *, gpu_args: list[str]) -> dict:
 
 
 def finite_timeout(value, default: float = 600.0) -> float:
-    """Coerce a timeout into a FINITE, BOUNDED number of seconds, capped at `MAX_TIMEOUT_S`.
+    """Coerce a timeout into a FINITE, BOUNDED number of seconds, capped at the launch ceiling
+    (`launch_timeout_ceiling()`: `MAX_TIMEOUT_S` unless the run configured a longer one).
 
     The fail-OPEN case is the only one that must be rewritten: a NaN/±inf deadline is NEVER reached,
     so `monotonic() >= start + timeout` stays False and a runaway never times out (arch-review §3
     P0-7 / §4 P1-5). NaN/inf/unparseable therefore fall back to `default`. Finite values are clamped
-    to `[0, MAX_TIMEOUT_S]`: a negative deadline is already fail-SAFE (it fires immediately), and 0
+    to `[0, ceiling]`: a negative deadline is already fail-SAFE (it fires immediately), and 0
     remains a deliberately-honored sentinel for lower-level callers, so both stay non-fatal rather
     than being rewritten. Every subprocess deadline flows through `run_argv`, which applies this; the
     eval/stage builders apply it too so the bounded value is what gets traced. Note the stricter task
@@ -201,7 +247,7 @@ def finite_timeout(value, default: float = 600.0) -> float:
             v = 600.0
         if not math.isfinite(v):
             v = 600.0
-    return max(0.0, min(v, MAX_TIMEOUT_S))
+    return max(0.0, min(v, launch_timeout_ceiling()))
 
 
 def require_docker_cli(what: str) -> None:
@@ -1106,27 +1152,32 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     # SubprocessSandbox path.) setdefault: an explicit engine/env value still wins.
     full_env.setdefault("PYTHONUTF8", "1")
     full_env.setdefault("PYTHONIOENCODING", "utf-8")
-    # Cap BLAS/OpenMP thread pools to the pod's CPU QUOTA, not the host core count. torch/numpy/sklearn
-    # size their pools from os.cpu_count() (the HOST's cores), so one eval on a 4-vCPU JupyterHub pod
-    # sharing a 64-core node would spin ~64 threads → context-switch thrash + CPU throttling billed to
-    # the user. sched_getaffinity respects the cgroup cpuset where cpu_count does not; on an unconstrained
-    # box it returns every core, so this setdefault equals the library default (no local regression).
-    # setdefault: an explicit operator/engine value still wins. POSIX/Linux only (guarded).
-    try:
-        _aff = len(os.sched_getaffinity(0))         # type: ignore[attr-defined]
-        _quota = str(_aff)
-        # BLAS/OpenMP pools track the pod's CPU QUOTA (the cgroup cpuset), so an eval uses its cores
-        # without oversubscribing a shared node. NUMEXPR is the exception: it HARD-rejects
-        # NUMEXPR_NUM_THREADS > NUMEXPR_MAX_THREADS (default 64) with a loud "Error." line, so its two
-        # vars are capped at 64 while the general BLAS/OpenMP vars get the full quota.
-        _nx = str(min(_aff, 64))
+    # Cap BLAS/OpenMP thread pools to the CPUs this process may USE, not the host core count.
+    # torch/numpy/sklearn size their pools from os.cpu_count() (the HOST's cores), so one eval on a
+    # 4-vCPU JupyterHub pod sharing a 64-core node would spin ~64 threads → context-switch thrash + CPU
+    # throttling billed to the user. The budget is `core/hardware.py::usable_cpu_count`: the affinity
+    # mask (the cgroup cpuset, which cpu_count does not respect) bounded by the cgroup CFS QUOTA
+    # (`cpu.max`; v1 `cpu.cfs_quota_us`), which no cpuset shows. UNTIL 2026-09-27 THIS WAS THE
+    # AFFINITY ALONE while this comment called it "the pod's CPU QUOTA": a CFS quota hides no core, so
+    # on the box doc 69 §8 measured (affinity 192, `cpu.max` 8000000/100000 = 80 CPUs,
+    # `throttled_usec` ≈ 44,331 s over the container's life) every eval child got 192 threads under an
+    # 80-CPU quota. On an unconstrained box the budget is every core, so this setdefault equals the
+    # library default (no local regression). setdefault: an explicit operator/engine value still wins.
+    # The budget is per LAUNCH: evals running side by side each get all of it, and a caller that
+    # knows its own share declares a smaller value. POSIX/Linux only (guarded).
+    if hasattr(os, "sched_getaffinity"):
+        _cpus = usable_cpu_count()
+        _threads = str(_cpus)
+        # NUMEXPR is the exception: it HARD-rejects NUMEXPR_NUM_THREADS > NUMEXPR_MAX_THREADS
+        # (default 64) with a loud "Error." line, so its two vars are capped at 64 while the general
+        # BLAS/OpenMP vars get the full budget.
+        _nx = str(min(_cpus, 64))
         for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
                      "VECLIB_MAXIMUM_THREADS"):
-            full_env.setdefault(_var, _quota)
+            full_env.setdefault(_var, _threads)
         for _var in ("NUMEXPR_NUM_THREADS", "NUMEXPR_MAX_THREADS"):
             full_env.setdefault(_var, _nx)
-    except AttributeError:
-        pass   # no sched_getaffinity (Windows/macOS) — leave the libraries' own defaults
+    # (no sched_getaffinity — Windows/macOS: leave the libraries' own defaults)
     # Unbuffered child stdio so the live log (log_path) updates line-by-line rather than only when
     # the child's block buffer flushes. setdefault: an explicit value still wins. Harmless on the
     # buffered path (the parent reads pipes either way).

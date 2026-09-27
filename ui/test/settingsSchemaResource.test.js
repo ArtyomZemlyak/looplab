@@ -232,7 +232,10 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   because the web start route is where an operator reaches for it; the Python half moved too.
   //   229 -> 230 (2026-09-27): `ablation_simplify` — a no-worse ablation probe nominates the program
   //   it ran as a node. A row because it spends a node per nomination; the Python half moved too.
-  assert.equal(Object.keys(schema.fieldByKey).length, 230)
+  //   230 -> 231 (2026-09-27, the merge of master): `max_launch_timeout_s` — the hard
+  //   per-launch wall clock (24 h default, up to 7 days). A row because it decides whether a
+  //   multi-day training is killed at a day; the Python half moved too.
+  assert.equal(Object.keys(schema.fieldByKey).length, 231)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

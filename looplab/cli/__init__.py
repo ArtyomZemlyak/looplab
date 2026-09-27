@@ -46,7 +46,7 @@ from looplab.engine.orchestrator import (
 )
 from looplab.search.policy import make_policy, parse_model_arms, policy_knobs
 from looplab.search.speculation_calibration import speculation_runtime_scope_digest
-from looplab.runtime.sandbox import docker_tier_kwargs, make_sandbox
+from looplab.runtime.sandbox import docker_tier_kwargs, make_sandbox, set_launch_timeout_ceiling
 from looplab.adapters.tasks import TaskAdapter, kinds, load_task, make_llm_client, make_roles
 from looplab.tools.vectorstore import make_embedder as _make_embedder
 from looplab.adapters.tasks import _make_abstractor as _make_lesson_abstractor
@@ -795,6 +795,13 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
     # `trace_llm_io` EngineOptions knob, which binds it to that Engine's Tracer, so a second run
     # started later in this process cannot flip the policy out from under this one.
     set_llm_capture(settings.trace_llm_io)
+    # THE HARD LAUNCH CEILING, the same process-wide shape one axis over: every subprocess deadline
+    # this process starts is clamped to it (`runtime/sandbox.py::finite_timeout`). Installed HERE —
+    # the one funnel run/resume/finalize and every UI spawn share — from the Settings this run loaded,
+    # and BEFORE the roles are built, because a repo Researcher's profile hint quotes it at
+    # construction (`adapters/repo_task.py::RepoTask._eval_profile_researcher_hint`). The server
+    # validates `budget_extend{eval_timeout}` against the same recorded value.
+    set_launch_timeout_ceiling(settings.max_launch_timeout_s)
     # The runtime-scope primitive is intentionally bounded to the calibration/public-receipt lane
     # (`max_nodes <= 64`).  Ordinary CLI runs may use the product's much larger node budgets and must
     # never cross this rollout-only validator.
