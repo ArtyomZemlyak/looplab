@@ -269,6 +269,18 @@ def verifier_evidence_digest(direction: str, node) -> str:
         canonical_json(verifier_evidence_snapshot(direction, node))).hexdigest()
 
 
+def verifier_raw_evidence_digest(direction: str, node) -> str:
+    """The `verifier_evidence_digest` this node carries while it holds only its SINGLE measurement —
+    no confirmation, no holdout score. A score the verifier gave on that evidence stays its reading of
+    the node's raw measurement after a confirmation moves the current evidence and clears
+    `verifier_score`; `events/replay_selection.py::simpler_tie` reads it on the ruler a confirm pass
+    ranks by, which that pass's own confirmations cannot move (critic 2026-09-27)."""
+    snapshot = {**verifier_evidence_snapshot(direction, node), "confirmed_mean": None,
+                "confirmed_std": None, "confirmed_seeds": None, "holdout_metric": None,
+                "generalization_gap": None}
+    return hashlib.sha256(canonical_json(snapshot)).hexdigest()
+
+
 class SearchFitness:
     """The run's ordering owner, built from its optimize `direction`. Stateless beyond `direction`
     (+ the R1-c `verifier_tiebreak` flag); construct one per fold / policy call (cheap)."""

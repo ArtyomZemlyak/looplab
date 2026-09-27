@@ -178,44 +178,30 @@ def _runs_nothing(stmt) -> bool:
                                           and isinstance(stmt.value, ast.Constant))
 
 
-def _inert_lines(code: str) -> Optional[frozenset]:
-    """The 1-based lines a statement that runs nothing (`_runs_nothing`) covers, from ONE parse — or
-    None when `code` does not parse. A block with a code line outside them changes what runs by
-    construction, so `_removes_something` asks the full dump only of the blocks inside them."""
+def _load_bearing_starts(code: str) -> Optional[frozenset]:
+    """The 1-based FIRST lines of every statement that runs something (`_runs_nothing` false), from
+    ONE parse — or None when `code` does not parse. A block holding one changes what runs wherever
+    it is removed from: the statement leaves its body, or what is left of it does not parse. A
+    block holding none — inert statements, comments, or only a FRAGMENT of a statement that starts
+    elsewhere (an `else:` header, a continuation line, a `''` inside an implicit concatenation) —
+    pays the dump, which decides. The gate it replaced asked whether every code LINE was covered by
+    an inert statement, and a fragment is covered by a statement that runs something: `else:` over
+    a `pass`, then `else\\` + `:` and a paragraph of `''`, were each nominated while removing
+    them changed nothing (critic 2026-09-27, driven twice)."""
     import ast
     try:
         tree = ast.parse(code)
-        out: set = set()
-        for owner in ast.walk(tree):
-            for field in ("body", "orelse", "finalbody"):
-                body = getattr(owner, field, None)
-                if isinstance(body, list):
-                    for stmt in body:
-                        if _runs_nothing(stmt):
-                            out.update(range(stmt.lineno, (stmt.end_lineno or stmt.lineno) + 1))
-        return frozenset(out)
+        return frozenset(node.lineno for node in ast.walk(tree)
+                         if isinstance(node, ast.stmt) and not _runs_nothing(node))
     except (SyntaxError, ValueError, RecursionError, MemoryError):
         return None
 
 
 # Line breaks `str.splitlines` honours and the tokenizer does not (a form feed opens a "page" in
-# hand-kept Python). `_inert_lines` numbers lines as the tokenizer does and `_removes_something`'s
-# blocks as `splitlines` does, so on a program holding one the two numberings part; that program
-# takes the dump-per-block path, which needs no numbering.
+# hand-kept Python). `_load_bearing_starts` numbers lines as the tokenizer does and
+# `_removes_something`'s blocks as `splitlines` does, so on a program holding one the two
+# numberings part; that program takes the dump-per-block path, which needs no numbering.
 _SPLITLINES_ONLY_BREAKS = frozenset("\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029")
-
-
-def _clause_header(line: str) -> bool:
-    """An `else:` / `finally:` header — the one code line no statement covers whose clause can run
-    nothing: `else:\n    pass` in its own paragraph is a line outside `_inert_lines`, and removing
-    it leaves the dump unchanged (critic 2026-09-27, driven: the fast path nominated a cut that ran
-    the same program). Such a block pays the dump, which decides; `elif`/`except`/`case` headers
-    test something, so a block holding one changes what runs wherever it is removed from."""
-    head = line.strip()
-    for keyword in ("else", "finally"):
-        if head.startswith(keyword) and head[len(keyword):].lstrip().startswith(":"):
-            return True
-    return False
 
 
 @functools.lru_cache(maxsize=64)
@@ -239,13 +225,12 @@ def _removes_something(code: str, blocks: int) -> frozenset:
     whole = _semantic_dump(code or "")
     # ONE walk decides which blocks COULD run nothing; only those pay a full re-parse and dump. A
     # dump per block cost O(blocks × size) on the event-loop thread — 13.7 s for a 2,001-line,
-    # 401-block champion (critic 2026-09-27, driven) — for the same answer: a code line of a
-    # statement that runs something changes the dump (or the parse) wherever it is removed from.
-    # (An `else:`/`finally:` header belongs to no statement and is the one exception —
-    # `_clause_header`.) A program of nothing but inert paragraphs still pays one dump per
-    # block: the rule is exact, and only a parse can say a removal left a body empty.
-    inert = (_inert_lines(code or "")
-             if whole is not None and _SPLITLINES_ONLY_BREAKS.isdisjoint(code or "") else None)
+    # 401-block champion (critic 2026-09-27, driven) — for the same answer: a block holding the
+    # first line of a statement that runs something changes the dump (or the parse) wherever it
+    # is removed from (`_load_bearing_starts`). Every other block pays the dump, so the answer is
+    # the per-block rule's by construction, not by a generator's sample of it.
+    starts = (_load_bearing_starts(code or "")
+              if whole is not None and _SPLITLINES_ONLY_BREAKS.isdisjoint(code or "") else None)
     out = set()
     for index, (start, end) in enumerate(spans):
         code_lines = [k for k in range(start, end)
@@ -253,8 +238,7 @@ def _removes_something(code: str, blocks: int) -> frozenset:
         if not code_lines:
             continue
         if (whole is not None
-                and (inert is None
-                     or all(k + 1 in inert or _clause_header(lines[k]) for k in code_lines))
+                and (starts is None or not any(k + 1 in starts for k in code_lines))
                 and _semantic_dump("\n".join(lines[:start] + lines[end:])) == whole):
             continue
         out.add(index)
@@ -275,8 +259,10 @@ def simplify_actions(state: RunState, node, *, refused=(), spent=()) -> list[dic
     ablation nominates nothing: a parameter set to 0.0 is not a component removed, and the program
     its probe ran is not recorded (doc 67 §3).
 
-    Never twice for one (lifecycle, block): a node whose `simplified` receipt names them — evaluated,
-    failed or deleted — spends it. `spent` is the engine's stamp of those receipts off the WHOLE fold
+    Never twice for one block of one PROGRAM: a node whose `simplified` receipt names it — evaluated,
+    failed, deleted, or repaired in place since it was built — spends it while the parent still
+    runs that program (`core/code_blocks.py::cut_spent`); a parent re-developed to another program
+    frees it. `spent` is the engine's stamp of those receipts off the WHOLE fold
     (`policy.simplify_spent`): the Card lane hands the policy a view without tombstoned, gated or
     discarded nodes (`search/card_selection.py::_effective_policy_state`), and a simplification it
     hid spent nothing there, so the block was nominated again every turn (critic 2026-09-27,

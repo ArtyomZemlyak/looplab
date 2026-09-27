@@ -47,7 +47,10 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // constraining anything, which is exactly what the header above says happened to the old
     // numbers. The structural gates are the closures, not this line.
     // 2026-09-22: measured 561,807 B JS gzip (was 504 KiB, +44.6 KiB over) / 52,031 B CSS.
-    // 2026-09-27: measured 569,426 B JS gzip (was 556 KiB, +82 B over). The bytes bought: the ruler a number was measured with (doc 68 68.1) and the retargeted-objective surfaces (68.2), the drain command's "re-score, then pause" (68.3b), seed_from_run (67.2), the substituted-build Card readers and the command-settlement copy —
+    // 2026-09-27: measured 569,426 B JS gzip (was 556 KiB, +82 B over). The bytes bought: the
+    // ruler a number was measured with (doc 68 68.1) and the retargeted-objective surfaces
+    // (68.2), the drain command's "re-score, then pause" (68.3b), seed_from_run (67.2), the
+    // substituted-build Card readers and the command-settlement copy —
     // all of it route-local lazy code; every forbidden reachability proof below still holds, and
     // master (ed47c64b) measured 566,615 B locally and in CI alike, byte for byte.
     js: { gzip: 557 * KIB },

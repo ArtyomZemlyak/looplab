@@ -55,7 +55,7 @@ from looplab.engine.lessons_distill import (LessonDistillMixin, promoted_skill_k
 # re-imported so `from looplab.engine.lessons import LESSON_ROLE_*` (tests, cross-run tooling)
 # keeps resolving.
 from looplab.engine.lessons_priors import (  # noqa: F401
-    LESSON_ROLE_DEVELOPER, LESSON_ROLE_RESEARCHER, LessonPriorsMixin, retargeted_lesson_note)
+    LESSON_ROLE_DEVELOPER, LESSON_ROLE_RESEARCHER, LessonPriorsMixin)
 from looplab.engine.lessons_reconcile import LessonReconcileMixin
 from looplab.engine.memory import JsonlCaseLibrary
 # Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.

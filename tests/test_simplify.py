@@ -1595,6 +1595,14 @@ _BREAKS = "\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
                                    "    'nothing runs here'\n\nprint(x)\n", 2),
     *[(f"a docstring holding {ch!r}", f'"""a{ch}b"""\n\n"""doc"""\n\nx = 1\n', 1)
       for ch in _BREAKS],
+    # A FRAGMENT of a statement that runs something — no statement starts in the block (critic
+    # 2026-09-27, driven: the two kinds the line-coverage gate still nominated).
+    ("a clause header split by a backslash", "x = int('1')\nif x:\n    y = 2\n\nelse\\\n:\n"
+                                             "    pass\n\nprint(y)\n", 1),
+    ("an empty string inside a concatenation", "s = ('a'\n\n     ''\n\n     )\n\nprint(s)\n", 1),
+    ("an else header with a space", "x = int('1')\nif x:\n    y = 2\n\nelse :\n    pass\n\nprint(y)\n", 1),
+    ("an else header with a comment", "x = int('1')\nif x:\n    y = 2\n\nelse:  # note\n    pass\n"
+                                      "\nprint(y)\n", 1),
 ])
 def test_the_fast_path_is_the_per_block_rule(label, code, runs_nothing):
     """LOW (critic 2026-09-27, driven: 335 of 40,000 random programs). An `else:`/`finally:` header
@@ -1610,11 +1618,14 @@ def test_the_fast_path_is_the_per_block_rule(label, code, runs_nothing):
     assert runs_nothing not in answer, f"{label}: block {runs_nothing} runs nothing"
 
 
-def test_the_raw_slot_never_reads_the_verifier_the_pass_itself_clears(tmp_path):
-    """LOW (critic 2026-09-27, driven). `simpler_tie(raw=True)` consulted `_verifier_prefers`, and
-    the leader's own `node_confirmed` moves its verifier evidence — clearing its score — so a
-    re-entered pass granted the cut the slot its first entry denied. The raw ruler reads the single
-    measurements alone; the selector, verifier included, judges what the slot buys."""
+def test_the_raw_slot_hears_the_verifier_on_the_raw_evidence_on_every_entry(tmp_path):
+    """Two critic findings on one rule (2026-09-27, both driven). First: `simpler_tie(raw=True)`
+    consulted the CURRENT verifier scores, and the leader's own `node_confirmed` clears its score,
+    so a re-entered pass granted the cut the slot its first entry denied. Then the fix skipped the
+    verifier on the raw ruler, and a cut it vetoed got the slot and — both confirmed, both scores
+    cleared, the verifier re-scoring only exact ties — the crown. The raw ruler now asks the scores
+    the verifier gave the RAW evidence, which no confirmation clears: the veto holds on every entry,
+    and the selector hears it after both are confirmed."""
     from looplab.core.code_blocks import code_blocks, comment_block
     from looplab.core.fitness import verifier_evidence_digest
     from looplab.events.eventstore import EventStore
@@ -1646,13 +1657,88 @@ def test_the_raw_slot_never_reads_the_verifier_the_pass_itself_clears(tmp_path):
         return [n.id for n in simpler_slots(st, ranked, 2, raw=True)]
 
     first = fold(store.read_all())
-    assert first.nodes[0].verifier_score == 0.9 and slots(first) == [0, 1, 2]
-    assert simpler_tie(first, first.nodes[0], [first.nodes[0], first.nodes[2]]) is first.nodes[0], (
-        "the selector still hears the verifier")
+    assert first.nodes[0].verifier_score == 0.9 and slots(first) == [0, 1]
     store.append("node_confirmed", {"node_id": 0, "generation": 0, "mean": 1.0, "std": 0.01,
                                     "seeds": 2})
     again = fold(store.read_all())
-    assert again.nodes[0].verifier_score is None and slots(again) == [0, 1, 2]
+    assert again.nodes[0].verifier_score is None and slots(again) == [0, 1], (
+        "the re-entered pass reads the veto its first entry read")
+    # …and a cut confirmed by any route is still not crowned over the verifier's veto.
+    store.append("node_confirmed", {"node_id": 2, "generation": 0, "mean": 1.0, "std": 0.01,
+                                    "seeds": 2})
+    both = fold(store.read_all())
+    assert both.nodes[2].verifier_score is None
+    assert simpler_tie(both, both.nodes[0], [both.nodes[0], both.nodes[2]]) is both.nodes[0]
+    # A NEW lifecycle is new raw evidence: the old raw score no longer speaks for it.
+    store.append("node_reset", {"node_id": 0, "generation": 0, "from_stage": "eval"})
+    store.append("node_evaluated", {"node_id": 0, "generation": 1, "metric": 1.0, "violations": []})
+    reset = fold(store.read_all())
+    assert reset.nodes[0].attempt == 1 and slots(reset) == [0, 1, 2]
+
+
+def test_without_a_verifier_the_raw_slot_is_the_same_on_every_entry(tmp_path):
+    """The first finding's other half: with no verifier, the leader's confirmation must not cost
+    the cut the slot either ("two rulers" on the robust ruler) — one refused seed would change
+    which node is confirmed and crowned."""
+    from looplab.events.replay_selection import simpler_slots
+
+    state = _state(tmp_path, (0, [], 1.0, {}), (1, [0], 1.0, _receipt(0)))
+    ranked = [state.nodes[0], state.nodes[1]]
+    assert [n.id for n in simpler_slots(state, ranked, 1, raw=True)] == [0, 1]
+    confirmed = _confirmed(state, n0=(1.0, 0.01, 2))
+    assert [n.id for n in simpler_slots(confirmed, ranked, 1, raw=True)] == [0, 1]
+    assert [n.id for n in simpler_slots(confirmed, ranked, 1)] == [0], (
+        "precondition: on the robust ruler the confirmed leader and the cut are two rulers")
+
+
+def test_each_ruler_hears_the_verifier_on_its_own_evidence(tmp_path):
+    """The current scores decide when both exist, else the raw ones — and the raw ruler hears the
+    raw evidence ONLY. Driven through the group record (the live producer's row): the pair is
+    scored on its single measurements, then confirmed, then the confirmed tie re-scored the other
+    way round. The robust ruler follows the re-score; the confirm pass's ruler keeps the raw veto."""
+    from looplab.core.code_blocks import code_blocks, comment_block
+    from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT, verifier_evidence_digest
+    from looplab.events.eventstore import EventStore
+    from looplab.events.replay_selection import simpler_tie
+
+    def group(st, scores):
+        return {"v": 1, "contract": VERIFIER_SELECTION_CONTRACT,
+                "requested_samples": st.select_verifier_samples,
+                "members": [{"node_id": nid, "generation": st.nodes[nid].attempt, "score": score,
+                             "n_samples": st.select_verifier_samples, "agreement": 1.0,
+                             "method": "llm",
+                             "evidence_digest": verifier_evidence_digest(st.direction,
+                                                                         st.nodes[nid])}
+                            for nid, score in scores]}
+
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min",
+                                 "select_verifier": True})
+    idea = durable_idea_payload(Idea(operator="draft", params={"x": 0.5}, rationale="r"))
+    store.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                  "idea": idea, "code": CODE, "files": {}})
+    store.append("node_created", {
+        "node_id": 1, "parent_ids": [0], "operator": "simplify", "idea": idea,
+        "code": comment_block(CODE, code_blocks(CODE)[0]), "files": {},
+        "parent_generations": {"0": 0},
+        "simplified": {"parent_id": 0, "generation": 0, "block": 0, "ablation_id": "a" * 32}})
+    for nid in (0, 1):
+        store.append("node_evaluated", {"node_id": nid, "generation": 0, "metric": 1.0,
+                                        "violations": []})
+    store.append("verifier_group_scored", group(fold(store.read_all()), ((0, 0.9), (1, 0.2))))
+    raw = fold(store.read_all())
+    assert (raw.nodes[0].verifier_score, raw.nodes[1].verifier_score) == (0.9, 0.2)
+    assert simpler_tie(raw, raw.nodes[0], list(raw.nodes.values()), raw=True) is raw.nodes[0]
+    for nid in (0, 1):
+        store.append("node_confirmed", {"node_id": nid, "generation": 0, "mean": 1.0,
+                                        "std": 0.01, "seeds": 2})
+    store.append("verifier_group_scored", group(fold(store.read_all()), ((0, 0.2), (1, 0.9))))
+    st = fold(store.read_all())
+    assert (st.nodes[0].verifier_score, st.nodes[1].verifier_score) == (0.2, 0.9)
+    pool = list(st.nodes.values())
+    assert simpler_tie(st, st.nodes[0], pool) is st.nodes[1], "the robust ruler reads the re-score"
+    assert simpler_tie(st, st.nodes[0], pool, raw=True) is st.nodes[0], (
+        "the raw ruler reads the raw evidence, whatever a confirmed re-score said")
 
 
 def test_the_holdout_slots_decide_the_tie_on_the_robust_ruler(tmp_path):
@@ -1696,6 +1782,21 @@ def test_a_malformed_plan_never_costs_a_card_its_slot(tmp_path, phases):
     state = _state(tmp_path, (0, [], 1.0, {}), (1, [], 2.0, {}))
     card = {"kind": "improve", "parent_id": 0, META_CARD_ID: "c"}
     assert endgame_actions(state, {"endgame_start": 0, "phases": phases}, [card]) == [card]
+
+
+def test_an_empty_kinds_list_is_the_default_reserve(tmp_path):
+    """`kinds: []` names no reserve and reads as the default one — the ensemble first — as a missing
+    or malformed `kinds` does; an empty list is not "no endgame kinds" (critic 2026-09-27, L1)."""
+    from looplab.engine.plan import endgame_actions
+
+    state = _state(tmp_path, (0, [], 1.0, {}), (1, [], 2.0, {}))
+    action = {"kind": "improve", "parent_id": 0}
+    for phases in ([{"kinds": []}], [{"kinds": ["merge"]}], None):
+        out = endgame_actions(state, {"endgame_start": 0, "phases": phases}, [action])
+        assert [a["kind"] for a in out] == ["merge"], phases
+    assert [a["kind"] for a in endgame_actions(
+        state, {"endgame_start": 0, "phases": [{"kinds": ["sweep"]}]}, [action])] == ["improve"], (
+        "precondition: a reserve without the ensemble does not merge")
 
 
 def test_the_spent_stamp_names_the_parents_lifecycle_now(tmp_path):

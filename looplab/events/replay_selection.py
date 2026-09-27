@@ -23,7 +23,7 @@ from __future__ import annotations
 from looplab.core.code_blocks import still_cut_of
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, SearchFitness, is_usable_metric,
                                   one_se_better, one_se_non_inferior,
-                                  verifier_evidence_digest)
+                                  verifier_evidence_digest, verifier_raw_evidence_digest)
 from looplab.core.models import (Event, Node, NodeStatus, RunState,
                                  coerce_node_id as _coerce_node_id, row_objective)
 from looplab.events.replay_ctx import (_MISSING, _FoldCtx, _event_generation, _generation_matches,
@@ -238,6 +238,15 @@ def _on_node_verified(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     score = d.get("score")
     if is_usable_metric(score) and 0.0 <= float(score) <= 1.0:
         n.verifier_score = float(score)
+        _keep_raw_verifier_score(st, n, float(score))
+
+
+def _keep_raw_verifier_score(st: RunState, node: Node, score: float) -> None:
+    """A score given while `node` held only its single measurement is ALSO its raw-evidence score
+    (`Node.verifier_raw_score`), which a later confirmation does not clear."""
+    raw = verifier_raw_evidence_digest(st.direction, node)
+    if raw == verifier_evidence_digest(st.direction, node):
+        node.verifier_raw_score = (raw, score)
 
 
 def _on_verifier_group_scored(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -292,6 +301,7 @@ def _on_verifier_group_scored(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") 
         return
     for node, score in staged:
         node.verifier_score = score
+        _keep_raw_verifier_score(st, node, score)
 
 def _on_best_confirmed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # R1 epoch identity: a confirmation certificate authorizes selection state (confirmed_done + the
@@ -345,14 +355,33 @@ def _apply_trust_gate(st: RunState) -> set:
     return flagged
 
 
-def _verifier_prefers(st: RunState, leader: Node, other: Node) -> bool:
-    """Whether the calibrated verifier scored `leader` SOUNDER than `other`: both scored, the
-    selector's verifier tie-break on (R1-c). Soundness breaks a metric tie before simplicity does."""
+def _raw_verifier_score(st: RunState, node: Node) -> float | None:
+    """The verifier's score on `node`'s RAW evidence while that evidence is still the node's."""
+    held = node.verifier_raw_score
+    if held is not None and held[0] == verifier_raw_evidence_digest(st.direction, node):
+        return held[1]
+    return None
+
+
+def _verifier_prefers(st: RunState, leader: Node, other: Node, *, raw: bool = False) -> bool:
+    """Whether the calibrated verifier scored `leader` SOUNDER than `other`: both scored on ONE
+    evidence tier, the selector's verifier tie-break on (R1-c). Soundness breaks a metric tie before
+    simplicity does.
+
+    The current scores decide when both exist, else the scores on both nodes' RAW evidence
+    (`_raw_verifier_score`): a confirmation clears `verifier_score` and the verifier re-scores only
+    exact (or CI) ties, so a veto the cut earned on its single measurement lapsed the moment both
+    were confirmed, and the pass that confirmed them had granted the slot (critic 2026-09-27,
+    driven). `raw` asks the raw tier only — the ruler a confirm pass ranks by, which that pass's own
+    confirmations cannot move, so every entry of the pass reads the same verdict."""
     if not st.select_verifier_tiebreak:
         return False
-    a, b = leader.verifier_score, other.verifier_score
-    usable = all(is_usable_metric(v) and 0.0 <= float(v) <= 1.0 for v in (a, b))
-    return usable and float(a) > float(b)
+    pairs = [] if raw else [(leader.verifier_score, other.verifier_score)]
+    pairs.append((_raw_verifier_score(st, leader), _raw_verifier_score(st, other)))
+    for a, b in pairs:
+        if all(is_usable_metric(v) and 0.0 <= float(v) <= 1.0 for v in (a, b)):
+            return float(a) > float(b)
+    return False
 
 
 def _significantly_beaten(st: RunState, candidate: Node, pool, value, holdout: bool) -> bool:
@@ -399,12 +428,13 @@ def simpler_tie(st: RunState, leader: Node | None, pool, *, holdout: bool = Fals
     each). The tolerance is capped at the leader's own SE (`one_se_non_inferior`), and a cut some
     pool node beats by the >1-SE rule is never taken (`_significantly_beaten`). A simplification the
     calibrated verifier scored below the leader is not a tie (`_verifier_prefers`) — where it scored
-    both: it scores the selector's exact tie groups, so a tie within the spread is decided by
-    simplicity alone.
+    both, on the current evidence or else on the raw one: it scores the selector's exact tie groups,
+    so a tie within the spread that it never scored is decided by simplicity alone.
 
     `raw` compares the SINGLE measurements (`metric`, exactly, whatever is confirmed) — the ruler a
     pass that is about to confirm ranks on (`simpler_slots`), and one the pass itself cannot move:
-    the verifier, whose score the pass's confirmations clear, is not consulted on it.
+    the verifier is asked of the scores it gave the RAW evidence, which the pass's confirmations do
+    not clear.
 
     Inert — `leader` — on every log without a receipt: every log before 67.5, and every run with
     `Settings.ablation_simplify` off."""
@@ -446,11 +476,12 @@ def simpler_tie(st: RunState, leader: Node | None, pool, *, holdout: bool = Fals
                 candidate.confirmed_std if spread else 0.0,
                 candidate.confirmed_seeds if spread else 0, st.direction,
                 leader.confirmed_std if spread else 0.0, leader.confirmed_seeds if spread else 0)
-            # Not on the raw ruler: the leader's own `node_confirmed` moves its verifier evidence
-            # and clears its score, so a re-entered confirm pass granted the cut a slot its first
-            # entry denied (critic 2026-09-27, driven) — an EXTRA measurement, which the selector,
-            # verifier included, then judges.
-            if (not held or (not raw and _verifier_prefers(st, leader, candidate))
+            # On the raw ruler the verifier is asked of the RAW evidence only: the leader's own
+            # `node_confirmed` moves its current evidence and clears its score, so a re-entered
+            # confirm pass granted the cut a slot its first entry denied — and skipping the
+            # verifier there instead handed a vetoed cut the slot and then the crown (both
+            # critic 2026-09-27, driven).
+            if (not held or _verifier_prefers(st, leader, candidate, raw=raw)
                     or _significantly_beaten(st, candidate, members.values(), value, single)):
                 continue
             key = (depth + 1, sign * float(value(candidate)), -candidate.id)
@@ -473,7 +504,8 @@ def simpler_slots(st: RunState, ranked: list, k: int, *, raw: bool = False) -> l
     `raw` decides the extra slot on the single measurements (`simpler_tie(raw=True)`) — for the
     confirm pass, whose own confirmations move the robust ruler: once the leader held a
     `node_confirmed`, the cut was "two rulers" and lost its slot on every re-entry, so one refused
-    seed changed which node was confirmed and crowned (critic 2026-09-27, driven)."""
+    seed changed which node was confirmed and crowned (critic 2026-09-27, driven). The verifier is
+    heard there on the raw evidence, which those confirmations do not clear either."""
     ranked = list(ranked)
     picked = ranked[:max(0, k)]
     if not picked:

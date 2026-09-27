@@ -1693,6 +1693,11 @@ class Node(BaseModel):
     # — it can never override a strictly-better robust_metric (§21.7 advisory-never-overrides). None
     # otherwise; additive/reader-defaulted so old logs fold byte-identically.
     verifier_score: Optional[float] = None
+    # …and the score it gave this node's RAW evidence (the single measurement, before a confirmation
+    # or a holdout score moved the evidence and cleared `verifier_score`), beside that evidence's
+    # digest (`core/fitness.py::verifier_raw_evidence_digest`): read only while the node's raw
+    # evidence still has it. Fold-internal, excluded from dumps like `simplified_cut`.
+    verifier_raw_score: Optional[tuple[str, float]] = Field(default=None, exclude=True)
     eval_seconds: Optional[float] = None     # wall-clock of this node's eval (cost accounting #2)
     # Multi-objective (#5): extra reported metrics + unmet hard constraints. `feasible` is
     # False when any constraint was violated — such a node keeps its metric (for the audit
@@ -1838,9 +1843,12 @@ class Node(BaseModel):
     # no worse without (`engine/ablation.py::AblationMixin._simplify`). `{"parent_id", "generation",
     # "block", "ablation_id"}`, or None. Written only by that build, folded only when it names the
     # node's one parent at the lifecycle the node was built from (`events/replay.py::
-    # _simplification_receipt`), and read by two decisions: "on a tie, simpler"
-    # (`events/replay_selection.py::simpler_tie`) and which block a nomination has already spent
-    # (`core/code_blocks.py::cut_spent`). A node's operator is not the fact — a receipt is.
+    # _simplification_receipt`), and read by the decisions a cut changes: "on a tie, simpler"
+    # (`events/replay_selection.py::simpler_tie`), which block a nomination has already spent
+    # (`core/code_blocks.py::cut_spent`), whether the reserve already cut its champion
+    # (`engine/plan.py::endgame_actions`) and a reset cut's rebuild
+    # (`engine/ablation.py::AblationMixin._rebuild_simplification`). A node's operator is not the
+    # fact — a receipt is.
     simplified: Optional[dict] = None
     # Fold-internal beside it: the identity of the cut that receipt certified AT THE BUILD — its
     # program and files hashed (`core/code_blocks.py::cut_identity`) — so "this block was already

@@ -880,6 +880,30 @@ def test_a_git_failure_exits_1_says_why_and_leaves_nothing_behind(tmp_path, monk
     assert _export(rd, repo).exit_code == 0
 
 
+def test_a_failing_fsck_is_a_failed_export_on_every_git(tmp_path, monkeypatch):
+    """The fsck half of the fail-closed set, driven whatever git is installed (critic 2026-09-27,
+    L2): each real tree above also passes as "fast-import failed", so on a git that refuses both at
+    fast-import, deleting the fsck step leaves that test green. Here fast-import takes the run's own
+    stream and the fsck call alone is made to fail."""
+    from looplab.cli import export_cmds
+
+    rd = _run(tmp_path)
+    repo = tmp_path / "repo"
+    real, fscks = export_cmds._git_argv, []
+
+    def argv(git, stage, *args):
+        if args[:1] == ("fsck",):
+            fscks.append(args)
+            args = (*args, "--no-such-option")
+        return real(git, stage, *args)
+
+    monkeypatch.setattr(export_cmds, "_git_argv", argv)
+    result = _export(rd, repo)
+    assert fscks, "the export reported success without running fsck"
+    assert result.exit_code == 1 and "git fsck --strict failed:" in result.stderr, result.stderr
+    assert not repo.exists() and _leftovers(tmp_path) == []
+
+
 def test_a_truncated_log_says_so_on_every_commit(tmp_path):
     rd = _run(tmp_path)
     good = EventStore(rd / "events.jsonl").read_all()
