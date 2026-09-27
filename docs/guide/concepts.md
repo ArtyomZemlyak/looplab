@@ -990,13 +990,14 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   out got a fresh Debug node to have another go at the same experiment, and that node is deleted —
   along with any `draft`/`improve` that would be one under another name (nothing may be created to
   retry an experiment that just failed). Since 2026-08-12
-  **any but one** of the sixteen `FAILURE_REASONS` is eligible for repair **in place** within the same eval
+  **every one but two** of the seventeen `FAILURE_REASONS` is eligible for repair **in place** within the same eval
   (`inline_repair`): `crash`, `timeout`, `oom`, `setup`, `no_metric`, `drift`, `unclassified`,
   `expect_failed`, `check_failed`, `diverged`, `stalled`, `needs_failed`, `not_learning`, `check_false_positive`,
-  `inert_path` — not only the mechanical three. The one that is not is `rules_violation`, and the criterion is the one this list was built on: a reason ends a node unrepaired only when it is evidence the HYPOTHESIS is wrong. It is stated by an operator-pinned eval whose arena REFUSED the candidate before scoring (`engine/triage.py::DECLARABLE_REASONS`), so a repair could only look for a way around the rule. `inert_path` (2026-09-23) is the one about a run that SUCCEEDED: it printed its metric, but an activation marker the node itself declared its new code prints never appeared (`engine/activation.py`), so the number measured the path the node meant to replace and is withheld.
+  `inert_path` — not only the mechanical three. The two that are not are `rules_violation` and `canary_timeout`, and the criterion is the one this list was built on: a reason ends a node unrepaired only when it is evidence the HYPOTHESIS is wrong. `rules_violation` is stated by an operator-pinned eval whose arena REFUSED the candidate before scoring (`engine/triage.py::DECLARABLE_REASONS`), so a repair could only look for a way around the rule. `canary_timeout` (2026-09-27) is the eval canary's clock stopping the node's own pipeline on the task's tiny slice twice — at its cap and at one mechanical retry's doubled cap (`engine/eval_canary.py`) — so it is the candidate's COST, and a repair could only shrink the experiment or special-case the canary path; a real hang in that path ends unrepaired too, because one clock cannot tell it from a slow model. `inert_path` (2026-09-23) is the one about a run that SUCCEEDED: it printed its metric, but an activation marker the node itself declared its new code prints never appeared (`engine/activation.py`), so the number measured the path the node meant to replace and is withheld.
 
   **WHO SAYS WHICH ONE IT WAS, since 2026-08-20** (`engine/failure_diagnosis.py`). The engine
-  classifies only what it CAUSED, RAN or MEASURED and remembers doing — its own clock (`timeout`),
+  classifies only what it CAUSED, RAN or MEASURED and remembers doing — its own clock (`timeout`, and
+  the eval canary's, twice: `canary_timeout`),
   its three watchdogs' kills (`diverged`/`stalled`/`not_learning`), its cross-reader (`drift`), the
   return code of the setup command it ran (`setup`), its own `stat` of a stage's declared input
   and output (`needs_failed`/`expect_failed`), and its own check of a node's declared activation

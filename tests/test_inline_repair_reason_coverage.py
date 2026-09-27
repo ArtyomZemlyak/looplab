@@ -93,7 +93,9 @@ def test_the_shipped_default_repairs_every_one_of_them():
     # Every reason is repairable EXCEPT the ones that are evidence the HYPOTHESIS is wrong, which
     # is this file's own criterion for ending a node unrepaired (see the module docstring). Today
     # that is `rules_violation`: the arena's submission validator refused the candidate before
-    # scoring, so a repair could only find a way AROUND the rule. The exception is named in
+    # scoring, so a repair could only find a way AROUND the rule; and `canary_timeout` (doc 69
+    # 69.10): the eval canary's clock stopped the node's pipeline on the task's tiny slice at its cap
+    # and at a mechanical retry's doubled one, the candidate's COST. The exceptions are named in
     # `core/models.py::NON_REPAIRABLE_REASONS` and read from there, so the set can only change where
     # the criterion is written down.
     assert set(Settings().inline_repair_reasons) == (set(FAILURE_REASONS)
@@ -238,7 +240,7 @@ def test_the_concepts_guide_enumerates_every_failure_reason():
         f"{len(FAILURE_REASONS)} of FAILURE_REASONS")
     # And the WORD introducing it has to agree with the number of members.
     words = {8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve", 13: "thirteen",
-             14: "fourteen", 15: "fifteen", 16: "sixteen"}
+             14: "fourteen", 15: "fifteen", 16: "sixteen", 17: "seventeen"}
     expected = words.get(len(FAILURE_REASONS))
     assert expected, "extend the number-word table for the new registry size"
     head = text[max(0, text.index(anchor) - 200):text.index(anchor)]

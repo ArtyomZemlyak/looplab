@@ -1440,16 +1440,27 @@ FAILURE_REASONS: tuple[str, ...] = ("crash", "timeout", "oom", "setup", "no_metr
                                     "unclassified",
                                     "expect_failed", "check_failed", "diverged", "stalled",
                                     "needs_failed", "not_learning", "check_false_positive",
-                                    "rules_violation", "inert_path")
+                                    "rules_violation", "inert_path", "canary_timeout")
 
-# The ONE reason that is not eligible for inline repair, and the criterion is
+# The reasons that are not eligible for inline repair (two since 2026-09-27), and the criterion is
 # `tests/test_inline_repair_reason_coverage.py`'s own: a reason should end a node with no repair
 # attempted only when it is evidence the HYPOTHESIS is wrong. Every other member describes a run
 # that could have worked -- a crash, a missing dependency, a metric printed one directory over.
 # `rules_violation` describes a candidate the ARENA WILL NOT ACCEPT AT ALL (its own submission
 # validator refused it before scoring), so there is nothing for a repair to fix that would not be a
 # way AROUND the rule. It ends the node and the reason travels to whoever proposes the next idea.
-NON_REPAIRABLE_REASONS: tuple[str, ...] = ("rules_violation",)
+#
+# `canary_timeout` (2026-09-27, doc 69 69.10) is the SECOND, and it meets the same criterion from the
+# other side: it is not a defect in the code but the candidate's COST. The eval canary runs the node's
+# own chain on the task's tiny slice; the engine's clock killed it at its cap AND at a mechanical
+# retry's doubled cap, so the candidate cannot run the slice in twice the time the operator allowed
+# for it — a repair could only shrink the experiment or special-case the canary path. Measured on
+# MiniOneRec v10: three triage→repair rounds on one such node (2 h 54 min, no metric, the second
+# repair changing no executable file) and a 1520-second triage that abandoned a backbone which had
+# passed twice before. THE PRICE, stated: one clock cannot tell a slow model from a hung harness, so
+# a real hang in the canary path ends unrepaired too. An operator who wants those rounds back lists
+# it in `Settings.inline_repair_reasons`.
+NON_REPAIRABLE_REASONS: tuple[str, ...] = ("rules_violation", "canary_timeout")
 REPAIRABLE_REASONS: tuple[str, ...] = tuple(r for r in FAILURE_REASONS
                                             if r not in NON_REPAIRABLE_REASONS)
 

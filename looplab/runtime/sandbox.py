@@ -521,6 +521,11 @@ class RunResult:
     # Like `drift`, `metric` is then forced to None: the number measured the path the node meant to
     # replace, not its change. None on the normal path and on every node that declared no marker.
     inert_path: Optional[dict] = None
+    # A FAILED EVAL CANARY that its clock killed twice — at its cap and at the one mechanical retry's
+    # doubled cap (`engine/eval_canary.py`, doc 69 69.10). Set only by `canary_failure_result`; read
+    # by `triage._failure_reason`, which names it `canary_timeout`: the ENGINE's own clock, and no
+    # code defect a repair could fix.
+    canary_expired: bool = False
     # Multi-objective (#5, RepoTask): extra reported metrics {name: value} (audit) and unmet
     # hard constraints [{name,value,max,min}]. A node with violations stays measured but is
     # excluded from best-selection. None on the normal path.

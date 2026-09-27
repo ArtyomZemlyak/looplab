@@ -1657,12 +1657,14 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "eval_canary_finished": PayloadContract(
         "The eval canary's result: whether the node's stage chain survived the task's tiny slice.",
         required=("attempt", "code_digest", "eval_seconds", "generation", "node_id", "passed"),
-        optional=("error", "exit_code", "failed_stage", "log_dir", "timed_out"),
+        # `retry` (1) marks the one re-run at twice the cap after a clock kill (doc 69 69.10);
+        # `near_cap` a PASS that used >= 75 % of its cap. Both written only when true.
+        optional=("error", "exit_code", "failed_stage", "log_dir", "near_cap", "retry", "timed_out"),
     ),
     "eval_canary_started": PayloadContract(
         "An eval canary is about to run the node's stage chain on the task's tiny slice.",
         required=("attempt", "code_digest", "generation", "node_id", "timeout"),
-        optional=(),
+        optional=("retry",),
     ),
     "eval_invocation_claimed": PayloadContract(
         "One paid evaluation attempt is about to invoke the evaluator, under a reconciliable id.",

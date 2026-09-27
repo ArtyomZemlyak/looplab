@@ -42,6 +42,7 @@ NOT HERE: selection, the fold, the metric. A canary's number never reaches `node
 """
 from __future__ import annotations
 
+import math
 import threading
 import time
 from typing import Iterable, Optional
@@ -170,7 +171,35 @@ def canary_failure_detail(res, *, expired: bool, timeout: float) -> str:
     return "the canary failed"
 
 
-def canary_failure_result(res, *, detail: str, log_dir: str, env_names: Iterable[str]):
+# THE ONE MECHANICAL RETRY an expired canary gets, at this multiple of its cap (doc 69 69.10). A clock
+# kill says nothing about the code, and a cold JIT or compile cache — the one cause a retry heals —
+# was measured on MiniOneRec v10: a backbone that had passed twice was killed at the cap with its eval
+# already done, then passed at 1020 s once the operator raised the cap. No LLM is asked; a second
+# expiry ends the node as `canary_timeout` (`core/models.py::NON_REPAIRABLE_REASONS`).
+CANARY_RETRY_CAP_FACTOR = 2.0
+
+# A PASSED canary that used at least this share of its cap is recorded `near_cap` on its finished row
+# and logged at WARNING (doc 69 69.10): MiniOneRec v10 node 10 passed at 1102 s of a 1200 s cap (92 %)
+# and the engine said nothing, so the next backbone's expiry was the first the operator heard of it.
+# A record, never a gate: the cap is the operator's number, and growing it on its own would have let
+# node 12 through, whose canary was right to stop a model scoring at 13-17 min a batch.
+CANARY_NEAR_CAP_FRACTION = 0.75
+
+
+def canary_near_cap(seconds, cap) -> bool:
+    """Did a canary that took `seconds` use at least `CANARY_NEAR_CAP_FRACTION` of its `cap`?
+    False for anything that is not a positive finite pair — a malformed number records nothing."""
+    try:
+        seconds, cap = float(seconds), float(cap)
+    except (TypeError, ValueError):
+        return False
+    if not (math.isfinite(seconds) and math.isfinite(cap)) or cap <= 0 or seconds < 0:
+        return False
+    return seconds >= CANARY_NEAR_CAP_FRACTION * cap
+
+
+def canary_failure_result(res, *, detail: str, log_dir: str, env_names: Iterable[str],
+                          expired: bool = False):
     """The metric-less `RunResult` a FAILED canary hands SETTLE_OUTCOME as the attempt's result.
 
     Deliberately NARROW: exit code non-zero (a clean exit that printed no number is still a failure
@@ -179,13 +208,23 @@ def canary_failure_result(res, *, detail: str, log_dir: str, env_names: Iterable
     `failed_stage` (the node's workdir ran nothing, so no reuse decision may stand on it), and every
     measurement field left at its default so nothing downstream can carry a canary number. The
     canary's own output is the evidence, framed so the repair and the triage judge read it as what
-    it is."""
+    it is. `expired` — the clock killed it at its cap and at the retry's — marks it
+    `canary_expired`, which `triage._failure_reason` names `canary_timeout`, and it gets its OWN
+    header: "fix the defect below" is the wrong sentence for a run nothing was seen to be wrong with,
+    and a non-expired failure keeps the historical header byte for byte."""
     from looplab.runtime.command_eval import RunResult
     names = ", ".join(sorted(env_names))
-    header = (f"[eval canary] The canary preflight FAILED — {detail}. The canary is this node's own "
-              f"eval pipeline run on the task's tiny slice (env: {names}) in a scratch directory; "
-              "the FULL evaluation was NOT started. Fix the defect below so the canary passes. "
-              f"Canary logs: {log_dir}\n")
+    if expired:
+        header = (f"[eval canary] The canary preflight TIMED OUT — {detail}. The canary is this "
+                  f"node's own eval pipeline run on the task's tiny slice (env: {names}) in a scratch "
+                  "directory; the FULL evaluation was NOT started. The clock stopped it, so this is "
+                  "the candidate's COST on that slice, not a defect the engine observed: its pipeline "
+                  f"must finish the slice within the cap. Canary logs: {log_dir}\n")
+    else:
+        header = (f"[eval canary] The canary preflight FAILED — {detail}. The canary is this node's "
+                  f"own eval pipeline run on the task's tiny slice (env: {names}) in a scratch "
+                  "directory; the FULL evaluation was NOT started. Fix the defect below so the "
+                  f"canary passes. Canary logs: {log_dir}\n")
     code = getattr(res, "exit_code", None) if res is not None else None
     stdout = (getattr(res, "stdout", "") or "") if res is not None else ""
     stderr = (getattr(res, "stderr", "") or "") if res is not None else ""
@@ -194,7 +233,7 @@ def canary_failure_result(res, *, detail: str, log_dir: str, env_names: Iterable
         stdout=stdout[-_CANARY_OUTPUT_CHARS:],
         stderr=header + stderr[-_CANARY_OUTPUT_CHARS:]
         + f"\n[eval canary] ({detail}; the full evaluation was not started)",
-        metric=None, timed_out=False)
+        metric=None, timed_out=False, canary_expired=bool(expired))
 
 
 def canary_already_passed(events, node_id: int, generation: int, code_digest: str) -> bool:

@@ -216,6 +216,10 @@ def _failure_reason(res) -> str:
     # outranks it but the trust gate that already discarded the metric.
     if getattr(res, "inert_path", None):
         return "inert_path"
+    # The eval canary's own clock, twice (`engine/eval_canary.py`, doc 69 69.10): a flag only
+    # `canary_failure_result` sets, on a result that carries `timed_out` False on purpose.
+    if getattr(res, "canary_expired", False):
+        return "canary_timeout"
     if res.timed_out:
         return "timeout"
     # THE SETUP FLAG, not the stderr prefix. `run_command_eval` sets `setup_failed` on the branch

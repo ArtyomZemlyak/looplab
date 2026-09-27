@@ -20,8 +20,14 @@ from looplab.adapters.repo_task import CanarySpec, EvalSpec
 from looplab.adapters.toytask import ToyTask
 from looplab.core.config import Settings
 from looplab.core.models import Idea
-from looplab.engine.eval_canary import (canary_already_passed, canary_failure_result,
-                                        canary_passed, canary_spec, capped_pipeline)
+from looplab.core.models import FAILURE_REASONS, NON_REPAIRABLE_REASONS, REPAIRABLE_REASONS
+from looplab.engine.eval_canary import (CANARY_NEAR_CAP_FRACTION, CANARY_RETRY_CAP_FACTOR,
+                                        canary_already_passed, canary_failure_result,
+                                        canary_near_cap, canary_passed, canary_spec,
+                                        capped_pipeline)
+from looplab.engine.failure_diagnosis import ENGINE_FINAL_REASONS
+from looplab.engine.metric_salvage import NEVER_SALVAGED_REASONS
+from looplab.engine.triage import _failure_reason
 from looplab.engine.evaluate import _workdir_manifest_digest
 from looplab.engine.orchestrator import Engine
 from looplab.events.eventstore import EventStore
@@ -115,10 +121,18 @@ def test_the_setting_is_off_by_default():
 
 
 # ------------------------------------------------------------------ driven through the real engine
-def _script(ledger: Path, *, canary: str, full: str) -> str:
+def _script(ledger: Path, *, canary: str, full: str, warm: Path | None = None) -> str:
     """A node program that appends what it ran to `ledger` (outside the run) and then does
-    `canary` / `full` — each one of: a metric `METRIC: <n>`, `raise`, `nometric`, `sleep`."""
+    `canary` / `full` — each one of: a metric `METRIC: <n>`, `raise`, `nometric`, `sleep`, and the
+    two COLD-CACHE kinds over the marker file `warm` (outside the run too): the first run creates it
+    and sleeps; a later one prints `METRIC: 0.1` (`cold`) or raises (`cold_raise`)."""
     def _body(kind: str) -> str:
+        if kind in ("cold", "cold_raise"):
+            after = ("    raise KeyError('history_item_sid')\n" if kind == "cold_raise"
+                     else "    print('METRIC: ' + str(1 / 10))\n")
+            return (f"    if not os.path.exists({str(warm)!r}):\n"
+                    f"        open({str(warm)!r}, 'w').write('1')\n"
+                    "        import time; time.sleep(30)\n" + after)
         if kind == "raise":
             return "    raise KeyError('history_item_sid')\n"
         if kind == "nometric":
@@ -161,19 +175,23 @@ class _Dev:
 class _Researcher:
     def __init__(self, repairs: int = 3):
         self.repairs = repairs
+        self.triaged: list = []                  # every error a triage judge was asked about
 
     def propose(self, state, parent):
         return Idea(operator="x", params={"x": 1.0, "y": 1.0})
 
     def triage_crash(self, node, error, attempt, **kw):
+        self.triaged.append(error)
         if attempt <= self.repairs:
             return {"action": "repair", "rationale": "fix the defect the canary found"}
         return {"action": "abandon", "rationale": "stop"}
 
 
-def _engine(run_dir: Path, dev, *, canary=_CANARY, repairs: int = 3, **kw) -> Engine:
+def _engine(run_dir: Path, dev, *, canary=_CANARY, repairs: int = 3, researcher=None,
+            **kw) -> Engine:
     kw.setdefault("eval_canary", True)
-    eng = Engine(run_dir, task=ToyTask.load(TASK), researcher=_Researcher(repairs), developer=dev,
+    researcher = researcher if researcher is not None else _Researcher(repairs)
+    eng = Engine(run_dir, task=ToyTask.load(TASK), researcher=researcher, developer=dev,
                  sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
                  auto_install_deps=False, inline_repair=True, **kw)
     eng._eval_spec = {"command": [sys.executable, "run.py"], "cwd": ".",
@@ -295,21 +313,239 @@ def test_a_canary_metric_never_becomes_the_node_metric(tmp_path, metric_salvage)
     assert "0.271828" not in json.dumps([e.data for e in evs])
 
 
-def test_a_canary_that_outruns_its_cap_fails_as_a_crash(tmp_path):
+# ------------------------------------------------------------------ the clock (doc 69 69.10)
+def test_the_canary_timeout_reason_is_registered_as_the_engine_s_and_never_repaired():
+    """`canary_timeout` is the ENGINE's clock (final, never diagnosed), never salvaged, and out of
+    the default repair gate; `_failure_reason` names it off the flag only a canary result carries."""
+    assert "canary_timeout" in FAILURE_REASONS and "canary_timeout" in NON_REPAIRABLE_REASONS
+    assert "canary_timeout" not in REPAIRABLE_REASONS
+    assert "canary_timeout" not in Settings().inline_repair_reasons
+    assert "canary_timeout" in ENGINE_FINAL_REASONS and "canary_timeout" in NEVER_SALVAGED_REASONS
+    expired = canary_failure_result(RunResult(exit_code=-9, stdout="", stderr="", metric=None,
+                                              timed_out=True),
+                                    detail="d", log_dir="L", env_names=["A"], expired=True)
+    assert expired.timed_out is False and _failure_reason(expired) == "canary_timeout"
+    crashed = canary_failure_result(RunResult(exit_code=1, stdout="", stderr="", metric=None,
+                                              timed_out=False),
+                                    detail="d", log_dir="L", env_names=["A"])
+    assert _failure_reason(crashed) == "crash"
+    assert "TIMED OUT" in expired.stderr and "Fix the defect below" not in expired.stderr
+    assert "FAILED" in crashed.stderr and "Fix the defect below" in crashed.stderr
+
+
+def test_the_near_cap_rule_is_a_share_of_the_cap():
+    assert CANARY_NEAR_CAP_FRACTION == 0.75 and CANARY_RETRY_CAP_FACTOR == 2.0
+    assert canary_near_cap(75.0, 100.0) and canary_near_cap(1102, 1200)
+    assert not canary_near_cap(74.99, 100.0) and not canary_near_cap(0, 100)
+    for seconds, cap in ((1, 0), (1, -5), (-1, 10), (float("nan"), 10), (5, float("inf")),
+                         (None, 10), ("x", 10), (5, None)):
+        assert not canary_near_cap(seconds, cap), (seconds, cap)
+
+
+def test_a_canary_the_clock_stops_twice_ends_the_node_with_no_model_asked(tmp_path):
+    """MiniOneRec v10 node 12 before 69.10: three canary expiries each bought a ~20-min triage and a
+    ~20-min repair (2 h 54 min, no metric). Now: the one mechanical retry at twice the cap, then
+    `node_failed{canary_timeout}` — no triage judge, no Developer repair, no full eval."""
     ledger = tmp_path / "ledger.txt"
     code = _script(ledger, canary="sleep", full="0.9")
-    dev = _Dev(code)
-    eng = _engine(tmp_path / "run", dev, repairs=0,
+    dev, researcher = _Dev(code), _Researcher(repairs=3)
+    eng = _engine(tmp_path / "run", dev, researcher=researcher,
                   canary={"env": {"LOOPLAB_CANARY": "1"}, "timeout": 1.5})
     _seed(eng, code)
     evs = _evaluate(eng)
-    (finished,) = _of(evs, EV_EVAL_CANARY_FINISHED)
-    assert finished.data["passed"] is False and finished.data["timed_out"] is True
-    assert "did not finish within" in finished.data["error"]
+    started, finished = _of(evs, EV_EVAL_CANARY_STARTED), _of(evs, EV_EVAL_CANARY_FINISHED)
+    assert [s.data["timeout"] for s in started] == [1.5, 3.0]
+    assert [s.data.get("retry") for s in started] == [None, 1]
+    assert [(f.data["passed"], f.data["timed_out"], f.data.get("retry")) for f in finished] == [
+        (False, True, None), (False, True, 1)]
+    assert "within its 1.5s cap" in finished[0].data["error"]
+    assert "within its 3s cap" in finished[1].data["error"]
+    assert not any(f.data.get("near_cap") for f in finished), "near_cap is a PASS's record only"
+    assert len({f.data["code_digest"] for f in started + finished}) == 1
     (term,) = _terminals(evs)
-    assert term.type == "node_failed"
-    assert term.data.get("engine_reason", term.data.get("reason")) == "crash"
-    assert ledger.read_text().split() == ["canary"]
+    assert term.type == "node_failed" and term.data["reason"] == "canary_timeout"
+    assert term.data.get("reason_source", "engine") == "engine"
+    # The terminal keeps the TAIL of the failure text, so it is the closing sentence it carries;
+    # the header's own wording is `canary_failure_result`'s, pinned in the unit test above.
+    assert ("(the canary did not finish within its 1.5s cap, nor within 3s on its one retry; the "
+            "full evaluation was not started)") in term.data["error"]
+    assert researcher.triaged == [], "a clock kill is not a failure a model is asked to read"
+    assert dev.errors == [] and _of(evs, "node_repaired") == []
+    assert _of(evs, "eval_invocation_claimed") == []
+    assert "full" not in ledger.read_text().split(), "the multi-hour eval must never start"
+    assert fold(evs).nodes[0].error_reason == "canary_timeout"
+
+
+def test_a_canary_slow_only_on_its_first_run_passes_on_the_one_retry(tmp_path):
+    """The cause a retry heals — a cold JIT/compile/download cache (MiniOneRec v10 node 13 passed at
+    1020 s once the cap was raised): the retry passes, the full eval runs, no model is asked, and
+    the retry's passed row is the one a resume keys on."""
+    ledger, warm = tmp_path / "ledger.txt", tmp_path / "warm"
+    code = _script(ledger, canary="cold", full="0.9", warm=warm)
+    dev, researcher = _Dev(code), _Researcher()
+    eng = _engine(tmp_path / "run", dev, researcher=researcher,
+                  canary={"env": {"CANARY_USERS": "2000"}, "timeout": 2.0})
+    _seed(eng, code)
+    evs = _evaluate(eng)
+    started, finished = _of(evs, EV_EVAL_CANARY_STARTED), _of(evs, EV_EVAL_CANARY_FINISHED)
+    assert [s.data["timeout"] for s in started] == [2.0, 4.0]
+    assert [(f.data["passed"], f.data.get("retry")) for f in finished] == [(False, None), (True, 1)]
+    assert ledger.read_text().split() == ["canary", "canary", "full"]
+    (term,) = _terminals(evs)
+    assert term.type == "node_evaluated" and term.data["metric"] == 0.9
+    assert researcher.triaged == [] and dev.errors == []
+    assert canary_already_passed(evs, 0, 0, finished[1].data["code_digest"])
+    # Both rounds are this attempt's eval seconds, like the full eval's own.
+    assert term.data["eval_seconds"] >= sum(f.data["eval_seconds"] for f in finished) - 0.01
+
+
+def test_a_retry_that_fails_otherwise_takes_the_ordinary_crash_path(tmp_path):
+    """The doubled cap uncovered a DEFECT: that is a crash in its own words, and the triage judge is
+    asked about it exactly as before — only the clock's verdict skips the model."""
+    ledger, warm = tmp_path / "ledger.txt", tmp_path / "warm"
+    code = _script(ledger, canary="cold_raise", full="0.9", warm=warm)
+    dev, researcher = _Dev(code), _Researcher(repairs=0)
+    eng = _engine(tmp_path / "run", dev, researcher=researcher,
+                  canary={"env": {"CANARY_USERS": "2000"}, "timeout": 2.0})
+    _seed(eng, code)
+    evs = _evaluate(eng)
+    finished = _of(evs, EV_EVAL_CANARY_FINISHED)
+    assert [(f.data["passed"], f.data["timed_out"], f.data.get("retry")) for f in finished] == [
+        (False, True, None), (False, False, 1)]
+    (term,) = _terminals(evs)
+    # The ENGINE's word is `crash`; the judge was asked and named no kind, so the row reads
+    # `unclassified` beside it — the ordinary path, word for word.
+    assert term.type == "node_failed" and term.data["engine_reason"] == "crash"
+    assert term.data["reason"] in ("crash", "unclassified")
+    assert "history_item_sid" in term.data["error"]
+    assert "(the canary exited 1; the full evaluation was not started)" in term.data["error"]
+    assert len(researcher.triaged) == 1 and "history_item_sid" in researcher.triaged[0]
+    assert "full" not in ledger.read_text().split()
+
+
+@pytest.mark.parametrize("control", ["run_abort", "pause"])
+def test_no_retry_once_the_run_stopped_taking_work(tmp_path, control):
+    """A retry is NEW work: a stop or a pause recorded while the first round ran means no second
+    round. A stopping run settles the node on the one expiry it had; a paused one keeps it pending
+    (no terminal), so the canary is owed again after the pause lifts."""
+    ledger = tmp_path / "ledger.txt"
+    code = _script(ledger, canary="sleep", full="0.9")
+    dev, researcher = _Dev(code), _Researcher()
+    eng = _engine(tmp_path / "run", dev, researcher=researcher,
+                  canary={"env": {"LOOPLAB_CANARY": "1"}, "timeout": 1.5})
+    _seed(eng, code)
+    real_round = eng._eval_canary_round
+
+    async def _round(a, spec, digest, scratch, cancel, *, retry):
+        out = await real_round(a, spec, digest, scratch, cancel, retry=retry)
+        if retry == 0:                               # the operator's control lands mid-canary
+            eng.store.append(control, {"reason": "operator"})
+        return out
+
+    eng._eval_canary_round = _round
+    evs = _evaluate(eng)
+    assert len(_of(evs, EV_EVAL_CANARY_STARTED)) == 1, "the retry ran on a run taking no work"
+    assert researcher.triaged == [] and dev.errors == []
+    if control == "pause":
+        assert _terminals(evs) == [] and 0 in {n.id for n in fold(evs).pending_nodes()}
+        return
+    (term,) = _terminals(evs)
+    assert term.type == "node_failed" and term.data["reason"] == "canary_timeout"
+    assert "its one retry was not run" in term.data["error"]
+
+
+def _expired(*, timed_out: bool):
+    return RunResult(exit_code=-9, stdout="", stderr="killed\n", metric=None, timed_out=timed_out)
+
+
+def _passed():
+    return RunResult(exit_code=0, stdout="METRIC: 0.1\n", stderr="", metric=0.1, timed_out=False)
+
+
+@pytest.mark.parametrize("shape", ["chain_clock", "stage_cap"])
+def test_either_clock_buys_the_retry(tmp_path, shape):
+    """Both of the canary's clocks are the CLOCK: the whole-chain `CanaryClock` (`expired`, the
+    result itself not marked) and a stage's own cap (`res.timed_out`). Driven through a stub of the
+    blocking half, so which of the two fired is decided here rather than by a race."""
+    ledger = tmp_path / "ledger.txt"
+    code = _script(ledger, canary="0.1", full="0.9")
+    researcher = _Researcher()
+    eng = _engine(tmp_path / "run", _Dev(code), researcher=researcher)
+    _seed(eng, code)
+    caps: list = []
+
+    def _stub(a, spec, scratch, cancel):
+        caps.append(spec["timeout"])
+        if len(caps) == 1:
+            return ((_expired(timed_out=False), True) if shape == "chain_clock"
+                    else (_expired(timed_out=True), False))
+        return _passed(), False
+
+    eng._run_canary_in_scratch = _stub
+    evs = _evaluate(eng)
+    assert caps == [60.0, 120.0]
+    (term,) = _terminals(evs)
+    assert term.type == "node_evaluated" and term.data["metric"] == 0.9
+    assert researcher.triaged == []
+
+
+@pytest.mark.parametrize("when", ["during", "after_expiry"])
+def test_an_operator_intervention_is_never_retried(tmp_path, when):
+    """`during`: the operator's intervention stopped the canary before any clock — it is not the
+    clock's verdict, so it keeps the ordinary path (a crash, the judge asked) and is not retried.
+    `after_expiry`: the clock stopped it first and the operator intervened before the retry could
+    start — no retry, and the node carries the one expiry it had."""
+    ledger = tmp_path / "ledger.txt"
+    code = _script(ledger, canary="0.1", full="0.9")
+    researcher = _Researcher(repairs=0)
+    eng = _engine(tmp_path / "run", _Dev(code), researcher=researcher)
+    _seed(eng, code)
+    caps: list = []
+
+    def _stub(a, spec, scratch, cancel):
+        caps.append(spec["timeout"])
+        cancel.set()                                  # the intervention's own Event
+        return _expired(timed_out=True), when == "after_expiry"
+
+    eng._run_canary_in_scratch = _stub
+    evs = _evaluate(eng)
+    assert caps == [60.0], "an intervention bought a second canary"
+    (finished,) = _of(evs, EV_EVAL_CANARY_FINISHED)
+    (term,) = _terminals(evs)
+    if when == "during":
+        assert finished.data["error"] == "interrupted by an operator intervention"
+        assert term.data["engine_reason"] == "crash" and len(researcher.triaged) == 1
+    else:
+        assert term.data["reason"] == "canary_timeout" and researcher.triaged == []
+        assert "its one retry was not run" in term.data["error"]
+
+
+@pytest.mark.parametrize("share, near", [(0.8, True), (0.0, False)])
+def test_a_pass_close_to_its_cap_is_recorded_and_said(tmp_path, caplog, share, near):
+    """MiniOneRec v10 node 10 passed at 92 % of its cap in silence. A pass at >= 75 % is marked
+    `near_cap` on its row and logged at WARNING; it changes nothing else — the full eval runs."""
+    ledger = tmp_path / "ledger.txt"
+    code = _script(ledger, canary="0.1", full="0.9")
+    eng = _engine(tmp_path / "run", _Dev(code),
+                  canary={"env": {"CANARY_USERS": "2000"}, "timeout": 1.0})
+    _seed(eng, code)
+
+    def _timed_pass(a, spec, scratch, cancel):
+        import time
+        time.sleep(share * spec["timeout"])
+        return RunResult(exit_code=0, stdout="METRIC: 0.1\n", stderr="", metric=0.1,
+                         timed_out=False), False
+
+    eng._run_canary_in_scratch = _timed_pass
+    with caplog.at_level("WARNING", logger="looplab.engine.evaluate"):
+        evs = _evaluate(eng)
+    (finished,) = _of(evs, EV_EVAL_CANARY_FINISHED)
+    assert finished.data["passed"] is True
+    assert finished.data.get("near_cap", False) is near
+    said = [r for r in caplog.records if "eval canary for node 0 passed" in r.getMessage()]
+    assert bool(said) is near
+    (term,) = _terminals(evs)
+    assert term.type == "node_evaluated" and term.data["metric"] == 0.9
 
 
 class _Kill(BaseException):

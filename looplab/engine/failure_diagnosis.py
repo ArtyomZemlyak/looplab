@@ -207,7 +207,9 @@ ENGINE_FINAL_REASONS: tuple[str, ...] = (
     # node said its new path prints never appeared in an eval that otherwise succeeded. There is no
     # failure text for a diagnostician to read -- the run was clean -- and nothing it could say would
     # change which lines were printed.
-    "inert_path")
+    "inert_path",
+    # The eval canary's clock, which the engine ran and killed it by, twice (`engine/eval_canary.py`).
+    "canary_timeout")
 
 # The deterministic answers `_failure_reason` still PRODUCES that are handed to the diagnostician as
 # evidence rather than kept as answers. Every one is a reason no out-of-band channel witnessed

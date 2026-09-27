@@ -1051,15 +1051,26 @@ canary runs in `<run>/canary/node_<id>`, never in the node's workdir, so nothing
 read as the real run's output; it runs on the node's own GPU lease and its seconds are charged as
 eval seconds.
 
-- **Canary fails** (non-zero exit, no metric read, or over its `timeout`): it is that attempt's crash.
-  The node goes through the ordinary triage/repair path with the canary's output as the evidence,
-  the full eval is **not** started, and no salvage rung may recover a number from it. The failed
-  canary's logs stay in its scratch directory for you to read.
+- **Canary fails** (non-zero exit or no metric read): it is that attempt's crash. The node goes
+  through the ordinary triage/repair path with the canary's output as the evidence, the full eval is
+  **not** started, and no salvage rung may recover a number from it. The failed canary's logs stay
+  in its scratch directory for you to read.
+- **Canary runs out of time** (its `timeout`, on a stage or over the chain): the engine runs it
+  **once more**, from a fresh scratch tree, at **twice** the cap, and asks no model — a cold JIT,
+  compile or download cache is the one cause a re-run heals. A pass there lets the full eval start.
+  A second expiry ends the node as `canary_timeout`: that is the candidate's cost on your slice, not
+  a defect the engine saw, so it is not in the default `inline_repair_reasons` and buys no triage and
+  no repair (list it there to have them back — a real hang in the canary path ends unrepaired too,
+  because one clock cannot tell it from a slow model). A retry is new work, so it is skipped once
+  the run is paused or stopping.
 - **Canary passes**: the full evaluation runs in the same attempt. The canary's own metric is
-  discarded — it is never the node's metric and never reaches selection.
+  discarded — it is never the node's metric and never reaches selection. A pass that used 75 % or
+  more of its cap is marked `near_cap` on its `eval_canary_finished` row and logged at WARNING: the
+  next candidate may not fit, and raising `timeout` is your call — the engine never grows it.
 - **Resume**: `eval_canary_started` / `eval_canary_finished` rows (diagnostic) are keyed on the
   node's code digest, so a resumed run does not re-run a canary that already passed for the same
-  code; a repaired node is canaried again, because its code is new.
+  code (the retry's two rows carry `retry: 1`); a repaired node is canaried again, because its code
+  is new.
 
 Without `eval.canary` the setting does nothing, and with the setting off `eval.canary` is ignored.
 

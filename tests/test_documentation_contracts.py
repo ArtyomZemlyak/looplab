@@ -515,16 +515,26 @@ def test_every_failure_reason_surface_names_all_of_them():
     # registry-derivation check that a REFLOW can redden teaches "re-wrap until green", which is the
     # opposite of what it is for — the rule is about which reasons are named, never about where the
     # line ends.
-    bullet = re.search(r"\*\*any but one\*\* of the (\w+) `FAILURE_REASONS`(.{0,600}?)"
-                       r"mechanical\s+three", concepts, re.S)
+    bullet = re.search(r"\*\*(any but one|every one but two)\*\* of the (\w+) `FAILURE_REASONS`"
+                       r"(.{0,600}?)mechanical\s+three", concepts, re.S)
     assert bullet, "the concepts.md inline-repair bullet moved — re-derive this check"
+    # The EXCEPTION count is a claim too, and it went stale the same way the others did: the phrase
+    # read "any but one" until `canary_timeout` became the second non-repairable reason (doc 69
+    # 69.10), so it is derived from the registry like the two counts beside it.
+    except_phrase = {1: "any but one", 2: "every one but two"}.get(len(NON_REPAIRABLE_REASONS))
+    assert except_phrase, (f"NON_REPAIRABLE_REASONS has {len(NON_REPAIRABLE_REASONS)} members — "
+                           "extend the phrase table and this regex")
+    if bullet.group(1) != except_phrase:
+        problems.append(f"docs/guide/concepts.md says {bullet.group(1)!r} of FAILURE_REASONS is "
+                        f"repairable, but {len(NON_REPAIRABLE_REASONS)} are not: "
+                        f"{except_phrase!r}")
     # The count word here is the REGISTRY's, not the eligible subset's ("any but one OF the N"),
     # and it was matched as a bare `\w+` — i.e. not checked at all. A surface that names a count
     # has to name the right one, which is the whole rule this test exists for.
-    if bullet.group(1).lower() != registry_word:
+    if bullet.group(2).lower() != registry_word:
         problems.append(f"docs/guide/concepts.md says FAILURE_REASONS has "
-                        f"{bullet.group(1)!r} members, not {registry_word!r}")
-    missing = [r for r in reasons if f"`{r}`" not in bullet.group(2)]
+                        f"{bullet.group(2)!r} members, not {registry_word!r}")
+    missing = [r for r in reasons if f"`{r}`" not in bullet.group(3)]
     # ...and the exception has to be NAMED, right after the list it is an exception to. A bullet
     # that says "any but one" without saying which one is worse than the miscounts this guard was
     # written for: the reader now knows there is a rule they have not been told.

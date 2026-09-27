@@ -972,8 +972,10 @@ from looplab.engine.shared import engine_fold as fold
 # reader plus its `_MISSING` sentinel across the package boundary.
 from looplab.events.replay import event_generation_binds
 from looplab.runtime.sandbox import GpuPinUnenforceable
-from looplab.engine.eval_canary import (CanaryClock, canary_already_passed, canary_failure_detail,
-                                       canary_failure_result, canary_passed, canary_spec)
+from looplab.engine.eval_canary import (CANARY_NEAR_CAP_FRACTION, CANARY_RETRY_CAP_FACTOR,
+                                       CanaryClock, canary_already_passed, canary_failure_detail,
+                                       canary_failure_result, canary_near_cap, canary_passed,
+                                       canary_spec)
 from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_CARD_DROPPED, EV_DEPS_INSTALLED,
                                   EV_EVAL_INVOCATION_CLAIMED, EV_EVAL_INVOCATION_RECOVERED,
                                   EV_EVAL_INVOCATION_SETTLED, EV_WORKSPACE_SEEDED,
@@ -2924,42 +2926,41 @@ class EvaluateMixin:
         of it (a materialize `OSError`, an unenforceable GPU pin, ...) is recorded on the finished row
         and the full eval runs exactly as it would with the canary off — where the same fault, if it
         is real, meets the handler that already owns it. The deliberate stops are never contained.
+
+        ONE MECHANICAL RETRY ON THE CLOCK (doc 69 69.10). A canary the CLOCK stopped — over the chain
+        or on one stage's cap — with no engine fault and no operator intervention runs ONCE more, from
+        a fresh scratch tree, at `eval_canary.CANARY_RETRY_CAP_FACTOR` x its cap, and no model is
+        asked; that round's two rows carry `retry: 1`. A pass there lets the full eval start. A second
+        expiry is `canary_failure_result(expired=True)`, which `triage._failure_reason` names
+        `canary_timeout`: out of `REPAIRABLE_REASONS`, so the default gate ends the node with no
+        triage and no repair. Measured on MiniOneRec v10 before this: three triage -> repair rounds
+        on one such node (2 h 54 min, no metric) and a 1520-second triage that abandoned a backbone
+        which had passed twice. NOT retried: any other failure (one run, the ordinary crash path), and
+        an expiry recorded after the operator intervened or the run stopped taking work (`halted`) —
+        a retry is new work; that attempt fails on the one expiry it had, and DECIDE_REPAIR's own
+        fold then holds a paused node pending or settles a stopping one.
         """
         spec = canary_spec(self._eval_spec)
         digest = _workdir_manifest_digest(a.node)
         scratch = self.run_dir / "canary" / f"node_{a.node_id}"
-        async with self._write_lock:
-            self.store.append(EV_EVAL_CANARY_STARTED, {
-                "node_id": a.node_id, "generation": a.generation, "attempt": a.attempt,
-                "code_digest": digest, "timeout": spec["timeout"]})
-        t0 = time.time()
-        res, expired, fault = None, False, None
-        try:
-            res, expired = await anyio.to_thread.run_sync(
-                self._run_canary_in_scratch, a, spec, scratch, cancel)
-        except _EVAL_DELIBERATE_STOPS:
-            raise
-        except Exception as exc:  # noqa: BLE001 — fail-open preflight: the full eval owns this fault
-            fault = f"{type(exc).__name__}: {exc}"[:300]
-        passed = fault is None and canary_passed(res, expired=expired)
-        interrupted = cancel.is_set() and not expired
-        row = {"node_id": a.node_id, "generation": a.generation, "attempt": a.attempt,
-               "code_digest": digest, "passed": passed,
-               "eval_seconds": round(time.time() - t0, 3), "log_dir": str(scratch)}
-        if res is not None:
-            row["exit_code"] = getattr(res, "exit_code", None)
-            row["timed_out"] = bool(getattr(res, "timed_out", False) or expired)
-            if getattr(res, "failed_stage", None):
-                row["failed_stage"] = str(res.failed_stage)
-        detail = ""
-        if fault is not None:
-            row["error"] = f"canary could not run (engine side; the full eval proceeds): {fault}"
-        elif not passed:
-            detail = ("interrupted by an operator intervention" if interrupted else
-                      canary_failure_detail(res, expired=expired, timeout=spec["timeout"]))
-            row["error"] = detail
-        async with self._write_lock:
-            self.store.append(EV_EVAL_CANARY_FINISHED, row)
+        res, clocked, fault, passed, detail = await self._eval_canary_round(
+            a, spec, digest, scratch, cancel, retry=0)
+        expired = False
+        if clocked:
+            expired = True
+            retry_cap = spec["timeout"] * CANARY_RETRY_CAP_FACTOR
+            if cancel.is_set() or fold(self.store.read_all()).halted:
+                detail += "; its one retry was not run: the run stopped taking work"
+            else:
+                first = detail
+                res, clocked, fault, passed, detail = await self._eval_canary_round(
+                    a, {**spec, "timeout": retry_cap}, digest, scratch, cancel, retry=1)
+                a.sp.set("eval_canary_retried", True)
+                # A retry that FAILED OTHERWISE is that failure — a crash the doubled cap uncovered
+                # is a defect, and it takes the ordinary path with its own words.
+                expired = clocked
+                if clocked:
+                    detail = f"{first}, nor within {retry_cap:g}s on its one retry"
         a.sp.set("eval_canary", "passed" if passed else ("fault" if fault else "failed"))
         if passed or fault is not None:
             if passed:
@@ -2972,9 +2973,62 @@ class EvaluateMixin:
                     pass
             return True
         a.res = canary_failure_result(res, detail=detail, log_dir=str(scratch),
-                                      env_names=spec["env"])
+                                      env_names=spec["env"], expired=expired)
         a.canary_failed = True
         return False
+
+    async def _eval_canary_round(self, a: "EvalAttempt", spec: dict, digest: str, scratch, cancel,
+                                 *, retry: int):
+        """ONE canary run under `spec`'s cap, between its two diagnostic rows (`retry` is stamped on
+        both when it is not 0). Returns `(res, clocked, fault, passed, detail)`: `clocked` = the clock
+        stopped it — the chain's `CanaryClock` or a stage's own cap — with no engine fault and no
+        operator intervention, the one failure `_eval_run_canary` retries; `detail` is the sentence
+        its finished row's `error` carries ("" on a pass or an engine fault)."""
+        started = {"node_id": a.node_id, "generation": a.generation, "attempt": a.attempt,
+                   "code_digest": digest, "timeout": spec["timeout"]}
+        if retry:
+            started["retry"] = retry
+        async with self._write_lock:
+            self.store.append(EV_EVAL_CANARY_STARTED, started)
+        t0 = time.time()
+        res, expired, fault = None, False, None
+        try:
+            res, expired = await anyio.to_thread.run_sync(
+                self._run_canary_in_scratch, a, spec, scratch, cancel)
+        except _EVAL_DELIBERATE_STOPS:
+            raise
+        except Exception as exc:  # noqa: BLE001 — fail-open preflight: the full eval owns this fault
+            fault = f"{type(exc).__name__}: {exc}"[:300]
+        passed = fault is None and canary_passed(res, expired=expired)
+        interrupted = cancel.is_set() and not expired
+        clocked = (fault is None and not passed and not interrupted
+                   and bool(expired or getattr(res, "timed_out", False)))
+        seconds = round(time.time() - t0, 3)
+        row = {"node_id": a.node_id, "generation": a.generation, "attempt": a.attempt,
+               "code_digest": digest, "passed": passed,
+               "eval_seconds": seconds, "log_dir": str(scratch)}
+        if retry:
+            row["retry"] = retry
+        if res is not None:
+            row["exit_code"] = getattr(res, "exit_code", None)
+            row["timed_out"] = bool(getattr(res, "timed_out", False) or expired)
+            if getattr(res, "failed_stage", None):
+                row["failed_stage"] = str(res.failed_stage)
+        if passed and canary_near_cap(seconds, spec["timeout"]):
+            row["near_cap"] = True
+            _LOG.warning("eval canary for node %s passed in %.0fs of its %gs cap (>= %.0f%%): the "
+                         "next candidate may not fit it — consider raising eval.canary.timeout",
+                         a.node_id, seconds, spec["timeout"], 100 * CANARY_NEAR_CAP_FRACTION)
+        detail = ""
+        if fault is not None:
+            row["error"] = f"canary could not run (engine side; the full eval proceeds): {fault}"
+        elif not passed:
+            detail = ("interrupted by an operator intervention" if interrupted else
+                      canary_failure_detail(res, expired=expired, timeout=spec["timeout"]))
+            row["error"] = detail
+        async with self._write_lock:
+            self.store.append(EV_EVAL_CANARY_FINISHED, row)
+        return res, clocked, fault, passed, detail
 
     async def _land_terminal_before_ceiling(self, a: "EvalAttempt", exc: BaseException) -> None:
         """Land THIS node's terminal before a spend ceiling raised by its own post-score bookkeeping

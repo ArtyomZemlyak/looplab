@@ -827,7 +827,10 @@ class Settings(BaseSettings):
     # the cap (`eval.canary = {"env": {...}, "timeout": 900}`, `adapters/repo_task.py::CanarySpec`)
     # — in a scratch directory outside the node's workdir. A
     # failing canary is the attempt's crash — the normal triage/repair path, with the canary's output
-    # as the evidence, and the full eval is never started; a passing one lets the full eval run. Its
+    # as the evidence, and the full eval is never started; a passing one lets the full eval run. One
+    # the CLOCK stopped is re-run ONCE at twice its cap with no model asked, and a second expiry ends
+    # the node as `canary_timeout`, which the default `inline_repair_reasons` leaves out (doc 69
+    # 69.10). Its
     # number is never the node's metric. Recorded as `eval_canary_started` / `eval_canary_finished`
     # rows keyed on the node's code digest, so a resume does not re-run a canary that already passed
     # for the same code. Motivated by multi-hour repo evals (MiniOneRec SFT: 30 min prep + 8 h train +

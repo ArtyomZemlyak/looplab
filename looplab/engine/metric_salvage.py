@@ -256,7 +256,10 @@ def unbound_subject_violation_rows(prov, metric, mode: str) -> list:
 NEVER_SALVAGED_REASONS = frozenset({"drift", "setup", "timeout", "diverged",
                                     # The number exists and is real -- about the WRONG code: the
                                     # node's declared new path never ran (`engine/activation.py`).
-                                    "inert_path"})
+                                    "inert_path",
+                                    # A canary's output measured the task's tiny slice, never the
+                                    # node (the canary path skips salvage by name as well).
+                                    "canary_timeout"})
 
 # Stage statuses that VETO salvage even when a reader can find a number.
 #
