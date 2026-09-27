@@ -1043,3 +1043,66 @@ def test_the_writer_bounds_a_fingerprint_to_what_the_reader_accepts():
     assert _valid_claim_source_row(row, research=False)
     assert not _valid_claim_source_row({**row, "fingerprint": long + ["zzz"]}, research=False), (
         "precondition: one token more and the reader refuses the row")
+
+
+def test_a_row_past_the_fence_is_repaired_in_place_and_nothing_else_moves(tmp_path):
+    """Doc 69 69.14a: the rows written before the writer owned the reader's fence stayed invisible to
+    every fenced reader — neither used nor retirable. The migration gives each the fingerprint the
+    writer writes now, ON ITS OWN LINE (the readers' bounded windows are taken over the store's
+    order), leaves a row refused for another reason as well where it is, and keeps every other line
+    byte for byte. A dry run writes nothing; a second run finds nothing to do."""
+    import json
+
+    from looplab.engine.claims_health import load_claim_source_path, rebound_lesson_fingerprints
+    from looplab.engine.memory import _MAX_SOURCE_FINGERPRINT
+
+    long_fp = sorted([f"aword{i:04d}" for i in range(300)] + ["kind:repo", "dir:max", "metric:recall"])
+    base = {"outcome": "supported", "evidence": [1], "task_id": "t", "run_id": "r"}
+    lines = [json.dumps({**base, "statement": "good", "fingerprint": ["kind:repo"]}),
+             "not json",
+             json.dumps({**base, "statement": "past", "fingerprint": long_fp}),
+             json.dumps({"future": True, "v": 99}),
+             json.dumps({**base, "statement": "both", "fingerprint": long_fp, "evidence": "x"}),
+             ""]
+    store = tmp_path / "lessons.jsonl"
+    store.write_text("\n".join(lines), encoding="utf-8")
+    before = store.read_bytes()
+
+    def statements():
+        return [row["statement"] for row in load_claim_source_path(store, research=False)]
+
+    assert rebound_lesson_fingerprints(store, apply=False) == {
+        "rows": 5, "past_fence": 2, "rebound": 1, "left_quarantined": 1, "applied": False}
+    assert store.read_bytes() == before and statements() == ["good"]
+
+    assert rebound_lesson_fingerprints(store, apply=True)["applied"] is True
+    old, new = before.split(b"\n"), store.read_bytes().split(b"\n")
+    assert len(new) == len(old)
+    assert [i for i, (a, b) in enumerate(zip(old, new)) if a != b] == [2], (
+        "only the repaired row's own line may change")
+    repaired = json.loads(new[2])
+    assert {k: v for k, v in repaired.items() if k != "fingerprint"} == {**base, "statement": "past"}
+    assert len(repaired["fingerprint"]) == _MAX_SOURCE_FINGERPRINT
+    assert {"kind:repo", "dir:max", "metric:recall"} <= set(repaired["fingerprint"])
+    assert statements() == ["good", "past"]
+    assert rebound_lesson_fingerprints(store, apply=True) == {
+        "rows": 5, "past_fence": 1, "rebound": 0, "left_quarantined": 1, "applied": False}
+
+
+def test_the_memory_fingerprints_command_reports_then_applies(tmp_path):
+    from typer.testing import CliRunner
+
+    from looplab.cli import app
+
+    runner = CliRunner()
+    missing = runner.invoke(app, ["memory-fingerprints", str(tmp_path / "nowhere")])
+    assert missing.exit_code == 1 and "no lesson store" in missing.output
+    row = {"statement": "past", "outcome": "supported", "evidence": [1], "task_id": "t",
+           "run_id": "r", "fingerprint": [f"w{i:04d}" for i in range(300)]}
+    (tmp_path / "lessons.jsonl").write_bytes(orjson.dumps(row) + b"\n")
+    dry = runner.invoke(app, ["memory-fingerprints", str(tmp_path)])
+    assert dry.exit_code == 0 and "1 repairable" in dry.output and "Nothing was written" in dry.output
+    applied = runner.invoke(app, ["memory-fingerprints", str(tmp_path), "--apply", "--json"])
+    assert applied.exit_code == 0 and orjson.loads(applied.output)["applied"] is True
+    again = runner.invoke(app, ["memory-fingerprints", str(tmp_path)])
+    assert "0 past the fingerprint fence" in again.output and "Nothing was written" not in again.output

@@ -122,7 +122,9 @@ GROUPS = {
     # writes nothing and calls no model; it is here and not in `inspect_cmds` because that group
     # sits at its own ceiling and the subject is the cross-run store's usefulness, not one run's
     # account of itself.
-    "memory_cmds": {"memory-orphans", "prior-citations"},
+    # `memory-fingerprints` (doc 69 69.14a) is its second writer and the same kind: it repairs, in
+    # place, a lesson row's task fingerprint that is past the reader's fence — no model, no claim.
+    "memory_cmds": {"memory-orphans", "memory-fingerprints", "prior-citations"},
     # CORPUS INSTRUMENTS. Its own group for the same two reasons `memory_cmds` and `audit_cmds` are,
     # and they point the same way. The DOMAIN first: every command here takes a runs ROOT, folds
     # each run's own event log and reports ONE reading a `docs/BACKLOG.md` marker named as the

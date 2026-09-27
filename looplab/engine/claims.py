@@ -107,6 +107,7 @@ from looplab.engine.claims_health import (  # noqa: F401
     _node_ids,
     _parse_node_id,
     _qualify_refs,
+    rebound_lesson_fingerprints,
     _research_source_receipt,
     _research_source_summary,
     _research_verification,

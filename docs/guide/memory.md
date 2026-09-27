@@ -762,6 +762,18 @@ identity sidecar records **why** a uid is missing rather than an empty string: `
 `unreadable` — and only the last is a case where a name keying might be hitting a run that does have
 a uid.
 
+### Lesson rows past the reader's fingerprint fence
+
+Every fenced reader of `lessons.jsonl` — the claim sources, the stale-lesson reconcile — refuses a row
+whose task fingerprint holds more than 256 tokens or a token longer than 500 characters. Since doc 69
+69.14 the writer bounds the fingerprint it writes to exactly that fence, but rows written before then
+stay invisible: neither used nor retirable (a real run's store hid 29 of 77 rows this way).
+
+`looplab memory-fingerprints <memory_dir>` reports them and, only with `--apply`, repairs each one in
+place — the fingerprint the writer writes now, on the row's own line, so the store's order (which the
+readers' bounded windows are taken over) does not move and every other line is kept byte for byte. A
+row the fence refuses for another reason as well is left as it is. No model is called.
+
 ### Rows whose run was never deleted through the UI
 
 A cascade only ever runs as part of a deletion. Runs removed **outside** the UI — a `rm -rf`, a

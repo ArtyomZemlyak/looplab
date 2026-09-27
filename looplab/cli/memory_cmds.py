@@ -15,6 +15,11 @@ operator says `--apply`, and every rule it obeys (attribution by `run_uid` then 
 predicates that keep shared evidence, the `blind` refusal) belongs to `serve/memory_cascade.py`
 rather than to this file.
 
+`memory-fingerprints` (2026-09-27, doc 69 69.14a) is the second writer and the same kind: it
+rewrites, in place, only a lesson row's task fingerprint that is past the reader's fence to the one
+the writer writes now — a repair of a derived field, no model call and no new claim, report-only
+unless `--apply`; the rule is `engine/claims_health.py::rebound_lesson_fingerprints`'s.
+
 `prior-citations` (2026-09-06, doc 52 row 17) joined it for the same domain reason: it is the READ
 side of the same stores — a pure projection over one run's `prior_injected` + `memory_read`
 diagnostic rows (`events/prior_citations.py`) that says which lessons the store pushed and which
@@ -89,6 +94,42 @@ def memory_orphans_cmd(
         for failure in failures[:20]:
             typer.echo(f"  FAILED {failure.get('store')}: {failure.get('error')}")
     raise typer.Exit(1 if failures else 0)
+
+
+@app.command(name="memory-fingerprints")
+def memory_fingerprints_cmd(
+    memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (holds lessons.jsonl)."),
+    apply: bool = typer.Option(False, "--apply",
+                               help="Rewrite the rows in place. Without it, nothing is written."),
+    as_json: bool = typer.Option(False, "--json", help="Emit the receipt as JSON."),
+):
+    """Report — and only with `--apply`, repair in place — lesson rows the reader cannot see because
+    their task fingerprint is past its fence (doc 69 69.14a).
+
+    A row written before the writer owned the reader's bound (more than 256 tokens, or a token over
+    500 characters) was refused by every fenced reader and by the stale-lesson reconcile, so it
+    could be neither used nor retired. Each such row gets the fingerprint the writer writes now,
+    on its own line: the store's order, which the readers' bounded windows are taken over, does not
+    move, and every other line is kept byte for byte. No model is called.
+    """
+    from looplab.engine.claims_health import rebound_lesson_fingerprints
+
+    store = memory_dir / "lessons.jsonl"
+    if not store.is_file():
+        typer.echo(f"{store}: no lesson store", err=True)
+        raise typer.Exit(1)
+    receipt = rebound_lesson_fingerprints(store, apply=apply)
+    if as_json:
+        typer.echo(orjson.dumps(receipt, option=orjson.OPT_INDENT_2).decode())
+        raise typer.Exit(0)
+    typer.echo(f"{receipt['rows']} row(s); {receipt['past_fence']} past the fingerprint fence: "
+               f"{receipt['rebound']} repairable, {receipt['left_quarantined']} refused for "
+               "another reason as well (left as they are)")
+    if receipt["applied"]:
+        typer.echo(f"rewrote {receipt['rebound']} row(s) in place")
+    elif receipt["rebound"]:
+        typer.echo("Nothing was written. Re-run with --apply to rewrite them in place.")
+    raise typer.Exit(0)
 
 
 @app.command(name="prior-citations")

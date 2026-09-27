@@ -41,6 +41,7 @@ looplab cross-run-search Bounded hybrid cross-run query + lean receipt (PART IV 
 looplab cross-run-digest Read-only axis-prefix concept rollup (PART IV Step 7)
 looplab prior-citations Did the cross-run priors this run was shown reach its proposals? (doc 52 row 17)
 looplab memory-orphans  Report — and only with --apply, remove — cross-run memory rows whose run no longer exists
+looplab memory-fingerprints Report — and only with --apply, repair in place — lesson rows whose task fingerprint is past the reader's fence (doc 69 69.14a)
 looplab landlock-check  Print the KERNEL read allow-list this run would grant, and prove the ruleset applies
 looplab reap-service-files Report — and only with --apply, remove — the service files a FINISHED destructive operation left behind
 looplab mlebench-extras The two official MLE-bench extras over ONE finished run: the paid rule-violation judge + the Dolos plagiarism pass, recorded to mlebench_extras.json (doc 52 row 22)
@@ -2377,6 +2378,28 @@ looplab memory-orphans MEMORY_DIR [--runs-root runs] [--apply] [--limit 25] [--j
 | `--apply` | off | Actually purge. Without it, nothing is written. **Irreversible** |
 | `--limit N` | `25` | How many contributing runs to list |
 | `--json` | off | Emit the survey as JSON |
+
+## `memory-fingerprints`
+
+Report — and only with `--apply`, repair in place — lesson rows the reader cannot see because their
+task fingerprint is past its fence (doc 69, 69.14a). A row written before the writer owned the
+reader's bound (more than 256 tokens, or a token longer than 500 characters) was refused by every
+fenced reader and by the stale-lesson reconcile, so it could be neither used nor retired. Each such row
+gets the fingerprint the writer writes now (`engine/memory.py::bound_fingerprint`), on its own line:
+the store's order, which the readers' bounded windows are taken over, does not move, and every other
+line (a row refused for another reason as well, a malformed or future line) is kept byte for byte.
+No model is called; the write happens under the store's lock. The rule is
+`engine/claims_health.py::rebound_lesson_fingerprints`.
+
+```bash
+looplab memory-fingerprints MEMORY_DIR [--apply] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `MEMORY_DIR` | *(required)* | Cross-run memory dir (holds `lessons.jsonl`) |
+| `--apply` | off | Rewrite the repairable rows in place. Without it, nothing is written |
+| `--json` | off | Emit the receipt (`rows`, `past_fence`, `rebound`, `left_quarantined`, `applied`) as JSON |
 
 ## `prior-citations`
 

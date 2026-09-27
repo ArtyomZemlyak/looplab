@@ -310,6 +310,67 @@ def load_claim_source_path(path, *, research: bool) -> _ClaimSourceRows:
     return _ClaimSourceRows(valid, read_health=health)
 
 
+def rebound_lesson_fingerprints(path, *, apply: bool) -> dict:
+    """THE MIGRATION doc 69 69.14a names: a lesson row written before the writer owned the reader's
+    fence (69.14) whose ONLY defect is its task fingerprint — more than `_MAX_SOURCE_FINGERPRINT`
+    tokens, or a token longer than `_MAX_SOURCE_ID` — gets the fingerprint the writer writes now
+    (`engine/memory.py::bound_fingerprint`), and the reader, the passive prior's fenced siblings and
+    the stale-lesson reconcile see it again. A real run's store hid 29 of 77 rows this way.
+
+    IN PLACE, line for line: the bounded-tail readers take their window over the store's ORDER, so
+    moving a repaired row to the end (what `core/jsonlio.py::replace_jsonl_rows_atomic_preserving_
+    quarantine` does to a replacement) would make an old lesson read as a new one. Every other line
+    is kept byte for byte — a row the fence refuses for another reason, a malformed or future line.
+    No model, no new claim, and nothing written unless `apply`; the write happens under the store's
+    lock, the file re-read inside it. Returns `{rows, past_fence, rebound, left_quarantined,
+    applied}` — `left_quarantined` counts rows past the fence that re-bounding does not admit."""
+    from pathlib import Path
+
+    from looplab.core.atomicio import atomic_write_bytes
+    from looplab.engine.memory import bound_fingerprint
+    from looplab.events.eventstore import interprocess_lock
+
+    p = Path(path)
+
+    def _survey(data: bytes) -> tuple[list[bytes], dict]:
+        lines = data.split(b"\n")
+        counts = {"rows": 0, "past_fence": 0, "rebound": 0, "left_quarantined": 0}
+        for index, raw in enumerate(lines):
+            if not raw.strip():
+                continue
+            counts["rows"] += 1
+            try:
+                # The fenced reader's own decoding (`load_claim_source_path`): UTF-8 text, `json`.
+                row = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError, RecursionError):
+                continue
+            fingerprint = row.get("fingerprint") if isinstance(row, dict) else None
+            if (not isinstance(fingerprint, list)
+                    or not all(isinstance(token, str) for token in fingerprint)
+                    or (len(fingerprint) <= _MAX_SOURCE_FINGERPRINT
+                        and all(len(token) <= _MAX_SOURCE_ID for token in fingerprint))):
+                continue          # inside the fingerprint fence: whatever else it is, not this
+            counts["past_fence"] += 1
+            repaired = {**row, "fingerprint": bound_fingerprint(fingerprint)}
+            if not _valid_claim_source_row(repaired, research=False):
+                counts["left_quarantined"] += 1
+                continue
+            counts["rebound"] += 1
+            # Re-encoded by the library that decoded it, so every other field round-trips exactly.
+            lines[index] = json.dumps(repaired, ensure_ascii=False,
+                                      separators=(",", ":")).encode("utf-8")
+        return lines, counts
+
+    if not apply:
+        _, counts = _survey(p.read_bytes())
+        return {**counts, "applied": False}
+    with interprocess_lock(Path(str(p) + ".lock"), required=True):
+        lines, counts = _survey(p.read_bytes())
+        if counts["rebound"]:
+            atomic_write_bytes(p, b"\n".join(lines))
+    return {**counts, "applied": bool(counts["rebound"])}
+
+
 _MAX_NODE_ID_TEXT = 24
 
 
