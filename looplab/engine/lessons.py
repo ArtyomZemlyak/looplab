@@ -48,6 +48,7 @@ from looplab.core.models import (
 from looplab.engine.cadence import at_creation_boundary
 from looplab.engine.concept_registry import normalize_key
 from looplab.engine.curation_protocol import CurationProtocolMixin
+from looplab.engine.lesson_hygiene import stamp_lesson_objective
 from looplab.engine.lessons_distill import (LessonDistillMixin, promoted_skill_keys,
                                             settled_skill_cards)
 # The role constants moved to lessons_priors.py with the prior renderer that filters on them;
@@ -153,15 +154,8 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
         # is a declared extra metric's, and a lesson is read by later runs of the task beside their
         # own task metric (critic 2026-09-27). Said in the statement a later run reads, and stamped
         # (`objective_key`, additive; the readers ignore unknown keys).
-        objective = getattr(state, "objective_key", None) if state is not None else None
-        if objective:
-            note = retargeted_lesson_note(objective)
-            for lz in lessons:
-                if isinstance(lz, dict):
-                    lz.setdefault("objective_key", objective)
-                    statement = lz.get("statement")
-                    if isinstance(statement, str) and note not in statement:
-                        lz["statement"] = statement + note
+        stamp_lesson_objective(
+            lessons, getattr(state, "objective_key", None) if state is not None else None)
         if state is not None:
             from looplab.engine.concept_shelf import state_concepts
             for lz in lessons:

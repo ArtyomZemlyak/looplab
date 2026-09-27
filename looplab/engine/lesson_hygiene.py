@@ -177,6 +177,27 @@ def lesson_objective(o) -> Optional[str]:
     return key if isinstance(key, str) and key else None
 
 
+def stamp_lesson_objective(lessons, objective) -> None:
+    """Mark lessons a RETARGETED run writes (doc 68 68.2): `objective_key`, and the clause at the
+    end of the statement a later run reads. Every number such a run ranked on was a declared extra
+    metric's, and a lesson is read by later runs of the task beside their own task metric (critic
+    2026-09-27). In place; a no-op when `objective` is None, so a run without a retarget writes the
+    bytes it always wrote. The ONE stamp both writers go through: the append funnel
+    (`engine/lessons.py::append_lessons`) and the reconcile rewrite
+    (`engine/lessons_reconcile.py::reconcile_lessons`), which wrote its re-derived rows with neither,
+    and a plain run's verdict then retired them (critic 2026-09-27, driven)."""
+    if not (isinstance(objective, str) and objective):
+        return
+    from looplab.trust.cross_run import retargeted_lesson_note
+    note = retargeted_lesson_note(objective)
+    for lz in lessons or ():
+        if isinstance(lz, dict):
+            lz.setdefault("objective_key", objective)
+            statement = lz.get("statement")
+            if isinstance(statement, str) and note not in statement:
+                lz["statement"] = statement + note
+
+
 def _objective_identity(o) -> tuple:
     """What a lesson's OBJECTIVE adds to its identity: `()` for a lesson on the task's own metric, so
     every key and id such a lesson ever had is the one it has now, and `(key,)` for a retargeted

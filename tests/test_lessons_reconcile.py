@@ -589,3 +589,98 @@ def test_reconcile_aborts_when_authoritative_locked_read_fails(tmp_path, monkeyp
     assert (mem / "lessons.jsonl").read_bytes() == before
     assert not [event for event in eng.store.read_all() if event.type == "lessons_reconciled"]
     assert eng.lessons._reconcile_sig_hash is None
+
+
+# --------------------------------------------------------------------------- #
+# a retarget (doc 68 68.2) moves `Node.metric`, not what a lesson was learned on
+
+def _retarget_log(*extra):
+    from looplab.core.models import Event
+
+    rows = [("run_started", {"run_id": "run_me", "task_id": "toy_quadratic",
+                             "goal": "minimize (x-3)^2 + (y+1)^2", "direction": "min"})]
+    for nid, metric, filtered in ((0, 9.0, 0.30), (1, 4.0, 0.10)):
+        rows.append(("node_created", {"node_id": nid, "parent_ids": [] if nid == 0 else [0],
+                                      "operator": "draft",
+                                      "idea": {"operator": "draft", "params": {"x": float(nid)},
+                                               "rationale": "r"},
+                                      "code": f"x={nid}\n"}))
+        rows.append(("node_evaluated", {"node_id": nid, "generation": 0, "metric": metric,
+                                        "violations": [],
+                                        "extra_metrics": {"filtered": filtered},
+                                        "extra_metrics_provenance": {"filtered": "declared"}}))
+    rows.extend(extra)
+    return [Event(seq=i, ts=float(i), type=t, data=d) for i, (t, d) in enumerate(rows)]
+
+
+def _lesson(eng, state, statement, **extra):
+    return {"task_id": "toy_quadratic", "run_id": "run_me", "statement": statement,
+            "outcome": "supported", "evidence": [0, 1], "fingerprint": [], "kind": "quadratic",
+            "evidence_sig": eng.lessons._evidence_sig_map(state, [0, 1]), **extra}
+
+
+def test_a_retarget_leaves_the_runs_lessons_in_sync(tmp_path, monkeypatch):
+    """MEDIUM (critic 2026-09-27, driven). The signature was taken over `Node.metric`, which a
+    retarget recomputes: the first reconcile after it read every lesson of the run as a flipped
+    outcome and — offline — deleted them from the shared store, though the task's number had not
+    moved. A lesson is checked on the ruler IT was learned on, either way across a retarget."""
+    mem = tmp_path / "mem"
+    eng = _engine(tmp_path, reflection_priors=True, memory_dir=str(mem),
+                  comparative_lessons=False)
+    plain = fold(_retarget_log())
+    retargeted = fold(_retarget_log(("metric_retarget", {"key": "filtered"})))
+    undone = fold(_retarget_log(("metric_retarget", {"key": "filtered"}),
+                                ("metric_retarget", {"key": None})))
+    assert retargeted.objective_key == "filtered" and undone.objective_key is None
+    task_lesson = _lesson(eng, plain, "a sharper step helps convergence")
+    ruler_lesson = _lesson(eng, retargeted, "the filter helps", objective_key="filtered")
+    for state in (plain, retargeted, undone):
+        assert not eng.lessons._lesson_evidence_stale(state, task_lesson)
+        assert not eng.lessons._lesson_evidence_stale(state, ruler_lesson)
+    _seed(mem, [task_lesson])
+    monkeypatch.setattr(eng, "_reflect_client", lambda: None)
+    eng.lessons.reconcile_lessons(retargeted)
+    assert _rows(mem) == [task_lesson], "offline, a retarget retired nothing"
+    moved = fold(_retarget_log(("metric_retarget", {"key": "filtered"}),
+                               ("node_reset", {"node_id": 1, "generation": 0,
+                                               "from_stage": "eval"}),
+                               ("node_evaluated", {"node_id": 1, "generation": 1, "metric": 4.0,
+                                                   "violations": [],
+                                                   "extra_metrics": {"filtered": 0.2},
+                                                   "extra_metrics_provenance": {
+                                                       "filtered": "declared"}})))
+    assert eng.lessons._lesson_evidence_stale(moved, ruler_lesson), (
+        "the objective's number moved: the lesson on it is stale")
+
+
+def test_a_reconciled_lesson_of_a_retargeted_run_carries_its_ruler(tmp_path, monkeypatch):
+    """The re-derived rows are written by the locked rewrite, never through `append_lessons` — the
+    funnel that stamps `objective_key` and appends the clause — so they reached the store with no
+    ruler, keyed like a plain lesson of that text, and a plain run's later verdict retired them
+    (critic 2026-09-27, driven). One stamp for both writers
+    (`engine/lesson_hygiene.py::stamp_lesson_objective`)."""
+    from looplab.engine.lesson_hygiene import lesson_id
+    from looplab.trust.cross_run import retargeted_lesson_note
+
+    mem = tmp_path / "mem"
+    eng = _engine(tmp_path, reflection_priors=True, memory_dir=str(mem),
+                  comparative_lessons=False)
+    plain = fold(_retarget_log())
+    _seed(mem, [_lesson(eng, plain, "a sharper step helps convergence")])
+    moved = fold(_retarget_log(("metric_retarget", {"key": "filtered"}),
+                               ("node_reset", {"node_id": 1, "generation": 0,
+                                               "from_stage": "eval"}),
+                               ("node_evaluated", {"node_id": 1, "generation": 1, "metric": 5.0,
+                                                   "violations": [],
+                                                   "extra_metrics": {"filtered": 0.1},
+                                                   "extra_metrics_provenance": {
+                                                       "filtered": "declared"}})))
+    monkeypatch.setattr(eng, "_reflect_client",
+                        lambda: FakeClient("[GOOD] a sharper step helps convergence on this ruler"))
+    eng.lessons.reconcile_lessons(moved)
+    fresh = [r for r in _rows(mem) if "on this ruler" in r.get("statement", "")]
+    assert fresh and all(r.get("objective_key") == "filtered" for r in fresh), _rows(mem)
+    assert all(r["statement"].endswith(retargeted_lesson_note("filtered")) for r in fresh)
+    twin = {"statement": "a sharper step helps convergence on this ruler",
+            "task_id": "toy_quadratic", "outcome": "abandoned", "run_id": "P"}
+    assert lesson_id(fresh[0]) != lesson_id(twin)

@@ -19,13 +19,17 @@ from typing import Optional
 
 from looplab.core.containment import refuse_budget_stop
 from looplab.core.llm import BudgetExceeded
-from looplab.core.models import RunState
+from looplab.core.models import RunState, objective_value
 from looplab.core.run_identity import row_belongs_to_run
 from looplab.engine.lessons_priors import LESSON_ROLE_DEVELOPER, LESSON_ROLE_RESEARCHER
 from looplab.events.eventstore import read_jsonl_lenient
 # Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
 from looplab.engine.shared import engine_fold as fold
 from looplab.events.types import EV_LESSONS_DISTILLED, EV_LESSONS_RECONCILED
+
+# "The node's number on the ruler in force" — `Node.metric`, which is what every signature read
+# before a lesson could name another ruler (`_metric_on_ruler`).
+_IN_FORCE = object()
 
 
 # The self-pair rendering reads at most this many repair rows and this much of each rationale. The
@@ -254,7 +258,7 @@ class LessonReconcileMixin:
             return k
 
     @staticmethod
-    def _node_outcome_sig(node) -> Optional[str]:
+    def _node_outcome_sig(node, metric=_IN_FORCE) -> Optional[str]:
         """A compact OUTCOME signature for a node — what its terminal looks like right now. A lesson
         grounded in a node is 'in sync' iff its stored sig still equals this. Captures status + the
         metric (ROUNDED, so float jitter never trips a re-derive) or the failure reason. None when the
@@ -263,14 +267,14 @@ class LessonReconcileMixin:
         if node is None:
             return None
         status = getattr(node.status, "value", None) or str(node.status)
-        m = getattr(node, "metric", None)
+        m = getattr(node, "metric", None) if metric is _IN_FORCE else metric
         if m is not None:
             return f"{status}:{round(float(m), 4)}"
         reason = getattr(node, "error_reason", "") or ""
         return f"{status}:{reason}" if reason else status
 
     @classmethod
-    def _node_sig(cls, node, *, aborted: bool = False) -> Optional[str]:
+    def _node_sig(cls, node, *, aborted: bool = False, metric=_IN_FORCE) -> Optional[str]:
         """Bind evidence to the exact node lifecycle, not just its coincidental scalar outcome."""
         if node is None:
             return None
@@ -278,7 +282,7 @@ class LessonReconcileMixin:
         if type(attempt) is not int:
             attempt = 0
         tombstoned = bool(getattr(node, "tombstoned", False))
-        outcome = cls._node_outcome_sig(node) or "missing"
+        outcome = cls._node_outcome_sig(node, metric) or "missing"
         return (f"v2:a={attempt}:t={int(tombstoned)}:x={int(bool(aborted))}:"
                 f"{outcome}")
 
@@ -317,6 +321,24 @@ class LessonReconcileMixin:
                 names.append(operator)
         return sorted(names)[:MAX_LESSON_OPERATORS]
 
+    @staticmethod
+    def _metric_on_ruler(state: RunState, node, ruler):
+        """A node's number on the ruler a LESSON speaks of — its `objective_key`, None for the task's
+        own metric — whatever ruler the run is ranked by NOW (doc 68 68.2). `_IN_FORCE` when the two
+        are the one ruler, which is every lesson of every run without a retarget: the signature it
+        was stamped with is read exactly as it always was. A retarget recomputes `Node.metric`, and
+        read on that, every lesson the run wrote before it drifted at once: retired, re-derived and
+        rewritten, though the task's number had not moved (critic 2026-09-27, driven)."""
+        in_force = getattr(state, "objective_key", None) or None
+        if ruler == in_force:
+            return _IN_FORCE
+        if ruler is None:
+            return getattr(node, "task_metric", None)
+        return objective_value(getattr(node, "extra_metrics", None),
+                               getattr(node, "extra_metrics_provenance", None), ruler,
+                               getattr(node, "extra_metrics_direction", None),
+                               getattr(state, "direction", None))
+
     def _lesson_evidence_stale(self, state: RunState, o: dict) -> bool:
         """True iff a lesson's grounding nodes no longer match the OUTCOME SIGNATURE it was distilled
         from — a re-eval FLIPPED something it depends on. Requires the exact `evidence_sig`: a node now
@@ -338,12 +360,15 @@ class LessonReconcileMixin:
                     return True
             return False
         aborted = set(getattr(state, "aborted_nodes", None) or [])
+        from looplab.engine.lesson_hygiene import lesson_objective
+        ruler = lesson_objective(o)
         for key, stored in sig.items():
             nid = self._coerce_id(key)
             node = state.nodes.get(nid)
             if node is None:
                 return True
-            current = self._node_sig(node, aborted=nid in aborted)
+            metric = self._metric_on_ruler(state, node, ruler)
+            current = self._node_sig(node, aborted=nid in aborted, metric=metric)
             if isinstance(stored, str) and stored.startswith("v2:"):
                 if current != stored:
                     return True
@@ -352,7 +377,7 @@ class LessonReconcileMixin:
             # reset/tombstone/abort occurred they cannot prove which realization they described, so stale
             # guidance fails closed even when the replacement happens to reproduce the same metric.
             if (getattr(node, "attempt", 0) != 0 or getattr(node, "tombstoned", False)
-                    or nid in aborted or self._node_outcome_sig(node) != stored):
+                    or nid in aborted or self._node_outcome_sig(node, metric) != stored):
                 return True
         return False
 
@@ -480,6 +505,10 @@ class LessonReconcileMixin:
             # empty/failed LLM re-derivation must NOT nuke existing memory (then drop only the drifted).
             drop_all_reflect = reflect_stale and bool(fresh_reflect)
             fresh = fresh_reflect + comp
+            # The stamp every lesson a retargeted run writes carries (doc 68 68.2): the rewrite
+            # below bypasses `append_lessons`, and its rows went to the store with no ruler.
+            from looplab.engine.lesson_hygiene import stamp_lesson_objective
+            stamp_lesson_objective(fresh, getattr(state, "objective_key", None))
 
             def _is_stale(o) -> bool:
                 # Identify a stale row of THIS run by IDENTITY (evidence pair / staleness), NOT raw line
