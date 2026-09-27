@@ -119,6 +119,39 @@ def test_run_records_workspace_and_resume_detects_change(tmp_path):
     assert s2.workspace_changed is True
 
 
+def test_every_workspace_change_is_recorded_and_the_rows_chain(tmp_path):
+    """Doc 69 69.20: gated on the folded flag, only a run's first change was written — a real run's
+    editable repo changed three times, the decoder fix among them, and left one row. Every resume
+    that finds a NEW fingerprint records it against the last one recorded; a resume that finds the
+    one already recorded writes nothing."""
+    from looplab.events.eventstore import EventStore
+
+    repo = _repo(tmp_path, 'import json; print(json.dumps({"metric": 1.0}))\n')
+    t = RepoTask(id="w", direction="max", editable_path=str(repo), edit_surface=["*.txt"],
+                 eval=EvalSpec(command=[sys.executable, "run.py"], metric=_M))
+    run_dir = tmp_path / "run"
+
+    def enter():
+        r, d = t.build_roles()
+        return anyio.run(Engine(run_dir, task=t, researcher=r, developer=d,
+                                sandbox=SubprocessSandbox(),
+                                policy=GreedyTree(n_seeds=1, max_nodes=1)).run)
+
+    def rows():
+        return [e.data for e in EventStore(run_dir / "events.jsonl").read_all()
+                if e.type == "workspace_changed"]
+
+    start = enter().workspace
+    for metric in (2.0, 3.0):
+        (repo / "run.py").write_text(
+            f'import json; print(json.dumps({{"metric": {metric}}}))\n', encoding="utf-8")
+        enter()
+    enter()                                             # nothing changed since the last row
+    first, second = rows()
+    assert first["was"] == start and first["now"] != start
+    assert second["was"] == first["now"] and second["now"] != first["now"]
+
+
 # --------------------------------------------------------------------------- gap-safe node-id alloc
 def test_create_node_id_is_gap_safe(tmp_path):
     # A dropped/malformed node_created leaves a GAP in node ids (fold skips the bad event). The next

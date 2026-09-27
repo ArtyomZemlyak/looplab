@@ -2343,7 +2343,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         optional=(),
     ),
     "workspace_changed": PayloadContract(
-        "The workspace directory differs from the one the run started in.",
+        "The workspace differs from the one last recorded: the run's own at its start, or the "
+        "previous row's `now` (one row per change).",
         required=("now", "was"),
         optional=(),
     ),

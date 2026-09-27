@@ -330,13 +330,18 @@ class SetupPhaseMixin:
                 setup_seq = setup_events[-1].seq if setup_events else -1
                 self._finish_with_report_if_quiescent(
                     setup_state, {"reason": "leakage"}, after_seq=setup_seq)
-        elif self._repo_spec and state.workspace and not state.workspace_changed:
+        elif self._repo_spec and state.workspace:
             # Resume (item #4): the editable workspace is copied fresh each node, so if the
             # operator's repo changed since the run started, later nodes silently evaluate a
             # DIFFERENT codebase. Record it instead of pretending the run is reproducible.
+            # EVERY change, compared with the last one recorded (doc 69 69.20): gated on the folded
+            # flag, only a run's first change was written — a real run's editable repo changed
+            # three times, the decoder fix among them, and left one row. So the rows chain: `was` is
+            # the previous row's `now`, or the run's own fingerprint before any.
+            last = state.workspace_now if isinstance(state.workspace_now, dict) else state.workspace
             now = self._workspace_fingerprint()
-            if now != state.workspace:
-                self.store.append(EV_WORKSPACE_CHANGED, {"was": state.workspace, "now": now})
+            if now != last:
+                self.store.append(EV_WORKSPACE_CHANGED, {"was": last, "now": now})
         # P0-5 environment drift: on ANY resume where an env was pinned at run start, flag a Python/
         # library change — a run continued after an upgrade is no longer bit-reproducible, so record it
         # instead of pretending it is. Diagnostic-only (mirrors workspace_changed). state.env is None on

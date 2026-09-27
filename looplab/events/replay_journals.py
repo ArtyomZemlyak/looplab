@@ -61,6 +61,9 @@ def _on_data_leakage(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
 
 def _on_workspace_changed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.workspace_changed = True                 # resume saw the source repo/data change
+    now = d.get("now")
+    if isinstance(now, dict):
+        st.workspace_now = now                  # the latest recorded fingerprint (69.20)
 
 
 def _on_env_changed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:

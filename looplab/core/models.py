@@ -2564,6 +2564,10 @@ class RunState(BaseModel):
     # run_started, and whether a resume detected the source changed underneath.
     workspace: Optional[dict] = None
     workspace_changed: bool = False
+    # …and the fingerprint the LAST `workspace_changed` row recorded (`now`), so a later resume
+    # compares against it and records every new change, not only the run's first (doc 69 69.20).
+    # Fold-internal, excluded from dumps like `simplified_cut`; None until a change is recorded.
+    workspace_now: Optional[dict] = Field(default=None, exclude=True)
     # F18: folded like workspace_changed so the env-drift note is emitted ONCE, not re-appended on
     # every resume of an upgraded run (the emit is gated on `not state.env_changed`).
     env_changed: bool = False
