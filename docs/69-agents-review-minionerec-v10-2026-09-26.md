@@ -409,7 +409,7 @@ UnseenRecall@20=0.03328)» уйдёт в межпрогонные claims как 
   Полосы `benchmarks/algotune/` по-прежнему режутся по affinity намеренно — это пиннинг ядер и ключ
   линейки, а не размер пула.*
 - **69.35** OPEN[probes-run-on-engine-interpreter] при неизвестном интерпретаторе задачи пробы молча идут на интерпретаторе движка (§8). proof:`present:return sys.executable, ""@looplab/tools/dev_probe.py`
-- **69.36** OPEN[dotenv-files-unreadable] `*.env` не входят в читаемые текстовые файлы (§8). proof:`present:return p.suffix.lower() in TEXT_EXT or p.name.lower() in SAFE_NAMES@looplab/core/_pathsafe.py`
+- **69.36** *Закрыто 2026-09-27: здесь стоял `dotenv-files-unreadable`. `read_file` разведчика (`tools/reposcout.py::RepoScoutTools._read_file`) читает файл-ручку `*.env` (`core/_pathsafe.py::env_knob_file`: `train.env`, `configs/eval.env`, но не dotfile `.env*` — его `looks_secret` по-прежнему отвергает) с маскировкой (`core/redact.py::redact_env_file_text`): значение переменной, которую песочница не отдала бы дочернему процессу (`envsafe.is_secret_env`: секретоподобное имя или URL с логином-паролем), маскируется целиком — направление безопасности песочницы, потому что читатель — возможно удалённая модель; остальные строки проходят экраны известных форм и секретных значений этого хоста. Список `readable` не расширен: grep, индексация базы знаний и прочие читатели `*.env` не видят (`tests/test_reposcout.py`).*
 
 ## 10. Приоритет (мнение, оспоримо)
 

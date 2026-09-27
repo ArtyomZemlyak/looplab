@@ -12,6 +12,8 @@ Rules (defense in depth, because tool RESULTS are fed to a possibly-REMOTE model
     listings — so a secret (incl. the server's LLM API key) can't reach the model or be clobbered.
   - `readable(path)`: an ALLOWLIST of known source/doc/config extensions (+ a few safe extensionless
     names) — used by the read scout so an unrecognized dotfile can't be slurped.
+  - `env_knob_file(path)`: a `*.env` knob file (never a `.env*` dotfile) — outside the allowlist,
+    served by the scout's `read_file` ALONE, with every secret-shaped value masked (doc 69 69.36).
 """
 from __future__ import annotations
 
@@ -54,6 +56,14 @@ def looks_secret(p: Path) -> bool:
         return True
     parts = {part.lower() for part in p.parts}                   # any ancestor dir is a known secret dir
     return bool(parts & SECRET_DIRS)
+
+
+def env_knob_file(p: Path) -> bool:
+    """A `*.env` KNOB file — `train.env`, `configs/eval.env`: a task's settings, which `read_file`
+    serves with every secret-shaped value masked (`core/redact.py::redact_env_file_text`, doc 69
+    69.36) though the allowlist below does not name it. NOT a `.env*`-named dotfile: `looks_secret`
+    keeps refusing that name, where credentials live by convention."""
+    return p.suffix.lower() == ".env" and not p.name.lower().startswith(".env")
 
 
 def readable(p: Path) -> bool:
