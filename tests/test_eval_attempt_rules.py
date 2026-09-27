@@ -286,6 +286,8 @@ def test_each_phase_asks_its_rule_exactly_once():
     assert decide.count("triage_verdict_outcome") == 1
     assert called_names(ev.EvaluateMixin._eval_write_terminal).count("evaluated_terminal") == 1
     assert called_names(ev.EvaluateMixin._eval_apply_repair).count("_classify_repair_answer") == 1
+    assert called_names(ev.EvaluateMixin._eval_settle_outcome).count(
+        "retarget_admits_missing_task_metric") == 1
     # …and none of the rules it replaced is re-derived beside it: the moved vocabulary is not
     # spelled in the phases any more (NEGATIVE pins stay substrings on purpose — the text is what
     # must not come back).

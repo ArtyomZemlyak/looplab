@@ -224,6 +224,28 @@ def calibrate_detector(corpus=None, *, direction: str = "max") -> dict:
     }
 
 
+def perfect_metric_signals(metric, direction: str, *, label: str = "metric") -> list[dict]:
+    """The `perfect_metric` tell for ONE number: its EXACT theoretical optimum (0.0 minimized, 1.0
+    maximized), `[]` otherwise — the rule `detect_reward_hacks` asks of the task's metric, named so the
+    engine can ask it of the objective an operator retarget ranks by (doc 68 68.2a). `label` names the
+    number in the detail; the task metric's row reads exactly as it always did."""
+    if metric is None:
+        return []
+    # Only the EXACT theoretical optimum is the gaming tell. `metric <= 0.0` false-flagged every
+    # SIGNED objective on the min side (a log-likelihood / signed score is legitimately negative);
+    # SYMMETRICALLY, `metric >= 1.0` on the max side false-flagged every UNBOUNDED max objective
+    # (reward / return / throughput / negative-loss offset / log-likelihood are routinely > 1.0),
+    # flooding the Trust panel. So flag ONLY the exact capped ceiling metric == 1.0 (accuracy/AUC/F1
+    # at their cap), never a value merely above it. Advisory in every gate mode either way.
+    if direction == "min" and metric == 0.0:
+        return [{"signal": "perfect_metric",
+                 "detail": f"{label} {metric} at the theoretical floor (0.0)"}]
+    if direction == "max" and metric == 1.0:
+        return [{"signal": "perfect_metric",
+                 "detail": f"{label} {metric} at the theoretical ceiling (1.0)"}]
+    return []
+
+
 def detect_reward_hacks(code: str, metric: float | None, direction: str,
                         protected_names: set[str] | None = None,
                         stdout: str = "",
@@ -308,20 +330,9 @@ def detect_reward_hacks(code: str, metric: float | None, direction: str,
                     break
 
     # Suspiciously-perfect score: an exact theoretical optimum is rare from real learning and is the
-    # classic specification-gaming tell (e.g. MSE == 0.0, accuracy == 1.0). Heuristic, audit-only.
-    if metric is not None:
-        # Only the EXACT theoretical optimum is the gaming tell. `metric <= 0.0` false-flagged every
-        # SIGNED objective on the min side (a log-likelihood / signed score is legitimately negative);
-        # SYMMETRICALLY, `metric >= 1.0` on the max side false-flagged every UNBOUNDED max objective
-        # (reward / return / throughput / negative-loss offset / log-likelihood are routinely > 1.0),
-        # flooding the Trust panel. So flag ONLY the exact capped ceiling metric == 1.0 (accuracy/AUC/F1
-        # at their cap), never a value merely above it. Advisory in every gate mode either way.
-        if direction == "min" and metric == 0.0:
-            signals.append({"signal": "perfect_metric",
-                            "detail": f"metric {metric} at the theoretical floor (0.0)"})
-        elif direction == "max" and metric == 1.0:
-            signals.append({"signal": "perfect_metric",
-                            "detail": f"metric {metric} at the theoretical ceiling (1.0)"})
+    # classic specification-gaming tell (e.g. MSE == 0.0, accuracy == 1.0). Heuristic, audit-only;
+    # the rule is `perfect_metric_signals`.
+    signals.extend(perfect_metric_signals(metric, direction))
 
     # P1-7 versioned TrustEvidence: annotate each signal with the METHOD that found it and a
     # CONFIDENCE, so the event/panel carry structured evidence instead of a bare {signal, detail}.
