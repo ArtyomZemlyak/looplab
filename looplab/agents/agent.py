@@ -48,7 +48,9 @@ from looplab.agents.roles import (
 from looplab.agents.tool_loop import (  # noqa: F401
     CompositeTools, LoopOptions, _cap_tool_result, _flatten_transcript, _force_emit, _handoff_ctx,
     agentic_struct, agentic_text, drive_tool_loop, emit_loop, handoff_scope,
-    loop_opts_from_settings, summarize_phase)
+    loop_opts_from_settings, phase_cancel_check, phase_cancel_scope, phase_cancelled,
+    summarize_phase)
+from looplab.core.errors import LLMCancelled, PhaseCancelled
 
 
 # The "your idea space is the WHOLE experiment / the Developer owns HOW" guidance, as worded for
@@ -131,7 +133,35 @@ def run_phase(client, tools, messages, emit_spec, *, label: str, next_label: str
     then (2) after the loop, distills THIS phase's transcript into the ledger (one best-effort LLM
     call) for the next phase. Pass `handoff=False` for a TERMINAL phase (nothing downstream reads its
     brief — the single-session implement, the last plan step, a repair) so it doesn't spend a wasted
-    summary call. A drop-in for drive_tool_loop: with no active scope it just forwards."""
+    summary call. A drop-in for drive_tool_loop: with no active scope it just forwards.
+
+    Inside a `phase_cancel_scope` (doc 68 68.7 — the owner's cancel token for the whole build) a
+    phase whose token has fired never starts, a running one ends at its next turn boundary, and one
+    that ended that way raises `PhaseCancelled` instead of handing its fallback to the next phase.
+    Outside a scope nothing below changes a byte of the call."""
+    cancel = phase_cancel_check()
+    if cancel is not None:
+        # BEFORE the briefs are spliced in and before any provider call: a phase of cancelled work
+        # must not even start — the v10 build STARTED `Developer·plan` 14 minutes after its card
+        # was dropped (`tool_loop.py::phase_cancel_scope`).
+        if phase_cancelled():
+            raise PhaseCancelled(
+                f"{label} was not started: the work it belongs to was cancelled")
+        caller_check = loop_kwargs.get("cancel_check")
+
+        def _owner_or_caller_cancelled() -> bool:
+            # Closes over the PREDICATE OBJECTS, never re-reads the ContextVar: the loop hands this
+            # to its tools as their `cancel_check`, and a tool may poll it from a thread of its own,
+            # where the scope's context is not set. Guarded per half, so a broken caller token
+            # cannot mask the owner's (the loop guards the whole call, not each half).
+            try:
+                if cancel():
+                    return True
+            except Exception:  # noqa: BLE001 — a broken cancel probe must not fail the phase it observes
+                pass
+            return bool(caller_check()) if caller_check is not None else False
+
+        loop_kwargs["cancel_check"] = _owner_or_caller_cancelled
     ledger = _handoff_ctx.get()
     if ledger:                              # earlier phases produced briefs → inject them up front
         ins = 1 if (messages and messages[0].get("role") == "system") else 0
@@ -151,10 +181,25 @@ def run_phase(client, tools, messages, emit_spec, *, label: str, next_label: str
             + _fenced_notes(ledger, loop_kwargs.get("tool_result_label") or ""))})
     # The phase's own label reaches the `agent_phase_*` diagnostic rows (doc 52 row 16); a caller
     # that named one itself keeps its spelling.
-    result = drive_tool_loop(client, tools, messages, emit_spec,
-                             finalize=finalize, fallback=fallback,
-                             **({"phase_label": label} if "phase_label" not in loop_kwargs else {}),
-                             **loop_kwargs)
+    try:
+        result = drive_tool_loop(client, tools, messages, emit_spec,
+                                 finalize=finalize, fallback=fallback,
+                                 **({"phase_label": label} if "phase_label" not in loop_kwargs else {}),
+                                 **loop_kwargs)
+    except LLMCancelled as exc:
+        # The owner's token cut a generation mid-stream (the loop hands its `cancel_check` to the
+        # request). Re-typed so every caller sees ONE exception for "this work was cancelled",
+        # whichever boundary the token fired at; any other cancel is the caller's own, unchanged.
+        if cancel is not None and not isinstance(exc, PhaseCancelled) and phase_cancelled():
+            raise PhaseCancelled(
+                f"{label} was cut mid-turn: the work it belongs to was cancelled") from exc
+        raise
+    if cancel is not None and phase_cancelled():
+        # Ended at a turn boundary on the owner's token: the loop returned its FALLBACK, and handing
+        # that on would let the next phase build on a half-finished one (and buy the handoff summary
+        # below for work nobody will use).
+        raise PhaseCancelled(
+            f"{label} ended at a turn boundary: the work it belongs to was cancelled")
     if handoff and ledger is not None:      # non-terminal phase in an active scope → contribute a brief
         # Wrap the summary call in its OWN operation span so it's a distinct, clearly-labeled band in
         # the UI trace ("handoff-summary") instead of an anonymous complete_text generation buried in

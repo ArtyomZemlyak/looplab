@@ -180,6 +180,19 @@ class LLMCancelled(LLMError):
     """
 
 
+class PhaseCancelled(LLMCancelled):
+    """An agent PHASE refused to start, or ended at a turn boundary, because the work it belongs to
+    was cancelled (`agents/tool_loop.py::phase_cancel_scope`; doc 68 68.7).
+
+    An `LLMCancelled` and not a new family, for that class's own reason: the Developer's phases
+    already degrade around `LLMError` (a failed stages or plan phase falls back, `_run` turns the
+    rest into its crash sentinel), and every phase that fallback then reaches refuses again at its
+    own entry — so a cancelled build walks its remaining phases WITHOUT a provider call instead of
+    buying them. The engine never reads the sentinel such a build returns: the producer that owned
+    the build checks its own token and discards the result (`engine/speculation.py`).
+    """
+
+
 class LLMCredentialError(LLMError):
     """A credential refusal that carries its ROOT CAUSE, not just the role that tripped over it.
 

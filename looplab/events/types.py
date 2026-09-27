@@ -1399,7 +1399,11 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         required=("card_id", "generation"),
         # `index`: the queue position this row closes, written only when it is not the head — a
         # build that finished before one opened earlier (several producers). Absent = the head.
-        optional=("index", "node_id", "skipped", "skipped_reason", "speculative"),
+        # `producer_cancelled`: True when this skip closed a request whose build was STILL RUNNING
+        # in the writing process, which the close then cancelled (doc 68 68.7). Absent = no live
+        # build was stopped (or a row written before the key existed).
+        optional=("index", "node_id", "producer_cancelled", "skipped", "skipped_reason",
+                  "speculative"),
     ),
     "card_build_requested": PayloadContract(
         "The durable selection-and-compute gate for one Card's build.",

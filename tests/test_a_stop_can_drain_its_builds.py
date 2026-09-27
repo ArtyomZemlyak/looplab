@@ -577,8 +577,11 @@ def test_a_later_pause_cancels_the_drain_and_the_held_build_is_closed_as_a_plain
     seen = _run_while(engine, gate, controller)
     card = gate.cards[0]
     closes = _card_closes_after(engine, card, seen["pause_seq"])
+    # `producer_cancelled`: the close lands while the held producer still runs, so it also tells that
+    # build to stop and says so on the row (doc 68 68.7) — the plain stop's own close, since then.
     assert closes[0].data == {"card_id": card, "generation": closes[0].data["generation"],
-                              "skipped": "stale", "skipped_reason": "run_is_stopping"}, closes[0].data
+                              "skipped": "stale", "skipped_reason": "run_is_stopping",
+                              "producer_cancelled": True}, closes[0].data
     assert closes[0].seq < seen["released_at"], "closed while its producer was still running"
     assert not [c for c in closes if c.data.get("skipped") == "producer_failed"]
     assert not [e for e in engine.store.read_all()
