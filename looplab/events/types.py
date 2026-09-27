@@ -1039,6 +1039,18 @@ EV_ASHA_VERDICT = "asha_verdict"
 # fold-ignored — the fork cursor already advanced, so this only makes the drop legible in the event
 # log, `looplab replay` and the trace; it never re-serves the request or changes selection.
 EV_FORK_UNFULFILLED = "fork_unfulfilled"
+# A queued node-creating operator request (a `fork`, an `inject_node`, a forced ablation) that is
+# WAITING FOR A NODE SLOT: the node budget (`max_nodes` + `add_nodes` + refunds) is spent, counting the
+# slots open Card build requests already own, and `budget_extend {add_nodes}` is what admits it (doc
+# 68 68.8). Measured on `minionerec-backbones-v10` (2026-09-27): inject idx 13 waited 20 minutes for a
+# slot while every `inject_node` command read `succeeded` (its postcondition is the engine's ack) —
+# nothing anywhere said it was parked, and the operator found out by reading the engine's code.
+# Appended by the MAIN task once per parking episode (a new row only when the request or its numbers
+# change), from the outer loop's forced-request serve and from the Card session, which can hold the
+# loop head for a whole build. DIAGNOSTIC / fold-ignored: the queue cursor and the budget are already
+# folded state, this only SAYS what they mean; `events/parked_requests.py` pairs each row with its
+# request's receipt, so a served request stops being reported (the attention feed, `looplab inspect`).
+EV_OPERATOR_REQUEST_PARKED = "operator_request_parked"
 # The SHARED cross-run lessons store (`memory_dir/lessons.jsonl`, `meta_notes.jsonl`) could not be
 # read or written — permissions, a full/quota'd/read-only network mount, a transient FS fault. That
 # store is a DIFFERENT filesystem from the run dir, so a run whose own events.jsonl appends succeed
@@ -1171,6 +1183,7 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_ASHA_RANK,
     EV_ASHA_VERDICT,
     EV_FORK_UNFULFILLED,
+    EV_OPERATOR_REQUEST_PARKED,
     EV_LESSONS_STORE_UNAVAILABLE,
     # EV_ENV_CHANGED moved to the FOLDED set (F18): it now sets a dedup flag (RunState.env_changed) so
     # the drift note is emitted once, not re-appended on every resume of an upgraded run.
@@ -1403,7 +1416,11 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         required=("card_id", "generation"),
         # `index`: the queue position this row closes, written only when it is not the head — a
         # build that finished before one opened earlier (several producers). Absent = the head.
-        optional=("index", "node_id", "skipped", "skipped_reason", "speculative"),
+        # `producer_cancelled`: True when this skip closed a request whose build was STILL RUNNING
+        # in the writing process, which the close then cancelled (doc 68 68.7). Absent = no live
+        # build was stopped (or a row written before the key existed).
+        optional=("index", "node_id", "producer_cancelled", "skipped", "skipped_reason",
+                  "speculative"),
     ),
     "card_build_requested": PayloadContract(
         "The durable selection-and-compute gate for one Card's build.",
@@ -1715,6 +1732,16 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         required=("from_node_id", "generation", "idx"),
         optional=(),
     ),
+    "operator_request_parked": PayloadContract(
+        "A queued fork / inject / forced ablation waits for a node slot: the node budget is spent; "
+        "add_nodes admits it.",
+        # `request` is fork | inject | ablate; a fork or an inject is named by its queue position
+        # `idx`, a forced ablation by the lifecycle it ablates (`node_id` + `generation`).
+        # `reserved` = node ids already reserved, `held_by_card_requests` = future slots open Card
+        # build requests own, `limit` = the hard node ceiling; `detail` is the engine's own sentence.
+        required=("detail", "held_by_card_requests", "limit", "reason", "request", "reserved"),
+        optional=("generation", "idx", "node_id"),
+    ),
     "full_retrain_charged": PayloadContract(
         "A repair that forced a full retrain, and the evaluation budget it spent.",
         required=("attempt", "generation", "node_id", "spent"),
@@ -1940,7 +1967,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         optional=(
             "attribution", "budget_exhausted", "code", "edit_calls", "engine_reason",
             "error_evidence", "eval_seconds", "failure_signature", "footprint_finalized",
-            "idea_footprint",
+            "idea_footprint", "judge_deferred",
             "param_overrides", "reason", "reason_evidence", "reason_evidence_resolved",
             "reason_findings", "reason_hypotheses", "reason_override_refused", "reason_source",
             "reason_summary", "salvaged_metric", "unmet", "unparseable_repairs", "verified"
@@ -1987,7 +2014,11 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "pause": PayloadContract(
         "The run paused — by an operator, or by the engine with a stated reason.",
         required=(),
-        optional=("attempt", "detail", "drain_only", "generation", "node_id", "reason"),
+        # `drain_builds`: the operator's `looplab stop --drain-builds` — builds already running
+        # finish and commit before the engine exits. `drain_only`: the pause a drain-only resume
+        # (`looplab resume --drain-only`) writes when its drain ends, done or stuck.
+        optional=("attempt", "detail", "drain_builds", "drain_only", "generation", "node_id",
+                  "reason"),
     ),
     "phase_progress": PayloadContract(
         "One build/eval phase started or finished — the live activity feed's row.",

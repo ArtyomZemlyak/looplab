@@ -14,6 +14,10 @@ export const ATTENTION_KINDS = new Set([
   // the training is broken, this one asks whether it will finish, and a node can be perfectly
   // healthy and doomed at the same time (node 6 burned 7.78 GPU-hours reading `healthy` throughout).
   'train_overrun', 'asha',
+  // A queued operator request (inject / fork / forced ablation) waiting for a node slot: the node
+  // budget is spent and only the operator can extend it (doc 68 68.8). The command itself read
+  // `succeeded` — its postcondition is the engine's ack — so without this nothing said it was parked.
+  'request_parked',
 ])
 const SEVERITIES = new Set(['action', 'warning', 'danger', 'success'])
 const SEVERITY_PRIORITY = Object.freeze({ danger: 4, action: 3, warning: 2, success: 1 })
@@ -23,6 +27,8 @@ const NEEDS_ACTION = new Set([
   // NEEDS_ACTION, and the action is time-critical in a way the others are not: the window closes
   // when the wall arrives, and after that there is nothing to decide.
   'train_overrun',
+  // Nothing runs until the operator extends the node budget (`budget_extend add_nodes`).
+  'request_parked',
 ])
 
 const COPY = Object.freeze({
@@ -54,6 +60,9 @@ const COPY = Object.freeze({
   // or a row whose detail failed sanitisation).
   train_overrun: ['Experiment will miss its wall', 'This experiment is projected to be killed by its own deadline before it finishes. Raise the wall or stop it.', 'Inspect training'],
   asha: ['ASHA rank warning', 'Inspect the live curve. Automatic stopping requires peers at the same declared progress.', 'Inspect experiment'],
+  // The FALLBACK: the server's measured sentence (`events/parked_requests.py::parked_request_detail`)
+  // says which request and how many slots are taken; this row is for a payload that carries none.
+  request_parked: ['Operator request waiting for node budget', 'A queued experiment waits for a node slot: the node budget is spent. Extend it with budget_extend add_nodes.', 'Open Events'],
   assistant_permission: ['Assistant approval needed', 'Open Assistant to review the exact action and scope.', 'Open Assistant'],
 })
 
@@ -63,7 +72,9 @@ const safeRunId = value => typeof value === 'string' && value.length > 0 && valu
 // built from the ENGINE's own measurements, never from model-authored text. Adding a kind here is a
 // trust decision, not a formatting one — `train_monitor` is deliberately absent because its detail
 // quotes an LLM verdict about a candidate's own log.
-export const MEASURED_DETAIL_KINDS = new Set(['train_overrun'])
+// `request_parked` is built from the engine's own reservation ledger — request kind, queue position
+// and slot counts (`events/parked_requests.py::parked_request_detail`) — with no model text in it.
+export const MEASURED_DETAIL_KINDS = new Set(['train_overrun', 'request_parked'])
 
 // A server detail is untrusted TEXT even when its numbers are trusted: bounded, single-line, and
 // control-free, on the same rule `safeContextText` applies one line down. It is deliberately more

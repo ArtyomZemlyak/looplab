@@ -886,7 +886,7 @@ def coerce_evidence(verdict, redact=None) -> dict:
     return {"source": src, "locator": loc, "quote": quote}
 
 
-def diagnosis_repair_lead(summary, reason_source, error_text) -> str:
+def diagnosis_repair_lead(summary, reason_source, error_text, *, host_refusal: bool = False) -> str:
     """The diagnostician's own account, prefixed to the text the Developer repairs from.
 
     THE DEFECT THIS CLOSES, and it was recorded against itself: the `check_false_positive` repair
@@ -916,13 +916,22 @@ def diagnosis_repair_lead(summary, reason_source, error_text) -> str:
       sentence upstream, and on a `not_learning` kill the two texts can be the same words; saying
       them twice reads as two independent findings agreeing.
 
+    ONE EXCEPTION to the second conjunct, `host_refusal` (`Settings.host_refusal_repair_lead`,
+    2026-09-26): the operator's host scorer refusing through its declared contract is engine-final
+    (`expect_failed`) — but all the engine OBSERVED is that the scorer refused; WHY the candidate's
+    output is wrong is exactly what the diagnostician read in its code. Measured on MiniOneRec inf13
+    node 5: both triages named the bug (pages addressing padding; decode positions from the batch
+    max) and neither sentence reached the Developer, who re-derived each for ~25 minutes. The caller
+    decides that the refusal is the host contract's (`evaluate._host_contract_refused`); the first
+    and third conjuncts still apply.
+
     Returns the lead INCLUDING its trailing blank line, or `""`. The caller concatenates; this
     function decides. It is a pure string rule so its truth table is drivable — the property lives
     at a call site three hundred lines inside `_evaluate` where no test can reach it otherwise.
     """
     if not isinstance(summary, str) or not summary.strip():
         return ""
-    if reason_source in NON_DIAGNOSIS_SOURCES:
+    if reason_source in NON_DIAGNOSIS_SOURCES and not host_refusal:
         return ""
     text = error_text if isinstance(error_text, str) else ""
     if summary.strip() in text:

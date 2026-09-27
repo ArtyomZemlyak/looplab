@@ -2364,6 +2364,19 @@ def _on_run_abort(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
 def _on_pause(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # STOP: freeze WITHOUT finalizing (finalize.py gates the wrap-up on `finished`, which a pause
     # never sets). A later `finalize` (EV_RUN_ABORT) can still wrap it up; RESUME lifts it.
+    #
+    # A DRAIN (`looplab stop --drain-builds`) rides only the OPERATOR's own pause — a node-less row
+    # carrying `drain_builds: true`; `is True`, not truthiness, so a forged/garbled value never turns
+    # a stop into a drain. EVERY OTHER pause row CANCELS a standing drain, whether or not it moves the
+    # triple below: an engine auto-pause (a provider outage, a Developer crash, an engine error), a
+    # later plain `looplab stop`, a `restart` (critic review 2026-09-27). Once any of them lands, the
+    # builds still running are against whatever that pause is about — a dead endpoint, drained, ends
+    # each in a REAL `producer_failed` close that bars its Card — and a plain stop's disposition
+    # (close them `run_is_stopping`) is the safe one. Read only through
+    # `engine/speculation.py::_pause_drains_builds`.
+    drain = d.get("drain_builds") is True and d.get("node_id") is None
+    if not drain:
+        st.pause_drain_builds = False
     previous = (st.paused, st.pause_node_id, st.pause_generation)
     if d.get("node_id") is not None:
         # A human STOP is stronger than the scoped developer-crash circuit breaker. If the operator
@@ -2394,6 +2407,11 @@ def _on_pause(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         # the log it replayed. Every producer already bounds its own text at the append site.
         reason = d.get("reason")
         st.pause_reason = str(reason) if isinstance(reason, str) and reason.strip() else None
+        # …and whether the operator asked for running builds to finish and commit before the engine
+        # exits (`looplab stop --drain-builds`, `drain` above). A drain STARTS only on the pause that
+        # takes effect: one landing on a run that is already paused changes nothing, exactly as its
+        # reason does not (`looplab stop` refuses the flag there rather than promise it).
+        st.pause_drain_builds = drain
 
 
 def _on_restart(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:

@@ -29,7 +29,7 @@ SETTINGS_UI_SCHEMA_VERSION = 2
 # here reading as if 207 were derived while it is typed, which is the drift it warns about. The
 # unforgeable gate is `SETTINGS_UI_SCHEMA_KEYSET_REVISION` further down; this integer is the
 # human-readable half the docs sentence quotes, and `_load_schema` refuses when the two disagree.
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 231
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 235
 # On the KEYSET REVISION below: DERIVED, and deliberately no longer a hand-pinned review gate: a
 # bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
@@ -314,22 +314,39 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # whether the noise floor is measured once mid-search instead of at the end. OFF by default; a row
 # because an operator must be able to move a spend they opted into. Re-derived by INTERSECTION: the
 # 227 previous keys plus exactly that one, none removed.
-# 228 -> 229 on 2026-09-26: `seed_from_run` (doc 67 67.2) — a new run's first experiment imported
-# from a prior run's node, with the evaluation-contract receipt beside it. A launch form, so a row:
-# the web start route is where an operator reaches for it. Re-derived by INTERSECTION: the 228
-# previous keys plus exactly that one, none removed.
-# 229 -> 230 on 2026-09-27: `ablation_simplify` (doc 67 67.5), beside `ablation_probe_hint` —
+# 228 -> 229 on 2026-09-27: `max_launch_timeout_s`, beside `max_eval_timeout` — the hard wall clock
+# every launch is clamped to (24 h default, up to 7 days), which was the literal
+# `sandbox.MAX_TIMEOUT_S`. A row, not an omission: it decides whether a multi-day training is killed
+# at 24 h, and it is the per-run lever that unlocks a `budget_extend{eval_timeout}` above a day.
+# Re-derived by INTERSECTION: the 228 previous keys (digest `178cfb7b…`) plus exactly that one.
+# 229 -> 231 on 2026-09-26: `host_refusal_deferral` and `host_refusal_repair_lead`, beside
+# `repair_context_record` — whether a first host-contract refusal holds the judge's `reject_idea` for
+# one repair, and whether the triage diagnosis of such a refusal leads the repair. Rows on the
+# curation rule's own ground (the first changes whether a judge's verdict ends an experiment) and on
+# the different-prompt ground (the second). The branch pinned 223 -> 225 against a tree without the
+# six rows above, so neither side's digest is carried: RE-DERIVED over the merged keyset by
+# INTERSECTION — the 229 previous keys plus exactly those two, none removed.
+# 231 -> 232 on 2026-09-26: `host_scorer_account`, beside those two — whether a host-contract
+# refusal's failure text is the scorer's own account (`host_scorer.diagnosis_key`) instead of the
+# stderr tail. A row on the different-prompt ground, like `host_refusal_repair_lead`. The branch
+# pinned 225 -> 226 against a tree without origin's six rows; RE-DERIVED by INTERSECTION over the
+# merged keyset: the 231 previous keys plus exactly that one, none removed.
+# 232 -> 233 on 2026-09-27: `card_select_k`, beside `mcts_value_weight` — the operator's Card lane
+# width (`search/card_selection.py::card_lane_width`), carried through every Strategist rebuild. A
+# row because it decides how many concurrent builds the freshness gate keeps, which is a WIDTH an
+# operator must be able to read and set per run. The branch pinned 223 -> 224 against a tree without
+# the nine rows above; RE-DERIVED by INTERSECTION over the merged keyset: the 232 previous keys plus
+# exactly that one, none removed.
+# 233 -> 235 on 2026-09-27 (the merge of `claude/open-todo-moments-lqgdik`): `seed_from_run`
+# (doc 67 67.2) — a new run's first experiment imported from a prior run's node, with the
+# evaluation-contract receipt beside it; a launch form, so a row: the web start route is where an
+# operator reaches for it — and `ablation_simplify` (doc 67 67.5), beside `ablation_probe_hint` —
 # whether a code-block ablation's no-worse probe nominates the program it ran as a node, which the
-# selector takes on a tie with the node it was cut from. OFF by default; a row because it SPENDS a
-# node and an evaluation per nomination, and an operator must be able to turn it on per run.
-# Re-derived by INTERSECTION: the 229 previous keys plus exactly that one, none removed.
-# 230 -> 231 on 2026-09-27 (the merge of master): `max_launch_timeout_s`, beside
-# `max_eval_timeout` — the hard wall clock every launch is clamped to (24 h default, up to 7
-# days), which was the literal `sandbox.MAX_TIMEOUT_S`. A row, not an omission: it decides
-# whether a multi-day training is killed at 24 h, and it is the per-run lever that unlocks a
-# `budget_extend{eval_timeout}` above a day. Re-derived by INTERSECTION: the 230 previous keys
-# plus exactly that one, none removed.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "fc5547b88317ef35bab5b8b2aacb658a51b10bfbb7aa1f88dc3a974e82ee845e"
+# selector takes on a tie with the node it was cut from; OFF by default, a row because it SPENDS a
+# node and an evaluation per nomination. The branch pinned 228 -> 231 against a tree without the
+# four rows above; RE-DERIVED by INTERSECTION over the merged keyset: the 233 previous keys plus
+# exactly those two, none removed.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "ee71524ce71d14d3abf6af58cdc04542b31df1c344b36905b3ed511fb3c26a28"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

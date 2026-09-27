@@ -225,6 +225,19 @@ def _format_repair_log(repair_log) -> str:
                   f"THE LOOP ENDED THIS SESSION ITSELF ({_cutoff}) rather than the Developer "
                   "finishing: it stopped without a model-chosen emit, so what this attempt changed "
                   "is what had been written by then.")
+        # A FOURTH, and the one that changes how "the fix claimed" above must be read: on this row
+        # the judge did NOT ask for a repair. It answered `reject_idea` on the node's first refusal
+        # by the operator's host scorer, and `eval_attempt_rules.deferred_triage_verdict` held that
+        # verdict until one repair had been made — so the rationale shown is a rejection, the repair
+        # was the engine's, and the NEXT row (or the failure being judged now) is its result. A row
+        # without the column renders byte-identically to what this prompt has always been.
+        _deferred = r.get("judge_deferred")
+        if isinstance(_deferred, dict) and _deferred.get("action"):
+            note += (f"\n    THE JUDGE ANSWERED `{_deferred.get('action')}` ON THIS FAILURE, and the "
+                     "engine did not act on it yet: a first refusal by the operator's scorer buys one "
+                     f"repair before an idea is judged ({_deferred.get('rule')}). \"The fix claimed\" "
+                     "above is that rejection, not a fix; what came after this repair is the evidence "
+                     "the idea is to be judged on.")
         out.append(
             f"attempt {r.get('attempt')}: failed with — {' '.join(str(r.get('error', '')).split())}\n"
             f"    the fix claimed: {str(r.get('fix', '')).strip() or '(no rationale)'}\n"

@@ -89,6 +89,7 @@ LAZY_ENGINE_ATTRIBUTES: dict[str, tuple[str, ...]] = {
     '_run_loop_exit_owed': ('orchestrator.py::_record_run_loop_exit', 'orchestrator.py::_run_with_llm_broker'),
     '_spec_adopted': ('speculation.py::_ensure_speculation_state',),
     '_spec_build_inflight': ('speculation.py::_ensure_speculation_state',),
+    '_spec_build_cancel': ('speculation.py::_ensure_speculation_state',),
     '_spec_builder_generation': ('speculation.py::_drop_producer_pool', 'speculation.py::_ensure_speculation_state'),
     '_spec_builds': ('speculation.py::_ensure_speculation_state',),
     '_spec_force_outer': ('speculation.py::_card_phase_serve_head', 'speculation.py::_ensure_speculation_state', 'speculation.py::_serve_card_builds'),

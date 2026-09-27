@@ -207,6 +207,87 @@ def is_fenced(text: str, label: str) -> bool:
     return f"{label}\n{_neutralize_fences(interior, label)}\nEND {label}" == text
 
 
+def fenced_tail(text, chars: int, label: str) -> str:
+    """The LAST `chars` characters of `text`, with every fenced block in that window WELL FORMED.
+
+    `text[-chars:]` for any text whose cut does not fall inside a fenced block — byte for byte, which
+    is every text that carries no block. When it does fall inside one, the block's own INTERIOR is
+    cut instead and fenced again (`fence_untrusted`), and whatever followed the block rides after it:
+    a window is never handed a closing marker without its opening one.
+
+    WHY IT EXISTS (2026-09-26, the host scorer's account): `evaluate._eval_failure_text` gives a
+    host-contract refusal the scorer's own account FENCED, because the candidate's code runs inside
+    the scorer's process — and that one string is then cut by readers with their own windows (the
+    judge history's last 300 characters, the 200-character "last eval error" of the provider-failure
+    rewrites, the MLE-bench transcript). A plain tail cut kept the account's last characters and its
+    CLOSING marker only: candidate-influenced text followed by `END UNTRUSTED_RUN_EVIDENCE`, which a
+    reader takes as the END of evidence, i.e. as everything before it not being evidence at all.
+
+    A block is recognized by its two EXACT markers (an opening `LABEL` line that is not the tail of an
+    `END LABEL`, then the next `END LABEL`), not by `is_fenced`: `_neutralize_fences` is no fixpoint,
+    so a block whose interior held a forged marker — the adversarial case, exactly — would fail the
+    re-derivation and be cut plainly. Recognition needs no trust: the cut interior is fenced AGAIN,
+    which neutralizes any marker spelling in it, so a region a candidate forged comes out fenced, and
+    one it did not forge comes out as it went in. `""` for a non-positive `chars` (a window of
+    nothing — never `text[-0:]`, which is all of it); the result never exceeds `chars`."""
+    return _fenced_cut(text, chars, label, tail=True)
+
+
+def fenced_head(text, chars: int, label: str) -> str:
+    """The FIRST `chars` characters of `text` under the rule `fenced_tail` states for the last: a cut
+    inside a fenced block keeps the head of the block's interior, fenced again. The repo Developer's
+    head-kept repair context (`adapters/repo_developer.py`) is its reader."""
+    return _fenced_cut(text, chars, label, tail=False)
+
+
+def _fence_regions(text: str, label: str):
+    """`(start, end, interior_start, interior_end)` of every EXACT-marker region of `text`, in
+    order."""
+    opening, closing = f"{label}\n", f"\nEND {label}"
+    pos = 0
+    while True:
+        start = text.find(opening, pos)
+        if start < 0:
+            return
+        if start >= 4 and text.startswith("END ", start - 4):
+            pos = start + 1                     # the tail of a closing marker, not an opening one
+            continue
+        close = text.find(closing, start + len(opening) - 1)
+        if close < 0:
+            return
+        interior_start = start + len(opening)
+        yield start, close + len(closing), interior_start, max(interior_start, close)
+        pos = close + len(closing)
+
+
+def _fenced_cut(text, chars: int, label: str, *, tail: bool) -> str:
+    text = "" if text is None else str(text)
+    if chars <= 0:
+        return ""
+    if len(text) <= chars:
+        return text
+    cut = len(text) - chars if tail else chars
+    region = (next((r for r in _fence_regions(text, label) if r[0] < cut < r[1]), None)
+              if label else None)
+    if region is None:
+        return text[cut:] if tail else text[:cut]
+    start, end, interior_start, interior_end = region
+    interior = text[interior_start:interior_end]
+    outside = text[end:] if tail else text[:start]
+    budget = chars - len(outside)
+    # Fenced AGAIN, so the block grows by the two markers and by any marker spelling the cut exposed
+    # (`_neutralize_fences` marks each): shrink the kept interior until the whole block fits. A budget
+    # with no room for one character of it drops the block, never the marker pair around nothing.
+    keep = min(len(interior), budget - (2 * len(label) + 6))
+    while keep > 0:
+        piece = interior[len(interior) - keep:] if tail else interior[:keep]
+        block = fence_untrusted(piece, label)
+        if len(block) <= budget:
+            return block + outside if tail else outside + block
+        keep -= len(block) - budget
+    return outside
+
+
 def _fence_pattern(label: str) -> "re.Pattern":
     """A matcher for one fence marker that is as tolerant as the reader it defends.
 

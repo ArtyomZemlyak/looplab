@@ -572,6 +572,20 @@ flapped socket used to end a node with zero repair calls where the second ask wo
 And a `repair`/`abandon`/`reject_idea` never triggers a re-ask, so a healthy run still costs exactly
 one triage call per attempt.
 
+**One exception to "`reject_idea` ends the node", off by default** (`host_refusal_deferral`,
+2026-09-26). When the operator's host scorer refuses a candidate through its declared contract
+(`cmd.host_scorer.expect`) for the FIRST time in a node's lifecycle, the task declares
+`host_scorer.would_be_key`, the refused candidate's would-be number beats the current champion (a run
+with no champion yet defers nothing), and the repair
+cap leaves room for another judged attempt, a `reject_idea` is **held** for one repair: the repair's
+prompt shows the verdict and the judge's words, the next judged attempt decides (`reject_idea`
+included), and if the chain ends first — the Developer declaring it stuck, a dead provider, a floor,
+the budget, a stop — the held `reject_idea` is the node's terminal. The durable `node_repaired` row
+records the hold (`judge_deferred`, with the would-be number and the champion's metric and node id the
+gate compared) beside the engine's `repair`. Measured on MiniOneRec inf13: two
+fast candidates were rejected at their first refusal (one on a false premise about the gate), and one
+reached 4.17x inside the gate in two repairs once reset.
+
 Collapsing those two rows was a real defect and it cost more than it saved: one healthy model
 emitting a single out-of-enum verdict raised a run-level pause carrying no `node_id` (so a node reset
 could not clear it) telling the operator to check credits, key and base URL — using the *model's own*

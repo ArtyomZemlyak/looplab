@@ -1329,8 +1329,16 @@ def make_policy(name: str = "greedy", *, n_seeds: int, max_nodes: int,
         # accepted values: without them the refusal states the problem and not the fix.
         raise ConfigRefusal(f"unknown policy: {name!r}; choose one of: "
                             + ", ".join(available_policies()))
-    return factory(n_seeds=n_seeds, max_nodes=max_nodes, ablate_every=ablate_every,
-                   depth=depth, params=params)
+    policy = factory(n_seeds=n_seeds, max_nodes=max_nodes, ablate_every=ablate_every,
+                     depth=depth, params=params)
+    # The operator's Card lane width (`Settings.card_select_k`), stamped as the attribute
+    # `card_selection.py::card_lane_width` already reads. ASHA/BOHB are skipped: their selection lane
+    # is `_asha_lane`'s per-rung width, and a width stamped here would reach only their prefetch
+    # ceiling and disagree with the freshness set that lane defines.
+    select_k = params.get("card_select_k")
+    if select_k is not None and not isinstance(policy, ASHAPolicy):
+        policy.card_select_k = max(1, int(select_k))
+    return policy
 
 
 # THE RUN-LEVEL KNOBS A POLICY IS BUILT WITH, spelled ONCE (review 2026-09-22, SCJ-01). A policy is
@@ -1347,19 +1355,22 @@ def make_policy(name: str = "greedy", *, n_seeds: int, max_nodes: int,
 # both pass it, instead of a value one of them silently leaves at the factory's default. The names
 # are the `Settings`/`EngineOptions` field names; the returned keys are `make_policy`'s.
 def policy_knobs(*, n_seeds, max_nodes, ablate_every, debug_depth, operator_bandit, asha_eta,
-                 asha_rung_nodes, mcts_cost_weight, mcts_value_weight, model_arms) -> dict:
+                 asha_rung_nodes, mcts_cost_weight, mcts_value_weight, model_arms,
+                 card_select_k) -> dict:
     """Every `make_policy` keyword a run holds, from the run's own values. Pure; no coercion — the
     factories above coerce and clamp, exactly as they did for the launch's literal kwargs.
 
     `model_arms` is the PARSED table `parse_model_arms` returns (`{arm: (model, cost)}`, what the
     engine holds as `_model_arms`); the policy is handed only each arm's relative cost, without the
     implicit default arm, which `GreedyTree` adds itself (so no declared arm keeps the router off).
+    `card_select_k` is the operator's Card lane width (None = the policy's own; see `make_policy`).
     """
     return {"n_seeds": n_seeds, "max_nodes": max_nodes, "ablate_every": ablate_every,
             "debug_depth": debug_depth, "operator_bandit": operator_bandit,
             "eta": asha_eta, "rung_nodes": asha_rung_nodes,
             "cost_weight": mcts_cost_weight, "value_weight": mcts_value_weight,
-            "model_arms": {arm: cost for arm, (_model, cost) in (model_arms or {}).items()}}
+            "model_arms": {arm: cost for arm, (_model, cost) in (model_arms or {}).items()},
+            "card_select_k": card_select_k}
 
 
 # The `policy_knobs` keys a Strategist's `policy_params` may NOT restate: the run owns them. The
@@ -1367,8 +1378,11 @@ def policy_knobs(*, n_seeds, max_nodes, ablate_every, debug_depth, operator_band
 # the Strategist's own OPERATOR knob with its own grant, `debug_depth`/`operator_bandit` are
 # run-wide settings, and `model_arms` names models only the engine can resolve
 # (`Engine._model_arms`) — a params-supplied table could route a build to an arm with no model
-# behind it. Every other key (`eta`, `rung_nodes`, `cost_weight`, `value_weight`, `c`) is a
-# per-strategy choice, and an explicit `policy_params` entry for it wins over the run's value for
-# the rebuild that carries it.
+# behind it. `card_select_k` is the operator's Card lane width: a Strategist that switches to greedy
+# must not also be able to narrow the lane the operator widened (or widen one they left alone).
+# Every other key (`eta`, `rung_nodes`, `cost_weight`, `value_weight`, `c`) is a per-strategy choice,
+# and an explicit `policy_params` entry for it wins over the run's value for the rebuild that carries
+# it.
 RUN_OWNED_POLICY_KNOBS: frozenset[str] = frozenset({
-    "n_seeds", "max_nodes", "ablate_every", "debug_depth", "operator_bandit", "model_arms"})
+    "n_seeds", "max_nodes", "ablate_every", "debug_depth", "operator_bandit", "model_arms",
+    "card_select_k"})

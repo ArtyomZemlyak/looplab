@@ -1764,6 +1764,65 @@ def handoff_scope(enabled: bool = True):
         _handoff_ctx.reset(tok)
 
 
+# THE CANCEL TOKEN OF ONE PIECE OF WORK, as its PHASES read it (doc 68 68.7). Measured on
+# `minionerec-backbones-v10` (2026-09-27): the operator dropped card-16 at 01:33:11 while its
+# speculative build ran `Developer·stages`; the stages phase ran on to 01:44:20, `Developer·plan`
+# STARTED for the dropped card at 01:47:21, and only a `restart` 32 minutes later closed its request —
+# after which the Developer loop still ran until the process got SIGTERM. Nothing in the build could
+# be told to stop: `drive_tool_loop` takes a `cancel_check`, but no Developer phase passed one, and a
+# token published around the build with `cancel_check_scope` alone never reached the provider request
+# either, because the loop re-publishes its OWN predicate around every `client.chat` (the wall-clock
+# one, since every Developer session has a time budget) and that shadows the outer one.
+#
+# So the owner publishes ONE predicate here, and `agents/agent.py::run_phase` — the chokepoint every
+# Developer phase goes through — reads it three ways: a phase whose token already fired never
+# starts (`PhaseCancelled`, before any provider call); a running phase gets it as its `cancel_check`,
+# so its loop ends at the next turn boundary, its remaining tool calls are stubbed and an in-flight
+# streamed generation is cut (the loop hands the same predicate to the request); and a phase that
+# ended because of it raises instead of handing a fallback to the next phase. The scope also
+# publishes the predicate as the ambient request token (`core/llm.py::cancel_check_scope`), for the
+# provider calls a build makes outside a phase loop. `None` publishes nothing: a block outside a
+# scope — every unit test, every non-build caller — is byte-identical to before this existed.
+_phase_cancel_ctx: contextvars.ContextVar = contextvars.ContextVar(
+    "LOOPLAB_phase_cancel", default=None)
+
+
+@contextlib.contextmanager
+def phase_cancel_scope(cancelled):
+    """Publish `cancelled` — a zero-argument predicate — as the cancel token of every agent phase
+    and every provider request made in this context (see the comment above). A non-callable is a
+    no-op, so an owner with no token can open the scope unconditionally."""
+    if not callable(cancelled):
+        yield
+        return
+    tok = _phase_cancel_ctx.set(cancelled)
+    try:
+        with cancel_check_scope(cancelled):
+            yield
+    finally:
+        _phase_cancel_ctx.reset(tok)
+
+
+def phase_cancel_check():
+    """The active `phase_cancel_scope` predicate, or None outside one."""
+    return _phase_cancel_ctx.get()
+
+
+def phase_cancelled() -> bool:
+    """Has the owner of the active `phase_cancel_scope` cancelled? False outside one.
+
+    A GUARDED probe, like `core/llm.py::request_cancelled` and the loop's own `_cancelled`: a
+    predicate that raises answers False, because a broken observer must never be able to end the
+    paid work it observes."""
+    predicate = _phase_cancel_ctx.get()
+    if predicate is None:
+        return False
+    try:
+        return bool(predicate())
+    except Exception:  # noqa: BLE001 — a broken cancel probe must not fail the phase it observes
+        return False
+
+
 def summarize_phase(client, messages, *, phase: str, next_phase: str, min_chars: int = 2_000) -> str:
     """ONE LLM call that distills a COMPLETED phase's transcript into a handoff brief for the NEXT
     phase — so the next phase trusts what was already explored instead of re-reading the same repo /

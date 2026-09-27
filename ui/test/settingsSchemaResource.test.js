@@ -228,14 +228,22 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   A row because it changes a prompt; the Python half moved too.
   //   227 -> 228 (2026-09-26): `noise_floor_mid_search` — the noise floor measured once mid-search.
   //   A row because an operator must be able to move a spend they opted into; the Python half moved too.
-  //   228 -> 229 (2026-09-26): `seed_from_run` — a new run seeded from a prior run's node. A row
-  //   because the web start route is where an operator reaches for it; the Python half moved too.
-  //   229 -> 230 (2026-09-27): `ablation_simplify` — a no-worse ablation probe nominates the program
-  //   it ran as a node. A row because it spends a node per nomination; the Python half moved too.
-  //   230 -> 231 (2026-09-27, the merge of master): `max_launch_timeout_s` — the hard
-  //   per-launch wall clock (24 h default, up to 7 days). A row because it decides whether a
-  //   multi-day training is killed at a day; the Python half moved too.
-  assert.equal(Object.keys(schema.fieldByKey).length, 231)
+  //   228 -> 229 (2026-09-27): `max_launch_timeout_s` — the hard per-launch wall clock (24 h default,
+  //   up to 7 days). A row because it decides whether a multi-day training is killed at a day; the
+  //   Python half moved too.
+  //   229 -> 231 (2026-09-26): `host_refusal_deferral` + `host_refusal_repair_lead` — whether a
+  //   first host-contract refusal holds the judge's reject_idea for one repair, and whether its
+  //   diagnosis leads the repair. The Python half moved too.
+  //   231 -> 232 (2026-09-26): `host_scorer_account` — whether a host refusal's failure text is the
+  //   scorer's own account instead of the stderr tail. The Python half moved too.
+  //   232 -> 233 (2026-09-27): `card_select_k` — the operator's Card lane width, how many concurrent
+  //   builds the freshness gate keeps. A row because it is a width an operator sets per run; the
+  //   Python half moved too.
+  //   233 -> 235 (2026-09-27, the merge of the branch): `seed_from_run` — a new run seeded from a
+  //   prior run's node, a row because the web start route is where an operator reaches for it —
+  //   and `ablation_simplify` — a no-worse ablation probe nominates the program it ran as a node,
+  //   a row because it spends a node per nomination. The Python half moved too.
+  assert.equal(Object.keys(schema.fieldByKey).length, 235)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

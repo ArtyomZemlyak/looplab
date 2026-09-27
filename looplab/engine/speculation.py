@@ -15,6 +15,7 @@ from __future__ import annotations
 import functools
 import collections
 import logging
+import threading
 import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Mapping, Optional
@@ -106,7 +107,29 @@ CARD_BUILD_SKIP_REASONS = (
     # adopted build, width > 1, outlives the session the swap waits for). Nothing is wrong with the
     # Card; the build is simply not the treatment the run now uses.
     "builder_replaced",
+    # The ONE `producer_failed` close that is not a producer giving up: the head carried an attempt
+    # receipt from a process that DIED (a restart, a kill), and no live producer owns it. See
+    # `UNRECONCILED_AFTER_RESTART` for why this close alone does not bar the Card.
+    "unreconciled_after_restart",
 )
+
+# THE RESTART CLOSE, NAMED (2026-09-27, operator review of MiniOneRec inf13). A head whose attempt
+# receipt belongs to a dead process is quarantined `producer_failed` so the possibly-billed provider
+# work is not silently bought twice — and that word used to bar the Card from speculative election
+# FOR GOOD, sending it to the serial lane whose `await` blocks evaluation admission for the whole
+# build. Measured on inf13: every restart closed its in-flight card this way (card-7 at seq 2547), and
+# a node reset during the resulting serial build waited 41 min on an idle GPU. A restart is not the
+# Card's fault, so ONE such close leaves it speculatively electable (`_producer_failed_card_ids`); a
+# second close of any kind — a restart loop the Card itself provokes included — bars it as before.
+#
+# PROVEN, NOT INFERRED (critic review 2026-09-27). "No live producer, no result, a receipt present"
+# is also what an attempt of THIS process looks like once its producer released without storing a
+# result — and a tag that lets a Card off its bar must not be handed to a give-up the Card may own.
+# So the name is written only when the receipt's own seq is at or below the log tail this Engine saw
+# when it started (`_note_process_entry`), i.e. when an EARLIER process wrote it
+# (`_attempt_predates_this_process`); an in-process quarantine closes bare `producer_failed`, as
+# every close did before the name existed.
+UNRECONCILED_AFTER_RESTART = "unreconciled_after_restart"
 
 # WHY a consumed raw proposal staged nothing BEFORE the staging fence could say — the two
 # pre-staging paths of `_serve_raw_card_stage`, named beside `CARD_BUILD_SKIP_REASONS` because a
@@ -752,6 +775,13 @@ class SpeculationMixin:
             self._spec_reusable: dict[tuple[str, int], SpecBuildResult] = {}
         if not hasattr(self, "_spec_request_builder"):
             self._spec_request_builder: dict[tuple[str, int], int] = {}
+        if not hasattr(self, "_spec_build_cancel"):
+            # Each running build's CANCEL TOKEN (doc 68 68.7), set by the main task when the
+            # build's request closes or its Card dies (`_cancel_build_producer`) and read by the
+            # build's own phases through `agents/tool_loop.py::phase_cancel_scope`. In memory on
+            # purpose: it is an instruction to a worker of THIS process, never queue authority —
+            # the durable fact is the `card_build_done` that closed the request.
+            self._spec_build_cancel: dict[tuple[str, int], threading.Event] = {}
         if not hasattr(self, "_spec_raw_stage_inflight"):
             self._spec_raw_stage_inflight = False
         if not hasattr(self, "_spec_raw_stage_result"):
@@ -795,6 +825,13 @@ class SpeculationMixin:
     _eval_boundary_owed: bool = False
     _eval_drain_requested: bool = False
     _eval_budget_stop: Optional[BaseException] = None
+    #   `_spec_entry_seq`      the log's last seq when THIS Engine started — noted by `_enter_run`
+    #                          from the log it already reads, and lazily by the first attempt
+    #                          receipt or quarantine consult of an Engine driven without `run()`
+    #                          (`_note_process_entry`). Every `card_build_attempted` at or below it
+    #                          was written by an EARLIER process: the one fact that makes a
+    #                          restart close a restart close. `None` until noted; never moved after.
+    _spec_entry_seq: Optional[int] = None
     #   `_outer_boundary_served_tail`  the log seq at which a session last handed back for a
     #                          RECURRING producer yield, so the same unchanged condition cannot hand
     #                          back again — see `_card_phase_decide_exit`'s rate-limit clause.
@@ -1013,6 +1050,36 @@ class SpeculationMixin:
     def _adopted_producers(self) -> set:
         self._ensure_speculation_state()
         return set(self._spec_adopted) & set(self._spec_build_inflight)
+
+    def _cancel_build_producer(self, key: tuple[str, int]) -> bool:
+        """Tell the build still running for `key` to stop, and say whether one was (doc 68 68.7).
+
+        COOPERATIVE, not a kill: the token is what the build's own phases read
+        (`agents/tool_loop.py::phase_cancel_scope`) — no new Developer phase starts, the running
+        loop ends at its next turn boundary, and a streamed generation in flight is cut. The worker
+        thread then returns on its own, so `_run_isolated_producer` keeps waiting for it
+        (`abandon_on_cancel=False` still holds: a worker is never left behind the teardown) — it just
+        no longer waits for hours of paid work nobody will commit.
+
+        Called ONLY for a request that is closed (`_append_card_build_done`, the orphan sweep in
+        `_discard_orphaned_spec_results`), which is what makes a cancelled result safe to drop
+        unstored (`_produce_card_build`). Idempotent; False when nothing of ours is building `key`.
+
+        MEASURED, and why this exists: on `minionerec-backbones-v10` the operator dropped card-16
+        13 minutes into its build and the build ran on — stages to completion, then a fresh
+        `Developer·plan` — until a `restart` 32 minutes later, holding the run's last node slot the
+        whole time (68.7, 68.9)."""
+        self._ensure_speculation_state()
+        if key not in self._spec_build_inflight:
+            return False
+        token = self._spec_build_cancel.get(key)
+        if token is None:
+            return False
+        if not token.is_set():
+            token.set()
+            _LOG.info("cancelled the live build of %s (generation %s): its request is closed",
+                      key[0], key[1])
+        return True
 
     def _drop_producer_pool(self) -> None:
         """Forget every pooled producer pair and lease, and retire the builds running on them.
@@ -1283,6 +1350,91 @@ class SpeculationMixin:
     def _terminal_intent(state: RunState) -> bool:
         return state.halted
 
+    @staticmethod
+    def _pause_drains_builds(state: RunState) -> bool:
+        """Is the run PAUSED by `looplab stop --drain-builds`, and nothing stronger?
+
+        While it holds, a build already running finishes and COMMITS (its node lands pending, to be
+        evaluated after `looplab resume`) instead of being closed `run_is_stopping` and discarded;
+        nothing new is elected, and a request no producer is running for is closed as today. Never
+        on a finish or an abort (`finished` / `stop_requested`): those end the run, and a node
+        committed into an ending run is work nobody will evaluate.
+
+        ONLY THE OPERATOR'S OWN PAUSE STARTS ONE, AND ANY LATER PAUSE ENDS IT (critic review
+        2026-09-27; the fold's half is `replay.py::_on_pause`). An engine auto-pause — a provider
+        outage above all — means the builds still running are against a dead endpoint: drained,
+        each would end in a REAL `producer_failed` close that bars its Card, where a plain stop
+        closes them `stale` and bars nothing. A later plain `looplab stop` ends one the same way.
+
+        MEASURED 2026-09-27 on MiniOneRec inf13: every operator restart threw away the builds in
+        flight (card-7 at seq 2547; card-4 committed seconds before a kill), each up to an hour of
+        Developer work, because a finished build under any halt is closed `run_is_stopping`."""
+        return bool(state.paused and getattr(state, "pause_drain_builds", False)
+                    and not state.finished and not state.stop_requested)
+
+    def _drains_builds_now(self, state: RunState) -> bool:
+        """`_pause_drains_builds`, and no run-ending stop HELD for the loop head.
+
+        A spend ceiling parked on `_eval_budget_stop` ends the run as soon as the head raises it, so
+        a node committed under it is work nobody evaluates — the reason `_session_gates` reads a held
+        stop as a terminal intent. A drain that ignored it did worse than commit (critic review
+        2026-09-27): the producer that PARKED the stop stored no result, the drain overrode the
+        refused commit, and the head — no live producer, no result, a receipt present — was closed
+        `producer_failed` inside the very process that made the attempt, the race `_session_gates`
+        exists to close. With the stop held this is a plain stop: the head closes `stale`."""
+        return self._pause_drains_builds(state) and self._eval_budget_stop is None
+
+    # How often a drain-builds pause re-checks its adopted producers from the outer loop, which has no
+    # wake-up stream of its own. Each check re-folds the log, and a build takes minutes to hours, so a
+    # couple of seconds costs nothing in latency and keeps a long drain from re-folding hundreds of
+    # times a minute.
+    _DRAIN_BUILDS_POLL_S = 2.0
+
+    def _draining_builds_in_flight(self, state: RunState) -> bool:
+        """A drain-builds pause still has work to wait for: a LIVE producer or a finished result, for
+        a request that is still OPEN (the next serve commits or closes it).
+
+        OPEN REQUESTS ONLY (critic review 2026-09-27). A producer whose request is already closed —
+        the epoch rotated under it, the eval budget ran out — builds a result nothing will commit
+        (`_discard_orphaned_spec_results` drops it), so waiting for it bought nothing but a drain
+        that ends when that producer does, hours of provider time later or never."""
+        self._ensure_speculation_state()
+        outstanding = {
+            key for request in self._outstanding_requests(state)
+            if (key := self._request_key(request)) is not None
+        }
+        return bool(outstanding & (set(self._spec_build_inflight) | set(self._spec_builds)))
+
+    @staticmethod
+    def _dead_card(state: RunState, card_id: str) -> tuple[bool, bool]:
+        """`(dead, merged_away)`: is this request's Card closed to further work, and is it ABSENT?
+
+        ONE reading for `_serve_card_builds`' two closes of a dead Card's head — the in-process one
+        (doc 68 68.7) and the crash-recovery one — lifted out of the second so the two cannot come
+        to disagree about what "dead" means.
+
+        Two DEAD shapes: a DROPPED Card stays PRESENT with status=="dropped" (its reason MAY be
+        None); a MERGED Card is folded OUT of `state.cards` (ABSENT) and recorded only in its
+        canonical's `aliases` — the fold never assigns `Card.merged_into`, so a merged head resolves
+        via alias membership (a PROVEN merge receipt), not a present `merged_into` row. An absent id
+        that is NOT a known alias is a corrupt/partial chain — not dead (do not force-close on an
+        unproven receipt), matching the counterfactual path's fail-closed stance.
+
+        Key the dropped case on FOLDED status=="dropped", NOT `dropped_reason`: a valid reason-less
+        `card_dropped` folds to status=="dropped" with dropped_reason=None, so a reason-keyed check
+        would leave a head outstanding forever after a crash. Matches the selection guard
+        `_card_administratively_dead`. (`merged_into` stays a defensive disjunct; it is never set.)
+        """
+        card = state.cards.get(card_id)
+        merged_away = card is None and card_id in {
+            alias for c in state.cards.values()
+            for alias in (getattr(c, "aliases", None) or [])
+            if isinstance(alias, str) and alias
+        }
+        dead = merged_away or (
+            card is not None and (card.status == "dropped" or card.merged_into is not None))
+        return dead, merged_away
+
     def _discard_spec_result(self, result: Optional[SpecBuildResult]) -> None:
         if result is None or result.roles is None:
             return
@@ -1301,6 +1453,14 @@ class SpeculationMixin:
         for key in list(self._spec_builds):
             if key not in outstanding:
                 self._discard_spec_result(self._spec_builds.pop(key, None))
+        # …and a build still RUNNING for a request that closed, whichever path closed it (doc 68
+        # 68.7). `_append_card_build_done` cancels the producer of the request it closes itself;
+        # this is the net under every other close, so no path can leave a paid Developer session
+        # working for a request nothing will commit. Safe against a fresh request: a producer is
+        # started only for a request already in the log, and every caller passes a fold read after.
+        for key in list(self._spec_build_inflight):
+            if key not in outstanding:
+                self._cancel_build_producer(key)
         for key in list(self._spec_reusable):
             card = state.cards.get(key[0])
             if (key[1] != state.search_epoch or card is None
@@ -1411,14 +1571,29 @@ class SpeculationMixin:
         # Without it `run_phase` had no ledger to write to, so a speculative build's plan handed its
         # steps nothing: measured 2026-09-25 on MiniOneRec inf12, 20 plan and 58 plan_step sessions
         # ran under `card_build` with no brief, against 4 and 15 on the serial path.
-        from looplab.agents.agent import handoff_scope
+        # …AND THE BUILD'S CANCEL TOKEN (doc 68 68.7), published to every phase and provider request
+        # of the build: `_start_request_producer` minted it before this worker started, and the main
+        # task sets it when the request closes (`_cancel_build_producer`). None — a build started
+        # outside a session (tests call this directly) — opens no scope at all.
+        _tokens = getattr(self, "_spec_build_cancel", None)
+        cancel = _tokens.get(key) if _tokens is not None else None
+        from looplab.agents.agent import handoff_scope, phase_cancel_scope
         with self._op_span("card_build", card_id=card_id,
                            card_build_generation=build_generation) as span, \
-                handoff_scope(enabled=self._phase_handoff_summary):
+                handoff_scope(enabled=self._phase_handoff_summary), \
+                phase_cancel_scope(cancel.is_set if cancel is not None else None):
             # Read the id from the ACTIVE span rather than from the handle: `_op_span` degrades to a
             # null context when no tracer is wired, and a build with no trace must carry no claim.
             build_trace = tracing.current_ids()[0] if span is not None else None
             result = self._produce_requested_card(request, key, roles)
+        if cancel is not None and cancel.is_set():
+            # WHATEVER THE DEVELOPER HANDED BACK IS NOT A BUILD: its phases refused or were cut, and
+            # it degraded around that (a crash sentinel, or a working set nobody finished). Said as
+            # a failure, and `_produce_card_build` stores nothing for it anyway — the request that
+            # asked for it is closed.
+            result = SpecBuildResult(
+                card_id, build_generation, dict(result.action), False, roles=roles,
+                error="cancelled: the build's request was closed while it ran")
         return (result if not isinstance(build_trace, str) or not build_trace
                 else replace(result, build_trace=build_trace))
 
@@ -1613,7 +1788,10 @@ class SpeculationMixin:
                     or not parent_generations_current(latest, reserved.parent_generations)
                 )
                 transient = (
-                    latest.halted
+                    # …except a DRAIN-BUILDS pause, whose whole point is this commit
+                    # (`_drains_builds_now`: never under a held spend ceiling): the node lands
+                    # pending and `looplab resume` evaluates it.
+                    (latest.halted and not self._drains_builds_now(latest))
                     or (
                         max_eval_seconds is not None
                         and latest.total_eval_seconds >= max_eval_seconds
@@ -1797,12 +1975,25 @@ class SpeculationMixin:
         if skipped is not None and skipped not in {"producer_failed", "stale"}:
             return False
         payload: dict[str, Any] = {"card_id": card_id, "generation": generation}
+        # A BUILD STILL RUNNING FOR THE REQUEST THIS CLOSES is told to stop once the close is durable
+        # (doc 68 68.7): nothing can commit its result any more, so every further turn it takes is
+        # paid for nothing. `run_is_stopping` used to close the head with the producer live and
+        # leave it running — on v10 the Developer loop outlived the close by four minutes, until
+        # SIGTERM. The row says so (additive, fold-ignored), so a post-mortem can tell a build that
+        # was stopped from one that ran on to its end.
+        # Only a build this process can actually TELL to stop counts: an in-flight key with its token
+        # (`_start_request_producer` mints both), so the flag never claims a stop that did not happen.
+        live_producer = (skipped is not None
+                         and key in (getattr(self, "_spec_build_inflight", None) or ())
+                         and key in (getattr(self, "_spec_build_cancel", None) or {}))
         if skipped is not None:
             payload["skipped"] = skipped
             # ADDITIVE and fold-ignored (invariant #5): which of the nine refusals fired. The coarse
             # word stays exactly what it was, so every existing reader is byte-identical on it.
             if isinstance(skipped_reason, str) and skipped_reason.strip():
                 payload["skipped_reason"] = skipped_reason.strip()[:64]
+            if live_producer:
+                payload["producer_cancelled"] = True
         else:
             payload.update({"node_id": node_id, "speculative": True})
         def _plan(events, tail) -> bool:
@@ -1818,7 +2009,12 @@ class SpeculationMixin:
             return True
 
         # The head stays open, so the queue is unchanged and the next serve pass re-closes it.
-        return retry_tail_cas(self.store, _plan, on_exhaust=lambda: False)
+        closed = retry_tail_cas(self.store, _plan, on_exhaust=lambda: False)
+        if closed and live_producer:
+            # AFTER the close is durable, never before: a cancelled build stores no result
+            # (`_produce_card_build`), which is safe only for a request nothing can still commit.
+            self._cancel_build_producer(key)
+        return closed
 
     def _record_card_build_attempt(self, state: RunState,
                                    request: Mapping[str, Any]) -> None:
@@ -1836,6 +2032,9 @@ class SpeculationMixin:
         key = self._request_key(request)
         if key is None:
             return
+        # BEFORE the append, so every receipt this Engine writes sits strictly above its own entry
+        # boundary and can never be read back as an earlier process's (`_attempt_predates_this_process`).
+        self._note_process_entry()
         position = self._request_position(state, key)
         try:
             self.store.append(EV_CARD_BUILD_ATTEMPTED, {
@@ -1854,7 +2053,9 @@ class SpeculationMixin:
         Position-exact on purpose: the same (card_id, generation) can legitimately be re-elected after
         an earlier request for it was closed, and that older — fully reconciled — attempt must not
         quarantine the new head. Callers must first rule out an attempt this process itself started
-        (`_spec_build_inflight` / a present `_spec_builds` result).
+        (`_spec_build_inflight` / a present `_spec_builds` result). Even then the receipt may be this
+        process's own (a producer that released with no result stored): WHOSE it is, is
+        `_attempt_predates_this_process`, and only that answer may name the close a restart.
         """
         position = SpeculationMixin._request_position(state, key)
         index = int(state.card_builds_done) if position is None else position
@@ -1865,6 +2066,46 @@ class SpeculationMixin:
             and attempt.get("generation") == key[1]
             for attempt in state.card_build_attempts
         )
+
+    def _note_process_entry(self, events=None) -> int:
+        """The log's last seq when THIS Engine started (`_spec_entry_seq`), noted on first use.
+
+        `_enter_run` notes it from the log it reads first, so for every real run it is the tail at
+        engine start. An Engine driven without `run()` notes it lazily — at its first attempt receipt
+        (`_record_card_build_attempt`, BEFORE the append) or its first quarantine consult, whichever
+        comes first — and both are exact: before either, this Engine has appended no receipt, so
+        every receipt already in the log is another process's. Never moved once noted, so a second
+        `run()` of the same Engine keeps its first process's attempts its own."""
+        if self._spec_entry_seq is None:
+            if events is None:
+                events = self.store.read_all()
+            self._spec_entry_seq = events[-1].seq if events else -1
+        return self._spec_entry_seq
+
+    def _attempt_predates_this_process(self, events, state: RunState,
+                                       key: tuple[str, int]) -> bool:
+        """Was this open request's `card_build_attempted` receipt written by an EARLIER process?
+
+        The restart tag's proof (`UNRECONCILED_AFTER_RESTART`). `_head_has_unreconciled_attempt`
+        answers "a receipt no live producer of mine owns", which a dead process's attempt and one of
+        this process's own (its producer released with no result stored) both satisfy; only the
+        receipt's SEQ against `_note_process_entry` tells them apart. Read off the raw log rows —
+        `events` is the list `state` was folded from — because the folded attempt rows stay
+        byte-identical: `events/authoring_projection.py` says why nothing off the event envelope is
+        stamped onto them."""
+        entry = self._note_process_entry(events)
+        position = self._request_position(state, key)
+        index = int(state.card_builds_done) if position is None else position
+        for event in events:
+            if event.type != EV_CARD_BUILD_ATTEMPTED or type(event.seq) is not int:
+                continue
+            data = event.data if isinstance(event.data, Mapping) else {}
+            if (event.seq <= entry
+                    and data.get("card_id") == key[0]
+                    and type(data.get("generation")) is int and data.get("generation") == key[1]
+                    and type(data.get("index")) is int and data.get("index") == index):
+                return True
+        return False
 
     def _matching_created_speculation(
         self, state: RunState, request: Mapping[str, Any],
@@ -1906,11 +2147,18 @@ class SpeculationMixin:
 
     @staticmethod
     def _producer_failed_card_ids(state: RunState) -> set[str]:
-        """Replay-accepted give-ups that must next use the serial compatibility path."""
+        """Replay-accepted give-ups that must next use the serial compatibility path.
 
+        Except a Card whose ONLY `producer_failed` close is the restart quarantine
+        (`UNRECONCILED_AFTER_RESTART`): nothing about that Card failed — its producer's process died —
+        so it stays speculatively electable. A second close of any kind bars it as before. A log
+        written before the reason existed carries none, so every legacy close still bars."""
+
+        reasons = getattr(state, "card_build_producer_failed_reasons", None) or {}
         return {
             card_id for card_id in state.card_build_producer_failed
             if isinstance(card_id, str) and card_id
+            and reasons.get(card_id) != [UNRECONCILED_AFTER_RESTART]
         }
 
     def _election_excluded_card_ids(self, state: RunState) -> set[str]:
@@ -2010,7 +2258,7 @@ class SpeculationMixin:
         # (`inert` was an undiagnosed proxy for which bound ended the session), same remedy.
         if generation != state.search_epoch:
             return "stale:search_epoch_rotated", None
-        if self._terminal_intent(state):
+        if self._terminal_intent(state) and not self._drains_builds_now(state):
             return "stale:run_is_stopping", None
         if max_eval_seconds is not None and state.total_eval_seconds >= max_eval_seconds:
             return "stale:eval_budget_exhausted", None
@@ -2166,7 +2414,9 @@ class SpeculationMixin:
         request when several producers hold requests at once."""
 
         self._ensure_speculation_state()
-        state = self._session_state()
+        # The events too: the restart quarantine below proves WHOSE attempt receipt it closes from
+        # the raw rows `state` was folded from (`_attempt_predates_this_process`).
+        events, state = self._fold_current()
         if request is None:
             request = self._head_request(state)
         elif self._request_position(state, self._request_key(request)) is None:
@@ -2208,9 +2458,21 @@ class SpeculationMixin:
         #
         # It cannot wedge finalization: `_terminal_intent` is tested BEFORE this and wins the reason
         # ladder, so a stopping run still closes the head as `run_is_stopping` with a producer live.
-        commit_refused_this_turn = not allow_commit
+        # A DRAIN-BUILDS PAUSE (`_pause_drains_builds`) is the one halt under which a build already
+        # running is still worth its commit: the pause is not a fact about the world the build was
+        # made for, only an instruction to start nothing new. So it neither moves the world nor
+        # refuses the commit; the producer-less head below is closed instead of waiting for a
+        # producer the closed production gate will never start.
+        # …UNLESS A SPEND CEILING IS HELD (`_drains_builds_now`, critic review 2026-09-27).
+        # `allow_commit` carries that stop too (`_session_gates`), and overriding it let the head of
+        # the producer that PARKED the stop — no live producer, no result stored — fall through to
+        # the quarantine below and close `producer_failed` inside the process that made the attempt.
+        # With the stop held this is a plain stop, and the head closes `run_is_stopping`.
+        draining = self._drains_builds_now(state)
+        stopping = self._terminal_intent(state) and not draining
+        commit_refused_this_turn = not allow_commit and not draining
         world_moved = (key[1] != state.search_epoch
-                       or self._terminal_intent(state)
+                       or stopping
                        or budget_exhausted)
         # …AND LEFT OPEN WHEN THE BUILD HAS ALREADY FINISHED (2026-09-24). The rule above held the
         # head only while the producer ran; the session then waited the build out (a live producer
@@ -2221,16 +2483,38 @@ class SpeculationMixin:
         # result as work to wait for), the outer loop runs its cadences, and the next session commits
         # it through `_claim_requested_card_build`, which re-checks epoch, freshness, budget and the
         # Card itself — the boundary 8d9952a1 asked for is honoured, just not paid for with the build.
-        if (commit_refused_this_turn and not world_moved
+        #
+        # A DEAD CARD IS THE FOURTH FACT ABOUT THE WORLD (doc 68 68.7), and it is closed at once when
+        # this process is building it or holds its finished result. Measured on
+        # `minionerec-backbones-v10`: the operator dropped card-16 at 01:33:11, 13 minutes into its
+        # build; the head stayed open because the recovery close below skips a head whose producer
+        # is live, so the build ran on (stages to 01:44:20, then a fresh `Developer·plan` at
+        # 01:47:21) and the open request held the run's LAST node slot for 32 minutes — the queued
+        # operator injects could not take it, even after `llm_parallel=2` (68.9). Nothing can commit
+        # a dropped Card's build: the claim would refuse it `not_selected_now` whenever it finished.
+        # So it is closed now, with the Card's own reason, and the close cancels the live producer
+        # (`_append_card_build_done`). Only IN-PROCESS work takes this branch — a build still running
+        # here, or one that finished and SUCCEEDED: a head with no producer here and no result is
+        # crash recovery, and a producer that ran and gave up keeps its `producer_failed` close below
+        # (both ladders unchanged).
+        dead, merged_away = self._dead_card(state, key[0])
+        finished = self._spec_builds.get(key)
+        dead_in_process = dead and (key in self._spec_build_inflight
+                                    or (finished is not None and finished.success))
+        if (commit_refused_this_turn and not world_moved and not dead_in_process
                 and (key in self._spec_build_inflight or key in self._spec_builds)):
             return False
-        if world_moved or commit_refused_this_turn:
+        if world_moved or dead_in_process or commit_refused_this_turn:
             self._discard_spec_result(self._spec_builds.pop(key, None))
+            # `stopping`, not the bare terminal intent: under a drain the pause is not what refused
+            # this build, and an exhausted eval budget must say so rather than `run_is_stopping`.
             return self._append_card_build_done(
                 request, skipped="stale",
                 skipped_reason=("search_epoch_rotated" if key[1] != state.search_epoch else
-                                "run_is_stopping" if self._terminal_intent(state) else
-                                "eval_budget_exhausted" if budget_exhausted else "commit_not_allowed"))
+                                "run_is_stopping" if stopping else
+                                "eval_budget_exhausted" if budget_exhausted else
+                                ("card_gone" if merged_away else "card_dropped")
+                                if dead_in_process else "commit_not_allowed"))
         result = self._spec_builds.get(key)
         if result is None:
             # Quarantine before recovery even asks whether the Card is still alive: this head carries a
@@ -2238,12 +2522,22 @@ class SpeculationMixin:
             # already have been accepted and billed by the process that died. Restarting a producer
             # here would buy the identical Developer/Researcher work a second time with nothing in the
             # log to show for the first. `producer_failed` is the exact disposition wanted — it closes
-            # the head, keeps the Card buildable on the SERIAL path, and permanently bars this Card
-            # from being speculatively re-elected — and reusing it means the replay vocabulary and the
-            # quality denominator stay unchanged. The `card_build_attempted` row is what says WHY.
+            # the head, keeps the Card buildable on the SERIAL path, and bars this Card from being
+            # speculatively re-elected — and reusing it means the replay vocabulary and the quality
+            # denominator stay unchanged. The `card_build_attempted` row is what says WHY.
+            #
+            # …AND WHOSE (critic review 2026-09-27). A close PROVEN to be a restart's — the receipt
+            # predates this process — is named `unreconciled_after_restart`, and one such close does
+            # not bar the Card (`_producer_failed_card_ids`). A receipt THIS process wrote reaches
+            # here only when its own producer released with no result stored (a spawn refused at
+            # teardown, a close whose CAS ran out); that is not a restart, so it closes bare and bars
+            # the Card exactly as every close did before the name existed.
             if (key not in self._spec_build_inflight
                     and self._head_has_unreconciled_attempt(state, key)):
-                closed = self._append_card_build_done(request, skipped="producer_failed")
+                restart = self._attempt_predates_this_process(events, state, key)
+                closed = self._append_card_build_done(
+                    request, skipped="producer_failed",
+                    skipped_reason=UNRECONCILED_AFTER_RESTART if restart else None)
                 if closed:
                     self._spec_force_outer = True
                 return closed
@@ -2255,30 +2549,12 @@ class SpeculationMixin:
             # `outstanding` still true and no exit boundary reachable. Recognize a head whose Card was
             # dropped or merged (by recovery or an operator) as permanently unbuildable and close it
             # `stale`, so the outstanding request clears and the loop can reach its exit boundary. Never
-            # strand a live producer: skip while one is in-flight (its eventual result is released by
-            # `_discard_orphaned_spec_results` once the request closes), and leave an ALIVE card's request
-            # open so a producer can still be started for it.
-            # Two DEAD shapes: a DROPPED Card stays PRESENT with status=="dropped" (its reason MAY be
-            # None); a MERGED Card is folded OUT of `state.cards` (ABSENT) and recorded only in its
-            # canonical's `aliases` — the fold never assigns `Card.merged_into`, so a merged head
-            # resolves via alias membership (a PROVEN merge receipt), not a present `merged_into` row.
-            # An absent id that is NOT a known alias is a corrupt/partial chain — leave it open (do not
-            # force-close on an unproven receipt), matching the counterfactual path's fail-closed stance.
-            card = state.cards.get(key[0])
-            merged_away = card is None and key[0] in {
-                alias for c in state.cards.values()
-                for alias in (getattr(c, "aliases", None) or [])
-                if isinstance(alias, str) and alias
-            }
-            # Key the dropped case on FOLDED status=="dropped", NOT `dropped_reason`: a valid reason-less
-            # `card_dropped` folds to status=="dropped" with dropped_reason=None, so a reason-keyed check
-            # would leave this head outstanding forever after a crash. Matches the selection guard
-            # `_card_administratively_dead`. (`merged_into` stays a defensive disjunct; it is never set.)
-            if key not in self._spec_build_inflight and (
-                (card is not None
-                 and (card.status == "dropped" or card.merged_into is not None))
-                or merged_away
-            ):
+            # strand a live producer: skip while one is in-flight — and a live producer of THIS
+            # process never gets here for a dead Card anyway: the world-moved close above took its
+            # head and CANCELLED the build (doc 68 68.7), which stops the paid work instead of
+            # stranding it. An ALIVE card's request is left open so a producer can still be started
+            # for it. The two dead shapes and why each is keyed the way it is: `_dead_card`.
+            if key not in self._spec_build_inflight and dead:
                 # THE TWO DEAD SHAPES ARE TWO REASONS, because the comment above already treats
                 # them as two facts and a post-mortem reader needs the same split. A DROPPED card is
                 # PRESENT and administratively dead — somebody or something ended it, and the build
@@ -2293,6 +2569,11 @@ class SpeculationMixin:
                 return self._append_card_build_done(
                     request, skipped="stale",
                     skipped_reason="card_gone" if merged_away else "card_dropped")
+            if draining and key not in self._spec_build_inflight:
+                # Nothing is running for it and nothing new may start: close it the way any other
+                # halt would, so the drain can end.
+                return self._append_card_build_done(
+                    request, skipped="stale", skipped_reason="run_is_stopping")
             return False
         if self._spec_request_builder.get(key, self._spec_builder_generation) != (
                 self._spec_builder_generation):
@@ -2320,6 +2601,18 @@ class SpeculationMixin:
             self._discard_spec_result(self._spec_builds.pop(key, None))
             return True
         if outcome == "budget":
+            if draining:
+                # …EXCEPT UNDER A DRAIN (2026-09-27). The wait below is for an `add_nodes` extension a
+                # stopping run will not live to see: the engine exits once the drain ends and the
+                # result dies with it, leaving a head the next process quarantines. Worse, the result
+                # keeps `_draining_builds_in_flight` true, so the drain polls it every
+                # `_DRAIN_BUILDS_POLL_S` for ever. Close it the way the stop would have — dropped
+                # only once the close is durable, like every close below.
+                closed = self._append_card_build_done(
+                    request, skipped="stale", skipped_reason="run_is_stopping")
+                if closed:
+                    self._discard_spec_result(self._spec_builds.pop(key, None))
+                return closed
             # Keep both the durable head and its isolated result alive. A later add_nodes extension can
             # commit the exact paid result without rebuilding it or acknowledging the request as stale.
             return False
@@ -2486,6 +2779,15 @@ class SpeculationMixin:
             return
 
         def _store(result: SpecBuildResult) -> None:
+            token = self._spec_build_cancel.get(key)
+            if token is not None and token.is_set():
+                # A CANCELLED BUILD STORES NOTHING (doc 68 68.7). It was cancelled because its
+                # request CLOSED (`_cancel_build_producer` is called for nothing else), so there is
+                # no head left to advance off this slot — and a slot left holding it would be taken
+                # by a LATER request for the same (card, epoch), e.g. a reopened Card re-elected
+                # while this one wound down, and closed `producer_failed` over it.
+                self._discard_spec_result(result)
+                return
             self._discard_spec_result(self._spec_builds.get(key))
             self._spec_builds[key] = result
 
@@ -2501,6 +2803,7 @@ class SpeculationMixin:
             store=_store,
             release=lambda: (self._spec_build_inflight.discard(key),
                              self._spec_adopted.discard(key),
+                             self._spec_build_cancel.pop(key, None),
                              self._release_producer_pair(key)),
             notify=notify,
             notify_key=("producer", key),
@@ -3009,6 +3312,9 @@ class SpeculationMixin:
             return False
         self._producer_pair_misses = (None, 0)
         self._spec_build_inflight.add(key)
+        # Its cancel token, BEFORE the worker can start: the worker reads it once, at its first line
+        # (`_build_requested_card`), and a close that lands while it is running sets it (doc 68 68.7).
+        self._spec_build_cancel[key] = threading.Event()
         # Receipt BEFORE the producer can reach a provider, and after the inflight
         # marker so a main-task service turn in between cannot mistake this process's
         # own fresh attempt for a dead process's unreconciled one.
@@ -3045,6 +3351,7 @@ class SpeculationMixin:
         except BaseException:
             self._spec_build_inflight.discard(key)
             self._spec_adopted.discard(key)
+            self._spec_build_cancel.pop(key, None)
             self._release_producer_pair(key)
             raise
         return True
@@ -3823,3 +4130,17 @@ class SpeculationMixin:
                 self._eval_notify = None
                 if getattr(self, "_concurrent_research_repeat", False):
                     bg_tg.cancel_scope.cancel()
+
+
+def auto_pause_is_redundant(state: RunState) -> bool:
+    """Would an engine AUTO-PAUSE change nothing on this fold? The run is already halted — and NOT
+    merely draining its builds (`SpeculationMixin._pause_drains_builds`).
+
+    The writers' "already halted" check (`confirm_phase.py::_run_halt_intent`) skipped every
+    auto-pause under a drain-builds pause, so the one row that CANCELS a drain (`replay.py::_on_pause`)
+    was never written: a provider outage found by an evaluation still running kept the drain on, and
+    each build then ended against the dead endpoint in a real `producer_failed` close that bars its
+    Card, where a plain stop closes them `stale` (critic review 2026-09-27). Under a drain the
+    auto-pause is not redundant — it is what ends the drain. A work gate keeps `_run_halt_intent`:
+    nothing new starts under any pause."""
+    return bool(state.halted and not SpeculationMixin._pause_drains_builds(state))

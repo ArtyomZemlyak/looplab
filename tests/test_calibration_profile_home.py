@@ -282,23 +282,56 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               added and `[]` removed; `_EXPECTED_FIELD_COUNT` goes 259 -> 260 and both pins are
 #               re-set. INERT for a calibration replicate: off on both surfaces, and with it off the
 #               probe runs where it always did (and only when `eval_noise_seeds` asks for it).
+#   2026-09-27  + max_launch_timeout_s (the hard per-launch wall-clock ceiling, until now the literal
+#               `runtime/sandbox.py::MAX_TIMEOUT_S`, made configurable up to 7 days). The 'field set
+#               changed too' branch: a diff of `Settings.model_fields` against the pre-change tree
+#               reports exactly `['max_launch_timeout_s']` added and `[]` removed;
+#               `_EXPECTED_FIELD_COUNT` goes 260 -> 261 and both pins are re-set. INERT for a
+#               calibration replicate: its default is the literal it replaces (86400), the profile
+#               ships that default, and no toy evaluation comes near a day.
+#   2026-09-26  + host_refusal_deferral, host_refusal_repair_lead (the host-refusal pipeline: a first
+#               host-contract refusal holds the judge's `reject_idea` for one repair; the triage
+#               diagnosis of such a refusal leads the repair). The 'field set changed too' branch: an
+#               AST scan of `Settings`' annotated assignments against the pre-change tree reports
+#               exactly `['host_refusal_deferral', 'host_refusal_repair_lead']` added and `[]`
+#               removed; `_EXPECTED_FIELD_COUNT` goes 261 -> 263 and both pins are re-set. INERT for a
+#               calibration replicate (the profile ships both False, and the toy workload declares no
+#               host scorer, so no host contract can refuse); re-pinned on the COMPLETE-envelope rule.
+#               Rebased onto the six fields above: the branch pinned 255 -> 257 and 802196a4…
+#               against a tree without them, so neither side's digest describes the result.
+#               RECOMPUTED from the merged module (the pre-change tree re-derives a070e278…).
+#   2026-09-26  + host_scorer_account (a host-contract refusal's failure text is the scorer's own
+#               account instead of the stderr tail — the critic's fix to 71652c49, which had let the
+#               task field alone change the prompt). The 'field set changed too' branch: an AST scan
+#               of `Settings`' annotated assignments against the pre-change tree reports exactly
+#               `['host_scorer_account']` added and `[]` removed; `_EXPECTED_FIELD_COUNT` goes
+#               263 -> 264 and both pins are re-set (the pre-change tree re-derives the old digest
+#               82148327…; the branch's own 257 -> 258 and a3c14635… were cut against a tree without
+#               origin's six fields). INERT for a calibration replicate (the profile ships it False,
+#               and the toy workload declares no host scorer); re-pinned on the COMPLETE-envelope rule.
+#   2026-09-27  + card_select_k (the operator's Card lane width, `card_selection.py::card_lane_width`).
+#               The 'field set changed too' branch: an AST scan of `Settings`' annotated assignments
+#               against the pre-change tree reports exactly `['card_select_k']` added and `[]` removed;
+#               `_EXPECTED_FIELD_COUNT` goes 264 -> 265 and both pins are re-set. INERT for a
+#               calibration replicate (None on both surfaces = the policy's own width, the historical
+#               lane exactly); re-pinned on the COMPLETE-envelope rule. The PRODUCT lane's authority
+#               token does not bind the settings map (`speculation_product_authority_digests`), so a
+#               product-lane run already underway resumes unchanged. The branch pinned 255 -> 256 and
+#               e2f26066… against a tree without the nine fields above; RECOMPUTED from the merged
+#               module (the pre-change tree re-derives bb527775…).
 #   2026-09-26  + seed_from_run (doc 67 67.2: a new run seeded from a prior run's node). The 'field
 #               set changed too' branch: exactly `['seed_from_run']` added and `[]` removed;
-#               `_EXPECTED_FIELD_COUNT` goes 260 -> 261 and both pins are re-set. INERT for a
+#               `_EXPECTED_FIELD_COUNT` goes 265 -> 266 and both pins are re-set. INERT for a
 #               calibration replicate: empty by default, read only by `looplab run` on a fresh dir.
 #   2026-09-27  + ablation_simplify (doc 67 67.5: a code-block ablation's no-worse probe nominates the
 #               program it ran as a node). The 'field set changed too' branch: exactly
 #               `['ablation_simplify']` added and `[]` removed; `_EXPECTED_FIELD_COUNT` goes
-#               261 -> 262 and both pins are re-set. INERT for a calibration replicate: off on both
+#               266 -> 267 and both pins are re-set. INERT for a calibration replicate: off on both
 #               surfaces, and the replicate never ablates.
-#   2026-09-27  + max_launch_timeout_s (the merge of master: the hard per-launch wall-clock
-#               ceiling, until now the literal `runtime/sandbox.py::MAX_TIMEOUT_S`, made
-#               configurable up to 7 days). The 'field set changed too' branch: exactly
-#               `['max_launch_timeout_s']` added and `[]` removed; `_EXPECTED_FIELD_COUNT` goes
-#               262 -> 263 and both pins are re-set. INERT for a calibration replicate: its
-#               default is the literal it replaces (86400), the profile ships that default,
-#               and no toy evaluation comes near a day.
-_EXPECTED_DIGEST = "sha256:9b9630f67d2c46e0ceef3837d43017c46e8939a1bdcafcc98fa9a2966ca31fb6"
+#               (Both rows above: the branch pinned them 260 -> 262, and 263 with
+#               `max_launch_timeout_s` merged in (9b9630f6…), against a tree without origin's
+#               four host-refusal and Card-lane fields; RECOMPUTED from the merged module.)
+_EXPECTED_DIGEST = "sha256:886c2668139da74a267a0369a4842be2b1f257e7f961199aaba390b2263aac1c"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -791,10 +824,13 @@ _EXPECTED_DIGEST = "sha256:9b9630f67d2c46e0ceef3837d43017c46e8939a1bdcafcc98fa9a
 #   2026-09-26  + brief_mixed_comparability (doc 68 68.1a): 257 -> 258; see the digest history above.
 #   2026-09-26  + brief_node_frontier (doc 67 67.9): 258 -> 259; see the digest history above.
 #   2026-09-26  + noise_floor_mid_search (doc 67 67.1a): 259 -> 260; see the digest history above.
-#   2026-09-26  + seed_from_run (doc 67 67.2): 260 -> 261; see the digest history above.
-#   2026-09-27  + ablation_simplify (doc 67 67.5): 261 -> 262; see the digest history above.
-#   2026-09-27  + max_launch_timeout_s (the merge of master): 262 -> 263; see above.
-_EXPECTED_FIELD_COUNT = 263
+#   2026-09-27  + max_launch_timeout_s (the configurable launch ceiling): 260 -> 261; see above.
+#   2026-09-26  + host_refusal_deferral, host_refusal_repair_lead: 261 -> 263; see the digest history.
+#   2026-09-26  + host_scorer_account: 263 -> 264; see the digest history.
+#   2026-09-27  + card_select_k (the operator's Card lane width): 264 -> 265.
+#   2026-09-26  + seed_from_run (doc 67 67.2): 265 -> 266; see the digest history above.
+#   2026-09-27  + ablation_simplify (doc 67 67.5): 266 -> 267; see the digest history above.
+_EXPECTED_FIELD_COUNT = 267
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

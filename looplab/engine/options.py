@@ -267,6 +267,13 @@ class EngineOptions:
     # triage judge and the durable rows carry), and a prompt flag defaults off at every constructor
     # (CLAUDE.md): a bare `Engine(...)` keeps every one of those texts byte for byte.
     repair_context_record: bool = False
+    # THE HOST-REFUSAL PIPELINE (`Settings.host_refusal_deferral` / `host_refusal_repair_lead` /
+    # `host_scorer_account`, 2026-09-26): OFF here and OFF in the product surface — one buys a repair
+    # over a judge's stop, the other two change the repair and triage text — read through
+    # `shared.py`'s three readers.
+    host_refusal_deferral: bool = False
+    host_refusal_repair_lead: bool = False
+    host_scorer_account: bool = False
     localize_faults: bool = False        # C1: surface fault-localized files for repo tasks
     feature_engineering: bool = False    # I1: CV-gated feature-engineering directive
     ablate_code_blocks: bool = False     # A0a: ablate pipeline code blocks, not just params
@@ -366,6 +373,8 @@ class EngineOptions:
     asha_rung_nodes: int = 0
     mcts_cost_weight: float = 0.0
     mcts_value_weight: float = 0.0
+    # The operator's Card lane width (`Settings.card_select_k`); None = the policy's own.
+    card_select_k: Optional[int] = None
     # T5 embedding-similarity dedup inside the "algo" gate. False matches the Settings default
     # and the documented rationale (novelty is the agentic Researcher's job by default): the old
     # True made a direct `Engine(novelty_gate=True)` behave differently from the identical

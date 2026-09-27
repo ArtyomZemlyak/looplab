@@ -440,6 +440,14 @@
           "help": "LLM value estimate (mcts policy only): how much a model’s opinion of a branch’s REMAINING headroom counts in the UCB1 value term, so an unexpanded branch stops scoring like a spent one at the same metric. 0 = off and buys no calls; 0.4 = a once-visited branch the model calls spent loses 0.2 reward and one it calls wide open gains 0.2, decaying as the subtree is really measured."
         },
         {
+          "key": "card_select_k",
+          "label": "Card lane width",
+          "type": "int",
+          "default": null,
+          "placeholder": "policy's own",
+          "help": "How many Cards one selection turn may keep, so how many concurrent builds the freshness gate keeps instead of discarding the runner-up. Blank = the policy's own width (1 for greedy, elite for evolutionary, n_seeds for mcts). 2 lets a greedy run build the top two Cards side by side. Survives every Strategist policy switch; ASHA/BOHB derive their own lane and ignore it. Build concurrency itself is still llm_parallel."
+        },
+        {
           "key": "digest_char_cap",
           "label": "Digest budget (chars)",
           "type": "int",
@@ -495,6 +503,27 @@
           "type": "bool",
           "default": true,
           "help": "The repair Developer is told what the engine recorded: whether a watchdog really stopped the stage or the diagnostician named the failure afterwards, how a silent process ended (a signal, a deadline), the metric key a run that printed none must print, and this node's earlier repairs. Off = the pre-2026-09-23 repair text, byte for byte."
+        },
+        {
+          "key": "host_refusal_deferral",
+          "label": "First host refusal buys one repair",
+          "type": "bool",
+          "default": false,
+          "help": "When the operator's host scorer refuses a candidate through its declared contract (host_scorer.expect) for the first time, and its would-be number (host_scorer.would_be_key) beats the current champion (no champion yet: no deferral), the triage judge's reject_idea is HELD for one repair instead of ending the node; if the chain ends before the judge rules again, the held reject_idea is the terminal. Off = reject_idea always ends the node."
+        },
+        {
+          "key": "host_refusal_repair_lead",
+          "label": "Host refusal: diagnosis leads the repair",
+          "type": "bool",
+          "default": false,
+          "help": "The triage diagnostician's account of WHY the operator's host scorer refused leads the repair Developer's text (it is withheld on other engine-final reasons). Off = the historical repair text, byte for byte."
+        },
+        {
+          "key": "host_scorer_account",
+          "label": "Host refusal: the scorer's own account",
+          "type": "bool",
+          "default": false,
+          "help": "When the operator's host scorer refuses a candidate and the task names the scorer's account key (host_scorer.diagnosis_key), the triage judge and the repair read the failed stage, the relations that broke, the protected-scorer warning and that account (up to 2,000 characters, fenced as evidence) instead of the last 500 characters of stderr. Off = the historical stderr tail, byte for byte."
         },
         {
           "key": "inline_repair",

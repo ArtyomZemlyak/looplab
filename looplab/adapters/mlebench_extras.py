@@ -39,7 +39,7 @@ from typing import Callable, Literal, Optional
 import orjson
 from pydantic import BaseModel, Field
 
-from looplab.core.evidence import EVIDENCE_LABEL, fence_untrusted
+from looplab.core.evidence import EVIDENCE_LABEL, fence_untrusted, fenced_tail
 
 EXTRAS_SIDECAR = "mlebench_extras.json"
 EXTRAS_VERSION = 1
@@ -142,6 +142,9 @@ def champion_record(events, state) -> Optional[dict]:
 def node_record(events, state, node_id: int) -> Optional[dict]:
     """One node's code, files and transcript off the durable rows — the same record the bait audit
     (`judgebench/bait.py`) reads for EVERY evaluated node, since a hack RATE is over nodes."""
+    # The `judge_deferred` column's closed vocabulary, read here as by every other reader of it —
+    # function-local, the `adapters -> engine` edge being a deferred one.
+    from looplab.engine.eval_attempt_rules import coerce_judge_deferred
     nodes = getattr(state, "nodes", None) or {}
     best = nodes.get(node_id) if isinstance(nodes, dict) else None
     if best is None:
@@ -156,13 +159,24 @@ def node_record(events, state, node_id: int) -> Optional[dict]:
             idea = d.get("idea") if isinstance(d.get("idea"), dict) else {}
             lines.append(f"[build] operator={d.get('operator')} rationale: {str(idea.get('rationale', ''))[:600]}")
         elif e.type == "node_repaired":
-            lines.append(f"[repair {d.get('attempt')}] error: {str(d.get('error_in', ''))[-400:]}\n"
-                         f"  fix: {str(d.get('rationale', ''))[:300]} changed={d.get('changed')}")
+            # A deferred row's rationale is the judge's HELD `reject_idea`, not the fix
+            # (`eval_attempt_rules.deferred_triage_verdict`); every other row reads as before. The
+            # column is read through `coerce_judge_deferred`, the closed vocabulary every reader of
+            # it shares: a hand-edited or foreign row puts no word of its own in front of the judge.
+            _held = coerce_judge_deferred(d.get("judge_deferred"))
+            # Both tails are cut by `fenced_tail`: the plain tail, unless the cut falls inside a
+            # host refusal's fenced account (`evaluate._eval_failure_text`), kept one block.
+            lines.append(f"[repair {d.get('attempt')}] error: "
+                         f"{fenced_tail(str(d.get('error_in', '')), 400, EVIDENCE_LABEL)}\n"
+                         + (f"  held verdict ({_held['action']}, repaired over): "
+                            if _held else "  fix: ")
+                         + f"{str(d.get('rationale', ''))[:300]} changed={d.get('changed')}")
         elif e.type == "deps_installed":
             lines.append(f"[deps] installed {d.get('packages')} (source={d.get('source', 'traceback')})")
         elif e.type in ("node_evaluated", "node_failed"):
             tail = d.get("stdout_tail") or d.get("error") or ""
-            lines.append(f"[{e.type}] metric={d.get('metric')} tail: {str(tail)[-600:]}")
+            lines.append(f"[{e.type}] metric={d.get('metric')} tail: "
+                         f"{fenced_tail(str(tail), 600, EVIDENCE_LABEL)}")
     files = dict(best.files or {})
     code = best.code or ""
     surface = code + "".join(f"\n\n# --- {fn} ---\n{src}" for fn, src in files.items()

@@ -163,6 +163,22 @@ def accepts_co_parents(fn) -> bool:
         p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
+def inject_needs_developer(req) -> bool:
+    """Does materializing this `inject_node` request run a paid Developer session?
+
+    READY-MADE MEANS EITHER HALF OF THE ARTEFACT (2026-09-24): the script solution (`code`) or a
+    repo task's file overlay (`files` / `deleted`). An inject carrying either is committed exactly
+    as supplied — no Researcher, no Developer, no provider call — and one carrying neither has its
+    idea BUILT by the Developer. ONE spelling of that rule, for the two places that ask it: the
+    materializer (`_create_injected_node`, which decides whether to call the Developer) and the Card
+    session's inject lane (`forced_requests.py::_card_phase_serve_operator_inject`, which decides
+    whether serving the inject needs a free BUILD lane — doc 68 68.9). A non-mapping row answers
+    True, the conservative side: the lane gate then waits for a lane, and the validator refuses it."""
+    if not isinstance(req, Mapping):
+        return True
+    return not (req.get("code") or req.get("files") or req.get("deleted"))
+
+
 class _RerunCardCommit(NamedTuple):
     """What a node-reset re-proposal's main-task Card commit decided (`Engine._commit_rerun_card`).
 
@@ -2245,7 +2261,9 @@ class NodeBuildMixin:
             # `experiment.env`, while four GPUs idled. The overlay is committed exactly as supplied
             # below (`files=req.get("files")`), so skipping the session changes nothing it would
             # have kept.
-            developer_called = not (code or req.get("files") or req.get("deleted"))
+            # `inject_needs_developer` is that rule's one spelling, shared with the Card session's
+            # inject lane, which asks it to decide whether the inject needs a BUILD lane (68.9).
+            developer_called = inject_needs_developer(req)
             if not developer_called and code is None:
                 code = ""
             footprint_finalized = False

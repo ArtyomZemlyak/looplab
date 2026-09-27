@@ -78,7 +78,9 @@ LEAF_ONLY: frozenset[tuple[str, str]] = frozenset({("tools", "engine")})
 # Edges taken ONLY inside function bodies, each with the reason it stays deferred.
 DEFERRED: dict[tuple[str, str], str] = {
     ("adapters", "engine"): "`mlebench_campaign` reads a finished run's champion caveats; "
-                            "`repo_developer` verifies a repair (`repair_verify`) at build time",
+                            "`repo_developer` verifies a repair (`repair_verify`) at build time; "
+                            "`mlebench_extras` reads a held verdict through "
+                            "`eval_attempt_rules.coerce_judge_deferred` per transcript",
     ("adapters", "events"): "`mlebench_campaign` folds finished runs' logs at report time",
     ("adapters", "runtime"): "task adapters build sandboxes and stage pipelines when an eval is "
                              "prepared, not when the task is loaded",
@@ -106,7 +108,8 @@ DEFERRED: dict[tuple[str, str], str] = {
     ("judgebench", "tools"): "the same ladder composes the real tool providers per case, for the "
                              "same reason: a bench that stubs the provider measures the stub",
     ("judgebench", "engine"): "`score` re-runs the engine's triage/train-monitor rules over a "
-                              "bench case",
+                              "bench case; `triage_corpus` reads a held verdict through "
+                              "`eval_attempt_rules.coerce_judge_deferred` per extracted run",
     ("judgebench", "events"): "`bait` folds a run's log at audit time",
     ("judgebench", "trust"): "`bait` invokes the structured judge at audit time",
     ("search", "adapters"): "`speculation_quality` builds the toy task for its calibration "

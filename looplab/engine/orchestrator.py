@@ -1741,6 +1741,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # log. Making a resume visible needs a channel that is NOT the event log — see the note in
         # `events/types.py::PROGRESS_STAGES`, which is why that vocabulary has one stage and not two.
         events = self.store.read_all()
+        # THIS PROCESS'S ENTRY BOUNDARY, from the log it reads first: every `card_build_attempted`
+        # receipt at or below it was written by an earlier process, which is the one fact that lets a
+        # quarantine close call itself a restart's (`speculation.py::_attempt_predates_this_process`).
+        # In memory only — nothing is appended before the authorization fences below.
+        self._note_process_entry(events)
         state = fold(events)
         # Re-entry authorization is the first semantic boundary.  Recovery, command ACK and setup all
         # append events, so a stale/missing/different receipt must fail before any of them can mutate a
@@ -1876,7 +1881,21 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                     break
                 continue
             if state.paused:
-                if self._close_card_build_before_terminal_gate(state):
+                # THE RUN'S REAL EVAL-SECONDS CEILING, not None (critic review 2026-09-27): `max_es`
+                # is only derived further down, past this branch, and a drain that committed with no
+                # ceiling in view minted a node past the budget — one `looplab resume` then finishes
+                # the run over without evaluating. Side-effect free, unlike the per-turn derivation.
+                pause_max_es = self._eval_seconds_ceiling(state)
+                # `looplab stop --drain-builds`: a build still running is waited for and committed
+                # before the pause takes the engine down (`_drains_builds_now`). No session runs
+                # here, so only ADOPTED producers can still be in flight; a bounded poll, because
+                # this loop has no wake-up stream of its own and each turn re-folds the log.
+                if (self._speculation_enabled() and self._drains_builds_now(state)
+                        and self._draining_builds_in_flight(state)):
+                    self._close_card_build_before_terminal_gate(state, pause_max_es)
+                    await anyio.sleep(self._DRAIN_BUILDS_POLL_S)
+                    continue
+                if self._close_card_build_before_terminal_gate(state, pause_max_es):
                     continue
                 break
             # node_reset (operator "re-run this node from a stage"): a reset from implement/propose
@@ -2073,6 +2092,20 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 state = fold(self.store.read_all())
             actions = self._select_actions(state)
             actions = self._plan_gate(state, actions)
+            # A NODE-CREATING OPERATOR REQUEST PARKED ON THE NODE BUDGET reaches this line only
+            # because other work was waiting beside it (`forced_requests.py::_park_for_node_budget`,
+            # doc 68 68.8): this turn EVALUATES what already exists — node 18 on v10, which sat
+            # pending for 20 minutes behind the park — and keeps the two guarantees the park's wait
+            # used to keep by never letting the loop get here. Nothing that mints a node may take the
+            # slot the request waits for (a slot that frees is the operator's, served at the next
+            # loop head), and the empty-action ladder below may not confirm, hold out or FINISH the
+            # run over a request still queued. With nothing to evaluate, it waits as it always did.
+            parked_request = self._parked_forced_request(state)
+            if parked_request is not None:
+                actions = [a for a in actions if a["kind"] == "evaluate"]
+                if not actions:
+                    await self._defer_for_node_budget(state)
+                    continue
             if not actions:
                 if await self._handle_no_actions(state, decision_seq=decision_seq) == "break":
                     break
@@ -2115,8 +2148,9 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             # on a toy-backend run of this shape it fired ONCE in a whole 12-node run, at node 0.
             # Production was gated on occupancy ZERO, which is exactly backwards, and it is why F1f's
             # fix — the outer loop now turns while evaluations burn — could reach the boundary and
-            # still find nothing to build.
-            if not creates:
+            # still find nothing to build. (Never beside a request parked on the node budget: the
+            # slot it waits for is not production's to take — see `parked_request` above.)
+            if not creates and parked_request is None:
                 creates = self._occupancy_paced_creates(state, evals)
 
             if creates:

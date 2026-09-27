@@ -33,6 +33,7 @@ from typing import Optional
 import typer
 
 from looplab.events.eventstore import EventStore
+from looplab.events.parked_requests import open_parked_requests
 from looplab.events.token_spend import (CARD_UNATTRIBUTED, spend_around_champion,
                                         token_spend_by_build, token_spend_by_card)
 
@@ -814,3 +815,16 @@ def echo_comparability(run_dirs) -> int:
     if worst == UNKNOWN:
         return 4
     return 0
+
+
+def echo_parked_requests(events, state) -> None:
+    """`looplab inspect`'s `parked:` lines: every queued fork / inject / forced ablation that waits
+    for a node slot, in the engine's own sentence, until it is served (doc 68 68.8).
+
+    On `minionerec-backbones-v10` an inject sat parked on the spent node budget for 20 minutes while
+    its command read `succeeded`, and the operator found the reason by reading the engine. The engine
+    now says so in the log (`operator_request_parked`); this is where someone asking "what is the run
+    doing" reads it. Rendering only — the pairing of rows with receipts is
+    `events/parked_requests.py::open_parked_requests`, which the attention feed reads too."""
+    for parked in open_parked_requests(events, state):
+        typer.echo(f"parked: {parked['detail']}")

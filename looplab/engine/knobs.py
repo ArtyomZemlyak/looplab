@@ -175,6 +175,12 @@ class EngineKnobs:
     # The repair context as the engine's own record (review 2026-09-22, ENG2-14 / ES2-05). Read by
     # `shared.py::repair_context_record`, the one place the repair path learns it.
     _repair_context_record = Knob("repair_context_record", bool)
+    # The host-refusal pipeline (2026-09-26): read by `shared.py::host_refusal_deferral`,
+    # `shared.py::host_refusal_repair_lead` and `shared.py::host_scorer_account`, the one place the
+    # repair path learns each.
+    _host_refusal_deferral = Knob("host_refusal_deferral", bool)
+    _host_refusal_repair_lead = Knob("host_refusal_repair_lead", bool)
+    _host_scorer_account = Knob("host_scorer_account", bool)
     # Hybrid in-node crash repair (triage + inline repair). See Settings.inline_repair.
     _inline_repair = Knob("inline_repair")
     _inline_repair_attempts = Knob("inline_repair_attempts",
@@ -222,6 +228,7 @@ class EngineKnobs:
     _asha_rung_nodes = Knob("asha_rung_nodes")
     _mcts_cost_weight = Knob("mcts_cost_weight")
     _mcts_value_weight = Knob("mcts_value_weight")
+    _card_select_k = Knob("card_select_k")
     _research_verify = Knob("research_verify", bool)
     # D8 PUSH half: `roles._state_brief` renders the latest memo's SUMMARY into every Researcher,
     # crash-triage and repair-critic prompt, and the verifier never checks a summary — so the cue

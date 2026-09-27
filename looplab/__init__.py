@@ -82,6 +82,7 @@ _LAYOUT = {
     "question_board": "tools",   # the Developer/Researcher read of the open-question board
     "token_spend": "events",     # `looplab tokens`' per-phase split of the llm_usage ledger
     "fidelity_agreement": "events",  # `looplab fidelity-agreement`: cheap vs full ranking (doc 68 68.5)
+    "parked_requests": "events",  # which operator requests wait for a node slot (doc 68 68.8)
     "git_export": "events",      # `looplab export-git`: the node DAG as git history (doc 67 67.15)
     "node_import": "events",     # the ONE cross-run import snapshot, server + launch (doc 67 67.2)
     "seed_from_run": "engine",   # `Settings.seed_from_run`: a new run seeded from a prior node (67.2)

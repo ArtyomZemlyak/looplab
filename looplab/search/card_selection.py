@@ -462,6 +462,7 @@ def unconsumed_card_inventory(state: RunState, *, exclude: "Collection[str]" = (
     """
     skip = set(exclude or ())
     total = 0
+    top_two: list = []                     # `_dead_on_this_board`'s one-slot ranking cache
     for card in state.cards.values():
         if card.id in skip:
             continue                       # already counted by the caller's other half
@@ -529,8 +530,46 @@ def unconsumed_card_inventory(state: RunState, *, exclude: "Collection[str]" = (
             continue
         if getattr(card, "merged_into", None) is not None:
             continue
+        if _dead_on_this_board(state, card, top_two):
+            continue
         total += 1
     return total
+
+
+def _dead_on_this_board(state: RunState, card: Card, top_two: list) -> bool:
+    """Is this WORK item one no build can consume on the board as it stands? Two shapes only, both
+    read off board FACTS and never off readiness or freshness — the coarseness
+    `unconsumed_card_inventory` insists on is untouched for every other Card.
+
+    * A `debug` Card. F5 removed the forced repair gate that made one live, so `_live_card_action`
+      answers False for every `debug` Card, forever.
+    * A `merge` Card whose two parents are known, EVALUATED nodes that are not the current metric
+      top-two. `_live_card_action` makes a crossover live only on exactly those anchors; once the
+      board has moved past them the Card is unelectable. MEASURED on MiniOneRec inf13: card-8 (the
+      crossover of nodes 2 and 0) was built while node 7 and then node 5 overtook node 0, discarded
+      `not_selected_now`, and sat `proposed/open` with no evidence. Counted as inventory it filled the
+      prefetch ceiling of min(depth 1, lane 1) = 1 by itself, so `supply - outstanding = 1` refused the
+      raw lane on every turn and the run held ONE build for hours with the GPU idle. A parent still
+      pending is not "moved past" — its metric can still make the pair the top-two — so that Card
+      keeps counting. Asked again on every call: a board that comes back to the pair counts it again.
+
+    `top_two` is a one-slot cache the caller owns, so the ranking is computed once per count and only
+    when a merge Card is actually on the board.
+    """
+    operator = getattr(card, "operator", None)
+    if operator == "debug":
+        return True
+    if operator != "merge":
+        return False
+    parents = _card_parent_ids(card)
+    if parents is None or len(parents) != 2:
+        return False
+    nodes = [state.nodes.get(parent) for parent in parents]
+    if any(node is None or node.status is not NodeStatus.evaluated for node in nodes):
+        return False
+    if not top_two:
+        top_two.append({node.id for node in rank_by_metric(state, state.breedable_nodes())[:2]})
+    return set(parents) != top_two[0]
 
 
 def _strictly_selection_ready(card: Card) -> bool:
@@ -2077,6 +2116,26 @@ def speculative_raw_actions(
     if expanded:
         fallback = [action for action in fallback
                     if _action_key(action) not in expanded]
+    # A CROSSOVER ALREADY BEING BUILT IS NOT THE NEXT PROPOSAL. The engine writes a merge's Idea as a
+    # pure function of its parents (`node_build.py::_ensemble_idea`), so re-proposing the merge an
+    # excluded Card owns can only produce that Card's twin: staging returns it as `reuse`, the
+    # election refuses it (it is the Card being built), the session yields, and the next turn does it
+    # again. MEASURED on MiniOneRec inf13, 11:50-12:44: the evolutionary policy's due crossover of
+    # nodes 2 and 0, then of 2 and 7, was "proposed" every ~1.1 s (0.001 s each, no LLM) while card-8
+    # and then card-9 built exactly that merge — 5,190 `phase_progress` rows, 58% of the log, and each
+    # row moved the tail, so the hand-back rate limit (which waits for the tail to move) never held.
+    # Only `merge` is filtered: an `improve` of the same parent is a DIFFERENT paid proposal each
+    # time, i.e. legitimate parallel work, and a draft's key is shared by every seed.
+    building_merges = {
+        key for card_id in excluded
+        if (card := state.cards.get(card_id)) is not None
+        and card.operator == "merge"
+        and (key := _action_key(card_action(card) or {})) is not None
+    }
+    if building_merges:
+        fallback = [action for action in fallback
+                    if not (action.get("kind") == "merge"
+                            and _action_key(action) in building_merges)]
     if selected or not fallback:
         return []
     # Ablation is executed by the outer orchestrator before Card creation.  It has no concrete Card

@@ -1100,6 +1100,43 @@ class Settings(BaseSettings):
     # `engine/shared.py::repair_context_record`. No extra call, and no metric, champion,
     # selectability decision or violation moves on it (docs/36): only what the repair is TOLD.
     repair_context_record: bool = True
+    # THE OPERATOR'S HOST SCORER REFUSES; THE REPAIR HEARS WHY (2026-09-26, MiniOneRec inf13). Three
+    # switches for a task whose `host_scorer.expect` gates candidates (a quality floor, an order
+    # check) — all OFF, all inert for a task that declares no host contract.
+    #
+    # `host_refusal_deferral`: the FIRST refusal of a node's lifecycle by the host contract buys ONE
+    # repair before the crash-triage judge's `reject_idea` may end it — held, never discarded: if the
+    # chain then ends without a second verdict (the Developer stuck, a dead provider, a floor, the
+    # budget, a stop) the held `reject_idea` is the terminal. Only when the task declares
+    # `host_scorer.would_be_key` and the refused candidate's would-be number beats the champion (a
+    # run with no champion yet defers nothing: there is no number the repair could be shown to be
+    # worth), and only with repair-cap headroom for a second judged attempt (`eval_attempt_rules.
+    # deferred_triage_verdict`). Measured: nodes 5 and 6 were rejected at zero repairs (6 on the
+    # false premise "the gate demands byte-exact answers"); reset with the diagnosis in hand, node 5
+    # reached 4.17x inside the gate in two repairs — while node 9 (would-be 2.11x under a 4.17x
+    # champion) was rightly rejected, which the value gate keeps. It overrides a judge's stop for one
+    # attempt, so it ships OFF and has a `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row.
+    host_refusal_deferral: bool = False
+    # `host_refusal_repair_lead`: the crash-triage diagnosis of a host-contract refusal leads the
+    # repair's text. `failure_diagnosis.diagnosis_repair_lead` withholds a diagnostician's account on
+    # an ENGINE-final reason (`expect_failed` is one), which is right for the engine's own watchdogs
+    # and wrong here: what the engine observed is only THAT the scorer refused; WHY the output is
+    # wrong is the diagnostician's reading of the candidate's code. Measured on inf13 node 5: both
+    # triages named the bug (`_rebuild_flat_indices` addressing pad pages; decode positions M+s
+    # instead of L+s) and neither sentence reached the Developer, who spent ~25 min per repair
+    # re-deriving it. It changes a PROMPT, so it ships OFF with a legacy row.
+    host_refusal_repair_lead: bool = False
+    # `host_scorer_account`: on a host-contract refusal, the failure text — the repair prompt, the
+    # triage judge's `err` and history, `node_repaired.error_in`, the terminal's `error` — is the
+    # failed stage, the relations that broke, the protected-scorer warning and the scorer's OWN
+    # account (the string the task names in `host_scorer.diagnosis_key`, capped at 2,000 characters
+    # and fenced as evidence) instead of the 500-character stderr tail, which in 5 of 5 inf13
+    # refusals opened with progress-bar or CUDA residue and cut the warning off
+    # (`evaluate._eval_failure_text`). The task field names WHICH key; this switch decides whether
+    # the engine reads it into a prompt at all, because the task field alone is no opt-in a resumed
+    # snapshot can hold: a run launched before this field resumes with the historical tail, byte
+    # for byte (`LEGACY_CONFIG_SNAPSHOT_DEFAULTS`). It changes a PROMPT, so it ships OFF.
+    host_scorer_account: bool = False
     # === Inline crash repair ==============================================================
     # Hybrid in-node crash repair: when an LLM-generated node CRASHES at runtime (mechanical errors
     # — bad import, removed kwarg, typo), the agent triages it and may repair the code IN PLACE within
@@ -1411,6 +1448,21 @@ class Settings(BaseSettings):
     # Only the `mcts` policy reads it (greedy/evolutionary/asha ignore it, as they ignore `c`), and
     # it buys ONE bounded structured call per unestimated candidate per creation boundary.
     mcts_value_weight: float = 0.0
+    # THE CARD LANE WIDTH, operator-set: how many Cards ONE selection turn may retain, and therefore
+    # how many committed-but-unconsumed prefetches the freshness gate keeps
+    # (`search/card_selection.py::card_lane_width`, which has always read a policy's `card_select_k`
+    # — nothing set it). None = the policy's own width, the historical behaviour exactly: 1 for
+    # `greedy`, `elite` for `evolutionary`, `n_seeds` for `mcts`. MEASURED on MiniOneRec inf13: after
+    # the Strategist switched to greedy the run built ONE Card at a time for 3+ hours against
+    # 1-3-minute evaluations (GPU busy 3.5% of the run), and a second concurrent build of the
+    # runner-up Card is exactly what a width-1 freshness set discards `not_selected_now` on arrival.
+    # 2 keeps the runner-up. It travels with every policy the run builds, the launch's and each
+    # Strategist rebuild's (`policy_knobs`), and a Strategist's `policy_params` cannot restate it
+    # (`RUN_OWNED_POLICY_KNOBS`). ASHA/BOHB derive their lane per rung and ignore it. It narrows
+    # nothing: the prefetch ceiling is still `min(speculation_depth, width)`, and how many builds run
+    # at once is still `llm_parallel`. No `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row: None IS the pre-field
+    # value.
+    card_select_k: int | None = Field(default=None, ge=1, le=64)
     # THE MODEL ARMS of the operator x model router (doc 52 row 19): `{arm: "model-id[@cost]"}` —
     # the models the bandit branch may route a BUILD to beside the configured Developer model (the
     # implicit `default` arm), `cost` the arm's price relative to it (1.0), declared because it is a
@@ -3719,6 +3771,17 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # pointable at every commit before this one; `tests/test_repair_context_record.py` holds that
     # `false` is the historical text byte for byte.
     "repair_context_record": False,
+    # THE HOST-REFUSAL PIPELINE, added 2026-09-26 defaulting OFF (MiniOneRec inf13). (a) holds. (b):
+    # `host_refusal_deferral` buys a repair over a judge's stop (a paid call and an evaluation) and
+    # `host_refusal_repair_lead` changes the repair PROMPT, so a resumed run must not acquire either
+    # mid-log. (c) is `False`, pointable at every commit before this one.
+    "host_refusal_deferral": False,
+    "host_refusal_repair_lead": False,
+    # …and `host_scorer_account` (the scorer's own account in place of the stderr tail), on the same
+    # DIFFERENT-PROMPT ground: ON, a host refusal's failure text — the repair prompt, the triage
+    # judge's `err` and history, `error_in` / `error` — changes bytes, and the task field that names
+    # the key is no switch a resumed snapshot can hold. (c) is `False`, the historical tail.
+    "host_scorer_account": False,
     # THE NODE BUDGET CUE, added 2026-09-23 defaulting ON (Q-3, the Researcher's context audit).
     # (a) holds. (b) is the rows above's DIFFERENT-PROMPT ground: ON, every proposal prompt gains a
     # line stating the run's remaining node budget and its plan phase, so a resumed run would change

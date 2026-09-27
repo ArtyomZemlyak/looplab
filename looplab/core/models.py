@@ -2643,6 +2643,14 @@ class RunState(BaseModel):
     # Meaningful ONLY while `paused` is True — the same lifetime as `pause_node_id`/`pause_generation`
     # above, and cleared beside them at every site that lifts a pause.
     pause_reason: Optional[str] = None
+    # The operator's `looplab stop --drain-builds`: while THIS pause stands, builds already running
+    # finish and COMMIT instead of being closed `run_is_stopping` and thrown away; nothing new is
+    # elected. STARTED only by the operator's node-less pause that takes effect (the guard that sets
+    # `pause_reason`); CANCELLED by any later pause row that does not carry it — an engine auto-pause
+    # or a plain stop (`replay.py::_on_pause`). Read only through `speculation.py::_pause_drains_builds`,
+    # which also requires `paused` (so a lifted pause needs no clearing site). Hidden: no dump,
+    # snapshot or wire payload changes.
+    pause_drain_builds: bool = Field(default=False, exclude=True)
     stop_requested: Optional[str] = None       # `run_abort`: reason; loop -> run_finished + break
     # Seq of the latest finalize intent. A request newer than the accepted finish still needs a new
     # finish/finalization boundary; an older one was already consumed by that finish.
@@ -2685,6 +2693,11 @@ class RunState(BaseModel):
     # Only replay-accepted exact-head give-ups enter this hidden set-like list. Runtime scheduling must
     # never infer serial fallback from raw/orphan ``card_build_done`` rows that fold deliberately rejects.
     card_build_producer_failed: list[str] = Field(default_factory=list, exclude=True)
+    # card_id -> the `skipped_reason` of each of its accepted give-ups, in close order ("" = none).
+    # Lets the engine tell the restart quarantine (`unreconciled_after_restart`) from a producer that
+    # failed; hidden and empty on every log written before the reason existed.
+    card_build_producer_failed_reasons: dict[str, list[str]] = Field(
+        default_factory=dict, exclude=True)
     # node_id -> exact request identity reconstructed from a successful card_build_done. Consumers use
     # this durable link (never merely Idea.card_id) to count and freshness-check speculative work.
     speculative_nodes: dict[int, dict] = Field(default_factory=dict, exclude=True)

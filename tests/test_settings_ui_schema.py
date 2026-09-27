@@ -100,18 +100,22 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 231
-    # 230 -> 231 on 2026-09-27 (the merge of master): `max_launch_timeout_s` -- the hard
-    # per-launch wall-clock ceiling (24 h default, up to 7 days), which was the literal
-    # `sandbox.MAX_TIMEOUT_S`. A ROW: it decides whether a multi-day training is killed at a day.
-    # Verified by INTERSECTION: 230 keys common to the previous keyset plus exactly that one.
-    # 229 -> 230 on 2026-09-27: `ablation_simplify` (doc 67 67.5) -- a code-block ablation's no-worse
-    # probe nominates the program it ran as a node. A ROW on the SPEND ground, OFF by default.
-    # Verified by INTERSECTION: 229 keys common to the previous keyset plus exactly that one, none
-    # removed.
-    # 228 -> 229 on 2026-09-26: `seed_from_run` (doc 67 67.2) -- a new run seeded from a prior
-    # run's node. A ROW on the LAUNCH ground. Verified by INTERSECTION: 228 keys common to the
-    # previous keyset plus exactly that one, none removed.
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 235
+    # 233 -> 235 on 2026-09-27 (the merge of the branch): `seed_from_run` (doc 67 67.2, a ROW on
+    # the LAUNCH ground) and `ablation_simplify` (doc 67 67.5, a ROW on the SPEND ground, OFF by
+    # default). The branch pinned 228 -> 231 against a tree without the four rows below; verified
+    # by INTERSECTION over the merged keyset: 233 keys common to the previous keyset plus exactly
+    # those two, none removed.
+    # 232 -> 233 on 2026-09-27: `card_select_k` -- the operator's Card lane width. Verified by
+    # INTERSECTION: 232 keys common to the previous keyset plus exactly that one.
+    # 231 -> 232 on 2026-09-26: `host_scorer_account` (a curated row beside the two below). Verified
+    # by INTERSECTION: 231 keys common to the previous keyset plus exactly that one.
+    # 229 -> 231 on 2026-09-26: `host_refusal_deferral` + `host_refusal_repair_lead` (curated rows).
+    # Verified by INTERSECTION: 229 keys common to the previous keyset plus exactly those two.
+    # 228 -> 229 on 2026-09-27: `max_launch_timeout_s` -- the hard per-launch wall-clock ceiling (24 h
+    # default, up to 7 days), which was the literal `sandbox.MAX_TIMEOUT_S`. A ROW: it decides whether
+    # a multi-day training is killed at a day, and it unlocks `budget_extend{eval_timeout}` above one.
+    # Verified by INTERSECTION: 228 keys common to the previous keyset plus exactly that one.
     # 227 -> 228 on 2026-09-26: `noise_floor_mid_search` (doc 67 67.1a) -- the noise floor measured
     # once mid-search. A ROW on the SPEND ground, OFF by default. Verified by INTERSECTION: 227 keys
     # common to the previous keyset plus exactly that one, none removed.
@@ -475,10 +479,15 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # 260 -> 261 on 2026-09-26: `brief_mixed_comparability` (a curated row, so both counts move).
     # 261 -> 262 on 2026-09-26: `brief_node_frontier` (a curated row, so both counts move).
     # 262 -> 263 on 2026-09-26: `noise_floor_mid_search` (a curated row, so both counts move).
-    # 263 -> 264 on 2026-09-26: `seed_from_run` (a curated row, so both counts move).
-    # 264 -> 265 on 2026-09-27: `ablation_simplify` (a curated row, so both counts move).
-    # 265 -> 266 on 2026-09-27 (the merge of master): `max_launch_timeout_s` (a curated row).
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 266
+    # 263 -> 264 on 2026-09-27: `max_launch_timeout_s` (a curated row, so both counts move).
+    # 264 -> 266 on 2026-09-26: `host_refusal_deferral` + `host_refusal_repair_lead` (curated rows,
+    # so both counts move).
+    # 266 -> 267 on 2026-09-26: `host_scorer_account` (a curated row, so both counts move); the AST
+    # scan of `Settings` against the pre-change tree reports exactly `['host_scorer_account']` added.
+    # 267 -> 268 on 2026-09-27: `card_select_k` (a curated row, so both counts move).
+    # 268 -> 270 on 2026-09-27 (the merge of the branch): `seed_from_run` + `ablation_simplify`
+    # (curated rows, so both counts move).
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 270
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

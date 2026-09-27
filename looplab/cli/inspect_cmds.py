@@ -51,10 +51,10 @@ from looplab.cli import (
 from looplab.cli.workspace_bytes import (DEFAULT_ENTRY_BUDGET, EntryBudget, measure_run,
                                          render_workspace_bytes, seed_claims)
 from looplab.cli.run_report import (echo_card_and_build_tables, echo_comparability,
-                                    echo_containments, echo_edit_types, echo_reconciliation,
-                                    echo_run_opening, echo_section, echo_spend_around_champion,
-                                    minutes, output_fingerprint, span_category, span_seconds,
-                                    stage_identity_rows)
+                                    echo_containments, echo_edit_types, echo_parked_requests,
+                                    echo_reconciliation, echo_run_opening, echo_section,
+                                    echo_spend_around_champion, minutes, output_fingerprint,
+                                    span_category, span_seconds, stage_identity_rows)
 
 
 @app.command()
@@ -494,6 +494,7 @@ def inspect(run_dir: Path = typer.Argument(...)):
         _evidence = last_record_line(all_events)
         if _evidence:
             typer.echo(f"stop evidence: {_evidence}")
+        echo_parked_requests(all_events, state)      # what waits for a node slot (doc 68 68.8)
         # WHAT THIS RUN'S LOG CAN AND CANNOT SAY ABOUT ITS TRUST SCANS. `looplab inspect` is where
         # someone goes to ask what a run actually did, and until the `trust_scan` receipt existed the
         # honest answer here was unobtainable: a clean scan wrote nothing, so silence covered

@@ -95,8 +95,33 @@ class CalibrationOverrideRefusal(ConfigRefusal, RuntimeError):
     """
 
 
+def budget_ceiling(overrides, key: str, fallback: Optional[float]) -> Optional[float]:
+    """One live budget ceiling: the operator's `budget_extend` value for `key` (`max_seconds`,
+    `max_eval_seconds`) when it is a finite positive number, else `fallback` — the launch knob.
+
+    ONE rule for its two readers, hoisted out of `_apply_control_overrides` (critic review 2026-09-27):
+    that method re-applies every live width, timeout and broker ceiling each turn, so a caller that
+    only needs the NUMBER — the run loop's pause branch, where a drain commits builds — must not
+    re-derive it by a second hand. Total over a forged/garbled value: a poison ceiling falls back,
+    and never disables a budget."""
+    raw = (overrides or {}).get(key)
+    if raw is None or isinstance(raw, bool):
+        return fallback
+    try:
+        value = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return fallback
+    return value if math.isfinite(value) and value > 0 else fallback
+
+
 class WidthSettlingMixin:
     """The live width settle: the proposals' re-pin, the operator's override, the broker ceiling."""
+
+    def _eval_seconds_ceiling(self, state: RunState) -> Optional[float]:
+        """The run's eval-seconds ceiling on this fold — `_apply_control_overrides`' `max_es`, by the
+        same rule (`budget_ceiling`) and with none of its side effects, for a turn that must not
+        re-apply the widths (the pause branch of `orchestrator.py::_run_with_llm_broker`)."""
+        return budget_ceiling(state.budget_overrides, "max_eval_seconds", self.max_eval_seconds)
 
     def _proposal_footprints(self, state: RunState) -> list[Optional[int]]:
         """The declared `gpus` of every OPEN proposal — one entry per Card the run could run next.
@@ -313,19 +338,9 @@ class WidthSettlingMixin:
                 "run cannot be re-shaped live: launch a fresh --speculation-gate-calibration run, "
                 "or run the workload without that flag to keep live budget controls")
 
-        def _finite_ceiling(key: str, fallback: Optional[float]) -> Optional[float]:
-            raw = _bo.get(key)
-            if raw is None or isinstance(raw, bool):
-                return fallback
-            try:
-                value = float(raw)
-            except (TypeError, ValueError, OverflowError):
-                return fallback
-            return value if math.isfinite(value) and value > 0 else fallback
-
         # apply stays total even for a manually constructed/forward-version RunState;
         # replay normally sanitizes these first, but a poison ceiling must never disable a budget.
-        max_s = _finite_ceiling("max_seconds", self.max_seconds)
+        max_s = budget_ceiling(_bo, "max_seconds", self.max_seconds)
         # An operator's width is a pin the Strategist cannot override (`_strategy_may`); noted here,
         # every turn, from the same fold the widths below are re-applied from.
         self._operator_width_axes = operator_width_axes(_bo, state.explicit_settings)
@@ -338,7 +353,7 @@ class WidthSettlingMixin:
         # — no agent authors them — and only ever DROPPED the operator's OWN override, silently pinning
         # the run to the old cap. Agent-authored resource retunes (the Strategist's timeout/max_parallel)
         # remain governed by the matrix in `_apply_strategy`, which is where the M4 lock genuinely lives.
-        max_es = _finite_ceiling("max_eval_seconds", self.max_eval_seconds)
+        max_es = budget_ceiling(_bo, "max_eval_seconds", self.max_eval_seconds)
         if "timeout" in _bo and not isinstance(_bo["timeout"], bool):
             try:
                 _timeout = float(_bo["timeout"])

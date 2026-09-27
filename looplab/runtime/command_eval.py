@@ -47,7 +47,8 @@ from looplab.core.models import DIRECTIONS, EXTRA_METRIC_AUTO, EXTRA_METRIC_DECL
 # The two stage-row identity slots and the derivation behind them. A LEAF under this module — it
 # reaches back for `_confined`/`normalize_declared_path` through deferred, function-local imports
 # only (`metric_subject`'s precedent), so this module-level import closes no cycle.
-from looplab.runtime.numeric_contract import numeric_contract_defects, validate_numeric
+from looplab.runtime.numeric_contract import (last_json_string, last_values,
+                                              numeric_contract_defects, validate_numeric)
 from looplab.runtime.stage_identity import (STAGE_INPUT_KEY, STAGE_KEY_REASON,  # noqa: F401
                                             STAGE_OUTPUTS_KEY, stage_output_identity)
 from looplab.runtime.sandbox import (RunResult, _to_float, docker_gpu_argv,
@@ -1113,6 +1114,26 @@ def expand_params(argv: list, params: Optional[dict]) -> list:
 # bytes are distinguishable after the fact. The candidate's own printed number is still read (off
 # the stage BEFORE this one) and recorded as `RunResult.self_metric`, never selected on.
 HOST_STAGE_KEY = "host"
+# The engine-stamped names under which `_host_scorer_stage` hands the host stage the task's
+# `host_scorer.would_be_key` / `diagnosis_key` — the keys of the SCORER'S result row read on a
+# refusal (`_host_refusal_readings`). Engine-owned like `HOST_STAGE_KEY`: no declarer writes them.
+HOST_WOULD_BE_KEY = "host_would_be_key"
+HOST_DIAGNOSIS_KEY = "host_diagnosis_key"
+# The most of the scorer's diagnosis the engine carries to the judge and the repair.
+HOST_DIAGNOSIS_CHARS = 2000
+
+
+def _host_refusal_readings(stage: dict, text: str) -> tuple:
+    """`(would_be, diagnosis)` a refusing host stage's own result row carries, under the keys the
+    task declared and the engine stamped (`HOST_WOULD_BE_KEY` / `HOST_DIAGNOSIS_KEY`); None for a key
+    not declared or not printed. The LAST occurrence decides for both, as for the numeric contract
+    itself, and the diagnosis is capped at `HOST_DIAGNOSIS_CHARS`."""
+    stage = stage if isinstance(stage, dict) else {}
+    wb_key, dg_key = stage.get(HOST_WOULD_BE_KEY), stage.get(HOST_DIAGNOSIS_KEY)
+    would_be = last_values(text, [wb_key]).get(wb_key) if isinstance(wb_key, str) and wb_key else None
+    diagnosis = last_json_string(text, dg_key) if isinstance(dg_key, str) and dg_key else None
+    diagnosis = (diagnosis.strip()[:HOST_DIAGNOSIS_CHARS] or None) if diagnosis else None
+    return would_be, diagnosis
 # The standalone argv token a host scorer writes where the candidate's artifact path belongs:
 # expanded at the score stage's start from the metric subject the engine has just bound, i.e. the
 # ONE artifact `eval.metric.subject` / `subject_glob` declared and the pipeline produced.
@@ -3363,7 +3384,13 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
                 stage_results[-1]["concern"] = _problem[:700]
                 stage_results[-1][EXPECT_SINCE_KEY] = _w0
                 _stderr = f"stage '{_sname}' failed its declared numeric contract: {'; '.join(_defects)}"
+                _would_be = _diagnosis = None
                 if _stg.get(HOST_STAGE_KEY):
+                    # …and what the scorer's own row says about the refusal, under the keys the task
+                    # declared: the number the candidate WOULD have scored and the scorer's account
+                    # of why it did not (`_host_refusal_readings`). Read from the same attempt-bounded
+                    # text the contract was just held to.
+                    _would_be, _diagnosis = _host_refusal_readings(_stg, _text)
                     # WHAT THE REPAIR ACTUALLY READS. Every consumer downstream -- the repair prompt,
                     # the triage history, `node_repaired.error_in`, the terminal error -- is built
                     # from the TAIL of this stderr (`evaluate.py::_eval_failure_text`), never from the
@@ -3379,7 +3406,12 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
                 run.early = RunResult(
                     exit_code=0, stdout=run.out, metric=None, timed_out=False,
                     stderr=_stderr,
-                    stages=stage_results, failed_stage=_sname, metric_subject=run.metric_subject)
+                    stages=stage_results, failed_stage=_sname, metric_subject=run.metric_subject,
+                    host_would_be=_would_be, host_diagnosis=_diagnosis,
+                    # Which relations broke, as the fact (`RunResult.host_defects`): the failure
+                    # text that replaces the stderr tail with the scorer's account must still name
+                    # them (`evaluate._eval_failure_text`).
+                    host_defects=list(_defects) if _stg.get(HOST_STAGE_KEY) else None)
                 return run
         # WHICH BYTES the stage produced, bound at the instant the contract PASSED and against the
         # identical `_w0` floor it was just held to. `verify_stage_artifacts` proves the artifact is

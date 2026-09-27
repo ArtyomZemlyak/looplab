@@ -645,6 +645,8 @@ def derive_label(facts: dict) -> dict:
 
 def extract_run(run_dir) -> list:
     """Every failure classification in one run, with its evidence and its label."""
+    # The `judge_deferred` column's closed vocabulary — the one reading every consumer of it shares.
+    from looplab.engine.eval_attempt_rules import coerce_judge_deferred
     run_dir = Path(run_dir)
     events_path, spans_path = run_dir / "events.jsonl", run_dir / "spans.jsonl"
     if not events_path.exists():
@@ -729,6 +731,7 @@ def extract_run(run_dir) -> list:
         data = event.get("data") or {}
         seq = event.get("seq")
         error = str(data.get("error_in") or data.get("error") or "")
+        _deferred = coerce_judge_deferred(data.get("judge_deferred"))
         # THE RECORD'S OWN WIDER WINDOW, when the row has one. `error_in` is the 500-character
         # PROMPT tail and always has been; `error_evidence` is the column the engine started
         # stamping beside it so the record would stop being thinner than what the classifier read.
@@ -849,6 +852,14 @@ def extract_run(run_dir) -> list:
                 "reason_from": ("event" if data.get("reason") not in (None, *VERDICT_OVERWRITES_REASON)
                                 else ("triage_span" if span_attrs.get("reason") else "unrecoverable")),
                 "triage_action": data.get("triage_action"),
+                # WHAT THE JUDGE ACTUALLY ANSWERED, beside what the engine did. On a deferred row
+                # (`node_repaired.judge_deferred`, `eval_attempt_rules.deferred_triage_verdict`)
+                # `triage_action` is the engine's `repair` while the judge said `reject_idea`; a
+                # corpus that kept only the former would score the judge on an answer it never gave.
+                # Absent on every other row, so existing records are unchanged. Read through
+                # `coerce_judge_deferred`, the column's closed vocabulary: a hand-edited or foreign
+                # row must not put a word of its own into the corpus as the judge's answer.
+                **({"judge_action": _deferred["action"]} if _deferred else {}),
                 "rationale": facts["rationale"][:1200],
                 "node_terminal_reason": data.get("reason") if failure["terminal"] else None,
             },

@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-159 event types — 113 folded into `RunState`, 46 diagnostic; 990 declared payload keys; 22 types whose whole payload is stored by the fold.
+160 event types — 113 folded into `RunState`, 47 diagnostic; 1002 declared payload keys; 22 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -46,7 +46,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `card_added` | folded | A research Card minted into durable inventory: its id, statement and the action it owns. | — | `action`, `at_node`, `concepts`, `footprint`, `generation`, `id`, `idea`, `node_id`, `ownership_receipt`, `parent_card_id`, `parent_generations`, `parent_id`, `parent_ids`, `rationale`, `scored_against`, `scored_against_empty`, `scored_against_generation`, `source`, `statement`, `steering_context` |
 | `card_auto_dropped` | folded | The engine dropped a Card as a lifecycle effect, with the reason (`dropped_by=engine`). | `dropped_by`, `id`, `reason` | `by` |
 | `card_build_attempted` | folded | One dispatch attempt for a Card's build, indexed so a repeat is visible instead of silently re-issued. | `card_id`, `generation`, `index` | — |
-| `card_build_done` | folded | A Card's build finished: the node it produced, or the reason it was skipped. | `card_id`, `generation` | `index`, `node_id`, `skipped`, `skipped_reason`, `speculative` |
+| `card_build_done` | folded | A Card's build finished: the node it produced, or the reason it was skipped. | `card_id`, `generation` | `index`, `node_id`, `producer_cancelled`, `skipped`, `skipped_reason`, `speculative` |
 | `card_build_requested` | folded | The durable selection-and-compute gate for one Card's build. | `card_id`, `generation` | — |
 | `card_dropped` | folded | The operator stopped a Card (server-stamped). | `id` | `by`, `dropped_by`, `reason` |
 | `card_edited` | folded | The operator rewrote a Card's statement. | `id` | `source`, `statement` |
@@ -128,14 +128,15 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `node_eval_started` | folded | A node's evaluation was dispatched — the promise `node_created`'s eval-start boundary made. | `generation`, `node_id` | `attempt` |
 | `node_evaluated` | folded | A node's terminal: its metric, the trials behind it, its secondary metrics and any trust violations. | `eval_seconds`, `extra_metrics`, `generation`, `metric`, `node_id`, `stdout_tail`, `trials`, `violations` | `attempt`, `extra_metrics_direction`, `extra_metrics_provenance`, `metric_provenance`, `resource_curve`, `self_metric`, `stderr_tail` |
 | `node_failed` | folded | A node's other terminal: why the evaluation produced no number, and who said so. | — | `attempt`, `card_id`, `engine_reason`, `error`, `error_evidence`, `eval_seconds`, `failed_stage`, `failure_signature`, `finish_data`, `finish_report_planned`, `generation`, `never_evaluated`, `node_id`, `reason`, `reason_evidence`, `reason_evidence_resolved`, `reason_findings`, `reason_hypotheses`, `reason_override_refused`, `reason_source`, `reason_summary`, `repair_stop`, `scope`, `step`, `triage_action`, `triage_rationale` |
-| `node_repaired` | folded | One repair round on a failing node: what it changed, on what evidence, and the verdict on the change. | `attempt`, `changed`, `deleted`, `error_in`, `files`, `generation`, `node_id`, `rationale`, `stages_passed`, `triage_action` | `attribution`, `budget_exhausted`, `code`, `edit_calls`, `engine_reason`, `error_evidence`, `eval_seconds`, `failure_signature`, `footprint_finalized`, `idea_footprint`, `param_overrides`, `reason`, `reason_evidence`, `reason_evidence_resolved`, `reason_findings`, `reason_hypotheses`, `reason_override_refused`, `reason_source`, `reason_summary`, `salvaged_metric`, `unmet`, `unparseable_repairs`, `verified` |
+| `node_repaired` | folded | One repair round on a failing node: what it changed, on what evidence, and the verdict on the change. | `attempt`, `changed`, `deleted`, `error_in`, `files`, `generation`, `node_id`, `rationale`, `stages_passed`, `triage_action` | `attribution`, `budget_exhausted`, `code`, `edit_calls`, `engine_reason`, `error_evidence`, `eval_seconds`, `failure_signature`, `footprint_finalized`, `idea_footprint`, `judge_deferred`, `param_overrides`, `reason`, `reason_evidence`, `reason_evidence_resolved`, `reason_findings`, `reason_hypotheses`, `reason_override_refused`, `reason_source`, `reason_summary`, `salvaged_metric`, `unmet`, `unparseable_repairs`, `verified` |
 | `node_reset` | folded | The operator re-ran an existing node in place from a named stage. | `node_id` | `attempt`, `from_stage`, `generation` |
 | `node_tombstoned` | folded | Nodes struck from selection without deleting their history. | `node_ids` | — |
 | `node_value_estimated` | folded | How much a model thinks expanding one node's branch still has left, in [0, 1]. | `generation`, `node_id`, `value` | `attempt`, `rationale` |
 | `node_verified` | folded | The selection verifier's score for one node, over a named evidence digest. | — | `attempt`, `evidence_digest`, `generation`, `node_id`, `score` |
 | `novelty_graded` | folded · whole | The graded-novelty verdict on a proposal the flat gate would have rejected. | — | `grade`, `level`, `literature`, `rationale`, `recommendation`, `shared_concepts`, `stance` |
 | `novelty_rejected` | folded · whole | A near-duplicate proposal the novelty gate nudged off, with the distance that decided it. | — | `action`, `distance`, `generation`, `kind`, `literature`, `node_id`, `nudged`, `original`, `reason`, `stance` |
-| `pause` | folded | The run paused — by an operator, or by the engine with a stated reason. | — | `attempt`, `detail`, `drain_only`, `generation`, `node_id`, `reason` |
+| `operator_request_parked` | diagnostic | A queued fork / inject / forced ablation waits for a node slot: the node budget is spent; add_nodes admits it. | `detail`, `held_by_card_requests`, `limit`, `reason`, `request`, `reserved` | `generation`, `idx`, `node_id` |
+| `pause` | folded | The run paused — by an operator, or by the engine with a stated reason. | — | `attempt`, `detail`, `drain_builds`, `drain_only`, `generation`, `node_id`, `reason` |
 | `phase_progress` | diagnostic | One build/eval phase started or finished — the live activity feed's row. | `phase`, `stage`, `status` | — |
 | `plan` | folded · whole | The run's PLAN artifact: how `max_nodes` was cut into seed, search and endgame reserve. | — | `at_node`, `endgame_start`, `max_nodes`, `phases`, `reason`, `reserve`, `reserve_frac`, `source` |
 | `policy_decision` | folded | The search policy's pick among the legal actions, with the scores behind it. | `chosen`, `reason`, `scores` | — |
