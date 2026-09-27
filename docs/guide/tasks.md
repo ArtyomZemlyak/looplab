@@ -400,6 +400,14 @@ Developer's own time-budget note tells it they exist. A value you declare yourse
 entry, a stage `env`) wins over the derived one, and a deadline-grace extension the judge may grant
 at the wall is NOT in the number — plan on the declared ceiling.
 
+A host launch also sizes the BLAS/OpenMP pools: `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`,
+`MKL_NUM_THREADS` and `VECLIB_MAXIMUM_THREADS` default to the CPUs the engine's process may actually
+use — its affinity mask bounded by its cgroup CFS quota (`cpu.max`, or v1 `cpu.cfs_quota_us`),
+rounded up (`core/hardware.py::usable_cpu_count`) — and the two `NUMEXPR_*` variables to the same
+number capped at 64. Until 2026-09-27 it was the affinity mask alone, which on a pod with 192
+visible cores and an 80-CPU quota handed every eval 192 threads (doc 69 §8). The number is per
+LAUNCH, so evals running side by side each get all of it; a value you declare wins, as above.
+
 **A stage can declare what it needs SET, and so can the task and the run.** `expect` states what a
 stage writes and `needs` what it reads; until 2026-08-13 nothing could say what it needs in its
 *environment*, so an environment variable's only home was CODE. What that cost, measured: on

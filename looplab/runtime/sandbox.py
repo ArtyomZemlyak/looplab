@@ -29,6 +29,7 @@ from typing import Optional, Protocol
 
 from looplab.core.atomicio import atomic_write_text
 from looplab.core.errors import BudgetExceeded, ConfigRefusal
+from looplab.core.hardware import usable_cpu_count
 from looplab.core.numeric import parse_mem_bytes  # noqa: F401 (re-export; moved to core, CORE-05)
 from looplab.core.jsonutil import surrogate_safe
 from looplab.runtime.read_fence import (FENCE_DIR_ENV, WORKDIR_ENV, prepend_pythonpath,
@@ -1106,27 +1107,32 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     # SubprocessSandbox path.) setdefault: an explicit engine/env value still wins.
     full_env.setdefault("PYTHONUTF8", "1")
     full_env.setdefault("PYTHONIOENCODING", "utf-8")
-    # Cap BLAS/OpenMP thread pools to the pod's CPU QUOTA, not the host core count. torch/numpy/sklearn
-    # size their pools from os.cpu_count() (the HOST's cores), so one eval on a 4-vCPU JupyterHub pod
-    # sharing a 64-core node would spin ~64 threads → context-switch thrash + CPU throttling billed to
-    # the user. sched_getaffinity respects the cgroup cpuset where cpu_count does not; on an unconstrained
-    # box it returns every core, so this setdefault equals the library default (no local regression).
-    # setdefault: an explicit operator/engine value still wins. POSIX/Linux only (guarded).
-    try:
-        _aff = len(os.sched_getaffinity(0))         # type: ignore[attr-defined]
-        _quota = str(_aff)
-        # BLAS/OpenMP pools track the pod's CPU QUOTA (the cgroup cpuset), so an eval uses its cores
-        # without oversubscribing a shared node. NUMEXPR is the exception: it HARD-rejects
-        # NUMEXPR_NUM_THREADS > NUMEXPR_MAX_THREADS (default 64) with a loud "Error." line, so its two
-        # vars are capped at 64 while the general BLAS/OpenMP vars get the full quota.
-        _nx = str(min(_aff, 64))
+    # Cap BLAS/OpenMP thread pools to the CPUs this process may USE, not the host core count.
+    # torch/numpy/sklearn size their pools from os.cpu_count() (the HOST's cores), so one eval on a
+    # 4-vCPU JupyterHub pod sharing a 64-core node would spin ~64 threads → context-switch thrash + CPU
+    # throttling billed to the user. The budget is `core/hardware.py::usable_cpu_count`: the affinity
+    # mask (the cgroup cpuset, which cpu_count does not respect) bounded by the cgroup CFS QUOTA
+    # (`cpu.max`; v1 `cpu.cfs_quota_us`), which no cpuset shows. UNTIL 2026-09-27 THIS WAS THE
+    # AFFINITY ALONE while this comment called it "the pod's CPU QUOTA": a CFS quota hides no core, so
+    # on the box doc 69 §8 measured (affinity 192, `cpu.max` 8000000/100000 = 80 CPUs,
+    # `throttled_usec` ≈ 44,331 s over the container's life) every eval child got 192 threads under an
+    # 80-CPU quota. On an unconstrained box the budget is every core, so this setdefault equals the
+    # library default (no local regression). setdefault: an explicit operator/engine value still wins.
+    # The budget is per LAUNCH: evals running side by side each get all of it, and a caller that
+    # knows its own share declares a smaller value. POSIX/Linux only (guarded).
+    if hasattr(os, "sched_getaffinity"):
+        _cpus = usable_cpu_count()
+        _threads = str(_cpus)
+        # NUMEXPR is the exception: it HARD-rejects NUMEXPR_NUM_THREADS > NUMEXPR_MAX_THREADS
+        # (default 64) with a loud "Error." line, so its two vars are capped at 64 while the general
+        # BLAS/OpenMP vars get the full budget.
+        _nx = str(min(_cpus, 64))
         for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
                      "VECLIB_MAXIMUM_THREADS"):
-            full_env.setdefault(_var, _quota)
+            full_env.setdefault(_var, _threads)
         for _var in ("NUMEXPR_NUM_THREADS", "NUMEXPR_MAX_THREADS"):
             full_env.setdefault(_var, _nx)
-    except AttributeError:
-        pass   # no sched_getaffinity (Windows/macOS) — leave the libraries' own defaults
+    # (no sched_getaffinity — Windows/macOS: leave the libraries' own defaults)
     # Unbuffered child stdio so the live log (log_path) updates line-by-line rather than only when
     # the child's block buffer flushes. setdefault: an explicit value still wins. Harmless on the
     # buffered path (the parent reads pipes either way).

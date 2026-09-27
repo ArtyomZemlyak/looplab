@@ -249,7 +249,8 @@ and holds the run's lock). Only that server does: the launcher marks it with
 `LOOPLAB_UI_REAP_ON_EXIT=1`, while a `looplab ui` you start by hand in a hub terminal — and the
 private server `looplab tui` starts — carry no marker, so stopping them leaves their runs running,
 exactly as on a local box (set the variable yourself to opt a hand-started, pod-lifetime server in).
-Eval subprocesses cap their BLAS/OpenMP threads to the pod's CPU quota; and an OOM-killed eval
+Eval subprocesses cap their BLAS/OpenMP threads to the CPUs the pod may use — the smaller of its
+cpuset and its cgroup CFS quota (`cpu.max`, which hides no core and only throttles); and an OOM-killed eval
 is recognised and repaired (reduce batch/model size) instead of dying silently. These are no-ops on a
 local box. On a local box, GPU-owning Engine processes running as the same OS user and sharing the
 same temporary-filesystem namespace instead coordinate through one crash-released, pool-wide lease:

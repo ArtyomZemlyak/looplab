@@ -301,13 +301,145 @@ def gpu_compute_pids(*, timeout: float = 30.0) -> "set[int] | None":
     return {int(tok) for tok in (out.stdout or "").split() if tok.strip().isdecimal()}
 
 
-def usable_cpu_count() -> int:
-    """Usable CPU cores respecting the cgroup cpuset (sched_getaffinity), falling back to cpu_count.
-    This is the number an eval's thread pools are (and should be) sized against."""
+# Where this process's CPU BANDWIDTH QUOTA is read from. Module attributes rather than default
+# arguments, so a test can point the whole chain — `usable_cpu_count` and the sandbox launch that
+# reads it — at a fake cgroup tree.
+CGROUP_ROOT = "/sys/fs/cgroup"
+PROC_SELF_CGROUP = "/proc/self/cgroup"
+# Where a cgroup v1 box mounts the cpu controller when `/proc/self/cgroup` does not name it: the
+# joined controller list is the directory, and `cpu` is the conventional alias of it.
+_V1_CPU_DIRS = ("cpu", "cpu,cpuacct", "cpuacct,cpu")
+
+
+def _read_pseudo_file(path: str) -> "str | None":
+    """A small cgroup/proc pseudo-file as text, or None when it cannot be read (absent, no
+    permission, not ASCII) — which the quota reader treats exactly like a file that says nothing."""
     try:
-        return len(os.sched_getaffinity(0))   # type: ignore[attr-defined]
+        with open(path, encoding="ascii") as fh:
+            return fh.read(65536)
+    except (OSError, ValueError):      # UnicodeDecodeError is a ValueError
+        return None
+
+
+def _cgroup_levels(base: str, rel: str) -> list[str]:
+    """`base/<rel>`, then every ancestor of it up to `base` itself, innermost first.
+
+    A process is throttled by the quota of EVERY cgroup on its path, not only its own (a pod-level
+    limit sits on the pod's cgroup, a container's on the leaf), so the reader takes the tightest of
+    them. Inside a container with its own cgroup namespace `rel` is `/` and `base` alone IS the
+    container's cgroup. A path that climbs out of the mount (`..`: a cgroup outside this namespace)
+    names nothing below `base`, which is then the only level read.
+    """
+    parts = [p for p in rel.strip().split("/") if p and p != "."]
+    if ".." in parts:
+        parts = []
+    return [os.path.join(base, *parts[:n]) for n in range(len(parts), -1, -1)]
+
+
+def _ceil_div(quota: int, period: int) -> int:
+    return -(-quota // period)
+
+
+def _v2_cpu_max_cpus(text: str) -> "int | None":
+    """cgroup v2 `cpu.max` (`<quota> <period>`, quota `max` = no limit) as whole CPUs rounded UP,
+    None for no limit. Anything else raises ValueError."""
+    fields = text.split()
+    if len(fields) != 2 or int(fields[1]) <= 0:
+        raise ValueError(f"not a cpu.max value: {text!r}")
+    if fields[0] == "max":
+        return None
+    quota = int(fields[0])
+    if quota <= 0:
+        raise ValueError(f"not a cpu.max quota: {text!r}")
+    return _ceil_div(quota, int(fields[1]))
+
+
+def _v1_cfs_cpus(quota_text: str, period_text: str) -> "int | None":
+    """cgroup v1 `cpu.cfs_quota_us` / `cpu.cfs_period_us` (quota -1 = no limit) as whole CPUs rounded
+    UP, None for no limit. Anything else raises ValueError."""
+    quota, period = int(quota_text.strip()), int(period_text.strip())
+    if period <= 0 or quota == 0 or quota < -1:
+        raise ValueError(f"not a CFS quota/period pair: {quota_text!r} / {period_text!r}")
+    return None if quota == -1 else _ceil_div(quota, period)
+
+
+def cgroup_cpu_limit(*, cgroup_root: "str | None" = None,
+                     proc_cgroup: "str | None" = None) -> "int | None":
+    """Whole CPUs this process's cgroup CFS bandwidth quota allows (quota / period, rounded UP), or
+    None when there is no quota — or it cannot be read, which callers must treat the same way.
+
+    cgroup v2 first: `cpu.max` of the cgroup `/proc/self/cgroup` names (`0::/<path>`) and of each
+    ancestor up to the mount root, so a namespaced container (`0::/`) reads `<root>/cpu.max`, its
+    own. Only when NO level answers — a v1 or hybrid box, where the cpu controller is not on the
+    unified hierarchy — is v1 read the same way, under the cpu controller's mount:
+    `cpu.cfs_quota_us` / `cpu.cfs_period_us`, quota -1 = no limit. The tightest limited level wins;
+    a level that is absent or unparseable says nothing. `cgroup_root` / `proc_cgroup` override the
+    module paths. Reads a few bytes of pseudo-files per call and caches nothing, so a pod resized
+    in place is seen by the next launch.
+    """
+    root = CGROUP_ROOT if cgroup_root is None else cgroup_root
+    proc = PROC_SELF_CGROUP if proc_cgroup is None else proc_cgroup
+    v2_rel, v1_rel, v1_dirs = "", "", list(_V1_CPU_DIRS)
+    for line in (_read_pseudo_file(proc) or "").splitlines():
+        hierarchy, _, rest = line.partition(":")
+        controllers, sep, path = rest.partition(":")
+        if not sep:
+            continue
+        if hierarchy == "0" and not controllers:
+            v2_rel = path
+        elif "cpu" in controllers.split(","):
+            v1_rel = path
+            v1_dirs.insert(0, controllers)
+
+    answered, limits = False, []
+    for level in _cgroup_levels(root, v2_rel):
+        text = _read_pseudo_file(os.path.join(level, "cpu.max"))
+        if text is None:
+            continue
+        try:
+            cpus = _v2_cpu_max_cpus(text)
+        except ValueError:
+            continue
+        answered = True
+        if cpus is not None:
+            limits.append(cpus)
+    if not answered:
+        for mount in dict.fromkeys(v1_dirs):
+            for level in _cgroup_levels(os.path.join(root, mount), v1_rel):
+                quota = _read_pseudo_file(os.path.join(level, "cpu.cfs_quota_us"))
+                period = _read_pseudo_file(os.path.join(level, "cpu.cfs_period_us"))
+                if quota is None or period is None:
+                    continue
+                try:
+                    cpus = _v1_cfs_cpus(quota, period)
+                except ValueError:
+                    continue
+                if cpus is not None:
+                    limits.append(cpus)
+    return min(limits) if limits else None
+
+
+def usable_cpu_count(*, cgroup_root: "str | None" = None,
+                     proc_cgroup: "str | None" = None) -> int:
+    """The CPUs this process can actually USE: its affinity mask (the cgroup cpuset; `os.cpu_count()`
+    where there is no `sched_getaffinity`) bounded by its cgroup CFS quota (`cgroup_cpu_limit`).
+    This is the number an eval's thread pools are (and should be) sized against —
+    `runtime/sandbox.py::run_argv` defaults the BLAS/OpenMP variables to it — and the one
+    `environment_brief` tells the agents.
+
+    WHY THE QUOTA TOO (doc 69 §8, measured 2026-09-26). A CFS quota hides no core: all 192 stay in
+    the affinity mask and schedulable, and the kernel throttles the whole group once it has burned
+    quota/period CPU-seconds in a period. That box's `cpu.max` was `8000000 100000` (80 CPUs) and its
+    `cpu.stat` showed `throttled_usec` ≈ 44,331 s (≈12.3 h) over the container's life, while this
+    function answered 192 — so every eval child sized its pools at 192 threads under an 80-CPU
+    quota. An unreadable quota answers the affinity alone, which is what this returned before.
+    """
+    try:
+        cores = len(os.sched_getaffinity(0))   # type: ignore[attr-defined]
     except (AttributeError, OSError):
-        return os.cpu_count() or 1
+        cores = os.cpu_count() or 1
+    limit = cgroup_cpu_limit(cgroup_root=cgroup_root, proc_cgroup=proc_cgroup)
+    return cores if limit is None else min(cores, limit)
 
 
 def _fmt_gib(mib) -> str:

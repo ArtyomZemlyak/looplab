@@ -1,6 +1,11 @@
 """Honest runtime-capability brief + task-aware gating (no torch claim for offline tasks)."""
 from __future__ import annotations
 
+import os
+
+import pytest
+
+import looplab.core.hardware as hw
 from looplab.core.hardware import runtime_capabilities_brief, task_runtime_caps
 
 
@@ -200,3 +205,136 @@ def test_effective_gpu_inventory_fails_closed_on_cuda_or_duplicate_identity_erro
     duplicate = [_cuda_rows()[0], {**_cuda_rows()[1], "uuid": _UUID_B}]
     assert hw.effective_gpu_inventory(
         _cuda_api=_FakeCudaApi(duplicate), _driver_version_query=_display_versions) == []
+
+
+# --- the CPU budget: the affinity mask bounded by the cgroup CFS quota (doc 69 §8) -------------------
+#
+# `usable_cpu_count` sizes every eval's BLAS/OpenMP pools (`runtime/sandbox.py::run_argv`) and is the
+# "usable CPU cores" the agents are told. It answered the affinity mask alone — 192 on the box doc 69
+# measured, whose `cpu.max` allows 80 CPUs — so the quota is read from a cgroup tree the tests below
+# fake on disk, one file layout per case, and nothing here depends on the box they run on.
+
+
+def _tree(base, proc_lines, files):
+    """A fake cgroup mount + `/proc/self/cgroup` under `base`, as the readers' keyword arguments.
+    `files` maps a path under the mount to its content; `proc_lines=None` leaves no proc file."""
+    root = base / "sys-fs-cgroup"
+    root.mkdir(parents=True)
+    for rel, content in files.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content if isinstance(content, bytes) else content.encode("ascii"))
+    proc = base / "proc-self-cgroup"
+    if proc_lines is not None:
+        proc.write_text("".join(f"{line}\n" for line in proc_lines), encoding="ascii")
+    return {"cgroup_root": str(root), "proc_cgroup": str(proc)}
+
+
+def _affinity() -> int:
+    try:
+        return len(os.sched_getaffinity(0))
+    except AttributeError:
+        return os.cpu_count() or 1
+
+
+def test_a_v2_quota_bounds_the_budget_rounded_up(tmp_path):
+    measured = _tree(tmp_path / "doc69", ["0::/"], {"cpu.max": "8000000 100000\n"})
+    assert hw.cgroup_cpu_limit(**measured) == 80          # the box doc 69 §8 measured
+    assert hw.usable_cpu_count(**measured) == min(_affinity(), 80)
+    # A fractional quota is rounded UP: 1.5 CPUs of bandwidth keep two threads busy, and a quota
+    # below one CPU still leaves one thread, never zero.
+    assert hw.cgroup_cpu_limit(**_tree(tmp_path / "half", ["0::/"], {"cpu.max": "150000 100000"})) == 2
+    small = _tree(tmp_path / "tiny", ["0::/"], {"cpu.max": "50000 100000"})
+    assert hw.cgroup_cpu_limit(**small) == 1
+    assert hw.usable_cpu_count(**small) == 1
+
+
+def test_a_v2_max_is_no_quota_and_the_budget_is_the_affinity(tmp_path):
+    unlimited = _tree(tmp_path, ["0::/"], {"cpu.max": "max 100000\n"})
+    assert hw.cgroup_cpu_limit(**unlimited) is None
+    assert hw.usable_cpu_count(**unlimited) == _affinity()
+
+
+def test_a_v2_process_is_bounded_by_every_ancestor_of_its_own_cgroup(tmp_path):
+    # Not namespaced: /proc/self/cgroup names the full path, and a pod-level limit sits on the pod's
+    # cgroup while the container's own leaf says `max`. The tightest level on the path is the bound.
+    pod = _tree(tmp_path / "pod", ["0::/kubepods/pod1/ctr"], {
+        "kubepods/pod1/ctr/cpu.max": "max 100000", "kubepods/pod1/cpu.max": "400000 100000"})
+    assert hw.cgroup_cpu_limit(**pod) == 4
+    leaf = _tree(tmp_path / "leaf", ["0::/kubepods/pod1/ctr"], {
+        "kubepods/pod1/ctr/cpu.max": "200000 100000", "kubepods/pod1/cpu.max": "400000 100000"})
+    assert hw.cgroup_cpu_limit(**leaf) == 2
+    # A path this mount does not hold (the process's cgroup is outside what is mounted here) falls
+    # through to the mount root, which is where a namespaced container's own quota lives.
+    moved = _tree(tmp_path / "moved", ["0::/elsewhere/deep"], {"cpu.max": "300000 100000"})
+    assert hw.cgroup_cpu_limit(**moved) == 3
+
+
+def test_a_path_that_climbs_out_of_the_mount_reads_only_the_mount_root(tmp_path):
+    escape = _tree(tmp_path, ["0::/../outside"], {"cpu.max": "max 100000"})
+    (tmp_path / "outside").mkdir()
+    (tmp_path / "outside" / "cpu.max").write_text("100000 100000", encoding="ascii")
+    assert hw.cgroup_cpu_limit(**escape) is None
+
+
+def test_a_v1_quota_bounds_the_budget_and_minus_one_is_no_quota(tmp_path):
+    # A v1 container: /proc/self/cgroup names the host-side path, the mount holds only the
+    # container's own cgroup at its root, and the directory is the joined controller list.
+    lines = ["12:cpu,cpuacct:/docker/abc", "1:name=systemd:/docker/abc", "0::/docker/abc"]
+    limited = _tree(tmp_path / "v1", lines, {"cpu,cpuacct/cpu.cfs_quota_us": "200000\n",
+                                             "cpu,cpuacct/cpu.cfs_period_us": "100000\n"})
+    assert hw.cgroup_cpu_limit(**limited) == 2
+    assert hw.usable_cpu_count(**limited) == min(_affinity(), 2)
+    unlimited = _tree(tmp_path / "v1-unlimited", lines, {"cpu,cpuacct/cpu.cfs_quota_us": "-1\n",
+                                                         "cpu,cpuacct/cpu.cfs_period_us": "100000\n"})
+    assert hw.cgroup_cpu_limit(**unlimited) is None
+    assert hw.usable_cpu_count(**unlimited) == _affinity()
+    # No readable /proc/self/cgroup: the conventional `cpu` mount is still read at its root.
+    alias = _tree(tmp_path / "v1-alias", None, {"cpu/cpu.cfs_quota_us": "250000",
+                                                "cpu/cpu.cfs_period_us": "100000"})
+    assert hw.cgroup_cpu_limit(**alias) == 3
+
+
+def test_v1_is_read_only_where_v2_gives_no_answer(tmp_path):
+    v1 = {"cpu/cpu.cfs_quota_us": "200000", "cpu/cpu.cfs_period_us": "100000"}
+    both = _tree(tmp_path / "both", ["0::/"], {"cpu.max": "max 100000", **v1})
+    assert hw.cgroup_cpu_limit(**both) is None            # v2 answered "no quota"
+    garbage_v2 = _tree(tmp_path / "garbage", ["0::/"], {"cpu.max": "banana", **v1})
+    assert hw.cgroup_cpu_limit(**garbage_v2) == 2          # an unparseable file says nothing
+
+
+def test_missing_files_leave_the_budget_at_the_affinity(tmp_path):
+    nothing = _tree(tmp_path, None, {})
+    assert hw.cgroup_cpu_limit(**nothing) is None
+    assert hw.usable_cpu_count(**nothing) == _affinity()
+
+
+@pytest.mark.parametrize("content", [
+    "banana", "100000", "0 100000", "-5 100000", "100000 0", "100000 -1", "max", "max 0",
+    "1 2 3", "", b"\xff\xfe 100000", "1.5 100000"])
+def test_a_garbage_cpu_max_is_no_quota(tmp_path, content):
+    tree = _tree(tmp_path, ["0::/"], {"cpu.max": content})
+    assert hw.cgroup_cpu_limit(**tree) is None
+    assert hw.usable_cpu_count(**tree) == _affinity()
+
+
+@pytest.mark.parametrize("quota, period", [
+    ("abc", "100000"), ("100000", "0"), ("100000", "x"), ("0", "100000"), ("-7", "100000"),
+    ("", "100000")])
+def test_a_garbage_v1_pair_is_no_quota(tmp_path, quota, period):
+    tree = _tree(tmp_path, None, {"cpu/cpu.cfs_quota_us": quota, "cpu/cpu.cfs_period_us": period})
+    assert hw.cgroup_cpu_limit(**tree) is None
+    assert hw.usable_cpu_count(**tree) == _affinity()
+
+
+def test_on_this_box_the_budget_is_within_its_own_cgroup_quota():
+    """The real box, read independently of the helper: where the mount's own `cpu.max` carries a
+    quota, the budget may not exceed it (the root is an ancestor of every level the helper reads)."""
+    try:
+        with open("/sys/fs/cgroup/cpu.max", encoding="ascii") as fh:
+            quota, period = fh.read().split()
+    except (OSError, ValueError):
+        pytest.skip("no readable cgroup v2 cpu.max on this box")
+    if quota == "max":
+        pytest.skip("this box's cgroup carries no CPU quota")
+    assert hw.usable_cpu_count() <= -(-int(quota) // int(period))

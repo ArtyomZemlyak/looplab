@@ -307,15 +307,84 @@ def test_deps_install_stops_after_repeated_egress_timeouts(monkeypatch):
 
 
 @pytest.mark.skipif(not hasattr(os, "sched_getaffinity"), reason="sched_getaffinity is POSIX/Linux only")
-def test_sandbox_caps_blas_threads_to_cpu_quota(tmp_path):
+def test_sandbox_caps_blas_threads_to_cpu_quota(tmp_path, monkeypatch):
     """On Linux the sandbox must bound BLAS/OpenMP thread pools to the CPU quota so one eval can't
-    oversubscribe a cgroup-limited pod. We assert the env reaches the child by having it echo the var."""
+    oversubscribe a cgroup-limited pod. We assert the env reaches the child by having it echo the var.
+
+    This asserted the AFFINITY count until 2026-09-27 — 192 on a box whose `cpu.max` allows 80 CPUs
+    (doc 69 §8) — so the test pinned the defect. The budget is `usable_cpu_count` now; the quota
+    arithmetic is driven on fake cgroup trees in tests/test_hardware.py and through this same launch
+    in the test below."""
+    from looplab.core.hardware import usable_cpu_count
     from looplab.runtime.sandbox import _run_argv
     import sys
+    monkeypatch.delenv("OMP_NUM_THREADS", raising=False)   # an exported value would win the default
     code = "import os; print(os.environ.get('OMP_NUM_THREADS', 'UNSET'))"
     exit_code, out, err, timed_out = _run_argv([sys.executable, "-c", code], tmp_path, timeout=30)
     assert exit_code == 0, err
-    assert out.strip() == str(len(os.sched_getaffinity(0)))
+    assert out.strip() == str(usable_cpu_count())
+    assert 1 <= int(out) <= len(os.sched_getaffinity(0))
+
+
+_THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS", "NUMEXPR_MAX_THREADS")
+
+
+def _echo_thread_env():
+    import sys
+    return [sys.executable, "-c",
+            f"import json, os; print(json.dumps({{n: os.environ.get(n) for n in {_THREAD_VARS!r}}}))"]
+
+
+def _fake_cgroup(tmp_path, monkeypatch, cpu_max: str) -> None:
+    """Point the quota reader at a namespaced-container cgroup tree holding `cpu_max`, and clear the
+    thread variables from THIS environment — the launch inherits it, and a value the shell exported
+    would win the setdefault the tests below are about."""
+    import looplab.core.hardware as hw
+    for name in _THREAD_VARS:
+        monkeypatch.delenv(name, raising=False)
+    root = tmp_path / "fake-cgroup"
+    root.mkdir()
+    (root / "cpu.max").write_text(cpu_max, encoding="ascii")
+    proc = tmp_path / "fake-proc-self-cgroup"
+    proc.write_text("0::/\n", encoding="ascii")
+    monkeypatch.setattr(hw, "CGROUP_ROOT", str(root))
+    monkeypatch.setattr(hw, "PROC_SELF_CGROUP", str(proc))
+
+
+@pytest.mark.skipif(not hasattr(os, "sched_getaffinity"), reason="sched_getaffinity is POSIX/Linux only")
+def test_the_eval_child_gets_the_cgroup_quota_not_the_affinity(tmp_path, monkeypatch):
+    """Doc 69 §8: the thread variables were `len(os.sched_getaffinity(0))` and read no CFS quota, so
+    every eval child on a 192-core, 80-CPU-quota box sized its pools at 192. Driven through the real
+    launch against a fake `cpu.max` of 3 CPUs: every BLAS/OpenMP variable carries min(affinity, 3),
+    and NUMEXPR the same under its 64 cap."""
+    import json
+    from looplab.runtime.sandbox import _run_argv
+    _fake_cgroup(tmp_path, monkeypatch, "300000 100000\n")
+    exit_code, out, err, _timed_out = _run_argv(
+        _echo_thread_env(), str(tmp_path / "work"), timeout=30)
+    assert exit_code == 0, err
+    budget = str(min(len(os.sched_getaffinity(0)), 3))
+    assert json.loads(out.strip().splitlines()[-1]) == {
+        "OMP_NUM_THREADS": budget, "OPENBLAS_NUM_THREADS": budget, "MKL_NUM_THREADS": budget,
+        "VECLIB_MAXIMUM_THREADS": budget, "NUMEXPR_NUM_THREADS": budget,
+        "NUMEXPR_MAX_THREADS": budget}
+
+
+@pytest.mark.skipif(not hasattr(os, "sched_getaffinity"), reason="sched_getaffinity is POSIX/Linux only")
+def test_a_declared_thread_count_still_wins_over_the_quota(tmp_path, monkeypatch):
+    """setdefault semantics survive the new budget: what the engine or operator declares wins."""
+    import json
+    from looplab.runtime.sandbox import _run_argv
+    _fake_cgroup(tmp_path, monkeypatch, "300000 100000\n")
+    exit_code, out, err, _timed_out = _run_argv(
+        _echo_thread_env(), str(tmp_path / "work"), timeout=30,
+        env={"OMP_NUM_THREADS": "7", "NUMEXPR_MAX_THREADS": "5"})
+    assert exit_code == 0, err
+    seen = json.loads(out.strip().splitlines()[-1])
+    budget = str(min(len(os.sched_getaffinity(0)), 3))
+    assert seen["OMP_NUM_THREADS"] == "7" and seen["NUMEXPR_MAX_THREADS"] == "5"
+    assert seen["MKL_NUM_THREADS"] == budget and seen["NUMEXPR_NUM_THREADS"] == budget
 
 
 def test_kill_process_tree_is_pid_recycle_safe_on_bogus_pid():
