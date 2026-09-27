@@ -353,3 +353,26 @@ def test_cli_refuses_when_the_fence_itself_cannot_be_read(tmp_path):
     result = CliRunner().invoke(app, ["readmodel", str(run_dir)])
     assert result.exit_code == 2
     assert not (run_dir / "readmodel.sqlite").exists()
+
+
+def test_the_schema_version_moves_with_the_tables(tmp_path):
+    """`READMODEL_SCHEMA_VERSION` is what lets a reader refuse a sidecar whose columns mean something
+    else, and it moves only when someone remembers to move it: the `objective` table (doc 68 68.2)
+    landed at version 1, so a version-1 sidecar without it read `current` and `SELECT key FROM
+    objective` failed `no such table` (critic 2026-09-27, driven). The version is pinned to the DDL
+    the builder writes — change a table and this is red until the version (and this pin) move."""
+    import hashlib
+
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "max"})
+    db = tmp_path / "rm.sqlite"
+    build_readmodel(store.read_all(), db)
+    con = sqlite3.connect(db)
+    try:
+        ddl = sorted(con.execute("SELECT name, sql FROM sqlite_master WHERE type='table'"))
+    finally:
+        con.close()
+    assert [name for name, _sql in ddl] == ["nodes", "objective", WATERMARK_TABLE]
+    digest = hashlib.sha256(repr(ddl).encode()).hexdigest()
+    assert (READMODEL_SCHEMA_VERSION, digest) == (
+        2, "d9f6195c1673eee004217b71eb6e54812ec7e37f7668749c24b3efb9fd7c871b")

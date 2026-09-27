@@ -4,8 +4,8 @@ import {
   reconcileScopeReportGeneration, fmt,
 } from './util.js'
 import {
-  scopeObservationRows, scopeReportAuthority, scopeReportGenerationError, scopeReportKey,
-  scopeReportPublicationUnconfirmed,
+  observationRuler, scopeObservationRows, scopeReportAuthority, scopeReportGenerationError,
+  scopeReportKey, scopeReportPublicationUnconfirmed,
 } from './scopeReportModel.js'
 import { useDialogFocus } from './useDialogFocus.js'
 
@@ -211,10 +211,12 @@ function Section({ title, items }) {
   </div>
 }
 
-function MetricRun({ item, note, onOpen }) {
+export function MetricRun({ item, note, onOpen }) {
   const id = text(item?.run_id)
+  const ruler = observationRuler(item)
   return <button type="button" className="sr-best" disabled={!id} onClick={() => onOpen?.(id)}>
     <b className="sr-m">{Number.isFinite(item?.metric) ? fmt(item.metric) : '—'}</b><span className="sr-rid">{id}</span>
+    {ruler && <span className="muted">{ruler}</span>}
     {note && <span className="muted"> · {note}</span>}
   </button>
 }

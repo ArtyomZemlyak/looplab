@@ -629,6 +629,73 @@ def test_a_command_admitted_after_the_drain_exited_is_decided_by_the_log(
         assert len(started) == 1 and "--drain-only" not in started[0][0], started
 
 
+def test_a_drain_that_exits_between_the_read_and_the_probe_is_read_after_it(tmp_path):
+    """LOW (critic 2026-09-27, driven): admission asked the rule of the log it had read BEFORE its
+    lock probe; the drain wrote its pause and its last ack pass and exited in between, the stale read
+    showed no drain pause, and a plain search was started for a fork whose record said it waits.
+    Once a probe finds no engine the log is read again, and that read decides."""
+    rd, driver, client = _draining(tmp_path)
+    svc = client.app.state.looplab.commands
+    store = EventStore(rd / "events.jsonl")
+    real_state = svc._engine_state
+    exited: list = []
+
+    def _state(rd_):
+        if not exited and any(e.type == "fork" and e.data.get("_command_id")
+                              for e in store.read_all()):
+            exited.append(True)          # the drain: its pause, its last ack pass, the lock released
+            store.append("pause", {"reason": "drain-only resume: done", "drain_only": True})
+            _real_ack(rd, drain=True)
+            driver.alive = False
+            return False
+        return real_state(rd_)
+
+    svc._engine_state = _state
+    spawns = len(driver.calls)
+    driver.on_spawn = lambda: setattr(driver, "alive", True)          # any child: a plain search
+    settled = _terminal(client, _post(client, "fork", {"from_node_id": 1, "generation": 0},
+                                      "race").json())
+    assert exited and settled["status"] == "succeeded", settled
+    assert settled.get("deferred_to_next_search") is True, settled
+    assert driver.calls[spawns:] == [], "nothing was started"
+
+
+def test_the_monitors_rung_reads_the_log_again_once_no_engine_is_found(tmp_path):
+    """The monitor's re-spawn rung asked the rule of the log it read before its own lock probe too
+    (critic 2026-09-27, second pass): a drain another command started pauses, acks and exits
+    between the rung's read and its probe, and the stale read spawned a plain search for a fork that
+    waits. Once the probe finds no engine the rung reads the log again."""
+    rd, driver, client = _draining(tmp_path)
+    svc = client.app.state.looplab.commands
+    store = EventStore(rd / "events.jsonl")
+    real_state = svc._engine_state
+    phase = {"now": "alive"}
+
+    def _state(rd_):
+        if phase["now"] == "gone":            # the monitor's loop head: no engine, no drain pause yet
+            phase["now"] = "drain"
+            driver.alive = False
+            return False
+        if phase["now"] == "drain":           # the rung's own probe: a drain paused, acked, exited
+            phase["now"] = "done"
+            store.append("pause", {"reason": "drain-only resume: done", "drain_only": True})
+            _real_ack(rd, drain=True)
+            return False
+        return real_state(rd_)
+
+    svc._engine_state = _state
+    sent = _executing(client, _post(client, "fork", {"from_node_id": 1, "generation": 0},
+                                    "rung").json())
+    assert sent["status"] == "executing" and not sent.get("spawned_by_command"), sent
+    spawns = len(driver.calls)
+    driver.on_spawn = lambda: setattr(driver, "alive", True)          # any child: a plain search
+    phase["now"] = "gone"
+    settled = _terminal(client, sent)
+    assert phase["now"] == "done", phase
+    assert settled["status"] == "succeeded" and settled.get("deferred_to_next_search") is True, settled
+    assert driver.calls[spawns:] == [], "nothing was started"
+
+
 def test_a_folded_intent_a_drain_deferred_is_not_said_to_wait(tmp_path):
     """`deferred_to_next_search` is an ENGINE-ACK command's account (critic 2026-09-27, mutant D6):
     an intent whose postcondition is its own fold was applied the moment it folded, whatever a drain

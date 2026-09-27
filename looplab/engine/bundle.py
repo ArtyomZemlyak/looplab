@@ -88,9 +88,10 @@ def bundle_summary(run_dir: Path, state, events) -> dict:
             "champion": best.id if best is not None else None,
             "best_metric": best.metric if best is not None else None,
             # WHICH metric `best_metric` is, as the server's run row says it (doc 68 68.2, critic
-            # 2026-09-27): the declared extra metric an operator retarget ranked by, else None — the
-            # task's own; the caveat alone said "retargeted" and named no key.
-            "objective_key": state.objective_key,
+            # 2026-09-27): the declared extra metric an operator retarget ranked by — the caveat
+            # alone said "retargeted" and named no key. ABSENT on every other run, so a plain run's
+            # summary is the one it always was (critic 2026-09-27, second pass).
+            **({"objective_key": state.objective_key} if state.objective_key else {}),
             "best_metric_caveats": champion_metric_caveats(state), "mislead_gap": mislead_gap(state),
             "private_grade": private, "seeds": seeds,
             "exported_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}

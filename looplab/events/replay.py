@@ -1730,7 +1730,9 @@ def _on_metric_retarget(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> Non
     direction = d.get("direction")
     if isinstance(direction, str):
         # Read in the spelling `serve/control_validation.py` normalizes to before appending, so a
-        # row an earlier build wrote as "MAX" is the run's own max, never a flip (critic 2026-09-27).
+        # row spelled "MAX" is the run's own max, never a flip. No LoopLab build appended one (the
+        # first build refused it, the second lowercases it — critic 2026-09-27, second pass); a
+        # hand-written or foreign row can, and the fold reads it the way the server would write it.
         direction = direction.strip().lower()
     if direction is not None and direction != st.direction:
         return

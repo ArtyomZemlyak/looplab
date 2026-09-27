@@ -173,6 +173,7 @@ class LiveTracker:
         self._logged: set[int] = set()  # node ids already mirrored
         self._best: Optional[float] = None
         self._objective: Optional[str] = None   # the objective the parent is tagged with (68.2)
+        self._rulers_tagged = False     # once an objective was ever in force: every node says its own
         self.failures = 0
 
     # -- internals -----------------------------------------------------------------------------
@@ -200,20 +201,25 @@ class LiveTracker:
             **_objective_tag(state),
         })
         self._objective = _objective_tag(state).get("looplab.objective_key")
+        self._rulers_tagged = self._objective is not None
 
     def _follow_objective(self, mlflow, state) -> None:
         """An operator `metric_retarget` LANDED MID-MIRROR (doc 68 68.2, critic 2026-09-27): the tag
         was written once, at open, so a later retarget — or its undo — left the parent naming the
         wrong ruler. The tag follows the objective in force (`""` once it is the task's own metric
-        again), `looplab.objective_changed_after_node` names the last node published on the old one,
-        and the running best restarts: the `best_metric` series held a task-metric best against the
-        objective's values, a comparison across two rulers."""
+        again), `looplab.objective_changed_after_published` COUNTS the nodes mirrored on the old one,
+        every node mirrored from then on carries the ruler it was published on (`_log_node`), and the
+        running best restarts: the `best_metric` series held a task-metric best against the
+        objective's values, a comparison across two rulers. A count and a per-node tag, not "changed
+        after node N": evaluations finish in any id order, and a lower id landing after the change
+        read as the old ruler's (critic 2026-09-27, second pass, driven)."""
         objective = _objective_tag(state).get("looplab.objective_key")
         if objective == self._objective:
             return
         mlflow.set_tags({"looplab.objective_key": objective or "",
-                         "looplab.objective_changed_after_node": str(max(self._logged, default=-1))})
+                         "looplab.objective_changed_after_published": str(len(self._logged))})
         self._objective = objective
+        self._rulers_tagged = True
         self._best = None
 
     def _log_node(self, mlflow, state, node) -> None:
@@ -221,7 +227,11 @@ class LiveTracker:
         metric = node.robust_metric
         with mlflow.start_run(run_name=f"node-{node.id}", nested=True):
             mlflow.set_tags({"looplab.node_id": str(node.id),
-                             "looplab.operator": str(node.operator or "")})
+                             "looplab.operator": str(node.operator or ""),
+                             # …and, once any objective was in force, the ruler this node's
+                             # `metric` is on ("" = the task's own); absent on every other run.
+                             **({"looplab.objective_key": self._objective or ""}
+                                if self._rulers_tagged else {})})
             for k, v in (node.idea.params or {}).items():
                 try:
                     mlflow.log_param(str(k), v)

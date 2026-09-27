@@ -112,7 +112,8 @@ export function championRunHref(run, detail) {
     })
 }
 
-const valueFor = (id, run, detail, names, formatMetric) => {
+// Exported so a test can hold each column to the rule it prints, the `objective` one included.
+export const valueFor = (id, run, detail, names, formatMetric) => {
   const state = detail?.state
   if (id === 'status') return effectiveRunStatus(run)
   if (id === 'task') return run.task_id || '—'

@@ -735,10 +735,11 @@ def _ranked_by(objective) -> str:
 def echo_comparability(run_dirs) -> int:
     """`looplab comparability`'s rendering and pairwise walk; returns the exit code (0 / 3 / 4).
 
-    Moved here VERBATIM from the command (2026-09-27) for `inspect_cmds.py`'s line cap
-    (`tests/test_cli_command_groups.py::test_no_group_is_a_god_module_again`), when the retarget's
-    objective clause and pair refusal would have taken the file past it; the command keeps the
-    decorator, the signature and the docstring the CLI reference is written against.
+    Moved here from the command (2026-09-27) for `inspect_cmds.py`'s line cap
+    (`tests/test_cli_command_groups.py::test_no_group_is_a_god_module_again`), and CHANGED in the
+    same move — the retarget's objective clause and pair refusal (doc 68 68.2) are what would have
+    taken the file past it; the command keeps the decorator, the signature and the docstring the CLI
+    reference is written against.
     """
     from looplab.core.models import task_scale_metric
     from looplab.engine.comparability import (
@@ -750,13 +751,16 @@ def echo_comparability(run_dirs) -> int:
         events = run_dir / "events.jsonl"
         if not events.exists():
             typer.echo(f"{run_dir.name}: no event log — nothing to read a key from.")
-            rows.append((run_dir.name, None, None, None))
+            # Its objective is UNKNOWN, not "the task's own metric": a pair with it stays the
+            # evaluation's UNKNOWN (exit 4), never the objective refusal's DIFFERENT (critic
+            # 2026-09-27, second pass, driven: "nolog ranks its champion by the task's own metric").
+            rows.append((run_dir.name, None, None, None, False))
             continue
         state = fold(EventStore(events).read_all())
         best = state.best()
         record = record_of(best) if best is not None else None
         objective = state.objective_key
-        rows.append((run_dir.name, best, record, objective))
+        rows.append((run_dir.name, best, record, objective, True))
         # THE TASK'S OWN NUMBER, and the objective beside it when an operator retarget chose another
         # (doc 68 68.2, critic 2026-09-27, driven): `robust_metric` is then the declared extra
         # metric's, and it was printed bare beside a plain run's task metric under "SAME evaluation".
@@ -782,9 +786,9 @@ def echo_comparability(run_dirs) -> int:
     # PAIRWISE, and every pair is stated. A single "these runs are comparable" verdict would hide
     # which pair failed, and on a portfolio the operator's next question is always WHICH.
     worst = SAME
-    for index, (name, _best, record, objective) in enumerate(rows):
-        for other_name, _other_best, other_record, other_objective in rows[index + 1:]:
-            if objective != other_objective:
+    for index, (name, _best, record, objective, known) in enumerate(rows):
+        for other_name, _other_best, other_record, other_objective, other_known in rows[index + 1:]:
+            if known and other_known and objective != other_objective:
                 # Asked BEFORE the evaluation: a champion another objective chose is not a target
                 # for this one's, however much of the measurement the two share — the same refusal
                 # the run list makes (`ui/src/runIndex.js::metricIncomparability`, `objective`).

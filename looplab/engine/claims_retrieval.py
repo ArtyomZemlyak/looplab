@@ -55,6 +55,7 @@ from looplab.engine.memory import _CLAIM_STANCES, _NEGATIVE, filter_capsule_rows
 from looplab.trust.cross_run import (
     cross_run_identity_text,
     cross_run_text,
+    keep_retarget_clause,
     sanitize_cross_run_projection,
 )
 
@@ -165,7 +166,11 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
     def _slim(c: dict) -> dict:
         # Evidence refs are run-QUALIFIED ("run:node"), so the truncated support/oppose lists stay citable;
         # keep runs/scopes too so a reader can resolve the claim's provenance.
-        return {"statement": _claim_text(c.get("statement"), 300), "epistemic": c["epistemic"],
+        # A retargeted lesson's clause (doc 68 68.2) survives this bound too: cut here, it was gone
+        # before the renderer's own cut could keep it (critic 2026-09-27, second pass).
+        return {"statement": keep_retarget_clause(c.get("statement"),
+                                                  _claim_text(c.get("statement"), 300)),
+                "epistemic": c["epistemic"],
                 "maturity": c.get("maturity", "machine-proposed"),
                 "claim_uid": c.get("claim_uid", ""), "scope": c.get("scope", ""),
                 "evidence_digest": c.get("evidence_digest", ""),
@@ -801,7 +806,8 @@ def render_context_pack(pack: dict) -> str:
             f"(lessons quarantined={lessons_bad}; research quarantined={research_bad}); "
             "retained evidence is a lower bound and absence is not exact.")
     for c in pack.get("claims", []):
-        statement = _safe_text(c.get("statement"), 120)
+        # A retargeted lesson's clause survives the cut (doc 68 68.2, `keep_retarget_clause`).
+        statement = keep_retarget_clause(c.get("statement"), _safe_text(c.get("statement"), 120))
         contradicts = "; ".join(
             repr(_safe_text(value, 160))
             for value in (c.get("contradicts") or [])[:3])

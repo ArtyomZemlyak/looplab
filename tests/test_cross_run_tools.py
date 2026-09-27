@@ -1534,3 +1534,25 @@ def test_the_concept_card_keeps_a_retargeted_lessons_clause(tmp_path):
     [plain] = [line for line in out.splitlines() if "plain task metric lesson" in line]
     assert clause.strip() in retargeted, retargeted
     assert "ranked by" not in plain
+
+
+def test_the_atlas_and_the_search_keep_a_retargeted_claims_clause(tmp_path):
+    """Doc 68 68.2 (critic 2026-09-27, second pass, mutants L and M): the atlas's mixed-evidence line
+    and the search's claim line cut a statement at 160 and could drop the clause a retargeted
+    lesson ends with — the claim then read as one about the task's own metric."""
+    from looplab.trust.cross_run import retargeted_lesson_note
+
+    clause = retargeted_lesson_note("filtered")
+    statement = "mnr helps " + " ".join(["the hard negatives stayed apart under mnr"] * 6) + clause
+    assert len(statement) > 160 + len(clause)
+    _seed(tmp_path,
+          lessons=[{**_lesson(statement, "supported", [1], run_id="r1"), "objective_key": "filtered"},
+                   {**_lesson(statement, "tested", [2], run_id="r2"), "objective_key": "filtered"}],
+          capsules=[_cap("r1", ["hard-neg"], {}), _cap("r2", ["hard-neg"], {})])
+    tools = CrossRunTools(tmp_path)
+    atlas = tools.execute("cross_run_atlas", {})
+    [mixed] = [line for line in atlas.splitlines() if line.startswith("Mixed-evidence claim records")]
+    assert clause.strip() in mixed, mixed
+    search = tools.execute("cross_run_search", {"query": "hard negatives stayed apart mnr"})
+    claim_lines = [line for line in search.splitlines() if line.startswith("[claim ")]
+    assert claim_lines and all(clause.strip() in line for line in claim_lines), search

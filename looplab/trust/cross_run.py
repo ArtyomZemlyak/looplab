@@ -187,9 +187,13 @@ def with_retarget_clause(text: str, row: dict) -> str:
 
 # The clause's own shape, for a reader that holds only the TEXT a statement became — a cross-run
 # CLAIM is keyed on the lesson statement the clause was appended to, and carries no `objective_key`.
+# The key is matched as the Python `repr` `retargeted_lesson_note` wrote — either quote, backslash
+# escapes inside — so a key holding `]` or both quote kinds (`ndcg[10]`, `it's "x"`) is found: a
+# character-class pattern excluding `]` and the other quote came back as the bare cut for both
+# (critic 2026-09-27, driven).
 _RETARGET_CLAUSE_RE = re.compile(
-    r" \[ranked by (?:'[^'\]]{1,320}'|\"[^\"\]]{1,320}\"), an operator-retargeted objective, "
-    r"not the task's own metric\]$")
+    r" \[ranked by (?:'(?:[^'\\\n]|\\.){1,320}'|\"(?:[^\"\\\n]|\\.){1,320}\"), "
+    r"an operator-retargeted objective, not the task's own metric\]$")
 
 
 def keep_retarget_clause(full: str, cut: str) -> str:

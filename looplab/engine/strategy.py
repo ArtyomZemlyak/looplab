@@ -52,7 +52,7 @@ from looplab.search.coverage import (already_covered_at, analytics_projection_to
                                      latest_live_snapshot)
 from looplab.search.policy import (RUN_OWNED_POLICY_KNOBS, available_policies, make_policy,
                                    operator_yields, policy_knobs)
-from looplab.trust.cross_run import (cross_run_text, same_live_direction,
+from looplab.trust.cross_run import (cross_run_text, keep_retarget_clause, same_live_direction,
                                      sanitize_cross_run_projection, valid_live_direction)
 
 
@@ -311,7 +311,8 @@ class StrategyCadenceMixin:
                              + ", ".join(repr(_safe(x, 80)) for x in a["thin_coverage"][:6]))
             if a["contradictions"]:
                 parts.append("mixed-evidence records: "
-                             + "; ".join(repr(_safe(c.get("statement"), 120))
+                             + "; ".join(repr(keep_retarget_clause(
+                                 c.get("statement"), _safe(c.get("statement"), 120)))
                                           for c in a["contradictions"][:2]))
             note = cross_run_text(
                 "UNTRUSTED_MEMORY_SUMMARY=" + repr(" | ".join(parts)),

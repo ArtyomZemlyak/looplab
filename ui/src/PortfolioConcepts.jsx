@@ -135,7 +135,7 @@ function _ConceptMemory({ memory, id, onRetry = null }) {
   </>
 }
 
-function ConceptDetail({ forest, cooccurrence, id, runsById, onOpenRun, onClose,
+export function ConceptDetail({ forest, cooccurrence, id, runsById, onOpenRun, onClose,
   memory = null, onMemoryRetry = null }) {
   const node = id && forest.nodes[id]
   if (!node) return null

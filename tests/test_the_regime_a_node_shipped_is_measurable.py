@@ -124,7 +124,8 @@ def test_a_retargeted_run_writes_the_ledger_on_the_tasks_own_scale():
     under an operator `metric_retarget` (doc 68 68.2) `metric` is the declared extra metric's — the
     row was written in another ruler's units with no key, and a later plain run's prior read those
     medians as this task's. The row is the task's own numbers, byte for byte what the same run
-    unretargeted writes."""
+    unretargeted writes — the nodes the retarget left unranked (no declared value) included (critic
+    2026-09-27, second pass, driven: 4 nodes became 2)."""
     from looplab.core.models import Event
     from looplab.events.replay import fold
 
@@ -132,17 +133,18 @@ def test_a_retargeted_run_writes_the_ledger_on_the_tasks_own_scale():
         rows = [("run_started", {"run_id": "r", "task_id": "t", "goal": "maximize recall",
                                  "direction": "max"})]
         for nid, task, filtered, files in [(0, 0.90, 0.10, {"k.pyx": "x"}),
-                                           (1, 0.88, 0.12, {"k.pyx": "y"}),
+                                           (1, 0.88, None, {"k.pyx": "y"}),
                                            (2, 0.30, 0.45, {"solver.py": "print(1)"}),
-                                           (3, 0.28, 0.40, {"solver.py": "print(2)"})]:
+                                           (3, 0.28, None, {"solver.py": "print(2)"})]:
             rows.append(("node_created", {"node_id": nid, "parent_ids": [], "operator": "draft",
                                           "idea": {"operator": "draft", "params": {},
                                                    "rationale": "r"},
                                           "code": f"print({nid})", "files": files}))
             rows.append(("node_evaluated", {
                 "node_id": nid, "generation": 0, "metric": task, "violations": [],
-                "extra_metrics": {"filtered": filtered},
-                "extra_metrics_provenance": {"filtered": "declared"}}))
+                **({"extra_metrics": {"filtered": filtered},
+                    "extra_metrics_provenance": {"filtered": "declared"}}
+                   if filtered is not None else {})}))
         rows.extend(extra)
         return fold([Event(seq=i, ts=float(i), type=t, data=d) for i, (t, d) in enumerate(rows)])
 
@@ -150,6 +152,7 @@ def test_a_retargeted_run_writes_the_ledger_on_the_tasks_own_scale():
     assert retargeted.objective_key == "filtered"
     assert run_contrast(retargeted) == run_contrast(run())
     assert run_contrast(retargeted)["regimes"][REGIME_COMPILED]["median"] == 0.89
+    assert run_contrast(retargeted)["nodes"] == 4, "an unranked node measured the task metric"
 
 
 # ------------------------------------------------------------------ the shared ledger's read side

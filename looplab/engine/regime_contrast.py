@@ -163,8 +163,16 @@ def run_contrast(state) -> Optional[dict]:
     # every later run's `here` beside plain runs' medians. The task's number is the node's own single
     # measurement: exactly `metric`, byte for byte, on every run no retarget touched.
     objective_key = getattr(state, "objective_key", None)
-    measured = [(n, task_measurement(n, objective_key))
-                for n in getattr(state, "feasible_nodes", lambda: [])()]
+    if objective_key is None:
+        pool = getattr(state, "feasible_nodes", lambda: [])()
+    else:
+        # …over the nodes feasible on the TASK's scale too: `feasible_nodes()` asks for a usable
+        # OBJECTIVE value, so a node the retarget left unranked — it recorded no declared value —
+        # was dropped although it measured the task metric (critic 2026-09-27, driven: 4 nodes, 2).
+        aborted = getattr(state, "aborted_nodes", ()) or ()
+        pool = [n for n in getattr(state, "evaluated_nodes", lambda: [])()
+                if n.feasible and n.id not in aborted]
+    measured = [(n, task_measurement(n, objective_key)) for n in pool]
     rows = [(node_regime(getattr(n, "files", None)), m) for n, m in measured if m is not None]
     if not rows:
         return None

@@ -169,6 +169,25 @@ def normalize_statement(s: str) -> str:
     """
     return " ".join(str(s or "").split()).lower()[:160]
 
+
+def lesson_objective(o) -> Optional[str]:
+    """The objective a lesson was learned under (doc 68 68.2): a retargeted run's `objective_key`, or
+    None — the task's own metric, which every lesson a run without a retarget writes is."""
+    key = o.get("objective_key") if isinstance(o, dict) else None
+    return key if isinstance(key, str) and key else None
+
+
+def _objective_identity(o) -> tuple:
+    """What a lesson's OBJECTIVE adds to its identity: `()` for a lesson on the task's own metric, so
+    every key and id such a lesson ever had is the one it has now, and `(key,)` for a retargeted
+    run's. The retarget clause rides at the END of the statement (`engine/lessons.py`), past
+    `normalize_statement`'s 160-character cut on any long lesson, so the statement alone fused a
+    plain lesson with a retargeted one: one exact group, one contradiction key, one `lesson_id`, and
+    the newer verdict on one ruler retired the other's lesson from the shared store (critic
+    2026-09-27, driven)."""
+    objective = lesson_objective(o)
+    return () if objective is None else (objective,)
+
 # Every numeric literal (int/decimal/scientific, sign included) — the only thing that separates one
 # templated lesson from its siblings. Kept module-level so the pattern compiles once.
 _NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
@@ -228,7 +247,10 @@ def consolidate_lessons(lessons: list[dict], *, client=None, embed=None,
         # merging them would collapse both into the newest row's role and silently drop the other
         # role's copy. Same-role duplicates still merge; an untagged (shared) row stays its own group,
         # so a newer tagged same-statement row can never flip it role-restricted.
-        key = (normalize_statement(o.get("statement", "")), o.get("task_id"), o.get("role"))
+        # …and the OBJECTIVE (doc 68 68.2): a lesson a retargeted run learned is a claim on another
+        # ruler; see `_objective_identity`.
+        key = ((normalize_statement(o.get("statement", "")), o.get("task_id"), o.get("role"))
+               + _objective_identity(o))
         if key not in groups:
             groups[key] = []
             order.append(key)
@@ -354,11 +376,7 @@ def _agentic_merge_lessons(rows: list[dict], *, client, embed=None,
     # merge memo keyed on it) is the one it always was.
     by_task: dict[object, list[int]] = {}
     for i, o in enumerate(rows):
-        objective = o.get("objective_key")
-        bucket = (o.get("task_id"), o.get("role"))
-        if isinstance(objective, str) and objective:
-            bucket += (objective,)
-        by_task.setdefault(bucket, []).append(i)
+        by_task.setdefault((o.get("task_id"), o.get("role")) + _objective_identity(o), []).append(i)
     keep: list[tuple[int, dict]] = []                          # (earliest original index, row)
     try:
         for _tid, idxs in by_task.items():
@@ -411,13 +429,14 @@ def filter_contradicted(scored: list[tuple[float, int, dict]]) -> list[tuple[flo
     exactly what M3 keeps."""
     latest: dict[tuple, tuple[int, str]] = {}
     for _, idx, o in scored:
-        key = (normalize_statement(o.get("statement", "")), o.get("task_id"))
+        # …and on the same OBJECTIVE (doc 68 68.2): a verdict on another ruler reverses nothing.
+        key = (normalize_statement(o.get("statement", "")), o.get("task_id")) + _objective_identity(o)
         cur = latest.get(key)
         if cur is None or idx > cur[0]:
             latest[key] = (idx, str(o.get("outcome", "")))
     keep: list[tuple[float, int, dict]] = []
     for sim, idx, o in scored:
-        key = (normalize_statement(o.get("statement", "")), o.get("task_id"))
+        key = (normalize_statement(o.get("statement", "")), o.get("task_id")) + _objective_identity(o)
         newest_idx, newest_out = latest[key]
         mine = str(o.get("outcome", ""))
         if idx < newest_idx and ((mine == "supported" and newest_out in _NEGATIVE)
@@ -490,9 +509,15 @@ def lesson_id(value) -> str:
     """THE ONE identity of a lesson across every reader (doc 52 row 17): `les-` + 24 hex of the
     sha256 of the normalized statement. Derived, never stored — rows carry no id and consolidation
     rewrites statements, so a stored id would be the drift; the same statement yields the same id in
-    the prior receipt, the memory-read record, the utility ledger and the citation instrument."""
+    the prior receipt, the memory-read record, the utility ledger and the citation instrument.
+
+    A retargeted run's lesson (doc 68 68.2) digests its objective too — every other lesson's id is
+    the one it always had (`_objective_identity`); every reader passes the row, never a bare string."""
     statement = value.get("statement", "") if isinstance(value, dict) else value
-    digest = hashlib.sha256(normalize_statement(str(statement or "")).encode("utf-8")).hexdigest()
+    material = normalize_statement(str(statement or ""))
+    for objective in _objective_identity(value):
+        material += "\x00objective:" + objective
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
     return "les-" + digest[:24]
 
 

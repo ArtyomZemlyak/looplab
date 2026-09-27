@@ -2397,6 +2397,24 @@ class RunCommandService:
                 and record.get("event_type") not in DRAIN_LEFT_FOR_THE_SEARCH
                 and observation.drain_paused())
 
+    def _settled_without_an_engine(self, rd: Path, path: Path, record: dict) -> bool:
+        """Settle a command a probe has just found NO engine for, off the log as it stands NOW —
+        served (its postcondition holds) or left for the next search (`_left_for_the_next_search`) —
+        and say whether it did. Re-observed rather than asked of the observation taken before the
+        probe: the drain writes its pause and its last ack pass and releases the lock in between,
+        and the rule asked of the stale read saw no drain pause and spawned the plain `resume` it
+        exists to refuse, while the record said the command waits (critic 2026-09-27, driven). Once
+        no engine holds the lock nothing else can write the log's search half, so this read is the
+        one the decision is about."""
+        observation = self._observe(rd)
+        if self._postcondition(rd, record, observation):
+            self._succeeded(rd, path, record)
+            return True
+        if self._left_for_the_next_search(record, observation):
+            self._succeeded(rd, path, record, deferred=True)
+            return True
+        return False
+
     def _succeeded(self, rd: Path, path: Path, record: dict, *, deferred: bool = False) -> dict:
         # Exact ack / terminal postcondition proves the spawned process passed its startup window.
         # Release only this command's lease so an immediate next command/finalize-resume is not held
@@ -2744,9 +2762,12 @@ class RunCommandService:
             DRAIN_REFUSED, f"a drain would not drive this run: {refused[1]}",
             # Before the append nothing is recorded; before a spawn the reset already is, and a
             # plain resume is what serves it (critic 2026-09-26: "reset without the drain" was the
-            # remedy either way).
+            # remedy either way). On a run sitting on a drain's own pause a plain reset does not
+            # start that search, it waits for it (`_left_for_the_next_search`), so the remedy says
+            # so (critic 2026-09-27, second pass).
             ("nothing was recorded and nothing started; resolve what the message names, or reset "
-             "without the drain to rescore inside a resumed search" if reset is not None else
+             "without the drain to rescore inside a resumed search (on a run a drain paused, it "
+             "waits until you resume the run)" if reset is not None else
              "the reset is recorded and no drain was started for it; resume the run to serve it "
              "inside a resumed search, or resolve what the message names first"),
             retryable=False)
@@ -4009,12 +4030,11 @@ class RunCommandService:
                 if not self._try_restart_claim(rd, path, record):
                     return None, record
             elif spec.engine_policy is not EnginePolicy.NO_SPAWN and liveness is False:
-                if self._left_for_the_next_search(record, observation):
+                if self._settled_without_an_engine(rd, path, record):
                     # No engine, and the run sits on a drain's own pause: the intent waits for the
                     # search that follows, exactly as the monitor's re-spawn rung settles it — this
                     # ladder is also where a command whose worker died is re-driven, and a plain
                     # `resume` here lifted the pause the drain was asked to leave (doc 68 68.3b).
-                    self._succeeded(rd, path, record, deferred=True)
                     return None, record
                 spawned_now = False
                 pid = LAUNCH_IN_FLIGHT
@@ -4217,6 +4237,8 @@ class RunCommandService:
                             path, record, "failed",
                             error=self._engine_unknown_error(
                                 f"restart a driver for {event_type}", retryable=True))
+                        return
+                    if retry_liveness is False and self._settled_without_an_engine(rd, path, record):
                         return
                     if retry_liveness is False and not self._recent_spawn_claim(rd):
                         terminalized, pid = self._spawn_under_claim(

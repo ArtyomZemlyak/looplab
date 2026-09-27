@@ -746,6 +746,8 @@ decidable, and for the inversion (`unknown` is never `same`) that the whole mech
 
 A retargeted run's line prints its champion's number on the TASK's own metric, with the objective
 that ranked it beside it (`metric=0.5 (champion ranked by 'filtered' = 0.45, an operator retarget)`).
+The objective is asked FIRST: a pair ranked by different objectives is `DIFFERENT` whatever their keys
+say. A directory with no event log has no known objective, so its pairs stay `UNKNOWN`.
 
 Read-only: it folds each log and prints. It writes nothing and touches no memory store.
 

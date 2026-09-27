@@ -104,8 +104,15 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
     def task_fingerprint(self, final: RunState, best=None, *, goal: str | None = None) -> list[str]:
         """M2: content fingerprint of this task so cross-run transfer reaches SIMILAR tasks, not only
         the exact same task_id. Built from kind/direction/metric/goal keywords + the winner's params.
-        `goal` overrides the run's current one — a record on the TASK's scale passes
-        `RunState.task_goal()`, the goal before an operator retarget restated it (doc 68 68.2)."""
+        The goal is the TASK's (`RunState.task_goal()`, the goal before an operator retarget
+        restated it, doc 68 68.2) unless `goal` overrides it: the case, the capsule and the index
+        passport keyed on it while the lesson, meta-note, distillation, reconcile and novelty rows of
+        the same run keyed on the restated one — one run's cross-run rows on two keys, and none of the
+        latter where a later run of the task looks (critic 2026-09-27, second pass). The run's
+        `goal` on every run no retarget restated, byte for byte."""
+        if goal is None:
+            task_goal = getattr(final, "task_goal", None)
+            goal = task_goal() if callable(task_goal) else getattr(final, "goal", "")
         from looplab.engine.memory import task_fingerprint
         # NOTE: the winner's param NAMES are outcome-derived, so this fingerprint shifts when a new
         # node wins / the run extends — i.e. it is a fuzzy RETRIEVAL key, not an immutable scope identity.
@@ -114,8 +121,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
         # deliberately NOT changed here, since it would re-key every existing lesson/case store.
         pnames = list((best.idea.params or {}).keys()) if best is not None and best.idea else []
         return task_fingerprint(getattr(self._e.task, "kind", ""), final.direction,
-                                (final.goal if goal is None else goal)
-                                or getattr(self._e.task, "goal", ""),
+                                goal or getattr(self._e.task, "goal", ""),
                                 metric=str(getattr(self._e.task, "metric", "") or ""),
                                 param_names=pnames,
                                 universal=bool(getattr(self._e, "_fingerprint_universal", False)))

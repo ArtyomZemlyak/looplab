@@ -572,6 +572,119 @@ def test_a_retargeted_case_names_the_tasks_goal_and_says_what_ranked_it(tmp_path
     assert payload["text"].endswith("measured on this goal: maximize recall"), payload["text"]
 
 
+def test_every_cross_run_row_of_a_retargeted_run_keys_on_the_tasks_goal(tmp_path):
+    """LOW (critic 2026-09-27, second pass): the case, the capsule and the index passport keyed on
+    the task's goal while the lessons, the meta note, the distillation, the reconcile pass and the
+    novelty audit — every caller of `task_fingerprint` without an explicit goal — keyed on the
+    restated one: one run's rows on two keys. The fingerprint's default is the task's goal."""
+    restated = fold(_rows(_retarget(goal="maximize filtered recall")))
+    eng = _toy_engine(tmp_path, memory_dir=str(tmp_path / "mem"))
+    plain = fold(_rows())
+    assert eng._task_fingerprint(restated, restated.best()) == eng._task_fingerprint(
+        plain, restated.best())
+    assert eng.lessons.task_fingerprint(restated, restated.best(), goal="other words") != (
+        eng.lessons.task_fingerprint(plain, restated.best())), "an explicit goal still overrides"
+
+
+def test_the_tasks_goal_is_the_one_before_the_first_restatement():
+    """Mutant G (critic 2026-09-27, second pass): read last-first, two restatements named the FIRST
+    restated goal as the task's."""
+    twice = fold(_rows(_retarget(goal="maximize filtered recall"),
+                       _retarget(key=None, goal="maximize recall at k")))
+    assert twice.goal == "maximize recall at k"
+    assert twice.task_goal() == "maximize recall"
+
+
+def test_a_plain_lessons_identity_is_the_one_it_always_had_and_a_retargeted_one_is_its_own():
+    """MEDIUM (critic 2026-09-27, second pass, driven): the retarget clause rides past the 160-char
+    identity cut, so the exact pass folded a plain and a retargeted lesson into one row, one
+    contradiction key and one `lesson_id` — the newer verdict on one ruler retired the other's lesson
+    from the shared store. The objective joins the identity of a lesson that HAS one, and only
+    then: every plain lesson's id is the digest it always was (mutant I)."""
+    import hashlib
+
+    from looplab.engine.lesson_hygiene import (_objective_identity, consolidate_lessons,
+                                               filter_contradicted, lesson_id, normalize_statement)
+    from looplab.trust.cross_run import retargeted_lesson_note
+
+    base = ("Raising the contrastive margin from 0.2 to 0.4 while mining hard negatives from the "
+            "same batch improved the ranking on every seed we tried, and the gain held under the "
+            "longer schedule as well")
+    assert len(base) > 160
+    plain_id = "les-" + hashlib.sha256(normalize_statement(base).encode()).hexdigest()[:24]
+    for row in ({"statement": base}, {"statement": base, "objective_key": None},
+                {"statement": base, "objective_key": ""}):
+        assert _objective_identity(row) == () and lesson_id(row) == plain_id
+    plain = {"statement": base, "outcome": "supported", "task_id": "t", "run_id": "P",
+             "role": "researcher", "evidence": [1]}
+    retargeted = {"statement": base + retargeted_lesson_note("filtered"), "outcome": "abandoned",
+                  "task_id": "t", "run_id": "R", "role": "researcher", "evidence": [2],
+                  "objective_key": "filtered"}
+    assert _objective_identity(retargeted) == ("filtered",)
+    assert lesson_id(retargeted) != lesson_id(plain)
+    merged = consolidate_lessons([plain, retargeted])
+    assert [(r["run_id"], r["outcome"], r.get("objective_key")) for r in merged] == [
+        ("P", "supported", None), ("R", "abandoned", "filtered")]
+    kept = filter_contradicted([(0.9, 0, plain), (0.9, 1, retargeted)])
+    assert [r[2]["run_id"] for r in kept] == ["P", "R"], "another ruler's verdict reverses nothing"
+
+
+def test_the_clause_is_kept_for_any_key_and_touches_nothing_else():
+    """`keep_retarget_clause` (mutant K: always appended) — and its pattern, which missed a key
+    holding `]` or both quote kinds (critic 2026-09-27, second pass, driven)."""
+    from looplab.trust.cross_run import keep_retarget_clause, retargeted_lesson_note
+
+    plain = "a plain statement about the task's own metric " * 6
+    assert keep_retarget_clause(plain, plain[:40]) == plain[:40]
+    for key in ("filtered", "ndcg[10]", 'it\'s "x"', "a\\b"):
+        full = "the body of a long lesson " * 10 + retargeted_lesson_note(key)
+        assert keep_retarget_clause(full, full[:40]).endswith(retargeted_lesson_note(key)), key
+        assert keep_retarget_clause(full, full) == full, "a cut that kept it gains no second one"
+
+
+def test_the_steward_the_context_pack_and_the_strategist_keep_the_clause(tmp_path):
+    """LOW (critic 2026-09-27, second pass, driven): the claim steward's 400-character cut, the
+    proposal context pack's and the Strategist's mixed-evidence note's 120-character cuts took the
+    clause a retargeted lesson ends with — a number measured on a declared extra metric then read as
+    the task's. Each keeps it now (`keep_retarget_clause`); a plain claim renders as it did."""
+    import orjson
+
+    from looplab.engine.claim_steward import _claim_prompt_payload
+    from looplab.engine.claims import claims_for_memory
+    from looplab.engine.claims_retrieval import build_context_pack, render_context_pack
+    from looplab.engine.strategy import StrategyCadenceMixin
+    from looplab.core.models import RunState
+    from looplab.trust.cross_run import retargeted_lesson_note
+
+    clause = retargeted_lesson_note("filtered")
+    statement = ("mnr helps " + " ".join(["the hard negatives stayed apart under the margin"] * 9)
+                 + clause)
+    assert len(statement) > 400 + len(clause)
+    rows = [{"statement": statement, "outcome": outcome, "evidence": [i], "run_id": f"r{i}",
+             "task_id": "t", "direction": "max", "objective_key": "filtered"}
+            for i, outcome in ((1, "supported"), (2, "tested"))]
+    rows.append({"statement": "a plain lesson on the task's own metric", "outcome": "supported",
+                 "evidence": [3], "run_id": "r3", "task_id": "t", "direction": "max"})
+    (tmp_path / "lessons.jsonl").write_bytes(b"\n".join(orjson.dumps(r) for r in rows) + b"\n")
+    claims = claims_for_memory(tmp_path)
+    payload, _ids = _claim_prompt_payload(claims)
+    by_start = {p["statement"][:20]: p["statement"] for p in payload}
+    assert by_start["mnr helps the hard n"].endswith(clause.strip()), by_start
+    assert "ranked by" not in by_start["a plain lesson on th"]
+    pack = render_context_pack(build_context_pack(claims))
+    [line] = [x for x in pack.splitlines() if "mnr helps" in x]
+    assert clause.strip() in line, line
+
+    class _Host(StrategyCadenceMixin):
+        def __init__(self, memory_dir):
+            self._cross_run_advisory = True
+            self.memory_dir = str(memory_dir)
+
+    note = _Host(tmp_path)._cross_run_note_for_ctx(
+        RunState(run_id="current", task_id="t", direction="max"))
+    assert "mixed-evidence records" in note and "ranked by" in note, note
+
+
 def test_a_concept_capsule_is_on_the_task_scale(tmp_path):
     from types import SimpleNamespace
 
@@ -906,7 +1019,7 @@ def test_the_run_artifacts_say_which_metric_the_champion_is(tmp_path):
             "task's own metric") in header, header
 
     assert bundle_summary(tmp_path, retargeted, [])["objective_key"] == "filtered"
-    assert bundle_summary(tmp_path, plain, [])["objective_key"] is None
+    assert "objective_key" not in bundle_summary(tmp_path, plain, []), "a plain run's summary as it was"
 
     context = _node_context(retargeted, 1)
     assert "Ranked by: 'filtered' — an operator `metric_retarget`" in context, context
@@ -1052,9 +1165,10 @@ def test_a_paraphrase_merge_never_folds_two_objectives_together(monkeypatch):
     assert retargeted[0]["statement"].startswith("increase the margin")
 
 
-def test_a_legacy_row_spelling_the_runs_direction_in_capitals_is_applied():
-    """NIT (critic 2026-09-27): the server appends the direction in the fold's spelling since the
-    first pass, but a row an earlier build wrote as "MAX" was read as a flip and ignored. The fold
-    reads it the way the server writes it; a real flip is still ignored whole."""
+def test_a_row_spelling_the_runs_direction_in_capitals_is_applied():
+    """NIT (critic 2026-09-27): the server appends the direction in the fold's spelling, and a row
+    spelled "MAX" was read as a flip and ignored. No LoopLab build ever appended one (second pass: the
+    first build refused it with a 409, the second lowercases it) — a hand-written or foreign row can.
+    The fold reads it the way the server writes it; a real flip is still ignored whole."""
     assert fold(_rows(_retarget(direction=" MAX "))).objective_key == "filtered"
     assert fold(_rows(_retarget(direction="min"))).objective_key is None

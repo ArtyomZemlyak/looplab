@@ -43,7 +43,9 @@ from looplab.events.replay import fold
 
 # Bump when the projection's TABLES change shape. An older/newer version in a watermark is never
 # `current` — the rows may be fine, but this reader cannot prove the columns mean what it expects.
-READMODEL_SCHEMA_VERSION = 1
+# 2 (2026-09-27): the `objective` table (doc 68 68.2). A version-1 sidecar read `current` without it,
+# and `SELECT key FROM objective` failed `no such table` (critic 2026-09-27, driven).
+READMODEL_SCHEMA_VERSION = 2
 WATERMARK_TABLE = "readmodel_watermark"
 # `rmcov1:` digested `(seq, type)` only, so a log whose `node_evaluated.metric` was edited IN PLACE —
 # same seq, same type, a different number — still certified `current` (doc 52 row 27). `rmcov2:`

@@ -200,7 +200,14 @@ def _fake_mlflow(record):
     fake = types.ModuleType("mlflow")
     fake.set_tracking_uri = lambda uri: record.setdefault("uris", []).append(uri)
     fake.set_experiment = lambda name: record.setdefault("experiments", []).append(name)
-    fake.set_tags = lambda d: record.setdefault("tags", {}).update(d)
+    # `tags` is every tag the server received, merged; `run_tags` keeps them per run ("parent", or
+    # the nested run's name) for a test that asks which run a tag landed on.
+    def _set_tags(d):
+        record.setdefault("tags", {}).update(d)
+        open_runs = record.get("_open") or ["parent"]
+        record.setdefault("run_tags", {}).setdefault(open_runs[-1], {}).update(d)
+
+    fake.set_tags = _set_tags
     fake.set_tag = lambda k, v: record.setdefault("tags", {}).__setitem__(k, v)
     fake.log_param = lambda k, v: record.setdefault("params", {}).__setitem__(str(k), v)
     fake.log_text = lambda t, p: record.setdefault("texts", {}).__setitem__(p, t)
@@ -220,9 +227,11 @@ def _fake_mlflow(record):
 
         def __enter__(self):
             record.setdefault("runs", []).append((self.name, self.nested))
+            record.setdefault("_open", []).append(self.name)
             return self
 
         def __exit__(self, *a):
+            record["_open"].pop()
             return False
 
     def _start(run_name=None, nested=False):
@@ -321,6 +330,8 @@ def test_the_mirror_follows_the_objective_a_retarget_puts_in_force(tmp_path, mon
     store.append("metric_retarget", {"key": "filtered"})
     LiveTracker(rd, tracking_uri="file:/mlruns").sync()
     assert record["tags"]["looplab.objective_key"] == "filtered"
+    assert record["run_tags"]["node-0"]["looplab.objective_key"] == "filtered", (
+        "a node mirrored on a run opened retargeted says its ruler too")
 
     # A retarget that lands WHILE the mirror follows.
     record = {}
@@ -334,12 +345,61 @@ def test_the_mirror_follows_the_objective_a_retarget_puts_in_force(tmp_path, mon
     declared(store, 1, 5.0, 3.0)                 # min: 3.0 on `filtered`, worse than 1.0 on the task
     assert tracker.sync() == 1
     assert record["tags"]["looplab.objective_key"] == "filtered"
-    assert record["tags"]["looplab.objective_changed_after_node"] == "0"
+    assert record["tags"]["looplab.objective_changed_after_published"] == "1"
     assert ("best_metric", 3.0, 1) in record["metrics"], (
         "the running best restarts on the new ruler, never held at the task metric's 1.0")
+    assert "looplab.objective_key" not in record["run_tags"]["node-0"], "published before it"
+    assert record["run_tags"]["node-1"]["looplab.objective_key"] == "filtered"
     store.append("metric_retarget", {"key": None})
     tracker.sync()
     assert record["tags"]["looplab.objective_key"] == "", "back on the task's own metric"
+
+
+def test_a_node_finishing_out_of_order_says_which_ruler_it_was_published_on(
+        tmp_path, monkeypatch):
+    """Evaluations finish in any id order (critic 2026-09-27, second pass, driven): node 1 was
+    mirrored, the objective changed, THEN node 0 landed on the new ruler — and a tag reading "the
+    ruler changed after node 1" put node 0's 3.0 on the old one. The boundary is a COUNT of
+    published nodes and each node carries its own ruler."""
+    import sys
+
+    from looplab.events.mlflow_export import LiveTracker
+
+    record: dict = {}
+    monkeypatch.setitem(sys.modules, "mlflow", _fake_mlflow(record))
+    rd = tmp_path / "par"
+    store = _run_log(rd, nodes=())
+    for nid in (0, 1):
+        store.append("node_created", {"node_id": nid, "parent_ids": [], "operator": "draft",
+                                      "idea": {"operator": "draft", "params": {"x": float(nid)},
+                                               "rationale": ""}, "code": f"# node {nid}"})
+    store.append("node_evaluated", {"node_id": 1, "metric": 1.0, "extra_metrics": {"filtered": 9.0},
+                                    "extra_metrics_provenance": {"filtered": "declared"}})
+    tracker = LiveTracker(rd, tracking_uri="file:/mlruns")
+    assert tracker.sync() == 1
+    store.append("metric_retarget", {"key": "filtered"})
+    store.append("node_evaluated", {"node_id": 0, "metric": 5.0, "extra_metrics": {"filtered": 3.0},
+                                    "extra_metrics_provenance": {"filtered": "declared"}})
+    assert tracker.sync() == 1
+    assert record["tags"]["looplab.objective_changed_after_published"] == "1"
+    assert "looplab.objective_changed_after_node" not in record["tags"]
+    assert record["run_tags"]["node-0"]["looplab.objective_key"] == "filtered"
+    assert "looplab.objective_key" not in record["run_tags"]["node-1"]
+    assert ("node_metric", 3.0, 0) in record["metrics"]
+
+
+def test_a_run_never_retargeted_tags_no_node_with_a_ruler(tmp_path, monkeypatch):
+    """Byte for byte what a plain run's mirror always sent: no node carries a ruler tag."""
+    import sys
+
+    from looplab.events.mlflow_export import LiveTracker
+
+    record: dict = {}
+    monkeypatch.setitem(sys.modules, "mlflow", _fake_mlflow(record))
+    rd = tmp_path / "plain"
+    _run_log(rd)
+    assert LiveTracker(rd, tracking_uri="file:/mlruns").sync() == 2
+    assert all("looplab.objective_key" not in tags for tags in record["run_tags"].values())
 
 
 def test_the_mirror_closes_with_the_champion_and_redacts_its_code(tmp_path, monkeypatch):

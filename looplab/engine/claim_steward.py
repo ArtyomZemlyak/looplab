@@ -16,7 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 
-from looplab.trust.cross_run import cross_run_text
+from looplab.trust.cross_run import cross_run_text, keep_retarget_clause
 
 _MAX_PROPOSALS = 10
 _MAX_CLAIMS = 60             # bounded prompt — the most-evidenced / contested claims first
@@ -88,8 +88,10 @@ def _claim_prompt_payload(claims) -> tuple[list[dict], dict[str, dict]]:
             # persisted evidence string is redacted at the external-provider boundary. The private id map
             # below still resolves a returned id to the exact statement/scope/metric governance target.
             "id": cid,
-            "statement": cross_run_text(
-                statement, max_chars=400, single_line=True, entropy=True),
+            # …with a retargeted lesson's clause kept when the cut takes it (doc 68 68.2): the
+            # steward otherwise reads a number measured on a declared extra metric as the task's.
+            "statement": keep_retarget_clause(statement, cross_run_text(
+                statement, max_chars=400, single_line=True, entropy=True)),
             "scope": cross_run_text(
                 scope, max_chars=160, single_line=True, entropy=True),
             "metric": cross_run_text(

@@ -179,3 +179,41 @@ test('the selection scope offers only what the operator has actually checked', a
   // Both scope buttons name their size, so the operator can see the subset before choosing it.
   assert.match(chosen, /List scope · 5/)
 })
+
+
+// doc 68 68.2 (critic 2026-09-27, second pass): a concept every contributing run of which an operator
+// RETARGETED shows that ruler's best — the value, its title and the detail's sentence must name it,
+// or the number reads as the task's own metric. Each was deletable under the suite (UE, UE2, UI).
+const RETARGETED = [
+  { run_id: 'rt1', task_id: 'recsys', direction: 'max', objective_key: 'filtered',
+    concepts: { 'feature/embedding': { count: 2, best_metric: 0.45 } } },
+  { run_id: 'rt2', task_id: 'recsys', direction: 'max', objective_key: 'filtered',
+    concepts: { 'feature/embedding': { count: 1, best_metric: 0.40 } } },
+]
+
+test('a retargeted concept names the objective beside its best, in its title and in its detail',
+  async () => {
+    const html = await render({ runs: RETARGETED, scopeLabel: 'All runs' })
+    const row = html.slice(html.indexOf('data-concept-id="feature"'))
+    assert.match(row.slice(0, 600), /↑ 0\.4500 \(filtered\)/)
+    assert.match(row.slice(0, 600), /ranked by filtered, an operator retarget, not the task&#x27;s own metric/)
+
+    const vite = await createServer({
+      root: fileURLToPath(new URL('..', import.meta.url)),
+      configFile: false, appType: 'custom', logLevel: 'silent', server: { middlewareMode: true },
+    })
+    try {
+      const [{ ConceptDetail }, model] = await Promise.all([
+        vite.ssrLoadModule('/src/PortfolioConcepts.jsx'), vite.ssrLoadModule('/src/conceptForest.js'),
+      ])
+      const runsById = new Map(RETARGETED.map(run => [run.run_id, run]))
+      const forest = model.buildConceptForest(RETARGETED, { runsById })
+      const detail = renderToStaticMarkup(React.createElement(ConceptDetail, {
+        forest, cooccurrence: model.buildConceptCooccurrence(RETARGETED, { forest }),
+        id: 'feature', runsById, onOpenRun() {}, onClose() {},
+      }))
+      assert.match(detail, /over 2 run\(s\) of recsys \(max\) — ranked by filtered, an operator retarget/)
+    } finally {
+      await vite.close()
+    }
+  })

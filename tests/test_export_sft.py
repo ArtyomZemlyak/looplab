@@ -69,6 +69,10 @@ def test_every_answered_turn_becomes_a_row_carrying_its_nodes_outcome(tmp_path):
     # … and when it did not, which is what makes the corpus filterable rather than flattering
     assert second["outcome"]["metric"] is None and second["outcome"]["error_reason"] == "crash"
     assert first["run_id"] == "r" and first["task_id"] == "t" and first["direction"] == "min"
+    # A run no retarget touched exports the rows it always did: no objective, no task-metric twin
+    # (doc 68 68.2 — pinned, critic 2026-09-27, second pass: mutant O wrote `objective_key: null`).
+    for row in rows:
+        assert "objective_key" not in row and "task_metric" not in row["outcome"], row
     assert "2 turn(s) from 2 generation span(s)" in result.output
 
 

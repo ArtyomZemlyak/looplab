@@ -121,3 +121,18 @@ test('a RETARGETED run is its own group, named in its header, never ranked among
     assert.match(header, /1 run/)
     assert.match(doc.body.textContent, /retargeted objective/, 'and its number carries the caveat')
   })
+
+
+test("a retargeted group's trajectory chart is titled with the ruler it is drawn on", async () => {
+  // doc 68 68.2 (critic 2026-09-27, second pass, mutant UH): `trajectoryTitle` was tested and the
+  // panel could title the chart without it — the lines on the objective's scale under a bare
+  // "Running best · <task>".
+  const series = (points, evaluated) => ({ version: 1, points, evaluated, complete: true })
+  const doc = await panel([
+    run('rt', 0.95, { objective_key: 'filtered', best_metric_caveats: ['retargeted_objective'],
+                      trajectory: series([[0, 0.5, 1], [1, 0.95, 2]], 2) }),
+  ], undefined, 'retarget-trajectory')
+  const chart = doc.querySelector('.xr-trajectory')
+  assert.ok(chart, 'the group draws its trajectory')
+  assert.match(chart.textContent, /Running best · repo_task · higher is better · ranked by filtered/)
+})

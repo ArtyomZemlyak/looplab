@@ -412,8 +412,9 @@ the run's one in-flight driver command (which refused every stop) nor starts tha
 drain's own pause is marked `drain_only` and followed by one last ack pass over what it never folded,
 and a command admitted after that pass — onto a run a drain paused, whether the drain has exited yet
 or not, and a command re-driven after its worker died alike — settles the same way on the server
-(`serve/command_observation.py::CommandObservation.drain_paused`): it never starts the run as a
-search. Only an `engine_ack` command waits so: a finalize's postcondition is the finish itself, which
+(`serve/command_observation.py::CommandObservation.drain_paused`, read again once the lock probe
+finds no engine, so a drain that paused and exited between the first read and the probe is seen): it
+never starts the run as a search. Only an `engine_ack` command waits so: a finalize's postcondition is the finish itself, which
 no search that follows writes, so it starts the engine that finalizes.
 
 A `metric_retarget` (`{"key": "<extra metric>", "goal": "…"}`, doc 68 68.2) makes a DECLARED extra

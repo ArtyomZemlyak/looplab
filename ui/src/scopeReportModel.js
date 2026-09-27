@@ -81,6 +81,14 @@ export function scopeObservationRows(group) {
   return rows
 }
 
+// Which ruler an observation's number is on (doc 68 68.2): a run an operator RETARGETED ranked by a
+// declared extra metric, and the server stamps that key on the observation — printed bare, the value
+// read as the task's own metric (critic 2026-09-27, second pass). '' for every other run.
+export function observationRuler(item) {
+  const key = item?.objective_key
+  return typeof key === 'string' && key ? ` · ranked by ${key} (an operator retarget)` : ''
+}
+
 // JSON tuple encoding avoids identity collisions between values containing separators.
 export const scopeReportKey = scope => JSON.stringify([
   String(scope?.type ?? ''), String(scope?.id ?? ''),
