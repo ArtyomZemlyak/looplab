@@ -133,10 +133,16 @@ def _schema_key_sets(schema) -> tuple[frozenset[str], frozenset[str]]:
     """
     if not isinstance(schema, dict):
         return frozenset(), frozenset()
+    # CASE-FOLDED, as `_coerce_to_model` matches a key: an answer whose names differ from the
+    # schema's only in case is an answer that repair makes valid, and scoring it "answers nothing"
+    # refused it before the repair ran — the Researcher's own `{"Operator", …}` included (critic
+    # 2026-09-27, driven).
     props = schema.get("properties")
-    declared = frozenset(k for k in props if isinstance(k, str)) if isinstance(props, dict) else frozenset()
+    declared = (frozenset(k.lower() for k in props if isinstance(k, str))
+                if isinstance(props, dict) else frozenset())
     req = schema.get("required")
-    required = frozenset(k for k in req if isinstance(k, str)) if isinstance(req, list) else frozenset()
+    required = (frozenset(k.lower() for k in req if isinstance(k, str))
+                if isinstance(req, list) else frozenset())
     return required & declared if declared else required, declared
 
 
@@ -161,7 +167,7 @@ def _schema_fit(obj: dict, required: frozenset[str], declared: frozenset[str]) -
     Conservative by construction — a later object can only win by carrying required fields the
     earlier one lacked, never by being longer.
     """
-    keys = frozenset(k for k in obj if isinstance(k, str))
+    keys = frozenset(k.lower() for k in obj if isinstance(k, str))
     return len(keys & required), bool(keys & declared)
 
 
@@ -203,9 +209,9 @@ def _extract_json(text: str, schema=None) -> dict:
     # end of the reply: measured at 0.63 s against 0.0002 s on a 197 KB reply with 16,001 braces,
     # per structured call on the text-parser path. `_JSON_CANDIDATE_CAP` never bounded that, because
     # it counts DECODED candidates and the cost is in the failed `raw_decode` attempts.
-    perfect = (len(required), bool(declared))
+    perfect = (len(required), bool(declared), True)
     best: dict | None = None
-    best_fit = (-1, False)
+    best_rank = (-1, False, False)
     seen = 0
     i = text.find("{")
     while i != -1:
@@ -218,9 +224,15 @@ def _extract_json(text: str, schema=None) -> dict:
             if not declared and not required:
                 return obj                      # no schema to judge by: the historical behaviour
             fit = _schema_fit(obj, required, declared)
-            if fit > best_fit:                  # strictly better only — the first candidate wins ties
-                best, best_fit = obj, fit
-            if best_fit >= perfect:
+            # An ANSWER outranks a non-answer at the same fit, and that is the only tie it moves:
+            # `{}` (every field left to its default) and the schema's own echo both score (0, False),
+            # so "the first candidate wins ties" handed the echo — typed first — a win `_answers`
+            # then refused, and "…Nothing to change: {}" raised (critic 2026-09-27, driven). An
+            # object carrying a required or declared name answers by definition.
+            rank = (*fit, _answers(obj, fit))
+            if rank > best_rank:                # strictly better only — the first candidate wins ties
+                best, best_rank = obj, rank
+            if best_rank >= perfect:
                 return best                     # every declared field present; nothing can beat it
             seen += 1
             if seen >= _JSON_CANDIDATE_CAP:
@@ -228,7 +240,7 @@ def _extract_json(text: str, schema=None) -> dict:
         # Resume AFTER the object just decoded: a nested `{` inside it is not a second candidate.
         i = text.find("{", max(end, i + 1))
     if best is not None:
-        if _answers(best, best_fit):
+        if best_rank[2]:
             return best
         # THE BEST OF WHAT WAS READ ANSWERS NOTHING (doc 69 69.17): it carries names, and not one
         # the schema declares — the schema's own echo, an example of another shape. Returned, it
@@ -305,6 +317,21 @@ def _coerce_value(val, ann):
         it = args[0] if args else typing.Any
         return [_coerce_value(x, it) for x in val]
     return val
+
+
+def _case_drifted(obj, model) -> bool:
+    """Whether a reply names a model field ONLY in another case (`{"Operator": …}` for `operator`,
+    with no `operator` key beside it) — the key `_coerce_to_model` reads and plain validation drops."""
+    if not isinstance(obj, dict):
+        return False
+    names = model.model_fields
+    folded = {n.lower(): n for n in names}
+    for k in obj:
+        if isinstance(k, str) and k not in names:
+            n = folded.get(k.lower())
+            if n is not None and n not in obj:
+                return True
+    return False
 
 
 def _coerce_to_model(obj: dict, model: Type[T]) -> dict:
@@ -387,21 +414,27 @@ def _walk_parsers(client, messages, model, schema, order, obs) -> T:
                 # The SCHEMA reaches the extractor: this hint pastes it into the prompt, so a model
                 # that echoes it back emits a decodable object carrying none of the asked-for fields.
                 obj = _extract_json(client.complete_text([*messages, hint]), schema)
-            try:
-                answer = model.model_validate(obj)
-                obs.set("parser_used", p).set("attempts", attempts).set("repaired", False)
-                return answer
-            except ValidationError:
-                # H2 schema-aligned repair: coerce common type/format drift, then re-validate. Only
-                # if THAT fails do we fall through to the next parser — so a weak model's near-miss
-                # (e.g. {"degree":"3"} or single-quoted keys) parses instead of crashing the run.
-                answer = model.model_validate(_coerce_to_model(obj, model))
-                # `repaired` is the OTHER half of the H2 question and is not the same fact as which
-                # parser won: a `tool_call` that only validated after coercion is a native FC that
-                # nearly collapsed, and counting it as a clean win would hide precisely the signal
-                # the default flip needs.
-                obs.set("parser_used", p).set("attempts", attempts).set("repaired", True)
-                return answer
+            # A key naming a field only in another CASE goes straight to the repair: validated as it
+            # stands, a model that ignores unknown keys DROPS that value and answers the field's
+            # default as though the model had chosen it — the 69.17 shape, which the answer check's
+            # case fold (critic 2026-09-27) would otherwise let through.
+            if not _case_drifted(obj, model):
+                try:
+                    answer = model.model_validate(obj)
+                    obs.set("parser_used", p).set("attempts", attempts).set("repaired", False)
+                    return answer
+                except ValidationError:
+                    pass
+            # H2 schema-aligned repair: coerce common type/format drift, then re-validate. Only
+            # if THAT fails do we fall through to the next parser — so a weak model's near-miss
+            # (e.g. {"degree":"3"} or single-quoted keys) parses instead of crashing the run.
+            answer = model.model_validate(_coerce_to_model(obj, model))
+            # `repaired` is the OTHER half of the H2 question and is not the same fact as which
+            # parser won: a `tool_call` that only validated after coercion is a native FC that
+            # nearly collapsed, and counting it as a clean win would hide precisely the signal
+            # the default flip needs.
+            obs.set("parser_used", p).set("attempts", attempts).set("repaired", True)
+            return answer
         except (ValidationError, ParseError, json.JSONDecodeError, KeyError, AttributeError,
                 ArithmeticError, TypeError, LLMError) as e:
             # ArithmeticError/TypeError: belt-and-suspenders for a coercion path that raises on

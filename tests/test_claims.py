@@ -384,6 +384,52 @@ def test_v1_decision_uid_is_migrated_from_durable_statement(tmp_path):
     assert loaded[current_uid]["claim_key_version"] == CLAIM_KEY_VERSION
 
 
+def test_a_v3_decision_on_a_retargeted_statement_still_loads(tmp_path):
+    """Critic 2026-09-27 (driven): 7f70e3d9 took the retarget clause out of a claim's identity under
+    the same key version, so a v3 decision the previous build recorded on a clause-bearing statement
+    failed the current-version uid check — and that refuses the WHOLE shared ledger, every claims
+    surface on the memory dir. The validator admits exactly that old identity
+    (`claim_key.py::legacy_clause_uid`) and the reader keys the row by the current one; a version
+    bump was refused because it re-stales every decision on every box."""
+    import json
+
+    from looplab.engine.claim_key import claim_uid, legacy_clause_uid
+    from looplab.engine.claims import load_claim_decisions
+    from looplab.engine.governance_health import GovernanceLedgerUnavailable
+    from looplab.engine.memory import normalize_statement
+    from looplab.trust.cross_run import retargeted_lesson_note
+
+    plain = "teacher distillation improves student recall"
+    statement = plain + retargeted_lesson_note("filtered")
+    old_uid = legacy_clause_uid(statement, scope="t", metric="recall")
+    uid = claim_uid(statement, scope="t", metric="recall")
+    assert old_uid and old_uid != uid and uid == claim_uid(plain, scope="t", metric="recall")
+    assert legacy_clause_uid(plain, scope="t", metric="recall") is None, "no clause, no bridge"
+    row = {"statement": statement, "key": normalize_statement(statement), "scope": "t",
+           "metric": "recall", "decision": "rejected", "claim_key_version": 3,
+           "claim_uid": old_uid}
+    ledger = tmp_path / "claim_decisions.jsonl"
+    ledger.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    assert load_claim_decisions(str(tmp_path))[uid]["decision"] == "rejected"
+    # The bridge admits that ONE identity: any other uid on a current-version row is still forged.
+    ledger.write_text(json.dumps({**row, "claim_uid": "clm_" + "0" * 32}) + "\n",
+                      encoding="utf-8")
+    with pytest.raises(GovernanceLedgerUnavailable):
+        load_claim_decisions(str(tmp_path))
+    ledger.write_text(json.dumps({k: v for k, v in row.items() if k != "claim_uid"}) + "\n",
+                      encoding="utf-8")
+    with pytest.raises(GovernanceLedgerUnavailable):
+        load_claim_decisions(str(tmp_path))
+    # …and a statement with NO clause has no bridge, so a missing uid is not the bridge's None.
+    bare = {**row, "statement": plain, "key": normalize_statement(plain)}
+    ledger.write_text(json.dumps({k: v for k, v in bare.items() if k != "claim_uid"}) + "\n",
+                      encoding="utf-8")
+    with pytest.raises(GovernanceLedgerUnavailable):
+        load_claim_decisions(str(tmp_path))
+    ledger.write_text(json.dumps({**bare, "claim_uid": uid}) + "\n", encoding="utf-8")
+    assert load_claim_decisions(str(tmp_path))[uid]["decision"] == "rejected"
+
+
 # --- doc 25 EM-06: the lean read path is deleted; what happens to a store written under it -------
 
 def test_a_scoped_decision_written_before_the_deletion_still_governs_its_task_only(tmp_path):

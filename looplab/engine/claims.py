@@ -175,7 +175,7 @@ class ClaimTargetConflict(ValueError):
 
 def _validate_claim_decision_row(row: dict) -> str | None:
     """Strict schema fence for rows whose omission changes live claim policy."""
-    from looplab.engine.claim_key import CLAIM_KEY_VERSION, claim_uid
+    from looplab.engine.claim_key import CLAIM_KEY_VERSION, claim_uid, legacy_clause_uid
 
     decision = row.get("decision")
     if not isinstance(decision, str) or decision not in CLAIM_DECISION_ACTIONS:
@@ -209,11 +209,14 @@ def _validate_claim_decision_row(row: dict) -> str | None:
         canonical_statement = _claim_text(statement, _MAX_DECISION_STATEMENT)
         # current-version rows are writer receipts, not migration input. Replay must
         # never sanitize one durable identity and then expose/apply it under another key.
+        # …or, for a clause-bearing statement, the uid a v3 writer gave it before the retarget
+        # clause left the identity (`claim_key.py::legacy_clause_uid`); the reader keys it anew.
+        accepted = {claim_uid(canonical_statement, scope=scope, metric=metric),
+                    legacy_clause_uid(canonical_statement, scope=scope, metric=metric)} - {None}
         if (statement != canonical_statement
                 or row.get("scope") != scope or row.get("metric") != metric
                 or row.get("key") != normalize_statement(canonical_statement)
-                or row.get("claim_uid") != claim_uid(
-                    canonical_statement, scope=scope, metric=metric)):
+                or row.get("claim_uid") not in accepted):
             return "invalid_record"
     return validate_revision_fields(row)
 

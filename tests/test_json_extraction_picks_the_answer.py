@@ -177,6 +177,65 @@ def test_an_object_that_answers_nothing_is_never_the_answer():
     assert _extract_json("{'operator': 'improve', 'bogus': 1,}", _SCHEMA)["operator"] == "improve"
 
 
+def test_an_EMPTY_answer_typed_after_the_echo_still_answers():
+    """`{}` and the schema's echo tie at (0, False), and "the first candidate wins ties" handed the
+    echo — typed first — a win `_answers` then refused: "…Nothing to change: {}" RAISED where the
+    reply answered (critic 2026-09-27, driven). An answer outranks a non-answer at the same fit.
+    MUTATION: rank on the fit alone -> the first reply below raises again."""
+    from looplab.core.parse import ParseError
+
+    echo = json.dumps(_SCHEMA)
+    assert _extract_json(f"The schema is {echo}. Nothing to change: {{}}", _SCHEMA) == {}
+    assert _extract_json(f"Nothing to change: {{}}. (The schema was {echo}.)", _SCHEMA) == {}
+    # Two non-answers still answer nothing, whichever is typed first.
+    with pytest.raises(ParseError):
+        _extract_json(f'The schema is {echo}. Another shape: {{"kind": "x"}}', _SCHEMA)
+
+
+def test_a_CASE_DRIFTED_answer_reaches_the_repair_end_to_end():
+    """`_coerce_to_model` matches a key case-insensitively — the H2 repair's documented job — and
+    the 69.17 refusal compared a reply's names with the schema's case-SENSITIVELY, so `{"Operator":
+    …}` "answered nothing" and was refused before the repair ran; a model with REQUIRED fields, the
+    Researcher's own emit model among them, included (critic 2026-09-27, driven). `topK` is a schema
+    name that is not lower-case itself, so the schema's side of the fold is driven too. MUTATION:
+    drop the case fold of the reply's keys, of the schema's declared names or of its required names
+    -> ParseError."""
+    class _Req(BaseModel):
+        operator: str
+        rationale: str = ""
+
+    class _Opt(BaseModel):
+        topK: int = 0
+        note: str = ""
+
+    class _ReqK(BaseModel):
+        topK: int
+        note: str = ""
+
+    class _Client:
+        model = "m"
+
+        def complete_tool(self, messages, json_schema, **kw):
+            raise RuntimeError("force the text path")
+
+        def complete_text(self, messages, **kw):
+            return self.reply
+
+    client, msgs = _Client(), [{"role": "user", "content": "go"}]
+    for model, reply in ((_Answer, '{"Operator": "improve", "RATIONALE": "raise lr"}'),
+                         (_Req, '{"Operator": "improve", "RATIONALE": "raise lr"}'),
+                         (_Req, "{'OPERATOR': 'improve', 'Rationale': 'raise lr',}")):
+        client.reply = reply
+        got = parse_structured(client, msgs, model, "baml")
+        assert got.operator == "improve" and got.rationale == "raise lr", reply
+    client.reply = '{"TOPK": 3}'
+    assert parse_structured(client, msgs, _Opt, "baml").topK == 3
+    # A later object carrying the REQUIRED name, drifted in case, still outranks an earlier one
+    # carrying only an optional name.
+    client.reply = '{"note": "first"} then {"TOPK": 3}'
+    assert parse_structured(client, msgs, _ReqK, "baml").topK == 3
+
+
 def test_a_reply_that_only_echoes_the_schema_is_not_an_answer_end_to_end():
     """THE REAL PATH of 69.17: the text parser, the real hint, a client that only echoes the schema
     it was handed. It raised nothing and returned an all-defaults `_Answer`; now every parser fails

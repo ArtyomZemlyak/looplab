@@ -100,7 +100,7 @@ def _content(stems, *, allow_symbol: bool = False) -> tuple[str, ...]:
     return tuple(out)
 
 
-def _analyze(statement: str) -> tuple:
+def _analyze(statement: str, *, keep_clause: bool = False) -> tuple:
     """Return ``(subject, roles, polarity, relation_sign, negated)`` with conservative role-aware identity.
 
     For an effect assertion, ``roles`` is ``(lhs, rhs)``. Keeping the sides separate means
@@ -116,8 +116,9 @@ def _analyze(statement: str) -> tuple:
     for the contradiction pairing; `relation_sign`/`negated` enter the merge_key so null != harm never merge.
     """
     # What the statement CLAIMS: a retargeted run's lesson ends with the clause naming its ruler,
-    # whose words are not the claim's (`trust/cross_run.py::strip_retarget_clause`).
-    low = normalize_text(strip_retarget_clause(statement))
+    # whose words are not the claim's (`trust/cross_run.py::strip_retarget_clause`). `keep_clause` is
+    # the derivation before that (7f70e3d9), for `legacy_clause_uid` alone.
+    low = normalize_text(statement if keep_clause else strip_retarget_clause(statement))
     words = WORD_RE.findall(low)
     stems = [_stem(w) for w in words]
     # Preserve the historical rule that short alphabetic tokens are not claim content, while numeric
@@ -144,7 +145,8 @@ def _analyze(statement: str) -> tuple:
     return subject, roles, polarity, relation_sign, negated
 
 
-def claim_signature(statement: str, *, scope: str = "", metric: str = "") -> dict:
+def claim_signature(statement: str, *, scope: str = "", metric: str = "",
+                    keep_clause: bool = False) -> dict:
     """The structured semantic key for a claim. `scope` (task id) and `metric` qualify identity so the same
     words in two different tasks/metrics are two claims. Returns:
       - subject:   ordered stemmed content-token tuple (flattened from ``roles``)
@@ -155,7 +157,7 @@ def claim_signature(statement: str, *, scope: str = "", metric: str = "") -> dic
       - contra_key: polarity-agnostic — two claims sharing it with OPPOSITE polarity contradict
       - uid:       a stable opaque governance key over merge_key
     Pure/deterministic."""
-    subj, roles, pol, relation_sign, negated = _analyze(statement)
+    subj, roles, pol, relation_sign, negated = _analyze(statement, keep_clause=keep_clause)
     sc, mt = str(scope or ""), str(metric or "")
     role_payload = "\x1e".join("\x1f".join(f"{len(s)}:{s}" for s in role) for role in roles)
     subj_h = hashlib.sha256(role_payload.encode("utf-8")).hexdigest()[:32]
@@ -176,3 +178,18 @@ def claim_signature(statement: str, *, scope: str = "", metric: str = "") -> dic
 def claim_uid(statement: str, *, scope: str = "", metric: str = "") -> str:
     """Shorthand for `claim_signature(...)["uid"]` — the stable governance key for a claim."""
     return claim_signature(statement, scope=scope, metric=metric)["uid"]
+
+
+def legacy_clause_uid(statement: str, *, scope: str = "", metric: str = "") -> str | None:
+    """The uid a v3 writer gave `statement` BEFORE the retarget clause left the identity (7f70e3d9)
+    — or None when the statement carries no clause, whose identity that change did not move.
+
+    Why it exists: the identity changed under one `CLAIM_KEY_VERSION`, so a v3 decision recorded on
+    a clause-bearing statement failed the current-version uid check, and that refuses the WHOLE
+    shared `claim_decisions.jsonl` (critic 2026-09-27, driven). A version bump would have re-keyed it
+    — and re-staled every decision on every box, because a claim's evidence digest commits its uid
+    (`claims_health.py::claim_evidence_digest`). This is the narrow bridge instead: the validator
+    admits exactly this old identity, and the reader keys the row by the current one."""
+    if strip_retarget_clause(statement) == statement:
+        return None
+    return claim_signature(statement, scope=scope, metric=metric, keep_clause=True)["uid"]

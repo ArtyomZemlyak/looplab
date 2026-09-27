@@ -37,16 +37,23 @@ from tests.factories import make_engine
 SETUP = ["pip", "install", "nope-not-a-distribution"]
 
 
-def _failing_setup(monkeypatch, *, delay: float = 0.0) -> list:
+def _failing_setup(monkeypatch, *, delay: float = 0.0, until=None) -> list:
     """Every `run_setup` launch recorded and failed. `_do_run_setup` imports `_run_argv` from the
-    sandbox module at call time, so that is the seam (`tests/test_run_stop_word.py` uses it too)."""
+    sandbox module at call time, so that is the seam (`tests/test_run_stop_word.py` uses it too).
+
+    `until` turns the fixed `delay` into a DEADLINE: the launch fails as soon as `until()` holds.
+    A fixed 0.2 s assumed a sibling evaluation is dispatched within it, and the Windows leg — slower
+    to get there — failed the card-mode case's own precondition (one evaluation, not two)."""
     calls: list = []
     lock = threading.Lock()
 
     def _run_argv(cmd, cwd, timeout, log_path=None, **_kw):
         with lock:
             calls.append(list(cmd))
-        if delay:
+        deadline = time.monotonic() + delay
+        while until is not None and not until() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if delay and until is None:
             time.sleep(delay)          # long enough for a sibling eval to queue on the setup lock
         return (1, "", "ERROR: No matching distribution found for nope-not-a-distribution\n",
                 False)
@@ -171,8 +178,9 @@ def test_a_failed_run_setup_ends_a_card_mode_run_with_the_refusal(tmp_path, monk
         _admit_unit_speculation_receipt,
     )
 
-    calls = _failing_setup(monkeypatch, delay=0.2)
     engine = _occupancy_engine(tmp_path / "card", max_nodes=4)
+    calls = _failing_setup(monkeypatch, delay=30.0,
+                           until=lambda: _types(engine).count("node_eval_started") >= 2)
     engine.trust_mode = "trusted_local"
     engine._eval_spec = {"command": ["python", "-c", "print(1)"],
                          "metric": {"kind": "stdout_json", "key": "metric"},
