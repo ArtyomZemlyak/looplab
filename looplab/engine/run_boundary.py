@@ -167,6 +167,16 @@ def _lift_recarves(prior) -> bool:
     return _host_split(prior) and not getattr(prior, "split_salt_disclosure", False)
 
 
+def _lift_requeues(prior) -> bool:
+    """Whether lifting this run's pause or finish over its DISCLOSED holdout re-queues every
+    evaluated node: when the disclosure scored the engine's own hidden partition (or a row too old
+    to say — `RunState.holdout_partition_disclosed`), or on a host split the search epoch salts (a
+    log older than doc 68 68.3c). The fold's own rule (`events/replay.py::_rotate_search_epoch`); an
+    MLE-bench private grade or a withheld scorer re-queues nothing (doc 68 68.3d)."""
+    return bool(getattr(prior, "holdout_partition_disclosed", True)
+                or (_host_split(prior) and not getattr(prior, "split_salt_disclosure", False)))
+
+
 def _split_salt(prior) -> int:
     """`RunState.split_salt`, read off a folded state or a test double that carries only the epoch."""
     salt = getattr(prior, "split_salt", None)
@@ -213,7 +223,8 @@ def drain_only_refusal(prior, prior_kind: str, prior_events=None) -> Optional[tu
       still waiting for the loop head's rebuild): nothing to drain, and a finish or a pause is not
       lifted only to be put back (exit 0) — a `node_reset` re-opens a finished run itself;
     * a holdout was disclosed and lifting a pause or a finish would rotate the epoch, re-queuing
-      every evaluated node (exit 2);
+      every evaluated node (exit 2) — not after an MLE-bench private grade or a withheld scorer,
+      which disclose none of the rows the search is scored on (`_lift_requeues`, doc 68 68.3d);
     * owed nodes the epoch rotation RE-QUEUED rather than anyone reset — one reset after a
       disclosure re-opens every incumbent, and a drain would retrain each of them from scratch
       without having said so (exit 2);
@@ -247,7 +258,7 @@ def drain_only_refusal(prior, prior_kind: str, prior_events=None) -> Optional[tu
                        "finish is left as it was (a `node_reset` re-opens a finished run, in a new "
                        "search epoch like any reopen)")
         return 0, "nothing is owed an evaluation — nothing to drain; the run is left as it was"
-    if prior_kind in ("paused", "finished") and prior.holdout_evaluated_ids:
+    if prior_kind in ("paused", "finished") and prior.holdout_evaluated_ids and _lift_requeues(prior):
         return 2, ("a holdout was disclosed on this run: lifting its "
                    + ("pause" if prior_kind == "paused" else "finish")
                    + " opens a new search epoch and re-queues every evaluated node for "

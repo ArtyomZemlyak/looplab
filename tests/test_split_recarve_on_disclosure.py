@@ -97,6 +97,9 @@ def test_a_reopen_after_a_disclosure_hides_the_disclosed_rows_again(tmp_path):
     rows = set(first._holdout_idx)
     finished = anyio.run(first.run)
     assert finished.holdout_evaluated_ids, "a natural finish discloses the holdout"
+    disclosed = [e.data for e in first.store.read_all() if e.type == "holdout_evaluated"]
+    assert disclosed and all("partition_disclosed" not in row for row in disclosed), (
+        "the partition re-score IS the disclosure; its row carries no key (doc 68 68.3d)")
 
     resumed = _reopened(rd, max_nodes=2)
     state = anyio.run(resumed.run)
@@ -225,3 +228,127 @@ def test_the_live_rebuild_carves_the_split_salt_once_the_epochs_part(tmp_path, m
         final.search_epoch, final.split_salt)
     assert set(second._holdout_idx) == set(second._build_holdout_idx(0.25, final.split_salt))
     assert set(second._holdout_idx) != set(second._build_holdout_idx(0.25, final.search_epoch))
+
+
+# --------------------------------------------------------------------- doc 68 68.3d
+# A holdout that scored NONE of the engine's hidden partition — the MLE-bench private grade (the
+# competition's TEST answers) and the operator's withheld scorer (a split the engine does not hold) —
+# burns nothing: a reopen after it re-carves no split and re-measures no incumbent. Such a row says
+# so (`partition_disclosed: false`); a row without the key folds as it always did.
+
+_PRIVATE = {"protocol": "private_grade", "partition_disclosed": False}
+_SCORER = {"protocol": "holdout_scorer", "partition_disclosed": False}
+
+
+def _disclosed(tmp_path, row, *, pinned=True, host=True, then=("run_finished", "resume"),
+               before=(), fraction=0.25):
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append("run_started", {"run_id": "hg", "task_id": "t", "goal": "g", "direction": "max",
+                                 "holdout_fraction": fraction,
+                                 **({"split_salt": "disclosure"} if pinned else {})})
+    if host:
+        store.append("host_grading", {"predictions": "predictions.json", "scorer": "accuracy"})
+    for nid, metric in ((0, 0.4), (1, 0.5)):
+        store.append("node_created", {"node_id": nid, "parent_ids": [], "operator": "draft",
+                                      "idea": {"operator": "draft", "params": {}, "rationale": "r"},
+                                      "code": f"print({nid})"})
+        store.append("node_evaluated", {"node_id": nid, "generation": 0, "metric": metric,
+                                        "violations": []})
+    for kind, data in before:
+        store.append(kind, data)
+    store.append("holdout_evaluated", {"node_id": 1, "generation": 0, "metric": 0.6, "gap": -0.1,
+                                       "n_holdout": 3, "search_epoch": 0, **row})
+    for kind in then:
+        store.append(kind, {"reason": "done"} if kind == "run_finished" else {})
+    return store
+
+
+def _requeued(state):
+    return {nid: (n.status.value, n.attempt) for nid, n in state.nodes.items()}
+
+
+_KEPT = {0: ("evaluated", 0), 1: ("evaluated", 0)}
+_REQUEUED = {0: ("pending", 1), 1: ("pending", 1)}
+
+
+@pytest.mark.parametrize("why,row,pinned,host,fraction,salt,nodes", [
+    ("the partition re-score burned the split (68.3c)", {}, True, True, 0.25, 1, _REQUEUED),
+    ("the private grade burned nothing", _PRIVATE, True, True, 0.25, 0, _KEPT),
+    ("an older private-grade row folds as it always did", {"protocol": "private_grade"},
+     True, True, 0.25, 1, _REQUEUED),
+    ("a search-epoch salt moves the rows anyway (a log older than 68.3c)", _PRIVATE,
+     False, True, 0.25, 1, _REQUEUED),
+    ("a host grade with no split: no rows move", _PRIVATE, False, True, 0.0, 1, _KEPT),
+    ("a withheld scorer on a run with no host split", _SCORER, False, False, 0.25, 1, _KEPT),
+    ("an older withheld-scorer row re-measured everything, as it always did",
+     {"protocol": "holdout_scorer"}, False, False, 0.25, 1, _REQUEUED),
+])
+def test_a_reopen_re_measures_only_what_a_disclosure_burned(tmp_path, why, row, pinned, host,
+                                                             fraction, salt, nodes):
+    state = fold(_disclosed(tmp_path, row, pinned=pinned, host=host,
+                            fraction=fraction).read_all())
+    assert state.search_epoch == 1 and state.holdout_evaluated_ids == [], why
+    assert state.nodes[1].holdout_metric is None, "the disclosed number belongs to its epoch"
+    assert state.split_salt == salt, why
+    assert _requeued(state) == nodes, why
+    assert "holdout_partition_disclosed" not in state.model_dump(), "fold-internal, never dumped"
+
+
+def test_a_reset_or_a_new_candidate_after_a_private_grade_re_measures_no_incumbent(tmp_path):
+    for i, (kind, data) in enumerate((
+            ("node_reset", {"node_id": 0, "from_stage": "eval", "generation": 0}),
+            ("node_created", {"node_id": 2, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": "r"},
+                              "code": "print(2)"}))):
+        for row, kept in ((_PRIVATE, True), ({}, False)):
+            root = tmp_path / f"{kind}-{i}-{kept}"
+            root.mkdir()
+            store = _disclosed(root, row, then=("run_finished",) if kind == "node_reset" else ())
+            store.append(kind, data)
+            state = fold(store.read_all())
+            assert state.holdout_evaluated_ids == [] and state.search_epoch == 1, (kind, kept)
+            assert (state.nodes[1].status.value, state.nodes[1].attempt) == (
+                ("evaluated", 0) if kept else ("pending", 1)), (kind, kept)
+            assert state.split_salt == (0 if kept else 1), (kind, kept)
+
+
+def test_a_drain_after_a_private_grade_is_not_refused_for_the_disclosure(tmp_path):
+    """`resume --drain-only` refused ANY disclosed run, because lifting it re-queued every evaluated
+    node; after a private grade nothing is re-queued, so the owed node is drained. The shape: node
+    0 was reset BEFORE the finish's holdout phase (a reset after it consumes the disclosure itself),
+    and the eval budget finished the run with it pending."""
+    from looplab.engine.run_boundary import classify_prior_run, drain_only_refusal
+
+    reset = (("node_reset", {"node_id": 0, "from_stage": "eval", "generation": 0}),)
+    for row, refused in ((_PRIVATE, False), ({}, True)):
+        root = tmp_path / f"drain-{refused}"
+        root.mkdir()
+        store = _disclosed(root, row, then=("run_finished",), before=reset)
+        events = store.read_all()
+        state = fold(events)
+        kind = classify_prior_run(state, events)
+        assert kind == "finished" and state.holdout_evaluated_ids == [1], kind
+        assert state.nodes[0].status.value == "pending"
+        answer = drain_only_refusal(state, kind, events)
+        if refused:
+            assert answer is not None and "a holdout was disclosed" in answer[1], answer
+        else:
+            assert answer is None or "a holdout was disclosed" not in answer[1], answer
+
+
+def test_a_burn_is_consumed_with_its_epoch(tmp_path):
+    """The partition re-score burns the split and the reopen consumes it; a private grade in the
+    NEXT epoch burns nothing of its own, and does not inherit the consumed burn."""
+    store = _disclosed(tmp_path, {})                       # burned, finished, reopened
+    for nid, metric in ((0, 0.45), (1, 0.55)):             # the requeued leaders re-measured
+        store.append("node_evaluated", {"node_id": nid, "generation": 1, "metric": metric,
+                                        "violations": []})
+    store.append("holdout_evaluated", {"node_id": 1, "generation": 1, "metric": 0.6, "gap": -0.1,
+                                       "n_holdout": 3, "search_epoch": 1, **_PRIVATE})
+    disclosed = fold(store.read_all())
+    assert disclosed.holdout_evaluated_ids == [1] and disclosed.split_salt == 1
+    store.append("run_finished", {"reason": "done"})
+    store.append("resume", {})
+    state = fold(store.read_all())
+    assert state.search_epoch == 2 and state.split_salt == 1, "one burn, one re-carve"
+    assert _requeued(state) == {0: ("evaluated", 1), 1: ("evaluated", 1)}

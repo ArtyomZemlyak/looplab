@@ -408,6 +408,9 @@ class HoldoutGrader:
                        # which kind of holdout row this is; the count is not a claim about size.
                        "n_holdout": 0,
                        "protocol": "holdout_scorer",
+                       # …and it disclosed none of the rows the search is scored on (doc 68
+                       # 68.3d): a reopen after it re-measures no incumbent.
+                       "partition_disclosed": False,
                        "eval_seconds": seconds}
                 if program_sha256:
                     row["program_sha256"] = program_sha256
@@ -427,6 +430,10 @@ class HoldoutGrader:
                         "metric": m, "gap": gap,
                         "n_holdout": len(self._e._search_hidden_ids),
                         "protocol": "private_grade",
+                        # The competition's TEST answers, never a row of the search split (doc
+                        # 68 68.3d): a reopen after it neither re-carves the split nor re-measures
+                        # the leaders.
+                        "partition_disclosed": False,
                         "eval_seconds": seconds})
                 continue
             preds = None

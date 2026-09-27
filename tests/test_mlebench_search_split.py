@@ -282,6 +282,8 @@ def test_the_search_sees_the_hidden_slice_and_the_private_answers_once(tmp_path,
     rows = [e for e in EventStore(rd / "events.jsonl").read_all() if e.type == "holdout_evaluated"]
     assert len(rows) == 1 and rows[0].data["node_id"] == best.id
     assert rows[0].data["protocol"] == "private_grade" and rows[0].data["n_holdout"] == 3
+    # The TEST answers, none of the search split's rows (doc 68 68.3d).
+    assert rows[0].data["partition_disclosed"] is False
     assert rows[0].data["metric"] == pytest.approx(2 / 3)
     assert rows[0].data["gap"] == pytest.approx(1 / 3)
     hg = next(e for e in EventStore(rd / "events.jsonl").read_all() if e.type == "host_grading")

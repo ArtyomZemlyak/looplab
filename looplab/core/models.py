@@ -2583,6 +2583,13 @@ class RunState(BaseModel):
     # legacy holdout logs predate search epochs and must NOT wipe surviving incumbents on replay
     # (invariant 5b — old logs fold as before). Default False = legacy-safe for old logs.
     holdout_epoch_aware: bool = False
+    # Whether the CURRENTLY-disclosed holdout scored rows of the ENGINE's own hidden partition — the
+    # disclosure that burns the host split (doc 68 68.3d). A row says it did not with
+    # `partition_disclosed: false`: the MLE-bench private grade (the competition's TEST answers) and
+    # the operator's withheld scorer (a split the engine does not hold) reveal none of the rows the
+    # search is scored on. Every row without the key — every one written before 2026-09-27 — counts,
+    # so an old log folds as before. Fold-internal, excluded from every dump.
+    holdout_partition_disclosed: bool = Field(default=False, exclude=True)
 
     # --- live operator control (UI intervention via the event log) ---
     # These are folded from authenticated, allow-listed CONTROL events (intent) appended by server/CLI

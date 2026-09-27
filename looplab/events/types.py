@@ -1738,7 +1738,10 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # ENG2-15), charged once per (node, generation, epoch) into the `holdout` budget bucket by
         # `replay.py::_on_holdout_evaluated`. Absent on the partition re-score and on every log
         # written before it, which therefore charges nothing (invariant #5).
-        optional=("attempt", "eval_seconds", "program_sha256", "protocol"),
+        # `partition_disclosed`: `false` on the rows that scored none of the engine's hidden
+        # partition — the private grade and the withheld scorer (doc 68 68.3d) — so a reopen after
+        # them re-carves no split and re-measures no incumbent. Absent = it did (every older row).
+        optional=("attempt", "eval_seconds", "partition_disclosed", "program_sha256", "protocol"),
     ),
     "host_grading": PayloadContract(
         "The host-side scorer's grade over the candidate's predictions.",

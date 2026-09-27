@@ -1104,16 +1104,35 @@ def _requeue_partition_bound_results(st: RunState, *, fresh_node_ids: set[int]) 
     st.policy_reason = ""
 
 
+def _host_split(st: RunState) -> bool:
+    """Whether the host scores this run's search on a carved split: host grading with a holdout
+    fraction above 0, or one the log never pinned (unknown is not zero) — the fold's reading of
+    `engine/run_boundary.py::_host_split`, which `events` may not import."""
+    if not st.host_grading:
+        return False
+    return st.holdout_fraction is None or float(st.holdout_fraction) > 0
+
+
 def _rotate_search_epoch(st: RunState, *, requeue_partition_scores: bool,
                          fresh_node_ids: set[int] | None = None) -> None:
     """Advance one epoch and invalidate every value bound to the disclosed partition."""
     st.search_epoch += 1
-    if st.holdout_evaluated_ids:
+    # A disclosure that scored the ENGINE's hidden partition burns it (doc 68 68.3d); the MLE-bench
+    # private grade and the withheld scorer burn nothing of it (`holdout_partition_disclosed`).
+    burned = bool(st.holdout_evaluated_ids) and st.holdout_partition_disclosed
+    if burned:
         # A disclosure is being consumed: the one rotation that re-carves the host split
         # (`RunState.split_salt`, doc 68 68.3c). A plain reopen advances the search epoch alone.
         st.split_epoch += 1
+    # …and the incumbents are re-measured only when the rows the search is scored on MOVE: on a
+    # burning disclosure, or on a log older than the 68.3c pin, whose split is salted by the search
+    # epoch this rotation just advanced. After a private grade on MLE-bench every leader was
+    # re-evaluated on a re-carved search split for nothing (critic 2026-09-26).
+    requeue_partition_scores = requeue_partition_scores and (
+        burned or (not st.split_salt_disclosure and _host_split(st)))
     st.holdout_evaluated_ids.clear()
     st.holdout_epoch_aware = False   # the disclosure is consumed; the new epoch has none yet
+    st.holdout_partition_disclosed = False
     for candidate in st.nodes.values():
         if candidate.tombstoned or candidate.id in st.aborted_nodes:
             continue                         # post-hoc audit evidence is not part of the new pool
@@ -1882,6 +1901,10 @@ def _on_holdout_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
         st.holdout_epoch_aware = True
     if nid is not None and nid not in st.holdout_evaluated_ids:
         st.holdout_evaluated_ids.append(nid)   # gate: attempted, even if metric is null
+    if d.get("partition_disclosed", True) is not False:
+        # It scored the engine's own hidden partition — or cannot say so (a row older than the
+        # key): the disclosure burns the host split (doc 68 68.3d).
+        st.holdout_partition_disclosed = True
     metric = _finite_metric(d.get("metric"))
     if n is not None and metric is not None:
         prior_evidence = verifier_evidence_digest(st.direction, n)

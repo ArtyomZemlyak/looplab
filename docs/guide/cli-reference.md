@@ -339,7 +339,10 @@ a disclosure one reset re-opens every incumbent for a full re-evaluation, and it
 on a host-graded run started before doc 68 68.3c, when lifting its finish would re-carve the holdout
 split or it was already re-carved since an incumbent was measured — the drained node would be ranked
 against incumbents measured on other rows. A run started since re-carves its split only when a
-disclosed holdout is consumed, so a plain reopen keeps the rows (`RunState.split_salt`). It does
+disclosed holdout is consumed, so a plain reopen keeps the rows (`RunState.split_salt`) — and only
+a holdout that scored the engine's own hidden partition counts: an MLE-bench private grade or a
+withheld scorer (`partition_disclosed: false` on its row, doc 68 68.3d) burns none of the search's
+rows, so lifting after it re-queues nothing and the drain is not refused for it. It does
 nothing when nothing is owed (exit `0`; a `node_reset` re-opens a finished run itself); any other
 finished run that still owes work — the eval budget finalized it with a reset node pending — is
 lifted and drained. The mode belongs to that one invocation and is not

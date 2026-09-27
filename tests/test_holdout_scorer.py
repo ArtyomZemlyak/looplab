@@ -225,6 +225,8 @@ def test_the_withheld_number_overturns_the_search_ranking(tmp_path):
     rows = [e.data for e in engine.store.read_all() if e.type == "holdout_evaluated"]
     assert rows, "the withheld scorer never ran"
     assert {r["protocol"] for r in rows} == {"holdout_scorer"}
+    # The operator's program holds the split, none of the search's rows (doc 68 68.3d).
+    assert {r["partition_disclosed"] for r in rows} == {False}
     assert {r["program_sha256"] for r in rows} == {hashlib.sha256(before).hexdigest()}, (
         "every leader must be measured by the SAME withheld program")
 
