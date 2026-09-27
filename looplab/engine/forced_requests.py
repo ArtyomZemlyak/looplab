@@ -29,6 +29,7 @@ from looplab.core.errors import budget_stop_leaf
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import NodeStatus, RunState
 from looplab.engine.card_reservation import RESERVATION_VERDICTS
+from looplab.engine.node_build import inject_needs_developer
 # Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
 from looplab.engine.shared import engine_fold as fold
 from looplab.engine.speculation import notify_producer
@@ -620,7 +621,8 @@ class ForcedRequestsMixin:
     #   2. `_card_phase_serve_operator_inject`: the Card session serves the inject queue head itself
     #      when the live build width (`_llm_parallel`, which part 1 just raised) has a free slot
     #      beside the producer — the free half (reservation + `inject_done`) on the session's main
-    #      task, the paid half in a lane of the session's task group, exactly the serial rule.
+    #      task, the paid half in a lane of the session's task group, exactly the serial rule. A
+    #      READY-MADE inject needs no free build slot at all (doc 68 68.9): it runs no Developer.
     #   3. `_operator_node_request_ready`: otherwise the session stops electing new producer work
     #      while a node-creating operator request waits and hands the outer loop its turn as soon as
     #      the producer lane is idle, instead of starving the request behind card after card.
@@ -729,6 +731,15 @@ class ForcedRequestsMixin:
         flight: its receipt fence reads the node-id ceiling this reservation would move, and the run
         has already paid for that proposal.
 
+        A READY-MADE inject (its `code`, or a repo overlay in `files`/`deleted`) is served whatever
+        the build width (doc 68 68.9): it runs no Developer session, so it takes no BUILD lane from
+        the producer, and holding it behind one is holding an evaluation-ready experiment behind
+        hours of somebody else's Developer work. Measured on `minionerec-backbones-v10`: five
+        injects whose only file was a finished `experiment.env` (seq 5128-5137, 01:29:37-01:30:27)
+        waited behind card-16's build at `llm_parallel=1` with the GPUs idle — and after the operator
+        raised it to 2 (seq 5209) they still waited, on the node-slot gate below: the dropped
+        card-16's request, open while its build ran, held the run's last slot (68.7).
+
         It also SAYS, once per episode, that a queued node-creating request is parked on the node
         budget (`_note_parked_forced_request`, 68.8): this session can hold the loop head for a whole
         build, and the outer loop's own notice would come only after it.
@@ -745,14 +756,17 @@ class ForcedRequestsMixin:
         if parked is not None:
             self._note_parked_forced_request(parked)
         busy = self._build_lanes_busy()
-        if (busy == 0 or getattr(self, "_spec_raw_stage_inflight", False)
-                or busy >= max(1, int(self._llm_parallel))):
+        if busy == 0 or getattr(self, "_spec_raw_stage_inflight", False):
             return False
         if (len(state.inject_requests) <= state.injects_done or state.halted
                 or self._session_gates(state, session).stopping
                 or self._node_reservation_slots_remaining(state) < 1):
             return False
         req = state.inject_requests[state.injects_done]
+        if busy >= max(1, int(self._llm_parallel)) and inject_needs_developer(req):
+            # The live build width (`_llm_parallel`, which the control watcher re-applies on the fly)
+            # is spent, and THIS inject needs a Developer session: it waits for a lane.
+            return False
         prepared = self._prepare_inject_head(state, req)
         session.progressed = True
         if prepared is None:
