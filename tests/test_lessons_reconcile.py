@@ -729,13 +729,56 @@ def test_a_stale_row_the_retirement_cannot_see_buys_no_re_derivation(tmp_path, m
     eng.lessons._reconcile_sig_hash = None
     eng.lessons.reconcile_lessons(_flipped_state())
     assert client.prompts and not any("OLD STALE" in r.get("statement", "") for r in _rows(mem))
+    (rec,) = [e.data for e in eng.store.read_all() if e.type == "lessons_reconciled"]
+    assert rec["n_retired"] == 1 and "reason" not in rec, "a retirement names no reason for none"
 
 
-def test_nothing_retired_is_recorded_with_its_reason_and_its_spend(tmp_path, monkeypatch):
+def test_the_reconcile_rewrite_bounds_what_it_writes_as_the_append_funnel_does(tmp_path,
+                                                                               monkeypatch):
+    """The re-derived rows are written by the locked rewrite, never through `append_lessons` — so
+    the bound that funnel gives every row (doc 69 69.14) is given here too, or a long-goal task's
+    reconcile wrote the rows every fenced reader refuses. MUTATION: drop it -> unreadable rows."""
+    from looplab.engine.claims import load_claim_source_path
+
+    mem = tmp_path / "mem"
+    eng = _engine(tmp_path, reflection_priors=True, memory_dir=str(mem), comparative_lessons=True)
+    _seed(mem, [_STALE_PAIR_ROW])
+    long_fp = sorted(["kind:quadratic", "dir:min"] + [f"goal{i:04d}" for i in range(300)])
+    monkeypatch.setattr(eng, "_task_fingerprint", lambda state, best=None: list(long_fp))
+    monkeypatch.setattr(eng, "_reflect_client",
+                        lambda: FakeClient("P1 [BAD] this change regressed the metric\n"))
+    eng.lessons.reconcile_lessons(_flipped_state())
+    rows = _rows(mem)
+    assert rows and all(r["fingerprint_omitted"] == len(long_fp) - 256 for r in rows), rows
+    assert len(load_claim_source_path(mem / "lessons.jsonl", research=False)) == len(rows)
+
+
+def test_a_stale_row_the_lesson_fence_refuses_for_another_reason_is_not_judged(tmp_path,
+                                                                                monkeypatch):
+    """The scan's fence is the LESSON store's (`research=False`), whatever makes the row fail it — an
+    outcome outside the lesson vocabulary too, which the research fence does not check (critic
+    2026-09-27: only the fingerprint case was pinned). MUTATION: scan with `research=True` -> the
+    row is paid for and retires nothing."""
+    mem = tmp_path / "mem"
+    eng = _engine(tmp_path, reflection_priors=True, memory_dir=str(mem), comparative_lessons=True)
+    _seed(mem, [{**_STALE_PAIR_ROW, "outcome": "not-a-verdict"}])
+    client = FakeClient("P1 [BAD] this change regressed the metric\n")
+    monkeypatch.setattr(eng, "_reflect_client", lambda: client)
+    eng.lessons.reconcile_lessons(_flipped_state())
+    assert client.prompts == [] and not [
+        e for e in eng.store.read_all() if e.type == "lessons_reconciled"]
+
+
+def test_nothing_retired_is_recorded_with_its_reason_and_what_it_paid_for_is_kept(tmp_path,
+                                                                                   monkeypatch):
     """When the stale rows are gone by the time the lock is taken (another writer rewrote the store
     in between), the pass used to return silently: no receipt, and the pairs it PAID for left out
-    of the spend ledger, so the next cadence bought them again. Both are written now; nothing that
-    did not commit is claimed."""
+    of the spend ledger, so the next cadence bought them again. The receipt is written now, with
+    its reason — and what was re-derived is COMMITTED like on any other pass (critic 2026-09-27,
+    driven): the first version ledgered the pairs as spent and dropped their lessons, and the
+    selection takes the run's top pairs, not only the stale one — (2, 1) below was never distilled,
+    was paid for, dropped, and never offered again. MUTATION: drop what was re-derived when nothing
+    was retired -> the store stays empty."""
     import contextlib
 
     import looplab.events.eventstore as eventstore
@@ -745,21 +788,30 @@ def test_nothing_retired_is_recorded_with_its_reason_and_its_spend(tmp_path, mon
     eng = _engine(tmp_path, reflection_priors=True, memory_dir=str(mem), comparative_lessons=True)
     _seed(mem, [_STALE_PAIR_ROW])
     monkeypatch.setattr(eng, "_reflect_client",
-                        lambda: FakeClient("P1 [BAD] this change regressed the metric\n"))
+                        lambda: FakeClient("P1 [GOOD] lowering x a little more helps a lot\n"
+                                           "P2 [BAD] this change regressed the metric\n"))
     real_lock = eventstore.interprocess_lock
+    raced_once: list = []
 
     @contextlib.contextmanager
     def raced(path, **kwargs):
-        (mem / "lessons.jsonl").write_text("", encoding="utf-8")   # the other writer got there first
+        if not raced_once:           # the other writer got there first — once, not at every lock
+            raced_once.append(path)
+            (mem / "lessons.jsonl").write_text("", encoding="utf-8")
         with real_lock(path, **kwargs):
             yield
 
     monkeypatch.setattr(eventstore, "interprocess_lock", raced)
-    eng.lessons.reconcile_lessons(_flipped_state())
+    state = _state([_node(0, metric=9.0, op="draft", params={"x": 1.0}, code="x=1\n"),
+                    _node(1, metric=6.0, parent_ids=[0], params={"x": 3.0}, code="x=3\n"),
+                    _node(2, metric=2.0, parent_ids=[1], params={"x": 2.5}, code="x=2.5\n")])
+    eng.lessons.reconcile_lessons(state)
     rec = [e.data for e in eng.store.read_all() if e.type == "lessons_reconciled"]
-    assert len(rec) == 1 and rec[0]["n_retired"] == 0 and rec[0]["n_added"] == 0
+    assert len(rec) == 1 and rec[0]["n_retired"] == 0 and rec[0]["n_added"] == 2
     assert rec[0]["reason"] == RECONCILE_NOTHING_RETIRED
     spends = [d for d in fold(eng.store.read_all()).lessons_distilled
               if d.get("trigger") == "reconcile"]
-    assert len(spends) == 1 and spends[0]["pairs"] and spends[0]["count"] == 0
-    assert spends[0]["lessons"] == [] and _rows(mem) == []
+    assert len(spends) == 1 and sorted(map(tuple, spends[0]["pairs"])) == [(1, 0), (2, 1)]
+    assert spends[0]["count"] == 2 and len(spends[0]["lessons"]) == 2
+    assert sorted(tuple(r["evidence"]) for r in _rows(mem)) == [(1, 0), (2, 1)], (
+        "every pair ledgered as spent has its lesson in the store")

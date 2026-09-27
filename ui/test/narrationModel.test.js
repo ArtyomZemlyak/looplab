@@ -46,6 +46,19 @@ test('one narration entry per event type carries both halves', async () => {
   })
 })
 
+test('a reconcile that retired nothing says why, and one that retired says no reason', async () => {
+  // doc 69 69.15: `reason` rides on `lessons_reconciled` only when nothing was retired — the stale
+  // rows were gone under the lock — and "0 retired" alone read as "nothing drifted" (critic
+  // 2026-09-27).
+  await withNarration(async (vite, { eventNarration }) => {
+    const gone = eventNarration({ type: 'lessons_reconciled',
+      data: { n_retired: 0, n_added: 2, reason: 'stale_rows_gone_under_lock' } })
+    assert.equal(gone, 'lessons reconciled — 0 retired, 2 re-derived (the stale rows were already gone)')
+    assert.equal(eventNarration({ type: 'lessons_reconciled', data: { n_retired: 1, n_added: 1 } }),
+      'lessons reconciled — 1 retired, 1 re-derived')
+  })
+})
+
 test('every declared validator is consulted before its renderer interpolates a claim', async () => {
   await withNarration(async (vite, { NARR, eventNarration }) => {
     const validated = Object.keys(NARR).filter(type => NARR[type].validate)

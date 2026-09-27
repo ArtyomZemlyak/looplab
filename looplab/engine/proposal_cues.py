@@ -13,8 +13,9 @@ from looplab.core.models import NodeStatus, RunState, normalize_steering_context
 from looplab.engine.governance_health import GovernanceLedgerUnavailable
 from looplab.events.types import EV_NODE_CREATED
 from looplab.search.coverage import latest_live_snapshot
-from looplab.trust.cross_run import (LessonScope, cross_run_text, same_live_direction,
-                                     sanitize_cross_run_projection, valid_live_direction)
+from looplab.trust.cross_run import (LessonScope, cross_run_text, lesson_fingerprint_complete,
+                                     same_live_direction, sanitize_cross_run_projection,
+                                     valid_live_direction)
 from looplab.core.jsonutil import valid_digest_ref
 
 # PART IV Phase 2b: the streak length at which the capability-expansion directive treats the run as
@@ -1304,6 +1305,8 @@ class ProposalCuesMixin:
                     # fuzzy transfer into a different task's live Researcher prompt.
                     if not capsule_fingerprint_scope_complete(row):
                         return False
+                elif not lesson_fingerprint_complete(row):
+                    return False       # a lesson's CUT fingerprint, the same rule (doc 69 69.14)
                 stored = [t for t in stored if not str(t).startswith("param:")]
                 return fingerprint_similarity(fp, stored) >= 0.34
 

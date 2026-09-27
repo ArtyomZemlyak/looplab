@@ -108,17 +108,26 @@ def memory_fingerprints_cmd(
 
     A row written before the writer owned the reader's bound (more than 256 tokens, or a token over
     500 characters) was refused by every fenced reader and by the stale-lesson reconcile, so it
-    could be neither used nor retired. Each such row gets the fingerprint the writer writes now,
-    on its own line: the store's order, which the readers' bounded windows are taken over, does not
-    move, and every other line is kept byte for byte. No model is called.
+    could be retired by nothing and read by no fenced reader (the passive prompt prior applies no
+    fence, and did read it). Each such row gets the fingerprint the writer writes now, with the cut
+    recorded — so it serves its own task and admits no foreign one — on its own line: the store's
+    order, which the readers' bounded windows are taken over, does not move, and every other line is
+    kept byte for byte. No model is called.
     """
+    from looplab.core.errors import EnvironmentRefusal
     from looplab.engine.claims_health import rebound_lesson_fingerprints
+    from looplab.events.eventstore import EventStoreLockError
 
     store = memory_dir / "lessons.jsonl"
     if not store.is_file():
         typer.echo(f"{store}: no lesson store", err=True)
         raise typer.Exit(1)
-    receipt = rebound_lesson_fingerprints(store, apply=apply)
+    try:
+        receipt = rebound_lesson_fingerprints(store, apply=apply)
+    except (OSError, EventStoreLockError) as exc:
+        # An unreadable store or a lock this mount cannot take is the MACHINE's answer, said in one
+        # line at the refusal exit — not a traceback (critic 2026-09-27). Nothing was written.
+        raise EnvironmentRefusal(f"{store}: {exc}; nothing was written") from exc
     if as_json:
         typer.echo(orjson.dumps(receipt, option=orjson.OPT_INDENT_2).decode())
         raise typer.Exit(0)

@@ -141,6 +141,26 @@ def test_related_advisory_rejects_capsule_with_unknown_fingerprint_projection(tm
     }
 
 
+def test_related_advisory_rejects_a_lesson_whose_fingerprint_was_cut(tmp_path):
+    """Doc 69 69.14 (critic 2026-09-27, driven): the lesson store bounds a row's fingerprint past
+    the fenced reader's limits and records `fingerprint_omitted`; what the cut kept moves its overlap
+    with this task in a direction nobody measured, so the Researcher's pack takes such a row for its
+    own task only — the rule a capsule's receipt already carries. MUTATION: drop the check in
+    `_scoped` -> the foreign lesson is rendered."""
+    class _RelatedHost(_Host):
+        def _task_fingerprint(self, state, best=None):
+            return ["kind:dataset", "retrieval", "russian"]
+
+    foreign = {**_lesson("hard negatives from the teacher help", "supported", [1], run_id="prior"),
+               "task_id": "foreign", "fingerprint": ["kind:dataset", "retrieval", "russian"]}
+    for receipt, shown in ((None, True), (40, False)):
+        row = foreign if receipt is None else {**foreign, "fingerprint_omitted": receipt}
+        _seed(tmp_path, lessons=[row])
+        text = _RelatedHost(tmp_path, on=True)._cross_run_advisory_text(
+            RunState(run_id="current", task_id="current", direction="max"))
+        assert ("hard negatives from the teacher" in text) is shown, receipt
+
+
 def test_rank_tendency_marks_persisted_concept_names_as_untrusted(tmp_path):
     capsules = []
     for run_id in ("r1", "r2"):

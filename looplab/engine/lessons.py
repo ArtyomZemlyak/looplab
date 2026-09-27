@@ -156,6 +156,11 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
         # (`objective_key`, additive; the readers ignore unknown keys).
         stamp_lesson_objective(
             lessons, getattr(state, "objective_key", None) if state is not None else None)
+        # …and every row's fingerprint inside the fenced reader's bounds, with a receipt of the cut
+        # (doc 69 69.14): a row past them was written here and read by no fenced reader.
+        from looplab.engine.memory import bound_lesson_fingerprint
+        for lz in lessons:
+            bound_lesson_fingerprint(lz)
         if state is not None:
             from looplab.engine.concept_shelf import state_concepts
             for lz in lessons:

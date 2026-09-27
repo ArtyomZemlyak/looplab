@@ -227,6 +227,12 @@ def test_a_contradicting_lesson_demotes_a_candidate_and_two_demotions_retire(tmp
     # A promoted card ignores a reversal from an UNRELATED family…
     assert reconcile_auto_skill_statuses(tmp_path, [
         {"statement": statement, "outcome": "abandoned", "run_id": "run-9", "fingerprint": fp_c}]) == []
+    # …nor one whose fingerprint was CUT (doc 69 69.14): its overlap with the card's families moved
+    # with the cut, so it cannot place the reversal in one. MUTATION: drop the completeness check in
+    # `_skill_contradiction` -> the card is retired here.
+    assert reconcile_auto_skill_statuses(tmp_path, [
+        {"statement": statement, "outcome": "abandoned", "run_id": "run-8", "fingerprint": fp_b,
+         "fingerprint_omitted": 12}]) == []
     # …and is retired by a reversal on a family it was confirmed on: the second demotion.
     assert AUTO_SKILL_RETIRE_AFTER == 2
     receipts = reconcile_auto_skill_statuses(tmp_path, [

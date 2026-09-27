@@ -1018,31 +1018,103 @@ def test_the_reflection_row_of_a_substituted_winner_says_it_built_something_else
     assert "[NOT A TEST OF its IDEA (idea different) — built instead: the grouped path]" in row
 
 
-def test_the_writer_bounds_a_fingerprint_to_what_the_reader_accepts():
+def test_the_lesson_writer_bounds_a_row_to_what_the_reader_accepts_and_says_so(tmp_path):
     """Doc 69 69.14 (driven on a real run's store: a 336-token goal fingerprint hid 29 of 77 lesson
     rows, and the reconcile that found one stale retired nothing). The reader refuses a fingerprint
-    past `_MAX_SOURCE_FINGERPRINT` tokens or with a token past `_MAX_SOURCE_ID`; the writer now owns
-    both bounds and never writes past them — keeping the kind/direction/metric facets — while every
-    fingerprint the reader already accepted is byte for byte what it was."""
+    past `_MAX_SOURCE_FINGERPRINT` tokens or with a token past `_MAX_SOURCE_ID`; the lesson store's
+    writer now bounds the ROW — keeping the kind/direction/metric facets — and records the cut as
+    `fingerprint_omitted`, while every row the reader already accepted is byte for byte what it was.
+
+    The FINGERPRINT itself is not bounded (critic 2026-09-27, driven): `task_fingerprint` was, and
+    every other consumer lost the receipt of the cut — a concept capsule claimed a complete
+    fingerprint over a cut set. MUTATION: bound in `task_fingerprint` again -> the first assert."""
     from looplab.engine.claims_health import _valid_claim_source_row
-    from looplab.engine.memory import _MAX_SOURCE_FINGERPRINT, _MAX_SOURCE_ID
+    from looplab.engine.memory import (_MAX_SOURCE_FINGERPRINT, _MAX_SOURCE_ID,
+                                       bound_lesson_fingerprint)
+
+    # Words and an over-long token that SORT BEFORE the facets, so a plain sorted cut would keep
+    # them and drop `dir:`/`kind:`/`metric:` (and the over-long one would be written).
+    goal = " ".join(f"aword{i:04d}" for i in range(400)) + " " + "a" * (_MAX_SOURCE_ID + 1)
+    long = task_fingerprint("repo", "max", goal, metric="recall", param_names=["lr"])
+    assert len(long) == 405 and long == sorted(long), "the task's fingerprint is its whole set"
 
     short = task_fingerprint("repo", "max", "maximize recall on the dev split", metric="recall",
                              param_names=["lr"])
     assert short == sorted({"kind:repo", "dir:max", "metric:recall", "maximize", "recall", "dev",
                             "split", "param:lr"})
-    # Words and an over-long token that SORT BEFORE the facets, so a plain sorted cut would keep
-    # them and drop `dir:`/`kind:`/`metric:` (and the over-long one would be written).
-    goal = " ".join(f"aword{i:04d}" for i in range(400)) + " " + "a" * (_MAX_SOURCE_ID + 1)
-    long = task_fingerprint("repo", "max", goal, metric="recall", param_names=["lr"])
-    assert len(long) == _MAX_SOURCE_FINGERPRINT and long == sorted(long)
-    assert {"kind:repo", "dir:max", "metric:recall"} <= set(long)
-    assert all(len(token) <= _MAX_SOURCE_ID for token in long)
-    row = {"statement": "a wider margin helps", "outcome": "supported", "evidence": [1],
-           "task_id": "t", "run_id": "r", "fingerprint": long}
+    inside = {"statement": "a wider margin helps", "outcome": "supported", "evidence": [1],
+              "task_id": "t", "run_id": "r", "fingerprint": short}
+    kept = dict(inside)
+    bound_lesson_fingerprint(kept)
+    assert kept == inside and kept["fingerprint"] is short, "a row inside the fence is untouched"
+
+    row = {**inside, "fingerprint": list(long)}
+    assert not _valid_claim_source_row(row, research=False), "precondition: past the fence"
+    bound_lesson_fingerprint(row)
+    assert len(row["fingerprint"]) == _MAX_SOURCE_FINGERPRINT and row["fingerprint"] == sorted(
+        row["fingerprint"])
+    assert {"kind:repo", "dir:max", "metric:recall"} <= set(row["fingerprint"])
+    assert all(len(token) <= _MAX_SOURCE_ID for token in row["fingerprint"])
+    assert row["fingerprint_omitted"] == len(long) - _MAX_SOURCE_FINGERPRINT
     assert _valid_claim_source_row(row, research=False)
-    assert not _valid_claim_source_row({**row, "fingerprint": long + ["zzz"]}, research=False), (
-        "precondition: one token more and the reader refuses the row")
+
+    # …at the write funnel every lesson reaches (`LessonMemory.append_lessons`).
+    mem = tmp_path / "mem"
+    mem.mkdir()
+
+    class _Engine:
+        memory_dir = str(mem)
+
+    LessonMemory(_Engine()).append_lessons([{**inside, "fingerprint": list(long)}, dict(inside)],
+                                           hygiene=False)
+    written = read_jsonl_lenient(mem / "lessons.jsonl")
+    assert written[0]["fingerprint"] == row["fingerprint"]
+    assert written[0]["fingerprint_omitted"] == row["fingerprint_omitted"]
+    assert written[1] == inside, "a row inside the fence is written as it was"
+
+
+def test_a_cut_fingerprint_serves_its_own_task_and_never_admits_a_foreign_one(tmp_path):
+    """Critic 2026-09-27 (driven): the cut keeps the first tokens in sorted order, and what it kept
+    decides every overlap. Two long goals sharing 250 of their words: the whole fingerprints overlap
+    0.221 (Jaccard) and a bound reader's related-goal ratio is 0.457 — under its 0.5 — while the cut
+    one reads 0.996. So the RECEIPT decides: a row whose fingerprint was cut is exact-task-only for
+    the bound tools (`LessonScope`), and a concept capsule built from the whole fingerprint keeps
+    its own receipt and transfers to no foreign task. MUTATION: ignore `fingerprint_omitted` in
+    `LessonScope.related_goal` -> the foreign task reads the row as related."""
+    from looplab.engine.memory import (ConceptCapsuleStore, bound_lesson_fingerprint,
+                                       build_concept_capsule, capsule_fingerprint_scope_complete)
+    from looplab.trust.cross_run import LessonScope, lesson_fingerprint_complete, scope_terms
+
+    shared = [f"alpha{i:03d}" for i in range(250)]
+    goal_a = "maximize recall " + " ".join(shared + [f"zz{i:03d}" for i in range(300)])
+    goal_b = "maximize recall " + " ".join(shared + [f"zy{i:03d}" for i in range(600)])
+    fp_a = task_fingerprint("repo", "max", goal_a, metric="recall")
+    fp_b = task_fingerprint("repo", "max", goal_b, metric="recall")
+    assert round(fingerprint_similarity(fp_a, fp_b), 3) == 0.221
+
+    row = {"statement": "a wider margin helps", "outcome": "supported", "evidence": [1],
+           "task_id": "task-A", "run_id": "rA", "direction": "max", "fingerprint": list(fp_a)}
+    bound_lesson_fingerprint(row)
+    assert row["fingerprint_omitted"] == 299 and not lesson_fingerprint_complete(row)
+    foreign = LessonScope(bound=True, run_uid="uB", run_id="rB", task_id="task-B",
+                          direction="max", goal_terms=scope_terms(goal_b))
+    own = LessonScope(bound=True, run_uid="uA2", run_id="rA2", task_id="task-A",
+                      direction="max", goal_terms=scope_terms(goal_a))
+    assert not foreign.allows(row) and own.allows(row)
+    assert foreign.allows({k: v for k, v in row.items() if k != "fingerprint_omitted"}), (
+        "precondition: without its receipt the cut set reads as related — the receipt decides")
+    for receipt in (True, "299", -1, 1.0, None):
+        assert not lesson_fingerprint_complete({**row, "fingerprint_omitted": receipt}), receipt
+    assert lesson_fingerprint_complete({**row, "fingerprint_omitted": 0})
+
+    capsule = build_concept_capsule(run_id="rA", task_id="task-A", fingerprint=fp_a,
+                                    direction="max", concepts=["model/two-tower"], best_metric=0.5,
+                                    concept_outcomes={"model/two-tower": 0.5})
+    assert (capsule["fingerprint_total"], capsule["fingerprint_omitted"]) == (555, 299)
+    assert not capsule_fingerprint_scope_complete(capsule)
+    store = ConceptCapsuleStore(tmp_path / "concept_capsules.jsonl")
+    store.capsules = [capsule]
+    assert store.prior_capsules(fp_b, task_id="task-B", min_sim=0.3) == []
 
 
 def test_a_row_past_the_fence_is_repaired_in_place_and_nothing_else_moves(tmp_path):
@@ -1081,12 +1153,80 @@ def test_a_row_past_the_fence_is_repaired_in_place_and_nothing_else_moves(tmp_pa
     assert [i for i, (a, b) in enumerate(zip(old, new)) if a != b] == [2], (
         "only the repaired row's own line may change")
     repaired = json.loads(new[2])
-    assert {k: v for k, v in repaired.items() if k != "fingerprint"} == {**base, "statement": "past"}
+    assert {k: v for k, v in repaired.items() if k != "fingerprint"} == {
+        **base, "statement": "past", "fingerprint_omitted": len(long_fp) - _MAX_SOURCE_FINGERPRINT}
     assert len(repaired["fingerprint"]) == _MAX_SOURCE_FINGERPRINT
     assert {"kind:repo", "dir:max", "metric:recall"} <= set(repaired["fingerprint"])
     assert statements() == ["good", "past"]
     assert rebound_lesson_fingerprints(store, apply=True) == {
         "rows": 5, "past_fence": 1, "rebound": 0, "left_quarantined": 1, "applied": False}
+
+
+def test_the_migration_reads_under_the_lock_and_leaves_what_it_cannot_round_trip(tmp_path,
+                                                                                  monkeypatch):
+    """Critic 2026-09-27 on 69.14a, driven: a row only `json` reads as itself (a NaN, an integer
+    `orjson` turns into another float, a lone-surrogate escape) was either CRASHED on or repaired
+    into the path where the store's
+    `orjson` rewrites keep its raw copy AND re-write it — one more copy each pass; a CRLF store lost
+    its line end on the repaired line; a line of Unicode blank space counted as a row; the store came
+    back 0600. And nothing pinned that the survey runs INSIDE the lock (a writer appending in the
+    window lost 137 of 300 rows with the read moved out) or that a no-op `--apply` writes nothing."""
+    import contextlib
+    import json
+    import os
+    import stat
+
+    import looplab.events.eventstore as eventstore
+    from looplab.engine.claims_health import load_claim_source_path, rebound_lesson_fingerprints
+    from looplab.engine.memory import _MAX_SOURCE_ID
+
+    long_fp = sorted([f"aword{i:04d}" for i in range(300)] + ["kind:repo"])
+    base = {"outcome": "supported", "evidence": [1], "task_id": "t", "run_id": "r"}
+    past = json.dumps({**base, "statement": "past", "fingerprint": long_fp})
+    at_bound = json.dumps({**base, "statement": "at bound",
+                           "fingerprint": ["kind:repo", "b" * _MAX_SOURCE_ID]})
+    left = [json.dumps({**base, "statement": "nan", "fingerprint": long_fp, "delta": float("nan")}),
+            json.dumps({**base, "statement": "big", "fingerprint": long_fp, "delta": 2 ** 70 + 1}),
+            json.dumps({**base, "statement": "lone \ud800", "fingerprint": long_fp})]
+    ints = json.dumps({**base, "statement": "ints", "fingerprint": list(range(300))})
+    deep = "[" * 100_000 + "]" * 100_000
+    store = tmp_path / "lessons.jsonl"
+    store.write_bytes(("\r\n".join([past, at_bound, *left, ints, deep, "\u3000"]) + "\r\n")
+                      .encode("utf-8"))
+    os.chmod(store, 0o644)
+    assert rebound_lesson_fingerprints(store, apply=False) == {
+        "rows": 7, "past_fence": 4, "rebound": 1, "left_quarantined": 3, "applied": False}
+
+    real_lock = eventstore.interprocess_lock
+    taken: list = []
+
+    @contextlib.contextmanager
+    def lock_after_a_late_append(path, **kwargs):
+        taken.append(Path(path).name)
+        with store.open("ab") as fh:        # a writer that appended just before the lock was ours
+            fh.write((json.dumps({**base, "statement": "late"}) + "\r\n").encode("utf-8"))
+        with real_lock(path, **kwargs):
+            yield
+
+    monkeypatch.setattr(eventstore, "interprocess_lock", lock_after_a_late_append)
+    receipt = rebound_lesson_fingerprints(store, apply=True)
+    assert taken == ["lessons.jsonl.lock"] and receipt["rebound"] == 1 and receipt["applied"]
+    monkeypatch.setattr(eventstore, "interprocess_lock", real_lock)
+    lines = store.read_bytes().split(b"\n")
+    assert lines[-1] == b"" and all(line.endswith(b"\r") for line in lines[:-1]), "CRLF kept"
+    assert [line[:-1].decode("utf-8") for line in lines[2:5]] == left, "left byte for byte"
+    assert json.loads(lines[0])["fingerprint_omitted"] == len(long_fp) - 256
+    assert stat.S_IMODE(store.stat().st_mode) == 0o644, "the store's own mode"
+    (tmp_path / "read").mkdir()
+    (tmp_path / "read" / "lessons.jsonl").write_bytes(b"\n".join(
+        line for line in lines if not line.startswith(b"[[")))
+    statements = [row["statement"] for row in
+                  load_claim_source_path(tmp_path / "read" / "lessons.jsonl", research=False)]
+    assert statements == ["past", "at bound", "late"], "the late append survived: read in the lock"
+
+    identity = (store.stat().st_ino, store.stat().st_mtime_ns)
+    assert rebound_lesson_fingerprints(store, apply=True)["applied"] is False
+    assert (store.stat().st_ino, store.stat().st_mtime_ns) == identity, "a no-op apply writes nothing"
 
 
 def test_the_memory_fingerprints_command_reports_then_applies(tmp_path):
@@ -1106,3 +1246,26 @@ def test_the_memory_fingerprints_command_reports_then_applies(tmp_path):
     assert applied.exit_code == 0 and orjson.loads(applied.output)["applied"] is True
     again = runner.invoke(app, ["memory-fingerprints", str(tmp_path)])
     assert "0 past the fingerprint fence" in again.output and "Nothing was written" not in again.output
+
+
+def test_the_memory_fingerprints_command_refuses_in_one_line_when_the_store_cannot_be_locked(
+        tmp_path, monkeypatch):
+    """An unreadable store or a lock the mount cannot take is the machine's answer: one line at the
+    refusal exit, not a traceback (critic 2026-09-27). MUTATION: drop the `except` -> exit 1."""
+    from typer.testing import CliRunner
+
+    import looplab.engine.claims_health as claims_health
+    from looplab.cli import REFUSAL_EXIT_CODE, app
+    from looplab.events.eventstore import EventStoreLockError
+
+    (tmp_path / "lessons.jsonl").write_bytes(b"{}\n")
+
+    def _locked(path, *, apply):
+        raise EventStoreLockError(str(path) + ".lock",
+                                  OSError("advisory locks are not supported on this mount"))
+
+    monkeypatch.setattr(claims_health, "rebound_lesson_fingerprints", _locked)
+    result = CliRunner().invoke(app, ["memory-fingerprints", str(tmp_path), "--apply"])
+    assert result.exit_code == REFUSAL_EXIT_CODE, result.output
+    assert "not supported on this mount; nothing was written" in result.output
+    assert "Traceback" not in result.output

@@ -1833,7 +1833,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         stored_whole=True,
     ),
     "lessons_reconciled": PayloadContract(
-        "A re-evaluation changed an outcome, so this run's lessons were re-derived.",
+        "A re-evaluation changed an outcome; this run's lessons citing it were retired and "
+        "re-derived (`reason`: why none were).",
         required=("at_node", "derivation", "lessons", "n_added", "n_retired", "pairs", "reflect"),
         # `reason`: only when nothing was retired — why (`lessons_reconcile.py::
         # RECONCILE_NOTHING_RETIRED`, doc 69 69.15).

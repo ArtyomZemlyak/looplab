@@ -2384,11 +2384,14 @@ looplab memory-orphans MEMORY_DIR [--runs-root runs] [--apply] [--limit 25] [--j
 Report — and only with `--apply`, repair in place — lesson rows the reader cannot see because their
 task fingerprint is past its fence (doc 69, 69.14a). A row written before the writer owned the
 reader's bound (more than 256 tokens, or a token longer than 500 characters) was refused by every
-fenced reader and by the stale-lesson reconcile, so it could be neither used nor retired. Each such row
-gets the fingerprint the writer writes now (`engine/memory.py::bound_fingerprint`), on its own line:
-the store's order, which the readers' bounded windows are taken over, does not move, and every other
-line (a row refused for another reason as well, a malformed or future line) is kept byte for byte.
-No model is called; the write happens under the store's lock. The rule is
+fenced reader and by the stale-lesson reconcile, so nothing could retire it (the passive prompt prior
+applies no fence and did read it). Each such row gets the fingerprint the writer writes now, with the
+cut recorded as `fingerprint_omitted` (`engine/memory.py::bound_lesson_fingerprint`) — so it serves
+its own task and admits no foreign one — on its own line: the store's order, which the readers'
+bounded windows are taken over, does not move, and every other line (a row refused for another reason
+as well, one only `json` reads back as itself, a malformed or future line) is kept byte for byte, CRLF
+line ends and the file's mode included. No model is called; the write happens under the store's lock,
+and an unreadable store or an unavailable lock is a one-line refusal. The rule is
 `engine/claims_health.py::rebound_lesson_fingerprints`.
 
 ```bash

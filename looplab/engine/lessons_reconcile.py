@@ -520,6 +520,11 @@ class LessonReconcileMixin:
             # below bypasses `append_lessons`, and its rows went to the store with no ruler.
             from looplab.engine.lesson_hygiene import stamp_lesson_objective
             stamp_lesson_objective(fresh, getattr(state, "objective_key", None))
+            # …and the bound `append_lessons` gives every row it writes (doc 69 69.14), for the
+            # same reason: this rewrite bypasses it.
+            from looplab.engine.memory import bound_lesson_fingerprint
+            for lz in fresh:
+                bound_lesson_fingerprint(lz)
 
             def _is_stale(o) -> bool:
                 # Identify a stale row of THIS run by IDENTITY (evidence pair / staleness), NOT raw line
@@ -567,7 +572,12 @@ class LessonReconcileMixin:
                     path, research=False)   # authoritative interpreted rows, inside the lock
                 kept = [o for o in cur if isinstance(o, dict) and not _is_stale(o)]
                 n_retired = len(cur) - len(kept)   # rows ACTUALLY dropped (audit); reflect-sweep included
-                committed_fresh = fresh if n_retired else []
+                # COMMITTED EVEN WHEN NOTHING WAS RETIRED (critic 2026-09-27, driven): the stale rows
+                # were gone under the lock, but what was re-derived is this run's evidence as it
+                # stands — and the pairs it was derived from are about to be ledgered as spent
+                # below, which is not only the stale ones: the selection takes the run's top pairs,
+                # so a pair never distilled before was paid for, dropped and never offered again.
+                committed_fresh = fresh
                 # replace only current understood lesson rows. Malformed/future raw records
                 # remain byte-preserved quarantine and continue to make claim-source health incomplete.
                 replace_jsonl_rows_atomic_preserving_quarantine(
@@ -608,8 +618,9 @@ class LessonReconcileMixin:
             return state
         # NOTHING RETIRED is said, not swallowed (doc 69 69.15): with the fence above the scan and
         # the rewrite read one set, so this means the stale rows were gone when the lock was taken
-        # (another writer rewrote the store in between). What was paid for is still ledgered — else
-        # the next cadence buys the same pairs again — and the receipt names why nothing changed.
+        # (another writer rewrote the store in between). What was paid for is committed and
+        # ledgered as on any other pass — else the next cadence buys the same pairs again — and the
+        # receipt names why nothing was retired.
         fresh = committed_fresh
         if not fresh:
             pairs_used = []
@@ -620,11 +631,10 @@ class LessonReconcileMixin:
         # in the store; `count` says how many that was, and zero is a real answer.
         if spent_pairs_this_pass:
             from looplab.core.advisory_payloads import research_lesson_receipt
-            committed_comp = comp if n_retired else []
             self._e.store.append(EV_LESSONS_DISTILLED, {
-                "at_node": len(state.nodes), "trigger": "reconcile", "count": len(committed_comp),
+                "at_node": len(state.nodes), "trigger": "reconcile", "count": len(comp),
                 "pairs": [[pr["a"], pr["b"]] for pr in spent_pairs_this_pass],
-                "lessons": [research_lesson_receipt(lz, state) for lz in committed_comp]})
+                "lessons": [research_lesson_receipt(lz, state) for lz in comp]})
         # Audit sidecar (fold ignores it): what drifted and what replaced it.
         self._e.store.append(EV_LESSONS_RECONCILED, {
             "at_node": len(state.nodes), "n_retired": n_retired, "n_added": len(fresh),

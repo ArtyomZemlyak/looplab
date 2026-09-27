@@ -54,6 +54,20 @@ def scope_terms(text) -> frozenset[str]:
     return frozenset(w for w in tokenize(text) if len(w) > 2)
 
 
+def lesson_fingerprint_complete(row) -> bool:
+    """Whether a persisted row's fingerprint is the WHOLE fingerprint its writer built — the authority
+    a related-task match needs (doc 69 69.14). The lesson store's writers bound a fingerprint past the
+    fenced reader's limits and say so in `fingerprint_omitted` (`engine/memory.py::
+    bound_lesson_fingerprint`); what the cut kept moves its overlap with any other task in a direction
+    nobody measured, so such a row may still serve its own exact task and never admits a foreign one.
+    Absent is complete (every row within the fence, and every row written before it); anything but a
+    plain 0 is not."""
+    if not isinstance(row, dict) or "fingerprint_omitted" not in row:
+        return True
+    value = row.get("fingerprint_omitted")
+    return type(value) is int and value == 0
+
+
 class LessonScope:
     """Which persisted cross-run rows a BOUND agent may see (doc 25 TO-07).
 
@@ -116,10 +130,13 @@ class LessonScope:
         A single generic word ("model", "retrieval", "training") is not a security scope. Similar
         cross-task transfer requires at least two salient terms covering half of the smaller side;
         exact task ids remain authoritative. Rows carrying no fingerprint (including v3 D8) are
-        exact-task-only. Agent-proposed facets affect neither this predicate nor retrieval order.
+        exact-task-only, and so are rows whose fingerprint was CUT (`lesson_fingerprint_complete`):
+        a cut that kept mostly shared words read a foreign task as related at 0.99 where the whole
+        sets overlapped 0.46 (critic 2026-09-27, driven). Agent-proposed facets affect neither this
+        predicate nor retrieval order.
         """
         fp = row.get("fingerprint")
-        if not (isinstance(fp, list) and self.goal_terms):
+        if not (isinstance(fp, list) and self.goal_terms) or not lesson_fingerprint_complete(row):
             return False
         row_terms = {t for t in fp if isinstance(t, str) and ":" not in t}
         shared = row_terms & self.goal_terms

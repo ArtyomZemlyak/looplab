@@ -123,6 +123,11 @@ def _goal_tokens(goal: str, *, universal: bool) -> list[str]:
 # never read: a 336-token goal fingerprint hid 29 of 77 store rows, and the reconcile that found one of
 # them stale retired nothing (doc 69 §5.2). Defined here, where the fingerprint is built, and imported
 # by the reader (`claims_health` already imports this module; the reverse would be a cycle).
+#
+# The LESSON ROW is bounded, never the fingerprint itself (`bound_lesson_fingerprint`): the first cut
+# bounded `task_fingerprint`, and every other consumer lost the receipt of what it dropped — a concept
+# capsule claimed `fingerprint_complete` over a cut set and transferred to a foreign task at 0.992
+# similarity where the whole sets shared 0.221 (critic 2026-09-27, driven).
 _MAX_SOURCE_ID = 500
 _MAX_SOURCE_FINGERPRINT = 256
 _FINGERPRINT_FACETS = ("kind:", "dir:", "metric:")
@@ -147,7 +152,7 @@ def task_fingerprint(kind: str, direction: str, goal: str, metric: str = "",
         toks.add(w)
     for p in (param_names or []):
         toks.add(f"param:{str(p).lower()}")
-    return bound_fingerprint(toks)
+    return sorted(toks)
 
 
 def bound_fingerprint(tokens) -> list[str]:
@@ -155,7 +160,9 @@ def bound_fingerprint(tokens) -> list[str]:
     69.14). One the reader already accepts is returned byte for byte as it always was; one it would
     refuse loses every token past `_MAX_SOURCE_ID` (a cut would mint a token no task has), keeps the
     kind/direction/metric facets, and fills the remaining slots with the rest in sorted order —
-    deterministic, so every writer of one task's rows keys them alike."""
+    deterministic, so every writer of one task's rows keys them alike. A CUT set: whoever writes one
+    says so (`bound_lesson_fingerprint`), since its overlap with another task's moved in a direction
+    nobody measured."""
     out = sorted(tokens)
     if len(out) <= _MAX_SOURCE_FINGERPRINT and all(len(t) <= _MAX_SOURCE_ID for t in out):
         return out
@@ -163,6 +170,30 @@ def bound_fingerprint(tokens) -> list[str]:
     facets = [t for t in fitting if t.startswith(_FINGERPRINT_FACETS)]
     rest = [t for t in fitting if not t.startswith(_FINGERPRINT_FACETS)]
     return sorted(facets + rest[:max(0, _MAX_SOURCE_FINGERPRINT - len(facets))])
+
+
+def bound_lesson_fingerprint(row) -> bool:
+    """Bound a LESSON ROW's fingerprint, in place, to what the fenced reader accepts — and say what was
+    cut. The lesson store's writers call it (`lessons.py::LessonMemory.append_lessons`, the
+    reconcile's rewrite, the 69.14a migration); nothing else bounds a fingerprint.
+
+    A row the reader already accepts is left byte for byte as it is. Past the fence, the fingerprint
+    is `bound_fingerprint`'s and `fingerprint_omitted` counts the distinct tokens it dropped — the
+    receipt a related-task reader needs, because a cut set may still serve its own exact task but can
+    never authorize a foreign one (`trust/cross_run.py::lesson_fingerprint_complete`). Returns
+    whether it bounded anything — the migration's one test of "past the fence"."""
+    if not isinstance(row, dict):
+        return False
+    fingerprint = row.get("fingerprint")
+    if (not isinstance(fingerprint, list)
+            or not all(isinstance(token, str) for token in fingerprint)
+            or (len(fingerprint) <= _MAX_SOURCE_FINGERPRINT
+                and all(len(token) <= _MAX_SOURCE_ID for token in fingerprint))):
+        return False
+    bounded = bound_fingerprint(set(fingerprint))
+    row["fingerprint"] = bounded
+    row["fingerprint_omitted"] = len(set(fingerprint)) - len(bounded)
+    return True
 
 
 
@@ -551,6 +582,11 @@ def _skill_contradiction(metadata: dict, lesson_rows: list[dict]) -> Optional[di
     if newest is None or str(newest.get("outcome", "")) not in _NEGATIVE:
         return None
     if status == "promoted":
+        # A CUT fingerprint cannot place the row in the card's family (doc 69 69.14,
+        # `trust/cross_run.py::lesson_fingerprint_complete`): its overlap moved with the cut.
+        from looplab.trust.cross_run import lesson_fingerprint_complete
+        if not lesson_fingerprint_complete(newest):
+            return None
         stored = _stored_skill_fingerprints(metadata.get("fingerprints", ""))
         row_fp = newest.get("fingerprint")
         row_fp = [t for t in row_fp if isinstance(t, str)] if isinstance(row_fp, list) else []

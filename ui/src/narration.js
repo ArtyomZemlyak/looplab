@@ -465,7 +465,7 @@ export const NARR = {
     validate: d => ownAny(d, ['name', 'stage']),
     render: (d) => `stage ${d.name || d.stage || '?'} ${d.status === 'ok' || d.status === 'passed' || d.ok === true ? '✓' : (d.status || 'finished')}${d.node_id != null ? ` (#${d.node_id})` : ''}`,
   },
-  lessons_reconciled: { render: (d) => `lessons reconciled${d.n_retired != null || d.n_added != null ? ` — ${d.n_retired || 0} retired, ${d.n_added || 0} re-derived` : ''}` },
+  lessons_reconciled: { render: (d) => `lessons reconciled${d.n_retired != null || d.n_added != null ? ` — ${d.n_retired || 0} retired, ${d.n_added || 0} re-derived` : ''}${d.reason === 'stale_rows_gone_under_lock' ? ' (the stale rows were already gone)' : ''}` },
   // The verdict is about ONE eval phase, and saying so is the difference between "the training is
   // broken" and "the data_prep stage printed something odd". `log_role`/`stage` are additive (rows
   // predating them render exactly as before); only `training` may have killed anything.

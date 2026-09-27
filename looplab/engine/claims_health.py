@@ -314,7 +314,8 @@ def rebound_lesson_fingerprints(path, *, apply: bool) -> dict:
     """THE MIGRATION doc 69 69.14a names: a lesson row written before the writer owned the reader's
     fence (69.14) whose ONLY defect is its task fingerprint — more than `_MAX_SOURCE_FINGERPRINT`
     tokens, or a token longer than `_MAX_SOURCE_ID` — gets the fingerprint the writer writes now
-    (`engine/memory.py::bound_fingerprint`), and the reader, the passive prior's fenced siblings and
+    (`engine/memory.py::bound_lesson_fingerprint`: bounded, with `fingerprint_omitted` saying what
+    the cut dropped, so the row serves its own task and admits no foreign one), and the reader and
     the stale-lesson reconcile see it again. A real run's store hid 29 of 77 rows this way.
 
     IN PLACE, line for line: the bounded-tail readers take their window over the store's ORDER, so
@@ -323,11 +324,16 @@ def rebound_lesson_fingerprints(path, *, apply: bool) -> dict:
     is kept byte for byte — a row the fence refuses for another reason, a malformed or future line.
     No model, no new claim, and nothing written unless `apply`; the write happens under the store's
     lock, the file re-read inside it. Returns `{rows, past_fence, rebound, left_quarantined,
-    applied}` — `left_quarantined` counts rows past the fence that re-bounding does not admit."""
+    applied}` — `left_quarantined` counts rows past the fence that re-bounding does not admit, or
+    that only one of the store's two decoders reads (they stay as they are)."""
+    import os
+    import stat
     from pathlib import Path
 
+    import orjson
+
     from looplab.core.atomicio import atomic_write_bytes
-    from looplab.engine.memory import bound_fingerprint
+    from looplab.engine.memory import bound_lesson_fingerprint
     from looplab.events.eventstore import interprocess_lock
 
     p = Path(path)
@@ -336,29 +342,46 @@ def rebound_lesson_fingerprints(path, *, apply: bool) -> dict:
         lines = data.split(b"\n")
         counts = {"rows": 0, "past_fence": 0, "rebound": 0, "left_quarantined": 0}
         for index, raw in enumerate(lines):
-            if not raw.strip():
+            # The fenced reader's own line rule (`core/jsonlio.py::read_jsonl_lenient_with_health`):
+            # strict UTF-8, ONE CRLF terminator dropped — and put back on the repaired line, so a
+            # CRLF store keeps its line ends — and blank by `str.strip`.
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                if raw.strip():
+                    counts["rows"] += 1
+                continue
+            crlf = text.endswith("\r")
+            text = text[:-1] if crlf else text
+            if not text.strip():
                 continue
             counts["rows"] += 1
             try:
-                # The fenced reader's own decoding (`load_claim_source_path`): UTF-8 text, `json`.
-                row = json.loads(raw.decode("utf-8"))
-            except (UnicodeDecodeError, ValueError, RecursionError):
+                row = json.loads(text)              # …and its decoder, `json`
+            except (ValueError, RecursionError):
                 continue
-            fingerprint = row.get("fingerprint") if isinstance(row, dict) else None
-            if (not isinstance(fingerprint, list)
-                    or not all(isinstance(token, str) for token in fingerprint)
-                    or (len(fingerprint) <= _MAX_SOURCE_FINGERPRINT
-                        and all(len(token) <= _MAX_SOURCE_ID for token in fingerprint))):
+            repaired = dict(row) if isinstance(row, dict) else None
+            if repaired is None or not bound_lesson_fingerprint(repaired):
                 continue          # inside the fingerprint fence: whatever else it is, not this
             counts["past_fence"] += 1
-            repaired = {**row, "fingerprint": bound_fingerprint(fingerprint)}
-            if not _valid_claim_source_row(repaired, research=False):
+            try:
+                # Re-encoded by the library that decoded it, so every other field round-trips
+                # exactly — and kept only when `orjson`, the decoder the store's hygiene rewrites
+                # classify lines with, reads the line back as this row. A line only `json` reads as
+                # itself (a NaN, an Infinity, a lone surrogate; an integer `orjson` turns into
+                # another float) was re-written by those passes BESIDE its preserved raw copy, one
+                # more copy each pass, or crashed this one (critic 2026-09-27, driven). Such a row
+                # stays as it is.
+                line = json.dumps(repaired, ensure_ascii=False, allow_nan=False,
+                                  separators=(",", ":")).encode("utf-8")
+                faithful = orjson.loads(line) == repaired
+            except (ValueError, RecursionError):
+                faithful = False
+            if not faithful or not _valid_claim_source_row(repaired, research=False):
                 counts["left_quarantined"] += 1
                 continue
             counts["rebound"] += 1
-            # Re-encoded by the library that decoded it, so every other field round-trips exactly.
-            lines[index] = json.dumps(repaired, ensure_ascii=False,
-                                      separators=(",", ":")).encode("utf-8")
+            lines[index] = line + (b"\r" if crlf else b"")
         return lines, counts
 
     if not apply:
@@ -367,7 +390,8 @@ def rebound_lesson_fingerprints(path, *, apply: bool) -> dict:
     with interprocess_lock(Path(str(p) + ".lock"), required=True):
         lines, counts = _survey(p.read_bytes())
         if counts["rebound"]:
-            atomic_write_bytes(p, b"\n".join(lines))
+            # The store's own permission bits, not the temp file's 0600 (critic 2026-09-27).
+            atomic_write_bytes(p, b"\n".join(lines), mode=stat.S_IMODE(os.stat(p).st_mode))
     return {**counts, "applied": bool(counts["rebound"])}
 
 

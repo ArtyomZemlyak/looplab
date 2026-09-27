@@ -766,13 +766,22 @@ a uid.
 
 Every fenced reader of `lessons.jsonl` — the claim sources, the stale-lesson reconcile — refuses a row
 whose task fingerprint holds more than 256 tokens or a token longer than 500 characters. Since doc 69
-69.14 the writer bounds the fingerprint it writes to exactly that fence, but rows written before then
-stay invisible: neither used nor retirable (a real run's store hid 29 of 77 rows this way).
+69.14 the lesson store's writers bound such a row's fingerprint to exactly that fence (the
+kind/direction/metric facets kept, the rest in sorted order) and record what the cut dropped as
+`fingerprint_omitted`. What a cut keeps moves its overlap with any other task in a direction nobody
+measured, so such a row serves its own task and never admits a foreign one
+(`trust/cross_run.py::lesson_fingerprint_complete`, read by the bound tools, the Researcher's
+cross-run pack and the auto-skill lifecycle). The task fingerprint itself is not bounded: a concept
+capsule keeps its own receipt of what it cuts. Rows written before 69.14 are refused by every fenced
+reader and retired by nothing — the passive prompt prior applies no fence and does read them (a real
+run's store hid 29 of 77 rows this way).
 
 `looplab memory-fingerprints <memory_dir>` reports them and, only with `--apply`, repairs each one in
-place — the fingerprint the writer writes now, on the row's own line, so the store's order (which the
-readers' bounded windows are taken over) does not move and every other line is kept byte for byte. A
-row the fence refuses for another reason as well is left as it is. No model is called.
+place — the bounded fingerprint and its `fingerprint_omitted`, on the row's own line, so the store's
+order (which the readers' bounded windows are taken over) does not move and every other line is kept
+byte for byte, CRLF line ends and the file's mode included. A row the fence refuses for another reason
+as well is left as it is, and so is one only `json` reads back as itself (a NaN, a lone surrogate):
+the store's `orjson` rewrites would copy it once per pass. No model is called.
 
 ### Rows whose run was never deleted through the UI
 
