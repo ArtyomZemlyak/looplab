@@ -68,7 +68,7 @@ from looplab.core.atomicio import atomic_write_text
 from looplab.core.errors import (BudgetExceeded, RunSetupRefusal, budget_stop_leaf,
                                  exception_leaves)
 from looplab.core.models import (DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX, NodeStatus,
-                                 coerce_node_id, objective_value,
+                                 coerce_node_id,
                                  developer_artifact_footprint,
                                  EXTRA_METRIC_DECLARED, authenticated_extra_metrics_only,
                                  normalize_extra_metric_directions,
@@ -84,7 +84,7 @@ from looplab.engine.comparability import comparability_record, protocol_record
 from looplab.engine.eval_attempt_rules import (  # noqa: F401 — the ladder's rungs, re-exported
     _REPAIR_ANSWER_EDIT, _REPAIR_ANSWER_PROVIDER_FAILURE, _REPAIR_ANSWER_STUCK,
     RepairGateContext, _classify_repair_answer, _repair_change_set, _repair_provider_failure,
-    evaluated_terminal, repair_gate, retarget_admits_missing_task_metric, triage_verdict_outcome)
+    evaluated_terminal, repair_gate, triage_verdict_outcome)
 from looplab.engine.crash_repair import developer_repair_history
 from looplab.engine.eval_stages import STAGE_MANIFEST_NAME
 from looplab.engine.shared import repair_context_record
@@ -1665,8 +1665,7 @@ class EvaluateMixin:
             detectors = self._trust_scan_detectors(scan_src)
         sigs: list[dict] = []
         if TRUST_DETECTOR_REWARD_HACK in detectors:
-            from looplab.trust.reward_hack import (detect_reward_hacks, grader_import_sanctioned,
-                                                   perfect_metric_signals)
+            from looplab.trust.reward_hack import detect_reward_hacks, grader_import_sanctioned
             protected = set(self._repo_spec.get("protected_names", [])) | set(self._assets)
             # The grader-IMPORT waiver keys on the task genuinely MATERIALIZING
             # grader.py (an ASSET → calling `grader.score(...)` is the documented
@@ -1686,17 +1685,6 @@ class EvaluateMixin:
                 scan_src, res.metric, state.direction,
                 protected_names=protected, stdout=res.stdout,
                 grader_import_ok=grader_import_ok)
-            # …and under an operator retarget (doc 68 68.2a) the number that RANKS is the
-            # objective's, which the detector above never sees — an eval admitted on the objective
-            # has no task number at all. Same tell, same advisory weight, named as the objective.
-            _objective = getattr(state, "objective_key", None)
-            if _objective:
-                sigs += [{**row, "method": "value", "confidence": "low"}
-                         for row in perfect_metric_signals(
-                             objective_value(res.extra_metrics, res.extra_metrics_provenance,
-                                             _objective, res.extra_metrics_direction,
-                                             state.direction),
-                             state.direction, label=f"objective {_objective!r}")]
             # 4.3: also apply the hardened exploit ruleset grown by `looplab harden`
             # (hacker-fixer-solver) — each previously-discovered exploit stays guarded,
             # minus what this task's own eval contract sanctions (`scan` waives a match
@@ -2073,28 +2061,6 @@ class EvaluateMixin:
                                     "min": None,
                                     "unverifiable": f"salvage gate binding raised: {exc}"}],
                     "extra_metrics": {}, "drift": None}
-
-    def _objective_admission_violations(self, a: "EvalAttempt") -> list:
-        """The operator's CONSTRAINTS over an eval admitted on the run's OBJECTIVE (doc 68 68.2a).
-
-        `run_command_eval` evaluates them in its tail only beside a TASK metric (`viol = ... if
-        m is not None`), so an eval admitted without one reached its terminal with none evaluated —
-        the defect `_salvage_qualifying_gates` records for a salvaged number, one door over. Its rule
-        answers here too (`engine/metric_salvage.py::salvage_gates`, freshness from this attempt's
-        start, drift not asked: there is no task number to corroborate), and it fails CLOSED: a
-        binding that raises is one unverifiable-constraint row, never a clean pass."""
-        spec = self._eval_spec if isinstance(getattr(self, "_eval_spec", None), dict) else None
-        found = list(getattr(a.res, "violations", None) or [])
-        if not spec or not spec.get("constraints"):
-            return found
-        try:
-            return found + salvage_gates(
-                spec, None, getattr(a.res, "stdout", "") or "",
-                self._salvage_reader_root(a.workdir), a._t0, enforce_drift=False)["violations"]
-        except Exception as exc:  # noqa: BLE001 — fail closed: an unreadable constraint is a violation
-            return found + [{"name": "objective_admission_gates", "value": None, "max": None,
-                             "min": None,
-                             "unverifiable": f"constraint gate binding raised: {exc}"}]
 
     def _recheck_repaired_contract(self, res, node, workdir, salvaged, fix, err: str):
         """The artifact CHECK, re-asked against the CORRECTED declaration — the `metric_provenance`
@@ -3441,20 +3407,6 @@ class EvaluateMixin:
         # before the silence. NOT for a real deadline timeout (that is still mid-training).
         a.ok = (a.res.metric is not None and not a.res.timed_out
               and (a.res.exit_code == 0 or getattr(a.res, "stalled", False)))
-        # …or measured on the run's OBJECTIVE (doc 68 68.2a): under an operator retarget an eval
-        # that printed the declared objective and not the task's metric is measured on the ruler the
-        # run ranks by — it ended `no_metric`. The fold's objective is read NOW, where the terminal
-        # will be ranked; only the exact `no_metric` residual is asked, so no other failure folds.
-        # The operator's constraints ran in the eval's tail only beside a TASK metric, so they are
-        # asked here, fail closed, before the node may count (`_objective_admission_violations`).
-        objective_measured = None
-        if not a.ok and a.res.metric is None and _failure_reason(a.res) == "no_metric":
-            _live = fold(self.store.read_all())
-            objective_measured = retarget_admits_missing_task_metric(
-                a.res, _live.objective_key, _live.direction)
-            if objective_measured is not None:
-                a.res.violations = self._objective_admission_violations(a) or None
-                a.ok = True
         # THE NODE'S OWN ACTIVATION CONTRACT (`engine/activation.py`). Asked of a SUCCESS, before the
         # invocation settles, because a success is exactly what it can overturn: a declared marker
         # that nothing printed means the number measured the path this node meant to replace. The
@@ -3467,9 +3419,7 @@ class EvaluateMixin:
                     _declared, texts=(a.res.stdout or "", a.res.stderr or ""),
                     workdir=a.workdir, since=a._t0)
                 if _missing:
-                    a.res.inert_path = {"missing": _missing,
-                                        "metric": (a.res.metric if a.res.metric is not None
-                                                   else objective_measured)}
+                    a.res.inert_path = {"missing": _missing, "metric": a.res.metric}
                     a.res.metric = None
                     a.ok = False
         # …and the receipt closes, BEFORE any of the branches below can write a terminal or return.

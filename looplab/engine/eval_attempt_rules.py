@@ -16,8 +16,6 @@ CALL it — beside a fourth that was already a function:
     it carries and the `metric_provenance` it records (salvage, a corrected declaration, the
     subject and its `require` row, the host scorer's receipt, the evaluation inputs and
     comparability key, the applied coordinates).
-  * `retarget_admits_missing_task_metric` — under an operator retarget, is an eval that printed no
-    TASK metric still measured on the run's objective (doc 68 68.2a)?
   * `_classify_repair_answer` — was the repair's answer a repair at all (stuck / provider failure /
     edit, in that order). It landed first, as the one ladder the attempt loop and the
     salvage-cause fix share (ENG2-07), and moved here VERBATIM with its two rungs and its constant,
@@ -43,12 +41,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-from looplab.core.models import (developer_stuck_reason, is_developer_error, is_developer_stuck,
-                                 objective_value)
+from looplab.core.models import developer_stuck_reason, is_developer_error, is_developer_stuck
 from looplab.engine.failure_diagnosis import REASON_SOURCE_ENGINE
 from looplab.engine.metric_salvage import unbound_subject_violation_rows
 from looplab.engine.triage import (UNANSWERABLE_TRIAGE_ACTION, UNREADABLE_TRIAGE_ACTION,
-                                   _failure_reason, repair_artifact_defect)
+                                   repair_artifact_defect)
 
 # ---------------------------------------------------- was the repair's answer a repair at all?
 # Moved VERBATIM from `engine/evaluate.py` (ENG2-06), private spellings and all: the attempt
@@ -531,29 +528,3 @@ def evaluated_terminal(*, violations, metric, salvaged, salvage_cause_repaired: 
     if isinstance(applied_params, dict):
         provenance = dict(provenance or {}, applied_params=applied_params)
     return EvaluatedTerminal(violations, provenance)
-
-
-def retarget_admits_missing_task_metric(res, objective_key, direction) -> Optional[float]:
-    """THE RUN'S OBJECTIVE, MEASURED WHERE THE TASK'S METRIC WAS NOT PRINTED (doc 68 68.2a): the
-    value an eval that printed no TASK metric still measured on the objective an operator
-    `metric_retarget` put in force, or None.
-
-    Under a retarget the fold ranks every node by a declared extra metric and keeps the task's number
-    beside it (`Node.task_metric`), but SETTLE_OUTCOME asked for the task's number alone: an eval that
-    printed the objective and not the task metric ended `no_metric` though it was measured on the
-    run's own ruler (found by the critic 2026-09-27 reading the code; driven 2026-09-27: a node
-    printing `filtered` alone failed `no_metric` on a run retargeted to `filtered`).
-
-    Only the exact `no_metric` residual is admitted (`engine/triage.py::_failure_reason`: exit 0, no
-    timeout, drift, setup failure, stall, divergence, stage-contract failure or declared reason) —
-    every other failure stays what it was — and a gate reader the spec refused reads nothing. Only a
-    DECLARED value on the run's direction is a measurement: `core/models.py::objective_value` is the
-    fold's own rule, so the terminal ranks exactly where this admits it, and an auto-captured value —
-    the candidate's word — admits nothing."""
-    if not objective_key or getattr(res, "metric", None) is not None:
-        return None
-    if getattr(res, "gate_readers_refused", False) or _failure_reason(res) != "no_metric":
-        return None
-    return objective_value(getattr(res, "extra_metrics", None),
-                           getattr(res, "extra_metrics_provenance", None), objective_key,
-                           getattr(res, "extra_metrics_direction", None), direction)
