@@ -1052,6 +1052,22 @@ def _normalize_inject_node(ctx: _ControlIntake) -> dict:
     if not isinstance(deleted, list):
         raise HTTPException(400, "deleted must be a list of relative path strings")
     data["deleted"] = [_relative_file_name(name, "deleted") for name in deleted]
+    from looplab.core.config import read_config_snapshot
+    snapshot = ctx.rd / "config.snapshot.json"
+    if snapshot.is_file() and read_config_snapshot(snapshot).external_harness:
+        from looplab.adapters.tasks import load_task
+        from looplab.harness.contract import candidate_surface_refusal
+        task_snapshot = ctx.rd / "task.snapshot.json"
+        if not task_snapshot.is_file():
+            raise HTTPException(409, "external candidate requires the run's task snapshot")
+        try:
+            task = load_task(task_snapshot, existing_run=True)
+            repo_spec = task.repo_spec() if callable(getattr(task, "repo_spec", None)) else None
+        except (OSError, ValueError) as exc:
+            raise HTTPException(409, "cannot verify the external candidate's task surface") from exc
+        refusal = candidate_surface_refusal(repo_spec, normalized_files, data["deleted"])
+        if refusal:
+            raise HTTPException(400, refusal)
     # `origin` IS SERVER-DERIVED PROVENANCE, exactly like the fork receipt's stamped half, and it was
     # the one the client could write. `_import_cross_run_source` mints it from the source node it
     # just read — run id, node id, that node's `robust_metric`, its lifecycle generation — and the
@@ -1893,15 +1909,36 @@ CONTROL_SPECS: dict[str, ControlSpec] = {
 assert set(CONTROL_SPECS) == set(CONTROL_EVENTS), "every control event needs an explicit ControlSpec"
 
 
+def _external_mode_restriction(rd: Path, event_type: str, data: dict) -> None:
+    """Refuse intents that would call an internal role in an externally driven run."""
+    # The command service and legacy /control route share this boundary. An external run must
+    # never queue an intent whose engine fulfillment invokes its old Researcher/Developer loop.
+    # Read the run's snapshot, not the server's ambient config: one UI serves many run modes.
+    snapshot = Path(rd) / "config.snapshot.json"
+    if snapshot.is_file():
+        from looplab.core.config import read_config_snapshot
+        try:
+            external = read_config_snapshot(snapshot).external_harness
+        except (OSError, ValueError) as exc:
+            raise HTTPException(409, "cannot verify the run mode from its config snapshot") from exc
+        if external:
+            if event_type in (EV_FORK, EV_FORCE_ABLATE, EV_DEEP_RESEARCH):
+                raise HTTPException(409, "external harness owns this decision; submit a ready-made "
+                                    "inject_node with parent_id and code/files for a new candidate")
+            if event_type == EV_NODE_RESET and data.get("from_stage", "eval") != "eval":
+                raise HTTPException(409, "external harness supports node_reset from eval only; "
+                                    "submit a corrected ready-made inject_node for a new candidate")
+            if event_type == EV_INJECT_NODE and not (data.get("code") or data.get("files") or
+                                                      data.get("deleted") or
+                                                      (data.get("source_run") and
+                                                       data.get("source_node") is not None)):
+                raise HTTPException(400, "external harness requires code or files for inject_node")
+
 def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
     """Validate/normalize one control payload for both /control and /commands.
 
-    This is the old route's node-reset and cross-run-import logic extracted verbatim enough that the
-    compatibility endpoint and command service cannot drift into accepting different commands.
-
-    The shared preamble (known type, JSON object, allow-listed fields) and the shared tail (finite,
-    encodable, bounded JSON) are the parts EVERY event shares; everything between them is the
-    event's own `ControlSpec.normalize`.
+    The common preamble and tail serve every registered ControlSpec. External mode restrictions
+    apply before the event-specific normalizer and before any durable append.
     """
     spec = CONTROL_SPECS.get(event_type)
     if spec is None:
@@ -1915,6 +1952,7 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
     if unknown:
         raise HTTPException(
             400, f"{event_type} has unknown field(s): {', '.join(sorted(unknown))}")
+    _external_mode_restriction(rd, event_type, data)
 
     if spec.normalize is not None:
         data = spec.normalize(_ControlIntake(srv, rd, event_type, data))

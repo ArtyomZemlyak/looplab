@@ -110,6 +110,7 @@ class EngineKnobs:
 
     # --- the search budget and its cadences
     n_seeds = Knob("n_seeds")
+    external_harness = Knob("external_harness", bool)
     _policy_name = Knob("policy_name")
     _ablate_every = Knob("ablate_every")
     strategist_every = Knob("strategist_every", lambda v: max(1, v))

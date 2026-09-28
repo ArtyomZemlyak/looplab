@@ -1,5 +1,9 @@
 # LLM & coding agents
 
+For Codex and Claude Code CLI integration and the external-harness migration, see
+[External coding agents](external-harness.md). Run `looplab harness` for the current
+machine-readable capability contract.
+
 LoopLab's Researcher and Developer roles are **pluggable backends**. They can be the offline `toy`
 optimizer, a live LLM over any OpenAI-compatible endpoint, or — for the Developer — a full external
 coding agent. Swapping a backend is a config change; the engine, sandbox, policy, and event log are
@@ -321,7 +325,7 @@ looplab run examples/code_regression_task.json \
     --backend llm --developer-backend opencode --model qwen3:8b
 ```
 
-Supported presets: **`opencode`**, **`aider`**, **`goose`**, **`continue`**. Three guardrails make
+Supported presets: **`codex`**, **`claude`**, **`opencode`**, **`aider`**, **`goose`**, **`continue`**. Three guardrails make
 this robust (all on by default):
 
 - **Self-contained & headless.** A config (e.g. `opencode.json` with a local Ollama provider and an
@@ -359,7 +363,7 @@ keeps the current external Developer. Unified mode never performs this live faca
 
 | Setting | Default | Purpose |
 |---|---|---|
-| `developer_backend` | `default` | `default` / `opencode` / `aider` / `goose` / `continue` |
+| `developer_backend` | `default` | `default` / `codex` / `claude` / `opencode` / `aider` / `goose` / `continue` |
 | `agent_cmd` | — | Override the launcher/path |
 | `validate_agent` | `true` | Audit + retry + fall back |
 | `agent_max_retries` | `1` | Re-prompts on an invalid result |

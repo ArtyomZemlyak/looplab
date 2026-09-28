@@ -997,7 +997,7 @@ def run(
     max_nodes: Optional[int] = typer.Option(None, help="Override node budget."),
     backend: Optional[str] = typer.Option(None, help="Role backend: toy | llm."),
     developer_backend: Optional[str] = typer.Option(
-        None, help="Developer: default | opencode | aider | goose | continue."),
+        None, help="Developer: default | codex | claude | opencode | aider | goose | continue."),
     agent_cmd: Optional[str] = typer.Option(
         None, help="Path/launcher override for the external coding agent."),
     validate_agent: Optional[bool] = typer.Option(

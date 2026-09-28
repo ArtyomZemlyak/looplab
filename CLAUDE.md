@@ -371,3 +371,14 @@ refused — is in `docs/64-agent-guide-narratives-2026-09-06.md` ("Engine invari
 - A run directory contains `events.jsonl`, `config.snapshot.json`, `task.snapshot.json`,
   `engine.lock`, and per-node workdirs (`docs/guide/concepts.md` is accurate;
   `docs/04-file-layout.md` is the original *design* and differs from what shipped).
+# External agent integration
+
+When using this project as a research harness, run `looplab harness` to discover the
+implemented contract and read `docs/guide/external-harness.md`. A node's stages and plan
+are optional reasoning choices; operator-declared stages take precedence. The candidate
+may edit only the task's allowed surface, and LoopLab owns evaluation and the event log.
+In `external_harness=true` mode with `backend=toy`, connect `looplab harness-mcp`
+to the live UI and submit ready-made candidates through durable commands. The
+external agent owns Researcher, Developer, repair and next-action decisions;
+the engine owns evaluation and budgets. `developer_backend=claude` on a normal
+run delegates candidate editing only. See `AGENTS.md` for the operational guide.

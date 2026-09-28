@@ -14,13 +14,13 @@ import stat
 import threading
 import time
 from pathlib import Path
-from typing import Annotated, Any, NamedTuple, Optional
+from typing import Annotated, Any, Literal, NamedTuple, Optional
 
 import anyio
 import orjson
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import PlainTextResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from looplab.core.atomicio import (atomic_write_text, file_identity, same_file_entry,
                                    same_file_kind)
@@ -645,6 +645,27 @@ def _encode_state_frame(payload: dict, last_payload: Optional[dict], same_genera
     return kind, body, json.loads(full)
 
 
+class ExternalLessonBody(BaseModel):
+    """Agent-authored conclusion; scope and evidence signatures are derived by the server."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    expected_generation: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    action_id: str = Field(min_length=1, max_length=160)
+    statement: str = Field(min_length=1, max_length=1000)
+    outcome: Literal["supported", "tested", "abandoned", "failed", "refuted", "noted"]
+    role: Literal["researcher", "developer", "shared"] = "shared"
+    evidence: list[StrictInt] = Field(min_length=1, max_length=32)
+    confidence: float = Field(default=0.6, ge=0, le=1)
+
+
+class NoveltyPreviewBody(BaseModel):
+    """Candidate idea to compare with the current run; this call never admits it."""
+
+    model_config = ConfigDict(extra="forbid")
+    expected_generation: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    idea: dict[str, Any]
+
+
 def build_router(srv) -> APIRouter:
     router = APIRouter()
     log_pages = EventLogPager()
@@ -885,6 +906,49 @@ def build_router(srv) -> APIRouter:
         projection as the live state, SSE, and review surfaces.
         """
         return _state_payload(_run_dir(run_id), seq)
+
+    @router.post("/api/runs/{run_id}/lessons")
+    def publish_external_lesson(run_id: str, body: ExternalLessonBody):
+        """Record an external agent's evidence-linked cross-run lesson idempotently.
+
+        Read the run state for expected_generation and terminal node IDs, then submit
+        a generalizable conclusion. The server stamps task scope, run identity and
+        node lifecycle signatures; retry a lost response with the same action_id.
+        """
+        from looplab.harness.lessons import publish_lesson
+        return publish_lesson(srv, _run_dir(run_id), body)
+
+    @router.post("/api/runs/{run_id}/novelty-preview")
+    def novelty_preview(run_id: str, body: NoveltyPreviewBody):
+        """Compare an idea with tried nodes using LoopLab's pure graded novelty rubric.
+
+        This is advisory: concept tags may be agent-authored, and the agent decides whether
+        to submit, revise or abandon a candidate. It does not call an internal model.
+        """
+        from looplab.core.models import Idea
+        from looplab.search.concept_tagging import graph_from_node_concepts
+        from looplab.search.graded_novelty import grade_novelty
+
+        rd = _run_dir(run_id)
+        events = EventStore(rd / "events.jsonl").read_all()
+        generation = run_generation_token(events)
+        if not generation or generation != body.expected_generation.lower():
+            raise generation_conflict("The run changed before novelty was inspected.",
+                                      expected=body.expected_generation, current=generation or None,
+                                      remediation="Reload run state and inspect the new generation.")
+        try:
+            idea = Idea.model_validate(body.idea)
+        except Exception as exc:
+            raise HTTPException(400, "invalid candidate idea") from exc
+        state = fold(events)
+        graph, tags = graph_from_node_concepts(state.node_concepts)
+        for cid in idea.concepts:
+            graph.ensure(cid)
+        grade = grade_novelty(state, idea, graph, tags=tags,
+                              idea_tags=frozenset(idea.concepts))
+        return {"generation": generation, "advisory": True,
+                "concept_source": "authored tags (not independent classifier evidence)",
+                "grade": grade.__dict__}
 
     @router.get("/api/runs/{run_id}/lifecycle")
     def get_lifecycle(run_id: str):
@@ -2853,7 +2917,7 @@ def build_router(srv) -> APIRouter:
             # `search/speculation_quality.py`, and this key is ABSENT from that payload whenever no
             # environment was declared, which is every calibration run. So the refusal is stated
             # here instead of inherited, and the PUT enforces it explicitly below.
-            "run_read_only_fields": ["eval_env", "profile"],
+            "run_read_only_fields": ["eval_env", "profile", "external_harness"],
         }
         return effective
 
@@ -2912,6 +2976,10 @@ def build_router(srv) -> APIRouter:
             )
 
         updated = dict(current)
+        if ("external_harness" in incoming
+                and incoming["external_harness"] != updated.get("external_harness", False)):
+            raise HTTPException(422, "external_harness is a run-start mode; start a new run "
+                                     "to change which agent owns search and repairs")
         # Repair snapshots written by older servers. These values are not a new policy decision: the
         # RUN-START RECORD has always been the authority used by replay/re-entry, and GET already
         # overlays it.

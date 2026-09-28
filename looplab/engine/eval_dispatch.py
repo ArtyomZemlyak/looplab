@@ -919,7 +919,8 @@ class EvalDispatchMixin:
             # `log_dir` (== `root`, below) and the plan comes from the SAME resolved list this eval
             # runs, so neither is derived from anything a model said. See `_stage_check_fn`.
             check_fn = (self._stage_check_fn(node, root, stages)
-                        if stages and any(s.get("check") for s in stages) and canary is None
+                        if not self.external_harness and stages
+                        and any(s.get("check") for s in stages) and canary is None
                         else None)
             cwd = self._sandbox_cwd(workdir, es.get("cwd", "."))
             # PREFLIGHT the resolved chain for a PROTECTED script the workdir doesn't hold, BEFORE any

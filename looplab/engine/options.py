@@ -198,6 +198,7 @@ class EngineOptions:
     # --- A7 Strategist + richer-operator knobs (config-first; defaults == today's behavior) ---
     n_seeds: int = 3
     max_nodes: int = 8
+    external_harness: bool = False       # accept ready-made external candidates, no internal proposals
     policy_name: str = "greedy"          # Settings.policy (renamed: the Engine keeps the policy OBJECT under .policy)
     ablate_every: int = 0
     strategist_every: int = 3

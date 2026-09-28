@@ -90,8 +90,8 @@ and read leniently by read-only commands.
 ## Web editors, schema and concurrent saves
 
 The owner Web UI does not build forms by reflecting arbitrary Python fields in the browser. It fetches a
-server-owned curated catalogue with **233 of the 268 direct `Settings` fields in 10 groups**. The default
-**Essential** disclosure mode contains 18 high-frequency keys; search spans all 233 catalogued keys.
+server-owned curated catalogue with **234 of the 269 direct `Settings` fields in 10 groups**. The default
+**Essential** disclosure mode contains 18 high-frequency keys; search spans all 234 catalogued keys.
 Uncatalogued fields remain valid through environment/config/CLI inputs and are preserved by sparse Web
 writes. Which fields are catalogued is not a matter of taste: every `Settings` field is either a row or
 listed in `settings_ui_schema.py::SETTINGS_UI_SCHEMA_UNCURATED_FIELDS` with the reason the form omits it,
@@ -770,7 +770,8 @@ worth chasing; the clean-refund case is `charged_discards == 0`.
 | Setting | Env | Default | Description |
 |---|---|---|---|
 | `backend` | `LOOPLAB_BACKEND` | `llm` | `llm` (live model — the default; a real run needs a reachable endpoint, see **LLM endpoint** below) or `toy` (offline optimizer, no model calls at all). A CLOSED set: any other value — including a mis-cased `LLM` — is rejected at config time rather than falling through to the offline toy roles. |
-| `developer_backend` | `LOOPLAB_DEVELOPER_BACKEND` | `default` | `default`, or an external agent: `opencode` / `aider` / `goose` / `continue`. A CLOSED set (`core/config.py::DEVELOPER_BACKENDS`): a typo is refused at config time rather than falling through to the in-house Developer. The **live-swap** vocabulary is one name wider — see [Switching the Developer mid-run](#switching-the-developer-mid-run) |
+| `external_harness` | `LOOPLAB_EXTERNAL_HARNESS` | `false` | With `backend=toy`, wait for an external MCP agent to submit ready-made candidates, choose repairs and explicitly finalize. No internal Researcher/Developer decision loop runs. See [External agent harness](external-harness.md). |
+| `developer_backend` | `LOOPLAB_DEVELOPER_BACKEND` | `default` | `default`, or an external agent: `codex` / `claude` / `opencode` / `aider` / `goose` / `continue`. A CLOSED set (`core/config.py::DEVELOPER_BACKENDS`): a typo is refused at config time rather than falling through to the in-house Developer. The **live-swap** vocabulary is one name wider — see [Switching the Developer mid-run](#switching-the-developer-mid-run) |
 | `unified_agent` | `LOOPLAB_UNIFIED_AGENT` | `true` | One engine-facing control facade/object implements Researcher + Developer (+ Strategist/pilot) over stage-specific clients, tools and local contexts. It is not one shared cross-stage conversation identity |
 | `agent_drives_actions` | `LOOPLAB_AGENT_DRIVES_ACTIONS` | `true` | The agent picks the next macro action within a pure legal-action gate. Consulted only when `card_driven_selection` is off: the Card queue is on by default and wins (`engine/orchestrator.py::Engine._select_actions`' authority order), so with the shipped defaults this changes nothing |
 | `card_driven_selection` | `LOOPLAB_CARD_DRIVEN_SELECTION` | `true` | The Card queue owns macro-action selection. Set `false` for the legacy policy/unified-pilot action path. The value is pinned by `run_started` (changing the selector on resume would mix two search treatments in one run); when both action flags are enabled, Card selection takes precedence over `agent_drives_actions`. **This flag alone maintains the queue** — it mints each proposal as durable, selectable Card *inventory* first and only then selects and builds it, independent of `speculation_depth`. That was not true before 2026-08-07: the only writer of selectable inventory sat behind the prefetch lane, so a run with the flag on and the depth settled to `0` silently fell back to `policy.next_actions` while `run_started` still recorded `card_driven_selection: true` (measured over the shipped corpus: **0** selection-ready Cards across 27 nodes in seven such runs). |

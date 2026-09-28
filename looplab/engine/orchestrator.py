@@ -1382,7 +1382,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         report or record an ambiguous attempt, but can never buy it again. The successful report event
         remains immediately before ``run_finished`` as required by replay.
         """
-        report_planned = self.report_writer is not None and self.report_every > 0
+        report_planned = (not self.external_harness and self.report_writer is not None
+                          and self.report_every > 0)
         if not report_planned:
             return self._finish_if_quiescent(data, after_seq=after_seq)
 
@@ -1896,7 +1897,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                        if n.rerun_from in ("implement", "propose")
                        and n.status is NodeStatus.pending and not n.tombstoned
                        and n.id not in state.aborted_nodes]
-            if _resets:
+            if _resets and not self.external_harness:
                 # One rebuild per fold. A developer crash can auto-pause the first node, and a reset/
                 # abort can change the rest while it is building; never process a stale whole batch.
                 # OFF the loop thread (doc 52 row 12), like every other build: the rebuild is a paid
@@ -1929,7 +1930,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             # drain re-scoring the one node the operator fixed on a run whose other nodes all failed
             # was FINISHED here as a systemic failure, the owed node left pending (critic
             # 2026-09-26, driven). The drain pauses on its own terms below.
-            _systemic = (None if self._drain_only
+            _systemic = (None if self._drain_only or self.options.external_harness
                          else systemic_failure_stop_reason(state, self.systemic_failure_stop))
             if _systemic is not None:
                 # Through the SAME ladder as every other terminal gate, not a bare finish. This gate
@@ -1940,7 +1941,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 if self._settle_terminal_gate(state, _systemic, decision_seq=decision_seq) == "break":
                     break
                 continue
-            _signal = self._run_spec_gates(state)
+            _signal = None if self.external_harness else self._run_spec_gates(state)
             if _signal == "break":
                 break
             if _signal == "continue":
@@ -1980,10 +1981,27 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             # an operator's live `budget_extend` is already in force and the axis it owns is visibly
             # theirs; BEFORE the speculation block so the depth settle and every gate under it read
             # one width rather than two.
-            if self._settle_proposal_width(state):
+            if not self.external_harness and self._settle_proposal_width(state):
                 continue
 
             if await self._serve_forced_requests(state):
+                continue
+
+            if self.external_harness:
+                # The external agent owns every think/plan/propose turn. Only READY-MADE injected
+                # nodes enter this lane; the existing policy's evaluation eligibility is reused
+                # without consulting its create actions or any in-process agent selector. Do not
+                # run cadences, speculation, research overlap or the empty-action finalizer. A
+                # durable command wakes this bounded poll; pause/finalize/budget gates above it
+                # remain authoritative and replayable.
+                # Evidence reconciliation is deterministic here: it retires a lesson after a
+                # reset/remeasurement changes its cited node, without re-distilling it.
+                state = self._maybe_reconcile_lessons(state)
+                evals = [a for a in self.policy.next_actions(state) if a["kind"] == "evaluate"]
+                if evals:
+                    await self._dispatch_evals(evals, state, max_es, research=False)
+                else:
+                    await anyio.sleep(0.5)
                 continue
 
             if self._speculation_enabled():

@@ -2376,7 +2376,8 @@ class EvaluateMixin:
         AND the durable tail (`_commit_salvaged_cause_fix`), because the tail is I/O and the callers
         this paragraph names use `try/FINALLY` rather than `try/except`.
         """
-        if not (getattr(self, "metric_salvage_repair", True) and self._inline_repair
+        if not (not self.external_harness and getattr(self, "metric_salvage_repair", True)
+                and self._inline_repair
                 and reason in self._inline_repair_reasons
                 and callable(getattr(self.developer, "repair", None))
                 and (node.code or node.files or self._repo_spec)):
@@ -3482,7 +3483,8 @@ class EvaluateMixin:
             # Cancelled with the eval by `_tg.cancel_scope.cancel()` below. Gated on the
             # command-eval path (`_eval_spec`): only those write the per-stage `<stage>.log` the
             # monitor tails — the solution.py path (toy/dataset) has no live log to watch.
-            if getattr(self, "_train_monitor", False) and getattr(self, "_eval_spec", None):
+            if (not self.external_harness and getattr(self, "_train_monitor", False)
+                    and getattr(self, "_eval_spec", None)):
                 _idea = getattr(a.node, "idea", None)
                 _rationale = (getattr(_idea, "rationale", "") or "")[:400] if _idea else ""
                 _mkey = ((self._eval_spec.get("metric") or {}).get("key", "metric")
@@ -3495,7 +3497,8 @@ class EvaluateMixin:
             # 2026-08-04; still off in a bare `Engine(...)`): a sibling task that reads the live
             # log's latest INTERMEDIATE metric and ranks it against finished siblings; advisory
             # unless asha_live_kill. Same command-eval gate (needs a live log + the metric spec).
-            if getattr(self, "_asha_live", False) and isinstance(getattr(self, "_eval_spec", None), dict):
+            if (not self.external_harness and getattr(self, "_asha_live", False)
+                    and isinstance(getattr(self, "_eval_spec", None), dict)):
                 _mspec = self._eval_spec.get("metric") or {}
                 _tg.start_soon(self._monitor_asha, a.node_id, a.generation, a.workdir, cancel,
                                _mspec, a.state.direction, a.kill_signal, a._log_snapshot, a._log_plan)
@@ -3887,6 +3890,11 @@ class EvaluateMixin:
         if halted.finished or halted.stop_requested:
             a.triage_outcome = ("abandon", "the run is stopping (a finalize was requested): no further "
                                 "repair of this node")
+            return PHASE_SETTLED
+        if self.external_harness:
+            # The external session reads the terminal failure and decides whether to submit a
+            # corrected candidate. No internal triage judge, dependency retry or Developer repair.
+            a.triage_outcome = ("abandon", "external harness: agent decides the next candidate")
             return PHASE_SETTLED
         # Environment self-prep (deps.py): a crash that is purely a missing KNOWN library is
         # not a bad idea — install it (trusted_local only) and re-run BEFORE the crash-triage
@@ -5320,4 +5328,3 @@ class EvaluateMixin:
                     data["failure_signature"] = a.repeated_failure
                 self.store.append(EV_NODE_FAILED, data)
             self._maybe_crash()
-

@@ -239,7 +239,8 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   232 -> 233 (2026-09-27): `card_select_k` — the operator's Card lane width, how many concurrent
   //   builds the freshness gate keeps. A row because it is a width an operator sets per run; the
   //   Python half moved too.
-  assert.equal(Object.keys(schema.fieldByKey).length, 233)
+  //   233 -> 234: external_harness moves research and development decisions to an MCP client.
+  assert.equal(Object.keys(schema.fieldByKey).length, 234)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

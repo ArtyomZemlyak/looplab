@@ -100,7 +100,7 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 233
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 234
     # 232 -> 233 on 2026-09-27: `card_select_k` -- the operator's Card lane width. Verified by
     # INTERSECTION: 232 keys common to the previous keyset plus exactly that one.
     # 231 -> 232 on 2026-09-26: `host_scorer_account` (a curated row beside the two below). Verified
@@ -480,7 +480,7 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # 266 -> 267 on 2026-09-26: `host_scorer_account` (a curated row, so both counts move); the AST
     # scan of `Settings` against the pre-change tree reports exactly `['host_scorer_account']` added.
     # 267 -> 268 on 2026-09-27: `card_select_k` (a curated row, so both counts move).
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 268
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 269
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

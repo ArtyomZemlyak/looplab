@@ -133,8 +133,7 @@ def external_cli_developer(task: TaskAdapter, settings, developer, *, param_sear
     dev_target = resolve_llm_target(settings, role=developer_role)
     dev_base_url = dev_target.base_url
     agent_model = _agent_model(settings.developer_backend, dev_target.model)
-    # Drop a self-contained provider config in the agent's workdir so OpenCode talks
-    # to the local Ollama endpoint and never fetches the external model registry.
+    # OpenCode alone needs a local provider config; native coding CLIs use their own login/model.
     workdir_files = {}
     if settings.developer_backend == "opencode":
         workdir_files["opencode.json"] = opencode_config(dev_base_url, agent_model)
@@ -142,7 +141,8 @@ def external_cli_developer(task: TaskAdapter, settings, developer, *, param_sear
     # the validator runs in repo_mode and the fallback is the task's baseline developer.
     repo_spec_fn = getattr(task, "repo_spec", None)
     repo_spec = repo_spec_fn() if callable(repo_spec_fn) else None
-    brief = task.agent_brief() if repo_spec else getattr(developer, "brief", "")
+    from looplab.agents.external_harness import external_agent_brief
+    brief = external_agent_brief(task, repo_spec, settings.developer_backend, developer)
     surface = repo_spec["edit_surface"] if repo_spec else settings.agent_surface
     # Phase 4: seed all editable repos into the agent's worktree (each at its subdir).
     seed_dirs = repo_spec["editables"] if repo_spec else None

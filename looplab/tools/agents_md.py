@@ -8,9 +8,29 @@ run-level file is copied over those repository instructions.
 from __future__ import annotations
 
 
-def generate_agents_md(task, *, runtime_caps: str | None = None) -> str:
+def generate_agents_md(task, *, runtime_caps: str | None = None,
+                       external_harness: bool = False) -> str:
     direction = "minimize" if getattr(task, "direction", "min") == "min" else "maximize"
     repo_task = callable(getattr(task, "repo_spec", None))
+    harness_note = "" if not external_harness else """
+## External agent control
+This run waits for an external agent. Inspect its live state/config and the evaluation
+contract through `looplab harness-mcp`. Choose whether proposing, stages and a plan
+are useful; submit ready-made code/files through the durable `inject_node` command.
+After LoopLab measures a candidate, inspect its metric or failure before branching,
+repairing as a new child candidate, or finalizing. Respect the edit surface and
+protected scorer; no internal Researcher/Developer will complete a code-less idea.
+You own novelty and knowledge decisions. Preview an idea with
+`POST /api/runs/{run_id}/novelty-preview`, inspect prior lessons via `/api/memory`
+and `/api/cross-run/claims`, then choose whether the experiment merits evaluation.
+Write evidence-linked lessons with `POST /api/runs/{run_id}/lessons` and a stable
+`action_id`; LoopLab stamps the run/task identity and node outcome signatures.
+Author concept tags in the injected idea or use `concept_tag_edited` and
+`run_concepts` commands. Review `/api/runs/{run_id}/concepts` and
+`/api/cross-run/concept-policy` before applying a governed cross-run
+`concept-merge`, split, purge or alias-clear. No internal model will perform
+reflection, taxonomy stewardship or automatic concept ratification in this mode.
+"""
     if repo_task:
         # A repository task owns its evaluation environment: it may install declared requirements,
         # run another language, or use hardware described by the task brief.  The conservative
@@ -39,7 +59,7 @@ def generate_agents_md(task, *, runtime_caps: str | None = None) -> str:
 ## Provenance note
 This is the run-level contract record. External coding backends receive the task-specific brief
 directly, while any repository-owned `AGENTS.md` remains part of the seeded repository.
-"""
+""" + harness_note
     # Honest runtime line: real script tasks with auto-install get the capability sentence
     # (torch/xgboost + hardware); offline/synthetic tasks fall back to numpy+stdlib.
     runtime = runtime_caps or "Python standard library + numpy. No network access."
@@ -60,4 +80,4 @@ directly, while any repository-owned `AGENTS.md` remains part of the seeded repo
 ## Notes for agents
 - Prefer simple, correct solutions; the loop will iterate and refine.
 - Evaluate honestly (use held-out/cross-validation); leakage is checked and penalized.
-"""
+""" + harness_note

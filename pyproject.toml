@@ -37,6 +37,9 @@ docs = ["mkdocs-material>=9.5,<10", "pymdown-extensions>=10"]
 proc = ["psutil>=5.9"]
 # Live React UI server (ADR-18: a separate read/control process, never imported by the engine).
 ui = ["fastapi>=0.110", "uvicorn>=0.27"]
+# Stdio MCP server for Codex, Claude Code and other external harnesses. The server
+# proxies the same authenticated HTTP control plane used by the UI.
+harness = ["mcp>=1.20", "httpx>=0.27"]
 # Run LoopLab as an auto-launched, proxied app INSIDE a JupyterHub single-user server. Pulls
 # jupyter-server-proxy (so the entry point below registers a Launcher tile + auto-launches the UI on
 # a free port) and psutil (the reliable cross-platform process-tree kill for spawned engines/evals).

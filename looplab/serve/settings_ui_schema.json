@@ -900,6 +900,13 @@
           "help": "Which roles do the work. llm is the DEFAULT: Researcher/Developer are the live model, and looplab run REFUSES to start when that endpoint is unreachable rather than degrading to empty fallback proposals that finish flat and report success. toy keeps Researcher/Developer offline (a deterministic optimizer) and is how you run without a model; optional embedding and Memora features may still use the configured model. Wrapping up a run that is already over (finalize, or a run/resume that only completes a pending finalization) never refuses — it warns and names the artifacts a missing model degrades."
         },
         {
+          "key": "external_harness",
+          "label": "External agent controls run",
+          "type": "bool",
+          "default": false,
+          "help": "With backend=toy, wait for ready-made inject_node commands from an external agent. LoopLab evaluates them and keeps the event log; it does not launch its own proposal, planning or cadence loop. Finalize or stop explicitly."
+        },
+        {
           "key": "llm_model",
           "label": "Model",
           "type": "text",
