@@ -124,8 +124,8 @@ def build_server(api: HarnessAPI):
     @mcp.tool()
     def phases(query: str = "") -> list[dict]:
         """Find standard/external decision phases by name, entity or purpose.
-        Each phase names the built-in owner and the same durable read/write surfaces
-        available to an external agent. A command:TYPE write goes through the
+        Each phase names the built-in owner and durable read/write surfaces.
+        write_access marks owner-only setup actions. A command:TYPE write goes through the
         generation-fenced /api/runs/{run_id}/commands endpoint."""
         return phase_catalog(query)
 

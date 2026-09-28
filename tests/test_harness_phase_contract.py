@@ -13,6 +13,9 @@ def test_phase_catalog_covers_all_promptstore_decisions_and_legacy_families():
                 family for family, _ in UNGOVERNED_PROMPT_FAMILIES}
     assert all(phase.reads and phase.writes and phase.internal for phase in PHASES)
     assert phase_detail("research")["entity"] == "ResearchMemo"
+    assert phase_detail("configuration")["write_access"]["PUT /api/settings"] == "operator"
+    assert phase_detail("configuration")["write_access"]["PUT /api/runs/{run_id}/config"] == "external_agent"
+    assert phase_detail("genesis")["write_access"]["POST /api/start"] == "operator"
     assert phase_catalog("research")[0]["id"] == "research"
     assert phase_detail("absent") is None
 

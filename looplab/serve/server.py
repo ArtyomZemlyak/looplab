@@ -622,9 +622,16 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
                     and (p.startswith("/api/settings") or p == "/api/genesis"
                          or p == "/api/start" or p.startswith("/api/start/")
                          or p.startswith("/api/assistant/")
+                         # These owner workflows invoke LoopLab's own model. An external
+                         # agent must author the equivalent domain decisions itself.
+                         or p in ("/api/research", "/api/llm/health",
+                                  "/api/cross-run/concept-steward",
+                                  "/api/cross-run/claim-steward")
+                         or re.fullmatch(r"/api/runs/[^/]+/(chat|suggest|command|report_refresh)", p)
+                         or (p.startswith("/api/scope-report/") and p.endswith("/generate"))
                          or re.fullmatch(r"/api/runs/[^/]+/(reset|deletions)", p)
                          or (request.method == "DELETE" and re.fullmatch(r"/api/runs/[^/]+", p)))):
-                return JSONResponse({"detail": "harness token cannot change operator defaults, launch or reset/delete a run, or drive the owner assistant"},
+                return JSONResponse({"detail": "harness token cannot change operator defaults, launch or reset/delete a run, or invoke an internal model workflow"},
                                     status_code=403)
             # WHO THIS IS (`serve/principal.py`): the token holder is the `owner` principal; a request
             # on the small open surface that presented nothing is `anonymous` — never promoted.

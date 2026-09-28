@@ -1517,6 +1517,8 @@ class EvalStagesMixin:
         # own wall, and are not knowable here — the engine threads ONE cap for the whole pipeline.
         # Testing `cap <= 0` (what this said while the feature was opt-in) would read AUTO as OFF
         # and silently ship the new default as no change at all.
+        if getattr(self, "external_harness", False):
+            return None  # external evaluations use an agent-owned checkpoint instead
         import math
         try:
             # The default is the AUTO -1.0 a real Engine settles to, not the opt-in era's 0.0: that
@@ -1566,6 +1568,52 @@ class EvalStagesMixin:
             return float("inf") if parse_deadline_reply(out) else 0.0
 
         return _judge
+
+    def _external_deadline_grace_fn(self, node, cancel, stage_name=None):
+        """Ask the external agent once at a real command deadline, without an internal model.
+
+        The runtime owns the actual extension cap and records any seconds granted on
+        the stage row. A missing answer cannot silently mean permission to extend.
+        """
+        import math
+        import time
+
+        from looplab.harness.checkpoints import ask, answer_for
+
+        try:
+            cap = float(getattr(self, "eval_deadline_grace_s", -1.0) or 0.0)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(cap) or cap == 0:
+            return None
+
+        def _review(tail: str) -> float:
+            if cancel is not None and cancel.is_set():
+                return 0.0
+            question = None
+            while question is None:
+                if cancel is not None and cancel.is_set():
+                    return 0.0
+                try:
+                    redactor = getattr(self, "_redact", None)
+                    observed = redactor(tail) if callable(redactor) else tail
+                    question = ask(self.run_dir, node.id, node.attempt, "deadline_grace",
+                                   stage=stage_name() if stage_name is not None else "",
+                                   expectation="one bounded extension or stop at the declared deadline",
+                                   observation=str(observed)[-4000:])
+                except Exception:  # noqa: BLE001 — a ledger failure cannot grant an extension
+                    time.sleep(0.5)
+            while cancel is None or not cancel.is_set():
+                try:
+                    answer = answer_for(self.run_dir, question["checkpoint_id"])
+                except Exception:  # noqa: BLE001 — wait for the durable answer, never assume consent
+                    answer = None
+                if answer is not None:
+                    return float("inf") if answer["verdict"] == "extend" else 0.0
+                time.sleep(0.3)
+            return 0.0
+
+        return _review
 
     def _external_stage_check_fn(self, node, workdir, stages, cancel):
         """Block between checked stages until the external agent answers this attempt.

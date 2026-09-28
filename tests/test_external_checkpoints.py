@@ -1,5 +1,6 @@
 """External stage and live-eval decisions use the real run ledger and HTTP boundary."""
 import json
+import math
 import sys
 import threading
 import time
@@ -65,6 +66,86 @@ def test_stage_check_blocks_and_applies_lifecycle_fenced_verdict(tmp_path):
         assert verdict.kind == "declared_condition_violated"
         assert not client.get("/api/runs/demo/harness-checkpoints",
                               params={"expected_generation": generation}).json()["pending"]
+
+
+def test_external_deadline_grace_waits_for_agent_and_never_uses_internal_judge(tmp_path):
+    rd, store, client = seeded(tmp_path)
+    generation = run_generation_token(store.read_all())
+    worker = SimpleNamespace(run_dir=rd, external_harness=True, eval_deadline_grace_s=1.0,
+                             _redact=lambda value: value.replace("secret", "[redacted]"),
+                             _reflect_client=lambda: (_ for _ in ()).throw(
+                                 AssertionError("internal deadline judge was invoked")))
+    node = SimpleNamespace(id=0, attempt=0)
+    assert EvalStagesMixin._deadline_grace_fn(worker, node) is None
+    cancel = threading.Event()
+    callback = EvalStagesMixin._external_deadline_grace_fn(worker, node, cancel)
+    assert callback is not None
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        try:
+            for index, verdict in enumerate(("extend", "stop")):
+                future = pool.submit(callback, "training near end; secret")
+                questions = []
+                for _ in range(200):
+                    questions = client.get("/api/runs/demo/harness-checkpoints", params={
+                        "expected_generation": generation}).json()["pending"]
+                    if questions:
+                        break
+                    time.sleep(0.01)
+                assert len(questions) == 1 and not future.done()
+                q = questions[0]
+                assert q["phase_id"] == "deadline_grace"
+                assert "secret" not in q["observation"]
+                answer = {"expected_generation": generation, "checkpoint_id": q["checkpoint_id"],
+                          "action_id": f"deadline-{index}", "verdict": verdict,
+                          "reason": "near completed checkpoint" if index == 0 else "no progress"}
+                assert client.post("/api/runs/demo/harness-checkpoints", json={
+                    **answer, "verdict": "watch"}).status_code == 400
+                assert client.post("/api/runs/demo/harness-checkpoints", json=answer).status_code == 200
+                result = future.result(timeout=3)
+                assert (math.isinf(result) if verdict == "extend" else result == 0.0)
+        finally:
+            cancel.set()
+
+
+def test_agent_deadline_answer_changes_real_stage_outcome_and_records_grace(tmp_path):
+    rd, store, client = seeded(tmp_path)
+    generation = run_generation_token(store.read_all())
+    (rd / "slow.py").write_text(
+        "import json,time\n"
+        "for _ in range(12):\n"
+        "    print('progress', flush=True); time.sleep(0.1)\n"
+        "print(json.dumps({'metric': 0.5}), flush=True)\n", encoding="utf-8")
+    worker = SimpleNamespace(run_dir=rd, external_harness=True, eval_deadline_grace_s=2.0,
+                             _redact=lambda value: value)
+    cancel = threading.Event()
+    callback = EvalStagesMixin._external_deadline_grace_fn(
+        worker, SimpleNamespace(id=0, attempt=0), cancel, stage_name=lambda: "train")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        try:
+            future = pool.submit(run_command_eval, [sys.executable, "slow.py"], str(rd), 0.5,
+                                 {"kind": "stdout_json", "key": "metric"},
+                                 stages=[{"name": "train", "command": [sys.executable, "slow.py"]}],
+                                 on_deadline=callback, deadline_grace_max_s=2.0)
+            questions = []
+            for _ in range(300):
+                questions = client.get("/api/runs/demo/harness-checkpoints", params={
+                    "expected_generation": generation}).json()["pending"]
+                if questions:
+                    break
+                time.sleep(0.01)
+            assert len(questions) == 1 and not future.done()
+            assert questions[0]["stage"] == "train"
+            response = client.post("/api/runs/demo/harness-checkpoints", json={
+                "expected_generation": generation,
+                "checkpoint_id": questions[0]["checkpoint_id"],
+                "action_id": "deadline-real-eval", "verdict": "extend",
+                "reason": "allow one bounded extension"})
+            assert response.status_code == 200, response.text
+            result = future.result(timeout=8)
+            assert result.metric == 0.5
+            assert result.stages[0]["deadline_grace_s"] == 2.0
+        finally:
+            cancel.set()
 
 
 def test_monitor_answer_cannot_claim_kill_without_authority_or_after_terminal(tmp_path):

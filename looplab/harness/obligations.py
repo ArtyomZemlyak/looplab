@@ -26,6 +26,7 @@ EXTERNAL_POLICY_FIELDS = frozenset({
     "mcts_value_weight", "train_monitor", "train_monitor_kill", "asha_live",
     "asha_live_kill", "coverage_context", "concept_retag_every",
     "stage_check_tools", "train_monitor_interval_s", "asha_live_min_siblings",
+    "eval_deadline_grace_s",
 })
 
 
@@ -301,6 +302,13 @@ def run_obligations(task, settings, *, generation: str) -> dict:
                 "checkpoint": "after_each_checked_or_asserted_command_stage",
                 "proof": "answer the pending harness-checkpoints question before the next stage",
                 "enforced": True, "conditional_on": "resolved stage check or expect.assert",
+            },
+            "deadline_grace": {
+                "required": bool(external and settings.eval_deadline_grace_s != 0),
+                "settings": {"eval_deadline_grace_s": settings.eval_deadline_grace_s},
+                "checkpoint": "command_stage_reaches_its_time_limit",
+                "proof": "answer extend or stop before the runtime decides its bounded one-time grace",
+                "enforced": True, "conditional_on": "a command evaluation reaches its deadline",
             },
             "train_monitor": {
                 "required": bool(external and settings.train_monitor),

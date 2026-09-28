@@ -30,6 +30,13 @@ class Phase:
         row = asdict(self)
         for key in ("reads", "writes", "prompts"):
             row[key] = list(row[key])
+        # This index covers both orchestration modes. An agent using the scoped
+        # harness credential can inspect global settings and the task launch
+        # surface, but cannot mutate operator defaults or start another run.
+        row["write_access"] = {
+            ref: ("operator" if ref in {"PUT /api/settings", "POST /api/start"}
+                  else "external_agent") for ref in self.writes
+        }
         row["obligation"] = "see GET /api/runs/{run_id}/harness-contract and /harness-progress"
         return row
 
@@ -112,6 +119,10 @@ PHASES: tuple[Phase, ...] = (
            "GET /api/runs/{run_id}/harness-checkpoints"),
           ("POST /api/runs/{run_id}/harness-checkpoints", "command:node_abort"),
           legacy_prompt_family="monitor"),
+    Phase("deadline_grace", "StageDeadline", "engine/eval_stages.py; runtime/command_eval.py",
+          "At a command deadline, decide whether the bounded one-time extension is warranted.",
+          ("GET /api/runs/{run_id}/harness-checkpoints", "GET /api/runs/{run_id}/nodes/{nid}/logs"),
+          ("POST /api/runs/{run_id}/harness-checkpoints",)),
     Phase("evaluation", "Node/Metric", "engine/evaluate.py; engine/eval_stages.py",
           "Answer mandatory inter-stage checks; inspect metric provenance and trust signals.",
           ("GET /api/runs/{run_id}/nodes/{nid}/metrics",

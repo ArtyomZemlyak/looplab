@@ -67,11 +67,18 @@ stage cannot advance without a verdict; an opened live question holds the
 terminal until answered. `abort` is valid only when that checkpoint grants
 early-stop authority. A fast command evaluation with an attributed training
 log may open its first monitor question after the evaluator completes, before
-the node becomes terminal. A disabled monitor opens no questions.
+the node becomes terminal. At a command deadline, an enabled `deadline_grace`
+checkpoint requires `extend` or `stop`; the runtime caps the extension. A
+disabled monitor opens no questions.
 
 Search MCP `phases` for the relevant entity before each decision. It lists the
 same domain writes used by the built-in roles; `phase_info` shows what to read and
 which commands to submit. Research memos use `research_completed`, reports use
 `report_generated`, and hypotheses, Cards and concepts have their own controls.
+Check each phase's `write_access`: task launch and global settings writes require
+the operator credential. The scoped harness token also refuses owner model
+workflows such as the legacy chat/suggest/report routes, cross-run stewards and
+scope-report generation. Author the corresponding run decisions and reports
+through the durable commands and guarded knowledge APIs.
 When the evidence supports a reusable conclusion, publish it through `/lessons`
 with terminal node IDs; never include a claimed score in place of evaluation.

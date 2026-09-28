@@ -984,6 +984,21 @@ class EvalDispatchMixin:
             _host = es.get("host_scorer") if isinstance(es.get("host_scorer"), dict) else None
             _primary = ((_host.get("metric") if isinstance(_host.get("metric"), dict) else None)
                         or es["metric"]) if _host else es["metric"]
+            # The deadline callback receives only a log tail from the sandbox.
+            # Follow its stage cursor so a pending question names the precise
+            # command whose extra time the agent is deciding to spend.
+            stage_context = {"name": ""}
+            progress_fn = (self._stage_progress_fn(
+                node.id if node is not None else None,
+                node.attempt if node is not None else 0, stages)
+                if canary is None else None)
+
+            def _progress_with_stage(payload):
+                if payload.get("status") == "started":
+                    stage_context["name"] = str(payload.get("name") or "")
+                if progress_fn is not None:
+                    progress_fn(payload)
+
             res = command_eval.run_command_eval(
                 cmd, cwd, timeout, _primary, env,
                 self_metric=(es["metric"] if _host else None),
@@ -1026,15 +1041,16 @@ class EvalDispatchMixin:
                 # concedes the cursor "genuinely is unobservable from here") and every UI status
                 # surface simply called the whole multi-hour pipeline "Training / evaluating".
                 # Diagnostic beacons only — nothing here folds, decides, kills or selects.
-                on_stage_event=(self._stage_progress_fn(
-                    node.id if node is not None else None,
-                    node.attempt if node is not None else 0, stages)
-                    if canary is None else None),
+                on_stage_event=_progress_with_stage if canary is None else None,
                 # The one-shot deadline judge (doc 39 site #2). Both are needed and are separate on
                 # purpose: the callback may be None (no client) while the cap is set, and the cap is
                 # the OPERATOR'S number — `sandbox._granted_grace` clamps to it in the runtime, so a
                 # judge cannot name its own extension even if a future caller lets it try.
-                on_deadline=(self._deadline_grace_fn(node) if canary is None else None),
+                on_deadline=(self._external_deadline_grace_fn(
+                                 node, cancel, stage_name=lambda: stage_context["name"])
+                             if self.external_harness and canary is None and node is not None
+                             else self._deadline_grace_fn(node)
+                             if not self.external_harness and canary is None else None),
                 deadline_grace_max_s=self.eval_deadline_grace_s,
                 # METRIC PROVENANCE: what the number is a claim ABOUT. Gated on the rung so `off` is
                 # byte-identical to the behaviour before this shipped — and so a RESUMED pre-2026-08-13

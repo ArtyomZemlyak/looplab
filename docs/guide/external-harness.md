@@ -53,7 +53,13 @@ and curated field help without a server.
 
 `phases` is the workflow index for both modes. Each entry names the entity, the
 built-in owner, the evidence to read, the external actions that write the same
-domain state, and any PromptStore keys. `phase_info("research")`, for example,
+domain state, and any PromptStore keys. `write_access` distinguishes operator
+setup actions (global settings and launch) from scoped agent actions.
+The scoped token also refuses old owner routes that invoke LoopLab's model
+(legacy chat/suggestion/report refresh, taxonomy stewards, provider probe and
+scope-report generation). The agent writes run reports with `report_generated`
+and knowledge decisions through the guarded domain APIs.
+`phase_info("research")`, for example,
 includes the `ResearchMemo` schema and the accepted/server-derived fields of
 `command:research_completed`. A `command:TYPE` action
 means a durable `POST /api/runs/{run_id}/commands` with `type: TYPE`, `data`,
@@ -183,6 +189,11 @@ The normal control cycle is:
    An opened observation holds the node terminal until answered. Inspect measured
    metrics, stage logs and failures, then submit a corrected candidate if useful.
    The metric is measured by LoopLab's evaluator; never submit a claimed score.
+   If a command stage reaches its deadline and `eval_deadline_grace_s` is enabled,
+   the agent receives a `deadline_grace` checkpoint. Answer `extend` or `stop`;
+   the runtime limits an extension to the operator's configured allowance and
+   records the granted seconds with the stage. The external run does not invoke
+   LoopLab's internal deadline judge, and a missing answer never grants time.
    The train observer checks at the configured adaptive cadence during a command
    evaluation. If an evaluation finishes before its first tick, LoopLab checks
    its final attributed training log before committing the node result and waits

@@ -22,7 +22,7 @@ from looplab.events.replay import fold
 from looplab.serve.run_commands import run_generation_token
 
 _MAX_LEDGER = 16 * 1024 * 1024
-_PHASES = frozenset({"stage_check", "train_monitor", "asha_live"})
+_PHASES = frozenset({"stage_check", "train_monitor", "asha_live", "deadline_grace"})
 
 
 def _claim_seq(events, node_id: int, node_generation: int) -> int:
@@ -136,6 +136,9 @@ def respond(srv, rd: Path, body) -> dict:
                                                     or (body.failure_kind == "declared_condition_violated"
                                                         and not q["expectation"])):
                         raise HTTPException(400, "invalid stage failure kind")
+                elif q["phase_id"] == "deadline_grace":
+                    if body.verdict not in {"extend", "stop"}:
+                        raise HTTPException(400, "deadline review needs extend or stop")
                 elif body.verdict not in ({"continue", "watch", "abort"} if q["kill_enabled"]
                                           else {"continue", "watch"}):
                     raise HTTPException(400, "this monitor is advisory; abort is disabled")

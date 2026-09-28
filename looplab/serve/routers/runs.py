@@ -704,7 +704,8 @@ class ExternalCheckpointAnswer(BaseModel):
     expected_generation: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
     checkpoint_id: str = Field(pattern=r"^[0-9a-f]{32}$")
     action_id: str = Field(min_length=1, max_length=160)
-    verdict: Literal["proceed", "inconclusive", "fail", "continue", "watch", "abort"]
+    verdict: Literal["proceed", "inconclusive", "fail", "continue", "watch", "abort",
+                     "extend", "stop"]
     failure_kind: str = Field(default="", max_length=80)
     reason: str = Field(min_length=1, max_length=1200)
 
