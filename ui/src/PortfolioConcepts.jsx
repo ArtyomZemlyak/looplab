@@ -51,12 +51,13 @@ function BestMetric({ best }) {
   </span>
 }
 
-function ConceptRow({ row, selected, matched, expanded, onToggle, onSelect, setRef }) {
+function ConceptRow({ row, selected, matched, expanded, forcedOpen, onToggle, onSelect, setRef }) {
   const node = row.node
   return <li className={'pc-row' + (row.depth === 0 ? ' pc-root' : '')}
     style={{ paddingLeft: 4 + row.depth * 17 }}>
     {row.hasChildren
       ? <button type="button" className="pc-twist" aria-expanded={expanded}
+          disabled={forcedOpen} title={forcedOpen ? 'Clear search to collapse this path' : undefined}
           aria-label={`${expanded ? 'Collapse' : 'Expand'} ${row.id}`}
           onClick={() => onToggle(row.id)}>{expanded ? '▾' : '▸'}</button>
       : <span className="pc-twist pc-twist-leaf" aria-hidden="true">·</span>}
@@ -269,12 +270,13 @@ export default function PortfolioConcepts({
     if (!search) return null
     return new Set(Object.keys(forest.nodes).filter(id => id.includes(search)))
   }, [search, forest])
-  const openSet = useMemo(() => {
-    if (!matches) return expanded
-    const out = new Set(expanded)
-    for (const id of matches) for (const step of forestPathTo(id)) out.add(step)
+  const forcedOpen = useMemo(() => {
+    const out = new Set()
+    if (matches) for (const id of matches) for (const step of forestPathTo(id)) out.add(step)
     return out
-  }, [matches, expanded])
+  }, [matches])
+  const openSet = useMemo(() => matches ? new Set([...expanded, ...forcedOpen]) : expanded,
+    [matches, expanded, forcedOpen])
 
   const rows = useMemo(() => visibleForestRows(forest, openSet), [forest, openSet])
   const firstMatch = search ? rows.find(row => matches?.has(row.id))?.id : null
@@ -351,7 +353,7 @@ export default function PortfolioConcepts({
       </div>
       {search && <p className="pc-search-result" role="status">
         {matches.size} matching concept{matches.size === 1 ? '' : 's'} highlighted in the tree.
-        {matches.size > 0 && ' Press Enter to focus the first match.'}
+        {matches.size > 0 && ' Matching paths stay open until search is cleared. Press Enter to focus the first match.'}
       </p>}
     </div>
 
@@ -431,6 +433,7 @@ export default function PortfolioConcepts({
                 selected={selected === row.id}
                 matched={!!matches?.has(row.id)}
                 expanded={openSet.has(row.id)}
+                forcedOpen={forcedOpen.has(row.id)}
                 onToggle={toggle} onSelect={setSelected}
                 setRef={node => node
                   ? rowRefs.current.set(row.id, node) : rowRefs.current.delete(row.id)} />)}

@@ -43,6 +43,16 @@ test('ResearchView compiles, and addedConcepts reports only the narrowing concep
   }
 })
 
+test('bulk collapse targets visible branches, not leaves that may gain children later', async () => {
+  const { branchKeys } = await loadView()
+  const rows = latticeRows([
+    q('root', ['distill']), q('child', ['distill', 'llm']), q('leaf', ['calibration']),
+  ])
+  assert.deepEqual([...branchKeys(rows)], ['root'])
+  assert.deepEqual([...branchKeys(rows.filter(row => row.id !== 'child'))], [],
+    'filtered-away children do not leave a control that cannot change the visible tree')
+})
+
 test('the ladder RENDERS: nesting, the added concept, the best, and the mixed-comparability mark', async () => {
   // Stronger than "it compiles". The rules are driven in `questionLattice.test.js`; what this adds
   // is that they SURVIVE the render — a number derived correctly and then dropped by the JSX is the

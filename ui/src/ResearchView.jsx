@@ -36,6 +36,14 @@ function addedConcepts(row, byRowKey) {
   return row.tags.filter(tag => !inherited.has(tag))
 }
 
+// A row becomes collapsible only when a sharper question is already visible below it.
+// Stamping leaves as collapsed hides their empty-evidence message and can silently hide a child
+// added later, even though no collapse control was available for that leaf.
+function branchKeys(rows) {
+  return new Set(rows.filter(row => row.depth > 0)
+    .map(row => row.rowKey.slice(0, row.rowKey.lastIndexOf('>'))))
+}
+
 export default function ResearchView({ cards, state, renderCard }) {
   const [collapsed, setCollapsed] = useState(() => new Set())
   const [concept, setConcept] = useState('')
@@ -110,12 +118,20 @@ export default function ResearchView({ cards, state, renderCard }) {
     }
     return rows.filter(row => keep.has(row.rowKey))
   }, [rows, filtering, matched])
+  const visibleBranches = useMemo(() => branchKeys(visible), [visible])
 
   // A collapsed row hides its whole branch. Keyed by `rowKey`, so collapsing one copy of a
   // twice-placed question leaves the other copy open — they are two positions, not one row.
-  const effectiveCollapsed = filtering ? new Set() : collapsed
-  const shown = visible.filter(row => ![...effectiveCollapsed].some(
-    key => key !== row.rowKey && row.rowKey.startsWith(`${key}>`)))
+  const shown = useMemo(() => {
+    if (filtering || !collapsed.size) return visible
+    return visible.filter(row => {
+      const parts = row.rowKey.split('>')
+      for (let i = 1; i < parts.length; i += 1) {
+        if (collapsed.has(parts.slice(0, i).join('>'))) return false
+      }
+      return true
+    })
+  }, [visible, filtering, collapsed])
   const toggle = rowKey => setCollapsed((prev) => {
     const next = new Set(prev)
     if (next.has(rowKey)) next.delete(rowKey)
@@ -141,7 +157,7 @@ export default function ResearchView({ cards, state, renderCard }) {
       onKeyDown={event => { if (event.key === 'Escape') setQuery('') }} />
     <button type="button" className="btn sm ghost" disabled={filtering}
       title={filtering ? 'Clear filters to change branch visibility' : undefined}
-      onClick={() => setCollapsed(new Set(rows.map(row => row.rowKey)))}>
+      onClick={() => setCollapsed(new Set(visibleBranches))}>
       Collapse branches</button>
     <button type="button" className="btn sm ghost" disabled={filtering}
       title={filtering ? 'Clear filters to change branch visibility' : undefined}
@@ -176,8 +192,8 @@ export default function ResearchView({ cards, state, renderCard }) {
         // DESCENDANTS, not immediate children: a refinement of a refinement is still this
         // question's work, and drawing only one level put it in no section at all.
         const kids = descendantsOf(row.id, childKids)
-        const isCollapsed = effectiveCollapsed.has(row.rowKey)
-        const branch = visible.some(r => r.rowKey.startsWith(`${row.rowKey}>`))
+        const isCollapsed = !filtering && collapsed.has(row.rowKey)
+        const branch = visibleBranches.has(row.rowKey)
         const added = addedConcepts(row, byRowKey)
         // DIMMED, never removed. A closed question is part of the chain that explains its
         // neighbours, and dropping it out of the ladder would leave a sharpening under nothing —
@@ -293,4 +309,4 @@ export default function ResearchView({ cards, state, renderCard }) {
   </div>
 }
 
-export { addedConcepts }
+export { addedConcepts, branchKeys }
