@@ -1039,6 +1039,7 @@ def _requeue_partition_bound_results(st: RunState, *, fresh_node_ids: set[int]) 
         n.holdout_metric = None
         n.generalization_gap = None
         n.verifier_score = None   # R1-c: a soundness score judged the OLD attempt's result — discard it
+        n.value_prior = None      # MCTS headroom also describes the abandoned lifecycle.
         n.stages = []
         n.failed_stage = None
         n.repairs = 0            # a fresh lifecycle's repair budget starts at zero, and so does the
@@ -1402,6 +1403,7 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         # tie-break would rank the new attempt by a score for a realization it no longer produces.
         n.holdout_metric = None
         n.verifier_score = None
+        n.value_prior = None      # A new attempt requires its own branch judgment.
         if n.id in st.holdout_evaluated_ids:
             st.holdout_evaluated_ids.remove(n.id)
         if stage in ("implement", "propose"):
@@ -2522,5 +2524,4 @@ class FoldCursor:
         # Pydantic copy makes every GET independent and preserves the raw state for the next append.
         state = self._state.model_copy(deep=True)
         return _finalize_fold(state, self._ctx)
-
 

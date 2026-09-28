@@ -76,6 +76,24 @@ def missing_reviews(rd: Path, settings, state, generation: str) -> list[str]:
         for row in rows)]
 
 
+def cadence_reviews_due(rd: Path, settings, state, generation: str) -> list[str]:
+    """A configured mid-run lesson/skill window must be decided before expansion.
+
+    The receipt may say no action applies, but it must bind the measured evidence
+    of the current window. Finalization uses the same review ledger.
+    """
+    n = len(state.nodes)
+    if (not settings.external_harness or not settings.reflection_priors
+            or not settings.memory_dir or settings.lessons_every <= 0
+            or n == 0 or n % settings.lessons_every):
+        return []
+    due = set(missing_reviews(rd, settings, state, generation))
+    phases = {"skill_candidates"}
+    if settings.comparative_lessons:
+        phases.add("lessons")
+    return sorted(due & phases)
+
+
 def publish_review(srv, rd: Path, body) -> dict:
     from looplab.core.config import read_config_snapshot
 

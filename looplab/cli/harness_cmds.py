@@ -52,6 +52,10 @@ def harness_manifest(*, include_settings: bool = False) -> dict:
         },
         "obligations": "GET /api/runs/{run_id}/harness-contract returns effective choices and enforced evaluation constraints. Decision phases are available, not a mandatory sequence.",
         "live_checkpoints": "Poll GET /api/runs/{run_id}/harness-checkpoints?expected_generation=TOKEN while evaluations run. POST a verdict, reason and action_id to the same route. Checked stages wait before advancing; opened live observations must be answered before terminal. Abort is available only when the checkpoint grants it.",
+        "hypothesis_merge": "When four or more pure-belief Cards are open, GET /api/runs/{run_id}/harness-hypotheses and POST an atomic merge or justified no_merge review before the next candidate.",
+        "selection": "GET /api/runs/{run_id}/harness-selection. If select_verifier is enabled and a tie exists, POST complete evidence-bound samples to /harness-selection/verify. If MCTS value_weight is active, POST all current batch estimates to /harness-selection/values. Both are admission gates when due.",
+        "memory_cadence": "With reflection_priors and lessons_every enabled, publish relevant lessons/skills and POST lessons and skill_candidates harness-reviews at each node window, or justify no_applicable_action. New evidence invalidates current-window reviews.",
+        "report_cadence": "When report_every is enabled, publish report_generated at each configured node interval before the next candidate, and cover the latest candidate before finishing.",
         "interfaces": {
             "start": "looplab run CONFIG --out RUN_DIR --developer-backend codex",
             "resume": "looplab resume RUN_DIR",

@@ -102,8 +102,34 @@ The normal control cycle is:
    the protected score command.
    Enabled `deep_research_every` requires a current `research_completed` memo;
    enabled `track_hypotheses` requires a candidate hypothesis or Card link.
+   When four or more pure belief Cards are open, review the current board with
+   `GET/POST /api/runs/{run_id}/harness-hypotheses`: merge genuine aliases or
+   record `no_merge` with a reason. Echo the GET response's `board_sha256` as
+   `expected_board_sha256`; a changed board or measured outcome rejects a stale
+   review. Admission requires a fresh board review.
    With `concept_run_base`, publish `run_concepts` after the first scored node
    with authored tags and before the next candidate.
+   Enabled coverage snapshots remain live: LoopLab computes breadth and
+   concept lock-in at their configured cadences from measured outcomes and
+   the agent's recorded concept tags, without an internal classifier.
+   If `select_verifier` exposes a live selector tie, GET
+   `/api/runs/{run_id}/harness-selection` and POST a complete group to
+   `/harness-selection/verify`. Judge the realized result for each member
+   `select_verifier_samples` times and send boolean `samples` with the returned
+   node generation and evidence digest. LoopLab derives scores and refuses a
+   partial or stale group. If the active MCTS policy has positive
+   `mcts_value_weight`, use that GET's `value_candidates` and
+   `evidence_revision` to POST one headroom estimate (0–1 and rationale) per
+   candidate to `/harness-selection/values`. Both judgments are required before
+   the next candidate when their respective conditions arise; a reset or new
+   measurement requires a fresh judgment. These are the external agent's
+   assessments, not independent model verification.
+   With `reflection_priors` and `lessons_every` enabled, review lessons and
+   skill candidates at each configured node interval before admitting the
+   next candidate. Publish evidence-linked lessons and skill candidates if
+   warranted, then POST `harness-reviews` for each due phase with its recorded
+   action reference, or `no_applicable_action` and a reason. A changed measured
+   outcome invalidates the review of the current window.
    Record enabled novelty, foresight, ranking and strategy choices through
    `POST /api/runs/{run_id}/harness-decisions` before admitting that Idea.
 3. Submit `inject_node` using `POST /api/runs/{run_id}/commands`: include an `idea`
@@ -126,8 +152,9 @@ The normal control cycle is:
    The metric is measured by LoopLab's evaluator; never submit a claimed score.
 5. Review each enabled cross-run knowledge phase and record its action reference,
    or why no action applies, through `POST /api/runs/{run_id}/harness-reviews`.
-   Publish a `report_generated` covering the latest candidate when `report_every`
-   is enabled. No particular number of implementation stages is required.
+   Publish `report_generated` at each enabled `report_every` node interval
+   before the next candidate, and cover the latest candidate before finishing.
+   No particular number of implementation stages is required.
 6. Pause or finalize the run through the same command API. Resume from the durable
    state after a client restart. A run does not finish merely because the external
    agent has no immediate action.

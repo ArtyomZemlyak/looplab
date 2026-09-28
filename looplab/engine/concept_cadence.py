@@ -235,7 +235,8 @@ class ConceptCadenceMixin:
         # Defensive: a bare/None `self` (e.g. a unit test calling this as a pure helper) has no reflect
         # client -> deterministic fallback, unchanged behaviour. Real engines get the agentic path.
         _rc = getattr(self, "_reflect_client", None)
-        client = _rc() if callable(_rc) else None
+        client = (_rc() if callable(_rc) else None) if not getattr(
+            self, "external_harness", False) else None
         # The task's GOAL decides when the adapter's id cannot (docs/BACKLOG.md,
         # `concept-skeleton-matches-no-run`): `repo_task` names no curated pack, so the deterministic
         # fallback here had no vocabulary on any run this project has recorded.
@@ -256,6 +257,18 @@ class ConceptCadenceMixin:
                 mode = cmap.get("mode", "llm")
                 self._assert_concept_edges(state, graph, mode)
                 self._tag_hypothesis_concepts(state, graph, client, parser, mode)
+            elif getattr(self, "external_harness", False):
+                # The external agent already authored the node memberships at
+                # admission. Rebuild their graph from those recorded ids, including
+                # repository tasks for which no curated skeleton exists. This keeps
+                # the coverage and lock-in projections live without paying a hidden
+                # in-process model or treating a heuristic classifier as evidence.
+                from looplab.search.concept_tagging import graph_from_node_concepts
+                graph, tags = graph_from_node_concepts(state.node_concepts, seed_graph=seed)
+                if not graph.concepts():
+                    return None
+                cov = concept_coverage(state, graph, tags)
+                mode = "external_authored"
             if graph is None:                   # deterministic fallback needs a curated skeleton
                 if seed is None:
                     return None

@@ -29,6 +29,16 @@ unannotated candidate. A phase is skippable only when its effective run policy
 allows it. Operator-declared stages and protected evaluation always win.
 Enabled research, hypothesis, novelty, foresight, best-of-N, strategy, report
 and cross-run knowledge settings have admission or finalization checkpoints.
+Enabled `report_every` also requires a current report at each node interval.
+When the open pure-belief board reaches four Cards, the external agent must
+review duplicates through `/api/runs/{run_id}/harness-hypotheses` before the next
+candidate. A merge aliases real live Cards atomically; `no_merge` records a
+reason and is invalidated when the board or measured outcomes change.
+If `select_verifier` exposes a tie, score its complete evidence-bound group via
+`harness-selection/verify`. With active MCTS `value_weight`, estimate all current
+branches via `harness-selection/values`; both block the next candidate when due.
+With `lessons_every`, record lesson and skill reviews at each configured node
+window, including a reason when no conclusion is supported.
 Use `harness-decisions` and `harness-reviews` to record idea-bound reviews and
 justified no-action outcomes where a change is not supported by evidence.
 While evaluating, poll `/api/runs/{run_id}/harness-checkpoints` with the run

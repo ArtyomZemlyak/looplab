@@ -1104,11 +1104,49 @@ def _normalize_inject_node(ctx: _ControlIntake) -> dict:
                 "code": "external_research_required",
                 "message": "deep_research_every is enabled; publish research_completed at this node count before submitting a candidate",
             })
+        from looplab.harness.obligations import report_cadence_due
+        if report_cadence_due(settings, ctx.state(), events):
+            raise HTTPException(409, {
+                "code": "external_report_cadence_required",
+                "message": "report_every is enabled; publish a current report before another candidate",
+                "remediation": "command:report_generated",
+            })
         from looplab.harness.obligations import run_base_due
         if run_base_due(settings, ctx.state()):
             raise HTTPException(409, {
                 "code": "external_run_base_required",
                 "message": "concept_run_base is enabled; seed run_concepts from the first scored node's authored tags before the next candidate",
+            })
+        from looplab.harness.hypotheses import merge_due
+        if merge_due(settings, ctx.state(), events):
+            raise HTTPException(409, {
+                "code": "external_hypothesis_merge_review_required",
+                "message": "review the open pure-belief board and merge duplicates or record no_merge before another candidate",
+                "remediation": "GET then POST /api/runs/{run_id}/harness-hypotheses",
+            })
+        from looplab.harness.reviews import cadence_reviews_due
+        from looplab.serve.run_commands import run_generation_token
+        memory_reviews = cadence_reviews_due(ctx.rd, settings, ctx.state(),
+                                             run_generation_token(events))
+        if memory_reviews:
+            raise HTTPException(409, {
+                "code": "external_memory_cadence_review_required",
+                "phases": memory_reviews,
+                "message": "lessons_every is enabled; record each due lesson/skill review before another candidate",
+                "remediation": "POST /api/runs/{run_id}/harness-reviews",
+            })
+        from looplab.harness.selection import verification_due, value_due
+        if verification_due(settings, ctx.state()):
+            raise HTTPException(409, {
+                "code": "external_selection_verifier_required",
+                "message": "select_verifier is enabled; score the current tied group before proposing another candidate",
+                "remediation": "GET /api/runs/{run_id}/harness-selection then POST /api/runs/{run_id}/harness-selection/verify",
+            })
+        if value_due(settings, ctx.state()):
+            raise HTTPException(409, {
+                "code": "external_mcts_value_required",
+                "message": "MCTS value_weight is enabled; estimate the current branch batch before proposing another candidate",
+                "remediation": "GET /api/runs/{run_id}/harness-selection then POST /api/runs/{run_id}/harness-selection/values",
             })
         if settings.track_hypotheses and not (
                 (normalized_idea.hypothesis or "").strip() or normalized_idea.card_id):

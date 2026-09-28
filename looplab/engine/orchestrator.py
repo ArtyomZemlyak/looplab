@@ -1997,6 +1997,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 # Evidence reconciliation is deterministic here: it retires a lesson after a
                 # reset/remeasurement changes its cited node, without re-distilling it.
                 state = self._maybe_reconcile_lessons(state)
+                # Preserve the deterministic breadth and concept-coverage read models in
+                # external mode. The concept graph is rebuilt from the agent's authored
+                # memberships; no internal classifier or reflector is invoked.
+                state = self._maybe_snapshot_coverage(state)
+                state = self._maybe_snapshot_concept_coverage(state)
                 evals = [a for a in self.policy.next_actions(state) if a["kind"] == "evaluate"]
                 if evals:
                     await self._dispatch_evals(evals, state, max_es, research=False)

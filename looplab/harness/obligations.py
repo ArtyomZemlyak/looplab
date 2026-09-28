@@ -108,6 +108,18 @@ def final_report_due(settings, state, events=None) -> bool:
     return False
 
 
+def report_cadence_due(settings, state, events=None) -> bool:
+    """Require a narrative at the same node interval as the built-in writer."""
+    if not (settings.external_harness and settings.report_every > 0
+            and state.evaluated_nodes()):
+        return False
+    n = len(state.nodes)
+    last = (state.report or {}).get("at_node") or 0
+    if n - last < settings.report_every and n != last:
+        return False
+    return final_report_due(settings, state, events)
+
+
 def run_obligations(task, settings, *, generation: str) -> dict:
     external = bool(settings.external_harness)
     repo_spec = task.repo_spec() if callable(getattr(task, "repo_spec", None)) else None
@@ -172,6 +184,29 @@ def run_obligations(task, settings, *, generation: str) -> dict:
                 "proof": "idea.hypothesis or link to an existing Card",
                 "enforced": True,
             },
+            "hypothesis_merge": {
+                "required": bool(external and settings.track_hypotheses),
+                "settings": {"track_hypotheses": settings.track_hypotheses},
+                "checkpoint": "before_candidate_when_four_or_more_pure_beliefs_are_open",
+                "proof": "atomic merge receipt or explicit no_merge review of the current board",
+                "enforced": True, "conditional_on": "open pure-belief board size >= 4",
+            },
+            "selection_verifier": {
+                "required": bool(external and settings.select_verifier),
+                "settings": {"select_verifier": settings.select_verifier,
+                             "select_verifier_samples": settings.select_verifier_samples},
+                "checkpoint": "before_next_candidate_when_selector_tie_exists",
+                "proof": "one complete evidence-bound sample set for each reachable tie",
+                "enforced": True,
+            },
+            "value_estimate": {
+                "required": bool(external and settings.mcts_value_weight > 0),
+                "settings": {"policy": settings.policy,
+                             "mcts_value_weight": settings.mcts_value_weight},
+                "checkpoint": "before_next_candidate_when_mcts_value_weight_is_active",
+                "proof": "one headroom judgment per current branch in the bounded batch",
+                "enforced": True,
+            },
             "concept_tags": {
                 "required": concept_tags_required(settings),
                 "settings": {key: getattr(settings, key) for key in
@@ -187,11 +222,30 @@ def run_obligations(task, settings, *, generation: str) -> dict:
                 "proof": "run_concepts command seeds the shared base from measured authored tags",
                 "enforced": True,
             },
+            "coverage_snapshots": {
+                "required": bool(external and (settings.coverage_context or settings.concept_pivot)),
+                "settings": {"coverage_context": settings.coverage_context,
+                             "concept_pivot": settings.concept_pivot,
+                             "concept_retag_every": settings.concept_retag_every},
+                "checkpoint": "configured_creation_cadences",
+                "proof": "LoopLab derives breadth and concept coverage from recorded node outcomes and agent-authored tags",
+                "enforced": True, "owner": "deterministic_harness",
+            },
+            "memory_cadence": {
+                "required": bool(external and settings.reflection_priors and settings.memory_dir
+                                 and settings.lessons_every > 0),
+                "settings": {"reflection_priors": settings.reflection_priors,
+                             "comparative_lessons": settings.comparative_lessons,
+                             "lessons_every": settings.lessons_every},
+                "checkpoint": "before_candidate_at_each_configured_node_window",
+                "proof": "lesson and skill review receipts citing actual writes or explaining no action",
+                "enforced": True,
+            },
             "report": {
                 "required": bool(external and settings.report_every > 0),
                 "settings": {"report_every": settings.report_every},
-                "checkpoint": "run_finish_when_candidates_exist",
-                "proof": "report_generated covering current node count",
+                "checkpoint": "configured_node_interval_and_run_finish",
+                "proof": "report_generated covering current node count and measured outcomes",
                 "enforced": True,
             },
             "stage_check": {

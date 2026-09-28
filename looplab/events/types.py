@@ -327,6 +327,7 @@ EV_SPEC_APPROVED = "spec_approved"
 EV_HYPOTHESIS_ADDED = "hypothesis_added"       # also engine-written after deep research
 EV_HYPOTHESIS_UPDATED = "hypothesis_updated"
 EV_HYPOTHESIS_MERGED = "hypothesis_merged"     # engine-written: fold alias hypotheses into a canonical
+EV_HYPOTHESIS_MERGE_REVIEWED = "hypothesis_merge_reviewed"  # external board review; diagnostic
 # Durable Card ledger — a work-item projection beside the thin hypothesis-direction board. It never
 # directly selects the metric champion; the opt-in Card queue consumes folded `selection_ready` rows to
 # choose candidate actions. Main-task-written; NONE
@@ -1176,6 +1177,7 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_COMMAND_ACK, EV_FINALIZE_STEP, EV_REPORT_REFRESH_STARTED, EV_REPORT_REFRESH_FAILED,
     EV_CONCEPT_LENS_STARTED, EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED,
     EV_TRAIN_MONITOR_ALERT,
+    EV_HYPOTHESIS_MERGE_REVIEWED,
     EV_ASHA_RANK,
     EV_ASHA_VERDICT,
     EV_FORK_UNFULFILLED,
@@ -1781,6 +1783,12 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         required=("aliases", "at_node", "canonical", "statement"),
         optional=(),
     ),
+    "hypothesis_merge_reviewed": PayloadContract(
+        "An external agent reviewed one exact open-belief board for duplicate hypotheses.",
+        required=("action_id", "aliases", "board_sha256", "canonical", "decision",
+                  "reason", "statement"),
+        optional=(),
+    ),
     "hypothesis_ranked": PayloadContract(
         "The board's priority order over the open hypotheses, with confidence.",
         required=(),
@@ -1971,7 +1979,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "node_value_estimated": PayloadContract(
         "How much a model thinks expanding one node's branch still has left, in [0, 1].",
         required=("generation", "node_id", "value"),
-        optional=("attempt", "rationale"),
+        optional=("action_id", "attempt", "rationale", "request_sha256"),
     ),
     "node_verified": PayloadContract(
         "The selection verifier's score for one node, over a named evidence digest.",
@@ -2324,7 +2332,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "verifier_group_scored": PayloadContract(
         "One verifier round over a GROUP of nodes, keyed on the contract and evidence digests.",
         required=("contract", "members", "requested_samples", "v"),
-        optional=(),
+        optional=("action_id", "request_sha256"),
     ),
     "workspace_changed": PayloadContract(
         "The workspace directory differs from the one the run started in.",

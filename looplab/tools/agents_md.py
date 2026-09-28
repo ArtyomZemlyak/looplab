@@ -31,6 +31,17 @@ hypothesis. Novelty, foresight and best-of-N require idea-bound reviews through
 configured breadth exceeds one. Enabled knowledge phases require final
 `/api/runs/{run_id}/harness-reviews` receipts, including justified no-action
 decisions. An enabled report must cover the final candidate count.
+With `report_every`, publish the report at its configured node interval before
+submitting another candidate.
+When four or more pure belief Cards are open, review the board through
+`GET/POST /api/runs/{run_id}/harness-hypotheses` before the next candidate;
+merge genuine duplicates or record `no_merge` with a reason.
+If `select_verifier` yields a tie, GET `/api/runs/{run_id}/harness-selection`
+and POST complete evidence-bound samples to `/harness-selection/verify`.
+When MCTS `value_weight` is active, POST headroom for all listed branches to
+`/harness-selection/values`. With `lessons_every`, review lessons and skills
+at each configured node interval through `harness-reviews`, citing a write or
+explaining why no action applies. These are admission gates when due.
 During command evaluation, poll `GET /api/runs/{run_id}/harness-checkpoints`
 with the current `expected_generation`. A checked or asserted stage waits for
 your verdict before the next stage runs. Enabled live training and ASHA observers

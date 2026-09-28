@@ -20,7 +20,7 @@ import anyio
 import orjson
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import PlainTextResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator
 
 from looplab.core.atomicio import (atomic_write_text, file_identity, same_file_entry,
                                    same_file_kind)
@@ -709,6 +709,58 @@ class ExternalCheckpointAnswer(BaseModel):
     reason: str = Field(min_length=1, max_length=1200)
 
 
+class ExternalHypothesisReview(BaseModel):
+    """Merge live pure beliefs, or record an explicit no-merge review of this board."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    expected_generation: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    expected_board_sha256: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    action_id: str = Field(min_length=1, max_length=160)
+    decision: Literal["merge", "no_merge"]
+    canonical: str = Field(default="", max_length=256)
+    aliases: list[str] = Field(default_factory=list, max_length=32)
+    statement: str = Field(default="", max_length=600)
+    reason: str = Field(min_length=12, max_length=1200)
+
+
+class ExternalVerifierMember(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    node_id: StrictInt = Field(ge=0)
+    generation: StrictInt = Field(ge=0)
+    evidence_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    samples: list[StrictBool] = Field(min_length=1, max_length=32)
+
+
+class ExternalVerifierBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_generation: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    action_id: str = Field(min_length=1, max_length=160)
+    members: list[ExternalVerifierMember] = Field(min_length=2)
+
+
+class ExternalValueMember(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False, str_strip_whitespace=True)
+    node_id: StrictInt = Field(ge=0)
+    generation: StrictInt = Field(ge=0)
+    value: float = Field(ge=0, le=1)
+    rationale: str = Field(min_length=12, max_length=240)
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def _reject_boolean_value(cls, value):
+        if isinstance(value, bool):
+            raise ValueError("headroom must be a number")
+        return value
+
+
+class ExternalValueBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_generation: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    expected_evidence_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+    action_id: str = Field(min_length=1, max_length=160)
+    estimates: list[ExternalValueMember] = Field(min_length=1, max_length=6)
+
+
 class NoveltyPreviewBody(BaseModel):
     """Candidate idea to compare with the current run; this call never admits it."""
 
@@ -992,6 +1044,40 @@ def build_router(srv) -> APIRouter:
         """Answer exactly one checkpoint; the engine applies the verdict before advancing."""
         from looplab.harness.checkpoints import respond
         return respond(srv, _run_dir(run_id), body)
+
+    @router.get("/api/runs/{run_id}/harness-hypotheses")
+    def get_harness_hypotheses(run_id: str, expected_generation: str = Query(...)):
+        """Live pure-belief board and whether configured duplicate review is due."""
+        from looplab.harness.hypotheses import board_status
+        if _RUN_GENERATION_RE.fullmatch(expected_generation) is None:
+            raise HTTPException(400, "expected_generation must be a SHA-256 token")
+        return board_status(_run_dir(run_id), expected_generation)
+
+    @router.post("/api/runs/{run_id}/harness-hypotheses")
+    def review_harness_hypotheses(run_id: str, body: ExternalHypothesisReview):
+        """Record a duplicate review; a merge and its receipt append atomically."""
+        from looplab.harness.hypotheses import review_board
+        return review_board(srv, _run_dir(run_id), body)
+
+    @router.get("/api/runs/{run_id}/harness-selection")
+    def get_harness_selection(run_id: str, expected_generation: str = Query(...)):
+        """Current selector ties and MCTS branches requiring an agent judgment."""
+        from looplab.harness.selection import status
+        if _RUN_GENERATION_RE.fullmatch(expected_generation) is None:
+            raise HTTPException(400, "expected_generation must be a SHA-256 token")
+        return status(_run_dir(run_id), expected_generation)
+
+    @router.post("/api/runs/{run_id}/harness-selection/verify")
+    def verify_harness_selection(run_id: str, body: ExternalVerifierBody):
+        """Score one complete live selector tie against its evidence digests."""
+        from looplab.harness.selection import verify_group
+        return verify_group(srv, _run_dir(run_id), body)
+
+    @router.post("/api/runs/{run_id}/harness-selection/values")
+    def estimate_harness_values(run_id: str, body: ExternalValueBody):
+        """Estimate remaining headroom for the complete live MCTS candidate batch."""
+        from looplab.harness.selection import estimate_values
+        return estimate_values(srv, _run_dir(run_id), body)
 
     @router.post("/api/runs/{run_id}/lessons")
     def publish_external_lesson(run_id: str, body: ExternalLessonBody):
