@@ -8,12 +8,13 @@ import typer
 
 from looplab.cli import app
 from looplab.core.config import DEVELOPER_BACKENDS, Settings
+from looplab.harness.phases import phase_catalog
 
 
 def harness_manifest(*, include_settings: bool = False) -> dict:
     """The versioned, stable entry point; schemas come from their actual owners."""
     result = {
-        "protocol_version": 1,
+        "protocol_version": 2,
         "mode": "external_harness_or_delegated_developer",
         "external_run_mode": {
             "launch": "looplab run CONFIG --out RUN_DIR --backend toy -s external_harness=true",
@@ -24,6 +25,7 @@ def harness_manifest(*, include_settings: bool = False) -> dict:
             "stopping": "Pause or finalize through the durable command API. No automatic proposal or empty-search finalization runs in this mode.",
         },
         "developer_backends": list(DEVELOPER_BACKENDS),
+        "decision_phases": phase_catalog(),
         "node_build": {
             "optional_agent_actions": [
                 {"id": "stages", "purpose": "Declare repeatable prep/train/eval boundaries when needed; omit if the operator already declared stages or the scoring command is monolithic."},

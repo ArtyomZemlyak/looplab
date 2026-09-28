@@ -1133,9 +1133,8 @@ class ResearchCadenceMixin:
         means "nobody counted" rather than "none were skipped". A window that ENDS while converged
         loses only its own tail; every earlier row still carries the rate."""
         from looplab.core.advisory_payloads import (
-            research_claim_ref,
-            research_memo_ref,
             sanitize_research_memo_payload,
+            stamp_research_memo,
         )
         # Verify the same canonical, redacted payload that can be persisted. Otherwise a custom
         # researcher can expose secrets/prompt controls to the verifier and receive a verdict over
@@ -1206,17 +1205,10 @@ class ResearchCadenceMixin:
         # The model, tool ledger, and verifier are all untrusted text producers. This
         # writer-side pass is the invariant: custom researchers cannot bypass redaction, control
         # stripping, list caps, or the aggregate text budget before any durable derivative.
-        memo_d = sanitize_research_memo_payload(memo_d)
-        # Layer 1b Card provenance is reference-only.  Mint the memo id from the FINAL canonical payload
+        # Layer 1b Card provenance is reference-only. Mint the memo id from the FINAL canonical payload
         # (including verification) and bind every retained claim to that exact memo + positional slot.
         # The full bodies stay exclusively on the research timeline; Cards will carry only these ids.
-        memo_id = research_memo_ref(memo_d)
-        if memo_id is not None:
-            memo_d["memo_id"] = memo_id
-            for index, claim in enumerate(memo_d.get("claims", [])):
-                claim_id = research_claim_ref(memo_id, index, claim)
-                if claim_id is not None:
-                    claim["claim_id"] = claim_id
+        memo_d, memo_id = stamp_research_memo(memo_d)
         assert EV_RESEARCH_COMPLETED in BACKGROUND_APPENDABLE   # see the method-level note
         self.store.append(EV_RESEARCH_COMPLETED, {
             "memo": memo_d,

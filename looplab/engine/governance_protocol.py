@@ -209,6 +209,7 @@ def durable_governance_append(path: Path, line: str, *, created: bool,
 def append_governance(path: Path, rec: dict, *, validate: Optional[Callable[[], None]] = None,
                       guard: Optional[Callable[[], None]] = None,
                       read_rows: Optional[Callable[[Path], list[dict]]] = None,
+                      replay_payload: Callable[[dict], Any] = idempotency_payload,
                       expected_revision: Optional[int] = None,
                       global_revision: Optional[Callable[[], int]] = None,
                       expected_global_revision: Optional[int] = None,
@@ -254,7 +255,8 @@ def append_governance(path: Path, rec: dict, *, validate: Optional[Callable[[], 
                 existing_rows = read_jsonl_lenient(path, loads=json.loads, dicts_only=True)
             # Resolve idempotency before CAS/validation. A transport retry carrying the original stale
             # revision must return its first durable receipt, never append again or fail with a conflict.
-            existing, exact = action_replay(existing_rows, rec, action_id)
+            existing, exact = action_replay(existing_rows, rec, action_id,
+                                            payload=replay_payload)
             if existing is not None:
                 if not exact:
                     raise ConceptGovernanceIdempotencyConflict(path, action_id)

@@ -19,6 +19,7 @@ from looplab.events.types import (EV_FORCE_ABLATE, EV_FORK, EV_INJECT_NODE,
 from looplab.serve.control_validation import normalize_control
 from looplab.serve.server import make_app
 from tests.factories import http_run_generation
+from tests.factories import post_command, command_terminal
 from tests.factories import make_engine
 
 
@@ -27,6 +28,46 @@ class NoInternalRole:
 
     def __getattr__(self, name):
         raise AssertionError(f"external run invoked internal role: {name}")
+
+
+@pytest.mark.parametrize("external", [False, True])
+def test_external_research_and_report_use_internal_projections_without_internal_llm(tmp_path, external):
+    from looplab.events.eventstore import EventStore
+    root = tmp_path / "runs"
+    rd = root / "demo"
+    rd.mkdir(parents=True)
+    (rd / "config.snapshot.json").write_text(
+        json.dumps(Settings(backend="toy" if external else "llm",
+                            external_harness=external).model_dump(mode="json")))
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_started", {"run_id": "demo", "task_id": "task", "goal": "g",
+                                 "direction": "min"})
+    client = TestClient(make_app(root))
+    memo = {"summary": "A measured baseline suggests a simpler model.",
+            "open_questions": ["Does regularization improve it?"],
+            "claims": [{"statement": "Baseline is promising", "node_ids": [999]}]}
+    result = post_command(client, "research_completed", {"memo": memo}, key="research-1")
+    assert result.status_code == 200, result.text
+    assert command_terminal(client, result.json())["status"] == "succeeded"
+    assert result.json()["id"] == post_command(
+        client, "research_completed", {"memo": memo}, key="research-1").json()["id"]
+    content = {"headline": "The first batch is ready", "verdict": "More trials needed"}
+    result = post_command(client, "report_generated", {"content": content}, key="report-1")
+    assert result.status_code == 200, result.text
+    assert command_terminal(client, result.json())["status"] == "succeeded"
+    state = fold(store.read_all())
+    assert state.research[-1]["summary"] == memo["summary"]
+    assert state.research[-1]["trigger"] == "external"
+    assert state.research[-1]["verification"]["method"] == "deterministic"
+    assert state.report["headline"] == content["headline"]
+    assert state.report["trigger"] == "external"
+    research_event = next(e for e in store.read_all() if e.type == "research_completed")
+    assert research_event.data["memo_id"] == research_event.data["memo"]["memo_id"]
+    assert research_event.data["served_manual"] is False
+    for event_type, data in (("research_completed", {"memo": {**memo, "verification": {"method": "llm"}}}),
+                             ("report_generated", {"content": {**content, "trigger": "finish"}})):
+        response = post_command(client, event_type, data, key=f"forge-{event_type}")
+        assert response.status_code == 200 and response.json()["status"] == "rejected", response.text
 
 
 def test_external_mode_requires_offline_backend():

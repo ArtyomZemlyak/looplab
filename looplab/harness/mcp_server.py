@@ -13,6 +13,7 @@ from urllib.parse import unquote, urlsplit
 import httpx
 
 from looplab.cli.harness_cmds import harness_manifest
+from looplab.harness.phases import phase_catalog, phase_detail
 
 
 MAX_RESPONSE_BYTES = 256 * 1024
@@ -119,6 +120,34 @@ def build_server(api: HarnessAPI):
     def capabilities() -> dict:
         """Discover LoopLab phases, backend support, limits and control interfaces."""
         return harness_manifest()
+
+    @mcp.tool()
+    def phases(query: str = "") -> list[dict]:
+        """Find standard/external decision phases by name, entity or purpose.
+        Each phase names the built-in owner and the same durable read/write surfaces
+        available to an external agent. A command:TYPE write goes through the
+        generation-fenced /api/runs/{run_id}/commands endpoint."""
+        return phase_catalog(query)
+
+    @mcp.tool()
+    def phase_info(phase_id: str) -> dict:
+        """Read a phase's entity, evidence, output actions and command field contracts."""
+        phase = phase_detail(phase_id)
+        if phase is None:
+            return {"error": "unknown phase", "phase_id": phase_id}
+        from looplab.serve.control_validation import (CONTROL_DATA_FIELDS,
+                                                      CONTROL_SERVER_DERIVED_FIELDS)
+        phase["commands"] = {
+            name: {"request_fields": sorted(CONTROL_DATA_FIELDS[name]),
+                   "server_derived": sorted(CONTROL_SERVER_DERIVED_FIELDS.get(name, ())) }
+            for ref in phase["writes"] if ref.startswith("command:")
+            for name in (ref.removeprefix("command:"),)
+        }
+        if phase_id in ("research", "proposal", "novelty", "implementation"):
+            from looplab.core.models import Idea, ResearchMemo
+            phase["entity_schema"] = (ResearchMemo if phase_id == "research"
+                                      else Idea).model_json_schema()
+        return phase
 
     @mcp.tool()
     def settings_keys(query: str = "") -> dict:

@@ -1,9 +1,9 @@
 """Bounded HTTP surface for Part IV/V cross-run knowledge and operator governance.
 
 Reads expose live, revision-labelled projections plus an opaque identity for the configured portfolio.
-Mutations are explicit, append-only operator actions: every request carries that portfolio identity, a
-stable action id and the exact ledger revision observed by the caller. Agents can ask stewards for proposals,
-but only the typed operator endpoints below may change portfolio meaning.
+Mutations are explicit, append-only owner actions: every request carries that portfolio identity, a
+stable action id and the exact ledger revision observed by the caller. External agents use these same
+typed endpoints via the authenticated MCP adapter; no model output directly edits a ledger.
 """
 from __future__ import annotations
 
@@ -67,6 +67,28 @@ class _GovernedBody(_StrictBody):
     expected_portfolio_id: str = Field(pattern=_PORTFOLIO_ID_PATTERN)
     expected_revision: StrictInt = Field(ge=0)
     action_id: str = Field(min_length=1, max_length=160)
+
+
+class _TaskFacetsSet(_GovernedBody):
+    task_id: str = Field(min_length=1, max_length=500)
+    facets: dict[str, str] = Field(min_length=1, max_length=5)
+
+
+class TaskFacetsResponse(_StrictBody):
+    portfolio_id: str = Field(pattern=_PORTFOLIO_ID_PATTERN)
+    revision: int = Field(ge=0)
+    facets: dict[str, dict[str, str]]
+    total: int = Field(ge=0)
+    offset: int = Field(ge=0)
+    limit: int = Field(ge=1)
+
+
+class TaskFacetsSetResponse(_StrictBody):
+    ok: bool
+    portfolio_id: str = Field(pattern=_PORTFOLIO_ID_PATTERN)
+    revision: int = Field(ge=1)
+    task_id: str
+    facets: dict[str, str]
 
 
 class _ClaimDecision(_GovernedBody):
@@ -814,6 +836,41 @@ def build_router(srv) -> APIRouter:
             "claim_curation_log.jsonl", limit, memory_dir, portfolio_id))
         _assert_portfolio_current(memory_dir, portfolio_id)
         return payload
+
+    @router.get("/api/cross-run/task-facets", response_model=TaskFacetsResponse)
+    def task_facets(offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=200)):
+        """Read strict governed task facets and the revision needed to update them."""
+        from looplab.engine.task_facets import _read_task_facet_rows
+        memory_dir, portfolio_id = _portfolio()
+        try:
+            rows = _read_task_facet_rows(Path(memory_dir) / "task_facets.jsonl")
+        except Exception as exc:  # noqa: BLE001 - the shared governance error contract
+            _raise_governance_error(exc)
+        _assert_portfolio_current(memory_dir, portfolio_id)
+        current = {row["task_id"]: row["facets"] for row in rows}
+        selected = sorted(current)[offset:offset + limit]
+        return {"portfolio_id": portfolio_id, "revision": max(
+            [len(rows), *(row.get("revision", 0) for row in rows)], default=0),
+            "facets": {tid: current[tid] for tid in selected},
+            "total": len(current), "offset": offset, "limit": limit}
+
+    @router.post("/api/cross-run/task-facets", response_model=TaskFacetsSetResponse)
+    def task_facets_set(body: _TaskFacetsSet):
+        """Record an agent-authored facet decision using the existing strict ledger."""
+        from looplab.engine.task_facets import FACET_AXES, record_task_facets
+        if set(body.facets) - set(FACET_AXES):
+            raise HTTPException(422, "unknown task facet axis")
+        memory_dir, portfolio_id = _portfolio(body.expected_portfolio_id)
+        try:
+            row = record_task_facets(
+                memory_dir, task_id=body.task_id, facets=body.facets, by=_actor(),
+                at=_timestamp(), expected_revision=body.expected_revision,
+                action_id=body.action_id)
+        except Exception as exc:  # noqa: BLE001 - strict ledger errors become HTTP receipts
+            _raise_governance_error(exc)
+        return {"ok": True, "portfolio_id": portfolio_id,
+                "revision": row["revision"], "facets": row["facets"],
+                "task_id": row["task_id"]}
 
     def _steward_client():
         try:

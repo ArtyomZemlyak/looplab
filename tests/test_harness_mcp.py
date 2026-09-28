@@ -11,7 +11,7 @@ def test_mcp_advertises_run_controls_and_full_settings_discovery():
     api = HarnessAPI("http://127.0.0.1:8765", transport=httpx.MockTransport(
         lambda request: pytest.fail("listing local tools contacted the UI")))
     tools = anyio.run(build_server(api).list_tools)
-    assert {"capabilities", "settings_keys", "setting_info", "operations",
+    assert {"capabilities", "phases", "phase_info", "settings_keys", "setting_info", "operations",
             "operation_schema", "api_request"} == {tool.name for tool in tools}
 
 

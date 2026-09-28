@@ -20,3 +20,10 @@ ready-made candidates using durable `inject_node` commands, then inspect measure
 evidence before the next decision. Pause or finalize explicitly. The old
 `developer_backend=codex|claude` mode delegates only candidate editing and keeps
 LoopLab's internal Researcher/search roles.
+
+Search MCP `phases` for the relevant entity before each decision. It lists the
+same domain writes used by the built-in roles; `phase_info` shows what to read and
+which commands to submit. Research memos use `research_completed`, reports use
+`report_generated`, and hypotheses, Cards and concepts have their own controls.
+When the evidence supports a reusable conclusion, publish it through `/lessons`
+with terminal node IDs; never include a claimed score in place of evaluation.

@@ -10,7 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-135 routes on 121 paths; 10 deprecated; 25 with a declared response model.
+137 routes on 122 paths; 10 deprecated; 27 with a declared response model.
 
 ### `/api`
 
@@ -75,6 +75,8 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `POST` | `/api/cross-run/concept-split-clear` | Undo the active split while preserving the append-only history. | `ConceptSplitResponse` |  |
 | `POST` | `/api/cross-run/concept-steward` | Run a proposal-only taxonomy review; typed operator actions apply selected proposals. | `StewardProposalResponse` |  |
 | `GET` | `/api/cross-run/curation-log` | *Curation Log* (no docstring) | `CurationLogResponse` |  |
+| `GET` | `/api/cross-run/task-facets` | Read strict governed task facets and the revision needed to update them. | `TaskFacetsResponse` |  |
+| `POST` | `/api/cross-run/task-facets` | Record an agent-authored facet decision using the existing strict ledger. | `TaskFacetsSetResponse` |  |
 
 ### `/api/genesis`
 

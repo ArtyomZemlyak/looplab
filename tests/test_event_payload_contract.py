@@ -385,7 +385,7 @@ def test_control_event_payloads_stay_inside_their_allow_list():
     declared here — less the fields the normalizer CONSUMES, which must not be — and nothing may
     be `required` that the intake does not accept."""
     pytest.importorskip("fastapi")
-    from looplab.serve.control_validation import CONTROL_SPECS
+    from looplab.serve.control_validation import CONTROL_SPECS, CONTROL_SERVER_DERIVED_FIELDS
 
     consumed_by_type = _consumed_request_fields()
     assert set(consumed_by_type) <= set(CONTROL_SPECS)
@@ -401,9 +401,11 @@ def test_control_event_payloads_stay_inside_their_allow_list():
         assert not (consumed & contract.keys), (
             f"{etype}: declares request field(s) its normalizer consumes and never stores: "
             f"{sorted(consumed & contract.keys)}")
-        assert set(contract.required) <= set(spec.data_fields), (
-            f"{etype}: `required` names a key the control intake never accepts: "
-            f"{sorted(set(contract.required) - set(spec.data_fields))}")
+        derived = CONTROL_SERVER_DERIVED_FIELDS.get(etype, frozenset())
+        assert derived <= set(contract.required) and not (derived & spec.data_fields)
+        assert set(contract.required) <= set(spec.data_fields) | derived, (
+            f"{etype}: `required` names neither a request nor a server-derived field: "
+            f"{sorted(set(contract.required) - set(spec.data_fields) - derived)}")
 
 
 def test_a_real_comment_log_stripped_to_the_contract_keeps_every_comment(tmp_path):

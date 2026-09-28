@@ -17,6 +17,8 @@ def generate_agents_md(task, *, runtime_caps: str | None = None,
 This run waits for an external agent. Inspect its live state/config and the evaluation
 contract through `looplab harness-mcp`. Choose whether proposing, stages and a plan
 are useful; submit ready-made code/files through the durable `inject_node` command.
+Use MCP `phases` and `phase_info` to inspect every decision's entity, evidence,
+prompt keys, accepted command fields and corresponding built-in owner.
 After LoopLab measures a candidate, inspect its metric or failure before branching,
 repairing as a new child candidate, or finalizing. Respect the edit surface and
 protected scorer; no internal Researcher/Developer will complete a code-less idea.
@@ -25,11 +27,14 @@ You own novelty and knowledge decisions. Preview an idea with
 and `/api/cross-run/claims`, then choose whether the experiment merits evaluation.
 Write evidence-linked lessons with `POST /api/runs/{run_id}/lessons` and a stable
 `action_id`; LoopLab stamps the run/task identity and node outcome signatures.
+Author a `research_completed` memo or `report_generated` report through the same
+durable command API; LoopLab sanitizes and folds them into its normal projections.
 Author concept tags in the injected idea or use `concept_tag_edited` and
 `run_concepts` commands. Review `/api/runs/{run_id}/concepts` and
 `/api/cross-run/concept-policy` before applying a governed cross-run
 `concept-merge`, split, purge or alias-clear. No internal model will perform
 reflection, taxonomy stewardship or automatic concept ratification in this mode.
+Cross-run task facets have a revision-fenced `/api/cross-run/task-facets` ledger.
 """
     if repo_task:
         # A repository task owns its evaluation environment: it may install declared requirements,

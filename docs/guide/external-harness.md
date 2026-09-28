@@ -38,8 +38,8 @@ Keep that run process open while the coding agent sends commands from another te
 
 Configure your coding agent's MCP client to launch `looplab harness-mcp` over stdio,
 with `LOOPLAB_UI_TOKEN` and, if the server is elsewhere,
-`LOOPLAB_HARNESS_URL=http://127.0.0.1:8765`. The process offers six tools:
-`capabilities`, `settings_keys`, `setting_info`, `operations`,
+`LOOPLAB_HARNESS_URL=http://127.0.0.1:8765`. The process offers eight tools:
+`capabilities`, `phases`, `phase_info`, `settings_keys`, `setting_info`, `operations`,
 `operation_schema` and `api_request`. The latter
 forwards to the same authenticated HTTP API as the UI. It never writes directly to
 the event log. Use the live `operations` catalog to discover read, settings,
@@ -47,6 +47,18 @@ task, evidence, artifact and control routes, and `operation_schema` for a route'
 OpenAPI definition. `settings_keys` and `setting_info` expose all Settings, including
 advanced fields omitted from the UI form. `looplab harness --settings` returns the full Settings schema
 and curated field help without a server.
+
+`phases` is the workflow index for both modes. Each entry names the entity, the
+built-in owner, the evidence to read, the external actions that write the same
+domain state, and any PromptStore keys. `phase_info("research")`, for example,
+includes the `ResearchMemo` schema and the accepted/server-derived fields of
+`command:research_completed`. A `command:TYPE` action
+means a durable `POST /api/runs/{run_id}/commands` with `type: TYPE`, `data`,
+`expected_generation` from `/state`, and a fresh `Idempotency-Key`. Search
+`operations` for each HTTP path and read `operation_schema` before submitting.
+The catalog covers Genesis, onboarding, research, hypotheses and Cards, proposal,
+novelty, ranking, strategy, stages, implementation, repair, live monitoring,
+evaluation, concepts, claims, lessons, reports, and the pilot's next action.
 
 For Codex, add this to your project `.codex/config.toml` (or the user config):
 
@@ -94,11 +106,29 @@ The normal control cycle is:
    stage logs and failures. Submit another ready-made candidate if a repair or a
    different idea is useful. The metric is measured by LoopLab's evaluator; never
    submit a claimed score as evidence.
-5. Pause or finalize the run through the same command API. Resume from the durable
+5. Publish a research memo, hypothesis, lesson or report when the evidence warrants it.
+   These are separate durable decisions; no particular number of stages is required.
+6. Pause or finalize the run through the same command API. Resume from the durable
    state after a client restart. A run does not finish merely because the external
    agent has no immediate action.
 
 ## Novelty and cross-run knowledge
+
+A deep-research memo can be authored with `type: research_completed` and
+`data: {"memo": {"summary": "...", "findings": [...], "open_questions": [...],
+"next_experiments": [...]}}`. It enters the regular `RunState.research` projection,
+so subsequent readers see it as they see a built-in research memo. The server
+stamps the node count and external trigger, sanitizes the memo, computes its
+identity, and runs deterministic verification over its cited claims. An
+external agent cannot claim a model-verifier verdict or mark a manual internal
+research request served. Use `hypothesis_added` and `hypothesis_updated` commands
+for standalone board decisions, and the Card controls for prioritization.
+
+An authored run report uses `type: report_generated` and
+`data: {"content": {"headline": "...", "verdict": "..."}}`; the same
+projection and publication sequence as an internal report serve it. These
+commands are valid in normal runs too, so a human or external collaborator can
+add evidence while built-in roles continue their work.
 
 The agent can call `POST /api/runs/{run_id}/novelty-preview` with
 `expected_generation` and an `idea` before submitting a candidate. It returns
@@ -132,6 +162,14 @@ produces deterministic case and concept-capsule projections from measured,
 authored evidence at run end; it does not call its internal concept or claim
 stewards or automatically ratify concept merges in external mode. Use
 `operations` and `operation_schema` to get each route's live request shape.
+
+For cross-run task facets, read `GET /api/cross-run/task-facets` for the current
+portfolio identity and ledger revision, then send `POST` to the same path with
+`task_id`, a non-empty `facets` object, `expected_portfolio_id`,
+`expected_revision` and a stable `action_id`. The writer uses the same strict
+append-only ledger as `looplab task-facets-set`. An identical retry returns the
+first record even after its revision advanced; a stale or conflicting write is
+refused.
 
 The API rejects `fork`, `force_ablate`, `deep_research`, code-less `inject_node`
 and `node_reset` from `propose` or `implement` in external mode: those commands

@@ -306,6 +306,23 @@ def research_claim_ref(memo_id: str, index: int, claim) -> str | None:
         "claim", {"memo_id": memo_id, "index": index, "claim": bounded})
 
 
+def stamp_research_memo(payload) -> tuple[dict, str | None]:
+    """The common final write boundary for built-in and externally authored memos.
+
+    Verification is already attached by the caller; sanitize before minting the
+    identity, then bind each retained claim to that exact persisted version.
+    """
+    memo = sanitize_research_memo_payload(payload)
+    memo_id = research_memo_ref(memo)
+    if memo_id is not None:
+        memo["memo_id"] = memo_id
+        for index, claim in enumerate(memo.get("claims", [])):
+            claim_id = research_claim_ref(memo_id, index, claim)
+            if claim_id is not None:
+                claim["claim_id"] = claim_id
+    return memo, memo_id
+
+
 def research_lesson_ref(lesson, evidence_refs) -> str | None:
     """Stable id for a distilled lesson bound to the exact cited node lifecycles."""
     if not isinstance(lesson, dict) or not isinstance(evidence_refs, list) or len(evidence_refs) > 64:

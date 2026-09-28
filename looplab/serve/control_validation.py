@@ -64,7 +64,7 @@ from looplab.events.types import (
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
     EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_NODE_ABORT, EV_NODE_RESET, EV_PAUSE, EV_PROMOTE,
     EV_RESTART, EV_RESUME, EV_RUN_ABORT, EV_RUN_CONCEPTS, EV_RUN_REOPENED, EV_SET_STRATEGY,
-    EV_SPEC_APPROVED)
+    EV_SPEC_APPROVED, EV_RESEARCH_COMPLETED, EV_REPORT_GENERATED)
 from looplab.serve.engine_proc import _resolve_task_file
 # `EnginePolicy` is DEFINED in `serve/protocol.py` (2026-09-26) and imported here as the same class:
 # its values are persisted on every durable command record (`engine_policy`), and `looplab stop
@@ -1124,6 +1124,57 @@ def _normalize_hypothesis_updated(ctx: _ControlIntake) -> dict:
     return data
 
 
+def _normalize_research_completed(ctx: _ControlIntake) -> dict:
+    """Author a memo through the same sanitized projection as the built-in researcher.
+
+    IDs, verification, trigger and node count are server-derived. A memo cannot self-certify
+    its claims or pretend to be a paid internal research attempt.
+    """
+    from looplab.core.advisory_payloads import (
+        sanitize_research_memo_payload, stamp_research_memo)
+    from looplab.core.models import ResearchMemo
+    from looplab.trust.memo_verify import verify_memo
+
+    raw = ctx.data.get("memo")
+    if not isinstance(raw, dict):
+        raise HTTPException(400, "research_completed.memo must be an object")
+    allowed = set(ResearchMemo.model_fields) - {"at_node", "trigger", "claims_receipt"}
+    unknown = set(raw) - allowed
+    if unknown:
+        raise HTTPException(400, f"research_completed.memo has unknown field(s): {', '.join(sorted(unknown))}")
+    if not any(raw.get(key) for key in ("summary", "findings", "claims", "open_questions",
+                                        "next_experiments", "recommended_directions")):
+        raise HTTPException(400, "research_completed.memo needs a conclusion or direction")
+    state = ctx.state()
+    at_node = len(state.nodes)
+    memo = sanitize_research_memo_payload({**raw, "at_node": at_node, "trigger": "external"})
+    if memo.get("claims"):
+        verdict = verify_memo(memo, state, client=None)
+        if verdict is not None:
+            memo["verification"] = verdict
+    memo, memo_id = stamp_research_memo(memo)
+    return {"memo": memo, "at_node": at_node, "trigger": "external", "served_manual": False,
+            **({"memo_id": memo_id} if memo_id else {})}
+
+
+def _normalize_report_generated(ctx: _ControlIntake) -> dict:
+    from looplab.core.advisory_payloads import sanitize_report_payload
+
+    raw = ctx.data.get("content")
+    if not isinstance(raw, dict):
+        raise HTTPException(400, "report_generated.content must be an object")
+    allowed = set(sanitize_report_payload({})) - {"at_node", "trigger"}
+    unknown = set(raw) - allowed
+    if unknown:
+        raise HTTPException(400, f"report_generated.content has unknown field(s): {', '.join(sorted(unknown))}")
+    if not any(raw.get(key) for key in ("headline", "summary", "verdict", "champion_summary")):
+        raise HTTPException(400, "report_generated.content needs a narrative")
+    at_node = len(ctx.state().nodes)
+    return {"content": sanitize_report_payload({**raw, "at_node": at_node,
+                                                "trigger": "external"}),
+            "at_node": at_node, "trigger": "external"}
+
+
 # ------------------------------------------------------------------ collaboration normalizers
 
 def _normalize_comment_created(ctx: _ControlIntake) -> dict:
@@ -1696,6 +1747,8 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
         "forked_from",
         "source_run", "source_node"}),
     EV_DEEP_RESEARCH: frozenset(),
+    EV_RESEARCH_COMPLETED: frozenset({"memo"}),
+    EV_REPORT_GENERATED: frozenset({"content"}),
     EV_APPROVAL_GRANTED: frozenset({"node_id", "generation"}),
     EV_SPEC_APPROVED: frozenset(),
     EV_ANNOTATION: frozenset({"node_id", "text"}),
@@ -1718,6 +1771,13 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
     EV_CARD_REOPENED: frozenset({"id", "reason"}),
 }
 assert set(CONTROL_DATA_FIELDS) == set(CONTROL_EVENTS), "every control event needs a data allowlist"
+# These keys are required on the EVENT but deliberately absent from the REQUEST. The command
+# normalizers derive them from the folded run; accepting them from an agent would let it forge
+# a paid internal research attempt or a report's publication trigger.
+CONTROL_SERVER_DERIVED_FIELDS: dict[str, frozenset[str]] = {
+    EV_RESEARCH_COMPLETED: frozenset({"at_node", "served_manual", "trigger"}),
+    EV_REPORT_GENERATED: frozenset({"at_node", "trigger"}),
+}
 assert _INJECT_IMPORT_FIELDS <= CONTROL_DATA_FIELDS[EV_INJECT_NODE], (
     "the cross-run import fields must be accepted by inject_node's payload allowlist")
 
@@ -1740,6 +1800,8 @@ _CONTROL_NORMALIZERS: dict[str, Optional[Callable]] = {
     EV_FORK: _normalize_fork,
     EV_INJECT_NODE: _normalize_inject_node,
     EV_DEEP_RESEARCH: None,
+    EV_RESEARCH_COMPLETED: _normalize_research_completed,
+    EV_REPORT_GENERATED: _normalize_report_generated,
     EV_APPROVAL_GRANTED: _normalize_approval_granted,
     EV_SPEC_APPROVED: _normalize_spec_approved,
     EV_ANNOTATION: _normalize_annotation,
@@ -1780,6 +1842,8 @@ _CONTROL_PRECONDITIONS: dict[str, Optional[Callable]] = {
     EV_FORK: None,
     EV_INJECT_NODE: None,
     EV_DEEP_RESEARCH: None,
+    EV_RESEARCH_COMPLETED: None,
+    EV_REPORT_GENERATED: None,
     EV_APPROVAL_GRANTED: None,
     EV_SPEC_APPROVED: None,
     EV_ANNOTATION: None,
@@ -1821,6 +1885,8 @@ _CONTROL_DECISIONS: dict[str, Optional[Callable]] = {
     EV_FORK: None,
     EV_INJECT_NODE: None,
     EV_DEEP_RESEARCH: None,
+    EV_RESEARCH_COMPLETED: None,
+    EV_REPORT_GENERATED: None,
     EV_APPROVAL_GRANTED: _decide_approval_granted,
     EV_SPEC_APPROVED: _decide_spec_approved,
     EV_ANNOTATION: None,
@@ -1877,6 +1943,8 @@ _CONTROL_POLICIES: dict[str, tuple[EnginePolicy, str]] = {
     EV_FORK: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
     EV_INJECT_NODE: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
     EV_DEEP_RESEARCH: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
+    EV_RESEARCH_COMPLETED: (EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_REPORT_GENERATED: (EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_APPROVAL_GRANTED: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
     EV_SPEC_APPROVED: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
     EV_ANNOTATION: (EnginePolicy.NO_SPAWN, "folded_intent"),
