@@ -63,6 +63,25 @@ turned into an optional suggestion. The catalog covers Genesis, onboarding, rese
 novelty, ranking, strategy, stages, implementation, repair, live monitoring,
 evaluation, concepts, claims, lessons, reports, and the pilot's next action.
 
+Read `GET /api/runs/{run_id}/harness-progress?expected_generation=TOKEN` for
+the current expansion and finish gates, required concept/hypothesis fields,
+pending evaluation questions and paginated histories of decision, knowledge
+review and checkpoint receipts. The token comes from `/state`. Its `event_seq`
+identifies the measured event prefix; refresh after any event or response. The
+three histories live in independent JSONL journals, so `source_health` reports
+damaged rows and `complete=false` means an absent receipt cannot be taken as
+proof that no action occurred. `file_present=false` is normal for a fresh run;
+this view cannot detect deletion of an entire journal that had already been
+written. Older receipts stay visible as `superseded` when
+node count or measured evidence changes. A decision marked
+`current_evidence_for_idea` remains valid only for its original Idea (and for
+candidate ranking, its exact implementation); this view cannot preapprove a
+different candidate. The event timeline is the separate source for commands,
+node lifecycle, research, concepts, reports, selection and measured outcomes.
+Unsubmitted private agent planning cannot be reconstructed; publish material
+choices through the appropriate domain action. In the UI, open **Progress →
+Agent cycle** to inspect this view and its source health.
+
 For Codex, add this to your project `.codex/config.toml` (or the user config):
 
 ```toml
@@ -93,7 +112,8 @@ without putting the token value in the file:
 
 The normal control cycle is:
 
-1. Read `/api/runs/{run_id}/state`, task, config and relevant events/artifacts.
+1. Read `/api/runs/{run_id}/state`, task, config, `harness-contract`,
+   `harness-progress` and relevant events/artifacts.
    Search `operations` for the exact read routes. Review the goal, evaluation
    command, allowed edit paths, parent generations, budget and prior results.
 2. Decide whether a proposal, stage split and plan help. The operator's declared

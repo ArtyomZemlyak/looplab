@@ -20,6 +20,11 @@ are useful; submit ready-made code/files through the durable `inject_node` comma
 Use MCP `phases` and `phase_info` to inspect every decision's entity, evidence,
 prompt keys, accepted command fields and corresponding built-in owner.
 Read `/api/runs/{run_id}/harness-contract` for this run's actual obligations.
+Read `/api/runs/{run_id}/harness-progress?expected_generation=TOKEN` after each
+measurement, response or restart. It shows current gates, pending questions,
+and paged decisions, knowledge reviews and answered checks. Inspect
+`source_health` before treating an incomplete journal as proof of absence.
+The event timeline records commands and measured outcomes separately.
 Follow enabled run settings: a concept workflow requires effective concepts
 on every candidate, checked on admission. Other phases may be skipped only
 when the run contract and operator settings permit it.

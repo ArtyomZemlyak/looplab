@@ -30,7 +30,7 @@ class Phase:
         row = asdict(self)
         for key in ("reads", "writes", "prompts"):
             row[key] = list(row[key])
-        row["obligation"] = "see GET /api/runs/{run_id}/harness-contract"
+        row["obligation"] = "see GET /api/runs/{run_id}/harness-contract and /harness-progress"
         return row
 
 

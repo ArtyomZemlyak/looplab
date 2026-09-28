@@ -22,7 +22,13 @@ evidence before the next decision. Pause or finalize explicitly. The old
 LoopLab's internal Researcher/search roles.
 
 Read `GET /api/runs/{run_id}/harness-contract` before proposing. Enabled
-settings impose obligations on the external agent. In particular, when
+settings impose obligations on the external agent. For a live run, also read
+`GET /api/runs/{run_id}/harness-progress`
+with `expected_generation` from `/state`: it lists current admission and finish
+requirements, pending evaluation questions, and paged decision/review/checkpoint
+history. Refresh after events or responses; inspect `source_health` if a journal
+is incomplete. Commands and measured results remain in the event timeline.
+In particular, when
 `concept_pivot`, `concept_run_base`, or `cross_run_concepts` is enabled, every
 candidate must carry nonempty effective concept tags; the server rejects an
 unannotated candidate. A phase is skippable only when its effective run policy

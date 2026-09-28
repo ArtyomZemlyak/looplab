@@ -1028,6 +1028,21 @@ def build_router(srv) -> APIRouter:
             raise refusal("config_snapshot_unreadable") from exc
         return run_obligations(task, settings, generation=generation)
 
+    @router.get("/api/runs/{run_id}/harness-progress")
+    def get_harness_progress(run_id: str, expected_generation: str = Query(...),
+                             offset: int = Query(0, ge=0, le=1_000_000),
+                             limit: int = Query(20, ge=1, le=100)):
+        """Live external obligations, pending questions and paged decision histories.
+
+        The three sidecar histories are independent durable sources. Each has
+        its own total and source-health receipt; the event_seq identifies the
+        measured prefix used to mark old reviews as superseded.
+        """
+        from looplab.harness.progress import snapshot
+        if _RUN_GENERATION_RE.fullmatch(expected_generation) is None:
+            raise HTTPException(400, "expected_generation must be a SHA-256 token")
+        return snapshot(_run_dir(run_id), expected_generation, offset=offset, limit=limit)
+
     @router.get("/api/runs/{run_id}/harness-checkpoints")
     def get_harness_checkpoints(run_id: str, expected_generation: str = Query(...)):
         """Pending mandatory stage checks and live training/rank observations."""

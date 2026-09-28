@@ -11,7 +11,7 @@ export const RUN_ROUTE_TABS = ['Overview', 'Comments', 'Trials', 'Trace', 'Code'
 // `forkFromSeqModel.js::forkGestureAccess`. It is deliberately NOT in `REVIEW_SAFE_PANEL_NAMES`
 // below: branching steers the run, which no review capability grants.
 export const RUN_ROUTE_PANELS = [
-  'overview', 'queue', 'research', 'failures', 'trust', 'pareto', 'data',
+  'overview', 'queue', 'research', 'agent', 'failures', 'trust', 'pareto', 'data',
   'compare', 'sensitivity', 'importance', 'crossrun', 'artifacts', 'registry', 'memory',
   'collab', 'authoring', 'events', 'gpu', 'config', 'fork',
 ]

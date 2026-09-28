@@ -118,6 +118,7 @@ const OverviewPanel = lazyNamed(loadPanels, 'OverviewPanel')
 const ResearchPanel = lazyNamed(loadPanels, 'ResearchPanel')
 const ArtifactsPanel = lazyNamed(loadPanels, 'ArtifactsPanel')
 const QueuePanel = lazyNamed(loadPanels, 'QueuePanel')
+const HarnessProgressPanel = lazyNamed(loadPanels, 'HarnessProgressPanel')
 
 // The panel bar, grouped by importance then process order (Report is the [Search|Report] toggle, and
 // the deep-research/policy/strategist "why" cards now live in the chat — so those panels are gone).
@@ -154,7 +155,7 @@ const QueuePanel = lazyNamed(loadPanels, 'QueuePanel')
 // `?panel=hypotheses` links still work — `runRouteState.js::LEGACY_PANEL_VIEWS` migrates them to
 // `?view=cards` rather than reporting an unknown panel.
 const HUBS = [
-  ['Progress', [['queue', 'Queue'], ['research', 'Research'], ['failures', 'Failures']]],
+  ['Progress', [['queue', 'Queue'], ['research', 'Research'], ['agent', 'Agent cycle'], ['failures', 'Failures']]],
   ['Trust', [['trust', 'Trust'], ['pareto', 'Pareto / diversity'], ['data', 'Data quality']]],
   ['Analysis', [['compare', 'Compare'], ['sensitivity', 'Sensitivity'], ['importance', 'Importance'], ['crossrun', 'Cross-run']]],
   ['Lab', [['artifacts', 'Files'], ['registry', 'Registry'], ['collab', 'Comments & sharing'], ['events', 'Events']]],
@@ -2474,7 +2475,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                   onBlur={event => {
                     if (event.relatedTarget !== hubTriggerRef.current && !event.currentTarget.contains(event.relatedTarget)) closeHub(false)
                   }}>
-                  {items.map(([k, l]) => <button type="button" role="menuitem" tabIndex={-1}
+                  {items.filter(([k]) => k !== 'agent' || configResource.data?.external_harness === true)
+                    .map(([k, l]) => <button type="button" role="menuitem" tabIndex={-1}
                     key={k} className={'mi' + (panel === k ? ' on' : '')}
                     disabled={!panelAllowed(k)}
                     title={!panelAllowed(k)
@@ -2790,6 +2792,10 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         onSelectEvidence={selectEvidenceFromPanel} />}
       {panel === 'trust' && panelAllowed('trust') && <TrustPanel state={state} runId={runId} onSelect={selectNodeFromPanel} onToast={showToast} onClose={closePanel} readOnly={mutationReadOnlyMode} />}
       {panel === 'queue' && panelAllowed('queue') && <QueuePanel state={state} runId={runId} onSelect={selectNodeFromPanel} onToast={showToast} onClose={closePanel} />}
+      {panel === 'agent' && panelAllowed('agent') && <HarnessProgressPanel runId={runId}
+        expectedGeneration={generation} externalMode={configResource.data?.external_harness}
+        configStatus={configResource.status} onOpenEvents={() => setPanel('events')}
+        onClose={closePanel} />}
       {panel === 'sensitivity' && panelAllowed('sensitivity') && <SensitivityPanel state={state} onSelect={selectNodeFromPanel} onClose={closePanel} />}
       {panel === 'importance' && panelAllowed('importance') && <HyperImportancePanel state={state} onClose={closePanel} />}
       {panel === 'failures' && panelAllowed('failures') && <FailuresPanel state={state} onSelect={selectNodeFromPanel} onClose={closePanel} />}

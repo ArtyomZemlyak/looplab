@@ -10,7 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-141 routes on 126 paths; 10 deprecated; 27 with a declared response model.
+149 routes on 132 paths; 10 deprecated; 27 with a declared response model.
 
 ### `/api`
 
@@ -180,16 +180,17 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `POST` | `/api/runs/{run_id}/deletions` | Delete one exact run generation through an operation-bound durable transaction. | — |  |
 | `GET` | `/api/runs/{run_id}/deletions/{operation_id}` | *Observe Run Deletion* (no docstring) | — |  |
 | `GET` | `/api/runs/{run_id}/events` | Stream canonical public state frames — a full `state` frame first, then `state_delta` | — |  |
+| `GET` | `/api/runs/{run_id}/harness-checkpoints` | Pending mandatory stage checks and live training/rank observations. | — |  |
+| `POST` | `/api/runs/{run_id}/harness-checkpoints` | Answer exactly one checkpoint; the engine applies the verdict before advancing. | — |  |
 | `GET` | `/api/runs/{run_id}/harness-contract` | Effective choices and enforced task constraints for this run incarnation. | — |  |
-| `GET` | `/api/runs/{run_id}/harness-hypotheses` | Open pure-belief board and whether duplicate review is due. | — |  |
-| `POST` | `/api/runs/{run_id}/harness-hypotheses` | Atomically merge live aliases or record a justified no-merge review. | — |  |
-| `GET` | `/api/runs/{run_id}/harness-selection` | Evidence-bound selector ties and current MCTS value candidates. | — |  |
-| `POST` | `/api/runs/{run_id}/harness-selection/verify` | Submit complete tie judgments and derive verifier scores. | — |  |
-| `POST` | `/api/runs/{run_id}/harness-selection/values` | Submit complete current branch headroom estimates. | — |  |
-| `GET` | `/api/runs/{run_id}/harness-checkpoints` | Pending external stage checks and live observations, fenced by `expected_generation`. | — |  |
-| `POST` | `/api/runs/{run_id}/harness-checkpoints` | Answer a live evaluation checkpoint before stage advancement or terminal settlement. | — |  |
 | `POST` | `/api/runs/{run_id}/harness-decisions` | Record a reviewed choice for an enabled phase, bound to the submitted idea. | — |  |
+| `GET` | `/api/runs/{run_id}/harness-hypotheses` | Live pure-belief board and whether configured duplicate review is due. | — |  |
+| `POST` | `/api/runs/{run_id}/harness-hypotheses` | Record a duplicate review; a merge and its receipt append atomically. | — |  |
+| `GET` | `/api/runs/{run_id}/harness-progress` | Live external obligations, pending questions and paged decision histories. | — |  |
 | `POST` | `/api/runs/{run_id}/harness-reviews` | Record a configured end-of-run review, including a reason for no action. | — |  |
+| `GET` | `/api/runs/{run_id}/harness-selection` | Current selector ties and MCTS branches requiring an agent judgment. | — |  |
+| `POST` | `/api/runs/{run_id}/harness-selection/values` | Estimate remaining headroom for the complete live MCTS candidate batch. | — |  |
+| `POST` | `/api/runs/{run_id}/harness-selection/verify` | Score one complete live selector tie against its evidence digests. | — |  |
 | `POST` | `/api/runs/{run_id}/lessons` | Record an external agent's evidence-linked cross-run lesson idempotently. | — |  |
 | `GET` | `/api/runs/{run_id}/lifecycle` | Bounded identity/liveness probe used after a terminal SSE stream closes. | — |  |
 | `GET` | `/api/runs/{run_id}/log` | Raw event envelopes (for the activity feed + event/span explorer). `since` = exclusive | — | yes |
