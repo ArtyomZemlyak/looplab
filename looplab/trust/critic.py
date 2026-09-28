@@ -151,30 +151,104 @@ def _serialized_literal_score(code: str, metric_key: str) -> bool:
         tree = ast.parse(code)
     except (SyntaxError, ValueError):
         return False
+
+    def literal_dict(payload: ast.AST) -> bool:
+        return isinstance(payload, ast.Dict) and any(
+            isinstance(key, ast.Constant) and key.value == metric_key
+            and _numeric_literal(value)
+            for key, value in zip(payload.keys, payload.values))
+
+    def dump_call(call: ast.AST) -> bool:
+        return (isinstance(call, ast.Call) and bool(call.args)
+                and getattr(call.func, "id", getattr(call.func, "attr", None)) == "dumps")
+
+    def literal_dump(call: ast.AST) -> bool:
+        return dump_call(call) and literal_dict(call.args[0])
+
+    def output_call(call: ast.AST) -> bool:
+        if not isinstance(call, ast.Call):
+            return False
+        func = call.func
+        return ((isinstance(func, ast.Name) and func.id == "print")
+                or (isinstance(func, ast.Attribute) and func.attr == "write"
+                    and isinstance(func.value, ast.Attribute)
+                    and func.value.attr == "stdout"
+                    and isinstance(func.value.value, ast.Name)
+                    and func.value.value.id == "sys"))
+
+    def metric_writes(target: ast.AST) -> set[str]:
+        if isinstance(target, ast.Name):
+            return {target.id}
+        if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
+            if isinstance(target.slice, ast.Constant) and target.slice.value != metric_key:
+                return set()
+            return {target.value.id}
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return set().union(*(metric_writes(item) for item in target.elts))
+        return set()
+
     for emitted in ast.walk(tree):
-        if not isinstance(emitted, ast.Call):
+        if output_call(emitted) and any(
+            literal_dump(call) for argument in emitted.args for call in ast.walk(argument)):
+            return True
+
+    # Follow only an unmodified local binding in the same statement block. This
+    # catches `payload = json.dumps({...}); print(payload)` without treating an
+    # unused debug payload or a later computed overwrite as a reported score.
+    for owner in ast.walk(tree):
+        if not isinstance(owner, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.If, ast.For, ast.AsyncFor, ast.While,
+                                  ast.With, ast.AsyncWith, ast.Try, ast.ExceptHandler)):
             continue
-        func = emitted.func
-        is_print = isinstance(func, ast.Name) and func.id == "print"
-        is_stdout_write = (isinstance(func, ast.Attribute) and func.attr == "write"
-                           and isinstance(func.value, ast.Attribute)
-                           and func.value.attr == "stdout"
-                           and isinstance(func.value.value, ast.Name)
-                           and func.value.value.id == "sys")
-        if not (is_print or is_stdout_write):
-            continue
-        for argument in emitted.args:
-            for call in ast.walk(argument):
-                if (not isinstance(call, ast.Call) or not call.args
-                        or getattr(call.func, "id", getattr(call.func, "attr", None)) != "dumps"):
-                    continue
-                payload = call.args[0]
-                if not isinstance(payload, ast.Dict):
-                    continue
-                for key, value in zip(payload.keys, payload.values):
-                    if (isinstance(key, ast.Constant) and key.value == metric_key
-                            and _numeric_literal(value)):
+        for body in (getattr(owner, "body", ()), getattr(owner, "orelse", ())):
+            literal_names: set[str] = set()
+            dict_names: set[str] = set()
+
+            def serialized_literal(value: ast.AST) -> bool:
+                return (literal_dump(value) or
+                        (dump_call(value) and isinstance(value.args[0], ast.Name)
+                         and value.args[0].id in dict_names))
+
+            for statement in body:
+                if isinstance(statement, ast.Assign):
+                    names = {target.id for target in statement.targets
+                             if isinstance(target, ast.Name)}
+                    written = set().union(*(metric_writes(target)
+                                            for target in statement.targets))
+                    is_serialized = serialized_literal(statement.value)
+                    is_dict = literal_dict(statement.value)
+                    literal_names.difference_update(written)
+                    dict_names.difference_update(written)
+                    if is_serialized:
+                        literal_names.update(names)
+                    if is_dict:
+                        dict_names.update(names)
+                elif isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name):
+                    is_serialized = serialized_literal(statement.value)
+                    is_dict = literal_dict(statement.value)
+                    literal_names.discard(statement.target.id)
+                    dict_names.discard(statement.target.id)
+                    if is_serialized:
+                        literal_names.add(statement.target.id)
+                    if is_dict:
+                        dict_names.add(statement.target.id)
+                elif isinstance(statement, ast.AugAssign):
+                    written = metric_writes(statement.target)
+                    literal_names.difference_update(written)
+                    dict_names.difference_update(written)
+                elif isinstance(statement, ast.Expr) and output_call(statement.value):
+                    if any(isinstance(arg, ast.Name) and arg.id in literal_names
+                           for arg in statement.value.args):
                         return True
+                    if any(dump_call(call) and isinstance(call.args[0], ast.Name)
+                           and call.args[0].id in dict_names
+                           for arg in statement.value.args for call in ast.walk(arg)):
+                        return True
+                elif isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
+                    call = statement.value
+                    if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name):
+                        if call.func.attr in {"update", "pop", "clear", "setdefault"}:
+                            dict_names.discard(call.func.value.id)
     return False
 
 

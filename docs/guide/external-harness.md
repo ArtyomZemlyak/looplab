@@ -222,8 +222,12 @@ fields, including changes made through the MCP bridge's harness token. The
 harness token cannot change global settings, launch through Genesis or `/api/start`,
 drive the owner assistant, or reset/delete a run. Start a
 new run to change those obligations. The search `policy` is a tactical choice:
-`set_strategy` applies immediately to the live engine and records a durable
-`strategy_decision`; editing the run's `policy` config takes effect on the next
+`set_strategy` is durably accepted when its command succeeds, then the live engine
+applies it at its next decision boundary and records `strategy_decision`. Before
+acting on the new policy, refresh `harness-progress.policy_preview` and wait for
+its `policy` and `policy_source=recorded_strategy` to reflect the switch; command
+success alone does not confirm application. A paused engine needs a resume to
+reach that boundary. Editing the run's `policy` config takes effect on the next
 restart if no durable `set_strategy` pin overrides it. In external mode LoopLab
 uses the active policy only to schedule
 evaluations of agent-submitted nodes; the external agent still chooses and
