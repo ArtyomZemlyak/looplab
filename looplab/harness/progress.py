@@ -19,10 +19,10 @@ from looplab.events.replay import fold
 from looplab.harness.decisions import decision_file, required_decisions
 from looplab.harness.hypotheses import merge_due
 from looplab.harness.obligations import (concept_tags_required, evidence_revision,
-                                         final_report_due, report_cadence_due,
+                                         external_finish_due, report_cadence_due,
                                          research_due, run_base_due)
-from looplab.harness.reviews import (cadence_reviews_due, missing_reviews,
-                                     required_reviews, review_file)
+from looplab.harness.reviews import (cadence_reviews_due, required_reviews,
+                                     review_file)
 from looplab.harness.selection import value_due, verification_due
 from looplab.serve.run_commands import run_generation_token
 
@@ -196,6 +196,7 @@ def snapshot(rd: Path, expected_generation: str, *, offset: int = 0,
               "decisions": decision_health, "reviews": review_health,
               "checkpoints": checkpoint_health}
     pending = [row for row in checkpoint_rows if row["status"] == "pending"]
+    finish_due = external_finish_due(rd, settings, state, events)
     return {"generation": generation, "run_uid": uid,
             "event_seq": events[-1].seq, "at_node": n,
             "policy_preview": _policy_preview(settings, state),
@@ -208,8 +209,9 @@ def snapshot(rd: Path, expected_generation: str, *, offset: int = 0,
                 "effective_concepts": concept_tags_required(settings),
                 "hypothesis_statement": bool(settings.track_hypotheses),
             },
-            "finish_reviews_due": missing_reviews(rd, settings, state, generation),
-            "finish_report_due": final_report_due(settings, state, events),
+            "finish_reviews_due": finish_due["reviews"],
+            "finish_report_due": finish_due["report"],
+            "finish_pending_nodes": finish_due["pending_nodes"],
             "pending_checkpoint_count": len(pending),
             "pending_checkpoints": pending[:100],
             "pending_checkpoints_truncated": len(pending) > 100,

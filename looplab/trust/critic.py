@@ -14,7 +14,8 @@ from looplab.core.models import Idea
 
 
 def critique(idea: Idea, code: str, *, submission_file: str | None = None,
-             scorer_in_tree: bool = True) -> list[dict]:
+             scorer_in_tree: bool = True,
+             configuration_only: bool = False) -> list[dict]:
     """Return a list of {issue, detail} the critic flags (empty == looks fine).
 
     `submission_file`: set when the run is graded OUT-OF-PROCESS by a host grader (MLE-bench, and
@@ -27,8 +28,9 @@ def critique(idea: Idea, code: str, *, submission_file: str | None = None,
 
     `scorer_in_tree`: False when the eval command's entrypoint is NOT a file in the candidate's own
     tree — a task-supplied harness that takes the submission as an ARGUMENT and prints the score
-    itself. Then the candidate is a library with no output contract at all, and `no_metric_output`
-    is the same category error the paragraph above describes for MLE-bench. MEASURED on the
+    itself — or when the candidate changes only declarative configuration. Then the candidate's
+    authored source has no metric-output contract, and `no_metric_output` is the same category
+    error the paragraph above describes for MLE-bench. MEASURED on the
     AlgoTune corpus 2026-08-29: the critic ran on 34 nodes and flagged `no_metric_output` on 34 of
     34, because the eval stage runs `benchmarks/algotune/looplab_eval.py --solver solver.py` and
     the solver prints nothing, ever. Switching the check to the task's DECLARED metric key would
@@ -37,15 +39,21 @@ def critique(idea: Idea, code: str, *, submission_file: str | None = None,
 
     `hardcoded_metric` is NOT suppressed with it: that one is the hard gate, and a literal metric
     value sitting in a candidate is suspicious no matter who computes the score.
+
+    `configuration_only`: inspect unquoted YAML/TOML/INI metric assignments as well as JSON
+    fields. A bare ``metric = 0.0`` in executable code can be a legitimate accumulator, so this
+    additional syntax is only a hard signal when all authored files are declarative config.
     """
     code = code or ""
     issues: list[dict] = []
     stripped = code.strip()
-    if len(stripped) < 20:
+    short = len(stripped) < 20
+    if short:
         issues.append({"issue": "stub", "detail": "solution is suspiciously short / near-empty"})
-        return issues
 
     if submission_file:
+        if short:
+            return issues
         # Out-of-process grading: the deliverable is the submission file, not an in-code metric.
         name = os.path.basename(str(submission_file).replace("\\", "/")) or str(submission_file)
         # Match the name on a token boundary, NOT as a bare substring: nearly every solution reads
@@ -60,13 +68,18 @@ def critique(idea: Idea, code: str, *, submission_file: str | None = None,
     else:
         # In-workdir grading: the solution must compute and emit the metric itself -- but only
         # when the thing being RUN is the solution. See `scorer_in_tree` in the docstring.
-        if scorer_in_tree and "metric" not in code:
+        if not short and scorer_in_tree and "metric" not in code:
             issues.append({"issue": "no_metric_output",
                            "detail": "code never references 'metric' — it may not emit the required score"})
         # Flag a literal metric value ({"metric": 0.95}) ONLY when nothing in the code assigns the
         # metric from a name/expression. Otherwise a legitimate `print(json.dumps({"metric": score}))`
         # — or a placeholder `{"metric": 0.0}` later overwritten with a computed value — false-positives.
-        hardcoded = re.search(r'["\']metric["\']\s*:\s*[0-9.+\-eE]+\s*[}\)]', code)
+        # A later field does not make the literal computed: accept a comma after the value too.
+        hardcoded = re.search(r'["\']metric["\']\s*:\s*[0-9.+\-eE]+\s*[,})]', code)
+        if configuration_only and not hardcoded:
+            number = r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?'
+            hardcoded = re.search(
+                rf'(?m)^[ \t]*metric[ \t]*[:=][ \t]*{number}(?=[ \t\r]*(?:$|[,#;}}]))', code)
         # Anchor the `metric` token with a left word boundary. Unanchored, the bare-name alternative
         # matched `metric` as a SUFFIX of any identifier — `is_symmetric = True` (also `asymmetric`,
         # `parametric`, `barometric`, `isometric`) makes `metric = T` match `computed`, so
@@ -81,6 +94,9 @@ def critique(idea: Idea, code: str, *, submission_file: str | None = None,
         if hardcoded and not computed:
             issues.append({"issue": "hardcoded_metric",
                            "detail": "the metric appears to be a hard-coded constant, not computed"})
+
+    if short:
+        return issues
 
     # Requested hyperparameters should appear in the code; none appearing suggests a no-op that
     # ignores the proposal (the idea isn't actually implemented). Skipped for the `debug` operator:
@@ -165,8 +181,22 @@ def scorer_is_in_tree(task) -> bool:
         return True
 
 
+def candidate_only_configuration(code: str | None, files: dict | None) -> bool:
+    """A config-only patch cannot itself print the protected scorer's metric.
+
+    Unknown file types stay eligible for the output check. This only removes
+    ``no_metric_output`` when every authored file is a declarative config and
+    the candidate has no standalone code body; the hardcoded-metric check still
+    examines the same bytes.
+    """
+    config_suffixes = (".json", ".yaml", ".yml", ".toml", ".ini", ".cfg")
+    return (not (code or "").strip() and bool(files)
+            and all(str(path).lower().endswith(config_suffixes) for path in files))
+
+
 def critic_findings(idea, code: str, *, submission_file: str | None = None,
-                    scorer_in_tree: bool = True) -> list[dict]:
+                    scorer_in_tree: bool = True,
+                    configuration_only: bool = False) -> list[dict]:
     """`critique`'s issues as gate-visible trust findings (doc 25 CT-10).
 
     The `critic:` namespace decides gating, not presentation: `critic:hardcoded_metric` EXCLUDES a
@@ -177,5 +207,6 @@ def critic_findings(idea, code: str, *, submission_file: str | None = None,
 
     return [finding(CRITIC_NS + str(row["issue"]), row["detail"])
             for row in critique(idea, code, submission_file=submission_file,
-                                scorer_in_tree=scorer_in_tree)
+                                scorer_in_tree=scorer_in_tree,
+                                configuration_only=configuration_only)
             if row.get("issue")]

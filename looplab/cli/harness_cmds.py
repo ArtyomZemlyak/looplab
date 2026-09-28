@@ -22,6 +22,7 @@ def harness_manifest(*, include_settings: bool = False) -> dict:
             "reasoning_owner": "Codex, Claude Code or another MCP client: proposal, novelty, stages, plan, implementation, repair, lesson writing and concept curation are agent decisions.",
             "engine_owner": "LoopLab: candidate admission, source snapshot, evaluation, metrics, budgets, durable control commands and replay.",
             "submission": "Submit ready-made code/files using inject_node through /api/runs/{run_id}/commands; set parent_id for a branch. A code-less proposal is refused in this mode.",
+            "task_snapshot_read": "Read the launched task via GET /api/runs/{run_id}/artifact?root=run&path=task.snapshot.json&expected_generation=TOKEN; obtain TOKEN from /state. GET /api/runs/{run_id}/config reads its settings.",
             "repair": "Inspect a failed node and submit a corrected ready-made candidate; no in-process triage or inline repair runs.",
             "stopping": "Pause or finalize through the durable command API. No automatic proposal or empty-search finalization runs in this mode.",
         },

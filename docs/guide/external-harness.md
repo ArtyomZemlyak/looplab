@@ -51,6 +51,12 @@ OpenAPI definition. `settings_keys` and `setting_info` expose all Settings, incl
 advanced fields omitted from the UI form. `looplab harness --settings` returns the full Settings schema
 and curated field help without a server.
 
+Read the launched task snapshot through `GET /api/runs/{run_id}/artifact` with
+`root=run`, `path=task.snapshot.json`, and `expected_generation=TOKEN` from
+`/state`. `GET /api/runs/{run_id}/artifacts` lists that file and its root;
+`GET /api/runs/{run_id}/config` returns the run settings. All three routes are
+available through MCP `api_request` with the scoped harness token.
+
 `phases` is the workflow index for both modes. Each entry names the entity, the
 built-in owner, the evidence to read, the external actions that write the same
 domain state, and any PromptStore keys. `write_access` distinguishes operator
@@ -74,8 +80,9 @@ evaluation, concepts, claims, lessons, reports, and the pilot's next action.
 Read `GET /api/runs/{run_id}/harness-progress?expected_generation=TOKEN` for
 the current expansion and finish gates, required concept/hypothesis fields,
 pending evaluation questions and paginated histories of decision, knowledge
-review and checkpoint receipts. Its `policy_preview` computes suggested actions
-and parent IDs from a recorded strategy, or from the config snapshot before a
+review and checkpoint receipts. `finish_pending_nodes` lists candidates that
+must settle or be explicitly aborted before finalization. Its `policy_preview`
+computes suggested actions and parent IDs from a recorded strategy, or from the config snapshot before a
 strategy decision is recorded. It names that source; a config edit takes effect
 on engine restart, and admission may apply further gates. This is advice:
 the external agent implements or rejects the suggestion, and no internal

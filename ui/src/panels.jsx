@@ -690,6 +690,7 @@ export function HarnessProgressPanel({ runId, expectedGeneration, externalMode, 
         || !isRecord(value.history) || !isRecord(value.source_health)
         || !isRecord(value.candidate_requirements)
         || !Array.isArray(value.candidate_blockers_if_expanding)
+        || !Array.isArray(value.finish_pending_nodes)
         || !Array.isArray(value.pending_checkpoints)
         || ['decisions', 'reviews', 'checkpoints'].some(
           kind => !isRecord(value.history[kind]) || !Array.isArray(value.history[kind].items)
@@ -755,8 +756,8 @@ export function HarnessProgressPanel({ runId, expectedGeneration, externalMode, 
       <h3>For each proposed Idea</h3>
       {progress.candidate_requirements.effective_concepts && <p>Effective concept tags are
         required on every submitted candidate.</p>}
-      {progress.candidate_requirements.hypothesis_or_card && <p>A hypothesis or linked Card is
-        required on every submitted candidate.</p>}
+      {progress.candidate_requirements.hypothesis_statement && <p>A nonempty hypothesis statement
+        is required on every submitted candidate; injection creates a new Card.</p>}
       {perIdea.length ? <ul>{perIdea.map(([name, count]) => <li key={name}>
         {name}: review {count} option{count === 1 ? '' : 's'} for the exact Idea
       </li>)}</ul> : <p>No configured idea-specific review at this node count.</p>}
@@ -768,7 +769,9 @@ export function HarnessProgressPanel({ runId, expectedGeneration, externalMode, 
       </div>)}
       {progress.pending_checkpoints_truncated && <p className="muted">More questions: use the
         harness-checkpoints API.</p>}
-      <h3>Configured report and review gates at finalization</h3>
+      <h3>Before finalizing</h3>
+      {progress.finish_pending_nodes.length > 0 && <p>Wait for or explicitly abort pending nodes:
+        {' '}{progress.finish_pending_nodes.join(', ')}.</p>}
       <p>{progress.finish_report_due ? 'Current run report required. ' : ''}
         {progress.finish_reviews_due.length
           ? `Reviews due: ${progress.finish_reviews_due.join(', ')}`

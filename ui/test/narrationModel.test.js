@@ -1,7 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
-import { fileURLToPath } from 'node:url'
 
 import { sharedVite } from './_mount.js'
 
@@ -132,7 +131,8 @@ test('Dock consumes the narration model instead of owning it', async () => {
     // The real resolved import edge, read from vite's module graph — a commented-out import creates
     // no edge, so this cannot be satisfied by text.
     const graph = vite.environments?.ssr?.moduleGraph ?? vite.moduleGraph
-    const [dockModule] = [...graph.getModulesByFile(fileURLToPath(new URL('../src/Dock.jsx', import.meta.url)))]
+    const dockModule = await graph.getModuleByUrl('/src/Dock.jsx')
+    assert.ok(dockModule, 'Dock must have a transformed module in the SSR graph')
     const imported = [...(dockModule.importedModules ?? dockModule.ssrImportedModules)].map(m => m.url)
     assert.ok(imported.includes('/src/narration.js'),
       `Dock must import the narration model; its imports are ${imported.join(', ')}`)

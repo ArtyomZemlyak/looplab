@@ -67,6 +67,7 @@ def test_progress_restores_decisions_reviews_and_checkpoint_answers(tmp_path):
     assert initial.json()["candidate_decisions_per_idea"]["novelty"] == 1
     assert initial.json()["candidate_requirements"] == {
         "effective_concepts": False, "hypothesis_statement": False}
+    assert initial.json()["finish_pending_nodes"] == []
     assert initial.json()["source_health"]["decisions"]["file_present"] is False
     assert initial.json()["history"]["decisions"]["total"] == 0
     decision = {"expected_generation": generation, "phase_id": "novelty",
@@ -95,6 +96,7 @@ def test_progress_restores_decisions_reviews_and_checkpoint_answers(tmp_path):
                                   "idea": {"operator": "draft"}, "code": "print(2)"})
     q = ask(rd, 2, 0, "stage_check", stage="train", expectation="loss decreases")
     after = client.get(path, params=args).json()
+    assert after["finish_pending_nodes"] == [2]
     assert after["history"]["decisions"]["items"][0]["validity"] == "superseded"
     assert after["history"]["reviews"]["items"][0]["validity"] == "superseded"
     assert after["pending_checkpoint_count"] == 1

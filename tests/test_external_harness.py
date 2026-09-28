@@ -18,6 +18,7 @@ def test_harness_discovery_is_json_and_names_only_implemented_backends():
     assert payload["protocol_version"] == 4
     assert payload["mode"] == "external_harness_or_delegated_developer"
     assert "inject_node" in payload["external_run_mode"]["submission"]
+    assert "task.snapshot.json" in payload["external_run_mode"]["task_snapshot_read"]
     assert {"codex", "claude"} <= set(payload["developer_backends"])
     assert "settings_schema" not in payload
     assert "stages" in [step["id"] for step in payload["node_build"]["optional_agent_actions"]]

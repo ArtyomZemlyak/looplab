@@ -15,6 +15,8 @@ def test_phase_catalog_covers_all_promptstore_decisions_and_legacy_families():
     assert phase_detail("research")["entity"] == "ResearchMemo"
     assert phase_detail("configuration")["write_access"]["PUT /api/settings"] == "operator"
     assert phase_detail("configuration")["write_access"]["PUT /api/runs/{run_id}/config"] == "external_agent"
+    assert "GET /api/runs/{run_id}/artifact" in phase_detail("configuration")["reads"]
+    assert "GET /api/runs/{run_id}/artifact" in phase_detail("onboarding")["reads"]
     assert phase_detail("genesis")["write_access"]["POST /api/start"] == "operator"
     assert phase_catalog("research")[0]["id"] == "research"
     assert phase_detail("absent") is None

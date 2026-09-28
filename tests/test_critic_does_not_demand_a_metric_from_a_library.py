@@ -17,7 +17,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from looplab.core.models import Idea  # noqa: E402
-from looplab.trust.critic import critique, scorer_is_in_tree  # noqa: E402
+from looplab.trust.critic import (candidate_only_configuration, critique,
+                                  scorer_is_in_tree)  # noqa: E402
 
 # A real AlgoTune champion in miniature: a library, no printing, no `metric` anywhere.
 SOLVER = """
@@ -111,6 +112,34 @@ def test_a_task_that_cannot_be_asked_keeps_todays_answer():
     assert scorer_is_in_tree(_Task(None)) is True
 
 
+def test_config_only_patch_has_no_candidate_owned_metric_output():
+    files = {"config.json": '{"learning_rate":0.2,"epochs":3}'}
+    assert candidate_only_configuration("", files)
+    assert not candidate_only_configuration("print('training')", files)
+    assert not candidate_only_configuration("", {"train.py": "print('training')"})
+    config = files["config.json"]
+    assert "no_metric_output" not in _issues(config, scorer_in_tree=False)
+
+
+def test_short_config_still_flags_a_hardcoded_metric():
+    assert "hardcoded_metric" in _issues('{"metric":0.95}', scorer_in_tree=False)
+
+
+def test_hardcoded_metric_is_not_hidden_by_another_config_field():
+    config = '{"metric":0.95,"learning_rate":0.2,"epochs":3}'
+    assert "hardcoded_metric" in _issues(config, scorer_in_tree=False)
+
+
+def test_declarative_config_metric_literals_are_flagged_without_flagging_python_initializers():
+    idea = Idea(operator="improve")
+    for config in ("metric: 0.95\nepochs: 3", "epochs = 3\nmetric = 9.5e-1"):
+        issues = {row["issue"] for row in critique(
+            idea, config, scorer_in_tree=False, configuration_only=True)}
+        assert "hardcoded_metric" in issues
+    python = "metric = 0.0\nfor row in rows: metric += score(row)\n"
+    assert "hardcoded_metric" not in _issues(python, scorer_in_tree=False)
+
+
 # ---------------------------------------------------------------- the seam, not just the rule
 #
 # EVERYTHING ABOVE PASSES WITH THE ENGINE UNWIRED. `critique`/`scorer_is_in_tree` are pure and were
@@ -152,3 +181,27 @@ def test_the_engine_still_accuses_a_self_scoring_candidate(tmp_path):
     """And the other direction, or the seam would read as 'suppress always'."""
     eng = _critic_only_engine(tmp_path / "self", _Eval(command=["python", "score.py"]))
     assert any(s.endswith("no_metric_output") for s in _signals(eng))
+
+
+def test_engine_does_not_accuse_a_config_only_candidate(tmp_path):
+    eng = _critic_only_engine(tmp_path / "config", _Eval(command=["python", "score.py"]))
+    node = types.SimpleNamespace(
+        idea=Idea(operator="improve", params={"learning_rate": 0.2}), code="",
+        files={"config.json": '{"learning_rate":0.2,"epochs":3,"l2":0.0001}'})
+    source = eng._trust_scan_surface(node)
+    signals = {row["signal"] for row in eng._trust_gate_signals(node, source)}
+    assert "critic:no_metric_output" not in signals
+
+
+def test_engine_keeps_hardcoded_metric_gate_for_config_files(tmp_path):
+    eng = _critic_only_engine(tmp_path / "short", _Eval(command=["python", "score.py"]))
+    for filename, contents in (
+        ("config.json", '{"metric":0.95}'),
+        ("config.yaml", "metric: 0.95\nepochs: 3"),
+        ("config.toml", "epochs = 3\nmetric = 9.5e-1"),
+    ):
+        node = types.SimpleNamespace(
+            idea=Idea(operator="improve", params={}), code="", files={filename: contents})
+        source = eng._trust_scan_surface(node)
+        signals = {row["signal"] for row in eng._trust_gate_signals(node, source)}
+        assert "critic:hardcoded_metric" in signals, filename

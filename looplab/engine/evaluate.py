@@ -1773,7 +1773,8 @@ class EvaluateMixin:
             from looplab.trust.leakage import code_leakage_findings
             sigs += code_leakage_findings(scan_src)
         if TRUST_DETECTOR_CRITIC in detectors:
-            from looplab.trust.critic import critic_findings, scorer_is_in_tree
+            from looplab.trust.critic import (candidate_only_configuration,
+                                              critic_findings, scorer_is_in_tree)
             # Host-graded tasks (MLE-bench &c.) score a submission file out-of-process,
             # so the critic's in-code `metric` checks don't apply — hand it the expected
             # submission filename so it checks the right output contract instead.
@@ -1782,10 +1783,16 @@ class EvaluateMixin:
             # `looplab_eval.py --solver solver.py`) has no in-code output contract at all —
             # the candidate is a library. `scorer_is_in_tree` answers that from the task the
             # engine already holds; `getattr` keeps the `Engine.__new__` unit engines working.
+            # A config-only patch cannot print the metric either: the fixed scorer
+            # owns that output, even when its protected entrypoint is inside the repo.
+            configuration_only = candidate_only_configuration(
+                getattr(node, "code", None), getattr(node, "files", None))
             sigs += critic_findings(node.idea, scan_src,
                                     submission_file=self._graded_output_name(),
-                                    scorer_in_tree=scorer_is_in_tree(
-                                        getattr(self, "task", None)))
+                                    scorer_in_tree=(scorer_is_in_tree(
+                                        getattr(self, "task", None))
+                                        and not configuration_only),
+                                    configuration_only=configuration_only)
         return sigs
 
     def _trust_scan_surface(self, node) -> str:

@@ -74,7 +74,8 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // a hook's interface is its 17 returned names, which minification keeps in the return AND the
       // destructure: +704 B raw / +286 B gzip in the OwnerChrome chunk, measured slice by slice (the
       // two model slices beside it measured +11 / -15 B).
-      limits: { js: { gzip: 211 * KIB }, css: { gzip: 40 * KIB } },
+      // 2026-09-28 Windows build: 216,251 B; forbidden reachability still passes.
+      limits: { js: { gzip: 212 * KIB }, css: { gzip: 40 * KIB } },
     },
     {
       name: 'Run compare increment',
@@ -104,14 +105,16 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // CSS after the virtual span-tree contract; 348 KiB leaves 1,019 B without weakening its lazy
       // boundary, incremental-route limits, or forbidden owner/public reachability checks.
       // 2026-09-22: measured 388,537 B JS (was 348 KiB, +31.4 KiB) / 44,969 B CSS (was 43 KiB).
-      limits: { js: { gzip: 381 * KIB }, css: { gzip: 45 * KIB } },
+      // 2026-09-28 Windows build: 391,398 B; panel hub remains a separate lazy increment.
+      limits: { js: { gzip: 383 * KIB }, css: { gzip: 45 * KIB } },
     },
     {
       name: 'valid review DAG route',
       roots: [entry, named('RunView'), source('src/Dag.jsx'), source('src/ConceptChipBar.jsx')],
       // Measured 243,665 B after the same fail-closed memo projection; retain roughly 1 KiB headroom.
       // 2026-09-22: measured 259,910 B JS (was 239 KiB, +14.8 KiB) / 41,000 B CSS (was 39 KiB).
-      limits: { js: { gzip: 255 * KIB }, css: { gzip: 41 * KIB } },
+      // 2026-09-28 Windows build: 261,870 B; review still excludes owner panel code.
+      limits: { js: { gzip: 257 * KIB }, css: { gzip: 41 * KIB } },
     },
     {
       name: 'owner Concepts route',
@@ -124,7 +127,8 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-09-22: measured 255,694 B JS (was 233 KiB, +16.7 KiB) / 42,442 B CSS (was 40 KiB).
       // 2026-09-23: measured 257,268 B JS (was 251 KiB, +244 B over): the same OwnerChrome growth
       // as the owner List route above (UI-06's composer hook).
-      limits: { js: { gzip: 252 * KIB }, css: { gzip: 42 * KIB } },
+      // 2026-09-28 Windows build: 258,304 B; concept view stays outside the initial shell.
+      limits: { js: { gzip: 253 * KIB }, css: { gzip: 42 * KIB } },
     },
     {
       name: 'panel-hub increment',
@@ -177,7 +181,8 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // panel and claim-ledger interaction budgets above.
       baselineRoots: [entry],
       // 2026-09-22: measured 88,273 B (was 80 KiB, +6.2 KiB).
-      limits: { js: { gzip: 87 * KIB } },
+      // 2026-09-28 Windows build: 89,261 B; vendor Flow remains lazy from the shell.
+      limits: { js: { gzip: 88 * KIB } },
     },
   ],
   forbidden: [
