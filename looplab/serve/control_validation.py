@@ -1104,6 +1104,12 @@ def _normalize_inject_node(ctx: _ControlIntake) -> dict:
                 "code": "external_research_required",
                 "message": "deep_research_every is enabled; publish research_completed at this node count before submitting a candidate",
             })
+        from looplab.harness.obligations import run_base_due
+        if run_base_due(settings, ctx.state()):
+            raise HTTPException(409, {
+                "code": "external_run_base_required",
+                "message": "concept_run_base is enabled; seed run_concepts from the first scored node's authored tags before the next candidate",
+            })
         if settings.track_hypotheses and not (
                 (normalized_idea.hypothesis or "").strip() or normalized_idea.card_id):
             raise HTTPException(400, {

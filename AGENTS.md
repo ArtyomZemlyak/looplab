@@ -31,6 +31,11 @@ Enabled research, hypothesis, novelty, foresight, best-of-N, strategy, report
 and cross-run knowledge settings have admission or finalization checkpoints.
 Use `harness-decisions` and `harness-reviews` to record idea-bound reviews and
 justified no-action outcomes where a change is not supported by evidence.
+While evaluating, poll `/api/runs/{run_id}/harness-checkpoints` with the run
+generation and answer any pending stage or live monitor question. A checked
+stage cannot advance without a verdict; an opened live question holds the
+terminal until answered. `abort` is valid only when that checkpoint grants
+early-stop authority. A disabled monitor opens no questions.
 
 Search MCP `phases` for the relevant entity before each decision. It lists the
 same domain writes used by the built-in roles; `phase_info` shows what to read and

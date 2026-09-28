@@ -181,6 +181,8 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `GET` | `/api/runs/{run_id}/deletions/{operation_id}` | *Observe Run Deletion* (no docstring) | — |  |
 | `GET` | `/api/runs/{run_id}/events` | Stream canonical public state frames — a full `state` frame first, then `state_delta` | — |  |
 | `GET` | `/api/runs/{run_id}/harness-contract` | Effective choices and enforced task constraints for this run incarnation. | — |  |
+| `GET` | `/api/runs/{run_id}/harness-checkpoints` | Pending external stage checks and live observations, fenced by `expected_generation`. | — |  |
+| `POST` | `/api/runs/{run_id}/harness-checkpoints` | Answer a live evaluation checkpoint before stage advancement or terminal settlement. | — |  |
 | `POST` | `/api/runs/{run_id}/harness-decisions` | Record a reviewed choice for an enabled phase, bound to the submitted idea. | — |  |
 | `POST` | `/api/runs/{run_id}/harness-reviews` | Record a configured end-of-run review, including a reason for no action. | — |  |
 | `POST` | `/api/runs/{run_id}/lessons` | Record an external agent's evidence-linked cross-run lesson idempotently. | — |  |

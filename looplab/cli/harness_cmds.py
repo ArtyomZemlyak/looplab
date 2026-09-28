@@ -14,7 +14,7 @@ from looplab.harness.phases import phase_catalog
 def harness_manifest(*, include_settings: bool = False) -> dict:
     """The versioned, stable entry point; schemas come from their actual owners."""
     result = {
-        "protocol_version": 3,
+        "protocol_version": 4,
         "mode": "external_harness_or_delegated_developer",
         "external_run_mode": {
             "launch": "looplab run CONFIG --out RUN_DIR --backend toy -s external_harness=true",
@@ -51,6 +51,7 @@ def harness_manifest(*, include_settings: bool = False) -> dict:
             "skills": "POST /api/runs/{run_id}/skill-candidates with a current supported lesson_action_id and measured node evidence. The server derives candidate/promoted status from distinct task fingerprints. Enabled cross-run knowledge requires a final harness-reviews receipt with a justified no-action decision where appropriate.",
         },
         "obligations": "GET /api/runs/{run_id}/harness-contract returns effective choices and enforced evaluation constraints. Decision phases are available, not a mandatory sequence.",
+        "live_checkpoints": "Poll GET /api/runs/{run_id}/harness-checkpoints?expected_generation=TOKEN while evaluations run. POST a verdict, reason and action_id to the same route. Checked stages wait before advancing; opened live observations must be answered before terminal. Abort is available only when the checkpoint grants it.",
         "interfaces": {
             "start": "looplab run CONFIG --out RUN_DIR --developer-backend codex",
             "resume": "looplab resume RUN_DIR",

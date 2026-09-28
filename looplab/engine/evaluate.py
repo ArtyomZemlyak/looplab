@@ -1262,6 +1262,7 @@ class EvalAttempt:
     invocation_id: str = ""
     _log_snapshot: Any = None
     _log_plan: Any = None
+    _live_questions: list = field(default_factory=list)
     _seen: dict = field(default_factory=dict)          # the intervention watcher's one verdict
     kill_signal: dict = field(default_factory=dict)
     res: Any = None
@@ -3459,6 +3460,7 @@ class EvaluateMixin:
         # nothing inside it consults them.
         a._seen: dict = {}
         a.kill_signal: dict = {}       # filled by the training monitor if it kills a broken run (Phase 3)
+        a._live_questions = []         # opened external observations must be answered before terminal
         # The Card identity this worker can be dropped through, read while `node` is still
         # the fold this attempt started from — it is not rebound until after the group.
         _card_id = getattr(getattr(a.node, "idea", None), "card_id", None)
@@ -3522,6 +3524,12 @@ class EvaluateMixin:
                 run_ref(getattr(a.state, "run_uid", ""), getattr(a.state, "run_id", "")),
                 a.node_id, a.generation, a.attempt)
             await self._claim_eval_invocation(a)
+            if self.external_harness and getattr(self, "_eval_spec", None):
+                from looplab.engine.external_watch import observe_external_eval
+                for _phase, _enabled in (("train_monitor", getattr(self, "_train_monitor", False)),
+                                         ("asha_live", getattr(self, "_asha_live", False))):
+                    if _enabled:
+                        _tg.start_soon(observe_external_eval, self, a, cancel, _phase)
             try:
                 a.res = await anyio.to_thread.run_sync(
                     self._run_eval, a.node, str(a.workdir), a.eval_env, None, cancel, a.next_start
@@ -3571,6 +3579,9 @@ class EvaluateMixin:
                 return PHASE_RETURN
             cancel.set()                  # eval finished on its own …
             _tg.cancel_scope.cancel()     # … stop the watcher now (no poll-interval latency)
+        if self.external_harness and a._live_questions:
+            from looplab.engine.external_watch import settle_external_observations
+            await settle_external_observations(self, a)
         return PHASE_NEXT
 
     async def _eval_settle_outcome(self, a: "EvalAttempt") -> str:

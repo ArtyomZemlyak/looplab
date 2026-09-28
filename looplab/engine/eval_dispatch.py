@@ -918,10 +918,13 @@ class EvalDispatchMixin:
             # this attempt's stage log instead of the 4,000-char tail it is shown — the log lives in
             # `log_dir` (== `root`, below) and the plan comes from the SAME resolved list this eval
             # runs, so neither is derived from anything a model said. See `_stage_check_fn`.
-            check_fn = (self._stage_check_fn(node, root, stages)
-                        if not self.external_harness and stages
-                        and any(s.get("check") for s in stages) and canary is None
-                        else None)
+            has_check = (bool(stages) and canary is None
+                         and any(s.get("check") or ((s.get("expect") or {}).get("assert")
+                                                    if isinstance(s.get("expect") or {}, dict) else False)
+                                 for s in stages))
+            check_fn = ((self._external_stage_check_fn(node, root, stages, cancel)
+                         if self.external_harness else self._stage_check_fn(node, root, stages))
+                        if has_check else None)
             cwd = self._sandbox_cwd(workdir, es.get("cwd", "."))
             # PREFLIGHT the resolved chain for a PROTECTED script the workdir doesn't hold, BEFORE any
             # stage runs. The one failure the repair loop structurally cannot fix (the agent may not

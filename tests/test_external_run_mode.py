@@ -11,7 +11,9 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from looplab.core.config import Settings
-from looplab.core.models import RunState
+from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED, Idea, Node, NodeStatus,
+                                 RunState)
+from looplab.harness.obligations import run_base_due
 from looplab.harness.contract import candidate_surface_refusal
 from looplab.events.replay import fold
 from looplab.events.types import (EV_FORCE_ABLATE, EV_FORK, EV_INJECT_NODE,
@@ -74,6 +76,21 @@ def test_external_mode_requires_offline_backend():
     with pytest.raises(ValueError, match="backend=toy"):
         Settings(external_harness=True)
     assert Settings(backend="toy", external_harness=True).external_harness
+
+
+def test_external_concept_base_is_due_after_first_scored_authored_node():
+    settings = Settings(backend="toy", external_harness=True)
+    state = RunState(task_id="task", run_id="demo", goal="g", direction="min")
+    state.nodes[0] = Node(id=0, operator="draft", idea=Idea(operator="draft"),
+                          code="print(1)", status=NodeStatus.evaluated, metric=0.9)
+    state.node_concepts[0] = ["search/grid"]
+    state.node_concept_provenance[0] = NODE_CONCEPT_PROVENANCE_AUTHORED
+    assert run_base_due(settings, state)
+    state.run_base_concepts = ["search/grid"]
+    assert not run_base_due(settings, state)
+    state.run_base_concepts = []
+    settings.concept_run_base = False
+    assert not run_base_due(settings, state)
 
 
 def test_external_candidate_surface_reuses_patch_policy():

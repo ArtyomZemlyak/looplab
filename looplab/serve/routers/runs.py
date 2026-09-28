@@ -697,6 +697,18 @@ class ExternalReviewBody(BaseModel):
     action_ref: str = Field(default="", max_length=160)
 
 
+class ExternalCheckpointAnswer(BaseModel):
+    """One live evaluation decision; checkpoint_id identifies the observed stage/tick."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    expected_generation: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    checkpoint_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    action_id: str = Field(min_length=1, max_length=160)
+    verdict: Literal["proceed", "inconclusive", "fail", "continue", "watch", "abort"]
+    failure_kind: str = Field(default="", max_length=80)
+    reason: str = Field(min_length=1, max_length=1200)
+
+
 class NoveltyPreviewBody(BaseModel):
     """Candidate idea to compare with the current run; this call never admits it."""
 
@@ -963,6 +975,23 @@ def build_router(srv) -> APIRouter:
         except (OSError, ValueError, KeyError) as exc:
             raise refusal("config_snapshot_unreadable") from exc
         return run_obligations(task, settings, generation=generation)
+
+    @router.get("/api/runs/{run_id}/harness-checkpoints")
+    def get_harness_checkpoints(run_id: str, expected_generation: str = Query(...)):
+        """Pending mandatory stage checks and live training/rank observations."""
+        from looplab.harness.checkpoints import pending
+        if _RUN_GENERATION_RE.fullmatch(expected_generation) is None:
+            raise HTTPException(400, "expected_generation must be a SHA-256 token")
+        try:
+            return {"pending": pending(_run_dir(run_id), expected_generation)}
+        except OSError as exc:
+            raise HTTPException(503, "checkpoint ledger unavailable") from exc
+
+    @router.post("/api/runs/{run_id}/harness-checkpoints")
+    def answer_harness_checkpoint(run_id: str, body: ExternalCheckpointAnswer):
+        """Answer exactly one checkpoint; the engine applies the verdict before advancing."""
+        from looplab.harness.checkpoints import respond
+        return respond(srv, _run_dir(run_id), body)
 
     @router.post("/api/runs/{run_id}/lessons")
     def publish_external_lesson(run_id: str, body: ExternalLessonBody):

@@ -102,6 +102,8 @@ The normal control cycle is:
    the protected score command.
    Enabled `deep_research_every` requires a current `research_completed` memo;
    enabled `track_hypotheses` requires a candidate hypothesis or Card link.
+   With `concept_run_base`, publish `run_concepts` after the first scored node
+   with authored tags and before the next candidate.
    Record enabled novelty, foresight, ranking and strategy choices through
    `POST /api/runs/{run_id}/harness-decisions` before admitting that Idea.
 3. Submit `inject_node` using `POST /api/runs/{run_id}/commands`: include an `idea`
@@ -109,10 +111,19 @@ The normal control cycle is:
    `parent_ids` to branch from measured candidates. Read the command's schema for
    its exact envelope, including `expected_generation`, and send a fresh
    `Idempotency-Key`; reuse the key only when retrying the identical request.
-4. Poll the returned command record and run state. Inspect measured metrics,
-   stage logs and failures. Submit another ready-made candidate if a repair or a
-   different idea is useful. The metric is measured by LoopLab's evaluator; never
-   submit a claimed score as evidence.
+4. Poll the returned command record and run state. While a command eval runs,
+   poll `GET /api/runs/{run_id}/harness-checkpoints?expected_generation=TOKEN`.
+   Answer each pending question with `POST` to the same path, including the
+   checkpoint ID, generation, unique `action_id`, verdict and reason. An operator
+   stage with `check: true` or `expect.assert` waits for `proceed`, `inconclusive`
+   or `fail` (with a named physical failure kind); LoopLab still applies its
+   measured trajectory and declared-condition vetoes. When train monitoring or
+   ASHA is enabled and live evidence exists, answer `continue` or `watch`;
+   a follow-up question may grant `abort` after a prior `watch` and the engine's
+   attribution/comparability checks. Disabled kill settings grant no `abort`.
+   An opened observation holds the node terminal until answered. Inspect measured
+   metrics, stage logs and failures, then submit a corrected candidate if useful.
+   The metric is measured by LoopLab's evaluator; never submit a claimed score.
 5. Review each enabled cross-run knowledge phase and record its action reference,
    or why no action applies, through `POST /api/runs/{run_id}/harness-reviews`.
    Publish a `report_generated` covering the latest candidate when `report_every`

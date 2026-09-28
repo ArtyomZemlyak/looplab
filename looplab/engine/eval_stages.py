@@ -1567,6 +1567,66 @@ class EvalStagesMixin:
 
         return _judge
 
+    def _external_stage_check_fn(self, node, workdir, stages, cancel):
+        """Block between checked stages until the external agent answers this attempt.
+
+        A restarted attempt opens a new checkpoint. The existing runtime still applies
+        its physical-failure vocabulary and declared-condition veto to the answer.
+        """
+        import time
+
+        from looplab.engine.train_monitor import (eval_log_plan, snapshot_training_logs,
+                                                  stage_check_trajectory,
+                                                  trajectory_acquits_stage_check)
+        from looplab.harness.checkpoints import ask, answer_for
+        from looplab.runtime.command_eval import STAGE_CHECK_INCONCLUSIVE, StageCheckVerdict
+
+        plan = eval_log_plan(stages)
+        snapshot = snapshot_training_logs(workdir)
+
+        def _check(stage_name, tail, expect: str = ""):
+            if cancel is not None and cancel.is_set():
+                return None
+            # Publication is mandatory: on a transient ledger error retry rather than
+            # treating the stage as checked and silently running the next command.
+            question = None
+            while question is None:
+                if cancel is not None and cancel.is_set():
+                    return None
+                try:
+                    redactor = getattr(self, "_redact", None)
+                    observed = redactor(tail) if callable(redactor) else tail
+                    question = ask(self.run_dir, node.id, node.attempt, "stage_check",
+                                   stage=stage_name, expectation=expect,
+                                   observation=str(observed)[-4000:])
+                except Exception:  # noqa: BLE001 — never skip a required stage check
+                    time.sleep(0.5)
+            while cancel is None or not cancel.is_set():
+                try:
+                    answer = answer_for(self.run_dir, question["checkpoint_id"])
+                except Exception:  # noqa: BLE001 — keep waiting for the durable answer
+                    answer = None
+                if answer is not None:
+                    if answer["verdict"] == "proceed":
+                        return None
+                    if answer["verdict"] == "inconclusive":
+                        return StageCheckVerdict(STAGE_CHECK_INCONCLUSIVE, answer["reason"][:300])
+                    kind = answer["failure_kind"]
+                    try:
+                        trajectory = stage_check_trajectory(
+                            workdir, stage_name, plan=plan, snapshot=snapshot)
+                        acquitted, note = trajectory_acquits_stage_check(kind, trajectory)
+                    except (OSError, ValueError):
+                        acquitted, note = False, ""
+                    if acquitted:
+                        return StageCheckVerdict(STAGE_CHECK_INCONCLUSIVE,
+                                                 f"{note} | agent: {answer['reason'][:100]}"[:300])
+                    return StageCheckVerdict(kind, answer["reason"][:300])
+                time.sleep(0.3)
+            return None
+
+        return _check
+
     def _stage_check_fn(self, node, workdir=None, stages=None):
         """Phase 3 inter-stage verify: a callback (stage_name, log_tail, expect="") -> verdict|None that
         asks an LLM whether a `check`-flagged stage physically SUCCEEDED (train actually trained + saved a

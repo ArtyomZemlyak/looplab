@@ -47,6 +47,25 @@ def candidate_concepts(idea, state, parent_ids: list[int]) -> set[str]:
             | {normalize_concept_id(item) for item in idea.concepts_added})
 
 
+def run_base_due(settings, state) -> bool:
+    """Seed the enabled shared concept base once evidence from a scored node exists."""
+    from looplab.core.concepts import (CONCEPT_DELTA_MISSING_RUN_BASE_REASON,
+                                       normalized_concept_materialization_receipt)
+    from looplab.core.models import NODE_CONCEPT_PROVENANCE_AUTHORED
+
+    if not (settings.external_harness and settings.concept_run_base):
+        return False
+    receipt = normalized_concept_materialization_receipt(state.run_base_concept_receipt)
+    if state.run_base_concepts or (state.run_base_concept_receipt is not None
+                                   and (receipt is None or
+                                        CONCEPT_DELTA_MISSING_RUN_BASE_REASON not in receipt["reasons"])):
+        return False
+    provenance = getattr(state, "node_concept_provenance", None) or {}
+    return any(state.node_concepts.get(node.id)
+               and provenance.get(node.id) == NODE_CONCEPT_PROVENANCE_AUTHORED
+               for node in state.evaluated_nodes())
+
+
 _OUTCOME_EVENTS = frozenset({"node_evaluated", "node_failed", "node_reset", "node_abort"})
 
 
@@ -161,12 +180,44 @@ def run_obligations(task, settings, *, generation: str) -> dict:
                 "proof": "nonempty effective full/delta membership on every injected candidate",
                 "enforced": True,
             },
+            "concept_run_base": {
+                "required": bool(external and settings.concept_run_base),
+                "settings": {"concept_run_base": settings.concept_run_base},
+                "checkpoint": "before_next_candidate_after_first_scored_authored_concepts",
+                "proof": "run_concepts command seeds the shared base from measured authored tags",
+                "enforced": True,
+            },
             "report": {
                 "required": bool(external and settings.report_every > 0),
                 "settings": {"report_every": settings.report_every},
                 "checkpoint": "run_finish_when_candidates_exist",
                 "proof": "report_generated covering current node count",
                 "enforced": True,
+            },
+            "stage_check": {
+                "required": bool(external),
+                "settings": {"stage_check_tools": settings.stage_check_tools},
+                "checkpoint": "after_each_checked_or_asserted_command_stage",
+                "proof": "answer the pending harness-checkpoints question before the next stage",
+                "enforced": True, "conditional_on": "resolved stage check or expect.assert",
+            },
+            "train_monitor": {
+                "required": bool(external and settings.train_monitor),
+                "settings": {"train_monitor": settings.train_monitor,
+                             "train_monitor_kill": settings.train_monitor_kill,
+                             "train_monitor_interval_s": settings.train_monitor_interval_s},
+                "checkpoint": "changed_attributed_live_log_at_configured_cadence",
+                "proof": "answer each opened harness-checkpoints observation before terminal",
+                "enforced": True, "conditional_on": "command evaluation produces an attributed live log",
+            },
+            "asha_live": {
+                "required": bool(external and settings.asha_live),
+                "settings": {"asha_live": settings.asha_live,
+                             "asha_live_kill": settings.asha_live_kill,
+                             "asha_live_min_siblings": settings.asha_live_min_siblings},
+                "checkpoint": "intermediate_objective_with_enough_finished_siblings",
+                "proof": "answer each opened harness-checkpoints rank observation before terminal",
+                "enforced": True, "conditional_on": "metric reader yields an intermediate sample",
             },
         },
         "enforced_on_candidate": {

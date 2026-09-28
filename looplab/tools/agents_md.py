@@ -23,12 +23,19 @@ Read `/api/runs/{run_id}/harness-contract` for this run's actual obligations.
 Follow enabled run settings: a concept workflow requires effective concepts
 on every candidate, checked on admission. Other phases may be skipped only
 when the run contract and operator settings permit it.
+With `concept_run_base`, seed `run_concepts` from the first scored candidate's
+authored tags before submitting another candidate.
 Enabled research and hypothesis settings require a current memo and candidate
 hypothesis. Novelty, foresight and best-of-N require idea-bound reviews through
 `/api/runs/{run_id}/harness-decisions`; compare distinct alternatives when the
 configured breadth exceeds one. Enabled knowledge phases require final
 `/api/runs/{run_id}/harness-reviews` receipts, including justified no-action
 decisions. An enabled report must cover the final candidate count.
+During command evaluation, poll `GET /api/runs/{run_id}/harness-checkpoints`
+with the current `expected_generation`. A checked or asserted stage waits for
+your verdict before the next stage runs. Enabled live training and ASHA observers
+may open questions; answer each with `POST` to the same route. An opened live
+question must be answered before the node's terminal can be recorded.
 After LoopLab measures a candidate, inspect its metric or failure before branching,
 repairing as a new child candidate, or finalizing. Respect the edit surface and
 protected scorer; no internal Researcher/Developer will complete a code-less idea.

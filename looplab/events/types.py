@@ -1338,7 +1338,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "resource_underperforming", "underperforming"
         ),
         # The conditional `.update()` in `asha_monitor.py`, invisible to a target-only scan.
-        optional=("resource", "resource_key"),
+        optional=("checkpoint_id", "resource", "resource_key", "source"),
     ),
     "asha_verdict": PayloadContract(
         "The ASHA judge's call on a persistently underperforming node: stop or spare, with confidence.",
@@ -2302,10 +2302,11 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # scan could not see them and reported this type fully covered; two of the five
         # (`projected_overrun_s`, `stage_wall_s`) are read live by `serve/attention.py`.
         optional=(
-            "citation_resolved", "confidence_valid", "evidence_locator", "evidence_source", "fault",
+            "checkpoint_id", "citation_resolved", "confidence_valid", "evidence_locator", "evidence_source", "fault",
             "kill", "kill_role_withheld", "kill_superseded_by", "overrun_alert_floor_s",
-            "overrun_beyond_noise_s", "projected_overrun_s", "repair_decided", "stage",
-            "stage_grace_s", "stage_wall_s", "stop_decided", "trajectory", "trajectory_veto"
+            "overrun_beyond_noise_s", "projected_overrun_s", "repair_decided", "source",
+            "stage", "stage_grace_s", "stage_wall_s", "stop_decided", "trajectory",
+            "trajectory_veto"
         ),
     ),
     "trust_gate_changed": PayloadContract(
