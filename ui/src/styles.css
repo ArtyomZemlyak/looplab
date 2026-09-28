@@ -802,6 +802,9 @@ button { font: inherit; }
 .card-lanes-wrap { flex: 1; min-width: 0; display: flex; flex-direction: column;
   padding: 14px 16px; overflow: auto; }
 .card-lanes-head { display: flex; flex-direction: column; gap: 8px; font-size: 12px; flex: none; }
+.card-selection-missing { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.card-selection-missing code { overflow-wrap: anywhere; }
+.card-selection-missing button { margin-left: auto; }
 .card-lanes-head .card-projection-note { margin-bottom: 4px; }
 .card-workspace .card-board { flex: 1; min-height: 0; align-content: start; }
 /* A lane card is a summary you pick, not a record you read: the facts moved to the pane. The whole

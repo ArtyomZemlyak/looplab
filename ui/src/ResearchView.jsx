@@ -251,7 +251,7 @@ export default function ResearchView({ cards, state, renderCard }) {
               {roll.descendants} sharper question{roll.descendants === 1 ? '' : 's'}
             </span>}
           </div>
-          {!isCollapsed && kids.length > 0 && <details className="research-evidence">
+          {kids.length > 0 && <details className="research-evidence">
             <summary>{kids.length} experiment{kids.length === 1 ? '' : 's'} · show evidence</summary>
             <div className="research-experiments">{kids.map(child => renderCard(child))}</div>
           </details>}

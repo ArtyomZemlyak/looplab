@@ -482,7 +482,7 @@ export function cardLessons(state, card) {
 
 // Which card the route's `card=` target resolves to. Deliberately NEVER auto-picks a fallback: a
 // shared link that silently opened a DIFFERENT card than the one it names would be worse than an
-// empty pane, and the empty pane is recoverable by clicking a lane card.
+// explicit missing-selection notice. The board can still open another Card or clear the link.
 export function resolveSelectedCard(cards, cardId) {
   const wanted = cardText(cardId)
   if (!wanted) return null

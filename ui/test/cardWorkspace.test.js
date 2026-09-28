@@ -202,6 +202,17 @@ test('the view layout renders the board without a modal dialog wrapper', () => {
   assert.doesNotMatch(html, /card-detail-side/)
 })
 
+test('a Card link outside the loaded board explains the missing detail and can be cleared', () => {
+  const html = render({ pane: { compact: false, width: 420 }, selectedCardId: 'card-omitted' })
+  assert.ok(html.includes('Card <code>card-omitted</code> is not in the loaded board.'))
+  assert.ok(html.includes('Clear selection'))
+  assert.ok(!html.includes('aria-label="Work item details"'))
+  const clipped = render({ selectedCardId: 'card-omitted',
+    state: { ...STATE, cards_projection: { ...STATE.cards_projection,
+      total: 5, returned: 4, omitted: 1, complete: false } } })
+  assert.ok(clipped.includes('1 work item was omitted from this snapshot.'))
+})
+
 test('work-item search finds ideas, ids, operators and concepts without using status as a match', () => {
   const card = { id: 'card-12', statement: 'Try cosine learning-rate decay',
     operator: 'improve', concept_tags: ['optimization/warmup'], status: 'evaluated' }

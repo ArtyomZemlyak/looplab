@@ -1220,6 +1220,7 @@ function _CardKanban({
   // on a board the wire already lets reach 256 cards.
   const attemptsByCard = view ? cardAttemptIndex(state, visibleCards) : null
   const selectedCard = view ? resolveSelectedCard(visibleCards, selectedCardId) : null
+  const missingCardId = view && !selectedCard ? _cardText(selectedCardId) : null
   const closeDetails = () => {
     onSelectCard?.(null)
     window.requestAnimationFrame(() => detailReturnFocusRef.current?.focus?.())
@@ -1344,6 +1345,14 @@ function _CardKanban({
         <div className="card-lanes-head">
           <span className="muted">{sub}</span>
           <_CardProjectionNotice projection={projection} cards={visibleCards} />
+          {missingCardId && <div className="notice resource-warning card-selection-missing" role="status">
+            Card <code>{missingCardId}</code> is not in the loaded board.
+            {(_cardInt(projection?.omitted) ?? 0) > 0
+              ? ` ${projection.omitted} work item${projection.omitted === 1 ? '' : 's'} `
+                + `${projection.omitted === 1 ? 'was' : 'were'} omitted from this snapshot.`
+              : ' This link may be stale.'}
+            <button type="button" className="btn sm ghost" onClick={closeDetails}>Clear selection</button>
+          </div>}
           {groupingBar}
           {searchBar}
           {questionNotice}
