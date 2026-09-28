@@ -181,6 +181,43 @@ def test_enabled_live_monitor_opens_question_and_agent_answers(tmp_path):
                for event in store.read_all())
 
 
+def test_fast_external_training_still_requires_final_monitor_answer(tmp_path):
+    rd, store, client = seeded(tmp_path)
+    generation = run_generation_token(store.read_all())
+    workdir = rd / "nodes" / "node_0"
+    workdir.mkdir(parents=True)
+    snapshot = snapshot_training_logs(workdir)
+    (workdir / "eval.log").write_text("epoch 1 loss=1.5\n")
+    a = SimpleNamespace(workdir=workdir, node_id=0, generation=0,
+                        _log_plan=eval_log_plan([]), _log_snapshot=snapshot,
+                        _live_questions=[], kill_signal={})
+    engine = SimpleNamespace(run_dir=rd, _eval_spec={"metric": {"kind": "stdout_json"}},
+                             _monitor_cadence=lambda: 600.0, _redact=lambda value: value,
+                             _train_monitor_kill=False, store=store, _write_lock=anyio.Lock())
+
+    async def scenario():
+        async with anyio.create_task_group() as group:
+            async def final_review():
+                await observe_external_eval(engine, a, threading.Event(), "train_monitor",
+                                            final_pass=True)
+            group.start_soon(final_review)
+            with anyio.fail_after(4):
+                while not a._live_questions:
+                    await anyio.sleep(0.01)
+            questions = client.get("/api/runs/demo/harness-checkpoints",
+                                   params={"expected_generation": generation}).json()["pending"]
+            assert len(questions) == 1 and not questions[0]["kill_enabled"]
+            assert client.post("/api/runs/demo/harness-checkpoints", json={
+                "expected_generation": generation, "checkpoint_id": questions[0]["checkpoint_id"],
+                "action_id": "fast-monitor-ok", "verdict": "continue", "reason": "healthy"}).status_code == 200
+        await observe_external_eval(engine, a, threading.Event(), "train_monitor",
+                                    final_pass=True)
+
+    anyio.run(scenario)
+    assert len(a._live_questions) == 1
+    assert answer_for(rd, a._live_questions[0])["verdict"] == "continue"
+
+
 def test_asha_stop_requires_same_resource_evidence_and_grace(tmp_path, monkeypatch):
     import looplab.engine.external_watch as watch
 

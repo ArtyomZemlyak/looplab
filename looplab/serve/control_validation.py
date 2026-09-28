@@ -662,16 +662,6 @@ def _normalize_set_strategy(ctx: _ControlIntake) -> dict:
     if policy is not None:
         if not isinstance(policy, str) or policy not in available_policies():
             raise HTTPException(400, "strategy.policy must name an available policy")
-        snapshot = ctx.rd / "config.snapshot.json"
-        if snapshot.is_file():
-            from looplab.core.config import read_config_snapshot
-            configured = read_config_snapshot(snapshot)
-            if (configured.external_harness and configured.policy == "mcts"
-                    and configured.mcts_value_weight > 0 and policy != "mcts"):
-                raise HTTPException(409, {
-                    "code": "external_selection_policy_fixed",
-                    "message": "configured MCTS value review is mandatory; start a new run to change the selection policy",
-                })
         clean_strategy["policy"] = policy
     fidelity = strategy.get("fidelity")
     if fidelity is not None:

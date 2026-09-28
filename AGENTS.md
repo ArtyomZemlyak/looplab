@@ -30,6 +30,13 @@ history. Refresh after events or responses; inspect `source_health` if the event
 log or a sidecar journal is incomplete. Commands and measured results remain in
 the event timeline. External obligation settings are fixed for a launched run;
 change operational settings on resume or start another run to change obligations.
+Search `policy` is an agent choice: submit `set_strategy` to switch the live
+evaluation policy (including `greedy` or `mcts`), or leave the current policy.
+Only the external agent proposes new candidates; the policy schedules evaluation
+of submitted nodes. For a greedy next experiment, choose a parent using the
+measured state and submit its implementation yourself. An MCTS value review is
+due only while MCTS is active with positive value weight. The engine records
+each applied switch as `strategy_decision`.
 Read `harness-contract.delegated_semantics` before claiming parity with the
 built-in novelty, foresight or listwise model judgments.
 In particular, when
@@ -56,7 +63,9 @@ While evaluating, poll `/api/runs/{run_id}/harness-checkpoints` with the run
 generation and answer any pending stage or live monitor question. A checked
 stage cannot advance without a verdict; an opened live question holds the
 terminal until answered. `abort` is valid only when that checkpoint grants
-early-stop authority. A disabled monitor opens no questions.
+early-stop authority. A fast command evaluation with an attributed training
+log may open its first monitor question after the evaluator completes, before
+the node becomes terminal. A disabled monitor opens no questions.
 
 Search MCP `phases` for the relevant entity before each decision. It lists the
 same domain writes used by the built-in roles; `phase_info` shows what to read and

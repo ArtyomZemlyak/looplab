@@ -432,7 +432,7 @@ class LessonReconcileMixin:
             try:
                 client = self._e._reflect_client()
                 client_failed = False
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001 — an unavailable reflector skips its optional update; deterministic retirement still runs
                 client = None
                 client_failed = True
         fresh_reflect: list = []

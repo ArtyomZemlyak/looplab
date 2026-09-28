@@ -18,7 +18,7 @@ from looplab.events.types import EV_ASHA_RANK, EV_TRAIN_MONITOR_ALERT
 from looplab.harness.checkpoints import answer_for, ask
 
 
-async def observe_external_eval(engine, a, cancel, phase: str) -> None:
+async def observe_external_eval(engine, a, cancel, phase: str, *, final_pass: bool = False) -> None:
     """Publish changed, attributed live evidence and wait for a deliberate answer.
 
     No agent process or internal model is launched. An already finished evaluator
@@ -32,8 +32,11 @@ async def observe_external_eval(engine, a, cancel, phase: str) -> None:
     under_streak = 0
     cadence = engine._monitor_cadence() if phase == "train_monitor" else engine._asha_cadence()
     metric = (engine._eval_spec or {}).get("metric") or {}
+    if final_pass and phase in getattr(a, "_external_observed_phases", set()):
+        return  # a live tick already gave the agent this phase's observation
     while True:
-        await anyio.sleep(cadence)
+        if not final_pass:
+            await anyio.sleep(cadence)
         if cancel.is_set():
             return
 
@@ -94,6 +97,8 @@ async def observe_external_eval(engine, a, cancel, phase: str) -> None:
         try:
             observed = await anyio.to_thread.run_sync(observe, limiter=_watch_limiter())
             if observed is None or cancel.is_set():
+                if final_pass:
+                    return
                 continue
             stage, tail, eligible, details, facts = observed
             digest = hashlib.sha256(tail.encode("utf-8", "replace")).hexdigest()
@@ -105,13 +110,20 @@ async def observe_external_eval(engine, a, cancel, phase: str) -> None:
             last_digest = stage, digest
             redactor = getattr(engine, "_redact", None)
             text = redactor(tail) if callable(redactor) else tail
-            question = await anyio.to_thread.run_sync(
-                lambda: ask(engine.run_dir, a.node_id, a.generation, phase,
-                            stage=stage, observation=f"{details}\n{text}"[-6000:],
-                            kill_enabled=(eligible and watching and bool(
-                                engine._train_monitor_kill if phase == "train_monitor"
-                                else engine._asha_live_kill))), limiter=_watch_limiter())
-            a._live_questions.append(question["checkpoint_id"])
+            # The evaluator can finish while ask() is in the worker thread. Keep the durable
+            # question and its in-process tracking together: cancellation between them would
+            # otherwise commit a node whose newly opened question was never answered.
+            with anyio.CancelScope(shield=True):
+                question = await anyio.to_thread.run_sync(
+                    lambda: ask(engine.run_dir, a.node_id, a.generation, phase,
+                                stage=stage, observation=f"{details}\n{text}"[-6000:],
+                                kill_enabled=(eligible and watching and bool(
+                                    engine._train_monitor_kill if phase == "train_monitor"
+                                    else engine._asha_live_kill))), limiter=_watch_limiter())
+                observed_phases = getattr(a, "_external_observed_phases", set())
+                observed_phases.add(phase)
+                a._external_observed_phases = observed_phases
+                a._live_questions.append(question["checkpoint_id"])
             while not cancel.is_set():
                 answer = await anyio.to_thread.run_sync(
                     lambda: answer_for(engine.run_dir, question["checkpoint_id"]),
@@ -150,9 +162,13 @@ async def observe_external_eval(engine, a, cancel, phase: str) -> None:
                         return
                     break
                 await anyio.sleep(0.3)
+            if final_pass:
+                return
         except Exception:  # noqa: BLE001 — a tick hiccup cannot disable later observation
             # A transient storage/log read cannot turn an enabled review into an
             # implicit 'continue'. Keep observing; an opened question remains due.
+            if final_pass:
+                raise  # the final gate must not silently skip a failed observation
             continue
 
 

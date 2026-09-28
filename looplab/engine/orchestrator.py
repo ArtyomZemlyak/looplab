@@ -765,6 +765,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # "drifts" forever, and without this the strategy path rebuilt the whole StrategyContext on
         # every loop pass to re-derive the same no-op. Nothing durable keys off it — see there.
         self._invalid_pin_verdict: Optional[tuple] = None
+        # Recheck deterministic Card enrichment from the event log on resume.
+        self._external_enrichment_seq: Optional[int] = None
         # In-process abstention memo for the value-estimate cadence (docs/BACKLOG.md §0.1 row 17):
         # the `(node_id, attempt)` pairs whose estimate came back unusable. Declared HERE rather
         # than minted on first use so it takes no row in `engine/attribute_sites.py`'s shrink-only
@@ -1994,6 +1996,13 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 # run cadences, speculation, research overlap or the empty-action finalizer. A
                 # durable command wakes this bounded poll; pause/finalize/budget gates above it
                 # remain authoritative and replayable.
+                # Apply explicit set_strategy pins even though the internal Strategist cadence is
+                # skipped. The pin writes strategy_decision and changes the LIVE evaluation policy;
+                # re-fold before scheduling under it. No internal Strategist is consulted.
+                before_strategy = state
+                state = self._maybe_consult_strategist(state, allow_consult=False)
+                if state is not before_strategy:
+                    continue
                 # Evidence reconciliation is deterministic here: it retires a lesson after a
                 # reset/remeasurement changes its cited node, without re-distilling it.
                 state = self._maybe_reconcile_lessons(state)

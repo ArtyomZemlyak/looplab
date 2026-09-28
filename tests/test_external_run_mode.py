@@ -294,17 +294,66 @@ def test_external_policy_cannot_be_removed_through_run_config(tmp_path):
     assert client.get("/api/runs/demo/config").json()["concept_pivot"] is True
     tuned = client.put("/api/runs/demo/config", json={**body, "settings": {"timeout": 190}})
     assert tuned.status_code == 200, tuned.text
+    current = client.get("/api/runs/demo/config").json()
+    assert "policy" not in current["_looplab_config_meta"]["run_read_only_fields"]
+    changed = client.put("/api/runs/demo/config", json={
+        "expected_generation": generation,
+        "expected_revision": current["_looplab_config_meta"]["config_revision"],
+        "settings": {"policy": "mcts"},
+    })
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["config"]["policy"] == "mcts"
+    EventStore(rd / "events.jsonl").append("set_strategy", {
+        "strategy": {"policy": "greedy"}})
+    current = client.get("/api/runs/demo/config").json()
+    hidden_noop = client.put("/api/runs/demo/config", json={
+        "expected_generation": generation,
+        "expected_revision": current["_looplab_config_meta"]["config_revision"],
+        "settings": {"policy": "evolutionary"},
+    })
+    assert hidden_noop.status_code == 409
+    assert hidden_noop.json()["detail"]["code"] == "external_strategy_pin_active"
 
 
-def test_configured_mcts_value_review_cannot_be_disabled_by_strategy(tmp_path):
+def test_external_agent_can_switch_out_of_configured_mcts_value_review(tmp_path):
     settings = Settings(backend="toy", external_harness=True, policy="mcts",
                         mcts_value_weight=0.4)
     (tmp_path / "config.snapshot.json").write_text(json.dumps(settings.model_dump(mode="json")))
     state = RunState(task_id="task", run_id="demo", goal="g", direction="min")
-    with pytest.raises(HTTPException) as caught:
-        normalize_control(SimpleNamespace(state=lambda _: state), tmp_path,
-                          EV_SET_STRATEGY, {"strategy": {"policy": "greedy"}})
-    assert caught.value.detail["code"] == "external_selection_policy_fixed"
+    normalized = normalize_control(SimpleNamespace(state=lambda _: state), tmp_path,
+                                   EV_SET_STRATEGY, {"strategy": {"policy": "greedy"}})
+    assert normalized["strategy"]["policy"] == "greedy"
+    from looplab.harness.selection import _value_weight
+    state.active_strategy = {"policy": "greedy"}
+    assert _value_weight(settings, state) == 0
+    state.active_strategy = {"policy": "mcts", "policy_params": {"value_weight": 0.4}}
+    assert _value_weight(settings, state) == 0.4
+
+
+def test_external_agent_strategy_pin_applies_live_without_internal_strategist(tmp_path):
+    engine = make_engine(tmp_path / "run", researcher=NoInternalRole(),
+                         developer=NoInternalRole(), strategist=NoInternalRole(),
+                         external_harness=True)
+
+    async def scenario():
+        async with anyio.create_task_group() as group:
+            group.start_soon(engine.run)
+            with anyio.fail_after(8):
+                while not fold(engine.store.read_all()).setup_done:
+                    await anyio.sleep(0.02)
+                for policy in ("mcts", "greedy"):
+                    engine.store.append(EV_SET_STRATEGY, {"strategy": {"policy": policy}})
+                    while engine._policy_name != policy or (fold(engine.store.read_all()).active_strategy or {}).get("policy") != policy:
+                        await anyio.sleep(0.02)
+                engine.store.append(EV_RUN_ABORT, {"reason": "strategy checked"})
+                while not fold(engine.store.read_all()).finished:
+                    await anyio.sleep(0.02)
+            group.cancel_scope.cancel()
+
+    anyio.run(scenario)
+    decisions = [e.data["strategy"]["policy"] for e in engine.store.read_all()
+                 if e.type == "strategy_decision"]
+    assert decisions == ["mcts", "greedy"]
 
 
 def test_scoped_harness_token_preserves_operator_defaults(tmp_path, monkeypatch):

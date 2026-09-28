@@ -1263,6 +1263,7 @@ class EvalAttempt:
     _log_snapshot: Any = None
     _log_plan: Any = None
     _live_questions: list = field(default_factory=list)
+    _external_observed_phases: set = field(default_factory=set)
     _seen: dict = field(default_factory=dict)          # the intervention watcher's one verdict
     kill_signal: dict = field(default_factory=dict)
     res: Any = None
@@ -3461,6 +3462,7 @@ class EvaluateMixin:
         a._seen: dict = {}
         a.kill_signal: dict = {}       # filled by the training monitor if it kills a broken run (Phase 3)
         a._live_questions = []         # opened external observations must be answered before terminal
+        a._external_observed_phases = set()
         # The Card identity this worker can be dropped through, read while `node` is still
         # the fold this attempt started from — it is not rebound until after the group.
         _card_id = getattr(getattr(a.node, "idea", None), "card_id", None)
@@ -3579,6 +3581,16 @@ class EvaluateMixin:
                 return PHASE_RETURN
             cancel.set()                  # eval finished on its own …
             _tg.cancel_scope.cancel()     # … stop the watcher now (no poll-interval latency)
+        if self.external_harness and getattr(self, "_eval_spec", None) and not a._seen.get("kind"):
+            # A short command evaluation can finish before the first live-monitor tick.
+            # Inspect its final attributed log once so enabled monitoring cannot vanish merely
+            # because the configured cadence was longer than the evaluation. A phase already
+            # observed live is not questioned twice. This still never starts an internal model.
+            from looplab.engine.external_watch import observe_external_eval
+            for phase, enabled in (("train_monitor", getattr(self, "_train_monitor", False)),
+                                   ("asha_live", getattr(self, "_asha_live", False))):
+                if enabled:
+                    await observe_external_eval(self, a, threading.Event(), phase, final_pass=True)
         if self.external_harness and a._live_questions:
             from looplab.engine.external_watch import settle_external_observations
             await settle_external_observations(self, a)

@@ -12,7 +12,8 @@ from looplab.harness.phases import PHASES
 # Operator policy for a launched external run. The MCP bridge uses the owner's
 # HTTP token, so changing these fields through per-run config would otherwise
 # let the agent remove its own admission/finish requirements. Other tuning
-# fields still apply on resume; a different policy starts a new run.
+# fields still apply on resume. The agent can switch the search policy through
+# set_strategy; that choice is tactical, while enabled reviews remain mandatory.
 EXTERNAL_POLICY_FIELDS = frozenset({
     "concept_pivot", "concept_run_base", "cross_run_concepts", "track_hypotheses",
     "deep_research_every", "novelty_mode", "novelty_gate", "novelty_epsilon",
@@ -21,7 +22,7 @@ EXTERNAL_POLICY_FIELDS = frozenset({
     "foresight_agentic", "best_of_n", "best_of_n_listwise", "strategist_every",
     "report_every", "reflection_priors", "memory_dir", "lessons_every",
     "comparative_lessons", "cross_run_curation", "task_facets_finalize",
-    "concept_tidy", "select_verifier", "select_verifier_samples", "policy",
+    "concept_tidy", "select_verifier", "select_verifier_samples",
     "mcts_value_weight", "train_monitor", "train_monitor_kill", "asha_live",
     "asha_live_kill", "coverage_context", "concept_retag_every",
     "stage_check_tools", "train_monitor_interval_s", "asha_live_min_siblings",
@@ -306,7 +307,7 @@ def run_obligations(task, settings, *, generation: str) -> dict:
                 "settings": {"train_monitor": settings.train_monitor,
                              "train_monitor_kill": settings.train_monitor_kill,
                              "train_monitor_interval_s": settings.train_monitor_interval_s},
-                "checkpoint": "changed_attributed_live_log_at_configured_cadence",
+                "checkpoint": "changed_attributed_live_log_at_configured_cadence_or_first_final_log",
                 "proof": "answer each opened harness-checkpoints observation before terminal",
                 "enforced": True, "conditional_on": "command evaluation produces an attributed live log",
             },

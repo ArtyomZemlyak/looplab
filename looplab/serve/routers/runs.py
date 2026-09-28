@@ -3231,6 +3231,12 @@ def build_router(srv) -> APIRouter:
                     and updated.get(key) != value):
                 updated[key] = value
                 changed[key] = value
+        if ("policy" in changed and settings_from_snapshot(current).external_harness
+                and (folded.pending_strategy or {}).get("policy") is not None):
+            raise HTTPException(409, {
+                "code": "external_strategy_pin_active",
+                "message": "A durable set_strategy pin owns the live policy; use set_strategy to switch it.",
+            })
         if settings_from_snapshot(current).external_harness:
             from looplab.harness.obligations import EXTERNAL_POLICY_FIELDS
             before_policy = settings_from_snapshot(current)

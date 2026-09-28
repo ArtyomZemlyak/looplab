@@ -145,7 +145,10 @@ The normal control cycle is:
    `mcts_value_weight`, use that GET's `value_candidates` and
    `evidence_revision` to POST one headroom estimate (0–1 and rationale) per
    candidate to `/harness-selection/values`. Both judgments are required before
-   the next candidate when their respective conditions arise; a reset or new
+   the next candidate when their respective conditions arise. The external agent
+   can switch the live policy with `set_strategy` (including `greedy`, `mcts`,
+   `asha` and `bohb`); MCTS value judgments are due only while MCTS is active
+   with a positive value weight. A reset or new
    measurement requires a fresh judgment. These are the external agent's
    assessments, not independent model verification.
    With `reflection_priors` and `lessons_every` enabled, review skill candidates
@@ -175,6 +178,12 @@ The normal control cycle is:
    An opened observation holds the node terminal until answered. Inspect measured
    metrics, stage logs and failures, then submit a corrected candidate if useful.
    The metric is measured by LoopLab's evaluator; never submit a claimed score.
+   The train observer checks at the configured adaptive cadence during a command
+   evaluation. If an evaluation finishes before its first tick, LoopLab checks
+   its final attributed training log before committing the node result and waits
+   for the external agent's answer. ASHA only asks when comparable intermediate
+   measurements and enough completed siblings exist. Evaluators without an
+   attributed training log cannot produce a training-monitor question.
 5. Review each enabled cross-run knowledge phase and record its action reference,
    or why no action applies, through `POST /api/runs/{run_id}/harness-reviews`.
    Publish `report_generated` at each enabled `report_every` node interval
@@ -185,12 +194,21 @@ The normal control cycle is:
    agent has no immediate action.
 
 The obligation settings of an external run are fixed at launch (including concept,
-novelty, review and report switches). Per-run config rejects changes to these
+novelty, monitoring, review and report switches). Per-run config rejects changes to these
 fields, including changes made through the MCP bridge's harness token. The
 harness token cannot change global settings, launch through Genesis or `/api/start`,
 drive the owner assistant, or reset/delete a run. Start a
-new run to change that policy. Operational tuning fields such as `timeout`
-remain editable and take effect in the engine on its next restart. Budget or
+new run to change those obligations. The search `policy` is a tactical choice:
+`set_strategy` applies immediately to the live engine and records a durable
+`strategy_decision`; editing the run's `policy` config takes effect on the next
+restart if no durable `set_strategy` pin overrides it. In external mode LoopLab
+uses the active policy only to schedule
+evaluations of agent-submitted nodes; the external agent still chooses and
+submits every new candidate. Selecting `greedy` does not generate an internal
+`improve` step: the agent can follow that heuristic by choosing the best
+measured parent itself, or choose a different experiment. Operational tuning
+fields such as `timeout` remain editable and take effect in the engine on its
+next restart. Budget or
 leakage stops with outstanding external finish obligations pause the run; publish
 the due report and reviews, then explicitly finalize it. CLI `finalize` and HTTP
 `run_abort` apply the same preflight, including pending evaluations.
