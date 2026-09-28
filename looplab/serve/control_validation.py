@@ -423,6 +423,30 @@ def _normalize_run_abort(ctx: _ControlIntake) -> dict:
     # silently do nothing while the command lifecycle reports success.
     if ctx.data.get("reason") is not None:
         ctx.data["reason"] = ctx.text("reason", limit=256)
+    snapshot = ctx.rd / "config.snapshot.json"
+    if snapshot.is_file():
+        from looplab.core.config import read_config_snapshot
+        from looplab.harness.obligations import final_report_due
+        settings = read_config_snapshot(snapshot)
+        events = None
+        if settings.external_harness:
+            from looplab.events.eventstore import EventStore
+            events = EventStore(ctx.rd / "events.jsonl").read_all()
+        if final_report_due(settings, ctx.state(), events):
+            raise HTTPException(409, {
+                "code": "external_report_required",
+                "message": "report_every is enabled; publish a report covering the latest candidate before finishing",
+            })
+        if settings.external_harness and ctx.state().run_uid:
+            from looplab.serve.run_commands import run_generation_token
+            from looplab.harness.reviews import missing_reviews
+            generation = run_generation_token(events)
+            missing = missing_reviews(ctx.rd, settings, ctx.state(), generation)
+            if missing:
+                raise HTTPException(409, {
+                    "code": "external_reviews_required", "phases": missing,
+                    "message": "review each enabled cross-run phase before finishing",
+                })
     return ctx.data
 
 
@@ -1068,6 +1092,47 @@ def _normalize_inject_node(ctx: _ControlIntake) -> dict:
         refusal = candidate_surface_refusal(repo_spec, normalized_files, data["deleted"])
         if refusal:
             raise HTTPException(400, refusal)
+        # A configured concept workflow is an obligation in external mode, not
+        # an advisory prompt. Check effective membership after surface checks.
+        from looplab.harness.obligations import candidate_concepts, concept_tags_required
+        settings = read_config_snapshot(snapshot)
+        from looplab.harness.obligations import research_due
+        from looplab.events.eventstore import EventStore
+        events = EventStore(ctx.rd / "events.jsonl").read_all()
+        if research_due(settings, ctx.state(), events):
+            raise HTTPException(409, {
+                "code": "external_research_required",
+                "message": "deep_research_every is enabled; publish research_completed at this node count before submitting a candidate",
+            })
+        if settings.track_hypotheses and not (
+                (normalized_idea.hypothesis or "").strip() or normalized_idea.card_id):
+            raise HTTPException(400, {
+                "code": "external_hypothesis_required",
+                "message": "track_hypotheses is enabled; give this candidate a hypothesis or existing Card",
+            })
+        if concept_tags_required(settings) and not candidate_concepts(
+                normalized_idea, ctx.state(), parents):
+            raise HTTPException(400, {
+                "code": "external_concepts_required",
+                "message": "enabled concept settings require nonempty effective concepts on each candidate",
+                "settings": [key for key in
+                             ("concept_pivot", "concept_run_base", "cross_run_concepts")
+                             if getattr(settings, key)],
+                "remediation": "author idea.concepts (full) or a nonempty effective delta",
+            })
+        from looplab.serve.run_commands import run_generation_token
+        from looplab.harness.decisions import missing_decisions
+        generation = run_generation_token(events)
+        if generation and ctx.state().run_uid:
+            missing = missing_decisions(ctx.rd, settings, ctx.state(), normalized_idea, generation,
+                                        code=data.get("code"), files=normalized_files,
+                                        deleted=data["deleted"])
+            if missing:
+                raise HTTPException(409, {
+                    "code": "external_decisions_required", "phases": missing,
+                    "message": "enabled decision phases require idea-bound review receipts before admission",
+                    "remediation": "POST /api/runs/{run_id}/harness-decisions for this idea",
+                })
     # `origin` IS SERVER-DERIVED PROVENANCE, exactly like the fork receipt's stamped half, and it was
     # the one the client could write. `_import_cross_run_source` mints it from the source node it
     # just read — run id, node id, that node's `robust_metric`, its lifecycle generation — and the

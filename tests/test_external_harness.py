@@ -15,7 +15,7 @@ def test_harness_discovery_is_json_and_names_only_implemented_backends():
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload == harness_manifest()
-    assert payload["protocol_version"] == 2
+    assert payload["protocol_version"] == 3
     assert payload["mode"] == "external_harness_or_delegated_developer"
     assert "inject_node" in payload["external_run_mode"]["submission"]
     assert {"codex", "claude"} <= set(payload["developer_backends"])

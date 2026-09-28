@@ -658,6 +658,45 @@ class ExternalLessonBody(BaseModel):
     confidence: float = Field(default=0.6, ge=0, le=1)
 
 
+class ExternalSkillBody(BaseModel):
+    """A technique from an existing measured lesson, never a client-authored promotion."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    expected_generation: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    action_id: str = Field(min_length=1, max_length=160)
+    lesson_action_id: str = Field(min_length=1, max_length=160)
+    body: str = Field(min_length=1, max_length=16000)
+
+
+class ExternalDecisionBody(BaseModel):
+    """A reviewed, idea-bound decision at the current node count."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    expected_generation: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    action_id: str = Field(min_length=1, max_length=160)
+    phase_id: Literal["novelty", "foresight", "candidate_ranking", "strategy"]
+    idea: dict[str, Any]
+    decision: Literal["submit", "reject"]
+    alternatives: list[dict[str, Any]] = Field(default_factory=list, max_length=63)
+    implementations: list[dict[str, Any]] = Field(default_factory=list, max_length=64)
+    selected_index: int = Field(default=0, ge=0, le=63)
+    reason: str = Field(min_length=1, max_length=1200)
+
+
+class ExternalReviewBody(BaseModel):
+    """Evidence-aware review of one configured run-end knowledge cycle."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    expected_generation: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    action_id: str = Field(min_length=1, max_length=160)
+    phase_id: Literal["concept_merge", "claim_curation", "task_facets",
+                      "concept_ratification", "lessons", "skill_candidates"]
+    decision: Literal["completed", "no_applicable_action"]
+    reason: str = Field(min_length=12, max_length=1200)
+    evidence: list[StrictInt] = Field(default_factory=list, max_length=32)
+    action_ref: str = Field(default="", max_length=160)
+
+
 class NoveltyPreviewBody(BaseModel):
     """Candidate idea to compare with the current run; this call never admits it."""
 
@@ -907,6 +946,24 @@ def build_router(srv) -> APIRouter:
         """
         return _state_payload(_run_dir(run_id), seq)
 
+    @router.get("/api/runs/{run_id}/harness-contract")
+    def get_harness_contract(run_id: str):
+        """Effective choices and enforced task constraints for this run incarnation."""
+        from looplab.adapters.tasks import load_task
+        from looplab.harness.obligations import run_obligations
+
+        rd = _run_dir(run_id)
+        events = EventStore(rd / "events.jsonl").read_all()
+        generation = run_generation_token(events)
+        if not generation:
+            raise HTTPException(409, "run has not started")
+        try:
+            settings = settings_from_snapshot(json.loads((rd / "config.snapshot.json").read_bytes()))
+            task = load_task(rd / "task.snapshot.json", existing_run=True)
+        except (OSError, ValueError, KeyError) as exc:
+            raise refusal("config_snapshot_unreadable") from exc
+        return run_obligations(task, settings, generation=generation)
+
     @router.post("/api/runs/{run_id}/lessons")
     def publish_external_lesson(run_id: str, body: ExternalLessonBody):
         """Record an external agent's evidence-linked cross-run lesson idempotently.
@@ -917,6 +974,24 @@ def build_router(srv) -> APIRouter:
         """
         from looplab.harness.lessons import publish_lesson
         return publish_lesson(srv, _run_dir(run_id), body)
+
+    @router.post("/api/runs/{run_id}/skill-candidates")
+    def publish_external_skill(run_id: str, body: ExternalSkillBody):
+        """Draft an auto-skill from a fresh supported lesson; promotion is server-derived."""
+        from looplab.harness.skills import publish_skill_candidate
+        return publish_skill_candidate(srv, _run_dir(run_id), body)
+
+    @router.post("/api/runs/{run_id}/harness-decisions")
+    def record_harness_decision(run_id: str, body: ExternalDecisionBody):
+        """Record a reviewed choice for an enabled phase, bound to the submitted idea."""
+        from looplab.harness.decisions import publish_decision
+        return publish_decision(srv, _run_dir(run_id), body)
+
+    @router.post("/api/runs/{run_id}/harness-reviews")
+    def record_harness_review(run_id: str, body: ExternalReviewBody):
+        """Record a configured end-of-run review, including a reason for no action."""
+        from looplab.harness.reviews import publish_review
+        return publish_review(srv, _run_dir(run_id), body)
 
     @router.post("/api/runs/{run_id}/novelty-preview")
     def novelty_preview(run_id: str, body: NoveltyPreviewBody):

@@ -9,7 +9,8 @@ LoopLab has two ways to work with Codex, Claude Code and other coding agents:
 
 The external mode leaves proposal, stage design, planning, implementation, repair and
 search decisions to the connected agent. It also leaves novelty judgments, lesson
-distillation and taxonomy curation to that agent. It can skip a stage or plan when unnecessary.
+distillation and taxonomy curation to that agent. Enabled operator settings remain
+requirements for the external agent; it can skip an optional stage or plan when unnecessary.
 LoopLab still owns admission, lineage, protected files, execution, measured results,
 budgets, pause/finalize, event history and replay. The agent must stay connected (or
 reconnect later) to choose further work: an idle external run waits for commands.
@@ -56,7 +57,9 @@ includes the `ResearchMemo` schema and the accepted/server-derived fields of
 means a durable `POST /api/runs/{run_id}/commands` with `type: TYPE`, `data`,
 `expected_generation` from `/state`, and a fresh `Idempotency-Key`. Search
 `operations` for each HTTP path and read `operation_schema` before submitting.
-The catalog covers Genesis, onboarding, research, hypotheses and Cards, proposal,
+The catalog lists capabilities. Read `GET /api/runs/{run_id}/harness-contract`
+for the effective obligations of this run; an enabled feature is not silently
+turned into an optional suggestion. The catalog covers Genesis, onboarding, research, hypotheses and Cards, proposal,
 novelty, ranking, strategy, stages, implementation, repair, live monitoring,
 evaluation, concepts, claims, lessons, reports, and the pilot's next action.
 
@@ -97,6 +100,10 @@ The normal control cycle is:
    `cmd.stages` wins. For a single command, an agent may put preceding stages in
    `looplab_stages.json` only if `edit_surface` allows that JSON path; LoopLab appends
    the protected score command.
+   Enabled `deep_research_every` requires a current `research_completed` memo;
+   enabled `track_hypotheses` requires a candidate hypothesis or Card link.
+   Record enabled novelty, foresight, ranking and strategy choices through
+   `POST /api/runs/{run_id}/harness-decisions` before admitting that Idea.
 3. Submit `inject_node` using `POST /api/runs/{run_id}/commands`: include an `idea`
    and ready-made `code` or `files` (and optionally `deleted`). Use `parent_id` or
    `parent_ids` to branch from measured candidates. Read the command's schema for
@@ -106,8 +113,10 @@ The normal control cycle is:
    stage logs and failures. Submit another ready-made candidate if a repair or a
    different idea is useful. The metric is measured by LoopLab's evaluator; never
    submit a claimed score as evidence.
-5. Publish a research memo, hypothesis, lesson or report when the evidence warrants it.
-   These are separate durable decisions; no particular number of stages is required.
+5. Review each enabled cross-run knowledge phase and record its action reference,
+   or why no action applies, through `POST /api/runs/{run_id}/harness-reviews`.
+   Publish a `report_generated` covering the latest candidate when `report_every`
+   is enabled. No particular number of implementation stages is required.
 6. Pause or finalize the run through the same command API. Resume from the durable
    state after a client restart. A run does not finish merely because the external
    agent has no immediate action.
@@ -136,6 +145,14 @@ LoopLab's deterministic graded novelty result and nearby node, without admitting
 the idea or calling an internal model. Concept tags in this preview are authored
 claims, not independent classifier evidence. The agent makes the final novelty
 decision after reviewing node history and relevant cross-run claims.
+When novelty is enabled, the agent records that choice against the exact Idea,
+run generation and node count through `harness-decisions`. The same route
+records configured foresight and best-of-N reviews. It takes a list of
+different alternative Ideas for foresight. Best of N takes complete
+`implementations` with code/files, plus `selected_index`; the selected Idea and
+artifact must match the subsequently admitted candidate. The server counts
+distinct reviewed options and refuses a review narrower than the configured panel. A strategy review is due
+on its configured cadence. Candidate admission rejects a missing review.
 
 Read accumulated lessons through `GET /api/memory` (optionally `?run_id=...`)
 and claims through `GET /api/cross-run/claims`. When a result teaches something
@@ -150,7 +167,11 @@ lesson; reusing it for different content fails. An agent can publish before or
 after finalizing the run. In external mode, finalization does not ask LoopLab's
 internal reflector to create additional lessons or auto-promote skills.
 
-Concept authoring and deduplication use the existing durable controls. Supply
+Concept authoring and deduplication use the existing durable controls. If
+`concept_pivot`, `concept_run_base`, or `cross_run_concepts` is enabled, an
+external `inject_node` must carry nonempty effective concepts. The admission
+gate checks full tags or materialized base/parent plus delta and rejects an
+empty result. When all three are off, candidate concept tags are optional. Supply
 `idea.concepts`, or `concept_mode` with `concepts_added` and `concepts_removed`,
 in an `inject_node` command. `concept_tag_edited` updates an observed node's tags;
 `run_concepts` sets the run base. Inspect `/api/runs/{run_id}/concepts`,
@@ -162,6 +183,22 @@ produces deterministic case and concept-capsule projections from measured,
 authored evidence at run end; it does not call its internal concept or claim
 stewards or automatically ratify concept merges in external mode. Use
 `operations` and `operation_schema` to get each route's live request shape.
+
+An external agent may draft a reusable skill from a supported lesson with
+`POST /api/runs/{run_id}/skill-candidates`. Supply its current generation,
+unique action ID, published `lesson_action_id` and a procedural Markdown body.
+The server checks that the lesson still cites measured, reliable node outcomes,
+then applies the existing portability prefilter and cross-task fingerprint
+promotion rule. The agent cannot set `status: promoted` itself.
+
+Enabled `cross_run_curation`, `task_facets_finalize`, `concept_tidy` and
+`reflection_priors` require a final review of the applicable concept, claim,
+facet, lesson and skill decisions when the run contains candidates. Use
+`no_applicable_action` with a reason when evidence does not justify a write;
+`completed` includes the domain action reference. These reviews attest the
+agent's judgment; LoopLab verifies the referenced domain action exists. The
+actual write must still pass its own guarded API.
+Finalization rejects missing reviews or reviews from an earlier node count.
 
 For cross-run task facets, read `GET /api/cross-run/task-facets` for the current
 portfolio identity and ledger revision, then send `POST` to the same path with

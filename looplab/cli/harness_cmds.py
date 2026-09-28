@@ -14,7 +14,7 @@ from looplab.harness.phases import phase_catalog
 def harness_manifest(*, include_settings: bool = False) -> dict:
     """The versioned, stable entry point; schemas come from their actual owners."""
     result = {
-        "protocol_version": 2,
+        "protocol_version": 3,
         "mode": "external_harness_or_delegated_developer",
         "external_run_mode": {
             "launch": "looplab run CONFIG --out RUN_DIR --backend toy -s external_harness=true",
@@ -37,17 +37,20 @@ def harness_manifest(*, include_settings: bool = False) -> dict:
         },
         "knowledge": {
             "novelty": {"preview": "POST /api/runs/{run_id}/novelty-preview",
-                        "decision": "The agent compares current and prior candidates, then submits or skips. The preview reuses the deterministic graded rubric and has no admission side effect."},
+                        "decision": "When enabled, POST /api/runs/{run_id}/harness-decisions for the exact idea, submit/reject, reason and distinct alternatives. Admission requires an idea-bound submit receipt."},
             "lessons": {"read": "GET /api/memory and GET /api/cross-run/claims",
                         "write": "POST /api/runs/{run_id}/lessons with expected_generation, action_id, statement, outcome, role and terminal evidence node ids. The server stamps fingerprint, run UID and node outcome signatures; exact retries are idempotent.",
                         "finalize": "External runs never invoke LoopLab's internal lesson reflection; publish lessons before or after finalization."},
             "concepts": {"per_candidate": "Author idea.concepts or concept_mode plus concepts_added/concepts_removed on inject_node.",
+                         "requirement": "When concept_pivot, concept_run_base or cross_run_concepts is enabled, every external candidate must have nonempty effective concepts; the intake enforces this. Otherwise tagging is optional.",
                          "per_node": "concept_tag_edited command, with node_generation",
                          "run_base": "run_concepts command",
                          "inspect": "GET /api/runs/{run_id}/concepts, GET /api/cross-run/atlas, GET /api/cross-run/concept-policy",
                          "deduplicate": "POST /api/cross-run/concept-merge (or alias-clear, split, split-clear, purge) with portfolio identity and observed governance revisions. External runs skip automatic steward and ratifier."},
             "claims": "Inspect GET /api/cross-run/claims; use claim-decide for governed meaning changes. Research claims and concept capsules are still deterministic run-end projections from authored evidence.",
+            "skills": "POST /api/runs/{run_id}/skill-candidates with a current supported lesson_action_id and measured node evidence. The server derives candidate/promoted status from distinct task fingerprints. Enabled cross-run knowledge requires a final harness-reviews receipt with a justified no-action decision where appropriate.",
         },
+        "obligations": "GET /api/runs/{run_id}/harness-contract returns effective choices and enforced evaluation constraints. Decision phases are available, not a mandatory sequence.",
         "interfaces": {
             "start": "looplab run CONFIG --out RUN_DIR --developer-backend codex",
             "resume": "looplab resume RUN_DIR",

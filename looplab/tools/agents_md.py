@@ -19,6 +19,16 @@ contract through `looplab harness-mcp`. Choose whether proposing, stages and a p
 are useful; submit ready-made code/files through the durable `inject_node` command.
 Use MCP `phases` and `phase_info` to inspect every decision's entity, evidence,
 prompt keys, accepted command fields and corresponding built-in owner.
+Read `/api/runs/{run_id}/harness-contract` for this run's actual obligations.
+Follow enabled run settings: a concept workflow requires effective concepts
+on every candidate, checked on admission. Other phases may be skipped only
+when the run contract and operator settings permit it.
+Enabled research and hypothesis settings require a current memo and candidate
+hypothesis. Novelty, foresight and best-of-N require idea-bound reviews through
+`/api/runs/{run_id}/harness-decisions`; compare distinct alternatives when the
+configured breadth exceeds one. Enabled knowledge phases require final
+`/api/runs/{run_id}/harness-reviews` receipts, including justified no-action
+decisions. An enabled report must cover the final candidate count.
 After LoopLab measures a candidate, inspect its metric or failure before branching,
 repairing as a new child candidate, or finalizing. Respect the edit surface and
 protected scorer; no internal Researcher/Developer will complete a code-less idea.
@@ -27,6 +37,9 @@ You own novelty and knowledge decisions. Preview an idea with
 and `/api/cross-run/claims`, then choose whether the experiment merits evaluation.
 Write evidence-linked lessons with `POST /api/runs/{run_id}/lessons` and a stable
 `action_id`; LoopLab stamps the run/task identity and node outcome signatures.
+You may draft a procedural skill from a supported lesson with
+`POST /api/runs/{run_id}/skill-candidates`; LoopLab checks live evidence and
+derives candidate/promotion status from distinct task fingerprints.
 Author a `research_completed` memo or `report_generated` report through the same
 durable command API; LoopLab sanitizes and folds them into its normal projections.
 Author concept tags in the injected idea or use `concept_tag_edited` and

@@ -10,7 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-137 routes on 122 paths; 10 deprecated; 27 with a declared response model.
+141 routes on 126 paths; 10 deprecated; 27 with a declared response model.
 
 ### `/api`
 
@@ -180,6 +180,9 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `POST` | `/api/runs/{run_id}/deletions` | Delete one exact run generation through an operation-bound durable transaction. | — |  |
 | `GET` | `/api/runs/{run_id}/deletions/{operation_id}` | *Observe Run Deletion* (no docstring) | — |  |
 | `GET` | `/api/runs/{run_id}/events` | Stream canonical public state frames — a full `state` frame first, then `state_delta` | — |  |
+| `GET` | `/api/runs/{run_id}/harness-contract` | Effective choices and enforced task constraints for this run incarnation. | — |  |
+| `POST` | `/api/runs/{run_id}/harness-decisions` | Record a reviewed choice for an enabled phase, bound to the submitted idea. | — |  |
+| `POST` | `/api/runs/{run_id}/harness-reviews` | Record a configured end-of-run review, including a reason for no action. | — |  |
 | `POST` | `/api/runs/{run_id}/lessons` | Record an external agent's evidence-linked cross-run lesson idempotently. | — |  |
 | `GET` | `/api/runs/{run_id}/lifecycle` | Bounded identity/liveness probe used after a terminal SSE stream closes. | — |  |
 | `GET` | `/api/runs/{run_id}/log` | Raw event envelopes (for the activity feed + event/span explorer). `since` = exclusive | — | yes |
@@ -202,6 +205,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `GET` | `/api/runs/{run_id}/reviews` | *List Reviews* (no docstring) | — |  |
 | `POST` | `/api/runs/{run_id}/reviews` | *Create Review* (no docstring) | — |  |
 | `DELETE` | `/api/runs/{run_id}/reviews/{link_id}` | *Revoke Review* (no docstring) | — |  |
+| `POST` | `/api/runs/{run_id}/skill-candidates` | Draft an auto-skill from a fresh supported lesson; promotion is server-derived. | — |  |
 | `GET` | `/api/runs/{run_id}/spans/{sid}` | Bounded, redacted I/O projection for one observation; raw diagnostics stay in spans.jsonl. | — |  |
 | `GET` | `/api/runs/{run_id}/state` | Return the bounded public run state. | `PublicRunStateResponse` |  |
 | `POST` | `/api/runs/{run_id}/suggest` | Turn the chat discussion (or a free-form instruction) into a CONCRETE experiment idea | — | yes |

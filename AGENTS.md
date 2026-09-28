@@ -21,6 +21,17 @@ evidence before the next decision. Pause or finalize explicitly. The old
 `developer_backend=codex|claude` mode delegates only candidate editing and keeps
 LoopLab's internal Researcher/search roles.
 
+Read `GET /api/runs/{run_id}/harness-contract` before proposing. Enabled
+settings impose obligations on the external agent. In particular, when
+`concept_pivot`, `concept_run_base`, or `cross_run_concepts` is enabled, every
+candidate must carry nonempty effective concept tags; the server rejects an
+unannotated candidate. A phase is skippable only when its effective run policy
+allows it. Operator-declared stages and protected evaluation always win.
+Enabled research, hypothesis, novelty, foresight, best-of-N, strategy, report
+and cross-run knowledge settings have admission or finalization checkpoints.
+Use `harness-decisions` and `harness-reviews` to record idea-bound reviews and
+justified no-action outcomes where a change is not supported by evidence.
+
 Search MCP `phases` for the relevant entity before each decision. It lists the
 same domain writes used by the built-in roles; `phase_info` shows what to read and
 which commands to submit. Research memos use `research_completed`, reports use

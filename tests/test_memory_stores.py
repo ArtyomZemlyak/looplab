@@ -47,6 +47,8 @@ NOT_MEMORY_JSONL = {
     "sft.jsonl": "`looplab export-sft`'s default output (run directory)",
     "messages.jsonl": "an assistant session's transcript (`<run root>/assistant/<session>/`)",
     "harness.v1.jsonl": "the agent-trajectory bench fixture (`tests/data/agent_trajectory/`)",
+    "harness_decisions.jsonl": "the run's idea-bound external decisions (run directory)",
+    "harness_reviews.jsonl": "the run's external knowledge reviews (run directory)",
 }
 
 # The closed vocabulary of calls that WRITE a store. Generic spellings (`add`, `save`, `write`) are
@@ -80,6 +82,7 @@ PATH_BINDERS = {
 # Two-way, so flipping a run-owned store to PRESERVED (the one-word edit that would re-open ENG3-07)
 # is a red test until the exception is written down here.
 RUN_NAMING_PRESERVED = {
+    "skill_candidate_actions.jsonl": "an auto-skill outlives its source run; so must its authoring receipt",
     "concept_curation_log.jsonl": "the audit of a PAID decision; the at-most-once gate reads it",
     "claim_curation_log.jsonl": "the audit of a PAID decision; the at-most-once gate reads it",
     "task_facets_curation_log.jsonl": "the audit of a PAID decision; the at-most-once gate reads it",

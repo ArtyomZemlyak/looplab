@@ -122,6 +122,146 @@ def test_external_intake_refuses_file_overlay_on_script_task(tmp_path):
             "files": {"unsafe.txt": "content"}})
 
 
+def test_configured_concept_tags_are_enforced_at_external_candidate_admission(tmp_path):
+    (tmp_path / "task.snapshot.json").write_bytes(
+        (Path(__file__).resolve().parents[1] / "examples" / "toy_task.json").read_bytes())
+    state = RunState(task_id="task", run_id="demo", goal="test", direction="min")
+    srv = SimpleNamespace(state=lambda _: state)
+    config = tmp_path / "config.snapshot.json"
+    enabled = Settings(backend="toy", external_harness=True, deep_research_every=-1,
+                       track_hypotheses=False)
+    config.write_text(json.dumps(enabled.model_dump(mode="json")))
+    candidate = {"idea": {"operator": "draft"}, "code": "print(1)"}
+    with pytest.raises(HTTPException) as caught:
+        normalize_control(srv, tmp_path, EV_INJECT_NODE, candidate)
+    assert caught.value.detail["code"] == "external_concepts_required"
+    tagged = {**candidate, "idea": {**candidate["idea"],
+                                   "concepts": ["search/grid"]}}
+    assert normalize_control(srv, tmp_path, EV_INJECT_NODE, tagged)["idea"]["concepts"] == ["search/grid"]
+    state.run_base_concepts = ["search/grid"]
+    inherited = {**candidate, "idea": {"operator": "draft", "concept_mode": "delta",
+                                      "concepts_added": [], "concepts_removed": []}}
+    assert normalize_control(srv, tmp_path, EV_INJECT_NODE, inherited)["idea"]["concept_mode"] == "delta"
+    erased = {**inherited, "idea": {**inherited["idea"], "concepts_removed": ["search/grid"]}}
+    with pytest.raises(HTTPException) as caught:
+        normalize_control(srv, tmp_path, EV_INJECT_NODE, erased)
+    assert caught.value.detail["code"] == "external_concepts_required"
+    config.write_text(json.dumps(Settings(
+        backend="toy", external_harness=True, concept_pivot=False,
+        concept_run_base=False, cross_run_concepts=False,
+        deep_research_every=-1, track_hypotheses=False).model_dump(mode="json")))
+    assert normalize_control(srv, tmp_path, EV_INJECT_NODE, candidate)["idea"]["operator"] == "draft"
+
+
+def test_configured_research_and_report_gate_external_lifecycle(tmp_path):
+    (tmp_path / "task.snapshot.json").write_bytes(
+        (Path(__file__).resolve().parents[1] / "examples" / "toy_task.json").read_bytes())
+    settings = Settings(backend="toy", external_harness=True,
+                        concept_pivot=False, concept_run_base=False, cross_run_concepts=False,
+                        track_hypotheses=False)
+    (tmp_path / "config.snapshot.json").write_text(json.dumps(settings.model_dump(mode="json")))
+    state = RunState(task_id="task", run_id="demo", goal="test", direction="min")
+    srv = SimpleNamespace(state=lambda _: state)
+    candidate = {"idea": {"operator": "draft"}, "code": "print(1)"}
+    with pytest.raises(HTTPException) as caught:
+        normalize_control(srv, tmp_path, EV_INJECT_NODE, candidate)
+    assert caught.value.detail["code"] == "external_research_required"
+    state.research.append({"at_node": 0, "summary": "Opening direction"})
+    assert normalize_control(srv, tmp_path, EV_INJECT_NODE, candidate)["idea"]["operator"] == "draft"
+    state.nodes[0] = SimpleNamespace(status="evaluated", metric=1.0, attempt=0,
+                                     tombstoned=False)
+    with pytest.raises(HTTPException) as caught:
+        normalize_control(srv, tmp_path, EV_RUN_ABORT, {"reason": "finished"})
+    assert caught.value.detail["code"] == "external_report_required"
+    state.report = {"at_node": 1, "headline": "Result"}
+    assert normalize_control(srv, tmp_path, EV_RUN_ABORT, {"reason": "finished"})["reason"] == "finished"
+
+    settings.track_hypotheses = True
+    settings.deep_research_every = -1
+    (tmp_path / "config.snapshot.json").write_text(json.dumps(settings.model_dump(mode="json")))
+    with pytest.raises(HTTPException) as caught:
+        normalize_control(srv, tmp_path, EV_INJECT_NODE, candidate)
+    assert caught.value.detail["code"] == "external_hypothesis_required"
+    hypothesis = {**candidate, "idea": {**candidate["idea"],
+                                      "hypothesis": "Explicit search reduces error"}}
+    assert normalize_control(srv, tmp_path, EV_INJECT_NODE, hypothesis)["idea"]["hypothesis"]
+
+
+def test_enabled_novelty_foresight_and_best_of_n_require_idea_bound_decisions(tmp_path):
+    from looplab.events.eventstore import EventStore
+    root = tmp_path / "runs"
+    rd = root / "demo"
+    rd.mkdir(parents=True)
+    (rd / "task.snapshot.json").write_bytes(
+        (Path(__file__).resolve().parents[1] / "examples" / "toy_task.json").read_bytes())
+    settings = Settings(backend="toy", external_harness=True, deep_research_every=-1,
+                        track_hypotheses=False, concept_pivot=False, concept_run_base=False,
+                        cross_run_concepts=False, novelty_mode="llm", foresight=True,
+                        foresight_panel=2, best_of_n=2, report_every=0)
+    (rd / "config.snapshot.json").write_text(json.dumps(settings.model_dump(mode="json")))
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_started", {"run_id": "demo", "run_uid": "incarnation-one",
+                                 "task_id": "task", "goal": "g", "direction": "min"})
+    srv = SimpleNamespace(state=lambda _: fold(store.read_all()))
+    candidate = {"idea": {"operator": "draft", "params": {"x": 3}}, "code": "print(1)"}
+    with pytest.raises(HTTPException) as caught:
+        normalize_control(srv, rd, EV_INJECT_NODE, candidate)
+    assert set(caught.value.detail["phases"]) == {"novelty", "foresight", "candidate_ranking"}
+    client = TestClient(make_app(root))
+    contract = client.get("/api/runs/demo/harness-contract")
+    assert contract.status_code == 200, contract.text
+    assert contract.json()["phase_obligations"]["foresight"]["required"]
+    generation = http_run_generation(client)
+    for phase, count in (("novelty", 1), ("foresight", 2), ("candidate_ranking", 2)):
+        body = {"expected_generation": generation, "action_id": "review-" + phase,
+                "phase_id": phase, "idea": candidate["idea"], "decision": "submit",
+                "alternatives": ([{"operator": "alternative", "params": {"x": 2}}]
+                                 if count == 2 and phase != "candidate_ranking" else []),
+                "implementations": ([
+                    {"idea": candidate["idea"], "code": candidate["code"]},
+                    {"idea": {"operator": "alternative", "params": {"x": 2}},
+                     "code": "print(2)"}]
+                    if phase == "candidate_ranking" else []),
+                "reason": "Compared the candidate with alternatives"}
+        response = client.post("/api/runs/demo/harness-decisions", json=body)
+        assert response.status_code == 200, response.text
+        assert client.post("/api/runs/demo/harness-decisions", json=body).json()["replayed"]
+        if phase == "candidate_ranking":
+            same_code = {**body, "action_id": "same-code-options",
+                         "implementations": [body["implementations"][0],
+                                             {**body["implementations"][1], "code": candidate["code"]}]}
+            assert client.post("/api/runs/demo/harness-decisions", json=same_code).status_code == 400
+    assert normalize_control(srv, rd, EV_INJECT_NODE, candidate)["idea"]["params"] == {"x": 3}
+    different_code = {**candidate, "code": "print(3)"}
+    with pytest.raises(HTTPException) as caught:
+        normalize_control(srv, rd, EV_INJECT_NODE, different_code)
+    assert caught.value.detail["phases"] == ["candidate_ranking"]
+    changed = {**candidate, "idea": {**candidate["idea"], "params": {"x": 4}}}
+    with pytest.raises(HTTPException) as caught:
+        normalize_control(srv, rd, EV_INJECT_NODE, changed)
+    assert "novelty" in caught.value.detail["phases"]
+
+    review = {"expected_generation": generation, "action_id": "review-concept-merge",
+              "phase_id": "concept_merge", "decision": "no_applicable_action",
+              "reason": "There are no measured concept pairs to consolidate yet"}
+    response = client.post("/api/runs/demo/harness-reviews", json=review)
+    assert response.status_code == 200, response.text
+    assert client.post("/api/runs/demo/harness-reviews", json=review).json()["replayed"]
+    assert client.post("/api/runs/demo/harness-reviews", json={
+        **review, "reason": "Changed conclusion from the same action"}).status_code == 409
+    assert client.post("/api/runs/demo/harness-reviews", json={
+        **review, "action_id": "forged-review", "decision": "completed",
+        "action_ref": "missing-ledger-action"}).status_code == 409
+    state = srv.state(rd)
+    state.nodes[0] = SimpleNamespace(status="evaluated", metric=1.0, attempt=0,
+                                     tombstoned=False)
+    srv_with_node = SimpleNamespace(state=lambda _: state)
+    with pytest.raises(HTTPException) as caught:
+        normalize_control(srv_with_node, rd, EV_RUN_ABORT, {"reason": "finished"})
+    assert caught.value.detail["code"] == "external_reviews_required"
+    assert "concept_merge" in caught.value.detail["phases"]
+
+
 def test_external_run_waits_for_candidate_evaluates_and_stops(tmp_path):
     engine = make_engine(tmp_path / "run", researcher=NoInternalRole(), developer=NoInternalRole(),
                          n_seeds=1, max_nodes=3, external_harness=True)
@@ -198,7 +338,7 @@ def test_external_agent_publishes_reusable_lessons_without_internal_reflection(t
                         "settings": {"memory_dir": str(memory_dir)}}).status_code == 200
                     generation = http_run_generation(client)
                     body = {"expected_generation": generation, "action_id": "lesson-one",
-                            "statement": "Explicit candidates can reach the optimum in one trial",
+                            "statement": "Use explicit candidate search to reach the optimum in small parameter spaces",
                             "outcome": "supported", "role": "researcher", "evidence": [0]}
                     preview = client.post("/api/runs/demo/novelty-preview", json={
                         "expected_generation": generation,
@@ -225,6 +365,21 @@ def test_external_agent_publishes_reusable_lessons_without_internal_reflection(t
                     assert stale.status_code == 409
                     memory = client.get("/api/memory").json()
                     assert any(row["statement"] == body["statement"] for row in memory["lessons"])
+                    skill_body = {"expected_generation": generation, "action_id": "skill-one",
+                                  "lesson_action_id": "lesson-one",
+                                  "body": "Search bounded candidate parameter pairs and validate the chosen score."}
+                    skill_endpoint = "/api/runs/demo/skill-candidates"
+                    missing = client.post(skill_endpoint, json={**skill_body,
+                        "lesson_action_id": "missing"})
+                    assert missing.status_code == 409, missing.text
+                    skill = client.post(skill_endpoint, json=skill_body)
+                    assert skill.status_code == 200, skill.text
+                    assert skill.json()["skill"]["status"] == "candidate"
+                    assert client.post(skill_endpoint, json=skill_body).json()["replayed"] is True
+                    assert client.post(skill_endpoint, json={**skill_body,
+                        "body": "different"}).status_code == 409
+                    assert client.post(skill_endpoint, json={**skill_body,
+                        "expected_generation": "0" * 64}).status_code == 409
                     return body
 
                 body = await anyio.to_thread.run_sync(publish)
