@@ -3516,7 +3516,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
 
   // mode selector row — placed BELOW the input in the side + full composers.
   const modeRow = <div className="asst-moderow">
-    <div className="asst-modes">
+    <div className="asst-modes" role="group" aria-label="Mode">
       {MODES.map(x => <button key={x.id} aria-pressed={x.id === mode}
         className={'asst-mode' + (x.id === mode ? ' on' : '')}
         disabled={historical || composerEditingPaused} title={historical ? readOnlyShort
@@ -3691,7 +3691,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     </div>
     {draftingNewRun && <div id="assistant-new-run-hint" className="asst-new-run-hint" role="note">
       <span>{newRunDraft
-        ? 'New run draft · describe the goal in plain language. Nothing starts until you review the launch card and press Start run.'
+        ? 'New run · review its launch card to start.'
         : 'Describe the goal after /new. Nothing starts until you review the launch card and press Start run.'}</span>
       {newRunDraft && <button type="button" className="btn sm ghost" onClick={() => setNewRunDraft(false)}>Back to chat</button>}
     </div>}
@@ -3937,7 +3937,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       <div className="asst-drawer-feed" ref={feedRef} role="log" aria-label="Assistant transcript"
         aria-live="off" aria-busy={busy} tabIndex={0}
         onScroll={onFeedScroll}>{renderThread()}</div>
-      {composer('Message the assistant…  (/ for commands · Enter to send)')}
+      {composer('Ask Assistant… (Enter sends · Shift+Enter new line)')}
       {visibleToast && <div className="cmdbar-toast side" role="status" aria-live="polite" aria-atomic="true">{visibleToast}</div>}
     </aside>
   </>
@@ -4092,7 +4092,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         <div className="asst-feed" ref={feedRef} role="log" aria-label="Assistant transcript"
           aria-live="off" aria-busy={busy} tabIndex={0}
           onScroll={onFeedScroll}>{renderThread()}</div>
-        {composer('Message the assistant…  (/ for commands · Enter to send)')}
+        {composer('Ask Assistant… (Enter sends · Shift+Enter new line)')}
         {visibleToast && <div className="cmdbar-toast side" role="status" aria-live="polite" aria-atomic="true">{visibleToast}</div>}
       </div>
     </div>
