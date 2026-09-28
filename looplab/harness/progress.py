@@ -29,6 +29,39 @@ from looplab.serve.run_commands import run_generation_token
 _SIDECAR_MAX_BYTES = 16 * 1024 * 1024
 
 
+def _policy_preview(settings, state) -> dict:
+    """Read-only proposal cues from the same pure policy factories as the engine.
+
+    This is advice for the external agent, never an instruction to the engine to
+    create a node. The engine remains the authority for evaluation eligibility.
+    """
+    from looplab.search.policy import (RUN_OWNED_POLICY_KNOBS, make_policy,
+                                       parse_model_arms, policy_knobs)
+
+    strategy = state.active_strategy or {}
+    name = strategy.get("policy") or settings.policy
+    params = {key: value for key, value in (strategy.get("policy_params") or {}).items()
+              if key not in RUN_OWNED_POLICY_KNOBS}
+    ablate_every = (strategy.get("operators") or {}).get("ablate_every", settings.ablate_every)
+    knobs = policy_knobs(
+        n_seeds=settings.n_seeds, max_nodes=settings.max_nodes,
+        ablate_every=ablate_every, debug_depth=settings.debug_depth,
+        operator_bandit=settings.operator_bandit, asha_eta=settings.asha_eta,
+        asha_rung_nodes=settings.asha_rung_nodes,
+        mcts_cost_weight=settings.mcts_cost_weight,
+        mcts_value_weight=settings.mcts_value_weight,
+        model_arms=parse_model_arms(settings.model_arms), card_select_k=settings.card_select_k)
+    policy = make_policy(name, **{**knobs, **params})
+    policy.max_nodes = max(0, policy.max_nodes + int(
+        state.budget_overrides.get("add_nodes", 0) or 0))
+    actions = policy.next_actions(state)
+    return {"policy": name,
+            "policy_source": "recorded_strategy" if strategy.get("policy") else "config_snapshot",
+            "actions": actions[:32], "total_actions": len(actions),
+            "truncated": len(actions) > 32,
+            "meaning": "read-only policy reconstruction on this event prefix; admission and the live engine may apply further gates; the external agent authors every candidate"}
+
+
 def _source(path: Path) -> tuple[list[dict], dict]:
     try:
         exists = path.exists()
@@ -165,6 +198,7 @@ def snapshot(rd: Path, expected_generation: str, *, offset: int = 0,
     pending = [row for row in checkpoint_rows if row["status"] == "pending"]
     return {"generation": generation, "run_uid": uid,
             "event_seq": events[-1].seq, "at_node": n,
+            "policy_preview": _policy_preview(settings, state),
             "evidence_revision": revision, "complete": all(
                 item["read_complete"] for item in health.values()),
             "source_health": health,

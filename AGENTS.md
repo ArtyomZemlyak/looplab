@@ -32,6 +32,8 @@ the event timeline. External obligation settings are fixed for a launched run;
 change operational settings on resume or start another run to change obligations.
 Search `policy` is an agent choice: submit `set_strategy` to switch the live
 evaluation policy (including `greedy` or `mcts`), or leave the current policy.
+Read `harness-progress.policy_preview` for the active policy's suggested next
+action and parent IDs; treat it as advice and record your own candidate choice.
 Only the external agent proposes new candidates; the policy schedules evaluation
 of submitted nodes. For a greedy next experiment, choose a parent using the
 measured state and submit its implementation yourself. An MCTS value review is

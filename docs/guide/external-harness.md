@@ -68,7 +68,12 @@ evaluation, concepts, claims, lessons, reports, and the pilot's next action.
 Read `GET /api/runs/{run_id}/harness-progress?expected_generation=TOKEN` for
 the current expansion and finish gates, required concept/hypothesis fields,
 pending evaluation questions and paginated histories of decision, knowledge
-review and checkpoint receipts. The token comes from `/state`. Its `event_seq`
+review and checkpoint receipts. Its `policy_preview` computes suggested actions
+and parent IDs from a recorded strategy, or from the config snapshot before a
+strategy decision is recorded. It names that source; a config edit takes effect
+on engine restart, and admission may apply further gates. This is advice:
+the external agent implements or rejects the suggestion, and no internal
+Researcher is invoked. The token comes from `/state`. Its `event_seq`
 identifies the measured event prefix; refresh after any event or response. The
 three histories live in independent JSONL journals; the event log is a fourth
 source. `source_health` reports damaged rows in all four, and `complete=false`

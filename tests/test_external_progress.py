@@ -33,6 +33,28 @@ def _run(tmp_path):
     return rd, store, TestClient(make_app(tmp_path / "runs"))
 
 
+def test_policy_preview_tracks_live_strategy_without_creating_candidates(tmp_path):
+    rd, store, client = _run(tmp_path)
+    config = json.loads((rd / "config.snapshot.json").read_text())
+    config["n_seeds"] = 2
+    (rd / "config.snapshot.json").write_text(json.dumps(config))
+    generation = run_generation_token(store.read_all())
+    before = len(store.read_all())
+    preview = client.get("/api/runs/demo/harness-progress", params={
+        "expected_generation": generation}).json()["policy_preview"]
+    assert preview["policy"] == "greedy"
+    assert preview["policy_source"] == "config_snapshot"
+    assert preview["actions"][0]["kind"] == "improve"
+    assert preview["actions"][0]["parent_id"] == 0
+    assert len(store.read_all()) == before
+    store.append("strategy_decision", {"strategy": {"policy": "mcts"}, "at_node": 2})
+    preview = client.get("/api/runs/demo/harness-progress", params={
+        "expected_generation": generation}).json()["policy_preview"]
+    assert preview["policy"] == "mcts"
+    assert preview["policy_source"] == "recorded_strategy"
+    assert preview["actions"] and len(store.read_all()) == before + 1
+
+
 def test_progress_restores_decisions_reviews_and_checkpoint_answers(tmp_path):
     rd, store, client = _run(tmp_path)
     generation = run_generation_token(store.read_all())
@@ -40,6 +62,8 @@ def test_progress_restores_decisions_reviews_and_checkpoint_answers(tmp_path):
     args = {"expected_generation": generation}
     initial = client.get(path, params=args)
     assert initial.status_code == 200, initial.text
+    assert initial.json()["policy_preview"]["policy"] == "greedy"
+    assert initial.json()["policy_preview"]["actions"]
     assert initial.json()["candidate_decisions_per_idea"]["novelty"] == 1
     assert initial.json()["candidate_requirements"] == {
         "effective_concepts": False, "hypothesis_statement": False}
