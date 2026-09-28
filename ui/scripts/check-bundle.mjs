@@ -47,7 +47,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // constraining anything, which is exactly what the header above says happened to the old
     // numbers. The structural gates are the closures, not this line.
     // 2026-09-22: measured 561,807 B JS gzip (was 504 KiB, +44.6 KiB over) / 52,031 B CSS.
-    js: { gzip: 556 * KIB },
+    // 2026-09-28 Card workspace: 569,337 B before, 569,674 B after. The 337 B adds local
+    // search across ideas/ids/concepts and a readable detail heading; route closures remain lazy.
+    js: { gzip: 557 * KIB },
     css: { gzip: 52 * KIB },
   },
   individual: {

@@ -21,6 +21,7 @@ let cardAttempts
 let cardAttemptIndex
 let cardAttemptCoverage
 let cardAttemptSummary
+let cardMatchesQuery
 let nodeCardId
 let route
 
@@ -30,7 +31,7 @@ test.before(async () => {
     server: { middlewareMode: true },
   })
   ;({ CardWorkspace } = await vite.ssrLoadModule('/src/CardBoard.jsx'))
-  ;({ cardAttempts, cardAttemptSummary, nodeCardId } =
+  ;({ cardAttempts, cardAttemptSummary, cardMatchesQuery, nodeCardId } =
     await vite.ssrLoadModule('/src/cardBoardModel.js'))
   ;({ cardAttemptIndex, cardAttemptCoverage } =
     await vite.ssrLoadModule('/src/cardBoardViewModel.js'))
@@ -197,7 +198,20 @@ test('the view layout renders the board without a modal dialog wrapper', () => {
   // The board is a VIEW now: an aria-modal shell would make the header's own view-toggle inert.
   assert.doesNotMatch(html, /aria-modal/)
   assert.match(html, /class="card-board"/)
+  assert.match(html, /aria-label="Find work items"/)
   assert.doesNotMatch(html, /card-detail-side/)
+})
+
+test('work-item search finds ideas, ids, operators and concepts without using status as a match', () => {
+  const card = { id: 'card-12', statement: 'Try cosine learning-rate decay',
+    operator: 'improve', concept_tags: ['optimization/warmup'], status: 'evaluated' }
+  for (const query of ['COSINE', 'card-12', 'Improve', 'WARMUP']) {
+    assert.equal(cardMatchesQuery(card, query), true, query)
+  }
+  assert.equal(cardMatchesQuery(card, 'evaluated'), false)
+  assert.equal(cardMatchesQuery(card, 'missing'), false)
+  assert.equal(cardMatchesQuery(card, ''), true)
+  assert.equal(cardMatchesQuery(null, 'cosine'), false)
 })
 
 test('wide workspace opens details only after a Card is picked', () => {
@@ -205,7 +219,10 @@ test('wide workspace opens details only after a Card is picked', () => {
   assert.doesNotMatch(closed, /card-detail-side/)
   const open = render({ pane: { compact: false, width: 420 }, selectedCardId: 'card-many' })
   assert.match(open, /card-detail-side/)
+  assert.match(open, /class="card-detail-heading">Log-transform the target<\/h2>/)
+  assert.ok(open.indexOf('card-detail-heading') < open.indexOf('card-attempts'))
   assert.match(open, /these 3 experiments tested/)
+  assert.match(open, />Close<\/button>/)
 })
 
 test('compact workspace leaves the board reachable until a Card is opened', () => {

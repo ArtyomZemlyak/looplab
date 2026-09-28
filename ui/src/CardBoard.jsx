@@ -27,6 +27,7 @@ import {
   cardReopenable as _cardReopenable,
   cardText as _cardText, cardLessons as _cardLessons, cardOrigin as _cardOrigin,
   cardSelectionBlock,
+  cardMatchesQuery,
   resolveSelectedCard,
 } from './cardBoardModel.js'
 import { cardAttemptCoverage, cardAttemptIndex } from './cardBoardViewModel.js'
@@ -922,6 +923,7 @@ function _CardDetailPane({
     </div>
   }
   return <div className="card-detail">
+    <h2 className="card-detail-heading">{_cardText(card.statement) || `Card ${card.id}`}</h2>
     <_CardAttempts attempts={attempts} selectedNodeId={selectedNodeId} onOpenNode={onOpenNode}
       coverage={cardAttemptCoverage(attempts, receipt)} state={state} />
     <_CardKanbanCard card={card} receipt={receipt} presentation="full" state={state}
@@ -955,6 +957,9 @@ function _CardKanban({
   // Not persisted deliberately: this is a way of LOOKING at the current board, not a preference —
   // an operator who opened the run to see what is running should find the lanes, every time.
   const [grouping, setGrouping] = useState('lanes')
+  const [laneQuery, setLaneQuery] = useState('')
+  const laneSearchRef = useRef(null)
+  useEffect(() => { setLaneQuery('') }, [runId])
   const inFlight = useRef(new Set())
   const activeRef = useRef(true)
   useEffect(() => {
@@ -1276,6 +1281,8 @@ function _CardKanban({
   // `splitBoardByKind`. The questions are not dropped: the count and the way to them ride above the
   // lanes, because "five questions await an experiment" and "the board is empty" are different runs.
   const { work: laneCards, questions: laneQuestions } = splitBoardByKind(visibleCards)
+  const filteredLaneCards = laneQuery.trim()
+    ? laneCards.filter(card => cardMatchesQuery(card, laneQuery)) : laneCards
   // Said where the lanes are, not where the questions went: an operator who sees fewer rows than the
   // board's own total needs the reconciliation on the surface that shrank.
   const questionNotice = laneQuestions.length > 0 && grouping === 'lanes'
@@ -1295,9 +1302,24 @@ function _CardKanban({
       className={'btn sm' + (grouping === key ? ' primary' : '')}
       aria-pressed={grouping === key} onClick={() => setGrouping(key)}>{label}</button>)}
   </div>
-  const board = <div className="card-board" role="region" aria-label="Card lifecycle kanban">
+  const searchBar = view && grouping === 'lanes' && <div className="card-filter" role="search">
+      <input ref={laneSearchRef} className="text" type="search" aria-label="Find work items"
+        placeholder="Find by idea, ID or concept" maxLength={120} value={laneQuery}
+        onChange={event => {
+          const next = event.target.value
+          setLaneQuery(next)
+          if (selectedCard && !cardMatchesQuery(selectedCard, next)) onSelectCard?.(null)
+        }} />
+      {laneQuery && <button type="button" className="btn sm ghost"
+        onClick={() => { setLaneQuery(''); laneSearchRef.current?.focus() }}>Clear</button>}
+      {laneQuery.trim() && <span className="card-filter-count" role="status">
+        {filteredLaneCards.length} of {laneCards.length} shown</span>}
+    </div>
+  const board = laneQuery.trim() && !filteredLaneCards.length
+    ? <div className="card-filter-empty" role="status">No work items match this search.</div>
+    : <div className="card-board" role="region" aria-label="Card lifecycle kanban">
     {lanes.map(([key, label, hint]) => {
-      const rows = laneCards.filter(card => _cardStatus(card) === key).sort(_cardOrder)
+      const rows = filteredLaneCards.filter(card => _cardStatus(card) === key).sort(_cardOrder)
       const tone = _CARD_FROZEN_STATUSES.has(key) ? ` card-${key}` : ''
       const laneId = `card-lane-${encodeURIComponent(key)}`
       return <section key={key} className={'card-col' + tone + (rows.length ? '' : ' empty')}
@@ -1312,7 +1334,7 @@ function _CardKanban({
   </div>
   if (view) {
     // The workspace shape the modal could never have: lanes keep the whole left column (and their own
-    // horizontal scroll, so six lanes at the 225px floor no longer have to fit the window), and the
+    // horizontal scroll when occupied lanes exceed it), and the
     // Card's full record moves into a resizable pane on the right. `pane` carries the pane chrome
     // RunView already owns for the graph inspector — same width, same persisted `ll.sideW`, same
     // splitter, same compact drawer — so the board inherits the workspace's behaviour instead of
@@ -1323,6 +1345,7 @@ function _CardKanban({
           <span className="muted">{sub}</span>
           <_CardProjectionNotice projection={projection} cards={visibleCards} />
           {groupingBar}
+          {searchBar}
           {questionNotice}
         </div>
         {addBar}
@@ -1338,12 +1361,12 @@ function _CardKanban({
         data-route-focus-guard={pane?.compact ? 'true' : undefined}
         role={pane?.compact ? 'dialog' : 'complementary'} aria-label="Work item details">
         <div className="pane-grip">
-          <span className="muted">{selectedCard ? selectedCard.id : 'work item'}</span>
+          <strong>{selectedCard?.id}</strong>
           <span className="spacer" style={{ flex: 1 }} />
           {selectedCard && <button ref={detailCloseRef} className="btn sm ghost" title="close details"
             data-dialog-initial-focus={pane?.compact ? true : undefined}
             aria-label={`Close details for ${selectedCard.id}`}
-            onClick={closeDetails}>⟩</button>}
+            onClick={closeDetails}>Close</button>}
         </div>
         {/* `runGeneration`, NOT `state?.generation`. The folded run state has no run-level
             `generation` field at all — the generation is an envelope SIBLING of `state` in the
