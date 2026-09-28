@@ -39,6 +39,7 @@ function addedConcepts(row, byRowKey) {
 export default function ResearchView({ cards, state, renderCard }) {
   const [collapsed, setCollapsed] = useState(() => new Set())
   const [concept, setConcept] = useState('')
+  const [query, setQuery] = useState('')
 
   const all = useMemo(() => (Array.isArray(cards) ? cards.filter(isRecord) : []), [cards])
   // QUESTIONS are the rows; experiments are drawn under the question that owns them. Putting every
@@ -92,20 +93,27 @@ export default function ResearchView({ cards, state, renderCard }) {
   // A filtered row keeps its ANCESTRY: hiding the parents of a matching row would leave a sharpening
   // floating at depth 3 under nothing, which misstates what it sharpens. So a row is shown when it
   // matches or when a row below it in its own branch does.
+  const needle = query.trim().toLowerCase()
+  const filtering = !!(concept || needle)
+  const matched = useMemo(() => new Set(rows.filter(row =>
+    (!concept || row.tags.includes(concept))
+      && (!needle || `${_text(row.card.statement)} ${row.id}`.toLowerCase().includes(needle)))
+    .map(row => row.rowKey)), [rows, concept, needle])
   const visible = useMemo(() => {
-    if (!concept) return rows
+    if (!filtering) return rows
     const keep = new Set()
     for (const row of rows) {
-      if (!row.tags.includes(concept)) continue
+      if (!matched.has(row.rowKey)) continue
       const parts = row.rowKey.split('>')
       for (let i = 1; i <= parts.length; i += 1) keep.add(parts.slice(0, i).join('>'))
     }
     return rows.filter(row => keep.has(row.rowKey))
-  }, [rows, concept])
+  }, [rows, filtering, matched])
 
   // A collapsed row hides its whole branch. Keyed by `rowKey`, so collapsing one copy of a
   // twice-placed question leaves the other copy open — they are two positions, not one row.
-  const shown = visible.filter(row => ![...collapsed].some(
+  const effectiveCollapsed = filtering ? new Set() : collapsed
+  const shown = visible.filter(row => ![...effectiveCollapsed].some(
     key => key !== row.rowKey && row.rowKey.startsWith(`${key}>`)))
   const toggle = rowKey => setCollapsed((prev) => {
     const next = new Set(prev)
@@ -114,7 +122,7 @@ export default function ResearchView({ cards, state, renderCard }) {
     return next
   })
 
-  const bar = <div className="toolbar research-filter" role="group" aria-label="Filter by concept">
+  const bar = <div className="toolbar research-filter" role="group" aria-label="Find research questions">
     <label>
       <span className="muted">Concept</span>{' '}
       <select value={concept} onChange={e => setConcept(e.target.value)}
@@ -126,28 +134,45 @@ export default function ResearchView({ cards, state, renderCard }) {
     {concept && <button type="button" className="btn sm ghost" onClick={() => setConcept('')}>
       clear
     </button>}
+    <input type="search" className="text research-search" value={query}
+      placeholder="Find a question…" aria-label="Find a research question"
+      onChange={event => setQuery(event.target.value.slice(0, 160))}
+      onKeyDown={event => { if (event.key === 'Escape') setQuery('') }} />
+    <button type="button" className="btn sm ghost" onClick={() => setCollapsed(new Set(rows.map(row => row.rowKey)))}>
+      Collapse branches</button>
+    <button type="button" className="btn sm ghost" onClick={() => setCollapsed(new Set())}>
+      Expand branches</button>
   </div>
 
   if (!questions.length) {
     return <div className="card-research" role="region" aria-label="Research questions">
-      {/* NOT an error and NOT an empty board: at the start of a run the Researcher has not asked
-          anything yet, and a view that said "no questions" as though something were missing would
-          misreport a healthy run's first minutes. */}
-      <div className="muted card-empty">
-        no research question registered yet — the opening memo has not been written
+      <div className="research-empty">
+        <div className="research-empty-symbol" aria-hidden="true">?</div>
+        <h2>Research questions will appear here</h2>
+        <p>No research question registered yet for this run.</p>
+        {all.length > 0 && <p>Browse {all.length} work item{all.length === 1 ? '' : 's'} in Lanes.</p>}
       </div>
     </div>
   }
 
   return <div className="card-research" role="region" aria-label="Research questions">
-    {concepts.length > 0 && bar}
+    <div className="research-overview">
+      <h2>Research questions <span>{questions.length}</span></h2>
+      <p>Each indented question narrows a broader one. Open experiments under a question to inspect
+        its evidence.</p>
+    </div>
+    {bar}
+    {filtering && <p className="research-filter-result" role="status">
+      {new Set(rows.filter(row => matched.has(row.rowKey)).map(row => row.id)).size}
+      {' '}matching question(s) · matching branches are open
+    </p>}
     <ol className="research-lattice">
       {shown.map((row) => {
         const roll = rollups.get(row.rowKey) || {}
         // DESCENDANTS, not immediate children: a refinement of a refinement is still this
         // question's work, and drawing only one level put it in no section at all.
         const kids = descendantsOf(row.id, childKids)
-        const isCollapsed = collapsed.has(row.rowKey)
+        const isCollapsed = effectiveCollapsed.has(row.rowKey)
         const branch = visible.some(r => r.rowKey.startsWith(`${row.rowKey}>`))
         const added = addedConcepts(row, byRowKey)
         // DIMMED, never removed. A closed question is part of the chain that explains its
@@ -157,7 +182,9 @@ export default function ResearchView({ cards, state, renderCard }) {
         const closure = questionClosure(row.card, roll)
         const headId = `research-row-${encodeURIComponent(row.rowKey)}`
         return <li key={row.rowKey}
-          className={'research-row' + (closure ? ' research-closed' : '')
+          className={'research-row' + (row.depth === 0 ? ' research-root' : ' research-nested')
+            + (filtering && matched.has(row.rowKey) ? ' research-match' : '')
+            + (closure ? ' research-closed' : '')
             + (closure && !closure.supported ? ' research-closed-unsupported' : '')}
           style={{ marginLeft: row.depth * _INDENT_PX }}
           aria-labelledby={headId}>
@@ -173,6 +200,7 @@ export default function ResearchView({ cards, state, renderCard }) {
                 title={isCollapsed ? 'show the sharper questions under this' : 'hide them'}
                 onClick={() => toggle(row.rowKey)}>{isCollapsed ? '▸' : '▾'}</button>
               : <span className="research-twist" aria-hidden="true" />}
+            <span className="research-id">{row.id}</span>
             <span id={headId} className="research-statement">
               {_text(row.card.statement) || row.id}
             </span>
@@ -218,27 +246,23 @@ export default function ResearchView({ cards, state, renderCard }) {
             {roll.descendants > 0 && <span className="chip muted">
               {roll.descendants} sharper question{roll.descendants === 1 ? '' : 's'}
             </span>}
-            {kids.length > 0 && <span className="chip muted">
-              {kids.length} experiment{kids.length === 1 ? '' : 's'}
-            </span>}
           </div>
-          {!isCollapsed && kids.length > 0 && <div className="research-experiments">
-            {kids.map(child => renderCard(child))}
-          </div>}
+          {!isCollapsed && kids.length > 0 && <details className="research-evidence">
+            <summary>{kids.length} experiment{kids.length === 1 ? '' : 's'} · show evidence</summary>
+            <div className="research-experiments">{kids.map(child => renderCard(child))}</div>
+          </details>}
           {!isCollapsed && kids.length === 0 && !branch && <div className="muted card-empty">
             no experiment proposed against this yet
           </div>}
         </li>
       })}
       {shown.length === 0 && <li className="muted card-empty">
-        no question names {concept}
+        no question matches the current filters
       </li>}
     </ol>
     {/* Always LAST and never inside the ladder: these cards have no position in it. The section is
-        rendered only when occupied — a permanently empty "unfiled" heading is a question the
-        operator has to answer before they can ignore it — and it is suppressed while a concept
-        filter is on, because an unfiled card names no concept and cannot match one. */}
-    {!concept && unfiled.length > 0 && <section className="research-unfiled"
+        rendered only when occupied and suppressed while finding questions. */}
+    {!filtering && unfiled.length > 0 && <section className="research-unfiled"
       aria-labelledby="research-unfiled-h">
       <h3 id="research-unfiled-h" className="research-unfiled-h">
         Not filed under any question <span className="muted">{unfiled.length}</span>
@@ -249,9 +273,8 @@ export default function ResearchView({ cards, state, renderCard }) {
       </div>
       <div className="research-experiments">{unfiled.map(card => renderCard(card))}</div>
     </section>}
-    {/* Same rule as the unfiled block: rendered only when occupied, and hidden under a concept
-        filter — the parent this card names is off the page, so no concept here can speak for it. */}
-    {!concept && offPage.length > 0 && <section className="research-unfiled"
+    {/* Same rule as the unfiled block: the parent this card names is off the page. */}
+    {!filtering && offPage.length > 0 && <section className="research-unfiled"
       aria-labelledby="research-offpage-h">
       <h3 id="research-offpage-h" className="research-unfiled-h">
         Filed under a question not on this page <span className="muted">{offPage.length}</span>

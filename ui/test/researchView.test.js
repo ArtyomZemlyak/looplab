@@ -89,13 +89,13 @@ test('the ladder RENDERS: nesting, the added concept, the best, and the mixed-co
   }
 })
 
-test('before the opening memo the view says so, rather than reading as an empty board', async () => {
+test('before any question is registered the view shows an informative empty state', async () => {
   {
     const { default: ResearchView } = await loadView()
     const markup = renderToStaticMarkup(React.createElement(ResearchView, {
       cards: [{ id: 'e1', card_kind: 'experiment' }], state: { nodes: {} }, renderCard: () => null,
     }))
-    assert.ok(markup.includes('no research question registered yet'))
+    assert.ok(markup.includes('No research question registered yet'))
   }
 })
 
