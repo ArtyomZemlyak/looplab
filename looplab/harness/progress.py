@@ -14,7 +14,7 @@ from fastapi import HTTPException
 
 from looplab.core.config import read_config_snapshot
 from looplab.core.jsonlio import read_jsonl_lenient_with_health
-from looplab.events.eventstore import EventStore
+from looplab.events.eventstore import EventStore, log_integrity
 from looplab.events.replay import fold
 from looplab.harness.decisions import decision_file, required_decisions
 from looplab.harness.hypotheses import merge_due
@@ -158,7 +158,9 @@ def snapshot(rd: Path, expected_generation: str, *, offset: int = 0,
     for phase in cadence_reviews_due(rd, settings, state, generation):
         due(phase, True, "POST /api/runs/{run_id}/harness-reviews")
 
-    health = {"decisions": decision_health, "reviews": review_health,
+    event_health = log_integrity(rd / "events.jsonl")
+    health = {"events": {**event_health, "read_complete": event_health["complete"]},
+              "decisions": decision_health, "reviews": review_health,
               "checkpoints": checkpoint_health}
     pending = [row for row in checkpoint_rows if row["status"] == "pending"]
     return {"generation": generation, "run_uid": uid,
@@ -170,7 +172,7 @@ def snapshot(rd: Path, expected_generation: str, *, offset: int = 0,
             "candidate_decisions_per_idea": required_decisions(settings, n),
             "candidate_requirements": {
                 "effective_concepts": concept_tags_required(settings),
-                "hypothesis_or_card": bool(settings.track_hypotheses),
+                "hypothesis_statement": bool(settings.track_hypotheses),
             },
             "finish_reviews_due": missing_reviews(rd, settings, state, generation),
             "finish_report_due": final_report_due(settings, state, events),

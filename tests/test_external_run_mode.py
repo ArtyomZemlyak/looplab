@@ -16,7 +16,7 @@ from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED, Idea, Node, N
 from looplab.harness.obligations import run_base_due
 from looplab.harness.contract import candidate_surface_refusal
 from looplab.events.replay import fold
-from looplab.events.types import (EV_FORCE_ABLATE, EV_FORK, EV_INJECT_NODE,
+from looplab.events.types import (EV_FORCE_ABLATE, EV_FORK, EV_INJECT_NODE, EV_SET_STRATEGY,
                                   EV_NODE_RESET, EV_RUN_ABORT)
 from looplab.serve.control_validation import normalize_control
 from looplab.serve.server import make_app
@@ -264,6 +264,119 @@ def test_configured_research_and_report_gate_external_lifecycle(tmp_path):
     hypothesis = {**candidate, "idea": {**candidate["idea"],
                                       "hypothesis": "Explicit search reduces error"}}
     assert normalize_control(srv, tmp_path, EV_INJECT_NODE, hypothesis)["idea"]["hypothesis"]
+    with pytest.raises(HTTPException) as caught:
+        normalize_control(srv, tmp_path, EV_INJECT_NODE,
+                          {**candidate, "idea": {"operator": "draft", "card_id": "imaginary"}})
+    assert caught.value.detail["code"] == "external_card_link_unsupported"
+
+
+def test_external_policy_cannot_be_removed_through_run_config(tmp_path):
+    from looplab.events.eventstore import EventStore
+    root = tmp_path / "runs"
+    rd = root / "demo"
+    rd.mkdir(parents=True)
+    settings = Settings(backend="toy", external_harness=True, concept_pivot=True,
+                        report_every=1, deep_research_every=-1)
+    (rd / "config.snapshot.json").write_text(json.dumps(settings.model_dump(mode="json")))
+    EventStore(rd / "events.jsonl").append("run_started", {
+        "run_id": "demo", "run_uid": "one", "task_id": "task", "goal": "g", "direction": "min"})
+    client = TestClient(make_app(root))
+    generation = http_run_generation(client)
+    current = client.get("/api/runs/demo/config").json()
+    assert "concept_pivot" in current["_looplab_config_meta"]["run_read_only_fields"]
+    body = {"expected_generation": generation,
+            "expected_revision": current["_looplab_config_meta"]["config_revision"],
+            "settings": {"concept_pivot": False, "report_every": 0}}
+    blocked = client.put("/api/runs/demo/config", json=body)
+    assert blocked.status_code == 422, blocked.text
+    assert blocked.json()["detail"]["code"] == "external_policy_fixed"
+    assert blocked.json()["detail"]["fields"] == ["concept_pivot", "report_every"]
+    assert client.get("/api/runs/demo/config").json()["concept_pivot"] is True
+    tuned = client.put("/api/runs/demo/config", json={**body, "settings": {"timeout": 190}})
+    assert tuned.status_code == 200, tuned.text
+
+
+def test_configured_mcts_value_review_cannot_be_disabled_by_strategy(tmp_path):
+    settings = Settings(backend="toy", external_harness=True, policy="mcts",
+                        mcts_value_weight=0.4)
+    (tmp_path / "config.snapshot.json").write_text(json.dumps(settings.model_dump(mode="json")))
+    state = RunState(task_id="task", run_id="demo", goal="g", direction="min")
+    with pytest.raises(HTTPException) as caught:
+        normalize_control(SimpleNamespace(state=lambda _: state), tmp_path,
+                          EV_SET_STRATEGY, {"strategy": {"policy": "greedy"}})
+    assert caught.value.detail["code"] == "external_selection_policy_fixed"
+
+
+def test_scoped_harness_token_preserves_operator_defaults(tmp_path, monkeypatch):
+    from looplab.events.eventstore import EventStore
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "operator-secret")
+    monkeypatch.setenv("LOOPLAB_HARNESS_TOKEN", "agent-secret")
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    settings = Settings(backend="toy", external_harness=True)
+    (rd / "config.snapshot.json").write_text(json.dumps(settings.model_dump(mode="json")))
+    EventStore(rd / "events.jsonl").append("run_started", {
+        "run_id": "demo", "run_uid": "one", "task_id": "task", "goal": "g", "direction": "min"})
+    client = TestClient(make_app(tmp_path), headers={"X-LoopLab-Token": "agent-secret"})
+    assert client.get("/api/runs/demo/state").status_code == 200
+    for method, path in (("put", "/api/settings"), ("post", "/api/genesis"),
+                         ("post", "/api/start"),
+                         ("post", "/api/assistant/sessions"),
+                         ("post", "/api/runs/demo/reset"),
+                         ("post", "/api/runs/demo/deletions"),
+                         ("delete", "/api/runs/demo")):
+        response = (client.delete(path) if method == "delete"
+                    else getattr(client, method)(path, json={}))
+        assert response.status_code == 403, (path, response.text)
+    owner = TestClient(make_app(tmp_path), headers={"X-LoopLab-Token": "operator-secret"})
+    assert owner.get("/api/settings").status_code == 200
+
+
+def test_cli_finalize_refuses_external_due_report_before_abort(tmp_path):
+    from looplab.cli.run_cmds import finalize
+    from looplab.events.eventstore import EventStore
+    from typer import BadParameter
+
+    rd = tmp_path / "run"
+    rd.mkdir()
+    (rd / "task.snapshot.json").write_bytes((Path(__file__).resolve().parents[1]
+                                              / "examples" / "toy_task.json").read_bytes())
+    settings = Settings(backend="toy", external_harness=True, report_every=1,
+                        memory_dir=None, deep_research_every=-1)
+    (rd / "config.snapshot.json").write_text(json.dumps(settings.model_dump(mode="json")))
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_started", {"run_id": "run", "run_uid": "one", "task_id": "task",
+                                 "goal": "g", "direction": "min"})
+    store.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                  "idea": {"operator": "draft"}, "code": "print(1)"})
+    store.append("node_evaluated", {"node_id": 0, "metric": 1.0})
+    before = store.read_all()[-1].seq
+    with pytest.raises(BadParameter, match="report=True"):
+        finalize(rd, task_file=rd / "task.snapshot.json")
+    assert store.read_all()[-1].seq == before
+    (rd / "task.snapshot.json").unlink()
+    with pytest.raises(BadParameter, match="report=True"):
+        finalize(rd, task_file=rd / "task.snapshot.json")
+    assert store.read_all()[-1].seq == before
+
+
+def test_external_budget_stop_pauses_for_finish_obligations(tmp_path):
+    rd = tmp_path / "run"
+    engine = make_engine(rd, external_harness=True, report_every=1)
+    settings = Settings(backend="toy", external_harness=True, report_every=1,
+                        memory_dir=None, deep_research_every=-1)
+    (rd / "config.snapshot.json").write_text(json.dumps(settings.model_dump(mode="json")))
+    store = engine.store
+    store.append("run_started", {"run_id": "run", "run_uid": "one", "task_id": "task",
+                                 "goal": "g", "direction": "min"})
+    store.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                  "idea": {"operator": "draft"}, "code": "print(1)"})
+    store.append("node_evaluated", {"node_id": 0, "metric": 1.0})
+    events = store.read_all()
+    assert engine._settle_terminal_gate(fold(events), "eval_budget",
+                                        decision_seq=events[-1].seq) == "break"
+    assert store.read_all()[-1].type == "pause"
+    assert store.read_all()[-1].data["due"]["report"]
 
 
 def test_enabled_novelty_foresight_and_best_of_n_require_idea_bound_decisions(tmp_path):
@@ -330,11 +443,14 @@ def test_enabled_novelty_foresight_and_best_of_n_require_idea_bound_decisions(tm
         **review, "reason": "Changed conclusion from the same action"}).status_code == 409
     assert client.post("/api/runs/demo/harness-reviews", json={
         **review, "action_id": "forged-review", "decision": "completed",
-        "action_ref": "missing-ledger-action"}).status_code == 409
-    state = srv.state(rd)
-    state.nodes[0] = SimpleNamespace(status="evaluated", metric=1.0, attempt=0,
-                                     tombstoned=False)
-    srv_with_node = SimpleNamespace(state=lambda _: state)
+        "action_ref": "missing-ledger-action", "evidence": [0]}).status_code == 409
+    assert client.post("/api/runs/demo/harness-reviews", json={
+        **review, "action_id": "no-evidence", "decision": "completed",
+        "action_ref": "missing-ledger-action"}).status_code == 400
+    store.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                  "idea": {"operator": "draft"}, "code": "print(1)"})
+    store.append("node_evaluated", {"node_id": 0, "metric": 1.0})
+    srv_with_node = SimpleNamespace(state=lambda _: fold(store.read_all()))
     with pytest.raises(HTTPException) as caught:
         normalize_control(srv_with_node, rd, EV_RUN_ABORT, {"reason": "finished"})
     assert caught.value.detail["code"] == "external_reviews_required"

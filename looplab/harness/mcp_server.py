@@ -213,5 +213,6 @@ def build_server(api: HarnessAPI):
 
 def run_stdio(url: str | None = None, token: str | None = None) -> None:
     api = HarnessAPI(url or os.environ.get("LOOPLAB_HARNESS_URL", "http://127.0.0.1:8765"),
-                     token if token is not None else os.environ.get("LOOPLAB_UI_TOKEN", ""))
+                     token if token is not None else (os.environ.get("LOOPLAB_HARNESS_TOKEN")
+                                                     or os.environ.get("LOOPLAB_UI_TOKEN", "")))
     build_server(api).run(transport="stdio")

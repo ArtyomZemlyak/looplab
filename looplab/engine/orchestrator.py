@@ -2296,6 +2296,25 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             state, reason=reason,
         ):
             return "continue"
+        if self.external_harness and reason != "aborted":
+            # The first fold may precede an in-flight evaluation. Only the fresh
+            # durable prefix can decide whether its report and reviews still hold.
+            from looplab.core.config import read_config_snapshot
+            from looplab.harness.obligations import external_finish_due
+            events = self.store.read_all()
+            due = external_finish_due(self.run_dir,
+                                      read_config_snapshot(self.run_dir / "config.snapshot.json"),
+                                      fold(events), events)
+            if due["report"] or due["reviews"] or due["pending_nodes"]:
+                try:
+                    self.store.append(EV_PAUSE, {
+                        "reason": "external_finish_obligations_due",
+                        "terminal_reason": reason,
+                        "due": due,
+                    }, expected_last_seq=events[-1].seq)
+                    return "break"
+                except EventStoreConcurrencyError:
+                    return "continue"
         if self._finish_with_report_if_quiescent(
                 state, {"reason": reason}, after_seq=decision_seq):
             return "break"

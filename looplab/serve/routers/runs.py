@@ -3107,6 +3107,7 @@ def build_router(srv) -> APIRouter:
             if effective.get("eval_env") != _recorded_env:
                 mismatches = sorted([*mismatches, "eval_env"])
             effective["eval_env"] = dict(_recorded_env)
+        from looplab.harness.obligations import EXTERNAL_POLICY_FIELDS
         effective["_looplab_config_meta"] = {
             "config_revision": _run_config_revision(snapshot),
             "run_start_pinned_fields": sorted(pinned),
@@ -3122,7 +3123,9 @@ def build_router(srv) -> APIRouter:
             # `search/speculation_quality.py`, and this key is ABSENT from that payload whenever no
             # environment was declared, which is every calibration run. So the refusal is stated
             # here instead of inherited, and the PUT enforces it explicitly below.
-            "run_read_only_fields": ["eval_env", "profile", "external_harness"],
+            "run_read_only_fields": ["eval_env", "profile", "external_harness",
+                                     *(sorted(EXTERNAL_POLICY_FIELDS)
+                                       if effective.get("external_harness") else [])],
         }
         return effective
 
@@ -3228,6 +3231,18 @@ def build_router(srv) -> APIRouter:
                     and updated.get(key) != value):
                 updated[key] = value
                 changed[key] = value
+        if settings_from_snapshot(current).external_harness:
+            from looplab.harness.obligations import EXTERNAL_POLICY_FIELDS
+            before_policy = settings_from_snapshot(current)
+            after_policy = settings_from_snapshot(updated)
+            policy_changes = sorted(key for key in EXTERNAL_POLICY_FIELDS
+                                    if getattr(before_policy, key) != getattr(after_policy, key))
+            if policy_changes:
+                raise HTTPException(422, {
+                    "code": "external_policy_fixed",
+                    "fields": policy_changes,
+                    "message": "Enabled external agent obligations are fixed for this run; start a new run to change them.",
+                })
         # Validate the merged config before persistence. Optional fields may deliberately be cleared
         # with null; required fields remain protected by Settings' schema.
         try:

@@ -736,7 +736,7 @@ export function HarnessProgressPanel({ runId, expectedGeneration, externalMode, 
       onRetry={() => resource.retry()} />}
     {progress && <>
       {!progress.complete && <div className="report-inline-state error" role="alert">
-        A decision, review or checkpoint journal has damaged rows. History below is partial;
+        An event, decision, review or checkpoint journal has damaged rows. History below may be partial;
         inspect source health before treating a missing receipt as never written.
         <pre>{JSON.stringify(progress.source_health, null, 2)}</pre>
       </div>}

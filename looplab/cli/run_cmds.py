@@ -1918,12 +1918,11 @@ def finalize(
     # READ WHAT THE WRAP-UP SPENDS UNDER BEFORE WRITING ANYTHING (review 2026-09-22, the W2-2 tail).
     # The strict read — which REFUSES a snapshot this build cannot read, an unknown key included
     # (`core/config.py::CONFIG_SNAPSHOT_SCHEMA`) — ran AFTER the stop intent below was durably
-    # appended, so a refused `finalize` had still stopped the run: a live engine honours `run_abort`
-    # at its next boundary, and the operator was told, at exit 2, that nothing had happened. It is
-    # read once, lazily, after the already-finalized check (a pure read that needs no settings) and
-    # before either exit of the loop; with no task snapshot there is no wrap-up here to spend, so
-    # the intent is still recorded for a running engine that reads its own settings. To stop a run
-    # whose snapshot this build refuses, `looplab stop` reads no settings at all.
+    # appended, so a refused `finalize` had still stopped the run. Read it before either exit of
+    # the loop even when the task snapshot is missing: the external run may owe a report/review
+    # and the live engine would otherwise honor an unchecked abort. A valid config without a task
+    # snapshot can still record intent for the engine's wrap-up. To stop a run whose snapshot this
+    # build refuses, `looplab stop` reads no settings at all.
     settings = None
     # Record exactly one stop intent. The server may already have appended it before spawning this
     # command; two direct CLIs can also race. A tail CAS makes both cases idempotent. A terminal run
@@ -1950,11 +1949,21 @@ def finalize(
             typer.echo(f"already finalized {run_dir} — nothing to do "
                        f"(finished, wrap-up complete, no pending finalize, no pending resume)")
             return
-        if settings is None and snap.exists():
+        if settings is None and (snap.exists() or (run_dir / "config.snapshot.json").exists()):
             settings = load_run_settings(run_dir, strict=True)
-            task = _load_task(snap, existing_run=True)
+            if snap.exists():
+                task = _load_task(snap, existing_run=True)
         if wrap_up_incomplete or _pending_finalize(before):
             break
+        if settings is not None and settings.external_harness:
+            from looplab.harness.obligations import external_finish_due
+            due = external_finish_due(run_dir, settings, before, events)
+            if due["report"] or due["reviews"] or due["pending_nodes"]:
+                raise typer.BadParameter(
+                    "external finish obligations remain: "
+                    f"report={due['report']}, reviews={due['reviews']}, "
+                    f"pending_nodes={due['pending_nodes']}; settle nodes and publish "
+                    "the due report/reviews before finalizing")
         tail = events[-1].seq if events else -1
         try:
             store.append(
@@ -1962,7 +1971,7 @@ def finalize(
             break
         except EventStoreConcurrencyError:
             continue
-    if settings is None:
+    if not snap.exists():
         typer.echo(f"marked {run_dir} for finalize; a running engine will wrap it up "
                    f"(task file not found: {snap})")
         return

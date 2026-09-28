@@ -426,27 +426,32 @@ def _normalize_run_abort(ctx: _ControlIntake) -> dict:
     snapshot = ctx.rd / "config.snapshot.json"
     if snapshot.is_file():
         from looplab.core.config import read_config_snapshot
-        from looplab.harness.obligations import final_report_due
+        from looplab.harness.obligations import external_finish_due
         settings = read_config_snapshot(snapshot)
-        events = None
-        if settings.external_harness:
-            from looplab.events.eventstore import EventStore
-            events = EventStore(ctx.rd / "events.jsonl").read_all()
-        if final_report_due(settings, ctx.state(), events):
+        if not settings.external_harness:
+            return ctx.data
+        from looplab.events.eventstore import EventStore
+        events = EventStore(ctx.rd / "events.jsonl").read_all()
+        # The report/review evidence and node lifecycle must come from the same
+        # prefix; a live evaluation can append between two independent folds.
+        from looplab.events.replay import fold
+        due = external_finish_due(ctx.rd, settings, fold(events) if events else ctx.state(), events)
+        if due["pending_nodes"]:
+            raise HTTPException(409, {
+                "code": "external_pending_evaluations",
+                "node_ids": due["pending_nodes"],
+                "message": "wait for pending candidates to settle or explicitly abort them before finalizing",
+            })
+        if due["report"]:
             raise HTTPException(409, {
                 "code": "external_report_required",
                 "message": "report_every is enabled; publish a report covering the latest candidate before finishing",
             })
-        if settings.external_harness and ctx.state().run_uid:
-            from looplab.serve.run_commands import run_generation_token
-            from looplab.harness.reviews import missing_reviews
-            generation = run_generation_token(events)
-            missing = missing_reviews(ctx.rd, settings, ctx.state(), generation)
-            if missing:
-                raise HTTPException(409, {
-                    "code": "external_reviews_required", "phases": missing,
-                    "message": "review each enabled cross-run phase before finishing",
-                })
+        if due["reviews"]:
+            raise HTTPException(409, {
+                "code": "external_reviews_required", "phases": due["reviews"],
+                "message": "review each enabled cross-run phase before finishing",
+            })
     return ctx.data
 
 
@@ -657,6 +662,16 @@ def _normalize_set_strategy(ctx: _ControlIntake) -> dict:
     if policy is not None:
         if not isinstance(policy, str) or policy not in available_policies():
             raise HTTPException(400, "strategy.policy must name an available policy")
+        snapshot = ctx.rd / "config.snapshot.json"
+        if snapshot.is_file():
+            from looplab.core.config import read_config_snapshot
+            configured = read_config_snapshot(snapshot)
+            if (configured.external_harness and configured.policy == "mcts"
+                    and configured.mcts_value_weight > 0 and policy != "mcts"):
+                raise HTTPException(409, {
+                    "code": "external_selection_policy_fixed",
+                    "message": "configured MCTS value review is mandatory; start a new run to change the selection policy",
+                })
         clean_strategy["policy"] = policy
     fidelity = strategy.get("fidelity")
     if fidelity is not None:
@@ -1148,11 +1163,15 @@ def _normalize_inject_node(ctx: _ControlIntake) -> dict:
                 "message": "MCTS value_weight is enabled; estimate the current branch batch before proposing another candidate",
                 "remediation": "GET /api/runs/{run_id}/harness-selection then POST /api/runs/{run_id}/harness-selection/values",
             })
-        if settings.track_hypotheses and not (
-                (normalized_idea.hypothesis or "").strip() or normalized_idea.card_id):
+        if normalized_idea.card_id:
+            raise HTTPException(400, {
+                "code": "external_card_link_unsupported",
+                "message": "injected candidates mint a new Card; remove idea.card_id and supply idea.hypothesis when required",
+            })
+        if settings.track_hypotheses and not (normalized_idea.hypothesis or "").strip():
             raise HTTPException(400, {
                 "code": "external_hypothesis_required",
-                "message": "track_hypotheses is enabled; give this candidate a hypothesis or existing Card",
+                "message": "track_hypotheses is enabled; give this candidate a hypothesis statement (injected candidates mint their own Card)",
             })
         if concept_tags_required(settings) and not candidate_concepts(
                 normalized_idea, ctx.state(), parents):

@@ -112,6 +112,8 @@ def publish_review(srv, rd: Path, body) -> dict:
                 raise HTTPException(409, "run has no durable identity")
             if body.decision == "completed" and not body.action_ref:
                 raise HTTPException(400, "completed review requires the recorded action's reference")
+            if body.decision == "completed" and not body.evidence:
+                raise HTTPException(400, "completed review requires current run node evidence")
             if body.decision == "completed" and not _action_recorded(
                     str(settings.memory_dir), body.phase_id, body.action_ref, state.run_uid):
                 raise HTTPException(409, "completed review does not cite a recorded domain action")

@@ -42,7 +42,7 @@ def test_progress_restores_decisions_reviews_and_checkpoint_answers(tmp_path):
     assert initial.status_code == 200, initial.text
     assert initial.json()["candidate_decisions_per_idea"]["novelty"] == 1
     assert initial.json()["candidate_requirements"] == {
-        "effective_concepts": False, "hypothesis_or_card": False}
+        "effective_concepts": False, "hypothesis_statement": False}
     assert initial.json()["source_health"]["decisions"]["file_present"] is False
     assert initial.json()["history"]["decisions"]["total"] == 0
     decision = {"expected_generation": generation, "phase_id": "novelty",
@@ -99,3 +99,8 @@ def test_progress_restores_decisions_reviews_and_checkpoint_answers(tmp_path):
     assert structural["complete"] is False
     assert structural["source_health"]["reviews"]["invalid_record_rows"] == 1
     assert structural["history"]["reviews"]["total"] == 1
+    with (rd / "events.jsonl").open("ab") as fh:
+        fh.write(b"not a durable event\n")
+    hidden_tail = client.get(path, params=args).json()
+    assert hidden_tail["complete"] is False
+    assert hidden_tail["source_health"]["events"]["complete"] is False

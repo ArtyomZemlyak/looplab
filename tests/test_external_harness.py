@@ -52,3 +52,14 @@ def test_external_stage_guidance_tracks_operator_and_patch_gate():
     assert "outside the allowed edit surface or protected" in external_harness_brief(task, spec)
     task.eval.stages = [{"name": "train", "command": ["python", "train.py"]}]
     assert "operator already declared" in external_harness_brief(task, spec)
+
+
+def test_mcp_adapter_prefers_scoped_harness_credential(monkeypatch):
+    from looplab.harness import mcp_server
+    seen = []
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner")
+    monkeypatch.setenv("LOOPLAB_HARNESS_TOKEN", "agent")
+    monkeypatch.setattr(mcp_server, "build_server", lambda api: SimpleNamespace(
+        run=lambda **kwargs: seen.append(api.client.headers["X-LoopLab-Token"])))
+    mcp_server.run_stdio()
+    assert seen == ["agent"]

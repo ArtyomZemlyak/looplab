@@ -9,6 +9,24 @@ from __future__ import annotations
 
 from looplab.harness.phases import PHASES
 
+# Operator policy for a launched external run. The MCP bridge uses the owner's
+# HTTP token, so changing these fields through per-run config would otherwise
+# let the agent remove its own admission/finish requirements. Other tuning
+# fields still apply on resume; a different policy starts a new run.
+EXTERNAL_POLICY_FIELDS = frozenset({
+    "concept_pivot", "concept_run_base", "cross_run_concepts", "track_hypotheses",
+    "deep_research_every", "novelty_mode", "novelty_gate", "novelty_epsilon",
+    "novelty_semantic", "novelty_semantic_threshold", "foresight", "foresight_panel",
+    "foresight_min_confidence", "foresight_verify", "foresight_verify_samples",
+    "foresight_agentic", "best_of_n", "best_of_n_listwise", "strategist_every",
+    "report_every", "reflection_priors", "memory_dir", "lessons_every",
+    "comparative_lessons", "cross_run_curation", "task_facets_finalize",
+    "concept_tidy", "select_verifier", "select_verifier_samples", "policy",
+    "mcts_value_weight", "train_monitor", "train_monitor_kill", "asha_live",
+    "asha_live_kill", "coverage_context", "concept_retag_every",
+    "stage_check_tools", "train_monitor_interval_s", "asha_live_min_siblings",
+})
+
 
 def evidence_revision(state) -> str:
     """Materialized node outcomes, stable across unrelated notes and commands."""
@@ -120,6 +138,28 @@ def report_cadence_due(settings, state, events=None) -> bool:
     return final_report_due(settings, state, events)
 
 
+def external_finish_due(rd, settings, state, events) -> dict:
+    """One live preflight for every external finish writer, after evaluation drains.
+
+    This must also guard the CLI and engine budget paths, which do not pass
+    through HTTP's ``run_abort`` normalizer. A pending candidate can still
+    change measured evidence, invalidating an earlier report or review.
+    """
+    if not settings.external_harness:
+        return {"report": False, "reviews": [], "pending_nodes": []}
+    from looplab.harness.reviews import missing_reviews
+    from looplab.serve.run_commands import run_generation_token
+
+    return {
+        "report": final_report_due(settings, state, events),
+        "reviews": missing_reviews(rd, settings, state, run_generation_token(events))
+        if state.run_uid else [],
+        "pending_nodes": sorted(node.id for node in state.nodes.values()
+                                if node.status == "pending" and not node.tombstoned
+                                and node.id not in (state.aborted_nodes or [])),
+    }
+
+
 def run_obligations(task, settings, *, generation: str) -> dict:
     external = bool(settings.external_harness)
     repo_spec = task.repo_spec() if callable(getattr(task, "repo_spec", None)) else None
@@ -167,6 +207,12 @@ def run_obligations(task, settings, *, generation: str) -> dict:
             "novelty": "advisory preview; the agent decides to submit, revise or discard",
             "lessons_and_skills": "when reflection_priors is enabled, review both; publish only evidence-backed conclusions and portable techniques",
         },
+        "delegated_semantics": {
+            "novelty": "An Idea-bound decision is mandatory; deterministic novelty-preview is advice. The external agent may submit a near duplicate; the built-in LLM/algo veto does not run.",
+            "foresight": "Panel size is mandatory. The agent's choice is recorded; min_confidence, verifier samples and agentic tool use are not independently measured or enforced.",
+            "candidate_ranking": "Distinct complete implementations and exact selected artifacts are mandatory. Built-in static filtering, confidence abstention and listwise tie break do not run.",
+            "knowledge_review": "A receipt is mandatory where configured. A completed action reference exists in a domain ledger; no_applicable_action is an agent attestation, not independent semantic verification.",
+        } if external else {},
         "phase_obligations": {
             **idea_rules,
             **review_rules,
@@ -181,7 +227,7 @@ def run_obligations(task, settings, *, generation: str) -> dict:
                 "required": bool(external and settings.track_hypotheses),
                 "settings": {"track_hypotheses": settings.track_hypotheses},
                 "checkpoint": "candidate_admission",
-                "proof": "idea.hypothesis or link to an existing Card",
+                "proof": "nonempty idea.hypothesis (injected candidate mints its own Card)",
                 "enforced": True,
             },
             "hypothesis_merge": {

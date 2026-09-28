@@ -26,8 +26,12 @@ settings impose obligations on the external agent. For a live run, also read
 `GET /api/runs/{run_id}/harness-progress`
 with `expected_generation` from `/state`: it lists current admission and finish
 requirements, pending evaluation questions, and paged decision/review/checkpoint
-history. Refresh after events or responses; inspect `source_health` if a journal
-is incomplete. Commands and measured results remain in the event timeline.
+history. Refresh after events or responses; inspect `source_health` if the event
+log or a sidecar journal is incomplete. Commands and measured results remain in
+the event timeline. External obligation settings are fixed for a launched run;
+change operational settings on resume or start another run to change obligations.
+Read `harness-contract.delegated_semantics` before claiming parity with the
+built-in novelty, foresight or listwise model judgments.
 In particular, when
 `concept_pivot`, `concept_run_base`, or `cross_run_concepts` is enabled, every
 candidate must carry nonempty effective concept tags; the server rejects an
@@ -43,8 +47,9 @@ reason and is invalidated when the board or measured outcomes change.
 If `select_verifier` exposes a tie, score its complete evidence-bound group via
 `harness-selection/verify`. With active MCTS `value_weight`, estimate all current
 branches via `harness-selection/values`; both block the next candidate when due.
-With `lessons_every`, record lesson and skill reviews at each configured node
-window, including a reason when no conclusion is supported.
+With `lessons_every`, record skill reviews at each configured node window;
+lesson reviews are also due there when `comparative_lessons` is enabled. Both
+reviews are due at finish, including a reason when no conclusion is supported.
 Use `harness-decisions` and `harness-reviews` to record idea-bound reviews and
 justified no-action outcomes where a change is not supported by evidence.
 While evaluating, poll `/api/runs/{run_id}/harness-checkpoints` with the run

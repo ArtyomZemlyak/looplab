@@ -18,11 +18,13 @@ reconnect later) to choose further work: an idle external run waits for commands
 ## External harness setup
 
 Install the optional UI and MCP packages. Start the UI against the run root you want
-to control; set your own owner token so the MCP process can authenticate.
+to control. Set a distinct harness token for the coding agent; keep the owner token
+in the UI server/operator session.
 
 ```sh
 pip install 'looplab[ui,harness]'
 export LOOPLAB_UI_TOKEN='choose-a-private-token'
+export LOOPLAB_HARNESS_TOKEN='choose-a-different-agent-token'
 looplab ui --run-root runs --host 127.0.0.1 --port 8765
 ```
 
@@ -38,7 +40,7 @@ looplab run task.json --out runs/my-run --backend toy -s external_harness=true
 Keep that run process open while the coding agent sends commands from another terminal.
 
 Configure your coding agent's MCP client to launch `looplab harness-mcp` over stdio,
-with `LOOPLAB_UI_TOKEN` and, if the server is elsewhere,
+with **only** `LOOPLAB_HARNESS_TOKEN` and, if the server is elsewhere,
 `LOOPLAB_HARNESS_URL=http://127.0.0.1:8765`. The process offers eight tools:
 `capabilities`, `phases`, `phase_info`, `settings_keys`, `setting_info`, `operations`,
 `operation_schema` and `api_request`. The latter
@@ -68,8 +70,9 @@ the current expansion and finish gates, required concept/hypothesis fields,
 pending evaluation questions and paginated histories of decision, knowledge
 review and checkpoint receipts. The token comes from `/state`. Its `event_seq`
 identifies the measured event prefix; refresh after any event or response. The
-three histories live in independent JSONL journals, so `source_health` reports
-damaged rows and `complete=false` means an absent receipt cannot be taken as
+three histories live in independent JSONL journals; the event log is a fourth
+source. `source_health` reports damaged rows in all four, and `complete=false`
+means an absent receipt cannot be taken as
 proof that no action occurred. `file_present=false` is normal for a fresh run;
 this view cannot detect deletion of an entire journal that had already been
 written. Older receipts stay visible as `superseded` when
@@ -88,7 +91,7 @@ For Codex, add this to your project `.codex/config.toml` (or the user config):
 [mcp_servers.looplab]
 command = "looplab"
 args = ["harness-mcp"]
-env_vars = ["LOOPLAB_UI_TOKEN", "LOOPLAB_HARNESS_URL"]
+env_vars = ["LOOPLAB_HARNESS_TOKEN", "LOOPLAB_HARNESS_URL"]
 ```
 
 For Claude Code, a project `.mcp.json` can pass those environment variables
@@ -102,7 +105,7 @@ without putting the token value in the file:
       "command": "looplab",
       "args": ["harness-mcp"],
       "env": {
-        "LOOPLAB_UI_TOKEN": "${LOOPLAB_UI_TOKEN}",
+        "LOOPLAB_HARNESS_TOKEN": "${LOOPLAB_HARNESS_TOKEN}",
         "LOOPLAB_HARNESS_URL": "${LOOPLAB_HARNESS_URL:-http://127.0.0.1:8765}"
       }
     }
@@ -121,7 +124,8 @@ The normal control cycle is:
    `looplab_stages.json` only if `edit_surface` allows that JSON path; LoopLab appends
    the protected score command.
    Enabled `deep_research_every` requires a current `research_completed` memo;
-   enabled `track_hypotheses` requires a candidate hypothesis or Card link.
+   enabled `track_hypotheses` requires a nonempty candidate hypothesis statement;
+   injection creates a fresh Card and does not attach a supplied `card_id`.
    When four or more pure belief Cards are open, review the current board with
    `GET/POST /api/runs/{run_id}/harness-hypotheses`: merge genuine aliases or
    record `no_merge` with a reason. Echo the GET response's `board_sha256` as
@@ -144,9 +148,10 @@ The normal control cycle is:
    the next candidate when their respective conditions arise; a reset or new
    measurement requires a fresh judgment. These are the external agent's
    assessments, not independent model verification.
-   With `reflection_priors` and `lessons_every` enabled, review lessons and
-   skill candidates at each configured node interval before admitting the
-   next candidate. Publish evidence-linked lessons and skill candidates if
+   With `reflection_priors` and `lessons_every` enabled, review skill candidates
+   at each configured node interval; review lessons there when
+   `comparative_lessons` is also enabled. Both reviews are due at finalization.
+   Publish evidence-linked lessons and skill candidates if
    warranted, then POST `harness-reviews` for each due phase with its recorded
    action reference, or `no_applicable_action` and a reason. A changed measured
    outcome invalidates the review of the current window.
@@ -178,6 +183,17 @@ The normal control cycle is:
 6. Pause or finalize the run through the same command API. Resume from the durable
    state after a client restart. A run does not finish merely because the external
    agent has no immediate action.
+
+The obligation settings of an external run are fixed at launch (including concept,
+novelty, review and report switches). Per-run config rejects changes to these
+fields, including changes made through the MCP bridge's harness token. The
+harness token cannot change global settings, launch through Genesis or `/api/start`,
+drive the owner assistant, or reset/delete a run. Start a
+new run to change that policy. Operational tuning fields such as `timeout`
+remain editable and take effect in the engine on its next restart. Budget or
+leakage stops with outstanding external finish obligations pause the run; publish
+the due report and reviews, then explicitly finalize it. CLI `finalize` and HTTP
+`run_abort` apply the same preflight, including pending evaluations.
 
 ## Novelty and cross-run knowledge
 
@@ -211,6 +227,17 @@ different alternative Ideas for foresight. Best of N takes complete
 artifact must match the subsequently admitted candidate. The server counts
 distinct reviewed options and refuses a review narrower than the configured panel. A strategy review is due
 on its configured cadence. Candidate admission rejects a missing review.
+
+These receipts enforce that the agent performed and recorded a decision; they do
+not recreate every internal model judgment. `novelty-preview` is advice: the agent
+can still submit a near duplicate after recording a novelty decision. Foresight
+requires the configured panel size, but `foresight_min_confidence`,
+`foresight_verify`, verifier sample count and `foresight_agentic` do not run an
+independent check of the agent's choice. Best of N requires distinct full
+implementations and an exact selected artifact, but the built-in static floor,
+confidence abstention and listwise tie break are delegated to the agent. The
+live `harness-contract.delegated_semantics` field states these limits alongside
+the enforceable gates.
 
 Read accumulated lessons through `GET /api/memory` (optionally `?run_id=...`)
 and claims through `GET /api/cross-run/claims`. When a result teaches something
@@ -253,8 +280,10 @@ Enabled `cross_run_curation`, `task_facets_finalize`, `concept_tidy` and
 `reflection_priors` require a final review of the applicable concept, claim,
 facet, lesson and skill decisions when the run contains candidates. Use
 `no_applicable_action` with a reason when evidence does not justify a write;
-`completed` includes the domain action reference. These reviews attest the
-agent's judgment; LoopLab verifies the referenced domain action exists. The
+`completed` includes the domain action reference and current run node evidence. These reviews attest the
+agent's judgment; LoopLab verifies the referenced domain action exists, but a
+shared concept/claim ledger reference alone does not prove it was created for
+this run. The
 actual write must still pass its own guarded API.
 Finalization rejects missing reviews or reviews from an earlier node count.
 
@@ -296,8 +325,11 @@ in this mode. `param_search` tasks do not use the external editing Developer.
 
 The MCP adapter forwards JSON API requests and limits a response to 256 KiB and
 a request body to 1 MiB. Query narrow routes for larger outputs; binary uploads
-need their dedicated API or CLI flow. All MCP clients holding the owner token
-have the same authority as the UI owner. Agent reasoning and model token cost
+need their dedicated API or CLI flow. A dedicated harness token can read and
+control launched runs but cannot change operator defaults, launch new runs,
+drive the owner assistant, or reset/delete runs. Legacy configurations passing `LOOPLAB_UI_TOKEN` still give
+the agent full UI owner authority; keep that owner credential out of its environment
+when operator policy must remain separate. Agent reasoning and model token cost
 happen outside LoopLab's ledger; the event log records the submitted candidate,
 measured execution and command receipts, not external provider billing.
 
