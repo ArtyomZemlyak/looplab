@@ -167,6 +167,11 @@ def test_literal_score_dictionary_emitted_after_serialization():
                                      "payload['extra'] = 1\nprint(json.dumps(payload))")
     assert any(i["issue"] == "hardcoded_metric" for i in critique(
         idea, with_extra_field, metric_key="accuracy"))
+    with_extra_update = cheat.replace("print(json.dumps(payload))",
+                                      "payload.update({'extra': 1})\n"
+                                      "print(json.dumps(payload))")
+    assert any(i["issue"] == "hardcoded_metric" for i in critique(
+        idea, with_extra_update, metric_key="accuracy"))
     updated = cheat.replace("print(json.dumps(payload))",
                             "payload['accuracy'] = accuracy\nprint(json.dumps(payload))")
     assert not any(i["issue"] == "hardcoded_metric" for i in critique(
@@ -176,6 +181,20 @@ def test_literal_score_dictionary_emitted_after_serialization():
                                         "print(json.dumps(payload))")
     assert not any(i["issue"] == "hardcoded_metric" for i in critique(
         idea, updated_with_method, metric_key="accuracy"))
+    captured_update = cheat.replace("print(json.dumps(payload))",
+                                    "ignored = payload.update({'accuracy': accuracy})\n"
+                                    "print(json.dumps(payload))")
+    assert not any(i["issue"] == "hardcoded_metric" for i in critique(
+        idea, captured_update, metric_key="accuracy"))
+    computed_then_replaced = ("import json\naccuracy = run_validation()\n"
+                              "payload = {'accuracy': accuracy}\n"
+                              "payload['accuracy'] = 0.95\nprint(json.dumps(payload))\n")
+    assert any(i["issue"] == "hardcoded_metric" for i in critique(
+        idea, computed_then_replaced, metric_key="accuracy"))
+    computed_then_updated = computed_then_replaced.replace(
+        "payload['accuracy'] = 0.95", "payload.update({'accuracy': 0.95})")
+    assert any(i["issue"] == "hardcoded_metric" for i in critique(
+        idea, computed_then_updated, metric_key="accuracy"))
     stdout_alias = ("import json, sys\ndef score():\n"
                     "    accuracy = run_validation()\n"
                     "    payload = json.dumps({'accuracy': 0.95})\n"

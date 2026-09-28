@@ -139,11 +139,12 @@ def critique(idea: Idea, code: str, *, submission_file: str | None = None,
 
 
 def _serialized_literal_score(code: str, metric_key: str) -> bool:
-    """A literal inside ``json.dumps({...})`` is emitted as written.
+    """Find literal metrics that reach stdout through a local JSON payload.
 
     A separate assignment to a variable named like the output key cannot make
-    that serialized literal computed. Keep this narrower than all dictionary
-    literals: a placeholder dictionary may be updated before it is serialized.
+    that serialized literal computed. Track only straight-line local bindings
+    and metric-key writes, so a placeholder overwritten with a computed score
+    before serialization is not treated as a reported constant.
     """
     if "dumps" not in code or metric_key not in code:
         return False
@@ -187,6 +188,41 @@ def _serialized_literal_score(code: str, metric_key: str) -> bool:
             return set().union(*(metric_writes(item) for item in target.elts))
         return set()
 
+    def mutates_metric(call: ast.Call) -> bool:
+        method = call.func.attr
+        if method == "clear":
+            return True
+        if method == "update":
+            if (len(call.args) > 1 or any(kw.arg is None or kw.arg == metric_key
+                                          for kw in call.keywords)):
+                return True
+            if not call.args:
+                return False
+            values = call.args[0]
+            return (not isinstance(values, ast.Dict)
+                    or any(not isinstance(key, ast.Constant) or key.value == metric_key
+                           for key in values.keys))
+        if method == "pop":
+            return not (call.args and isinstance(call.args[0], ast.Constant)
+                        and call.args[0].value != metric_key)
+        # A tracked literal dictionary already has the metric key; setdefault
+        # cannot replace its value.
+        return False
+
+    def writes_literal_metric(call: ast.Call) -> bool:
+        if call.func.attr != "update":
+            return False
+        for keyword in reversed(call.keywords):
+            if keyword.arg == metric_key:
+                return _numeric_literal(keyword.value)
+            if keyword.arg is None:
+                return False
+        if call.args and isinstance(call.args[0], ast.Dict):
+            for key, value in reversed(list(zip(call.args[0].keys, call.args[0].values))):
+                if isinstance(key, ast.Constant) and key.value == metric_key:
+                    return _numeric_literal(value)
+        return False
+
     for emitted in ast.walk(tree):
         if output_call(emitted) and any(
             literal_dump(call) for argument in emitted.args for call in ast.walk(argument)):
@@ -215,6 +251,13 @@ def _serialized_literal_score(code: str, metric_key: str) -> bool:
                              if isinstance(target, ast.Name)}
                     written = set().union(*(metric_writes(target)
                                             for target in statement.targets))
+                    literal_field_names = {
+                        target.value.id for target in statement.targets
+                        if (isinstance(target, ast.Subscript)
+                            and isinstance(target.value, ast.Name)
+                            and isinstance(target.slice, ast.Constant)
+                            and target.slice.value == metric_key
+                            and _numeric_literal(statement.value))}
                     is_serialized = serialized_literal(statement.value)
                     is_dict = literal_dict(statement.value)
                     literal_names.difference_update(written)
@@ -223,6 +266,7 @@ def _serialized_literal_score(code: str, metric_key: str) -> bool:
                         literal_names.update(names)
                     if is_dict:
                         dict_names.update(names)
+                    dict_names.update(literal_field_names)
                 elif isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name):
                     is_serialized = serialized_literal(statement.value)
                     is_dict = literal_dict(statement.value)
@@ -244,11 +288,16 @@ def _serialized_literal_score(code: str, metric_key: str) -> bool:
                            and call.args[0].id in dict_names
                            for arg in statement.value.args for call in ast.walk(arg)):
                         return True
-                elif isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
-                    call = statement.value
-                    if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name):
-                        if call.func.attr in {"update", "pop", "clear", "setdefault"}:
+                value = statement.value if isinstance(statement, (
+                    ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Expr)) else None
+                if isinstance(value, ast.AST):
+                    for call in ast.walk(value):
+                        if (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                                and isinstance(call.func.value, ast.Name)
+                                and mutates_metric(call)):
                             dict_names.discard(call.func.value.id)
+                            if writes_literal_metric(call):
+                                dict_names.add(call.func.value.id)
     return False
 
 
