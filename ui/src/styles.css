@@ -2630,10 +2630,15 @@ pre.code.event-json { max-height: 220px; }
   touch-action: none; z-index: 3; }
 .asst-resize:hover { background: var(--accent-dim); }
 .asst-resize:focus-visible { background: var(--accent); outline: 2px solid var(--accent); outline-offset: 1px; }
-.asst-side-panel .asst-drawer-feed { flex: 1; min-height: 0; overflow: auto; padding: 18px 24px; }
+.asst-side-panel .asst-drawer-feed { flex: 1; min-height: 0; overflow: auto; padding: 18px 24px;
+  width: 100%; max-width: 1120px; margin-inline: auto; box-sizing: border-box; }
+:is(.asst-side-panel, .asst-full) .feed-msg.chat { max-width: min(86%, 820px); }
+:is(.asst-side-panel, .asst-full) .feed-msg.chat .chat-bubble { padding: 11px 14px; }
+:is(.asst-side-panel, .asst-full) .feed-msg.chat .chat-text { font-size: 15px; line-height: 1.55; }
+:is(.asst-side-panel, .asst-full) .feed-msg.chat .chat-who { font-size: 11.5px; margin-bottom: 5px; }
 .asst-run-context { display: flex; align-items: center; gap: 9px; min-height: 42px;
   padding: 7px 24px; border-bottom: 1px solid var(--line); color: var(--fg-dim); font-size: 12px; }
-.asst-run-context strong { color: var(--fg); font-weight: 600; overflow: hidden; text-overflow: ellipsis;
+.asst-run-context strong { min-width: 0; color: var(--fg); font-weight: 600; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; }
 .asst-run-context-state { border: 1px solid var(--line-2); border-radius: 99px;
   padding: 2px 8px; text-transform: capitalize; white-space: nowrap; }
@@ -2683,7 +2688,9 @@ pre.code.event-json { max-height: 220px; }
 .asst-view.asst-full { position: fixed; inset: 0; z-index: 200; background: var(--bg); }
 .asst-main-h { display: flex; align-items: center; gap: 8px; padding: 10px; border-bottom: 1px solid var(--line); }
 .asst-main-h .ttl { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.asst-full .asst-feed { flex: 1; min-height: 0; overflow: auto; padding: 12px 14px; }
+.asst-full .asst-feed { flex: 1; min-height: 0; overflow: auto; padding: 12px 14px;
+  width: 100%; max-width: 1120px; margin-inline: auto; box-sizing: border-box; }
+.asst-full .asst-empty { width: 100%; box-sizing: border-box; }
 .asst-shared { height: 100dvh; min-height: 100svh; }
 .asst-shared-terms { display: flex; align-items: center; justify-content: flex-end; gap: 8px;
   min-width: 0; flex-wrap: wrap; }

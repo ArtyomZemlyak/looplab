@@ -1346,7 +1346,7 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
         <div className="dock-foot">
           <span className="muted dock-foot-hint">
             {readOnly ? 'Historical timeline — live controls and sidecar trace details are disabled.' : <>
-              Steer below by chat or <code className="cmd-hint">/stop · /finalize · /resume · /approve #id</code>.
+              Ask Assistant about this run. Shortcuts: <code className="cmd-hint">/stop · /finalize · /resume · /approve #id</code>
             </>}
           </span>
           {!readOnly && <div className="transport">
@@ -1448,17 +1448,17 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
             </div>}
             {!transportBusy && !transportFailure && mode === 'running' && <>
               <button className="btn sm" aria-label="Stop run without finalizing"
-                title="Stop now; resume or finalize later" onClick={onStop}><OpIcon name="pause" size={13} /></button>
+                title="Stop now; resume or finalize later" onClick={onStop}><OpIcon name="pause" size={13} /> Stop run</button>
               <button className="btn sm danger" aria-label="Finalize run"
-                title="Finalize: stop, report, lessons and cost" onClick={onFinalize}><OpIcon name="stop" size={13} /></button></>}
+                title="Finalize: stop, report, lessons and cost" onClick={onFinalize}><OpIcon name="stop" size={13} /> Finalize</button></>}
             {!transportBusy && !transportFailure && (mode === 'paused' || mode === 'stalled') && <>
-              <button className="btn sm primary" aria-label="Resume run" title="Continue run" onClick={onResume}><OpIcon name="play" size={13} /></button>
+              <button className="btn sm primary" aria-label="Resume run" title="Continue run" onClick={onResume}><OpIcon name="play" size={13} /> Resume run</button>
               <button className="btn sm danger" aria-label="Finalize run"
-                title="Finalize: stop, report, lessons and cost" onClick={onFinalize}><OpIcon name="stop" size={13} /></button></>}
+                title="Finalize: stop, report, lessons and cost" onClick={onFinalize}><OpIcon name="stop" size={13} /> Finalize</button></>}
             {!transportBusy && !transportFailure && mode === 'finished' && <>
               <button className="btn sm primary" aria-label="Resume finished run"
                 title={runActionBusy ? 'Another run lifecycle action must be resolved first' : 'Reopen and continue'}
-                disabled={runActionBusy} onClick={onResume}><OpIcon name="play" size={13} /></button>
+                disabled={runActionBusy} onClick={onResume}><OpIcon name="play" size={13} /> Resume run</button>
               <button className="btn sm danger start-over-trigger" aria-haspopup="dialog"
                 aria-label="Start run over" title={startOverDisabled
                   ? startOverState?.disabledReason || 'Resolve the existing Start over outcome first'

@@ -159,7 +159,7 @@ const ASSISTANT_OVERLAY_MAX_PX = 1199
 const assistantMaxWidth = compact => Math.max(320, window.innerWidth - (compact ? 120 : 620))
 const clampAssistantWidth = (value, compact = window.innerWidth <= ASSISTANT_OVERLAY_MAX_PX) => {
   const max = assistantMaxWidth(compact)
-  return Math.min(Math.max(Number(value) || Math.round(window.innerWidth * .52), compact ? 320 : 520), max)
+  return Math.min(Math.max(Number(value) || Math.round(window.innerWidth * .52), 320), max)
 }
 const assistantRevertKey = (sessionId, change) => {
   const path = typeof change?.abs_path === 'string' ? change.abs_path : ''
@@ -370,11 +370,12 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const [shareCopyFallbacks, setShareCopyFallbacks] = useState({})
   const [shareBusySid, setShareBusySid] = useState(null)
   const [shareAckNotice, setShareAckNotice] = useState(null)
+  const preferredSideWRef = useRef(null)
   const [sideW, setSideW] = useState(() => {
-    const saved = Number(storageGet('ll.asstW'))
-    // The former 440px default was saved automatically, even when nobody resized the panel.
-    // Let those installations adopt the conversation-first width.
-    return clampAssistantWidth(saved > 520 ? saved : null)
+    const saved = storageGet('ll.asstW')
+    // Numeric values came from automatic persistence. Only an explicit resize pins the width.
+    preferredSideWRef.current = saved?.startsWith('user:') ? Number(saved.slice(5)) : null
+    return clampAssistantWidth(preferredSideWRef.current)
   })
   const autoRevealedPendingIdsRef = useRef(new Set())
 
@@ -643,7 +644,6 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       if (replyAnnouncementTimerRef.current) clearTimeout(replyAnnouncementTimerRef.current)
     }
   }, [])
-  useEffect(() => { storageSet('ll.asstW', sideW) }, [sideW])
   // VS Code-style docking: when the side panel is open, reserve its width on the right so the MAIN
   // view is pushed aside (shrinks) rather than overlaid. The panel is position:fixed; this frees the
   // exact space it occupies. The width lives in a CSS var so a drag-resize reflows the main view live.
@@ -885,11 +885,16 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // ── resizable side panel (drag its left edge) ──
   const resizeCleanupRef = useRef(null)
   const maxSideWidth = () => assistantMaxWidth(compactAssistant)
+  const setPreferredSideW = width => {
+    preferredSideWRef.current = width
+    storageSet('ll.asstW', `user:${width}`)
+    setSideW(width)
+  }
   const startResize = (e) => {
     if (e.button != null && e.button !== 0) return
     e.preventDefault()
     const x0 = e.clientX, w0 = sideW
-    const onMove = (ev) => setSideW(Math.min(Math.max(w0 - (ev.clientX - x0), 320), maxSideWidth()))
+    const onMove = (ev) => setPreferredSideW(Math.min(Math.max(w0 - (ev.clientX - x0), 320), maxSideWidth()))
     const cleanup = () => {
       window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', cleanup)
       window.removeEventListener('pointercancel', cleanup)
@@ -908,11 +913,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     else if (event.key === 'Home') next = 320
     else if (event.key === 'End') next = maxSideWidth()
     if (next == null) return
-    event.preventDefault(); setSideW(Math.min(Math.max(next, 320), maxSideWidth()))
+    event.preventDefault(); setPreferredSideW(Math.min(Math.max(next, 320), maxSideWidth()))
   }
   useEffect(() => () => resizeCleanupRef.current?.(), [])
   useEffect(() => {
-    const clamp = () => setSideW(width => clampAssistantWidth(width, compactAssistant))
+    const clamp = () => setSideW(clampAssistantWidth(preferredSideWRef.current, compactAssistant))
     clamp()
     window.addEventListener('resize', clamp)
     return () => window.removeEventListener('resize', clamp)
@@ -3071,9 +3076,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const selectedRun = runId ? runsById[runId] : null
   const selectedRunStatus = selectedRun ? effectiveRunStatus(selectedRun) : ''
   const runContextBanner = runId && <div className={`asst-run-context${selectedRunStatus === 'stalled' ? ' stalled' : ''}`}>
-    <strong title={runId}>{selectedRun?.label || runId}</strong>
+    <strong title={selectedRun?.goal || runId}>{selectedRun?.label || selectedRun?.goal || runId}</strong>
     <span className="asst-run-context-state">{selectedRunStatus || 'Loading'}</span>
-    {selectedRunStatus === 'stalled' && <span className="asst-run-context-help">Engine stopped · inspect run to resume.</span>}
+    {selectedRunStatus === 'stalled' && <span className="asst-run-context-help">Engine stopped · use Resume run in Lineage.</span>}
   </div>
 
   const slashMatch = /^\/(\w*)$/.exec(input)
