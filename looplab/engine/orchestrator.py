@@ -2002,6 +2002,9 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 # memberships; no internal classifier or reflector is invoked.
                 state = self._maybe_snapshot_coverage(state)
                 state = self._maybe_snapshot_concept_coverage(state)
+                # Keep the ref-only Card projection current for agent-authored
+                # research and measured evidence during the run as well as at finish.
+                state = self._sync_card_enrichments(state)
                 evals = [a for a in self.policy.next_actions(state) if a["kind"] == "evaluate"]
                 if evals:
                     await self._dispatch_evals(evals, state, max_es, research=False)
