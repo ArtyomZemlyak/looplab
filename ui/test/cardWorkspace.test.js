@@ -197,7 +197,15 @@ test('the view layout renders the board without a modal dialog wrapper', () => {
   // The board is a VIEW now: an aria-modal shell would make the header's own view-toggle inert.
   assert.doesNotMatch(html, /aria-modal/)
   assert.match(html, /class="card-board"/)
-  assert.match(html, /card-detail/)
+  assert.doesNotMatch(html, /card-detail-side/)
+})
+
+test('wide workspace opens details only after a Card is picked', () => {
+  const closed = render({ pane: { compact: false, width: 420 } })
+  assert.doesNotMatch(closed, /card-detail-side/)
+  const open = render({ pane: { compact: false, width: 420 }, selectedCardId: 'card-many' })
+  assert.match(open, /card-detail-side/)
+  assert.match(open, /these 3 experiments tested/)
 })
 
 test('compact workspace leaves the board reachable until a Card is opened', () => {

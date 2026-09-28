@@ -319,7 +319,6 @@ function _CardKanbanCard({
     return <article className={'card-kanban-card card-lane-card' + (selected ? ' on' : '')}
       data-card-id={card.id} aria-busy={ownPending ? 'true' : undefined}>
       <button type="button" className="card-lane-open" aria-pressed={selected}
-        aria-label={`Open Card ${card.id}: ${statement}`}
         onClick={event => onOpen?.(card.id, event.currentTarget)}>
         <span className="card-kanban-stmt">
           <span className="hyp-src" title={source ? `source: ${source}` : 'source unavailable'}>
@@ -328,7 +327,7 @@ function _CardKanbanCard({
           <span>{statement}</span>
         </span>
         <span className="card-kanban-meta">
-          <span className="chip xs" title="durable Card identity">{card.id}</span>
+          <span className="chip xs">{card.id}</span>
           {verdict && verdict !== 'open' && <span
             className={'chip xs ' + (verdict === 'supported' ? 'ok' : verdict === 'abandoned' ? 'warn' : '')}
             title={`research verdict: ${verdict} (distinct from the work status)`}>{verdict}</span>}
@@ -1224,7 +1223,7 @@ function _CardKanban({
     detailReturnFocusRef.current = trigger || detailReturnFocusRef.current
     onSelectCard?.(cardId)
   }
-  const detailOpen = view && (!pane?.compact || !!selectedCard)
+  const detailOpen = view && !!selectedCard
   // ESCAPE GOES THROUGH THE PRIORITY SYSTEM, like every other dialog. A raw window keydown that
   // unconditionally `preventDefault()`s and closes sat outside `DIALOG_PRIORITY` arbitration, so
   // with a nested prioritized dialog open inside `renderInspector` — the destructive trace-clear
@@ -1290,8 +1289,8 @@ function _CardKanban({
     : null
   const groupingBar = <div className="toolbar card-grouping" role="group"
     aria-label="Group the board by">
-    {[['lanes', 'Lanes', 'lifecycle status — what the machine is doing now'],
-      ['research', 'Research', 'the ladder of questions, each one narrowing the one above it'],
+    {[['lanes', 'Lanes', 'Work by status'],
+      ['research', 'Research', 'Questions and experiments'],
     ].map(([key, label, hint]) => <button key={key} type="button" title={hint}
       className={'btn sm' + (grouping === key ? ' primary' : '')}
       aria-pressed={grouping === key} onClick={() => setGrouping(key)}>{label}</button>)}
@@ -1301,7 +1300,8 @@ function _CardKanban({
       const rows = laneCards.filter(card => _cardStatus(card) === key).sort(_cardOrder)
       const tone = _CARD_FROZEN_STATUSES.has(key) ? ` card-${key}` : ''
       const laneId = `card-lane-${encodeURIComponent(key)}`
-      return <section key={key} className={'card-col' + tone} aria-labelledby={laneId}>
+      return <section key={key} className={'card-col' + tone + (rows.length ? '' : ' empty')}
+        aria-labelledby={laneId}>
         <h3 id={laneId} className="card-col-h" title={hint}>
           {label} <span className="muted">{rows.length}</span>
         </h3>
@@ -1365,9 +1365,8 @@ function _CardKanban({
     </div>
   }
   // `size="board"`, not `wide`: `wide` is a READING width (~1100px) and the kanban's intrinsic
-  // minimum GROWS with the data — `grid-auto-flow: column` at a 225px floor needs ~1390px for six
-  // lanes, so the board overflowed its own panel at every viewport (measured 1623px of lanes
-  // inside a 1070px content box). Still a percentage-capped `min()`, so the JupyterHub proxy's
+  // minimum grows with occupied lanes, so the board can overflow a 1070px content box.
+  // Still a percentage-capped `min()`, so the JupyterHub proxy's
   // narrower window gets a panel that fits rather than one clipped by the browser edge.
   return <Panel title="Cards" sub={sub} onClose={onClose} size="board">
     <_CardProjectionNotice projection={projection} cards={visibleCards} />
