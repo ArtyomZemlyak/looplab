@@ -127,13 +127,15 @@ def test_agent_deadline_answer_changes_real_stage_outcome_and_records_grace(tmp_
                                  stages=[{"name": "train", "command": [sys.executable, "slow.py"]}],
                                  on_deadline=callback, deadline_grace_max_s=2.0)
             questions = []
-            for _ in range(300):
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not future.done():
                 questions = client.get("/api/runs/demo/harness-checkpoints", params={
                     "expected_generation": generation}).json()["pending"]
                 if questions:
                     break
                 time.sleep(0.01)
-            assert len(questions) == 1 and not future.done()
+            assert len(questions) == 1 and not future.done(), (
+                future.result() if future.done() else "checkpoint did not open within 10s")
             assert questions[0]["stage"] == "train"
             response = client.post("/api/runs/demo/harness-checkpoints", json={
                 "expected_generation": generation,

@@ -114,6 +114,29 @@ def test_critic_no_false_positive_on_computed_metric():
     assert any(i["issue"] == "hardcoded_metric" for i in critique(idea, hard))
 
 
+def test_computed_variable_cannot_hide_a_literal_serialized_score():
+    idea = Idea(operator="draft")
+    cheat = ("import json\naccuracy = run_validation()\n"
+             "print(json.dumps({'accuracy': 0.95, 'samples': 400}))\n")
+    assert any(i["issue"] == "hardcoded_metric" for i in critique(
+        idea, cheat, metric_key="accuracy"))
+    placeholder = ("import json\nresult = {'accuracy': 0.0}\n"
+                   "result['accuracy'] = run_validation()\nprint(json.dumps(result))\n")
+    assert not any(i["issue"] == "hardcoded_metric" for i in critique(
+        idea, placeholder, metric_key="accuracy"))
+    unused = ("import json\naccuracy = run_validation()\n"
+              "debug_payload = json.dumps({'accuracy': 0.95})\n"
+              "print(json.dumps({'accuracy': accuracy}))\n")
+    assert not any(i["issue"] == "hardcoded_metric" for i in critique(
+        idea, unused, metric_key="accuracy"))
+    # A multi-file trust scan is not one parseable Python module once YAML is
+    # concatenated after the program; the authored Python source remains checkable.
+    combined = cheat + "\n# --- config.yaml ---\nlearning_rate: 0.2\n"
+    assert any(i["issue"] == "hardcoded_metric" for i in critique(
+        idea, combined, metric_key="accuracy",
+        source_units=(cheat, "learning_rate: 0.2\n")))
+
+
 def test_hardcoded_metric_not_masked_by_a_symmetric_substring():
     # Regression: the `computed` guard matched `metric` as a SUFFIX of any identifier, so a throwaway
     # line whose name ends in "metric" (`is_symmetric = True`, `asymmetric`, `parametric`, ...) made

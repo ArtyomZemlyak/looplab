@@ -1787,12 +1787,20 @@ class EvaluateMixin:
             # owns that output, even when its protected entrypoint is inside the repo.
             configuration_only = candidate_only_configuration(
                 getattr(node, "code", None), getattr(node, "files", None))
+            eval_spec = getattr(self, "_eval_spec", None)
+            metric_spec = eval_spec.get("metric") if isinstance(eval_spec, dict) else None
+            metric_key = metric_spec.get("key", "metric") if isinstance(metric_spec, dict) else "metric"
+            source_units = tuple(source for source in (
+                getattr(node, "code", None), *((getattr(node, "files", None) or {}).values()))
+                if isinstance(source, str))
             sigs += critic_findings(node.idea, scan_src,
                                     submission_file=self._graded_output_name(),
                                     scorer_in_tree=(scorer_is_in_tree(
                                         getattr(self, "task", None))
                                         and not configuration_only),
-                                    configuration_only=configuration_only)
+                                    configuration_only=configuration_only,
+                                    metric_key=metric_key,
+                                    source_units=source_units)
         return sigs
 
     def _trust_scan_surface(self, node) -> str:

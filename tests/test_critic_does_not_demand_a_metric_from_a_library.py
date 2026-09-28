@@ -6,11 +6,12 @@ stage runs `benchmarks/algotune/looplab_eval.py --solver solver.py` and the cand
 that prints nothing. dsIF6 alone carried the alarm on all six of its nodes, including the champion
 that went on to score 205.8223 on the test split.
 
-The obvious fix is the wrong one, and that was measured too: switching the check to the task's
-DECLARED metric key (`eval.metric.key`) would take the false-positive rate from 208/213 to 213/213,
-because AlgoTune's key is `speedup` and 0 of 213 solvers reference it while 5 mention `metric`.
-What actually distinguishes the two worlds is WHO IS RUN: `entrypoint_candidates` resolves
+Changing only the searched word was the wrong fix, and that was measured too: requiring the task's
+DECLARED metric key (`eval.metric.key`) from every candidate would take the false-positive rate
+from 208/213 to 213/213, because AlgoTune's key is `speedup` and 0 of 213 solvers reference it.
+What distinguishes the two worlds is WHO IS RUN: `entrypoint_candidates` resolves
 `["python", "score.py"]` to `score.py` and the AlgoTune stage command to `[]`.
+The declared key is checked only when the candidate actually owns scoring output.
 """
 import sys
 from pathlib import Path
@@ -132,12 +133,33 @@ def test_hardcoded_metric_is_not_hidden_by_another_config_field():
 
 def test_declarative_config_metric_literals_are_flagged_without_flagging_python_initializers():
     idea = Idea(operator="improve")
-    for config in ("metric: 0.95\nepochs: 3", "epochs = 3\nmetric = 9.5e-1"):
+    for config in (
+        "metric: 0.95\nepochs: 3", "epochs = 3\nmetric = 9.5e-1",
+        "metric: 1_000\nepochs: 3", "metric: 0x10\nepochs: 3",
+        "metric: .nan\nepochs: 3", "metric = inf\nepochs = 3",
+        'metric: "0.95"\nepochs: 3', 'metric = "0.95"\nepochs = 3',
+        '{"metric":"0.95","epochs":3}',
+    ):
         issues = {row["issue"] for row in critique(
             idea, config, scorer_in_tree=False, configuration_only=True)}
         assert "hardcoded_metric" in issues
     python = "metric = 0.0\nfor row in rows: metric += score(row)\n"
     assert "hardcoded_metric" not in _issues(python, scorer_in_tree=False)
+    for named_metric in ('metric: accuracy\nepochs: 3', 'metric = "accuracy"\nepochs = 3'):
+        assert "hardcoded_metric" not in {row["issue"] for row in critique(
+            idea, named_metric, scorer_in_tree=False, configuration_only=True)}
+
+
+def test_self_scoring_and_config_only_checks_use_the_declared_output_key():
+    idea = Idea(operator="improve")
+    computed = "score = train()\nprint(json.dumps({'accuracy': score}))\n"
+    assert "no_metric_output" not in {row["issue"] for row in critique(
+        idea, computed, metric_key="accuracy")}
+    assert "hardcoded_metric" in {row["issue"] for row in critique(
+        idea, '{"accuracy":0.95}', metric_key="accuracy")}
+    assert "hardcoded_metric" in {row["issue"] for row in critique(
+        idea, 'accuracy: 0.95\nepochs: 3', scorer_in_tree=False,
+        configuration_only=True, metric_key="accuracy")}
 
 
 # ---------------------------------------------------------------- the seam, not just the rule
@@ -198,10 +220,36 @@ def test_engine_keeps_hardcoded_metric_gate_for_config_files(tmp_path):
     for filename, contents in (
         ("config.json", '{"metric":0.95}'),
         ("config.yaml", "metric: 0.95\nepochs: 3"),
+        ("config.yaml", "metric: 1_000\nepochs: 3"),
         ("config.toml", "epochs = 3\nmetric = 9.5e-1"),
+        ("config.toml", "epochs = 3\nmetric = inf"),
     ):
         node = types.SimpleNamespace(
             idea=Idea(operator="improve", params={}), code="", files={filename: contents})
         source = eng._trust_scan_surface(node)
         signals = {row["signal"] for row in eng._trust_gate_signals(node, source)}
         assert "critic:hardcoded_metric" in signals, filename
+
+
+def test_engine_passes_declared_metric_key_to_critic(tmp_path):
+    eng = _critic_only_engine(tmp_path / "named", _Eval(command=["python", "score.py"]))
+    eng._eval_spec = {"metric": {"kind": "stdout_json", "key": "accuracy"}}
+    node = types.SimpleNamespace(
+        idea=Idea(operator="improve", params={}), code="",
+        files={"config.yaml": "accuracy: 0.95\nepochs: 3"})
+    source = eng._trust_scan_surface(node)
+    signals = {row["signal"] for row in eng._trust_gate_signals(node, source)}
+    assert "critic:hardcoded_metric" in signals
+
+
+def test_engine_checks_python_output_in_mixed_file_candidate(tmp_path):
+    eng = _critic_only_engine(tmp_path / "mixed", _Eval(command=["python", "train.py"]))
+    eng._eval_spec = {"metric": {"kind": "stdout_json", "key": "accuracy"}}
+    node = types.SimpleNamespace(
+        idea=Idea(operator="improve", params={}), code="",
+        files={"train.py": "import json\naccuracy = validate()\n"
+                           "print(json.dumps({'accuracy': 0.95}))\n",
+               "config.yaml": "learning_rate: 0.2\n"})
+    source = eng._trust_scan_surface(node)
+    signals = {row["signal"] for row in eng._trust_gate_signals(node, source)}
+    assert "critic:hardcoded_metric" in signals

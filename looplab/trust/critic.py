@@ -7,6 +7,7 @@ narrow ``critic:hardcoded_metric`` signal can exclude selection/breeding or bloc
 """
 from __future__ import annotations
 
+import ast
 import os
 import re
 
@@ -15,7 +16,9 @@ from looplab.core.models import Idea
 
 def critique(idea: Idea, code: str, *, submission_file: str | None = None,
              scorer_in_tree: bool = True,
-             configuration_only: bool = False) -> list[dict]:
+             configuration_only: bool = False,
+             metric_key: str = "metric",
+             source_units: tuple[str, ...] | None = None) -> list[dict]:
     """Return a list of {issue, detail} the critic flags (empty == looks fine).
 
     `submission_file`: set when the run is graded OUT-OF-PROCESS by a host grader (MLE-bench, and
@@ -33,9 +36,10 @@ def critique(idea: Idea, code: str, *, submission_file: str | None = None,
     error the paragraph above describes for MLE-bench. MEASURED on the
     AlgoTune corpus 2026-08-29: the critic ran on 34 nodes and flagged `no_metric_output` on 34 of
     34, because the eval stage runs `benchmarks/algotune/looplab_eval.py --solver solver.py` and
-    the solver prints nothing, ever. Switching the check to the task's DECLARED metric key would
-    have made it WORSE, not better — that key is `speedup`, and 0 of 213 solvers reference it
-    against 5 that mention `metric`.
+    the solver prints nothing, ever. Requiring the task's DECLARED metric key from these
+    out-of-tree solvers would have made it WORSE, not better — that key is `speedup`, and 0 of
+    213 solvers reference it against 5 that mention `metric`. The declared key applies where
+    the candidate owns scoring output.
 
     `hardcoded_metric` is NOT suppressed with it: that one is the hard gate, and a literal metric
     value sitting in a candidate is suspicious no matter who computes the score.
@@ -43,8 +47,16 @@ def critique(idea: Idea, code: str, *, submission_file: str | None = None,
     `configuration_only`: inspect unquoted YAML/TOML/INI metric assignments as well as JSON
     fields. A bare ``metric = 0.0`` in executable code can be a legitimate accumulator, so this
     additional syntax is only a hard signal when all authored files are declarative config.
+
+    `metric_key`: the task's declared stdout JSON key. It matters when the candidate
+    scores itself or authors a config; an out-of-tree scorer still owns its own output.
+
+    `source_units`: each authored file separately, so one YAML file cannot make
+    a neighboring Python scorer unparseable to the direct-output check.
     """
     code = code or ""
+    metric_key = metric_key if isinstance(metric_key, str) and metric_key else "metric"
+    key_pattern = re.escape(metric_key)
     issues: list[dict] = []
     stripped = code.strip()
     short = len(stripped) < 20
@@ -68,18 +80,27 @@ def critique(idea: Idea, code: str, *, submission_file: str | None = None,
     else:
         # In-workdir grading: the solution must compute and emit the metric itself -- but only
         # when the thing being RUN is the solution. See `scorer_in_tree` in the docstring.
-        if not short and scorer_in_tree and "metric" not in code:
+        if not short and scorer_in_tree and metric_key not in code:
             issues.append({"issue": "no_metric_output",
-                           "detail": "code never references 'metric' — it may not emit the required score"})
-        # Flag a literal metric value ({"metric": 0.95}) ONLY when nothing in the code assigns the
-        # metric from a name/expression. Otherwise a legitimate `print(json.dumps({"metric": score}))`
-        # — or a placeholder `{"metric": 0.0}` later overwritten with a computed value — false-positives.
-        # A later field does not make the literal computed: accept a comma after the value too.
-        hardcoded = re.search(r'["\']metric["\']\s*:\s*[0-9.+\-eE]+\s*[,})]', code)
+                           "detail": f"code never references {metric_key!r} — it may not emit the required score"})
+        # A literal metric value may be a placeholder later overwritten by a
+        # computation. Keep that broad guard, but a literal directly serialized
+        # to stdout is the output itself and must remain a hard signal.
+        # A later field does not make the literal computed: accept a comma.
+        hardcoded = re.search(
+            rf'["\']{key_pattern}["\']\s*:\s*[0-9.+\-eE]+\s*[,}})]', code)
         if configuration_only and not hardcoded:
-            number = r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?'
+            # YAML and TOML also admit digit separators, base-prefixed integers and
+            # non-finite float literals. A config's literal metric is still authored
+            # evidence regardless of which numeric spelling the parser accepts.
+            decimal = r'[+-]?(?:\d[\d_]*(?:\.[\d_]*)?|\.[\d_]+)(?:[eE][+-]?[\d_]+)?'
+            radix = r'[+-]?0(?:[xX][0-9a-fA-F_]+|[oO][0-7_]+|[bB][01_]+)'
+            special = r'[+-]?\.?(?:inf|nan)'
+            number = rf'(?:{radix}|{decimal}|{special})'
+            value = rf'(?:{number}|["\']{number}["\'])'
             hardcoded = re.search(
-                rf'(?m)^[ \t]*metric[ \t]*[:=][ \t]*{number}(?=[ \t\r]*(?:$|[,#;}}]))', code)
+                rf'(?im)(?:^|[{{,])[ \t]*(?:["\']{key_pattern}["\']|{key_pattern})'
+                rf'[ \t]*[:=][ \t]*{value}(?=[ \t\r]*(?:$|[,#;}}]))', code)
         # Anchor the `metric` token with a left word boundary. Unanchored, the bare-name alternative
         # matched `metric` as a SUFFIX of any identifier — `is_symmetric = True` (also `asymmetric`,
         # `parametric`, `barometric`, `isometric`) makes `metric = T` match `computed`, so
@@ -89,9 +110,15 @@ def critique(idea: Idea, code: str, *, submission_file: str | None = None,
         # needs the boundary. Together the two alternatives still admit every legit computed form: the
         # anchored first alt matches `{"metric": score}` and a bare `metric = score`, and the second alt
         # matches the bracket-assignment `result["metric"] = value`.
-        computed = re.search(r'(?<![A-Za-z0-9_])["\']?metric["\']?\s*[:=]\s*[A-Za-z_]', code) or \
-            re.search(r'\[\s*["\']metric["\']\s*\]\s*=\s*[A-Za-z_]', code)
-        if hardcoded and not computed:
+        computed = re.search(
+            rf'(?<![A-Za-z0-9_])["\']?{key_pattern}["\']?\s*[:=]\s*[A-Za-z_]', code) or \
+            re.search(rf'\[\s*["\']{key_pattern}["\']\s*\]\s*=\s*[A-Za-z_]', code)
+        # A declarative config cannot overwrite its literal with a later
+        # computation. In TOML, ``metric = inf`` also looks like a bare-name
+        # assignment to the generic computed-value pattern above.
+        if (any(_serialized_literal_score(unit, metric_key)
+                for unit in (source_units if source_units is not None else (code,)))
+                or (hardcoded and (configuration_only or not computed))):
             issues.append({"issue": "hardcoded_metric",
                            "detail": "the metric appears to be a hard-coded constant, not computed"})
 
@@ -109,6 +136,62 @@ def critique(idea: Idea, code: str, *, submission_file: str | None = None,
             issues.append({"issue": "params_ignored",
                            "detail": f"none of the proposed params {pnames} are referenced in the code"})
     return issues
+
+
+def _serialized_literal_score(code: str, metric_key: str) -> bool:
+    """A literal inside ``json.dumps({...})`` is emitted as written.
+
+    A separate assignment to a variable named like the output key cannot make
+    that serialized literal computed. Keep this narrower than all dictionary
+    literals: a placeholder dictionary may be updated before it is serialized.
+    """
+    if "dumps" not in code or metric_key not in code:
+        return False
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError):
+        return False
+    for emitted in ast.walk(tree):
+        if not isinstance(emitted, ast.Call):
+            continue
+        func = emitted.func
+        is_print = isinstance(func, ast.Name) and func.id == "print"
+        is_stdout_write = (isinstance(func, ast.Attribute) and func.attr == "write"
+                           and isinstance(func.value, ast.Attribute)
+                           and func.value.attr == "stdout"
+                           and isinstance(func.value.value, ast.Name)
+                           and func.value.value.id == "sys")
+        if not (is_print or is_stdout_write):
+            continue
+        for argument in emitted.args:
+            for call in ast.walk(argument):
+                if (not isinstance(call, ast.Call) or not call.args
+                        or getattr(call.func, "id", getattr(call.func, "attr", None)) != "dumps"):
+                    continue
+                payload = call.args[0]
+                if not isinstance(payload, ast.Dict):
+                    continue
+                for key, value in zip(payload.keys, payload.values):
+                    if (isinstance(key, ast.Constant) and key.value == metric_key
+                            and _numeric_literal(value)):
+                        return True
+    return False
+
+
+def _numeric_literal(value: ast.expr) -> bool:
+    if isinstance(value, ast.UnaryOp) and isinstance(value.op, (ast.UAdd, ast.USub)):
+        return _numeric_literal(value.operand)
+    if not isinstance(value, ast.Constant) or isinstance(value.value, bool):
+        return False
+    if isinstance(value.value, (int, float)):
+        return True
+    if isinstance(value.value, str):
+        try:
+            float(value.value)
+            return True
+        except ValueError:
+            return False
+    return False
 
 
 def _param_is_referenced(pname: str, code: str) -> bool:
@@ -196,7 +279,9 @@ def candidate_only_configuration(code: str | None, files: dict | None) -> bool:
 
 def critic_findings(idea, code: str, *, submission_file: str | None = None,
                     scorer_in_tree: bool = True,
-                    configuration_only: bool = False) -> list[dict]:
+                    configuration_only: bool = False,
+                    metric_key: str = "metric",
+                    source_units: tuple[str, ...] | None = None) -> list[dict]:
     """`critique`'s issues as gate-visible trust findings (doc 25 CT-10).
 
     The `critic:` namespace decides gating, not presentation: `critic:hardcoded_metric` EXCLUDES a
@@ -208,5 +293,7 @@ def critic_findings(idea, code: str, *, submission_file: str | None = None,
     return [finding(CRITIC_NS + str(row["issue"]), row["detail"])
             for row in critique(idea, code, submission_file=submission_file,
                                 scorer_in_tree=scorer_in_tree,
-                                configuration_only=configuration_only)
+                                configuration_only=configuration_only,
+                                metric_key=metric_key,
+                                source_units=source_units)
             if row.get("issue")]
