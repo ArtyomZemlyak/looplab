@@ -54,7 +54,7 @@ function framePayload(id) {
       complete: true, truncated: false, reasons: [], limits,
       source: { membership_nodes: 1, edges: 0 },
       included: { membership_nodes: 1, memberships: 1, concepts: 1, tree_nodes: treeIds.length,
-        edges: 0, experiment_refs: 1 },
+        edges: 0, derived_edges: 0, experiment_refs: 1 },
       source_integrity: { complete: true, generation_identified: true },
     },
   }

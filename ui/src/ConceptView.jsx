@@ -239,7 +239,7 @@ export function validateConceptPayload(value, expected = {}) {
       || !exactRecord(limits, LIMIT_FIELDS, count)
       || fieldNames(LIMIT_FIELDS).some(key => limits[key] <= 0)
       || !exactRecord(source, SOURCE_FIELDS, count)
-      || !exactRecord(included, INCLUDED_FIELDS, count)
+      || !exactRecord(included, `${INCLUDED_FIELDS} derived_edges`, count)
       || !exactRecord(sourceIntegrity, integrityFields)
       || !fields(sourceIntegrity, 'complete generation_identified', bool)
       || sourceIntegrity.generation_identified !== (generation !== null)
@@ -252,7 +252,11 @@ export function validateConceptPayload(value, expected = {}) {
       || edgesPresent !== (included.edges > 0)
       || fieldNames('membership_nodes memberships tree_nodes edges')
         .some(key => included[key] > limits[key])
-      || fieldNames(SOURCE_FIELDS).some(key => source[key] < included[key])
+      || source.membership_nodes < included.membership_nodes
+      // Projected edges include deterministic links derived from memberships. Those do not
+      // appear in the raw event edge count, so compare only the non-derived portion.
+      || included.derived_edges > included.edges
+      || source.edges < included.edges - included.derived_edges
       || [...lifecycleMemberships.values()].some(valueCount => valueCount > limits.concepts_per_node)
       || Object.keys(touch).length !== Object.keys(experimentRefs).length
       || Object.keys(metricRows).length !== Object.keys(experimentRefs).length) invalidPayload()
@@ -1216,6 +1220,9 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
                             ? 'Receipts are reconciled, but this tab cannot save one identity; paid work stays disabled.'
                             : currentRecovery.notice
                               || 'Paid AI action: charges may apply. Ledger is clear; a run-, generation-, and prompt-bound identity is saved before dispatch.'
+  const recoveryNeedsSurface = !!savedLensIntent
+    || ['checking', 'polling', 'resolving', 'error', 'settled'].includes(currentRecovery.status)
+    || ['orphaned', 'conflict'].includes(currentRecovery.receipt?.state)
   const lensCreator = <form className="cv-lensnew" onSubmit={createLens}>
     <input className="text" value={lensPrompt} maxLength={LENS_PROMPT_MAX_CHARS}
       onChange={event => setCurrentLensForm(form => ({ ...form, prompt: event.target.value, error: '' }))}
@@ -1281,9 +1288,6 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
       // this sentence is a navigation instruction, so a stale name here strands them.
       ? 'Some active experiments have only a legacy axis. Lineage can show that compatibility grouping, but Concepts stays empty until folded memberships exist; LoopLab does not infer a taxonomy.'
       : 'This view fills after the Researcher assigns concepts. LoopLab does not invent a taxonomy meanwhile.' }
-  const recoveryNeedsSurface = !!savedLensIntent
-    || ['checking', 'polling', 'resolving', 'error', 'settled'].includes(currentRecovery.status)
-    || ['orphaned', 'conflict'].includes(currentRecovery.receipt?.state)
   if (stateCard) return <div className="concept-view cv-state-layout" role="region"
     aria-label={projectionAriaLabel} aria-describedby={projectionDescription}>
     <StateCard {...stateCard} projectionLabel={projectionLabel} />
@@ -1328,7 +1332,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         <div className={'cs-box' + (searching ? ' focus' : '')}>
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true">
             <circle cx="11" cy="11" r="7" /><path d="M21 21l-4.3-4.3" /></svg>
-          <input className="cs-input" style={{ width: 210 }} value={query} autoComplete="off"
+          <input className="cs-input" value={query} autoComplete="off"
             placeholder="filter concepts & experiments…" aria-label="Filter concepts and experiments"
             onChange={event => setQuery(event.target.value)}
             onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); setQuery('') } }} />
@@ -1350,7 +1354,10 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         {activeDerived && <button type="button" className="cv-lensdel"
           title={`Delete lens “${activeDerived.label}”`} aria-label={`Delete lens ${activeDerived.label}`}
           onClick={() => deleteLens(activeDerived.name)}>×</button>}
-        {lensCreator}
+        <details className="cv-lens-add" open={recoveryNeedsSurface || undefined}>
+          <summary>Create custom lens · paid</summary>
+          {lensCreator}
+        </details>
       </div>
       <div className="cv-tree-actions">
         <button type="button" className="btn sm ghost"
@@ -1381,7 +1388,10 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
     </div>}
     {data.historical && <div className="cv-resource-note" role="status">Historical concept frame at sequence {data.captured_seq} of {data.max_seq}.</div>}
     <div className="cv-resource-note epistemic" role="note">Memberships are recorded claims; taxonomy semantics are not independently verified.</div>
-    <div className="cv-table-wrap"><table className="cv-table"><thead><tr><th className="cv-name" scope="col">Concept / experiment</th>
+    <div className="cv-table-wrap"><table className="cv-table"
+      style={cols.length > 3 ? { minWidth: 300 + cols.length * 82 } : undefined}>
+      <thead><tr><th className="cv-name" scope="col"
+        style={{ width: cols.length > 3 ? 300 : '58%' }}>Concept / experiment</th>
       {cols.map(column => <th key={column.key} className="cv-num" scope="col">{column.label}</th>)}</tr></thead><tbody>
       {rows.map(({ id, depth, hasChildren }) => {
         const node = data.tree.nodes[id]

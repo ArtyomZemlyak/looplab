@@ -73,7 +73,7 @@ function framePayload({ id = null, runId = 'run#one', generation = GENERATION_A,
       source: { membership_nodes: hasConcept ? 1 : 0, edges: edgesPresent ? 1 : 0 },
       included: { membership_nodes: hasConcept ? 1 : 0, memberships: hasConcept ? 1 : 0,
         concepts: hasConcept ? 1 : 0, tree_nodes: treeIds.length,
-        edges: edgesPresent ? 1 : 0, experiment_refs: hasConcept ? 1 : 0 },
+        edges: edgesPresent ? 1 : 0, derived_edges: 0, experiment_refs: hasConcept ? 1 : 0 },
       source_integrity: sourceIntegrity
         ? { complete: true, generation_identified: generation !== null }
         : { complete: false, generation_identified: generation !== null,
@@ -260,6 +260,17 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     }
     assert.doesNotThrow(() => conceptModule.validateConceptPayload(additiveReceipts),
       'additive receipt fields must not brick an otherwise valid projection')
+    const membershipDerivedEdges = framePayload({ id: 'loss/contrastive', edgesPresent: true })
+    membershipDerivedEdges.completeness.source.edges = 0
+    membershipDerivedEdges.completeness.included.derived_edges = 1
+    assert.doesNotThrow(() => conceptModule.validateConceptPayload(membershipDerivedEdges),
+      'membership-derived links may be included without raw edge events')
+    membershipDerivedEdges.completeness.included.derived_edges = 0
+    assert.throws(() => conceptModule.validateConceptPayload(membershipDerivedEdges),
+      /Invalid concept projection/, 'non-derived links still require a raw source')
+    membershipDerivedEdges.completeness.included.derived_edges = 2
+    assert.throws(() => conceptModule.validateConceptPayload(membershipDerivedEdges),
+      /Invalid concept projection/, 'derived links cannot exceed all included links')
     const derivedPath = framePayload({
       id: 'taxonomy/root', requestedLens: 'taxonomy', effectiveLens: 'taxonomy', derived: true,
       requestedRels: ['is_a'], requestedKind: 'path',

@@ -3366,23 +3366,33 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 .cv-empty-flow span { padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-3); color: var(--fg-dim); font-size: 12px; }
 .cv-empty-flow i { color: var(--accent); font-style: normal; }
 .cv-state-warning { font-size: 12px; }
-.cv-bar { display: grid; grid-template-columns: minmax(220px, 1fr) auto auto; align-items: center; gap: 12px 18px; padding: 14px 18px 12px; flex: none; border-bottom: 1px solid var(--line); background: var(--bg-1); }
+.cv-bar { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: center; gap: 10px 14px; padding: 14px 18px 12px; flex: none; border-bottom: 1px solid var(--line); background: var(--bg-1); }
 .cv-heading { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
 .cv-heading strong { font-size: 15px; letter-spacing: -.01em; }
 .cv-heading span { color: var(--fg-mut); font-size: 11px; }
-.cv-lensctl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cv-search { min-width: 0; }
+.cv-search .cs-box { width: 100%; min-width: 0; }
+.cv-search .cs-input { width: 100%; min-width: 0; }
+.cv-lensctl { display: flex; grid-column: 1 / -1; align-items: center; gap: 8px; flex-wrap: wrap; }
 .cv-lenspick { display: inline-flex; align-items: center; gap: 8px; }
+.cv-lenspick > span { white-space: nowrap; }
 .cv-lensctl .text { min-width: 176px; }
-/* In-the-moment lens creation (View 1): a compact author-a-lens control + a delete affordance. */
+/* Keep the paid creation form available without crowding the concept search and projection picker. */
 .cv-lensdel { background: none; border: 0; color: var(--fg-mut); cursor: pointer; font-size: 15px;
   line-height: 1; padding: 0 3px; border-radius: 4px; }
 .cv-lensdel:hover { color: var(--fail-text); background: var(--bg-3); }
-.cv-lensnew { display: inline-flex; align-items: center; gap: 5px; flex-wrap: wrap; }
-.cv-lensnew .text { min-width: 0; width: 148px; font-size: 12px; }
+.cv-lens-add { width: 100%; color: var(--fg-dim); font-size: 12px; }
+.cv-lens-add > summary { width: fit-content; cursor: pointer; color: var(--accent-text); }
+.cv-lens-add > summary:hover, .cv-lens-add > summary:focus-visible { text-decoration: underline; }
+.cv-lens-add[open] { padding: 8px 10px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--bg-2); }
+.cv-lens-add[open] > summary { margin-bottom: 8px; }
+.cv-lensnew { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.cv-lensnew .text { min-width: 180px; flex: 1; font-size: 12px; }
+.cv-lensnew > .muted { flex-basis: 100%; font-size: 11px; line-height: 1.4; }
 .cv-lenserr { color: var(--fail-text); font-size: 11px; max-width: 260px; }
 .cv-tree-actions { display: flex; grid-column: 1 / -1; align-items: center; flex-wrap: wrap; gap: 6px; }
 .cv-tree-actions .btn { white-space: nowrap; }
-.cv-cols { display: flex; grid-column: 1 / -1; align-items: center; gap: 7px; padding-top: 10px; border-top: 1px solid var(--line); }
+.cv-cols { display: flex; grid-column: 1 / -1; align-items: center; flex-wrap: wrap; gap: 7px; padding-top: 10px; border-top: 1px solid var(--line); }
 .cv-col { min-height: 30px; padding: 4px 10px; cursor: pointer; border: 1px solid var(--line-2); border-radius: 999px; background: var(--bg-2); color: var(--fg-dim); font-size: 11px; }
 .cv-col.on { border-color: var(--accent); color: var(--fg); box-shadow: 0 0 0 1px var(--accent); }
 .cv-col:disabled { cursor: default; opacity: .72; }
@@ -3393,12 +3403,12 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 .cv-resource-note.epistemic { color: var(--fg-mut); font-style: italic; }
 .cv-inline-spinner { width: 14px; height: 14px; flex: none; }
 .cv-table-wrap { flex: 1; min-height: 0; overflow: auto; }
-.cv-table { width: 100%; min-width: 720px; border-collapse: collapse; font-size: 13px; }
+.cv-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 13px; }
 .cv-table thead th { position: sticky; top: 0; z-index: 1; padding: 9px 12px; border-bottom: 1px solid var(--line-2); background: var(--bg-1); color: var(--fg-mut); font-size: 10px; font-weight: 700; letter-spacing: .06em; text-align: right; text-transform: uppercase; }
-.cv-table thead th.cv-name { width: 44%; text-align: left; }
-.cv-name { text-align: left; white-space: nowrap; }
+.cv-table thead th.cv-name { text-align: left; }
+.cv-name { padding-block: 7px; text-align: left; overflow-wrap: anywhere; }
 .cv-num { padding: 8px 12px; color: var(--fg-dim); text-align: right; font-variant-numeric: tabular-nums; }
-.cv-crow { height: 42px; border-bottom: 1px solid var(--line); }
+.cv-crow { border-bottom: 1px solid var(--line); }
 .cv-crow.tagged .cv-cid { color: var(--fg); }
 .cv-crow.ghost .cv-cid { color: var(--fg-dim); font-weight: 500; }
 .cv-crow:hover, .cv-erow:hover { background: var(--bg-1); }
@@ -3407,7 +3417,7 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 .cv-chev:hover, .cv-chev:focus-visible { background: var(--bg-3); color: var(--fg); }
 .cv-chev-placeholder { color: var(--line-2); }
 .cv-cid { font-family: ui-monospace, Menlo, Consolas, monospace; font-weight: 650; }
-.cv-badge { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: var(--bg-3); color: var(--fg-mut); font-size: 10px; }
+.cv-badge { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: var(--bg-3); color: var(--fg-dim); font-size: 11px; }
 .cv-crosslinks { display: inline-block; max-width: min(520px, 52vw); margin-left: 8px; vertical-align: middle; }
 .cv-crosslinks > summary.cv-badge { display: inline-block; margin-left: 0; cursor: pointer; list-style: none; }
 .cv-crosslinks > summary.cv-badge::-webkit-details-marker { display: none; }
