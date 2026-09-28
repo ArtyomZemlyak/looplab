@@ -2481,8 +2481,6 @@ export default function RunList({ onOpen, onGlobalNavigate,
               : compareRuns.length < 2 ? 'Select at least two runs from List' : 'Compare selected runs'}
             onClick={event => openComparison(event.currentTarget)}>Compare · {compareRuns.length}</button>
         </div>
-        {/* Slash remains a power-user shortcut; New run above is the first-use primary action. */}
-        <span className="muted home-new-hint" style={{ fontSize: 11 }}>type <code className="cmd-hint">/new</code> in the bar below to start a run</span>
         <span className="spacer" style={{ flex: 1 }} />
         <div className="home-actions">
           <DensityToggle />

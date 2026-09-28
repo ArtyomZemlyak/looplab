@@ -73,9 +73,10 @@ test('the scan reaches the real screens (it must not pass by finding nothing)', 
   const found = namedSlashCommands()
   assert.ok(found.length >= 4, `expected the printed slash hints to be visible; found ${found.length}`)
   const tokens = new Set(found.map(entry => entry.token))
-  for (const expected of ['/stop', '/finalize', '/resume', '/approve', '/new']) {
-    assert.ok(tokens.has(expected), `Dock/RunList should still print ${expected}; the span regex drifted`)
+  for (const expected of ['/stop', '/finalize', '/resume', '/approve']) {
+    assert.ok(tokens.has(expected), `Dock should still print ${expected}; the span regex drifted`)
   }
+  assert.ok(newRunDraftPattern().test('/new'), 'the power-user /new command must remain accepted')
 })
 
 test('the two dead-end commands stay gone', () => {

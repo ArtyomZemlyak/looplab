@@ -126,14 +126,19 @@ export function Trajectory({
   const hn = hoverId != null ? evald.find(n => n.id === hoverId) : null
   // running best — exclude infeasible (constraint-violating) nodes, mirroring engine selection
   // (replay.fold ranks only feasible nodes), so the line never claims a best the engine rejected.
-  let best = null; const bestPts = []; const tableRows = []
+  let best = null; let bestNodeId = null; const bestPts = []; const tableRows = []
   evald.forEach(n => {
     const v = n.confirmed_mean ?? n.metric
-    if (n.feasible !== false && (best === null || (direction === 'min' ? v < best : v > best))) best = v
+    if (n.feasible !== false && (best === null || (direction === 'min' ? v < best : v > best))) {
+      best = v
+      bestNodeId = n.id
+    }
     if (best !== null) bestPts.push([X(n.id), Y(best)])
     tableRows.push({ node: n.id, operator: n.operator || '—', theme: themeOf(n) || 'untagged',
       metric: v, best, feasible: n.feasible === false ? 'infeasible' : n.feasible === true ? 'feasible' : 'not reported' })
   })
+  const observedBestFlagged = bestNodeId != null
+    && (state?.reward_hacks || []).some(h => String(h.node_id) === String(bestNodeId))
   const line = bestPts.map((p, i) => (i ? 'L' : 'M') + p[0] + ' ' + p[1]).join(' ')
   const area = bestPts.length > 1
     ? `${line} L ${bestPts[bestPts.length - 1][0]} ${h - pad} L ${bestPts[0][0]} ${h - pad} Z` : ''
@@ -166,7 +171,7 @@ export function Trajectory({
       render: (value) => pick ? <button type="button" className="btn xs ghost" onClick={() => pick(value)}>#{value}</button> : `#${value}` },
     { key: 'operator', label: 'Operator' }, { key: 'theme', label: 'Primary concept axis' },
     { key: 'metric', label: 'Metric', numeric: true },
-    { key: 'best', label: 'Best so far', numeric: true }, { key: 'feasible', label: 'Constraint status' },
+    { key: 'best', label: 'Best observed so far', numeric: true }, { key: 'feasible', label: 'Constraint status' },
   ]
   return (
     <ChartFrame className="chart" title="Metric trajectory"
@@ -241,7 +246,7 @@ export function Trajectory({
           <text x={tx + tw / 2} y={13} fill="var(--fg)" fontSize="10.5" textAnchor="middle">{label}</text>
         </g>
       })()}
-      <text x={pad} y={12} fill={AX} fontSize="11">best so far: {fmt(best)}{useLog ? ' · log Y' : ''}</text>
+      <text x={pad} y={12} fill={AX} fontSize="11">best observed: {fmt(best)}{observedBestFlagged ? ' · flagged' : ''}{useLog ? ' · log Y' : ''}</text>
       <text x={pad} y={h - 8} fill={AX} fontSize="11">node id →</text>
     </svg>
     <ChartLegend items={groupsPresent.map(g => ({ key: g, label: grpLabel(g), color: grpSwatch(g), ...groupMarker(g) }))}

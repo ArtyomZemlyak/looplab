@@ -543,7 +543,8 @@ button { font: inherit; }
 .cmdbar-dock.fresh { border-top-color: var(--accent); box-shadow: 0 -2px 14px rgba(74,163,255,.22); }
 .cmdbar-dock.open { border-top-color: var(--accent-dim); }
 .cmdbar-ic { background: transparent; border: 1px solid var(--line-2); color: var(--accent); cursor: pointer;
-  font-size: 15px; line-height: 1; padding: 5px 8px; border-radius: 6px; flex: none; }
+  display: inline-flex; align-items: center; gap: 7px; font-size: 13px; line-height: 1; padding: 7px 10px;
+  border-radius: 6px; flex: none; font-weight: 600; }
 .cmdbar-ic:hover { background: var(--bg-3); border-color: var(--accent-dim); }
 .cmdbar-mode { flex: none; min-height: 30px; display: inline-flex; align-items: center; justify-content: center;
   gap: 2px; padding: 5px 8px; border: 1px solid var(--line-2); border-radius: 7px;
@@ -592,9 +593,10 @@ button { font: inherit; }
 
 /* ── Right-hand chat drawer (Cursor-style): the conversation thread + extra actions. Overlays the
    right side; the bottom bar remains the single composer. ── */
-.asst-drawer-h { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+.asst-drawer-h { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-height: 54px;
+  padding: 10px 18px; border-bottom: 1px solid var(--line); }
 .asst-drawer-h .assistant-share-state.warn { order: 2; flex: 1 0 100%; justify-content: center; }
-.asst-drawer-ttl { font-size: 13px; }
+.asst-drawer-ttl { font-size: 16px; letter-spacing: -.01em; }
 .asst-modes.sm { display: inline-flex; gap: 2px; }
 .asst-drawer-feed { flex: 1; min-height: 0; overflow: auto; padding: 10px 12px; }
 
@@ -2628,23 +2630,54 @@ pre.code.event-json { max-height: 220px; }
   touch-action: none; z-index: 3; }
 .asst-resize:hover { background: var(--accent-dim); }
 .asst-resize:focus-visible { background: var(--accent); outline: 2px solid var(--accent); outline-offset: 1px; }
-.asst-side-panel .asst-drawer-feed { flex: 1; min-height: 0; overflow: auto; padding: 10px 12px; }
+.asst-side-panel .asst-drawer-feed { flex: 1; min-height: 0; overflow: auto; padding: 18px 24px; }
+.asst-run-context { display: flex; align-items: center; gap: 9px; min-height: 42px;
+  padding: 7px 24px; border-bottom: 1px solid var(--line); color: var(--fg-dim); font-size: 12px; }
+.asst-run-context strong { color: var(--fg); font-weight: 600; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.asst-run-context-state { border: 1px solid var(--line-2); border-radius: 99px;
+  padding: 2px 8px; text-transform: capitalize; white-space: nowrap; }
+.asst-run-context.stalled { border-bottom-color: color-mix(in srgb, var(--working) 45%, var(--line)); }
+.asst-run-context.stalled .asst-run-context-state, .asst-run-context-help { color: var(--working-text); }
 
 /* Composer shared by side + full: attach + textarea + send/stop, mode selector BELOW it. */
-.asst-in { border-top: 1px solid var(--line); padding: 8px 10px; flex: none; position: relative; }
-.asst-inrow { display: flex; align-items: flex-end; gap: 6px; position: relative; }  /* relative: anchors the /command hint pop above the composer input */
-.asst-inrow .text { flex: 1; min-width: 0; min-height: 40px; max-height: 200px; resize: vertical; width: auto; }
-.asst-moderow { display: flex; align-items: center; gap: 8px; margin-top: 7px; }
-.asst-modehint { font-size: 11px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.asst-in { border-top: 1px solid var(--line-2); padding: 16px 24px 18px; flex: none;
+  position: relative; background: var(--bg-2); }
+.asst-inrow { display: flex; align-items: flex-end; gap: 8px; position: relative;
+  max-width: 980px; margin: 0 auto; }  /* relative: anchors the /command hint pop above the composer input */
+.asst-inrow .text { flex: 1; min-width: 0; min-height: 68px; max-height: 260px; resize: vertical;
+  width: auto; font-size: 14px; line-height: 1.5; padding: 12px 14px; }
+.asst-moderow { display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  max-width: 980px; margin: 10px auto 0; }
+.asst-modehint { font-size: 12px; flex: 1 1 220px; min-width: 0; white-space: normal; }
 .asst-files { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
 
 /* Empty-state one-tap command hints. */
-.asst-empty { padding: 16px; }
-.asst-hints { display: flex; flex-wrap: wrap; gap: 6px; }
+.asst-empty { max-width: 860px; margin: clamp(24px, 7vh, 92px) auto 0; padding: 16px; }
+.asst-empty-eyebrow { color: var(--accent); font-size: 11px; font-weight: 700;
+  letter-spacing: .12em; margin-bottom: 14px; }
+.asst-empty h2 { margin: 0; color: var(--fg); font-size: clamp(25px, 2vw, 34px);
+  line-height: 1.16; letter-spacing: -.025em; }
+.asst-empty p { margin: 12px 0 28px; color: var(--fg-dim); font-size: 15px;
+  line-height: 1.55; max-width: 650px; }
+.asst-hints { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .asst-hint { background: var(--bg-2); border: 1px solid var(--line-2); color: var(--fg); cursor: pointer;
-  border-radius: 14px; padding: 5px 12px; font-size: 12px; }
+  border-radius: 10px; padding: 14px 16px; min-height: 54px; text-align: left; font-size: 13px; }
 .asst-hint:hover { border-color: var(--accent-dim); background: var(--bg-3); }
-.asst-new-run-hint { margin: 6px 2px 2px; color: var(--fg-dim); font-size: 11px; line-height: 1.4; }
+.asst-new-run-hint { display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; max-width: 980px; margin: 10px auto 2px; color: var(--fg-dim);
+  font-size: 12px; line-height: 1.45; }
+
+@media (min-width: 1600px) {
+  body { font-size: 14px; }
+  .asst-drawer-ttl { font-size: 18px; }
+  .asst-empty { max-width: 960px; }
+  .asst-empty h2 { font-size: 38px; }
+  .asst-empty p { font-size: 17px; max-width: 760px; }
+  .asst-hint { min-height: 64px; font-size: 15px; }
+  .asst-inrow .text { min-height: 80px; font-size: 16px; }
+  .asst-modehint, .asst-new-run-hint, .asst-run-context { font-size: 13px; }
+}
 
 /* Full = a dedicated OPAQUE page above everything. */
 .asst-view.asst-full { position: fixed; inset: 0; z-index: 200; background: var(--bg); }
@@ -2801,7 +2834,7 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   max-width: calc(100% - 24px); box-shadow: var(--shadow); border-left-color: var(--line-2);
 }
 
-@media (max-width: 1439px) {
+@media (max-width: 1199px) {
   /* Below wide desktop, docking a 440px Assistant alongside a 420px Inspector starves the DAG. */
   body.asst-side-open .app-shell-main { margin-right: 0; }
   .asst-side-panel { width: min(var(--asst-side-w, 440px), 92vw) !important; }

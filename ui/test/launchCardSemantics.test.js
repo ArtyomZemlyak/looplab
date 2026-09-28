@@ -111,11 +111,11 @@ test('ambiguous startup is observed and never blind-retried', async () => {
     'a failed release is told to the operator rather than swallowed by the success path')
 })
 
-test('New Run CTA opens and prefills the composer without auto-submitting or replacing a draft', async () => {
+test('New Run CTA opens a plain-language goal draft without auto-submitting or replacing a draft', async () => {
   const assistant = await source('AssistantBar.jsx')
   const effect = assistant.slice(assistant.indexOf('const onNewRun = (event)'), assistant.indexOf("window.addEventListener('ll:new-run'"))
-  assert.match(effect, /const command = goal \? `\/new \$\{goal\}` : '\/new '/)
-  assert.match(effect, /if \(!existing \|\| existing === command\.trim\(\)\) setInput\(command\)/)
+  assert.match(effect, /if \(!existing\) \{[\s\S]*?setNewRunDraft\(true\)[\s\S]*?if \(goal\) setInput\(goal\)/)
+  assert.match(effect, /else if \(!newRunDraft \|\| \(goal && existing !== goal\)\)/)
   // The wording gained the second escape hatch (Chat) the composer actually offers; the property —
   // an existing draft is never silently overwritten, and the user is told why — is unchanged.
   assert.match(effect, /Draft preserved — choose Chat or clear the composer before drafting a new run/)
@@ -123,6 +123,7 @@ test('New Run CTA opens and prefills the composer without auto-submitting or rep
   assert.match(effect, /inputRef\.current\?\.focus\(\)/)
   assert.doesNotMatch(effect, /requestNewRun\(/)
   assert.doesNotMatch(effect, /runLLM\(/)
+  assert.match(assistant, /if \(newRunDraft && t && !t\.startsWith\('\/'\)\) \{[\s\S]*?requestNewRun\(t, \{ clearComposer: true \}\)/)
 })
 
 test('proposal chat and in-memory draft ownership are passed into the card', async () => {

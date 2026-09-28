@@ -774,7 +774,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
 
   return (
     <LodContext.Provider value={lod}>
-    <div ref={dagRef} className="dag-wrap" tabIndex={-1} aria-label="Experiment graph">
+    <div ref={dagRef} className="dag-wrap" role="region" tabIndex={-1} aria-label="Experiment graph">
     {/* Reactor/Energy backdrop + shared SVG defs (the edge gradient + the neon glow filter), mounted
         only while FX is on so there's zero cost otherwise. The defs ids are referenced from CSS. */}
     {fx && <div className="reactor-bg" aria-hidden="true" />}
