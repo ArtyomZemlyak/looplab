@@ -99,6 +99,7 @@ export default function ResearchView({ cards, state, renderCard }) {
     (!concept || row.tags.includes(concept))
       && (!needle || `${_text(row.card.statement)} ${row.id}`.toLowerCase().includes(needle)))
     .map(row => row.rowKey)), [rows, concept, needle])
+  const matchCount = new Set(rows.filter(row => matched.has(row.rowKey)).map(row => row.id)).size
   const visible = useMemo(() => {
     if (!filtering) return rows
     const keep = new Set()
@@ -138,9 +139,13 @@ export default function ResearchView({ cards, state, renderCard }) {
       placeholder="Find a question…" aria-label="Find a research question"
       onChange={event => setQuery(event.target.value.slice(0, 160))}
       onKeyDown={event => { if (event.key === 'Escape') setQuery('') }} />
-    <button type="button" className="btn sm ghost" onClick={() => setCollapsed(new Set(rows.map(row => row.rowKey)))}>
+    <button type="button" className="btn sm ghost" disabled={filtering}
+      title={filtering ? 'Clear filters to change branch visibility' : undefined}
+      onClick={() => setCollapsed(new Set(rows.map(row => row.rowKey)))}>
       Collapse branches</button>
-    <button type="button" className="btn sm ghost" onClick={() => setCollapsed(new Set())}>
+    <button type="button" className="btn sm ghost" disabled={filtering}
+      title={filtering ? 'Clear filters to change branch visibility' : undefined}
+      onClick={() => setCollapsed(new Set())}>
       Expand branches</button>
   </div>
 
@@ -163,8 +168,7 @@ export default function ResearchView({ cards, state, renderCard }) {
     </div>
     {bar}
     {filtering && <p className="research-filter-result" role="status">
-      {new Set(rows.filter(row => matched.has(row.rowKey)).map(row => row.id)).size}
-      {' '}matching question(s) · matching branches are open
+      {matchCount} matching {matchCount === 1 ? 'question' : 'questions'} · matching branches are open
     </p>}
     <ol className="research-lattice">
       {shown.map((row) => {

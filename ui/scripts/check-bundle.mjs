@@ -49,7 +49,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // 2026-09-22: measured 561,807 B JS gzip (was 504 KiB, +44.6 KiB over) / 52,031 B CSS.
     // 2026-09-28 Card workspace: 569,337 B before, 569,674 B after. The 337 B adds local
     // search across ideas/ids/concepts and a readable detail heading; route closures remain lazy.
-    // 2026-09-28 Research map: 570,105 B before, 570,614 B after. The 509 B adds
+    // 2026-09-28 Research map: 570,105 B before, 570,610 B after. The 505 B adds
     // question search with visible ancestry and collapsible evidence; route closures remain lazy.
     js: { gzip: 558 * KIB },
     css: { gzip: 52 * KIB },
