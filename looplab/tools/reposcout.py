@@ -20,6 +20,7 @@ to the model (possibly a REMOTE provider):
 """
 from __future__ import annotations
 
+from fnmatch import fnmatch
 from pathlib import Path
 
 from looplab.core import _pathsafe
@@ -59,6 +60,87 @@ def _fit_rows(header: str, rows: list[str], receipt: str = "") -> str:
     list_dir, find_files and grep did not, so a long listing arrived looking complete.
     """
     return fit_rows(header, rows, receipt=receipt)
+
+
+# ---------------------------------------------------------------------------------------------
+# The FILE FILTER of a content grep (WP-TOOLS T1, 2026-09-29).
+#
+# `glob` used to be matched against a file's BASENAME only, so a glob with a `/` in it could never
+# match anything: measured on MiniOneRec inf13, 250 `repo_grep` calls carried one (`service/
+# latency_engine.py`, `**/*.py`), 0 of the 250 ever hit, and every one answered `(no matches)` — which
+# the model read as "the symbol does not exist" (`def infer`, "not found" in a file that defines it).
+#
+# A glob WITHOUT a `/` (once a leading `./` is gone) keeps the basename rule, byte for byte. A glob
+# WITH one is matched SEGMENT by segment against the key the hit is SHOWN under (`_disp`, the staged
+# overlay's key — never a path relative to whatever directory the walk started in, so a staged file
+# and its disk copy, and a glob copied off a hit label, agree): `*` stays inside one segment, `**`
+# spans zero or more whole segments, and the match is RIGHT-anchored, so `service/x.py` also finds
+# `pkg/service/x.py`. A leading `/` anchors it at the key's start instead; a trailing `/` means
+# everything under that directory. Python >= 3.11 has no `PurePath.match` with a real `**` (that
+# arrived in 3.13), hence the matcher below.
+def _path_glob(glob: str) -> tuple[str, list[str] | None, bool]:
+    """`(normalized glob, its segments or None for a bare file-name glob, anchored at the start?)`."""
+    g = str(glob or "*").replace("\\", "/")
+    while g.startswith("./"):
+        g = g[2:]
+    if "/" not in g:
+        return g or "*", None, False
+    anchored = g.startswith("/")
+    if g.endswith("/"):
+        g += "**"
+    return g, [seg for seg in g.split("/") if seg], anchored
+
+
+def _parts_match(pattern: list[str], parts: list[str], match) -> bool:
+    """Do the path segments `parts` match the glob segments `pattern` IN FULL? `**` consumes zero or
+    more whole segments, every other pattern segment exactly one (through `match`, a fnmatch)."""
+    reach = [True] + [False] * len(parts)        # reach[j]: the pattern so far consumed parts[:j]
+    for seg in pattern:
+        if seg == "**":
+            seen, nxt = False, []
+            for ok in reach:
+                seen = seen or ok
+                nxt.append(seen)
+        else:
+            nxt = [False] + [reach[j] and match(parts[j], seg) for j in range(len(parts))]
+        reach = nxt
+    return reach[-1]
+
+
+def glob_admits(glob: str, key: str) -> bool:
+    """Does a grep's `glob` admit the file SHOWN as `key` (see the block above)?"""
+    g, pattern, anchored = _path_glob(glob)
+    shown = str(key or "").replace("\\", "/")
+    if pattern is None:
+        return fnmatch(shown.rsplit("/", 1)[-1], g)
+    parts = [seg for seg in shown.split("/") if seg]
+    return _parts_match(pattern if anchored else ["**", *pattern], parts, fnmatch)
+
+
+def no_file_receipt(where: str, glob: str) -> str:
+    """The answer of a grep that searched NO file at all — never `(no matches)`, which is a claim
+    about the PATTERN. Counted after every gate, so a glob naming only a credential file reads
+    exactly like one naming nothing (the existence of a secret is not disclosed, as in `_list_dir`)."""
+    return (f"(grep: no searchable file under {where} matches glob {glob!r} — a glob is a file-name "
+            "pattern like *.py or a repo-relative path pattern like service/*.py)")
+
+
+class GrepResult(str):
+    """`_grep`'s answer: exactly the text every caller has always received, plus WHAT KIND of
+    answer it is, so a caller merging several searches decides by kind and not by the text's shape.
+
+    `RepoTools.repo_grep` used to drop every block starting `(grep:` — which folded an empty pattern
+    and a glob no file matched into the same `(no matches)` a real miss gets. Kinds: `hits` (rows,
+    possibly capped), `stopped` (the file budget ran out), `not_found` (files were searched, no line
+    matched), `no_file` (no file was searched at all), `refused` (the named `root` cannot be
+    searched, with the reason) and `error` (the pattern itself was refused)."""
+
+    kind: str
+
+    def __new__(cls, text: str, kind: str) -> "GrepResult":
+        out = super().__new__(cls, text)
+        out.kind = kind
+        return out
 
 
 # Directories that are never worth walking for a content grep — model weights / checkpoints / caches
@@ -187,7 +269,9 @@ class RepoScoutTools:
                      {"pattern": {"type": "string", "description": "regex (or a plain substring)"},
                       "root": {"type": "string", "description": "dir to search under (optional; "
                                "defaults to the repo)"},
-                      "glob": {"type": "string", "description": "filename glob to restrict (optional, e.g. *.py)"},
+                      "glob": {"type": "string", "description": "file filter (optional): a file-name "
+                               "glob like *.py, or a repo-relative path glob like src/*.py (* stays "
+                               "inside one directory, **/ spans any)"},
                       "max_hits": {"type": "integer", "description": "cap on hits (optional, default 40)"}},
                      ["pattern"]),
         ]
@@ -496,7 +580,7 @@ class RepoScoutTools:
                          if notes else "")
 
     def _grep(self, pattern: str, root: str, glob: str, max_hits, *,
-              skip_hidden: bool = True) -> str:
+              skip_hidden: bool = True, label: str | None = None) -> GrepResult:
         """`skip_hidden=False` keeps DOTTED directories in the walk (doc 25 TO-06).
 
         This tool's own audience wants them pruned — `~/` is one of its roots, where `.cache`/`.venv`
@@ -505,49 +589,65 @@ class RepoScoutTools:
         credential surface is closed in both modes. `_find_files` already yields hidden entries and
         says so — this makes the divergence a parameter instead of a silent difference between the
         two walkers.
+
+        WHAT IT ANSWERS (WP-TOOLS, 2026-09-29) is a `GrepResult`: the text every caller has always
+        read, and its KIND. Two things changed in it. `glob` is path-aware (`glob_admits`, T1). And a
+        search that searched NO file says so (`no_file_receipt`) instead of "not found" — counted
+        over the files actually searched, after the symlink, secret and deletion gates and staged
+        files included, so a glob naming only a credential file is indistinguishable from one
+        naming nothing. `label` is how a receipt names the searched place when the caller's `root`
+        is a path the model never saw (`RepoTools` hands over absolute mount roots).
         """
         import os as _os
         import re as _re
-        from fnmatch import fnmatch as _fnmatch
         pattern = (pattern or "").strip()
         if not pattern or len(pattern) > 1000:      # cheap ReDoS guard (Python re has no match timeout)
-            return "(grep: give a (short) pattern to search for)"
-        base = self._resolve(root) if root else (self._default_root or (self._roots[0] if self._roots else None))
-        if base is None or not base.is_dir():
-            return f"(grep: {root or 'repo'} is not a searchable directory)"
+            return GrepResult("(grep: give a (short) pattern to search for)", "error")
         try:
             rx = _re.compile(pattern)
         except _re.error:
             rx = _re.compile(_re.escape(pattern))   # not a valid regex -> treat as a literal substring
         cap = max(1, min(int(max_hits) if max_hits else 40, 200))   # clamp: a model-supplied max can't disable the cap
+        glob = glob or "*"
+        where = label if label is not None else (root or "repo")
+        base = self._resolve(root) if root else (self._default_root or (self._roots[0] if self._roots else None))
+        if base is None or not base.is_dir():
+            return GrepResult(f"(grep: {root or 'repo'} is not a searchable directory)", "refused")
+        bare, path_glob, _anchored = _path_glob(glob)
         hits: list[str] = []
         # STAGED overlay first — the code the caller is EDITING wins over disk, and its paths dedup the
         # disk walk (so a patched file isn't grepped in both its edited and pristine form).
         staged_rel = set()
+        searched = 0
         for rel, content in sorted(self._overlay.items()):
-            if not _fnmatch(rel.rsplit("/", 1)[-1], glob):
+            if not glob_admits(glob, rel):
                 continue
             staged_rel.add(rel)
+            searched += 1
             for i, line in enumerate(str(content).splitlines(), 1):
                 if rx.search(line):
                     hits.append(f"{rel}:{i}: {line.strip()[:200]}")
                     if len(hits) >= cap:
-                        return _fit_rows("", hits, f"(capped at {cap} hits)")
+                        return GrepResult(_fit_rows("", hits, f"(capped at {cap} hits)"), "hits")
         scanned = 0
         for dp, dirs, files in _os.walk(base):
             dirs[:] = [d for d in dirs
                        if d not in _SKIP_DIRS and not (skip_hidden and d.startswith("."))]
             for fn in sorted(files):
                 if scanned >= 4000:                 # file budget so a huge repo can't stall the grep
-                    return _fit_rows("", hits, "(stopped after 4000 files; narrow `root`/`glob`)")
-                if not _fnmatch(fn, glob):
+                    return GrepResult(_fit_rows("", hits, "(stopped after 4000 files; narrow "
+                                                "`root`/`glob`)"), "stopped")
+                if path_glob is None and not fnmatch(fn, bare):
                     continue
                 fp = Path(dp) / fn
                 # skip a file STAGED (grepped above) or DELETED this session. Key it exactly as the overlay
                 # does (`_disp` == the write-tool path shape, prefixed per editable) so the dedup HITS in a
                 # multi-editable repo — else an already-edited file is re-grepped from PRISTINE disk and the
-                # model is shown the old content it already changed.
+                # model is shown the old content it already changed. A PATH glob is matched against this
+                # same key, so a staged file and its disk copy can never answer a glob differently.
                 _rel = self._disp(fp)
+                if path_glob is not None and not glob_admits(glob, _rel):
+                    continue
                 if _rel in staged_rel or self._is_deleted(_rel):
                     continue
                 # Resolve the (possibly symlinked) path and RE-VALIDATE on the resolved target — exactly as
@@ -572,7 +672,12 @@ class RepoScoutTools:
                                 # above + write_file's path shape, so a hit round-trips into an edit).
                                 hits.append(f"{self._disp(fp)}:{i}: {line.strip()[:200]}")
                                 if len(hits) >= cap:
-                                    return _fit_rows("", hits, f"(capped at {cap} hits)")
+                                    return GrepResult(_fit_rows("", hits, f"(capped at {cap} hits)"),
+                                                      "hits")
                 except OSError:
                     continue
-        return _fit_rows("", hits) if hits else f"(grep: {pattern!r} not found)"
+        if hits:
+            return GrepResult(_fit_rows("", hits), "hits")
+        if not searched + scanned:
+            return GrepResult(no_file_receipt(where, glob), "no_file")
+        return GrepResult(f"(grep: {pattern!r} not found)", "not_found")

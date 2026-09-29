@@ -98,6 +98,32 @@ def _recursive_glob(pattern: str) -> str:
     return pattern if ("**" in pattern or "/" in pattern) else f"**/{pattern}"
 
 
+#: `repo_grep`'s `glob`, which had no description at all while it was matched against basenames only.
+_GREP_GLOB_HELP = ("optional file filter: a file-name glob like *.py, or a repo-relative path glob "
+                   "like service/*.py (* stays inside one directory, **/ spans any)")
+
+
+def _merged_grep(results, where: str, glob: str) -> str:
+    """ONE `repo_grep` answer from each mount's `reposcout.GrepResult`, decided by KIND (WP-TOOLS T1).
+
+    It used to keep every block NOT starting `(grep:` and answer `(no matches)` when none was left.
+    That folded three different answers into the one that says "the pattern is absent": an empty
+    pattern the scout refused, a glob no file matched (250 inf13 calls with a path glob, none of
+    which could ever match), and a real miss. Now a refused PATTERN is said once (it is the same
+    for every mount), hit blocks keep each mount's own receipt, the no-file receipt is emitted ONCE
+    and only when no mount searched a single file, and `(no matches)` means what it says. A mount
+    that is not a searchable directory is dropped, as it always was."""
+    for result in results:
+        if getattr(result, "kind", "") == "error":
+            return str(result)
+    blocks = [str(r) for r in results if getattr(r, "kind", "") in ("hits", "stopped")]
+    if blocks:
+        return "\n".join(blocks)
+    kinds = {getattr(r, "kind", "") for r in results}
+    if "no_file" in kinds and "not_found" not in kinds:
+        from looplab.tools.reposcout import no_file_receipt
+        return no_file_receipt(where, glob)
+    return "(no matches)"
 
 
 class RepoTools:
@@ -129,7 +155,8 @@ class RepoTools:
         return [
             fn_spec("repo_grep", f"Regex search across the editable repo source ({names}). "
                      "Returns matching <repo>/<path>:<line> hits.",
-                     {"pattern": {"type": "string"}, "glob": {"type": "string"}}, ["pattern"]),
+                     {"pattern": {"type": "string"},
+                      "glob": {"type": "string", "description": _GREP_GLOB_HELP}}, ["pattern"]),
             fn_spec("repo_list", f"List source files in an editable repo ({names}).",
                      {"repo": {"type": "string"}, "glob": {"type": "string"}}, []),
             fn_spec("repo_read", "Read a file from an editable repo, given a <repo>/<path> "
@@ -144,6 +171,11 @@ class RepoTools:
                       "lines": {"type": "integer", "description": "how many lines to return (optional window)"}},
                      ["path"]),
         ]
+
+    def _mounts_label(self) -> str:
+        """How a receipt names the searched mounts: their names, the root mount as "the repo" —
+        never the absolute root, which is a path the model was never shown."""
+        return ", ".join("the repo" if name == "." else name for name in self.roots)
 
     def _resolve(self, rel: str):
         """Map a '<repo>/<path>' (or '<path>' for root '.') to an absolute path, restricted to
@@ -170,13 +202,12 @@ class RepoTools:
                 # what made an overflowing search read as an exhaustive one — a per-mount block keeps
                 # every partial answer labelled as partial. `skip_hidden=False`: `.github/*.yml` is
                 # ordinary repo source for a Researcher, and `.git` is pruned by `_SKIP_DIRS` anyway.
-                blocks = []
-                for root in self.roots.values():
-                    block = self._scout._grep(args.get("pattern", ""), str(root), glob, 40,
-                                              skip_hidden=False)
-                    if block and not block.startswith("(grep:"):
-                        blocks.append(block)
-                return "\n".join(blocks) or "(no matches)"
+                # The scout is handed the ABSOLUTE mount root, so `label` is what any receipt names
+                # instead; `_merged_grep` decides by each result's kind, not by its first bytes.
+                results = [self._scout._grep(args.get("pattern", ""), str(root), glob, 40,
+                                             skip_hidden=False, label=mount)
+                           for mount, root in self.roots.items()]
+                return _merged_grep(results, self._mounts_label(), glob)
             if name == "repo_list":
                 repo = args.get("repo") or ("." if "." in self.roots else next(iter(self.roots)))
                 root = self.roots.get(repo)
