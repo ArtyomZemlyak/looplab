@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { get } from './api.js'
 import { fmt, fmtAgo } from './format.js'
-import { campaignFolders, foldersSkipped, openCommand } from './campaignRunsModel.js'
+import { campaignFolders, foldersSkipped, openCommand, rootListingCut } from './campaignRunsModel.js'
 
 // The runs inside the root's CAMPAIGN folders, read-only (doc 70 70.1; the rules live in
 // `campaignRunsModel.js`). One read when the list mounts: the rows are a finder, and each folder's
@@ -28,7 +28,8 @@ export default function CampaignRuns() {
     </p>
     {folders.map(f => <details key={f.folder} className="notice compact">
       <summary>{f.folder} · {f.runs.length} run{f.runs.length === 1 ? '' : 's'}
-        {f.runsSkipped > 0 && ` (${f.runsSkipped} more not listed)`}</summary>
+        {f.runsSkipped > 0 && ` (${f.runsSkipped} more not listed)`}
+        {f.listingCut && ' (its listing was cut at the entry bound)'}</summary>
       <code style={{ userSelect: 'all' }}>{openCommand(f.runRoot)}</code>
       <ul>{f.runs.map(r => <li key={r.runId}>
         <strong>{r.runId}</strong>{r.taskId && ` · ${r.taskId}`}{r.phase && ` · ${r.phase}`}
@@ -36,6 +37,7 @@ export default function CampaignRuns() {
         {r.updated !== null && <span className="muted"> · {fmtAgo(r.updated)}</span>}
       </li>)}</ul>
     </details>)}
-    {skipped > 0 && <p className="muted">{skipped} more folder{skipped === 1 ? '' : 's'} not listed.</p>}
+    {skipped > 0 && <p className="muted">{skipped} more folder{skipped === 1 ? '' : 's'} not examined.</p>}
+    {rootListingCut(payload) && <p className="muted">The runs root's listing was cut at the entry bound.</p>}
   </section>
 }

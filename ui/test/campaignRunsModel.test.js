@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  MAX_CAMPAIGN_RUNS, campaignFolders, foldersSkipped, openCommand,
+  MAX_CAMPAIGN_RUNS, campaignFolders, foldersSkipped, openCommand, rootListingCut,
 } from '../src/campaignRunsModel.js'
 
 const row = (runId, extra = {}) => ({ run_id: runId, task_id: 't', phase: 'finished',
@@ -48,4 +48,23 @@ test('the open command is quoted only when it must be, and runs as shown', () =>
   assert.equal(openCommand('/r/$(rm -rf ~)'), "looplab ui --run-root '/r/$(rm -rf ~)'")
   assert.equal(openCommand(''), '')
   assert.equal(openCommand(null), '')
+})
+
+test('a backslash is quoted on a POSIX path and plain only in a Windows drive path', () => {
+  // Critic 2026-09-29: unquoted, `camp\A` ran as `campA` in sh.
+  assert.equal(openCommand('/data/runs/camp\\A'), "looplab ui --run-root '/data/runs/camp\\A'")
+  assert.equal(openCommand('C:\\runs\\camp_1'), 'looplab ui --run-root C:\\runs\\camp_1')
+  assert.equal(openCommand('C:\\my runs\\camp'), "looplab ui --run-root 'C:\\my runs\\camp'")
+})
+
+test('a listing the server cut at its entry bound says so, per folder and for the root', () => {
+  const [folder] = campaignFolders({ folders: [
+    { folder: 'c', run_root: '/r/c', runs: [row('s1')], listing_cut: true }] })
+  assert.equal(folder.listingCut, true)
+  const [plain] = campaignFolders({ folders: [
+    { folder: 'c', run_root: '/r/c', runs: [row('s1')], listing_cut: 'yes' }] })
+  assert.equal(plain.listingCut, false, 'only a real true is a cut')
+  assert.equal(rootListingCut({ listing_cut: true }), true)
+  assert.equal(rootListingCut({ listing_cut: 1 }), false)
+  assert.equal(rootListingCut(null), false)
 })

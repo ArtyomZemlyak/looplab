@@ -34,17 +34,24 @@ export function campaignFolders(payload) {
           updated: Number.isFinite(run.mtime) ? run.mtime : null,
         }]
       })
-    return runs.length ? [{ folder: name, runRoot, runs, runsSkipped: count(folder.runs_skipped) }] : []
+    return runs.length ? [{ folder: name, runRoot, runs, runsSkipped: count(folder.runs_skipped),
+      listingCut: folder.listing_cut === true }] : []
   })
 }
 
+// Candidate folders past the server's folder bound — NOT DESCENDED, so some may hold no run at all.
 export const foldersSkipped = payload => count(payload?.folders_skipped)
+// Whether the server stopped reading the ROOT's listing at its entry bound (a huge data directory
+// beside the campaigns): folders past it were never looked at.
+export const rootListingCut = payload => payload?.listing_cut === true
 
 // The command that serves `runRoot` as a root. Quoted for a POSIX shell unless the path is plain, and
-// a single quote inside is closed, escaped and reopened — so what is copied runs as shown.
+// a single quote inside is closed, escaped and reopened — so what is copied runs as shown. A
+// backslash is plain only in a Windows drive path (`C:\runs\camp`), where it separates; on a POSIX
+// path an unquoted one is an escape, and `camp\A` ran as `campA` (critic 2026-09-29).
 export function openCommand(runRoot) {
   const path = text(runRoot, 4096)
   if (!path) return ''
-  const plain = /^[A-Za-z0-9_./:\\-]+$/.test(path)
+  const plain = /^[A-Za-z0-9_./:-]+$/.test(path) || /^[A-Za-z]:\\[A-Za-z0-9_.\\:-]*$/.test(path)
   return `looplab ui --run-root ${plain ? path : `'${path.replace(/'/g, `'\\''`)}'`}`
 }

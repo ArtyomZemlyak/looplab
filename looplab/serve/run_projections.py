@@ -14,7 +14,9 @@ invalidate it.
 """
 from __future__ import annotations
 
+import os
 import stat
+from pathlib import Path
 
 from fastapi import HTTPException
 
@@ -325,6 +327,30 @@ def _run_row(srv, rd, fence_names: set, *, cache_key: str):
 # cut is COUNTED on the payload, never silently dropped.
 CAMPAIGN_FOLDERS_CAP = 200
 CAMPAIGN_RUNS_CAP = 500
+# …and at most this many ENTRIES of any one listing — the root's, each folder's — are looked at,
+# with no `stat` at all for an entry that is not a directory (critic 2026-09-29, LOW-2: a
+# 200 000-file `data/` beside the campaigns cost every run-list mount 3 s of `lstat`, and the caps
+# above bound only what was FOLDED). A listing the bound cut says so (`listing_cut`).
+CAMPAIGN_ENTRIES_CAP = 100_000
+
+
+def _directory_children(directory) -> tuple[list, bool]:
+    """The non-hidden subdirectories of `directory`, sorted by name — a link is not one, and no
+    entry is stat-ed for this (`DirEntry.is_dir(follow_symlinks=False)` reads the listing's own type
+    where the platform gives one) — and whether `CAMPAIGN_ENTRIES_CAP` cut the listing short."""
+    children: list = []
+    cut = False
+    with os.scandir(directory) as listing:
+        for seen, entry in enumerate(listing):
+            if seen >= CAMPAIGN_ENTRIES_CAP:
+                cut = True
+                break
+            try:
+                if not entry.name.startswith(".") and entry.is_dir(follow_symlinks=False):
+                    children.append(Path(entry.path))
+            except OSError:
+                continue
+    return sorted(children), cut
 
 
 def campaign_folder(entry) -> bool:
@@ -359,9 +385,24 @@ def campaign_runs(srv) -> dict:
 
     READ-ONLY by construction: nothing here spawns, reconciles or writes, and a row carries no id a
     per-run route accepts. `run_root` is the folder itself, the argument `looplab ui --run-root` takes
-    to serve it as a root where its runs ARE addressable. A folder holding no run is not listed."""
+    to serve it as a root where its runs ARE addressable. A folder holding no run is not listed.
+
+    A ROOT THAT IS ITSELF A RUN lists nothing (critic 2026-09-29, LOW-1, driven: `looplab ui
+    --run-root runs/demo` listed `nodes/` as a campaign and folded `nodes/node_0/events.jsonl`, a
+    file the candidate writes): its children are its own stores and node workspaces, never runs.
+
+    WHAT A BOUND CUT IS COUNTED AS IT IS (LOW-3): `runs_skipped` counts only directories past the cap
+    that carry a run's marker — never a file or a plain directory, which were never rows — and
+    `folders_skipped` the campaign-folder candidates past the folder cap, NOT DESCENDED, so some may
+    hold no run at all (said so by the UI's "not examined")."""
     root = srv.root
-    entries = sorted(root.iterdir()) if root.exists() else []
+    empty = {"folders": [], "folders_skipped": 0, "listing_cut": False}
+    if not root.exists() or is_run_dir(root) or has_run_marker(root):
+        return empty
+    try:
+        entries, root_cut = _directory_children(root)
+    except OSError:
+        return empty
     groups: list = []
     folders_skipped = 0
     for folder in entries:
@@ -371,26 +412,32 @@ def campaign_runs(srv) -> dict:
             folders_skipped += 1
             continue
         try:
-            children = sorted(folder.iterdir())
+            children, cut = _directory_children(folder)
         except OSError:
             continue
-        fence_names = {child.name.lower() for child in children
-                       if child.name.lower().startswith(RUN_DELETION_FENCE_PREFIX)}
+        # The deletion fences a run's row is checked against are FILES beside it, so they come from
+        # a name-only scan of the same listing (`_listed_fence_holds`), bounded like the listing.
+        try:
+            with os.scandir(folder) as listing:
+                fence_names = {entry.name.lower() for _i, entry in zip(
+                    range(CAMPAIGN_ENTRIES_CAP), listing)
+                    if entry.name.lower().startswith(RUN_DELETION_FENCE_PREFIX)}
+        except OSError:
+            continue
         runs: list = []
         runs_skipped = 0
         for rd in children:
-            if rd.name.startswith("."):
-                continue
             if len(runs) >= CAMPAIGN_RUNS_CAP:
-                runs_skipped += 1
+                if is_run_dir(rd) or has_run_marker(rd):
+                    runs_skipped += 1
                 continue
             row = _run_row(srv, rd, fence_names, cache_key=f"{folder.name}/{rd.name}")
             if row is not None:
                 runs.append(row)
         if runs:
             groups.append({"folder": folder.name, "run_root": str(folder), "runs": runs,
-                           "runs_skipped": runs_skipped})
-    return {"folders": groups, "folders_skipped": folders_skipped}
+                           "runs_skipped": runs_skipped, "listing_cut": cut})
+    return {"folders": groups, "folders_skipped": folders_skipped, "listing_cut": root_cut}
 
 
 def run_membership(srv) -> list:

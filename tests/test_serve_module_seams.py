@@ -15,6 +15,7 @@ from __future__ import annotations
 import ast
 import dataclasses
 import inspect
+import textwrap
 import threading
 
 import pytest
@@ -557,3 +558,9 @@ def test_every_deletion_service_prefix_reaches_all_five_consumers():
                and node.id.endswith("_PREFIX")}
     assert {getattr(run_projections, name) for name in skipped} == written, (
         f"_run_row skips {sorted(skipped)}, which is not the writer set")
+    # …and the campaign-folder rule reads the SHARED tuple, never a copy of it (critic 2026-09-29).
+    folder_names = {node.id for node in ast.walk(ast.parse(textwrap.dedent(
+        inspect.getsource(run_projections.campaign_folder))))
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
+    assert "_DELETE_SERVICE_PREFIXES" in folder_names, (
+        "campaign_folder no longer skips the deletion service files by the shared tuple")

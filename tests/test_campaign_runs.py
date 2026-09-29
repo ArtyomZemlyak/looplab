@@ -130,3 +130,72 @@ def test_the_list_is_a_read(tmp_path):
     assert client.get("/api/campaign-runs").status_code == 200
     after = sorted(str(p.relative_to(root)) for p in root.rglob("*"))
     assert after == before
+
+
+def test_a_root_that_is_itself_a_run_lists_no_campaign(tmp_path):
+    """LOW (critic 2026-09-29, driven): `looplab ui --run-root runs/demo` listed the run's own
+    `nodes/` as a campaign and folded `nodes/node_0/events.jsonl` — a file the candidate writes. A
+    run's children are its stores and node workspaces, never runs."""
+    demo = _run(tmp_path / "demo")
+    _run(demo / "nodes" / "node_0")                     # a candidate-authored log in a workspace
+    view = _client(demo).get("/api/campaign-runs").json()
+    assert view["folders"] == [] and view["folders_skipped"] == 0, view
+
+
+def test_a_huge_listing_is_bounded_and_its_files_are_never_stat_ed(tmp_path, monkeypatch):
+    """LOW (critic 2026-09-29, measured 2.993 s for a 200 000-file `data/` beside the campaigns):
+    the folder and run caps bounded only what was FOLDED, while every entry was `lstat`-ed. A file
+    is now skipped off the listing's own type, and a listing past `CAMPAIGN_ENTRIES_CAP` stops and
+    says so."""
+    root = tmp_path / "runs"
+    _run(root / "campA" / "seed1")
+    data = root / "data"
+    data.mkdir()
+    for index in range(300):
+        (data / f"shard_{index:04d}.parquet").write_bytes(b"")
+    rows: list = []
+    real_row = run_projections._run_row
+
+    def _counting_row(srv, rd, fence_names, *, cache_key):
+        rows.append(rd.name)
+        return real_row(srv, rd, fence_names, cache_key=cache_key)
+
+    monkeypatch.setattr(run_projections, "_run_row", _counting_row)
+    view = _client(root).get("/api/campaign-runs").json()
+    assert [f["folder"] for f in view["folders"]] == ["campA"]
+    assert rows == ["seed1"], "a file was examined as a possible run"
+    assert view["listing_cut"] is False and view["folders"][0]["listing_cut"] is False
+    monkeypatch.setattr(run_projections, "CAMPAIGN_ENTRIES_CAP", 3)
+    for name in ("seed2", "seed3", "seed4"):
+        _run(root / "campA" / name)
+    cut = _client(root).get("/api/campaign-runs").json()
+    (camp,) = [f for f in cut["folders"] if f["folder"] == "campA"]
+    assert camp["listing_cut"] is True and len(camp["runs"]) <= 3, camp
+
+
+def test_what_a_bound_skipped_is_only_what_would_have_been_listed(tmp_path, monkeypatch):
+    """LOW (critic 2026-09-29, driven with the caps at 1): three files and an empty directory past
+    the run cap counted as `runs_skipped: 3`. Past the cap only a directory carrying a run's marker
+    is a skipped run."""
+    monkeypatch.setattr(run_projections, "CAMPAIGN_RUNS_CAP", 1)
+    root = tmp_path / "runs"
+    _run(root / "campA" / "a_seed")
+    for name in ("b.txt", "c.txt", "d.txt"):
+        (root / "campA" / name).write_text("x", encoding="utf-8")
+    (root / "campA" / "e_empty").mkdir()
+    view = _client(root).get("/api/campaign-runs").json()
+    (camp,) = view["folders"]
+    assert [r["run_id"] for r in camp["runs"]] == ["a_seed"] and camp["runs_skipped"] == 0, camp
+    _run(root / "campA" / "f_seed")
+    again = _client(root).get("/api/campaign-runs").json()
+    assert again["folders"][0]["runs_skipped"] == 1
+
+
+def test_a_hidden_directory_inside_a_campaign_is_never_a_run(tmp_path):
+    """A dot-directory is a store, never a run, one level down as at the root (critic 2026-09-29,
+    mutant M11 survived: nothing drove a hidden run-shaped directory inside a campaign)."""
+    root = tmp_path / "runs"
+    _run(root / "campA" / "seed1")
+    _run(root / "campA" / ".trash_seed")
+    view = _client(root).get("/api/campaign-runs").json()
+    assert [r["run_id"] for r in view["folders"][0]["runs"]] == ["seed1"]
