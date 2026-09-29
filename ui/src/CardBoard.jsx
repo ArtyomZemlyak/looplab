@@ -973,6 +973,7 @@ function _CardKanban({
   const detailCloseRef = useRef(null)
   const detailDrawerRef = useRef(null)
   const detailReturnFocusRef = useRef(null)
+  const laneScrollRef = useRef(null)
   const cardsById = new Map(cards.map(card => [card.id, card]))
   const cardsByIdRef = useRef(cardsById)
   cardsByIdRef.current = cardsById
@@ -1290,6 +1291,16 @@ function _CardKanban({
   }))
   const occupiedLanes = laneGroups.filter(lane => lane.rows.length)
   const emptyLanes = laneGroups.filter(lane => !lane.rows.length)
+  const denseLane = occupiedLanes.length === 1 && occupiedLanes[0].rows.length >= 4
+  useEffect(() => {
+    if (!view || !detailOpen || !denseLane) return
+    // Opening details changes this long lane from two columns to one. Keep the picked Card in view
+    // after that reflow so the board and the record still point to the same visible item.
+    const frame = window.requestAnimationFrame(() =>
+      laneScrollRef.current?.querySelector('.card-lane-card.on')
+        ?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' }))
+    return () => window.cancelAnimationFrame(frame)
+  }, [view, detailOpen, denseLane, selectedCardId])
   // Said where the lanes are, not where the questions went: an operator who sees fewer rows than the
   // board's own total needs the reconciliation on the surface that shrank.
   const questionNotice = laneQuestions.length > 0 && grouping === 'lanes'
@@ -1331,7 +1342,8 @@ function _CardKanban({
         {emptyLanes.map(({ key, label, hint }) => <span key={key} className="card-empty-lane"
           title={hint}>{label} <span className="muted">0</span></span>)}
       </div>}
-      <div className="card-board" role="region" aria-label="Card lifecycle kanban">
+      <div className={'card-board' + (denseLane ? ' dense-lane' : '')}
+        role="region" aria-label="Card lifecycle kanban">
         {occupiedLanes.length === 0 && <div className="card-filter-empty">No work items yet.</div>}
         {occupiedLanes.map(({ key, label, hint, rows }) => {
           const tone = _CARD_FROZEN_STATUSES.has(key) ? ` card-${key}` : ''
@@ -1340,7 +1352,7 @@ function _CardKanban({
             <h3 id={laneId} className="card-col-h" title={hint}>
               {label} <span className="muted">{rows.length}</span>
             </h3>
-            {rows.map(renderCard)}
+            <div className="card-col-cards">{rows.map(renderCard)}</div>
           </section>
         })}
       </div>
@@ -1354,7 +1366,7 @@ function _CardKanban({
     // growing a second, subtly different one.
     return <div className={'main run-workspace card-workspace'
       + (pane?.compact ? ' compact' : '') + (detailOpen ? ' detail-open' : '')}>
-      <div className="card-lanes-wrap">
+      <div ref={laneScrollRef} className="card-lanes-wrap">
         <div className="card-lanes-head">
           <span className="muted">{sub}</span>
           <_CardProjectionNotice projection={projection} cards={visibleCards} />

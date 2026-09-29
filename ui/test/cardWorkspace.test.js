@@ -220,6 +220,18 @@ test('an empty Card board still explains its state and shows the lifecycle', () 
   assert.doesNotMatch(html, /<section class="card-col/)
 })
 
+test('a long single-status board keeps its Card order in the wider scan layout', () => {
+  const cards = Object.fromEntries(Array.from({ length: 5 }, (_, i) => [
+    `card-${i}`, { id: `card-${i}`, status: 'evaluated', statement: `Idea ${i}` },
+  ]))
+  const html = render({ state: { ...STATE, cards } })
+  assert.match(html, /class="card-board dense-lane"/)
+  assert.equal((html.match(/<section class="card-col(?: |")/g) || []).length, 1)
+  assert.ok([0, 1, 2, 3, 4].every((i, index) =>
+    index === 0 || html.indexOf(`Idea ${i - 1}`) < html.indexOf(`Idea ${i}`)))
+  assert.doesNotMatch(render(), /card-board dense-lane/)
+})
+
 test('a Card link outside the loaded board explains the missing detail and can be cleared', () => {
   const html = render({ pane: { compact: false, width: 420 }, selectedCardId: 'card-omitted' })
   assert.ok(html.includes('Card <code>card-omitted</code> is not in the loaded board.'))

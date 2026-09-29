@@ -809,6 +809,14 @@ button { font: inherit; }
 .card-selection-missing button { margin-left: auto; }
 .card-lanes-head .card-projection-note { margin-bottom: 4px; }
 .card-workspace .card-board { flex: 1; min-height: 0; align-content: start; }
+/* A long list in one status can use the width beside Assistant. Keep short lists at reading width,
+   and return to one column when details take part of the workspace. */
+.card-workspace:not(.detail-open) .card-board.dense-lane .card-col { max-width: 1200px; }
+.card-workspace:not(.detail-open) .card-board.dense-lane .card-col-cards {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));
+  gap: 8px; align-items: start; }
+.card-workspace:not(.detail-open) .card-board.dense-lane .card-col-cards > .card-kanban-card {
+  margin-bottom: 0; }
 /* A lane card is a summary you pick, not a record you read: the facts moved to the pane. The whole
    face is one button so the hit target is the card, not a link inside it. */
 .card-lane-card { padding: 0; overflow: hidden; }
