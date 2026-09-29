@@ -147,13 +147,17 @@ const normalizedFailureText = (value) => {
 const safeErrorNotice = (value) => assistantErrorInfo(`Assistant error: ${String(value || '')}`)?.title || 'Assistant request failed'
 
 
-// Popular one-tap prompts surfaced in the full view (and side view when empty). Keep short + generic.
-const HINTS = [
-  { label: 'Summarize my runs', text: 'Summarize my runs and any problems.' },
-  { label: 'Start a new run', newRun: true },
-  { label: 'Explain the best result', text: 'Explain the best run and its evidence.' },
-  { label: "What's next?", text: 'What should I try next, and why?' },
+// Empty-chat prompts must match the destination of the composer. A run-bound draft should ask about
+// that run, while the Runs overview may ask about the portfolio or begin a new run.
+const NEW_RUN_HINT = 'Start a new run'
+const OVERVIEW_HINTS = [
+  'Summarize my runs', NEW_RUN_HINT, 'Explain my best result', 'What should I try next?',
 ]
+const RUN_HINTS = [
+  'Summarize this run', 'Explain its best result',
+  'Review open work in this run', 'Choose the next experiment',
+]
+const STALLED_HINT = 'Why did this run stop?'
 
 const ASSISTANT_OVERLAY_MAX_PX = 1199
 const assistantMaxWidth = compact => Math.max(320, window.innerWidth - (compact ? 120 : 620))
@@ -3075,6 +3079,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     : null
   const selectedRun = runId ? runsById[runId] : null
   const selectedRunStatus = selectedRun ? effectiveRunStatus(selectedRun) : ''
+  const welcomeHints = newRunDraft ? [] : runId
+    ? selectedRunStatus === 'stalled'
+      ? [RUN_HINTS[0], STALLED_HINT, RUN_HINTS[1], RUN_HINTS[3]] : RUN_HINTS
+    : OVERVIEW_HINTS
   const runContextBanner = runId && <div className={`asst-run-context${selectedRunStatus === 'stalled' ? ' stalled' : ''}`}>
     <strong title={selectedRun?.goal || runId}>{selectedRun?.label || selectedRun?.goal || runId}</strong>
     <span className="asst-run-context-state">{selectedRunStatus || 'Loading'}</span>
@@ -3424,17 +3432,17 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       <p>{newRunDraft
         ? 'Describe the goal. Review the launch card before starting.'
         : runId
-          ? 'Ask about the result, inspect the evidence, or decide the next experiment.'
+          ? 'Ask about results or the next experiment.'
           : 'Describe a goal, ask about runs, or plan an experiment.'}</p>
-      {!input.trim() && <div className="asst-hints">
-        {HINTS.map(h => <button key={h.label} className="asst-hint"
-          disabled={composerEditingPaused}
+      {!input.trim() && welcomeHints.length > 0 && <div className="asst-hints">
+        {welcomeHints.map(h => <button key={h} className="asst-hint"
+          disabled={historical || composerEditingPaused}
           onClick={() => {
             if (openSessionPendingRef.current) return
-            setNewRunDraft(!!h.newRun)
-            if (!h.newRun) setInput(current => current.trim() ? current : h.text)
+            setNewRunDraft(h === NEW_RUN_HINT)
+            if (h !== NEW_RUN_HINT) setInput(current => current.trim() ? current : h)
             inputRef.current?.focus()
-          }}>{h.label}</button>)}
+          }}>{h}</button>)}
       </div>}
     </div>}
     {msgs.map((m, i) => <React.Fragment key={i}>

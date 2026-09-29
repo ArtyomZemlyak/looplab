@@ -253,11 +253,11 @@ async function withRunState(body, options = { pollOnly: true, pollMs: 5 }) {
       })
     }
     // Error responses cross several async adapters (`get`/`_throw`, the deadline wrapper, then the
-    // effect). Let assertions wait on the observable state they need instead of assuming React has
-    // committed it after one particular number of promise turns. This does not advance poll timers.
+    // effect). Give React a task boundary under full-suite load; spinning only microtasks can finish
+    // before its scheduled commit and incorrectly report that the error state was never published.
     const until = async (predicate, message) => {
       for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) {
-        await React.act(async () => { await Promise.resolve() })
+        await React.act(async () => { await new Promise(resolve => setTimeout(resolve, 2)) })
       }
       assert.ok(predicate(), message)
     }
