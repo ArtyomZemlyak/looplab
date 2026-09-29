@@ -249,3 +249,84 @@ def test_the_duration_is_NOT_repeated_here():
     calls = [c for c in ast.walk(fn) if isinstance(c, ast.Call)
              and getattr(c.func, "attr", None) in ("monotonic", "time", "perf_counter")]
     assert not calls, "this seam must not time anything — the span already did"
+
+
+# ------------------------------------------------------------- the run's STOP (WP-STOP), both sides
+class _StopsWhileProposing:
+    """A healthy Researcher: the operator's stop lands while its paid propose is in flight."""
+
+    def __init__(self, store):
+        self.store, self.calls = store, 0
+
+    def propose(self, _state, _parent):
+        from looplab.core.models import Idea
+        self.calls += 1
+        self.store.append("pause", {"reason": "operator stop (`looplab stop`)"})
+        return Idea(operator="draft", params={"x": 0.5, "y": 0.5}, rationale="a real proposal",
+                    hypothesis="x=0.5 improves the objective")
+
+
+def _discards(eng):
+    return [(e.data["status"], e.data.get("reason")) for e in eng.store.read_all()
+            if e.type == "phase_progress" and e.data.get("phase") == "discarded"]
+
+
+def test_a_proposal_the_stop_refused_before_the_stager_is_named_run_stopping(tmp_path):
+    """The funnel drops a proposal the run's stop refused after it was paid for, and counts it on
+    the `discarded` beacon. The session lane then named the same loss `proposal_refused` — the
+    novelty/degraded word — so its counter and the beacon disagreed about one paid call. It now says
+    `run_stopping`, the fence's own word for the stop, and the beacon is not written twice.
+    Control: a genuine refusal from the same real producer still reads `proposal_refused`."""
+    from looplab.events.replay import fold
+    from factories import make_engine
+
+    eng = make_engine(tmp_path / "run")
+    eng._novelty_mode = "off"
+    eng.store.append("run_started", {"run_id": "r", "task_id": "toy", "goal": "g",
+                                     "direction": "min"})
+    researcher = _StopsWhileProposing(eng.store)
+    roles = (researcher, eng.task.build_roles()[1])
+    events = eng.store.read_all()
+    result = eng._prepare_raw_card_stage({"kind": "draft"}, events, fold(events), 0, roles)
+    assert researcher.calls == 1 and result.success and result.idea is None
+    assert result.error == "run_is_stopping"
+    eng._spec_raw_stage_result = result
+    assert eng._serve_raw_card_stage() == (True, False, "run_stopping")
+    assert _discards(eng) == [("started", "run_is_stopping"), ("finished", "run_is_stopping")]
+
+
+def test_a_proposal_the_stop_refused_AT_the_stager_is_counted_on_the_beacon_too(tmp_path):
+    """The other side: a proposal already prepared when the stop lands is refused `run_stopping` by
+    `_stage_prepared_card`. The create lane's stager counted that on the `discarded` beacon and the
+    session lane's did not, so "a paid proposal the stop refused is counted as one beacon" was false
+    there. Control: a stager refusal for a moved fence is warned, never beaconed."""
+    from looplab.core.models import Idea
+    from looplab.events.replay import fold
+    from factories import make_engine
+
+    def _prepared(eng):
+        events = eng.store.read_all()
+        state = fold(events)
+        return SpecRawStageResult(
+            generation=state.search_epoch, action={"kind": "draft"}, proposal_state=state,
+            proposal_node_ceiling=eng._node_id_ceiling(events, state), at_node=0,
+            source="researcher", success=True,
+            idea=Idea(operator="draft", params={"x": 0.4, "y": -1.0}, rationale="paid for",
+                      hypothesis="a proposal the stop refuses at the stager"),
+            audit_events=())
+
+    for stop in (False, True):
+        eng = make_engine(tmp_path / f"run-{stop}")
+        eng.store.append("run_started", {"run_id": "r", "task_id": "toy", "goal": "g",
+                                         "direction": "min"})
+        eng._spec_raw_stage_result = _prepared(eng)
+        if stop:
+            eng.store.append("pause", {"reason": "operator stop (`looplab stop`)"})
+        else:
+            # A moved node ceiling: a stale-fence refusal, which is warned and re-made, not a stop.
+            eng.store.append("node_building", {"node_id": 0, "operator": "draft", "parent_ids": []})
+        consumed, staged, reason = eng._serve_raw_card_stage()
+        assert consumed and not staged
+        assert reason == ("run_stopping" if stop else "node_ceiling_moved"), reason
+        assert _discards(eng) == ([("started", "run_is_stopping"), ("finished", "run_is_stopping")]
+                                  if stop else [])

@@ -946,7 +946,8 @@ class NodeBuildMixin:
                            prospective_node_id: int, source: str,
                            proposal_events=None, preproposed=None,
                            already_gated: bool = False,
-                           drop_repeated_duplicate: bool = False) -> Optional[Idea]:
+                           drop_repeated_duplicate: bool = False,
+                           stopped: Optional[list] = None) -> Optional[Idea]:
         """Finish the concrete Idea before Card/node reservation, without implementing code.
 
         A native ownership receipt binds the final operator/params/space/profile/footprint, so the
@@ -956,6 +957,11 @@ class NodeBuildMixin:
         ``already_gated`` is the caller's statement that ``preproposed`` is an object the batch pass
         itself put through the vs-history novelty gate — `BatchProposal.crossed_gate(idea)`, an
         IDENTITY test (review 2026-09-22, ENG1-12). It was an engine list this method consumed.
+
+        ``stopped``, when a caller passes a list, receives ``"run_is_stopping"`` on a ``None`` that
+        was the RUN'S STOP refusing an already-paid proposal (WP-STOP) — the `refusal` out-list shape
+        of `_reserve_node_build`. A caller that reports why a paid proposal came to nothing (the
+        Card session's raw lane) must not call that a novelty or degraded-proposal refusal.
         """
         kind = action["kind"]
         if state.halted:
@@ -986,6 +992,8 @@ class NodeBuildMixin:
                 return False
             self._beacon_discarded_proposal("run_is_stopping", node_id=prospective_node_id,
                                             prospective=True, operator=str(kind or ""))
+            if stopped is not None:
+                stopped.append("run_is_stopping")
             return True
 
         def _link(candidate, *, proposed: bool = True, receipt_from=None) -> Optional[Idea]:
