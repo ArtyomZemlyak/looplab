@@ -32,6 +32,7 @@ import { timelineEventKey } from './timelineModel.js'
 import { queuedGenerationControls } from './queue.js'
 import Panel from './PanelShell.jsx'
 import './overview.css'
+import './report-trust-polish.css'
 import { DataTable, downloadBlob } from './accessibility.jsx'
 import { memoLead, normalizeResearchMemos } from './researchMemoModel.js'
 import ResearchMemoCard, { researchMemoTrust } from './ResearchMemoCard.jsx'
@@ -49,6 +50,15 @@ import {
 export { default as Panel } from './PanelShell.jsx'
 
 const Stat = ({ n, l }) => <div className="stat"><div className="n">{n}</div><div className="l">{l}</div></div>
+
+function overviewHintPreview(text) {
+  const plain = stripMd(text || '').trim()
+  const firstDirection = (plain.split(/[;\n]+/).map(part => part.trim()).find(Boolean) || plain)
+    .replace(/^deep-research directions:\s*/i, '')
+  if (firstDirection.length <= 200) return firstDirection
+  const cut = firstDirection.slice(0, 200).replace(/\s+\S*$/, '').trimEnd()
+  return `${cut || firstDirection.slice(0, 200)}…`
+}
 
 const MetricGauge = ({ value, max = 100, hot = false, label, valueText }) => {
   const numericValue = typeof value === 'number' && Number.isFinite(value) ? value : null
@@ -434,7 +444,7 @@ function PanelResourceNotice({ resource, label, onRetry }) {
 }
 
 // At-a-glance run facts derive from the folded state; RunView supplies the authoritative eval ceiling.
-export function OverviewPanel({ state, maxEval, phase, onClose, onOpenPanel }) {
+export function OverviewPanel({ state, maxEval, phase, runState, onClose, onOpenPanel }) {
   const nodes = Object.values(state.nodes || {})
   const evaluated = nodes.filter(n => n.metric != null).length
   const failed = nodes.filter(n => n.status === 'failed').length
@@ -448,6 +458,8 @@ export function OverviewPanel({ state, maxEval, phase, onClose, onOpenPanel }) {
   const hints = Array.isArray(state.pending_hints) ? state.pending_hints : []
   const hintText = hint => typeof hint?.text === 'string' ? hint.text : typeof hint === 'string' ? hint : ''
   const latestHint = hintText(hints.at(-1))
+  const latestHintPlain = stripMd(latestHint).trim()
+  const latestHintLead = overviewHintPreview(latestHint)
   const rewardFlags = state.reward_hacks?.length || 0
   const duplicates = state.novelty_events?.length || 0
   const discuss = () => {
@@ -464,7 +476,8 @@ export function OverviewPanel({ state, maxEval, phase, onClose, onOpenPanel }) {
             {state.direction && ` · ${state.direction === 'min' ? 'minimize' : state.direction === 'max' ? 'maximize' : state.direction}`}</span>
         </div>
         <div className="ov-run-facts">
-          <div><span className="ov-label">Status</span><strong>{phase || (state.paused ? 'paused' : state.phase || (state.finished ? 'finished' : '—'))}</strong></div>
+          <div><span className="ov-label">Run state</span><strong>{runState || (state.paused ? 'paused' : state.finished ? 'finished' : '—')}</strong></div>
+          <div><span className="ov-label">Phase</span><strong>{phase || state.phase || '—'}</strong></div>
           <div><span className="ov-label">Experiments</span><strong>{evaluated} evaluated <span className="ov-fact-muted">/ {nodes.length} nodes</span></strong></div>
           <div><span className="ov-label">Failures</span><strong>{failed}</strong></div>
         </div>
@@ -493,12 +506,12 @@ export function OverviewPanel({ state, maxEval, phase, onClose, onOpenPanel }) {
       {hints.length > 0 && <section className="ov-section ov-directions" aria-label="Saved hints">
         <div className="ov-section-head"><h3><OpIcon name="bulb" size={15} /> Saved hints</h3><span className="ov-count">{hints.length}</span></div>
         <div className="ov-latest"><span className="ov-label">Latest hint</span>
-          <p>{stripMd(latestHint) || 'No text available'}</p></div>
+          <p>{latestHintLead || 'No text available'}</p></div>
         {hints.length > 1 && <details className="ov-details"><summary>Show all {hints.length} hints</summary>
           <ol className="ov-hints">{hints.map((hint, i) => <li key={i}>{stripMd(hintText(hint)) || 'No text available'}</li>)}</ol>
         </details>}
-        {hints.length === 1 && latestHint.length > 320 && <details className="ov-details"><summary>Read full hint</summary>
-          <p className="ov-hint-full">{stripMd(latestHint)}</p></details>}
+        {hints.length === 1 && latestHintLead !== latestHintPlain && <details className="ov-details"><summary>Read full hint</summary>
+          <p className="ov-hint-full">{latestHintPlain}</p></details>}
       </section>}
       {strat && <section className="ov-section ov-strategy" aria-label="Search strategy">
         <div className="ov-section-head"><h3><OpIcon name="compass" size={15} /> Search strategy</h3>
@@ -647,6 +660,25 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly 
   const leakState = leakageStatus(leak)
   const driftState = driftStatus(state.drifts, cfg, evald.length)
   const hackState = rewardHackStatus(state.reward_hacks, cfg, evald.length)
+  const rewardSignalsRef = useRef(null)
+  const flaggedCount = state.reward_hacks?.length || 0
+  const trustSummaryTone = [leakState, driftState, hackState].some(item => item.tone === 'alarm')
+    ? 'alarm' : !state.host_grading || robust?.confirmed_mean == null
+      || [leakState, driftState, hackState].some(item => item.tone !== 'ok')
+      ? 'warn' : 'ok'
+  const trustSummary = {
+    tone: trustSummaryTone,
+    label: trustSummaryTone === 'alarm' ? 'Review flagged evidence before using this result'
+      : trustSummaryTone === 'warn' ? 'Trust coverage needs review'
+        : 'Recorded trust checks found no flagged issue',
+    detail: [
+      robust ? `Winner: ${robust.confirmed_mean != null ? 'multi-seed confirmed' : 'single evaluation'}`
+        : 'Winner: unavailable',
+      `Leakage: ${leakState.label.toLowerCase()}`,
+      `Cross-check: ${driftState.label.toLowerCase()}`,
+      `Suspicious results: ${flaggedCount}`,
+    ].join(' · '),
+  }
   return (
     <Panel title="Trust & rigor" sub="evidence and coverage" onClose={onClose} wide>
       <div className="trust-panel-body">
@@ -654,16 +686,25 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly 
       {configResource.status === 'error' && !configLoading && <TrustState
         value={{ tone: 'unknown', label: 'Detector configuration unavailable', detail: `Coverage cannot be verified: ${configResource.error}` }}
         action={<button className="btn sm" onClick={() => configResource.retry()}>Retry</button>} />}
-
-      <div className="cardgrid">
-        <Stat n={cfg?.trust_mode || (configLoading ? 'Loading…' : 'Unknown')} l="sandbox tier" />
-        <Stat n={cfg?.eval_trust_mode || (configLoading ? 'Loading…' : 'Unknown')} l="eval trust mode" />
-        <Stat n={state.host_grading ? 'host-side' : 'self-reported'} l="metric scoring" />
-        <Stat n={state.workspace_changed ? 'changed' : 'no change flag'} l="workspace drift" />
+      <div className="trust-overview">
+        <TrustState value={trustSummary} action={flaggedCount > 0
+          ? <button type="button" className="btn sm"
+              onClick={() => rewardSignalsRef.current?.scrollIntoView({ block: 'start' })}>
+              Review {flaggedCount} flagged {flaggedCount === 1 ? 'node' : 'nodes'}
+            </button> : null} />
       </div>
       {state.host_grading
         ? <TrustState value={{ tone: 'ok', label: 'Host-side grading recorded', detail: `The candidate writes predictions only; ${state.host_grading.scorer || 'the host scorer'} evaluates ${state.host_grading.n_labels ?? 'held-out'} labels outside the candidate process.` }} />
         : <TrustState value={{ tone: 'warn', label: 'Metric is not host-graded', detail: 'This run does not record an out-of-process grader, so the displayed metric may be self-reported by the candidate process.' }} />}
+      <details className="trust-config-details">
+        <summary>Detector configuration</summary>
+        <div className="cardgrid">
+          <Stat n={cfg?.trust_mode || (configLoading ? 'Loading…' : 'Unknown')} l="sandbox tier" />
+          <Stat n={cfg?.eval_trust_mode || (configLoading ? 'Loading…' : 'Unknown')} l="eval trust mode" />
+          <Stat n={state.host_grading ? 'host-side' : 'self-reported'} l="metric scoring" />
+          <Stat n={state.workspace_changed ? 'changed' : 'no change flag'} l="workspace drift" />
+        </div>
+      </details>
 
       <div className="section-h">Seed-luck and robustness</div>
       {robust && naive
@@ -699,7 +740,7 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly 
           {state.drifts.map((d, i) => <tr key={i}><td className="flag">#{d.node_id}</td><td>{fmt(d.primary)}</td><td>{fmt(d.cross)}</td><td>{fmt(d.tolerance)}</td></tr>)}</tbody></table></DataTable>
         : null}
 
-      <div className="section-h">Reward-hacking monitor (B5) {(state.reward_hacks || []).length > 0 && <span className="chip alarm">{state.reward_hacks.length} flagged</span>}</div>
+      <div className="section-h" ref={rewardSignalsRef}>Reward-hacking monitor (B5) {(state.reward_hacks || []).length > 0 && <span className="chip alarm">{state.reward_hacks.length} flagged</span>}</div>
       <TrustState value={hackState} />
       {/* Folded state is the enforcement truth (it applies trust_gate_changed events);
           the config snapshot alone can claim a gate the fold never engages. */}

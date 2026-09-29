@@ -44,7 +44,7 @@ function branchKeys(rows) {
     .map(row => row.rowKey.slice(0, row.rowKey.lastIndexOf('>'))))
 }
 
-export default function ResearchView({ cards, state, renderCard }) {
+export default function ResearchView({ cards, state, renderCard, onShowLanes, onDiscuss }) {
   const [collapsed, setCollapsed] = useState(() => new Set())
   const [concept, setConcept] = useState('')
   const [query, setQuery] = useState('')
@@ -166,13 +166,28 @@ export default function ResearchView({ cards, state, renderCard }) {
   </div>
 
   if (!questions.length) {
-    return <div className="card-research" role="region" aria-label="Research questions">
+    return <div className="card-research has-no-questions" role="region" aria-label="Research questions">
       <div className="research-empty">
         <div className="research-empty-symbol" aria-hidden="true">?</div>
-        <h2>Research questions will appear here</h2>
+        <h2>No research questions yet</h2>
         <p>No research question registered yet for this run.</p>
-        {all.length > 0 && <p>Browse {all.length} work item{all.length === 1 ? '' : 's'} in Lanes.</p>}
+        {all.length > 0 && <p>{all.length} work item{all.length === 1 ? '' : 's'} already exist.
+          They remain available below and in Lanes.</p>}
+        {(onDiscuss || onShowLanes) && <div className="research-empty-actions">
+          {onDiscuss && <button type="button" className="btn primary" onClick={onDiscuss}>
+            Discuss a question in Assistant</button>}
+          {onShowLanes && <button type="button" className="btn" onClick={onShowLanes}>
+            View work items in Lanes</button>}
+        </div>}
       </div>
+      {unfiled.length > 0 && <details className="research-empty-evidence">
+        <summary>{unfiled.length} experiment{unfiled.length === 1 ? '' : 's'} not filed under a question</summary>
+        <div className="research-experiments">{unfiled.map(card => renderCard(card))}</div>
+      </details>}
+      {offPage.length > 0 && <details className="research-empty-evidence">
+        <summary>{offPage.length} experiment{offPage.length === 1 ? '' : 's'} whose question is not on this page</summary>
+        <div className="research-experiments">{offPage.map(card => renderCard(card))}</div>
+      </details>}
     </div>
   }
 

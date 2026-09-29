@@ -43,3 +43,19 @@ export function cardAttemptCoverage(attempts, receipt) {
   const lowerBound = Math.max(visible, trustedTotal ?? visible)
   return { exact: false, lowerBound, label: `≥${lowerBound}` }
 }
+
+// A Card's verdict is a research judgment, while this is a measured node result. Keep the two
+// separate and only surface a terminal, present evidence node that actually tested the Card.
+export function cardLatestMeasuredEvidence(attempts) {
+  if (!Array.isArray(attempts)) return null
+  let latest = null
+  for (const entry of attempts) {
+    if (!entry?.evidence || entry.substituted || !entry.present
+      || entry.node?.status !== 'evaluated' || entry.node?.feasible === false
+      || typeof entry.node?.metric !== 'number' || !Number.isFinite(entry.node.metric)) continue
+    if (!latest || entry.nodeId > latest.nodeId) {
+      latest = { nodeId: entry.nodeId, metric: entry.node.metric }
+    }
+  }
+  return latest
+}

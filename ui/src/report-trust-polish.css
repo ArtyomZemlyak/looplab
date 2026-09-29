@@ -149,6 +149,13 @@
 .inspector-trust .section-h { margin-top: 18px; }
 .trust-panel-body .cardgrid { margin-bottom: 6px !important; }
 .trust-panel-body .stat .n { overflow-wrap: anywhere; }
+.trust-overview .trust-state { padding: 14px 16px; background: var(--bg-2); }
+.trust-overview .trust-state strong { font-size: 15px; }
+.trust-overview .trust-state span { font-size: 12px; }
+.trust-config-details { margin: 4px 0 12px; }
+.trust-config-details summary { width: fit-content; padding: 5px 0; color: var(--accent-text);
+  font-size: 12px; font-weight: 650; cursor: pointer; }
+.trust-config-details .cardgrid { margin-top: 8px; }
 
 .trust-state {
   display: grid;

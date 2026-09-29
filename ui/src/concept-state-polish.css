@@ -1,0 +1,7 @@
+.cv-state-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px;
+  margin-top: 4px; }
+/* An empty projection has no selectable experiment. Keep the inspector only for a prior selection. */
+.concept-workspace.concept-no-selection:has(.cv-state-layout) > .splitter.v,
+.concept-workspace.concept-no-selection:has(.cv-state-layout) > .side { display: none; }
+.cv-ref-facts { color: var(--fg-dim); font-size: 11px; line-height: 1.3; }
+.cv-ref-facts.excluded { color: var(--fail-text); }

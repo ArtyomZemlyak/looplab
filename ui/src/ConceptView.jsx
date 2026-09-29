@@ -16,6 +16,7 @@ import { Marked } from './Highlight.jsx'
 import { nodeTheme } from './conceptId.js'
 import { nodeIsActive } from './nodeProjection.js'
 import { conceptRefInspectable } from './conceptInspect.js'
+import './concept-state-polish.css'
 
 const TIMEOUT_MS = 12_000
 const LENS_PROMPT_MAX_CHARS = 800
@@ -354,7 +355,7 @@ export function conceptProjectionKey(state) {
 
 const initial = { scope: '', requestVersion: '', status: 'loading', data: null, timeout: false }
 
-function StateCard({ tone, title, body, action, pending = false, stale = false,
+function StateCard({ tone, title, body, action, secondaryAction, pending = false, stale = false,
   projectionLabel = 'Concept projection' }) {
   return <section className={`cv-state-card ${tone}`} role={tone === 'error' || stale ? 'alert' : 'status'}
     aria-live={tone === 'error' || stale ? 'assertive' : 'polite'} aria-atomic="true">
@@ -366,9 +367,14 @@ function StateCard({ tone, title, body, action, pending = false, stale = false,
       <i aria-hidden="true">→</i><span>Outcome comparison</span>
     </div>}
     {stale && <p className="cv-state-warning">Refresh failed; this is the last loaded empty result.</p>}
-    {action && <button type="button" className="btn primary" onClick={action} disabled={pending}>
-      {pending ? 'Refreshing…' : tone === 'error' ? 'Retry' : 'Refresh concepts'}
-    </button>}
+    {(action || secondaryAction) && <div className="cv-state-actions">
+      {secondaryAction && <button type="button" className="btn primary"
+        onClick={secondaryAction}>Explore experiments in Lineage</button>}
+      {action && <button type="button" className={'btn' + (secondaryAction ? '' : ' primary')}
+        onClick={action} disabled={pending}>
+        {pending ? 'Refreshing…' : tone === 'error' ? 'Retry' : 'Refresh concepts'}
+      </button>}
+    </div>}
   </section>
 }
 
@@ -378,7 +384,7 @@ function StateCard({ tone, title, body, action, pending = false, stale = false,
 // experiment the pane is answering about — without it the pane and the tree read as two unrelated
 // surfaces that happen to be side by side.
 export default function ConceptView({ runId, generation, sequence: displayedSequence, state, onPickNode,
-  selectedNodeId = null }) {
+  selectedNodeId = null, onOpenLineage = null }) {
   const runKey = String(runId)
   const lensScope = JSON.stringify([runKey, generation ?? null])
   const paidLensScope = JSON.stringify([runKey, generation ?? null, displayedSequence ?? null])
@@ -1282,16 +1288,15 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
     title: 'Concept frame is incomplete', action: refresh, pending: refreshing,
     body: `No safe concepts included; this is not evidence of no concepts. ${incompleteMessage}` }
   else if (empty) stateCard = { tone: 'empty', title: 'No concepts have been tagged yet',
-    action: refresh, pending: refreshing, stale: current.status === 'stale',
+    action: refresh, secondaryAction: onOpenLineage, pending: refreshing,
+    stale: current.status === 'stale',
     body: hasLegacyAxisFallback
-      // Names the view the operator can actually SEE in the toggle: `Search` became `Lineage` and
-      // this sentence is a navigation instruction, so a stale name here strands them.
-      ? 'Some active experiments have only a legacy axis. Lineage can show that compatibility grouping, but Concepts stays empty until folded memberships exist; LoopLab does not infer a taxonomy.'
+      ? 'This run has experiment history but no recorded concept memberships. Lineage still shows the experiments; LoopLab does not infer a taxonomy from legacy labels.'
       : 'This view fills after the Researcher assigns concepts. LoopLab does not invent a taxonomy meanwhile.' }
   if (stateCard) return <div className="concept-view cv-state-layout" role="region"
     aria-label={projectionAriaLabel} aria-describedby={projectionDescription}>
     <StateCard {...stateCard} projectionLabel={projectionLabel} />
-    {metricContext}{relationshipLegend}
+    {stateCard.tone !== 'empty' && metricContext}{relationshipLegend}
     {data && recoveryNeedsSurface && (currentRecovery.status === 'settled' && !savedLensIntent
       ? <p className="cv-state-warning" role="status">{currentRecovery.notice}</p>
       : lensCreator)}</div>
@@ -1324,9 +1329,10 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
     aria-label={projectionAriaLabel} aria-describedby={projectionDescription}
     aria-busy={refreshing}>
     <header className="cv-bar">
-      <div className="cv-heading"><strong>{projectionLabel}</strong><span>
+      <div className="cv-heading"><strong>{projectionLabel}</strong><span
+        title={`Concept frame sequence ${data.captured_seq}`}>
         {counted(taggedConceptCount, 'tagged concept')} · {counted(displayedConceptNodeCount,
-          'displayed concept node')} · {counted(experimentCount, 'tagged experiment')} · frame seq {data.captured_seq}
+          'displayed concept node')} · {counted(experimentCount, 'tagged experiment')}
       </span></div>
       <div className="cv-search cs">
         <div className={'cs-box' + (searching ? ' focus' : '')}>
@@ -1448,6 +1454,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
             const inspecting = lifecycleMatches && selectedNodeId === ref.node_id
             const constraint = ref.feasible === false ? 'infeasible'
               : ref.feasible === true ? 'feasible' : 'constraint status not reported'
+            const constraintLabel = ref.feasible === null ? 'constraint?' : constraint
             const rollup = ref.metric === null ? 'not included in the concept rollup: robust metric unavailable'
               : ref.feasible === false ? 'excluded from the concept rollup because it is infeasible'
                 : 'included in the concept rollup under the current eligibility rule'
@@ -1463,12 +1470,9 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
                   : 'This attempt is not in the displayed run snapshot'}`}>
                 <span className="cv-exp"><Marked text={`Experiment #${ref.node_id} · attempt ${ref.node_generation}`} query={searching ? query : ''} /></span>
                 <span className="badge"><Marked text={ref.status} query={searching ? query : ''} /></span>
-                {ref.feasible === true && <span className="badge">feasible</span>}
-                {ref.feasible === false && <span className="badge reason">infeasible</span>}
-                {ref.feasible === null && <span className="badge">constraint?</span>}
-                <span className="badge">membership · {ref.membership_provenance}</span>
-                <span className={'badge' + (rollupLabel === 'excluded' ? ' reason' : '')}>
-                  rollup · {rollupLabel}
+                <span className={'cv-ref-facts' + (rollupLabel === 'excluded' ? ' excluded' : '')}>
+                  {constraintLabel} · membership · {ref.membership_provenance}
+                  {' · '}rollup · {rollupLabel}
                 </span>
                 {ref.is_best
                   && <span className="cv-best" title="Frame champion" aria-label="Frame champion">★</span>}</button></td>

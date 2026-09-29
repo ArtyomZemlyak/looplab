@@ -103,9 +103,20 @@ test('before any question is registered the view shows an informative empty stat
   {
     const { default: ResearchView } = await loadView()
     const markup = renderToStaticMarkup(React.createElement(ResearchView, {
-      cards: [{ id: 'e1', card_kind: 'experiment' }], state: { nodes: {} }, renderCard: () => null,
+      cards: [
+        { id: 'e1', card_kind: 'experiment' },
+        { id: 'e2', card_kind: 'experiment', parent_card_id: 'question-outside-page' },
+      ], state: { nodes: {} },
+      renderCard: card => React.createElement('span', { key: card.id }, card.id),
+      onShowLanes: () => {}, onDiscuss: () => {},
     }))
     assert.ok(markup.includes('No research question registered yet'))
+    assert.ok(markup.includes('Discuss a question in Assistant'))
+    assert.ok(markup.includes('View work items in Lanes'))
+    assert.ok(markup.includes('1 experiment not filed under a question'))
+    assert.ok(markup.includes('>e1<'), 'unfiled experiment remains inspectable in Research')
+    assert.ok(markup.includes('1 experiment whose question is not on this page'))
+    assert.ok(markup.includes('>e2<'), 'an off-page parent does not hide its experiment')
   }
 })
 

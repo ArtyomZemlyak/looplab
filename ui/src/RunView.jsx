@@ -2597,12 +2597,15 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         // and this pane answers it, borrowing the SAME `.side` chrome as the graph inspector and the
         // Card board's pane (and the same persisted `ll.sideW`), because a third pane width would
         // drift from both. `renderNodeInspector` is the one Inspector, not a third copy.
-        ? <div className={'main run-workspace' + (compactWorkspace ? ' compact' : '')}>
+        ? <div className={'main run-workspace concept-workspace'
+            + (selectedId == null ? ' concept-no-selection' : '')
+            + (compactWorkspace ? ' compact' : '')}>
             <LazyBoundary label="concept tree"
               resetKey={`${runId}:${generation || 'pending'}:${historyActive ? viewSeq : 'live'}`}>
               <ConceptView runId={runId} generation={generation}
                 sequence={historyActive ? viewSeq : null} state={state}
-                selectedNodeId={selectedId} onPickNode={inspectFromConcepts} />
+                selectedNodeId={selectedId} onPickNode={inspectFromConcepts}
+                onOpenLineage={() => setView('dag')} />
             </LazyBoundary>
             {conceptPaneCollapsed
               // Narrow screens keep the tree unobstructed until asked, exactly as the graph does;
@@ -2789,7 +2792,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         mode="overlay" resetKey={`${panel}:${runId}@${generation || 'pending'}`} onClose={closePanel}>
       <>
       {panel === 'overview' && panelAllowed('overview') && <OverviewPanel state={state} maxEval={maxEval}
-        phase={displayedPhase} onClose={closePanel}
+        phase={displayedPhase} runState={liveLabel} onClose={closePanel}
         onOpenPanel={p => { if (panelAllowed(p)) setPanel(p, { mode: 'replace' }) }} />}
       {panel === 'research' && panelAllowed('research') && <ResearchPanel state={state} runId={runId}
         onToast={showToast} onClose={closePanel} onSelect={selectNodeFromPanel}

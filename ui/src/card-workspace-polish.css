@@ -1,0 +1,32 @@
+.card-lane-result { display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+  padding: 7px 9px; border: 1px solid var(--line-2); border-radius: 6px;
+  background: var(--bg-2); color: var(--fg-dim); font-size: 11px; }
+.card-lane-result strong { flex: none; color: var(--fg); font-size: 15px;
+  font-variant-numeric: tabular-nums; }
+.card-detail-heading { margin-bottom: 12px; font-size: 16px; line-height: 1.42; }
+.card-detail-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;
+  margin-bottom: 14px; }
+.card-detail-summary > div { display: grid; align-content: start; gap: 5px; min-width: 0;
+  padding: 10px; border: 1px solid var(--line-2); border-radius: 7px; background: var(--bg-3); }
+.card-detail-summary span { color: var(--fg-dim); font-size: 11px; }
+.card-detail-summary strong { font-size: 16px; font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere; }
+.card-detail-summary small { color: var(--fg-dim); font-size: 11px; font-weight: 500; }
+.card-attempts-explain { margin: 0 0 8px; }
+.card-attempts-explain summary { width: fit-content; color: var(--fg-dim); cursor: pointer;
+  font-size: 11px; }
+.card-attempts-explain summary:hover, .card-attempts-explain summary:focus-visible { color: var(--fg); }
+.card-attempts-explain p { margin: 6px 0 0; }
+@media (min-width: 1200px) {
+  .card-workspace .card-detail-side:not(.compact-drawer) { min-width: 380px; }
+}
+.card-research.has-no-questions { width: 100%; max-width: 1440px; margin: 0 auto; }
+.card-research.has-no-questions .research-empty { max-width: 640px;
+  margin: clamp(32px, 6vh, 72px) auto 24px; }
+.research-empty-actions { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px;
+  margin-top: 20px; }
+.research-empty-evidence { margin: 12px 0; padding: 14px 18px;
+  border: 1px solid var(--line-2); border-radius: 9px; background: var(--bg-2); }
+.research-empty-evidence summary { width: fit-content; color: var(--accent-text);
+  font-size: 13px; font-weight: 650; cursor: pointer; }
+.research-empty-evidence .research-experiments { margin: 16px 0 0; }

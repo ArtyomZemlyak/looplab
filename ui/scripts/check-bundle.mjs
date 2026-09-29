@@ -59,8 +59,11 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // initial-shell CSS fell to 36,358 B. Keep <1 KiB headroom on each total.
     // 2026-09-29 Report later gains: measured 573,716 B JS after the bounded two-scale
     // waterfall view. The 561 KiB ceiling leaves 748 B; route/reachability gates still apply.
-    js: { gzip: 561 * KIB },
-    css: { gzip: 54 * KIB },
+    // 2026-09-29 workspace UI: measured 574,846 B JS / 56,080 B CSS after Card evidence,
+    // Assistant context, Concept empty-state navigation and Trust summary. Optional Card and
+    // Concept styles load with their lazy screens; the initial shell remains below its ceiling.
+    js: { gzip: 562 * KIB },
+    css: { gzip: 55 * KIB },
   },
   individual: {
     js: { raw: 450 * KIB, gzip: 110 * KIB },
@@ -119,7 +122,8 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-09-22: measured 388,537 B JS (was 348 KiB, +31.4 KiB) / 44,969 B CSS (was 43 KiB).
       // 2026-09-28 Windows build: 391,398 B; panel hub remains a separate lazy increment.
       // 2026-09-29 Overview: 392,224 B; budget provenance in RunView adds a small shared path.
-      limits: { js: { gzip: 384 * KIB }, css: { gzip: 45 * KIB } },
+      // 2026-09-29 workspace UI: measured 393,283 B JS with Assistant handoff and inspector CTA.
+      limits: { js: { gzip: 385 * KIB }, css: { gzip: 45 * KIB } },
     },
     {
       name: 'valid review DAG route',
@@ -142,7 +146,8 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // as the owner List route above (UI-06's composer hook).
       // 2026-09-28 Windows build: 258,304 B; concept view stays outside the initial shell.
       // 2026-09-29 Overview: 259,090 B on the shared RunView path; the panel remains lazy.
-      limits: { js: { gzip: 254 * KIB }, css: { gzip: 42 * KIB } },
+      // 2026-09-29 workspace UI: measured 43,377 B CSS with the Concepts empty and evidence rows.
+      limits: { js: { gzip: 254 * KIB }, css: { gzip: 43 * KIB } },
     },
     {
       name: 'panel-hub increment',

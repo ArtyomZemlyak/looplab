@@ -39,6 +39,14 @@ test('Overview prioritizes measured state and keeps long hints available in a di
       assert.equal(bar.querySelector('span').style.width, '75%')
     } finally { dom.window.close() }
 
+    const stalled = new JSDOM(renderToStaticMarkup(React.createElement(OverviewPanel,
+      { state: { phase: 'search', nodes: {} }, phase: 'search', runState: 'stalled' })))
+    try {
+      const facts = [...stalled.window.document.querySelectorAll('.ov-run-facts > div')]
+      assert.equal(facts[0].textContent, 'Run statestalled')
+      assert.equal(facts[1].textContent, 'Phasesearch')
+    } finally { stalled.window.close() }
+
     const noLimit = new JSDOM(renderToStaticMarkup(React.createElement(OverviewPanel,
       { state: { nodes: {}, total_eval_seconds: 0 }, maxEval: null })))
     try {
@@ -62,5 +70,21 @@ test('Overview prioritizes measured state and keeps long hints available in a di
       assert.match(doc.querySelector('.ov-budget-note').textContent, /Over limit by 30s/)
       assert.match(doc.querySelector('.ov-run-facts').textContent, /paused/)
     } finally { overLimit.window.close() }
+
+    const multiDirection = new JSDOM(renderToStaticMarkup(React.createElement(OverviewPanel,
+      { state: { nodes: {}, pending_hints: [{ text: 'Try a smaller model; compare the seed variance; inspect the failed runs' }] } })))
+    try {
+      const doc = multiDirection.window.document
+      assert.equal(doc.querySelector('.ov-latest p').textContent, 'Try a smaller model')
+      assert.match(doc.querySelector('.ov-details').textContent, /compare the seed variance/)
+    } finally { multiDirection.window.close() }
+
+    const researchDirection = new JSDOM(renderToStaticMarkup(React.createElement(OverviewPanel,
+      { state: { nodes: {}, pending_hints: [{ text: 'deep-research directions: Try a smaller model; compare seeds' }] } })))
+    try {
+      const doc = researchDirection.window.document
+      assert.equal(doc.querySelector('.ov-latest p').textContent, 'Try a smaller model')
+      assert.match(doc.querySelector('.ov-details').textContent, /deep-research directions:.*compare seeds/)
+    } finally { researchDirection.window.close() }
   } finally { await vite.close() }
 })

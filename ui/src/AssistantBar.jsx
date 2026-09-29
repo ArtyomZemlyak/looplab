@@ -3079,18 +3079,25 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     : null
   const selectedRun = runId ? runsById[runId] : null
   const selectedRunStatus = selectedRun ? effectiveRunStatus(selectedRun) : ''
+  const draftingNewRun = newRunDraft || /^\/(?:new|genesis|run)\b/i.test(input.trim())
   const welcomeHints = newRunDraft ? [] : runId
     ? selectedRunStatus === 'stalled'
       ? [RUN_HINTS[0], STALLED_HINT, RUN_HINTS[1], RUN_HINTS[3]] : RUN_HINTS
     : OVERVIEW_HINTS
-  const runContextBanner = runId && <div className={`asst-run-context${selectedRunStatus === 'stalled' ? ' stalled' : ''}`}>
-    <strong title={selectedRun?.goal || runId}>{selectedRun?.label || selectedRun?.run_id || runId}</strong>
-    <span className="asst-run-context-state">{selectedRunStatus || 'Loading'}</span>
-    {selectedRunStatus === 'stalled' && <span className="asst-run-context-help">Engine stopped · use Resume run in Lineage.</span>}
+  const proposalContext = !historical && draftingNewRun
+  const runContextBanner = (runId || proposalContext) && <div className={`asst-run-context${!proposalContext && selectedRunStatus === 'stalled' ? ' stalled' : ''}`}>
+    <span className="asst-run-context-label">{proposalContext ? 'Drafting' : historical ? 'Viewing run' : 'Next message to run'}</span>
+    <strong title={proposalContext ? 'New run proposal' : selectedRun?.goal || runId}>
+      {proposalContext ? 'New run proposal' : selectedRun?.label || selectedRun?.run_id || runId}
+    </strong>
+    {!proposalContext && <span className="asst-run-context-state">{selectedRunStatus || 'Loading'}</span>}
+    {!proposalContext && selectedRunStatus === 'stalled' && <span className="asst-run-context-help">Engine stopped · use Resume run in Lineage.</span>}
   </div>
 
   const slashMatch = /^\/(\w*)$/.exec(input)
-  const draftingNewRun = newRunDraft || /^\/(?:new|genesis|run)\b/i.test(input.trim())
+  const nextMessageTarget = draftingNewRun ? 'New run proposal'
+    : runId ? (selectedRun?.label || selectedRun?.run_id || runId) : 'No run attached'
+  const nextMessageRefs = !draftingNewRun && runId ? refNodes(input) : []
   const directModeDecision = assistantDirectDecision(mode)
   const directModeHint = directModeDecision === 'deny'
     ? 'run control · unavailable in Plan'
@@ -3557,6 +3564,17 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // A full composer (textarea + attach + send/stop + mode row below) — reused by side + full views.
   const composer = (placeholder) => <div
     className={'chat-in asst-in' + (directConfirm ? ' direct-confirming' : '')}>
+    <div className="asst-next-context" role="note" aria-label="Assistant conversation and message context">
+      <span className="asst-next-chat" title={currentSession?.title || 'New chat'}>
+        Chat <strong>{currentSession?.title || 'New chat'}</strong>
+      </span>
+      <span className="asst-next-target" title={nextMessageTarget}>
+        {historical ? 'Viewing' : 'Next message to'} <strong>{nextMessageTarget}</strong>
+      </span>
+      {nextMessageRefs.length > 0 && <span className="asst-next-refs">
+        {nextMessageRefs.map(id => <span key={id}>#{id}</span>)}
+      </span>}
+    </div>
     {historical && <div className="assistant-history-lock">{runLoadingLocked
       ? 'Verifying this run · Assistant actions are paused.'
       : runUnavailableLocked
@@ -3768,6 +3786,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         <OpIcon name="chat" size={14} /> Assistant
       </button>
       {launchRecoveryButton}
+      <span className="cmdbar-target" title={`${draftingNewRun ? 'Drafting' : 'Next message to'} ${nextMessageTarget}`}>
+        {draftingNewRun ? 'New run' : runId ? `Run · ${nextMessageTarget}` : 'No run'}
+      </span>
       <button type="button" className={`cmdbar-mode mode-${mode}`}
         aria-label={`Assistant mode for the next message: ${activeMode.label}. ${activeMode.hint}. Open Assistant to inspect or change.`}
         title={`${activeMode.label} · ${activeMode.hint}`} onClick={openSide}>
@@ -3940,6 +3961,13 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         {newChatButton('btn sm ghost', '＋ Chat', 'new chat')}
         <button className="btn sm ghost" title="expand to the full view" onClick={openFull}>⤢ full</button>
         {foldToBarButton('btn sm ghost', 'collapse to the bar')}
+      </div>
+      <div className="asst-side-conversation" role="group" aria-label="Current Assistant chat">
+        <span>Chat</span>
+        <strong title={currentSession?.title || (sid ? 'Loading chat…' : 'New chat')}>
+          {currentSession?.title || (sid ? 'Loading chat…' : 'New chat')}
+        </strong>
+        <button type="button" className="btn sm ghost" onClick={openFull}>All chats</button>
       </div>
       {runContextBanner}
       <div className="asst-drawer-feed" ref={feedRef} role="log" aria-label="Assistant transcript"

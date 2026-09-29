@@ -30,7 +30,7 @@ import {
   cardMatchesQuery,
   resolveSelectedCard,
 } from './cardBoardModel.js'
-import { cardAttemptCoverage, cardAttemptIndex } from './cardBoardViewModel.js'
+import { cardAttemptCoverage, cardAttemptIndex, cardLatestMeasuredEvidence } from './cardBoardViewModel.js'
 import { CARD_KIND_DIRECTION, cardIsDirection, cardLineageViews,
   cardProposalDrift, rollupChips, splitBoardByKind } from './cardLineageModel.js'
 import ResearchView from './ResearchView.jsx'
@@ -39,6 +39,7 @@ import { nodeTraceSubject } from './traceSurfaceModel.js'
 import { isRecord, PANEL_REQUEST_TIMEOUT_MS, RUN_GENERATION_RE } from './panelPrimitives.js'
 import { traceReadDeadlineMs } from './traceScrollModel.js'
 import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
+import './card-workspace-polish.css'
 
 // Legacy direction board retained as a graceful fallback for pre-Card logs. Current runs use the
 // bounded public Card DTO and four generation-fenced, server-stamped operator controls below.
@@ -217,6 +218,7 @@ function _CardKanbanCard({
   const priority = _cardNumber(card.priority)
   const novelty = isRecord(card.novelty_verdict) ? _cardText(card.novelty_verdict.grade) : null
   const omissionCount = isRecord(receipt?.omissions) ? Object.keys(receipt.omissions).length : 0
+  const latestMeasured = cardLatestMeasuredEvidence(attempts)
   const declaredResources = footprintKnown
     ? _cardResourceSummary(baseFootprint) : 'resource projection unavailable'
   const configuredResources = _cardResourceSummary(configuredFootprint)
@@ -327,6 +329,11 @@ function _CardKanbanCard({
           </span>
           <span>{statement}</span>
         </span>
+        {latestMeasured && <span className="card-lane-result"
+          title={`Measured metric from evaluated evidence experiment #${latestMeasured.nodeId}; this is separate from the research verdict`}>
+          <span>Measured · #{latestMeasured.nodeId}</span>
+          <strong>{fmt(latestMeasured.metric)}</strong>
+        </span>}
         <span className="card-kanban-meta">
           <span className="chip xs">{card.id}</span>
           {verdict && verdict !== 'open' && <span
@@ -349,7 +356,8 @@ function _CardKanbanCard({
               lifecycle fact as an alarm. `cardSelectionBlock` splits the two and says which. */}
           {(() => {
             const block = cardSelectionBlock(card)
-            return block && <span className={`chip xs${block.tone === 'fault' ? ' warn' : ' quiet'}`}
+            return block && !(block.tone === 'lifecycle' && _cardStatus(card) === 'evaluated')
+              && <span className={`chip xs${block.tone === 'fault' ? ' warn' : ' quiet'}`}
               title={block.title}>{block.label}</span>
           })()}
           {receipt && receipt.complete !== true && <span className="chip xs warn"
@@ -397,7 +405,8 @@ function _CardKanbanCard({
         : card.selection_ready === false
           ? (() => {
             const block = cardSelectionBlock(card)
-            return block && <span className={`chip xs${block.tone === 'fault' ? ' warn' : ' quiet'}`}
+            return block && !(block.tone === 'lifecycle' && _cardStatus(card) === 'evaluated')
+              && <span className={`chip xs${block.tone === 'fault' ? ' warn' : ' quiet'}`}
               title={block.title}>{block.label}</span>
           })()
           : <span className="chip xs" title="selection readiness was not present in the public projection">readiness unknown</span>}
@@ -706,7 +715,9 @@ function _CardAttempts({ attempts, selectedNodeId, onOpenNode, coverage = null, 
         title="these attempts are not present in the snapshot being displayed (a historical fold, or trimmed live state)">
         {roll.missing} unavailable</span>}
     </h3>
-    <p className="muted card-attempts-note">
+    <details className="card-attempts-explain" open={roll.total === 0}>
+      <summary>How Cards and experiments relate</summary>
+      <p className="muted card-attempts-note">
       {roll.total === 0
         // A card with no node at all is a real, reachable state, not an empty-list placeholder:
         // `engine/card_reservation.py::_record_node_less_card` mints and immediately closes a
@@ -717,7 +728,8 @@ function _CardAttempts({ attempts, selectedNodeId, onOpenNode, coverage = null, 
           // A substituted build ran under the card and did not test it; "tested" was false for it.
           + (roll.substituted ? ` ${roll.substituted === 1 ? 'One of them' : `${roll.substituted} of them`}`
             + ' built something else instead of its idea and is not a test of it.' : '')}
-    </p>
+      </p>
+    </details>
     {attempts.length > 0 && <ul className="card-attempt-list">
       {attempts.map(entry => {
         const node = entry.node
@@ -922,8 +934,15 @@ function _CardDetailPane({
       {renderInspector(selectedNodeId)}
     </div>
   }
+  const latestMeasured = cardLatestMeasuredEvidence(attempts)
   return <div className="card-detail">
     <h2 className="card-detail-heading">{_cardText(card.statement) || `Card ${card.id}`}</h2>
+    <div className="card-detail-summary" role="group" aria-label="Card result summary">
+      <div><span>Research verdict</span><strong>{_cardText(card.verdict) || 'Open'}</strong></div>
+      <div><span>Latest measured evidence</span><strong>{latestMeasured
+        ? <>{fmt(latestMeasured.metric)} <small>#{latestMeasured.nodeId}</small></>
+        : 'No measured score'}</strong></div>
+    </div>
     <_CardAttempts attempts={attempts} selectedNodeId={selectedNodeId} onOpenNode={onOpenNode}
       coverage={cardAttemptCoverage(attempts, receipt)} state={state} />
     <_CardKanbanCard card={card} receipt={receipt} presentation="full" state={state}
@@ -1278,7 +1297,11 @@ function _CardKanban({
   // The question ladder. `visibleCards` and `renderCard` are the SAME inputs the other two views
   // draw from, so a filter or a control applied on one board reaches this one too rather than the
   // view growing its own quietly-different population.
-  const researchBoard = <ResearchView cards={visibleCards} state={state} renderCard={renderCard} />
+  const researchBoard = <ResearchView cards={visibleCards} state={state} renderCard={renderCard}
+    onShowLanes={() => setGrouping('lanes')}
+    onDiscuss={() => window.dispatchEvent(new CustomEvent('ll:focus-assistant', {
+      detail: { text: 'Help me frame the first research question for this run. Review the existing experiment Cards and propose a question that organizes the evidence.' },
+    }))} />
   // The lanes are a LIFECYCLE view and a question has no lifecycle of its own — see
   // `splitBoardByKind`. The questions are not dropped: the count and the way to them ride above the
   // lanes, because "five questions await an experiment" and "the board is empty" are different runs.
