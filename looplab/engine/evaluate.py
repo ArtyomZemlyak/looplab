@@ -2904,6 +2904,12 @@ class EvaluateMixin:
         a._resource_reservation = back
         a.eval_env = self._resource_eval_env(back, inherit_host=True)
 
+    def _canary_scratch(self, node_id: int):
+        """Where a node's eval canary runs — and where a FAILED one's logs stay until that node's
+        next canary rebuilds the tree (`_eval_run_canary`). One spelling for its two readers: the
+        canary itself and the crash triage that reads its evidence (`_eval_decide_repair`)."""
+        return self.run_dir / "canary" / f"node_{node_id}"
+
     def _halted_before_full_eval(self) -> bool:
         """Did the run pause or stop while this attempt's canary ran (doc 69 69.12)?
 
@@ -2988,7 +2994,7 @@ class EvaluateMixin:
         """
         spec = canary_spec(self._eval_spec)
         digest = _workdir_manifest_digest(a.node)
-        scratch = self.run_dir / "canary" / f"node_{a.node_id}"
+        scratch = self._canary_scratch(a.node_id)
         res, clocked, fault, passed, detail = await self._eval_canary_round(
             a, spec, digest, scratch, cancel, retry=0)
         expired = False
@@ -4271,8 +4277,16 @@ class EvaluateMixin:
         # serializes `append`/`read_all` through its own locks — and nothing in this hop
         # writes: `_durable_monitor_verdicts` is a pure filter over rows, which is what makes
         # it safe to move where `_stage_card_creates`' proposal needed a capture sink first.
+        # A FAILED CANARY is this attempt's crash, and its evidence is in the canary's scratch tree:
+        # the node's workdir holds nothing the canary wrote, so the judge was handed tools over a
+        # directory the dead run never touched — driven, `log_tools=None` beside the canary's own
+        # `eval.log` (doc 69 69.9). The scratch tree is rebuilt fresh for every canary, so there is
+        # no earlier attempt's byte to floor (no snapshot); its code is the node's own, materialized.
+        _evidence_root, _evidence_floor = ((self._canary_scratch(a.node_id), None) if a.canary_failed
+                                           else (a.workdir, a._log_snapshot))
+
         def _repair_inputs():
-            return (diagnosis_tools(self, a.workdir, a._log_plan, a._log_snapshot),
+            return (diagnosis_tools(self, _evidence_root, a._log_plan, _evidence_floor),
                     _durable_monitor_verdicts(self.store.read_all(), a.node_id, a.generation))
 
         _repair_tools, a._monitor_verdicts = await anyio.to_thread.run_sync(
@@ -4362,7 +4376,8 @@ class EvaluateMixin:
         # runs BEFORE the 300-char cap, like both siblings, so masking cannot be truncated
         # away; `coerce_evidence`/`coerce_findings` own that ordering.
         a._evidence = coerce_evidence(a.triage, self._redact)
-        a._evidence_resolved = evidence_citation_resolves(a._evidence, a.workdir)
+        # Resolved where the judge LOOKED: a failed canary's citations name its scratch tree.
+        a._evidence_resolved = evidence_citation_resolves(a._evidence, _evidence_root)
         # WHAT ACTUALLY HAPPENED, IN PROSE A READER CAN USE WITH NOTHING ELSE IN FRONT OF
         # THEM. This is the deliverable and the rest of this block is its trail: the
         # diagnostician has just read the stage logs, the config and the program the eval
@@ -4382,7 +4397,7 @@ class EvaluateMixin:
         # THE PROMPT IS UNTOUCHED BY ALL OF THIS. `err` is byte-identical to what it always
         # was, and this whole block runs AFTER the triage call it describes — nothing here
         # is spliced into anything the engine pays for.
-        a._findings = resolve_findings(coerce_findings(a.triage, self._redact), a.workdir)
+        a._findings = resolve_findings(coerce_findings(a.triage, self._redact), _evidence_root)
         # THE ALTERNATIVES THE DIAGNOSTICIAN CONSIDERED (doc 52 row 32), beside the trail of
         # what it read. Empty unless `Settings.diagnosis_hypotheses` asked for them, and read
         # by nothing that decides: the repair still follows the ONE `failure_kind`, because a

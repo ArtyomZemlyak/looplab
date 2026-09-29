@@ -275,6 +275,37 @@ def test_a_failing_canary_is_the_attempt_s_crash_and_the_full_eval_never_starts(
     assert term.data["eval_seconds"] >= sum(f.data["eval_seconds"] for f in finished) - 0.01
 
 
+def test_a_failed_canary_is_diagnosed_from_its_own_logs(tmp_path):
+    """doc 69 69.9: a failed canary IS the attempt's crash, but the triage judge was handed tools
+    over the node's WORKDIR, where the canary wrote nothing — driven, code tools and no `read_log`
+    at all beside the canary's own `eval.log`. The judge now looks in the canary's scratch tree, and
+    a citation of that log resolves there. MUTATION: root the tools (or the citation check) at
+    `a.workdir` again -> no `read_log` (or an unresolved citation)."""
+    ledger = tmp_path / "ledger.txt"
+    code = _script(ledger, canary="raise", full="0.9")
+    looked = []
+
+    class _Judge(_Researcher):
+        def triage_crash(self, node, error, attempt, tools=None, **kw):
+            names = {s.get("function", s).get("name") for s in tools.specs()} if tools else set()
+            read = str(tools.execute("read_log", {"log": "eval.log"})) if "read_log" in names else ""
+            looked.append((names, read))
+            return {"action": "abandon", "rationale": "the canary raised",
+                    "evidence_source": "log", "evidence_locator": "eval.log",
+                    "evidence_quote": "KeyError: 'history_item_sid'"}
+
+    eng = _engine(tmp_path / "run", _Dev(code), researcher=_Judge())
+    _seed(eng, code)
+    evs = _evaluate(eng)
+    assert looked, "the failed canary was triaged"
+    names, read = looked[0]
+    assert "read_log" in names, names
+    assert "history_item_sid" in read, "the judge read the canary's own traceback"
+    (term,) = _terminals(evs)
+    assert term.type == "node_failed" and "full" not in ledger.read_text().split()
+    assert term.data.get("reason_evidence_resolved") is True, term.data
+
+
 def test_a_canary_that_keeps_failing_ends_the_node_without_one_full_eval(tmp_path):
     ledger = tmp_path / "ledger.txt"
     broken = _script(ledger, canary="raise", full="0.9")
