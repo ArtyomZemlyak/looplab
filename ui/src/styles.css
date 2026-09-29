@@ -2737,6 +2737,14 @@ pre.code.event-json { max-height: 220px; }
 .asst-hint { background: var(--bg-2); border: 1px solid var(--line-2); color: var(--fg); cursor: pointer;
   border-radius: 10px; padding: 14px 16px; min-height: 54px; text-align: left; font-size: 13px; }
 .asst-hint:hover { border-color: var(--accent-dim); background: var(--bg-3); }
+/* The welcome state lives in a resizable panel even on a wide desktop. Keep its
+   type and actions sized for the panel instead of the viewport-wide full view. */
+.asst-side-panel .asst-empty { width: 100%; max-width: 620px; box-sizing: border-box;
+  margin-top: clamp(28px, 5vh, 64px); padding: 8px 0; }
+.asst-side-panel .asst-empty h2 { font-size: clamp(24px, 1.6vw, 30px); }
+.asst-side-panel .asst-empty p { font-size: 15px; margin: 10px 0 24px; }
+.asst-side-panel .asst-hints { grid-template-columns: minmax(0, 1fr); }
+.asst-side-panel .asst-hint { min-height: 54px; font-size: 14px; }
 .asst-new-run-hint { display: flex; align-items: center; justify-content: space-between;
   gap: 12px; max-width: 980px; margin: 10px auto 2px; color: var(--fg-dim);
   font-size: 12px; line-height: 1.45; }
