@@ -170,7 +170,16 @@ async def observe_external_eval(engine, a, cancel, phase: str, *, final_pass: bo
             # The fold PROVES the lifecycle this watcher observes is no longer pending (a reset or
             # a terminal moved it): no question about it can be asked, now or on a later tick, and
             # the event that moved it owns the node. Not a hiccup to retry, and not a failed final
-            # observation to raise into an attempt that no longer exists (critic 2026-09-29).
+            # observation to raise into an attempt that no longer exists (critic 2026-09-29). The
+            # intervention is handed to the settle as the intervention watcher would have: a final
+            # pass runs after that watcher stopped, and an unseen reset settled as an ordinary
+            # stale-generation terminal with no superseded record.
+            seen = getattr(engine, "_eval_intervention_seen", None)
+            if callable(seen) and not a._seen.get("kind"):
+                card_id = getattr(getattr(getattr(a, "node", None), "idea", None), "card_id", None)
+                kind = seen(a.node_id, a.generation, getattr(a, "start_seq", -1), card_id)
+                if kind:
+                    a._seen["kind"] = kind
             return
         except Exception:  # noqa: BLE001 — a tick hiccup cannot disable later observation
             # A transient storage/log read cannot turn an enabled review into an

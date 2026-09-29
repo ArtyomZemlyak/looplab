@@ -1633,7 +1633,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "deps_installed": PayloadContract(
         "The packages one evaluation installed and how they resolved.",
         required=("generation", "node_id", "packages", "resolved", "round"),
-        optional=("source",),
+        optional=("eval_seconds", "source"),
     ),
     "diversity_archive": PayloadContract(
         "The finalization snapshot of the diversity archive.",

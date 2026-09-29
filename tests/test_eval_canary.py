@@ -584,6 +584,49 @@ def test_a_finalize_during_a_passing_canary_drains_the_full_eval(tmp_path):
     assert term.type == "node_evaluated" and term.data["metric"] == 0.9
 
 
+def test_a_finalize_beside_a_pause_still_drains(tmp_path):
+    """MEDIUM (critic 2026-09-29, driven): a finalize requested on a PAUSED run stands beside the pause
+    (the fold never clears `paused` for it), and the loop finalizes on it — so a rule that read
+    `paused` alone withheld the full eval and left the node pending on a finished run. A stop wins
+    over a pause. MUTATION: drop the `stop_requested` clause -> the ledger stops at the canary."""
+    ledger = tmp_path / "ledger.txt"
+    code = _script(ledger, canary="0.1", full="0.9")
+    eng = _engine(tmp_path / "run", _Dev(code))
+    _seed(eng, code)
+    _after_canary(eng, _PAUSE, ("run_abort", {"reason": "finalized"}))
+    evs = _evaluate(eng)
+    assert ledger.read_text().split() == ["canary", "full"]
+    (term,) = _terminals(evs)
+    assert term.type == "node_evaluated" and term.data["metric"] == 0.9
+
+
+@pytest.mark.parametrize("canary", [False, True])
+def test_a_finalize_beside_a_pause_settles_the_repair_chain(tmp_path, canary):
+    """The same order in DECIDE_REPAIR: a pause AND a finalize landing while an attempt ran settle the
+    node on its own failure — a stop is final — instead of leaving it pending on a run that then
+    finished (critic 2026-09-29, driven: its twin, pre-existing). MUTATION: ask `paused` first."""
+    ledger = tmp_path / "ledger.txt"
+    broken = _script(ledger, canary="raise", full="raise")
+    dev = _Dev(broken)
+    eng = _engine(tmp_path / "run", dev, eval_canary=canary)
+    _seed(eng, broken)
+    real_run_eval = eng._run_eval
+
+    def _run_eval(*args, **kw):
+        out = real_run_eval(*args, **kw)
+        eng.store.append(*_PAUSE)
+        eng.store.append("run_abort", {"reason": "finalized"})
+        return out
+
+    if canary:
+        _after_canary(eng, _PAUSE, ("run_abort", {"reason": "finalized"}))
+    else:
+        eng._run_eval = _run_eval
+    evs = _evaluate(eng)
+    (term,) = _terminals(evs)
+    assert term.type == "node_failed" and dev.errors == [], "a stop buys no repair"
+
+
 def test_an_intervention_beside_a_pause_keeps_its_terminal(tmp_path):
     """LOW (critic 2026-09-29): an abort recorded while the canary ran owns this lifecycle's
     terminal, and a pause beside it withheld the attempt and dropped it — the abort got a later
@@ -629,9 +672,20 @@ def test_a_pause_during_a_repair_holds_the_repaired_attempt(tmp_path, canary):
     eng = _engine(run_dir, dev, eval_canary=canary)
     dev.store = eng.store
     _seed(eng, broken)
+    reclaimed = []
+    real_reclaim = eng._reclaim_eval_devices
+
+    async def _reclaim(node_id, generation):
+        reclaimed.append((node_id, generation))
+        return await real_reclaim(node_id, generation)
+
+    eng._reclaim_eval_devices = _reclaim
     evs = _evaluate(eng)
     first = "canary" if canary else "full"
     assert ledger.read_text().split() == [first], "the repaired attempt launched over the pause"
+    # …and it took nothing back from the GPU pool first: on a busy pool that reclaim WAITS, and a
+    # paused engine sat on it for devices it would never use (critic 2026-09-29).
+    assert reclaimed == [(0, 0)], reclaimed
     assert len(_of(evs, "node_repaired")) == 1 and _terminals(evs) == []
     assert 0 in {n.id for n in fold(evs).pending_nodes()}
     eng.store.append("resume", {})
@@ -660,10 +714,12 @@ def test_a_pause_during_a_repaired_attempt_s_canary_holds_its_full_eval(tmp_path
 
 
 @pytest.mark.parametrize("next_start, controls, withheld", [
-    (_UNSET, ["pause"], True),               # the first launch: the re-dispatch re-derives its start
+    (_UNSET, ["pause"], True),               # the first launch: every lifecycle is materialized afresh
     (None, ["pause"], True),                 # a full re-run was owed anyway
     ("score", ["pause"], False),             # a reuse point lives in this process alone
+    ("train", ["pause"], True),              # a rollback to the FIRST stage reuses nothing
     (_UNSET, ["run_abort"], False),          # a finalize drains
+    (_UNSET, ["pause", "run_abort"], False),     # …even one requested on a paused run
     (_UNSET, [], False),
     (_UNSET, ["pause", "node_abort"], False),    # an intervention owns the terminal
     (_UNSET, ["pause", "node_reset"], False),
@@ -671,9 +727,11 @@ def test_a_pause_during_a_repaired_attempt_s_canary_holds_its_full_eval(tmp_path
 def test_a_pause_withholds_only_work_it_cannot_destroy(tmp_path, next_start, controls, withheld):
     """The rule's truth table (`_pause_withholds_attempt`). MEDIUM (critic 2026-09-29, driven): a
     score-only repair paused in its canary lost its reuse point — which lives in the process — and
-    the re-dispatch re-ran an 8 h train, uncharged to the retrain cap. MUTATION: drop any clause ->
-    its row flips."""
+    the re-dispatch re-ran an 8 h train, uncharged to the retrain cap; LOW: a rollback to the first
+    stage counted as a reuse point and launched the whole pipeline over the pause. MUTATION: drop
+    any clause -> its row flips."""
     eng = _engine(tmp_path / "run", _Dev("print(1)\n"))
+    eng._resolved_stages = lambda node, workdir: [{"name": "train"}, {"name": "score"}]
     _seed(eng, "print(1)\n")
     events = eng.store.read_all()
     a = EvalAttempt(node_id=0)
@@ -686,6 +744,41 @@ def test_a_pause_withholds_only_work_it_cannot_destroy(tmp_path, next_start, con
             data["from_stage"] = "eval"
         eng.store.append(control, data)
     assert eng._pause_withholds_attempt(a) is withheld
+
+
+def test_a_dependency_round_s_attempt_is_charged_across_a_pause(tmp_path):
+    """MEDIUM (critic 2026-09-29, driven): a dependency round re-runs its attempt with no
+    `node_repaired` row, so a pause before the next terminal dropped that attempt's seconds — 1.002 s
+    charged for 2.015 s run. The round's row carries them and the re-dispatch's charge sums them.
+    MUTATION: drop `_durable_dep_round_seconds` from the seed -> the terminal misses the first run."""
+    marker = tmp_path / "installed"
+    code = ("import os, time\n"
+            f"if not os.path.exists({str(marker)!r}):\n"
+            f"    open({str(marker)!r}, 'w').write('1')\n"
+            "    time.sleep(1.0)\n"
+            "    raise ModuleNotFoundError(\"No module named 'somepkg'\")\n"
+            "print('METRIC: 0.5')\n")
+    run_dir = tmp_path / "run"
+    eng = _engine(run_dir, _Dev(code), eval_canary=False)
+    eng._auto_install_deps = True
+    _seed(eng, code)
+
+    def _prepare_env(stderr):
+        eng.store.append(*_PAUSE)                   # the operator pauses during the install
+        return ["somepkg"]
+
+    eng._prepare_env = _prepare_env
+    evs = _evaluate(eng)
+    (round_row,) = _of(evs, "deps_installed")
+    first = round_row.data["eval_seconds"]
+    assert first >= 1.0 and _terminals(evs) == [], "the re-run was withheld over the pause"
+    eng.store.append("resume", {})
+    again = _engine(run_dir, _Dev(code), eval_canary=False)
+    again._auto_install_deps = True
+    evs = _evaluate(again)
+    (term,) = _terminals(evs)
+    assert term.type == "node_evaluated" and term.data["eval_seconds"] >= first, term.data
+    assert fold(evs).total_eval_seconds >= first
 
 
 def _expired(*, timed_out: bool):

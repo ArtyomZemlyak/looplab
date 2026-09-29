@@ -510,6 +510,29 @@ def _durable_repair_seconds(events, node_id: int, generation: int) -> float:
     return spent
 
 
+def _durable_dep_round_seconds(events, node_id: int, generation: int) -> float:
+    """The eval seconds of this lifecycle's attempts a DEPENDENCY ROUND re-ran, off their durable
+    `deps_installed` rows — the other half of what `_durable_repair_seconds` sums. A dependency round
+    re-runs the attempt without a `node_repaired` row, so its attempt's seconds had no durable home:
+    a pause or a crash before the next terminal dropped them from the chain (critic 2026-09-29,
+    driven: 1.002 s charged for 2.015 s run). A row written before the field existed adds 0.0, the
+    same safe direction as `_durable_repair_seconds`."""
+    spent = 0.0
+    for e in events or []:
+        if e.type != EV_DEPS_INSTALLED:
+            continue
+        d = e.data or {}
+        if not _durable_row_belongs(d, node_id, generation):
+            continue
+        try:
+            seconds = float(d.get("eval_seconds") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if seconds > 0:
+            spent += seconds
+    return spent
+
+
 def _durable_monitor_verdicts(events, node_id: int, generation: int) -> list[dict]:
     """This node's TRAINING-WATCHDOG verdicts as the event log records them, oldest first.
 
@@ -1047,9 +1070,10 @@ def _workdir_manifest_digest(node) -> str:
     `canary_already_passed` reads off the FINISHED rows.
 
     `attempt` in it makes every stamp stale after every `node_reset` — the only thing that sets
-    `rerun_stage` — so stage reuse after a reset does not run. That is deliberate for now: taking
-    `attempt` out revived a path that trusted whatever was on disk, and was reverted (doc 68 68.3e
-    names what reuse must check first).
+    `rerun_stage` — and the reuse gate itself is off (`_eval_prepare_workdir`): a lifecycle's OWN
+    stamp matched on its re-dispatch after a pause or a crash and vouched for stages that never ran
+    there. Taking `attempt` out revived a path that trusted whatever was on disk and was reverted;
+    doc 68 68.3e names what reuse must prove first.
 
     Module-level on purpose: `_evaluate` takes a lazy `import hashlib` further down, which would make
     `hashlib` an unbound function-local for any closure defined above it.
@@ -1946,7 +1970,8 @@ class EvaluateMixin:
         `node` because the caller holds the node — within one attempt `node` is not rebound until
         after the task group closes, so reading it once up front is the same value the closure saw.
 
-        Runs in a worker THREAD (`_watch_for_intervention`'s tick), so it only reads.
+        Runs in a worker THREAD (`_watch_for_intervention`'s tick) and, synchronously, for
+        `_pause_withholds_attempt` and the external watcher's moved-lifecycle return — it only reads.
         """
         intervention = None
         current_events = self.store.read_all()
@@ -2917,6 +2942,11 @@ class EvaluateMixin:
         old ids would put this candidate on a sibling's GPU."""
         if a.generation < 0:
             return
+        # An attempt a pause is about to withhold takes nothing back: on a busy GPU pool the
+        # reclaim WAITS, and a paused engine then sat on the pool for devices it would never use
+        # (critic 2026-09-29). RUN_ATTEMPT asks the same rule and withholds.
+        if getattr(a, "launches", 0) and self._pause_withholds_attempt(a):
+            return
         back = await self._reclaim_eval_devices(a.node_id, a.generation)
         if back is None:
             return
@@ -2941,17 +2971,20 @@ class EvaluateMixin:
         eval, canary on or off (critic 2026-09-29, driven). ADMIT asks before the first launch.
 
         Three conditions, each against a measured failure of a broader rule:
-          * PAUSED, and only paused. A finalize DRAINS in-flight evaluation (`docs/guide/
+          * PAUSED, and not stopping. A finalize DRAINS in-flight evaluation (`docs/guide/
             architecture.md`: the loop drains before it finalizes); withholding on a stop left a
             FINISHED run with the node pending and a live-activity receipt — "evaluation
-            interrupted" on a run that was over (critic 2026-09-29, driven).
-          * NOTHING DONE IS LOST. `a.next_start` names a stage only after a repair that left earlier
-            stages reusable, and that reuse point lives in this process alone: the re-dispatch after
-            the pause re-materializes the workdir and re-runs the whole pipeline — a score-only
-            repair paused in its canary re-ran an 8 h train, uncharged to the retrain cap (critic,
-            driven). Such an attempt runs on, as every attempt did before this rule. `_UNSET` (the
-            first launch, whose start the re-dispatch re-derives from the durable `rerun_stage`) and
-            None (a full re-run already owed) lose nothing.
+            interrupted" on a run that was over. A finalize on a PAUSED run stands beside the pause
+            (`paused` is never cleared by it), and the loop finalizes on it: that is a stop too
+            (critic 2026-09-29, driven both).
+          * NOTHING DONE IS LOST. `a.next_start` names a stage past the first only after a repair
+            that left earlier stages reusable, and that reuse point lives in this process alone: the
+            re-dispatch after the pause re-materializes the workdir and re-runs the whole pipeline —
+            a score-only repair paused in its canary re-ran an 8 h train, uncharged to the retrain
+            cap (critic, driven). Such an attempt runs on, as every attempt did before this rule.
+            `_UNSET` (the first launch: PREPARE_WORKDIR materializes every lifecycle afresh), None
+            (a full re-run already owed) and the FIRST stage (a rollback to it reuses nothing, and
+            its allowance and retrain charge are durable) lose nothing.
           * NO INTERVENTION IS PENDING. A reset, abort or operator Card drop already recorded against
             this lifecycle owns its terminal, and a withheld return dropped it — an abort got a later
             0-second terminal, a reset's old generation none (critic 2026-09-29). The attempt runs
@@ -2964,8 +2997,14 @@ class EvaluateMixin:
         interrupts (no durable row carries them yet: doc 69 69.12a). A pause still never kills a
         RUNNING eval; it only refuses to START one."""
         if a.next_start is not _UNSET and a.next_start is not None:
-            return False
-        if not fold(self.store.read_all()).paused:
+            # TOTAL (`[]` on a resolution hiccup): an unreadable manifest names no first stage, so the
+            # reuse point stands and the attempt runs on.
+            stages = self._resolved_stages(a.node, a.workdir)
+            first = stages[0].get("name") if stages and isinstance(stages[0], dict) else None
+            if a.next_start != first:
+                return False
+        run = fold(self.store.read_all())
+        if not run.paused or run.stop_requested or run.finished:
             return False
         card_id = getattr(getattr(a.node, "idea", None), "card_id", None)
         return self._eval_intervention_seen(a.node_id, a.generation, a.start_seq, card_id) is None
@@ -3435,8 +3474,17 @@ class EvaluateMixin:
         # construction — a missing/unreadable/mismatched stamp just forces the full materialize
         # that every other entry path already does, costing artifacts, never correctness.
         a._manifest_stamp = a.workdir / ".looplab-manifest"
-        _reuse = bool(a.node.rerun_stage and a.workdir.exists()
-                      and not a._superseded_marker.exists() and a.workdir_matches(a.node))
+        # …AND THE REUSE ITSELF IS OFF (doc 68 68.3e), because the stamp cannot carry it. The stamp
+        # says the workdir HOLDS this manifest's files; reuse needs every stage before `rerun_stage`
+        # to have COMPLETED here under it, and nothing on disk says so. With `attempt` in the digest
+        # a reset's first dispatch never matches (the feature has been dead since 2026-07-28), and
+        # the only dispatch that did match was the WRONG one: a lifecycle this method had rebuilt and
+        # stamped, re-dispatched after a pause or a crash before its stages ran — its `train` read as
+        # `reused` and its `score` scored a checkpoint that was not there (critic 2026-09-29, driven:
+        # 0.1 where the same code scored 0.9). Every lifecycle is materialized afresh until reuse
+        # can prove its precondition from the fold; the stamp keeps its other reader, settled
+        # recovery, which asks only whether the files are this manifest's.
+        _reuse = False
         if not _reuse:
             self._materialize(a.node, a.workdir)    # seed tree -> node edits -> task assets
             a.stamp_workdir(a.node)                # the workdir now IS this manifest
@@ -3498,7 +3546,9 @@ class EvaluateMixin:
         # `_durable_repair_seconds` / `repair_judgment.repair_redone_work_stop`: this is the
         # bound that reaches the repair chains `inline_repair_retrain_cap` structurally cannot
         # charge — the ones that re-run a stage without discarding a completed one.
-        a.prior_repair_seconds = _durable_repair_seconds(a.events_at_start, a.node_id, a.generation)
+        a.prior_repair_seconds = (
+            _durable_repair_seconds(a.events_at_start, a.node_id, a.generation)
+            + _durable_dep_round_seconds(a.events_at_start, a.node_id, a.generation))
         # THE INVOCATIONS AN EARLIER PROCESS LEFT OPEN, from the same log and for the same reason as
         # the ledgers above: a bound (or here, a FACT) that a resume forgets is not one. An evaluator
         # may finish paid or external side effects — a training run, a submission, a remote job — and
@@ -4106,13 +4156,16 @@ class EvaluateMixin:
         # un-terminalized there would buy a whole pipeline again after the pause. The triage and repair
         # prompts still read the admission fold (`a.state`): swapping it would change what they show on
         # every chain, and that is a prompt contract, not this fix.
+        # A STOP WINS OVER A PAUSE: a finalize requested on a paused run stands beside the pause (the
+        # fold never clears `paused` for it) and the loop finalizes on it, so returning un-terminalized
+        # here left the node pending on a run that then finished (critic 2026-09-29, driven).
         halted = fold(self.store.read_all())
-        if halted.paused:
-            return PHASE_RETURN
         if halted.finished or halted.stop_requested:
             a.triage_outcome = ("abandon", "the run is stopping (a finalize was requested): no further "
                                 "repair of this node")
             return PHASE_SETTLED
+        if halted.paused:
+            return PHASE_RETURN
         if self.external_harness:
             # The external session reads the terminal failure and decides whether to submit a
             # corrected candidate. No internal triage judge, dependency retry or Developer repair.
@@ -4132,7 +4185,10 @@ class EvaluateMixin:
                     self.store.append(EV_DEPS_INSTALLED, {
                         "node_id": a.node_id, "generation": a.generation,
                         "packages": installed, "round": a.dep_rounds,
-                        "resolved": self._drain_dep_receipts(installed)})
+                        "resolved": self._drain_dep_receipts(installed),
+                        # The attempt this round re-runs, charged like a repair's (`node_repaired`):
+                        # a pause or a crash before the next terminal lost it (critic 2026-09-29).
+                        "eval_seconds": a.attempt_eval_seconds})
                 return PHASE_RETRY   # re-run now that the library is present (no repair attempt spent)
         # Eval-budget stop: the inline-repair loop re-runs FULL evals with no budget check
         # between attempts — the loop-top / per-eval guards only see `total_eval_seconds` from
@@ -4578,7 +4634,8 @@ class EvaluateMixin:
                     self.store.append(EV_DEPS_INSTALLED, {
                         "node_id": a.node_id, "generation": a.generation,
                         "packages": installed, "round": a.dep_rounds, "source": "triage",
-                        "resolved": self._drain_dep_receipts(installed)})
+                        "resolved": self._drain_dep_receipts(installed),
+                        "eval_seconds": a.attempt_eval_seconds})
                 return PHASE_RETRY   # re-run with the library present (no repair attempt spent)
         # THE CRITIC (F8). The triage judge just said "repair" — the question it answers is
         # "given this failure, do I know what to change?", and a model answers that

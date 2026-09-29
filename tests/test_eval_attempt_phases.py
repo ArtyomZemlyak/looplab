@@ -116,7 +116,9 @@ def test_the_driver_runs_the_phases_in_the_one_order_and_dispatches_on_identity(
 
 def test_the_record_declares_every_attribute_the_phases_touch_and_refuses_the_rest():
     fields = {f.name for f in dataclasses.fields(EvalAttempt)}
-    methods = {"mark_superseded_workdir", "stamp_workdir", "workdir_matches", "charged_eval_seconds"}
+    # `workdir_matches` is not here: since the stage-reuse gate is off (doc 68 68.3e) its one reader
+    # is settled recovery's helper `_settled_workdir_evidence`, which is not a phase.
+    methods = {"mark_superseded_workdir", "stamp_workdir", "charged_eval_seconds"}
     touched = set()
     for name in EVAL_PHASES + ("_eval_record_superseded",):
         for node in ast.walk(function_tree(getattr(EvaluateMixin, name))):

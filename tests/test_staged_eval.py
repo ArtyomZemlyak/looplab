@@ -236,9 +236,20 @@ def test_stage_reuse_refuses_a_workdir_that_is_not_the_folded_manifest(tmp_path)
         "stage reuse accepted a workdir whose bytes are not the folded manifest — the repaired "
         "code would have been scored using the pre-repair source")
 
-    # (b) A stamp that DOES match keeps the optimization: no rebuild, artifacts survive.
+    # (b) A stamp that DOES match rebuilds too. The stamp proves the workdir holds this manifest's
+    # FILES, not that the stages before `rerun_stage` ran here: the only stamp that matched was the
+    # lifecycle's OWN, written when a first dispatch rebuilt the workdir — and a re-dispatch after a
+    # pause or a crash before `train` ran then "reused" a `train` that never ran and scored a missing
+    # checkpoint (critic 2026-09-29, driven: 0.1 where the same code scored 0.9). Reuse after a reset
+    # is off until it can prove that precondition from the fold (doc 68 68.3e).
+    # MUTATION: restore the stamp-only gate in `_eval_prepare_workdir` -> no rebuild here.
+    # (a)'s evaluation settled the node, so a second stage-scoped reset opens the lifecycle this asks
+    # about — without it ADMIT refuses a settled node before any reuse is weighed, which is how the
+    # old "a matching stamp still reuses" assertion here passed without ever reaching the gate.
+    store.append("node_reset", {"node_id": 0, "kind": "eval", "from_stage": "eval"})
+    node = fold(store.read_all()).nodes[0]
+    assert node.rerun_stage == "eval" and node.status.value == "pending"
     materialized.clear()
-    (workdir / ".looplab-manifest").write_text(
-        _workdir_manifest_digest(fold(store.read_all()).nodes[0]), encoding="ascii")
+    (workdir / ".looplab-manifest").write_text(_workdir_manifest_digest(node), encoding="ascii")
     anyio.run(engine._evaluate, 0, anyio.CapacityLimiter(1))
-    assert materialized == [], "a matching stamp must still reuse the workdir"
+    assert materialized == [0], "a matching stamp vouched for stages that never ran in this workdir"

@@ -176,10 +176,12 @@ def test_a_final_observation_of_a_reset_lifecycle_ends_quietly(tmp_path):
     store.append("node_reset", {"node_id": 0, "from_stage": "eval"})
     a = SimpleNamespace(workdir=workdir, node_id=0, generation=0,
                         _log_plan=eval_log_plan([]), _log_snapshot=snapshot,
-                        _live_questions=[], kill_signal={})
+                        _live_questions=[], kill_signal={}, _seen={}, start_seq=1, node=None)
+    asked = []
     engine = SimpleNamespace(run_dir=rd, _eval_spec={"metric": {"kind": "stdout_json"}},
                              _monitor_cadence=lambda: 600.0, _redact=lambda value: value,
-                             _train_monitor_kill=False, store=store, _write_lock=anyio.Lock())
+                             _train_monitor_kill=False, store=store, _write_lock=anyio.Lock(),
+                             _eval_intervention_seen=lambda *args: asked.append(args) or "reset")
 
     async def final_review():
         with anyio.fail_after(10):
@@ -189,6 +191,9 @@ def test_a_final_observation_of_a_reset_lifecycle_ends_quietly(tmp_path):
     anyio.run(final_review)
     assert a._live_questions == [] and a.kill_signal == {}
     assert not (rd / "harness_checkpoints.jsonl").exists(), "no question was published"
+    # The final pass runs after the intervention watcher stopped, so the reset it found is handed to
+    # the settle, which records a superseded lifecycle instead of an ordinary stale terminal.
+    assert a._seen == {"kind": "reset"} and asked == [(0, 0, 1, None)]
 
 
 def test_agent_deadline_answer_changes_real_stage_outcome_and_records_grace(tmp_path):

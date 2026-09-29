@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-162 event types — 113 folded into `RunState`, 49 diagnostic; 1032 declared payload keys; 22 types whose whole payload is stored by the fold.
+162 event types — 113 folded into `RunState`, 49 diagnostic; 1033 declared payload keys; 22 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -77,7 +77,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `data_shift` | diagnostic | How far the deployment sample the task declares is from the training one, per column. | `checked`, `columns`, `detector`, `n_columns`, `n_shifted`, `only_current`, `only_reference`, `shift`, `source` | — |
 | `deep_research` | folded · whole | An operator request for a deep-research pass — the intent itself, with no payload. | — | — |
 | `deps_declared` | diagnostic | The dependency directives a task declared, what the resolver pinned, and what it dropped. | `action`, `command`, `digest`, `directives`, `dropped`, `env_delta`, `file`, `observed`, `pin_count`, `pins`, `pins_truncated`, `root` | — |
-| `deps_installed` | diagnostic | The packages one evaluation installed and how they resolved. | `generation`, `node_id`, `packages`, `resolved`, `round` | `source` |
+| `deps_installed` | diagnostic | The packages one evaluation installed and how they resolved. | `generation`, `node_id`, `packages`, `resolved`, `round` | `eval_seconds`, `source` |
 | `diversity_archive` | folded · whole | The finalization snapshot of the diversity archive. | — | `elites`, `finalize_scope`, `finish_seq`, `niches`, `resolution` |
 | `drift_unavailable` | diagnostic | Why the run could not compare its environment against the one it started in. | `reason` | — |
 | `effective_train_batch` | diagnostic | What the training process itself recorded as the batch it ran at, read off the node's own workdir at the metric read. | `disagree`, `generation`, `node_id`, `read_at`, `readings`, `train_batch_size` | `files_seen`, `truncated` |
