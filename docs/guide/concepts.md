@@ -417,6 +417,16 @@ finds no engine, so a drain that paused and exited between the first read and th
 never starts the run as a search. Only an `engine_ack` command waits so: a finalize's postcondition is the finish itself, which
 no search that follows writes, so it starts the engine that finalizes.
 
+A STOP holds a queued intent the same way (doc 69 69.30). A fork, an inject, a forced confirm or
+ablation, a deep-research request and a strategy pin (`serve/protocol.py::QUEUED_WHILE_STOPPED`) are
+served by the search, never by an engine start of their own, so on a paused run — paused by the
+operator, a drain or the engine itself, and neither finished, finalizing nor already asked to resume
+(`serve/protocol.py::stop_holds_queued_intents`) — such a command records its intent and settles
+`succeeded` with `deferred_until_resume` at once, whether or not a stopped engine is still finishing
+an evaluation. It starts nothing: starting `looplab resume` for it lifted the stop, and the operator's
+own resume (or restart) serves the whole queue. A reset, a budget extension and an approval still
+start the engine — each asks the run to go on.
+
 A `metric_retarget` (`{"key": "<extra metric>", "goal": "…"}`, doc 68 68.2) makes a DECLARED extra
 metric — one an `eval.metrics` reader recorded, never a number the candidate printed for itself — the
 objective every node is ranked by, and `"key": null` ranks by the task's own metric again. It is a

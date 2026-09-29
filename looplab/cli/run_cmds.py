@@ -1489,22 +1489,25 @@ def _pulse_of(value) -> float:
 
 
 def server_commands_restarting(run_dir: Path, *, now: Optional[float] = None,
-                               acked: Optional[dict] = None) -> dict:
+                               acked: Optional[dict] = None, stopped: bool = False) -> dict:
     """`{"coming", "stale", "uncertain", "unreadable"}` — the server commands that will start an
     engine into `run_dir` now that the current one has exited, those no worker is driving any more,
     those that could not tell whether they started one, and the records no server can read — each as
     printable names. `acked` is the log's acknowledgement index
-    (`serve/protocol.py::command_ack_index`).
+    (`serve/protocol.py::command_ack_index`); `stopped` is whether the run sits on a stop only the
+    operator's resume lifts (`serve/protocol.py::stop_holds_queued_intents`). On such a stop a
+    QUEUED intent — a fork, an inject, a forced confirm or ablation, a deep-research request, a
+    strategy pin — starts nothing: a re-drive settles it `deferred_until_resume` (doc 69 69.30).
 
     THE PRECLAIM FAMILY of engine starter (`engine/run_lifecycle.py`, "the launch-in-flight
-    handshake"). A command whose policy is `ENSURE_RUNNING` (`node_reset`, `budget_extend`, `fork`,
-    `inject_node`, …) or `RESTART_AFTER_EXIT` that the engine did not acknowledge before exiting —
-    because its loop head had already left for the drain when the command landed — is waited out by
-    its worker, which then starts `looplab resume`, and that LIFTS the stop, as long as the exit
-    comes inside the command's own observation deadline (`max_observation_timeout`, 20 min by
-    default). The plan lives only in the durable record under `.commands/`, never in the log
-    `stop_lifted` reads (critic 2026-09-26, driven). `ENSURE_DRIVER_PRESERVE_STOP` (a finalize) is
-    left out on purpose: its driver finishes the run and never lifts the pause.
+    handshake"). A command whose policy is `ENSURE_RUNNING` (`node_reset`, `budget_extend`, …; a
+    queued intent only off such a stop) or `RESTART_AFTER_EXIT` that the engine did not acknowledge
+    before exiting — because its loop head had already left for the drain when the command landed —
+    is waited out by its worker, which then starts `looplab resume`, and that LIFTS the stop, as
+    long as the exit comes inside the command's own observation deadline (`max_observation_timeout`,
+    20 min by default). The plan lives only in the durable record under `.commands/`, never in the
+    log `stop_lifted` reads (critic 2026-09-26, driven). `ENSURE_DRIVER_PRESERVE_STOP` (a finalize)
+    is left out on purpose: its driver finishes the run and never lifts the pause.
 
     WHAT A RE-DRIVE OF AN UNSETTLED RECORD WOULD DO decides the rest, each by the server's own rule,
     imported from `serve/protocol.py` rather than copied (critic 2026-09-26, driven: the copy of the
@@ -1533,7 +1536,8 @@ def server_commands_restarting(run_dir: Path, *, now: Optional[float] = None,
     cannot list, a file past its bound) is counted as coming, because the wait cannot tell what it
     would start."""
     from looplab.serve.protocol import (COMMAND_ACTIVE_STATUSES, ENGINE_START_UNCERTAIN,
-                                        EnginePolicy, deadline_passed, engine_ack_observed)
+                                        EnginePolicy, deadline_passed, engine_ack_observed,
+                                        waits_for_resume)
 
     now = time.time() if now is None else now
     acked = acked or {}
@@ -1570,6 +1574,8 @@ def server_commands_restarting(run_dir: Path, *, now: Optional[float] = None,
             if (record.get("postcondition") == "engine_ack"
                     and engine_ack_observed(record, acked)):
                 continue                    # a GET settles it `succeeded`
+            if waits_for_resume(record, stopped):
+                continue                    # …or `deferred_until_resume`, starting nothing
             if deadline_passed(record.get("absolute_deadline_at"), now):
                 if not (record.get("spawned_by_command")
                         and not record.get("spawn_claim_released")):
@@ -1808,8 +1814,10 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
         # ONE MORE LOOK once the lock has stayed free: the log's own starters (`stop_lifted`), and
         # the server's command workers, which record a planned engine start only in `.commands/`.
         why = stop_lifted(current())
-        from looplab.serve.protocol import command_ack_index
-        commands = server_commands_restarting(target, acked=command_ack_index(store.read_all()))
+        from looplab.serve.protocol import command_ack_index, stop_holds_queued_intents
+        commands = server_commands_restarting(
+            target, acked=command_ack_index(store.read_all()),
+            stopped=stop_holds_queued_intents(current()))
         if not why and commands["coming"]:
             why = (f"server command(s) {', '.join(commands['coming'])} will start an engine now "
                    "that " + ("this one has exited" if seen["alive"] else "no engine holds the lock")

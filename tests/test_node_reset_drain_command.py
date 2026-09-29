@@ -389,6 +389,14 @@ def _draining(tmp_path):
     driver = _Driver()
 
     def drain_child():
+        # What `looplab resume --drain-only` does first on a stopped run: it LIFTS the pause for the
+        # drain (it pauses again when the drain ends), so a drain in progress is not a stop — the
+        # fake left the seeded pause standing, which a queued intent now reads as the operator's
+        # stop (doc 69 69.30) rather than a drain that will ack it.
+        from looplab.events.replay import fold
+
+        if fold(store.read_all()).paused:
+            store.append("resume", {})
         driver.alive = True
         _real_ack(rd, drain="--drain-only" in driver.calls[-1][0])
 
@@ -425,8 +433,8 @@ def test_a_command_sent_during_a_drain_settles_and_never_locks_the_stop_out(
     assert stop.status_code == 200, stop.text
     driver.alive = False
     spawns = len(driver.calls)
-    # The seeded run is paused already (the fake drain never lifted it): `noop` is the pause
-    # ADMITTED and satisfied — what the lockout refused was admission itself.
+    # `noop` would be the pause ADMITTED and satisfied — what the lockout refused was admission
+    # itself; the fake drain lifts the seeded pause as the real one does, so it lands `succeeded`.
     assert _terminal(client, stop.json())["status"] in ("succeeded", "noop")
     assert len(driver.calls) == spawns, "nothing started a search after the drain"
 
@@ -509,23 +517,38 @@ def _executing(client, record):
     raise AssertionError(f"the intent was never appended: {current}")
 
 
-@pytest.mark.parametrize("drain_pause", [True, False])
+@pytest.mark.parametrize("drain_pause,event_type,data", [
+    (True, "fork", {"from_node_id": 1, "generation": 0}),
+    (False, "fork", {"from_node_id": 1, "generation": 0}),
+    (False, "budget_extend", {"add_nodes": 1}),
+])
 def test_a_command_the_drain_never_acked_waits_for_the_search_and_starts_nothing(
-        tmp_path, drain_pause):
+        tmp_path, drain_pause, event_type, data):
     """HIGH (critic 2026-09-27, driven: 5 fork trials of 6 fired as the drain's rescored node
     landed). The drain acks at its loop heads, so a fork admitted after its LAST one — here, after
     its own pause — sat `executing` until the drain exited, locking the operator's stop out, and then
     its monitor started a plain `resume`, which lifted the drain's pause and ran the search. On the
     drain's OWN pause (`drain_only`) such a command settles `deferred_to_next_search` and nothing is
-    started; on any other pause the monitor re-drives the command exactly as it always did."""
+    started. On any other pause a fork is a queued intent on a stopped run and waits for the
+    operator's resume in its own words (`deferred_until_resume`, doc 69 69.30) — while an intent
+    that asks the run to go on, a budget extension, is re-driven exactly as it always was: the
+    drain's rule does not widen to every pause."""
     rd, driver, client = _draining(tmp_path)
     EventStore(rd / "events.jsonl").append("pause", {
         "reason": "drain-only resume: done", **({"drain_only": True} if drain_pause else {})})
     driver.on_spawn = lambda: setattr(driver, "alive", True)       # a later child: a plain search
-    sent = _executing(client, _post(client, "fork", {"from_node_id": 1, "generation": 0},
-                                    "late").json())
-    assert sent["status"] == "executing", sent
+    posted = _post(client, event_type, data, "late").json()
     spawns = len(driver.calls)
+    if event_type == "fork" and not drain_pause:
+        settled = _terminal(client, posted)                        # settled at admission
+        assert settled["status"] == "succeeded", settled
+        assert settled.get("deferred_until_resume") is True, settled
+        assert "deferred_to_next_search" not in settled, settled
+        driver.alive = False                                       # the drain exits
+        assert len(driver.calls) == spawns, "nothing started a search over the stop"
+        return
+    sent = _executing(client, posted)
+    assert sent["status"] == "executing", sent
     driver.alive = False                                           # the drain exits, never acking
     if drain_pause:
         settled = _terminal(client, sent)
@@ -544,8 +567,8 @@ def test_a_command_the_drain_never_acked_waits_for_the_search_and_starts_nothing
             _time.sleep(0.01)
         assert len(driver.calls) > spawns, "a pause that is not the drain's changes nothing"
         assert "--drain-only" not in driver.calls[-1][0]
-        # The search it started serves the fork, and the command settles — its monitor must not
-        # outlive the test, polling (and sleeping) into whatever runs next.
+        # The search it started serves the extension, and the command settles — its monitor must
+        # not outlive the test, polling (and sleeping) into whatever runs next.
         _real_ack(rd, drain=False)
         assert _terminal(client, sent)["status"] == "succeeded"
 

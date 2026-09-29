@@ -36,7 +36,8 @@ from looplab.events.types import (EV_CARD_DROPPED, EV_COMMAND_ACK, EV_PAUSE, EV_
                                   EV_RESUME, EV_RUN_ABORT, EV_RUN_FINISHED, EV_RUN_REOPENED)
 from looplab.serve._log_index import LogIndexCursor, PathLocks, validated_index_bound
 from looplab.serve.protocol import (CONTROL_EVENTS, ack_observed, engine_ack_observed,
-                                    file_command_ack, file_deferred_ack, file_drain_ack)
+                                    file_command_ack, file_deferred_ack, file_drain_ack,
+                                    stop_holds_queued_intents)
 
 
 MAX_INDEXED_RUNS = 8
@@ -329,6 +330,22 @@ class CommandObservation:
         boundary = self._latest_pause_boundary
         return (boundary is not None and boundary.type == EV_PAUSE
                 and (boundary.data or {}).get("drain_only") is True)
+
+    def stop_holds_queued_intents(self) -> bool:
+        """Whether the run sits on a stop only the operator's resume lifts
+        (`serve/protocol.py::stop_holds_queued_intents`, doc 69 69.30) — a queued intent then waits
+        for that resume instead of starting an engine.
+
+        The FOLD decides (a scoped auto-pause a reset lifted, a pending resume request, a finish),
+        and is read off this revision's CACHED fold like `launch_claim_fresh` — but only once the
+        latest row that moves the run between paused and not is a `pause`: the fold sets `paused`
+        only at a `pause` row or a `restart` (which asks to resume, so the stop does not hold), so
+        any other latest boundary answers False without the full fold a busy run's growing log
+        would otherwise cost per ask."""
+        boundary = self._latest_pause_boundary
+        if boundary is None or boundary.type != EV_PAUSE:
+            return False
+        return stop_holds_queued_intents(self._owner._fold(self))
 
     def deferred_ack_observed(self, record: dict) -> bool:
         """Whether a DRAIN acked `record`'s intent WITHOUT serving it (`deferred`): the intent is

@@ -86,3 +86,20 @@ test('a command a drain deferred, and a reset a drain served, say so rather than
   assert.equal(commandFeedback({ status: 'succeeded' }, { success: 'Reset applied' }).message,
     'Reset applied', 'every other record reads as before')
 })
+
+test('a queued intent sent to a stopped run says it waits for the resume (doc 69 69.30)', () => {
+  // The command no longer starts the engine for it — that start lifted the operator's stop — so
+  // the record is `succeeded` with `deferred_until_resume`, and the toast must not claim "applied".
+  const queued = commandFeedback({ status: 'succeeded', deferred_until_resume: true },
+    { requested: 'Inject', success: 'Inject applied' })
+  assert.equal(queued.kind, 'success')
+  assert.equal(queued.terminal, true)
+  assert.match(queued.message, /^Inject recorded — the run is stopped, so it waits in the queue; resume the run/)
+  assert.doesNotMatch(queued.message, /applied/)
+  assert.equal(commandFeedback({ status: 'succeeded', deferred_until_resume: true },
+    { success: 'Fork applied', untilResume: 'Fork queued for the resume' }).message,
+  'Fork queued for the resume', 'a caller may say it in its own words')
+  // …and the drain's own account is untouched by it.
+  assert.match(commandFeedback({ status: 'succeeded', deferred_to_next_search: true }, {}).message,
+    /a drain does not serve it/)
+})

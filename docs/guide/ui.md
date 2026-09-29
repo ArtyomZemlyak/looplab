@@ -197,6 +197,11 @@ node workspaces.
   acknowledged as DEFERRED — its toast says it waits for the search that follows — so it never
   blocks a stop and never starts that search itself; a plain reset the drain serves says so, and a
   drain reset that a search launched in the meantime served instead says that.
+- **Queue work on a stopped run** (doc 69 69.30) — a fork, inject, merge, branch-from-history,
+  forced confirm or ablation, deep research or strategy sent to a STOPPED run is recorded and waits:
+  its toast says the run is stopped and the command waits in the queue, and nothing starts the
+  engine, so a batch of them plus a hint all land before the search does. **Resume** serves the
+  whole queue at once. A reset or a budget extension still resumes the run (it asks it to go on).
 - **Rank the run by another metric** (doc 68 68.2) — the Inspector's **Metrics** tab puts **rank by
   this** beside every extra metric an `eval.metrics` reader DECLARED (never a self-reported one, a
   key oriented the other way, or on a run with a holdout): the whole run is re-ranked on it as a

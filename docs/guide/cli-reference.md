@@ -514,13 +514,16 @@ standing. That covers three cases:
   that showed life in the last 30 s. The pulse is the fresher of the worker's `.executing` claim and
   the record's `updated_at`.
 
-Such a command (`node_reset`, `budget_extend`, `fork`, `inject_node`, …) is one the engine did not
-acknowledge, because its loop had already left for the drain when the command landed. Its worker
-waits for the exit, then runs `looplab resume` if the exit comes inside the command's own observation
-deadline (20 min from submission by default). A command whose acknowledgement is already in the log
-starts nothing and is not counted; this check reads the acknowledgement by the server's own rule, so
-it can never count a command the server would settle `succeeded`. Nor is one past its deadline
-counted: the server settles it `timed_out` without starting anything, never driving it again.
+Such a command (`node_reset`, `budget_extend`, …) is one the engine did not acknowledge, because its
+loop had already left for the drain when the command landed. Its worker waits for the exit, then runs
+`looplab resume` if the exit comes inside the command's own observation deadline (20 min from
+submission by default). A command whose acknowledgement is already in the log starts nothing and is
+not counted; this check reads the acknowledgement by the server's own rule, so it can never count a
+command the server would settle `succeeded`. Nor is one past its deadline counted: the server settles
+it `timed_out` without starting anything, never driving it again. Nor is a QUEUED intent — a fork, an
+inject, a forced confirm or ablation, a deep-research request, a strategy pin — on the run this stop
+paused: the server settles it `deferred_until_resume` and starts nothing, so it waits for your resume
+(doc 69 69.30) — unless it already started a child of its own, which is counted as it always was.
 
 A command that settled "engine start uncertain" in the last 30 s counts too, since its child may
 still be starting. So does an unsettled command past its deadline that already started a child which

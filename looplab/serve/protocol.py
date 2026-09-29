@@ -39,9 +39,10 @@ Protocols named here:
   ``engine_running`` on a non-finished run.
 
 * Durable command records — the lifecycle words, the engine policies and the settle codes a record
-  carries, and the three rules a reader OUTSIDE the server needs to say what re-driving a record
-  would do (`looplab stop --wait`, which must work without FastAPI): `deadline_passed`, and the
-  `engine_ack` postcondition as `command_intent_marker` + `file_command_ack` + `ack_observed`.
+  carries, and the rules a reader OUTSIDE the server needs to say what re-driving a record would do
+  (`looplab stop --wait`, which must work without FastAPI): `deadline_passed`, the `engine_ack`
+  postcondition as `command_intent_marker` + `file_command_ack` + `ack_observed`, and
+  `waits_for_resume` — a queued intent on a stopped run starts nothing (doc 69 69.30).
 """
 from __future__ import annotations
 
@@ -220,6 +221,55 @@ def engine_ack_observed(record, acknowledgements) -> bool:
     return ack_observed(acknowledgements,
                         command_intent_marker(record, str(record.get("id") or "")),
                         record.get("event_seq"))
+
+
+# THE STOP A QUEUED INTENT LEAVES STANDING (doc 69 69.30). A fork, an inject, a forced confirm or
+# ablation, a deep-research request and a strategy pin are each SERVED BY THE SEARCH — a loop turn
+# takes them off their durable queue — so none needs an engine start of its own. Sent to a PAUSED
+# run with no engine, the command started `looplab resume` for it anyway, and that start LIFTED the
+# stop (the CLI's resume appends `resume` to a paused run): on MiniOneRec v10 the first of eight
+# injects an operator queued on a stopped run started the search, and the hint sent with them landed
+# after the Strategist's first decision. Such a command now records its intent and settles
+# `succeeded` with `deferred_until_resume`, starting nothing: the queue waits for the operator's own
+# resume (or restart), which serves all of it at once.
+#
+# NOT HERE, each on purpose: a reset (a plain one rescores inside a resumed search — its twin that
+# pauses again is the drain, doc 68 68.3b), a budget extension (how a run stopped by its budget goes
+# on), an approval (it lifts the gate it answers), and a resume, reopen or restart (they ARE the
+# operator's resume). Read by the command service (`serve/run_commands.py::RunCommandService.
+# _left_for_the_operators_resume`) and by `looplab stop --wait` (`cli/run_cmds.py::
+# server_commands_restarting`), which must not count such a command as an engine start.
+QUEUED_WHILE_STOPPED: frozenset[str] = frozenset({
+    EV_FORK, EV_INJECT_NODE, EV_FORCE_CONFIRM, EV_FORCE_ABLATE, EV_DEEP_RESEARCH, EV_SET_STRATEGY})
+
+
+def stop_holds_queued_intents(state) -> bool:
+    """Does the folded run `state` sit on a stop only the operator's resume lifts? Paused — by the
+    operator, a drain or the engine itself — and none of: finished (a finished run is not paused
+    away; an inject there reopens it as it always did), stopping (a pending finalize wraps the run
+    up, and its command refuses engine-driving work meanwhile) or already asked to resume (a
+    restart's replacement owner, or a pending resume request, lifts the pause and serves the queue —
+    such a command waits for that engine's acknowledgement)."""
+    return bool(state.paused and not state.finished and not state.stop_requested
+                and not state.resume_pending())
+
+
+def waits_for_resume(record, stop_holds: bool, *, own_launch_over: bool = False) -> bool:
+    """Does re-driving `record` start NOTHING because its intent waits in its queue for the
+    operator's resume (`QUEUED_WHILE_STOPPED`)? `stop_holds` is `stop_holds_queued_intents` of the
+    run as it stands; only an `engine_ack` command waits — its acknowledgement is what the resumed
+    search writes.
+
+    Not a record whose OWN `looplab resume` child may still be starting (`spawned_by_command`
+    without `spawn_claim_released`): that child is on its way and serves the intent, and settling
+    the record would drop the lease that keeps a second child from launching beside it — unless the
+    caller KNOWS that launch is over (`own_launch_over`: the server, once the lease has expired or
+    its child is definitely gone; `looplab stop --wait` cannot tell, so it counts the child)."""
+    record = record or {}
+    launched = bool(record.get("spawned_by_command") and not record.get("spawn_claim_released"))
+    return bool(stop_holds and (own_launch_over or not launched)
+                and record.get("postcondition") == "engine_ack"
+                and record.get("event_type") in QUEUED_WHILE_STOPPED)
 
 
 CONTROL_EVENTS = frozenset({

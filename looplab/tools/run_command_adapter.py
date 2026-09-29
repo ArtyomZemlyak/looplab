@@ -333,6 +333,11 @@ def _render_command_result(record: dict, *, name: str, run_id: str, completed: s
     status = _safe_command_text((record or {}).get("status"), 40)
     command_id = _safe_command_text((record or {}).get("id"), 100)
     command = f"; command {command_id}" if command_id else ""
+    if status == "succeeded" and (record or {}).get("deferred_until_resume") is True:
+        # A queued intent on a STOPPED run (doc 69 69.30): recorded, not served — the server no
+        # longer starts the engine for it, which lifted the operator's stop.
+        return (f"(recorded, not yet applied: {name} for {run_id} waits in the run's queue because "
+                f"the run is stopped; it is served when the run is resumed{command})")
     if status == "succeeded":
         return f"(completed: {completed}{command})"
     if status == "noop":

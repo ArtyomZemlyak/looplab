@@ -448,16 +448,49 @@ def test_a_command_the_engine_already_acknowledged_or_let_expire_starts_nothing(
 @pytest.mark.parametrize("updated", [10 ** 400, "1e999"])
 def test_a_hand_edited_pulse_neither_crashes_the_wait_nor_lives_forever(tmp_path, updated):
     """`float()` of a 400-digit integer raised `OverflowError` AFTER the pause was appended, and
-    `1e999` (infinity) read as a worker alive forever (fourth critic pass, driven)."""
+    `1e999` (infinity) read as a worker alive forever (fourth critic pass, driven). A `node_reset`,
+    not a fork: a fork on the run this stop just paused starts nothing at all (doc 69 69.30), so its
+    pulse would never be read."""
     rd = _run_dir(tmp_path, in_flight=False)
-    path = _command_record(rd, event_type="fork", policy="ensure_running")
+    path = _command_record(rd, event_type="node_reset", policy="ensure_running")
     raw = path.read_text(encoding="utf-8")
     record = json.loads(raw)
     marker = str(record["updated_at"])
     path.write_text(raw.replace(marker, str(updated)), encoding="utf-8")
     out = CliRunner().invoke(app, ["stop", str(rd), "--wait"])
     assert out.exit_code == 0, out.output
-    assert "note: server command(s) `fork`" in out.output
+    assert "note: server command(s) `node_reset`" in out.output
+
+
+@pytest.mark.parametrize("event_type", ["fork", "inject_node", "force_confirm", "force_ablate",
+                                        "deep_research", "set_strategy"])
+def test_a_queued_intent_on_the_stopped_run_is_no_engine_start(tmp_path, event_type):
+    """Doc 69 69.30: the server no longer starts `looplab resume` for a queued intent on a stopped
+    run — a re-drive settles it `deferred_until_resume` — so the stop this command recorded STANDS,
+    and the wait must not read the unacked record as the start that would lift it. A reset still
+    starts its engine, and a record whose own child may still be starting is still counted."""
+    from looplab.cli.run_cmds import server_commands_restarting
+
+    rd = _run_dir(tmp_path, in_flight=False)
+    _command_record(rd, event_type=event_type, policy="ensure_running")
+    assert server_commands_restarting(rd)["coming"], "not stopped: it starts the engine"
+    assert server_commands_restarting(rd, stopped=True) == {
+        "coming": [], "stale": [], "uncertain": [], "unreadable": []}
+    out = CliRunner().invoke(app, ["stop", str(rd), "--wait"])
+    assert out.exit_code == 0, out.output
+    assert "does not stand" not in out.output and "note: server command" not in out.output
+
+    _command_record(rd, event_type=event_type, policy="ensure_running", name="c" * 32,
+                    spawned_by_command=True, engine_pid=4242)
+    assert server_commands_restarting(rd, stopped=True)["coming"], "its child may lift the stop"
+
+
+def test_a_reset_still_lifts_the_stop_it_lands_on(tmp_path):
+    from looplab.cli.run_cmds import server_commands_restarting
+
+    rd = _run_dir(tmp_path, in_flight=False)
+    _command_record(rd, event_type="node_reset", policy="ensure_running")
+    assert server_commands_restarting(rd, stopped=True)["coming"]
 
 
 def test_a_recent_uncertain_engine_start_counts_as_coming(tmp_path):

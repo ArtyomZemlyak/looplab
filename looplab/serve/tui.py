@@ -57,6 +57,18 @@ _REPORT_PENDING_CODES = {
     "job_contact_lost", "job_authorization_lost", "job_unknown", "job_timeout", "job_protocol_error",
     "report_refresh_uncertain", "report_refresh_protocol_error",
 }
+def _done_suffix(record: Any) -> str:
+    """What a settled-OK command adds to its ✓ line: a `noop` was already satisfied, and a queued
+    intent sent to a STOPPED run waits for its resume — the server no longer starts the engine for
+    it, which lifted the stop (`serve/protocol.py::QUEUED_WHILE_STOPPED`, doc 69 69.30)."""
+    record = record if isinstance(record, dict) else {}
+    if record.get("status") == "noop":
+        return " (already satisfied)"
+    if record.get("deferred_until_resume") is True:
+        return " (queued — the run is stopped; resume it to serve this)"
+    return ""
+
+
 # What the operator is told when the pre-POST row could not be persisted. Both submit paths said
 # this in their own words; the wording is the promise that nothing was sent, so it is one constant.
 _STAGE_COMMAND_FAILURE = "could not durably stage command identity; nothing was submitted"
@@ -597,7 +609,7 @@ class Tui:
                     status = result.get("status")
                     if status in _COMMAND_DONE:
                         turn["status"] = "done"
-                        suffix = " (already satisfied)" if status == "noop" else ""
+                        suffix = _done_suffix(result)
                         self.console.print(f"  [green]✓[/green] [cyan]{_esc(label)}[/cyan]{suffix}")
                     elif status in _COMMAND_PENDING:
                         turn["status"] = "pending"
@@ -675,7 +687,7 @@ class Tui:
             if staged_turn is not None:
                 staged_turn["command"] = _observed_command(result, staged_turn.get("command"))
             if status in _COMMAND_DONE:
-                suffix = " (already satisfied)" if status == "noop" else ""
+                suffix = _done_suffix(result)
                 self.console.print(f"[green]✓ {etype}{suffix}[/green]")
                 if staged_turn is not None:
                     staged_turn["status"] = "done"
@@ -884,7 +896,7 @@ class Tui:
                 turn["status"] = "done"
                 turn.pop("error", None)
                 self._persist_command_status(run_id, turn, action_index=action_index)
-                suffix = " (already satisfied)" if status == "noop" else ""
+                suffix = _done_suffix(record)
                 self.console.print(f"  [green]✓[/green] [cyan]{_esc(label)}[/cyan]{suffix}")
             elif status in _COMMAND_FAILED:
                 turn["status"] = "failed"

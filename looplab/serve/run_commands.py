@@ -64,7 +64,7 @@ from looplab.serve.http import generation_conflict, refusal
 from looplab.serve.protocol import COLLABORATION_EVENTS, CONTROL_EVENTS
 from looplab.serve.protocol import (COMMAND_ACTIVE_STATUSES, COMMAND_TERMINAL_STATUSES,
                                     DEADLINE_PASSED_BEFORE_INTENT, ENGINE_START_UNCERTAIN,
-                                    command_intent_marker, deadline_passed)
+                                    command_intent_marker, deadline_passed, waits_for_resume)
 
 
 # Kept under this name — its call sites read well — but DERIVED from `serve/protocol.py`, the
@@ -2363,6 +2363,27 @@ class RunCommandService:
                 and record.get("event_type") not in DRAIN_LEFT_FOR_THE_SEARCH
                 and observation.drain_paused())
 
+    def _left_for_the_operators_resume(self, rd: Path, record: dict,
+                                       observation: CommandObservation) -> bool:
+        """A QUEUED intent — a fork, an inject, a forced confirm or ablation, a deep-research
+        request, a strategy pin (`serve/protocol.py::QUEUED_WHILE_STOPPED`) — sent to a STOPPED run
+        waits in its queue for the operator's resume and starts nothing (doc 69 69.30). Starting
+        `looplab resume` for it LIFTED the stop: the first of eight injects an operator queued on a
+        stopped MiniOneRec run started the search, ahead of the hint sent with them.
+
+        Whatever engine the record rode on — the stop is the operator's (or the engine's own), and
+        only the resume that lifts it may start the search. The stop is the fold's
+        (`CommandObservation.stop_holds_queued_intents`): not finished, not stopping, no resume
+        already asked for. A child THIS command launched before the stop landed is left to its own
+        startup ladder while its lease is live (`waits_for_resume`), and counts as over once
+        `_recent_spawn_claim` no longer holds — the re-spawn the rule exists to refuse. Asked AFTER
+        the drain's own rule wherever both can answer, so a command a drain left waiting keeps the
+        drain's account (`deferred_to_next_search`)."""
+        launched = record.get("spawned_by_command") and not record.get("spawn_claim_released")
+        return waits_for_resume(
+            record, observation.stop_holds_queued_intents(),
+            own_launch_over=bool(launched) and not self._recent_spawn_claim(rd))
+
     def _settled_without_an_engine(self, rd: Path, path: Path, record: dict) -> bool:
         """Settle a command a probe has just found NO engine for, off the log as it stands NOW —
         served (its postcondition holds) or left for the next search (`_left_for_the_next_search`) —
@@ -2377,7 +2398,8 @@ class RunCommandService:
         run sits on a drain's own pause: the intent waits for the search that follows, exactly as
         the monitor's re-spawn rung settles it — this ladder is also where a command whose worker
         died is re-driven, and a plain `resume` here lifted the pause the drain was asked to leave
-        (doc 68 68.3b)."""
+        (doc 68 68.3b). A queued intent on any other stop waits for the operator's resume
+        (`_left_for_the_operators_resume`, doc 69 69.30), for the same reason."""
         observation = self._observe(rd)
         if self._postcondition(rd, record, observation):
             self._succeeded(rd, path, record)
@@ -2385,9 +2407,29 @@ class RunCommandService:
         if self._left_for_the_next_search(record, observation):
             self._succeeded(rd, path, record, deferred=True)
             return True
+        if self._left_for_the_operators_resume(rd, record, observation):
+            self._succeeded(rd, path, record, until_resume=True)
+            return True
         return False
 
-    def _succeeded(self, rd: Path, path: Path, record: dict, *, deferred: bool = False) -> dict:
+    def _settled_on_the_operators_stop(self, rd: Path, path: Path, record: dict,
+                                       observation: CommandObservation) -> bool:
+        """Settle, at ADMISSION, a queued intent sent to a STOPPED run as waiting for the operator's
+        resume (`_left_for_the_operators_resume`, doc 69 69.30) — whether or not an engine is still
+        alive — and say whether it did. Alive matters too: a stopped engine finishing a multi-hour
+        evaluation never reaches another loop head to acknowledge the intent, so left `executing`
+        the command held the run's one driver-command slot (the next inject of a batch answered 409
+        `command_in_progress`) and, once that engine exited, its monitor started the search. A
+        drain's OWN pause keeps the drain's account: the drain acknowledges what rode on it, and
+        once it has exited `_settled_without_an_engine` asks its rule first."""
+        if (observation.drain_paused()
+                or not self._left_for_the_operators_resume(rd, record, observation)):
+            return False
+        self._succeeded(rd, path, record, until_resume=True)
+        return True
+
+    def _succeeded(self, rd: Path, path: Path, record: dict, *, deferred: bool = False,
+                   until_resume: bool = False) -> dict:
         # Exact ack / terminal postcondition proves the spawned process passed its startup window.
         # Release only this command's lease so an immediate next command/finalize-resume is not held
         # behind a stale Popen claim; external/reset and other-command leases remain untouched.
@@ -2422,6 +2464,11 @@ class RunCommandService:
             # search that follows, and the record says so instead of "applied" (critic 2026-09-26,
             # third pass: left pending, it locked the operator's pause out for the whole drain).
             record = {**record, "deferred_to_next_search": True}
+        elif until_resume:
+            # A QUEUED intent on a STOPPED run (doc 69 69.30): recorded, and its queue waits for the
+            # operator's resume — which is what the record says, never "applied"
+            # (`_left_for_the_operators_resume`).
+            record = {**record, "deferred_until_resume": True}
         elif (record.get("drain_only") is not True
               and record.get("postcondition") == "engine_ack"
               and observation.drain_ack_observed(record)):
@@ -3990,6 +4037,8 @@ class RunCommandService:
                 self._clear_spawn_claim(rd, command_id)
                 self._terminal(path, record, "failed", error=domain_error)
                 return None, record
+            if self._settled_on_the_operators_stop(rd, path, record, observation):
+                return None, record          # a queued intent on a stopped run (doc 69 69.30)
 
             liveness = self._engine_state(rd)
             if spec.engine_policy is not EnginePolicy.NO_SPAWN and liveness is None:
@@ -4198,6 +4247,9 @@ class RunCommandService:
                         return
                     if self._left_for_the_next_search(record, retry_observation):
                         self._succeeded(rd, path, record, deferred=True)
+                        return
+                    if self._left_for_the_operators_resume(rd, record, retry_observation):
+                        self._succeeded(rd, path, record, until_resume=True)
                         return
                     retry_liveness = self._engine_state(rd)
                     if retry_liveness is None:

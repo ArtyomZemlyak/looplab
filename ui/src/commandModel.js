@@ -252,6 +252,13 @@ export function commandFeedback(record, labels = {}) {
     kind: 'success', terminal: true, status,
     message: labels.deferred || `${labels.requested || 'Command'} recorded — a drain does not `
       + 'serve it; the next search will (resume the run once the drain has paused)' }
+  // A queued intent (fork, inject, forced confirm/ablation, deep research, strategy) sent to a
+  // STOPPED run: recorded, and its queue waits for the operator's resume — the command no longer
+  // starts the engine, which lifted the stop (doc 69 69.30, `serve/protocol.py::QUEUED_WHILE_STOPPED`).
+  if (status === 'succeeded' && record?.deferred_until_resume === true) return {
+    kind: 'success', terminal: true, status,
+    message: labels.untilResume || `${labels.requested || 'Command'} recorded — the run is stopped, `
+      + 'so it waits in the queue; resume the run to serve it' }
   if (status === 'succeeded' && record?.served_by_drain === true) return {
     kind: 'success', terminal: true, status,
     message: labels.servedByDrain || `${labels.success || 'Command completed'} — by a drain; the `
