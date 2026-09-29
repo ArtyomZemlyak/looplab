@@ -1695,7 +1695,10 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
     engine stops STARTING work on its next iteration, lets every evaluation already running finish,
     then exits; an attempt that FAILS while the stop is pending buys no repair or triage and stays
     pending — `looplab resume` re-runs it — unless the engine closes it before its repair decision
-    (a watchdog kill the repair loop does not take, a refused reader, a salvaged metric).
+    (a watchdog kill the repair loop does not take, a refused reader, a salvaged metric). An eval
+    CANARY that passes while the stop is pending does not start its full evaluation, and a repaired
+    attempt that would re-run its whole pipeline does not launch: both stay pending, and `looplab
+    resume` runs them — the passed canary is not paid again.
     `--wait` blocks until the engine has exited — "stop after the current node". `--drain-builds`
     also keeps every Card build already running: it finishes and commits its node before the engine
     exits, instead of being closed `run_is_stopping` and discarded (measured on MiniOneRec inf13:

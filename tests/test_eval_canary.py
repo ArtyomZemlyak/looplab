@@ -28,7 +28,8 @@ from looplab.engine.eval_canary import (CANARY_NEAR_CAP_FRACTION, CANARY_RETRY_C
 from looplab.engine.failure_diagnosis import ENGINE_FINAL_REASONS
 from looplab.engine.metric_salvage import NEVER_SALVAGED_REASONS
 from looplab.engine.triage import _failure_reason
-from looplab.engine.evaluate import _workdir_manifest_digest
+from looplab.engine.evaluate import EvalAttempt, _workdir_manifest_digest
+from looplab.engine.options import _UNSET
 from looplab.engine.orchestrator import Engine
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
@@ -485,40 +486,168 @@ def test_no_retry_once_the_run_stopped_taking_work(tmp_path, control):
     assert "its one retry was not run" in term.data["error"]
 
 
-@pytest.mark.parametrize("control", ["pause", "run_abort"])
-def test_a_stop_during_a_passing_canary_does_not_start_the_full_eval(tmp_path, control):
+def _after_canary(eng: Engine, *rows, attempt=None) -> None:
+    """Append `rows` (type, data) the moment a canary round returns — the operator's controls,
+    landing while the canary ran — on every attempt, or only on `attempt`."""
+    real_round = eng._eval_canary_round
+
+    async def _round(a, spec, digest, scratch, cancel, *, retry):
+        out = await real_round(a, spec, digest, scratch, cancel, retry=retry)
+        if attempt is None or a.attempt == attempt:
+            for kind, data in rows:
+                eng.store.append(kind, dict(data))
+        return out
+
+    eng._eval_canary_round = _round
+
+
+_PAUSE = ("pause", {"reason": "operator"})
+
+
+def test_a_pause_during_a_passing_canary_does_not_start_the_full_eval(tmp_path):
     """doc 69 69.12, driven on 26.09: a pause at 03:47:52, the node's canary passed at 03:55:01 and
-    its full eval on 4xH200 was claimed the same second. A pause or a stop recorded while the canary
-    ran means the HEAVY half is not started: no invocation claimed, no terminal, the node still
-    pending — ADMIT's own rule for a halted run. After the pause lifts, the re-dispatch goes straight
-    to the full eval: the passed canary is remembered by its code digest, not paid again.
-    MUTATION: drop the `_halted_before_full_eval` check -> "full" is in the ledger."""
+    its full eval on 4xH200 was claimed the same second. A pause recorded while the canary ran means
+    the HEAVY half is not started: no invocation claimed, no terminal, the node still pending —
+    ADMIT's own rule for a paused run. After the pause lifts, the re-dispatch goes straight to the
+    full eval: the passed canary is remembered by its code digest, not paid again.
+    MUTATION: drop the post-canary `_pause_withholds_attempt` check -> "full" is in the ledger."""
     ledger = tmp_path / "ledger.txt"
     code = _script(ledger, canary="0.1", full="0.9")
     run_dir = tmp_path / "run"
     eng = _engine(run_dir, _Dev(code))
     _seed(eng, code)
-    real_round = eng._eval_canary_round
-
-    async def _round(a, spec, digest, scratch, cancel, *, retry):
-        out = await real_round(a, spec, digest, scratch, cancel, retry=retry)
-        eng.store.append(control, {"reason": "operator"})   # the operator's control, mid-canary
-        return out
-
-    eng._eval_canary_round = _round
+    _after_canary(eng, _PAUSE)
     evs = _evaluate(eng)
-    assert ledger.read_text().split() == ["canary"], "the full eval started over the stop"
+    assert ledger.read_text().split() == ["canary"], "the full eval started over the pause"
     assert [f.data["passed"] for f in _of(evs, EV_EVAL_CANARY_FINISHED)] == [True]
     assert _terminals(evs) == []
     assert not _of(evs, "eval_invocation_claimed"), "no evaluator invocation was claimed"
     assert 0 in {n.id for n in fold(evs).pending_nodes()}
-    if control != "pause":
-        return
     eng.store.append("resume", {})                          # the pause lifts
     evs = _evaluate(_engine(run_dir, _Dev(code)))           # the re-dispatch, a fresh process
     assert ledger.read_text().split() == ["canary", "full"], "the passed canary is not paid again"
     (term,) = _terminals(evs)
     assert term.type == "node_evaluated" and term.data["metric"] == 0.9
+
+
+def test_a_finalize_during_a_passing_canary_drains_the_full_eval(tmp_path):
+    """MEDIUM (critic 2026-09-29, driven): the rule withheld on any HALT, so a finalize landing in
+    a passing canary finished the run with the node pending and a live-activity receipt —
+    "evaluation interrupted" on a run that was over. A finalize DRAINS in-flight evaluation (the
+    loop drains before it finalizes); only a pause withholds. MUTATION: `paused` -> `halted`."""
+    ledger = tmp_path / "ledger.txt"
+    code = _script(ledger, canary="0.1", full="0.9")
+    eng = _engine(tmp_path / "run", _Dev(code))
+    _seed(eng, code)
+    _after_canary(eng, ("run_abort", {"reason": "finalized"}))
+    evs = _evaluate(eng)
+    assert ledger.read_text().split() == ["canary", "full"]
+    (term,) = _terminals(evs)
+    assert term.type == "node_evaluated" and term.data["metric"] == 0.9
+
+
+def test_an_intervention_beside_a_pause_keeps_its_terminal(tmp_path):
+    """LOW (critic 2026-09-29): an abort recorded while the canary ran owns this lifecycle's
+    terminal, and a pause beside it withheld the attempt and dropped it — the abort got a later
+    0-second terminal instead of one charging the seconds spent. The attempt runs on and its watcher
+    kills it at once, as before 69.12. MUTATION: drop the intervention clause -> no terminal."""
+    ledger = tmp_path / "ledger.txt"
+    code = _script(ledger, canary="0.1", full="sleep")
+    eng = _engine(tmp_path / "run", _Dev(code))
+    _seed(eng, code)
+    _after_canary(eng, ("node_abort", {"node_id": 0, "generation": 0}), _PAUSE)
+    evs = _evaluate(eng)
+    (term,) = _terminals(evs)
+    assert term.type == "node_failed" and term.data["reason"] == "aborted"
+    (finished,) = _of(evs, EV_EVAL_CANARY_FINISHED)
+    assert term.data["eval_seconds"] >= finished.data["eval_seconds"] - 0.01, \
+        "the terminal charges the canary the abort interrupted"
+
+
+class _PausingDev(_Dev):
+    """A Developer whose repair takes long enough for the operator to pause the run meanwhile."""
+
+    store = None
+
+    def repair(self, idea, code, error):
+        out = super().repair(idea, code, error)
+        self.store.append(*_PAUSE)
+        return out
+
+
+@pytest.mark.parametrize("canary", [False, True])
+def test_a_pause_during_a_repair_holds_the_repaired_attempt(tmp_path, canary):
+    """MEDIUM (critic 2026-09-29, driven with the canary off and on): DECIDE_REPAIR re-reads the
+    run before it buys a repair, and nothing re-read it after — a pause landing during the repair
+    (LLM work, measured at 1h40m) started the repaired attempt's full eval, or its canary, anyway.
+    The head of every launch after the first asks the same rule; the repair is durable, so the
+    re-dispatch after the pause lifts runs the REPAIRED code and buys no second repair.
+    MUTATION: drop the head-of-launch check -> the repaired attempt runs over the pause."""
+    ledger = tmp_path / "ledger.txt"
+    broken = _script(ledger, canary="raise", full="raise")
+    fixed = _script(ledger, canary="0.1", full="0.8")
+    dev = _PausingDev(broken, fixes=[fixed])
+    run_dir = tmp_path / "run"
+    eng = _engine(run_dir, dev, eval_canary=canary)
+    dev.store = eng.store
+    _seed(eng, broken)
+    evs = _evaluate(eng)
+    first = "canary" if canary else "full"
+    assert ledger.read_text().split() == [first], "the repaired attempt launched over the pause"
+    assert len(_of(evs, "node_repaired")) == 1 and _terminals(evs) == []
+    assert 0 in {n.id for n in fold(evs).pending_nodes()}
+    eng.store.append("resume", {})
+    again = _Dev(fixed)
+    evs = _evaluate(_engine(run_dir, again, eval_canary=canary))
+    assert ledger.read_text().split() == [first] + (["canary", "full"] if canary else ["full"])
+    (term,) = _terminals(evs)
+    assert term.type == "node_evaluated" and term.data["metric"] == 0.8
+    assert again.errors == [], "the re-dispatch ran the repaired code; no second repair"
+
+
+def test_a_pause_during_a_repaired_attempt_s_canary_holds_its_full_eval(tmp_path):
+    """The post-canary check is asked on EVERY attempt, not only the first (critic 2026-09-29:
+    mutant `a.attempt == 0` survived): a repaired attempt's canary passing during a pause does not
+    start its full eval. MUTATION: ask it on the first attempt only -> "full" is in the ledger."""
+    ledger = tmp_path / "ledger.txt"
+    broken = _script(ledger, canary="raise", full="raise")
+    fixed = _script(ledger, canary="0.1", full="0.8")
+    eng = _engine(tmp_path / "run", _Dev(broken, fixes=[fixed]))
+    _seed(eng, broken)
+    _after_canary(eng, _PAUSE, attempt=1)
+    evs = _evaluate(eng)
+    assert ledger.read_text().split() == ["canary", "canary"]
+    assert [f.data["passed"] for f in _of(evs, EV_EVAL_CANARY_FINISHED)] == [False, True]
+    assert _terminals(evs) == [] and not _of(evs, "eval_invocation_claimed")
+
+
+@pytest.mark.parametrize("next_start, controls, withheld", [
+    (_UNSET, ["pause"], True),               # the first launch: the re-dispatch re-derives its start
+    (None, ["pause"], True),                 # a full re-run was owed anyway
+    ("score", ["pause"], False),             # a reuse point lives in this process alone
+    (_UNSET, ["run_abort"], False),          # a finalize drains
+    (_UNSET, [], False),
+    (_UNSET, ["pause", "node_abort"], False),    # an intervention owns the terminal
+    (_UNSET, ["pause", "node_reset"], False),
+])
+def test_a_pause_withholds_only_work_it_cannot_destroy(tmp_path, next_start, controls, withheld):
+    """The rule's truth table (`_pause_withholds_attempt`). MEDIUM (critic 2026-09-29, driven): a
+    score-only repair paused in its canary lost its reuse point — which lives in the process — and
+    the re-dispatch re-ran an 8 h train, uncharged to the retrain cap. MUTATION: drop any clause ->
+    its row flips."""
+    eng = _engine(tmp_path / "run", _Dev("print(1)\n"))
+    _seed(eng, "print(1)\n")
+    events = eng.store.read_all()
+    a = EvalAttempt(node_id=0)
+    a.generation, a.start_seq, a.node = 0, events[-1].seq, fold(events).nodes[0]
+    a.next_start = next_start
+    for control in controls:
+        data = ({"node_id": 0, "generation": 0} if control.startswith("node_")
+                else {"reason": "operator"})
+        if control == "node_reset":
+            data["from_stage"] = "eval"
+        eng.store.append(control, data)
+    assert eng._pause_withholds_attempt(a) is withheld
 
 
 def _expired(*, timed_out: bool):

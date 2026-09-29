@@ -1284,6 +1284,11 @@ class EvalAttempt:
     # judge sees something it has never seen. Removed rather than wired: handing the judge a new
     # number changes a paid prompt, which is a flagged decision and not a review's to make.
     next_start: Any = None
+    # How many times RUN_ATTEMPT has LAUNCHED an attempt in this call: process-local on purpose (a
+    # re-dispatch is a new call, and ADMIT has just asked its question). Every launch after the first
+    # follows work that re-read nothing — a repair, a dependency install, a device reclaim — so it is
+    # where `_pause_withholds_attempt` is asked at the head.
+    launches: int = 0
     full_retrains: int = 0
     rolled_to: set = field(default_factory=set)
     rollback_refusal: str = ""
@@ -2933,19 +2938,46 @@ class EvaluateMixin:
         canary itself and the crash triage that reads its evidence (`_eval_decide_repair`)."""
         return self.run_dir / "canary" / f"node_{node_id}"
 
-    def _halted_before_full_eval(self) -> bool:
-        """Did the run pause or stop while this attempt's canary ran (doc 69 69.12)?
+    def _pause_withholds_attempt(self, a: "EvalAttempt") -> bool:
+        """Does a PAUSE withhold the evaluation work this attempt is about to START (doc 69 69.12)?
 
-        ADMIT refuses a halted run before any compute, and DECIDE_REPAIR re-reads the run before it
-        buys new work; the canary -> full-eval hand-off was the one boundary between them that
-        started the HEAVY half without looking. Driven on 26.09: a pause at 03:47:52, the node's
-        canary passed at 03:55:01, and its full eval on 4xH200 was claimed the same second. One
-        fresh fold and the `halted` ADMIT reads: a halted run returns with NO terminal, as ADMIT
-        does, so the node stays pending, and its passed canary is remembered by code digest
-        (`canary_already_passed`) — the re-dispatch after the pause lifts goes straight to the full
-        eval. The canary's seconds go uncharged, as a pause costs DECIDE_REPAIR the attempt it
-        interrupts. A pause still never kills a RUNNING eval; it only refuses to START one."""
-        return fold(self.store.read_all()).halted
+        Asked where an attempt begins heavy work with no phase in front of it that re-read the run:
+        the canary -> full-eval hand-off (driven on 26.09: a pause at 03:47:52, the node's canary
+        passed at 03:55:01, and its full eval on 4xH200 was claimed the same second), and the HEAD of
+        every launch after the first — a repair (LLM work, measured at 1h40m), a dependency install
+        and the device reclaim (which can wait on the GPU pool) all sit between DECIDE_REPAIR's fold
+        and the next launch, and a pause landing there started the repaired attempt's canary or full
+        eval, canary on or off (critic 2026-09-29, driven). ADMIT asks before the first launch.
+
+        Three conditions, each against a measured failure of a broader rule:
+          * PAUSED, and only paused. A finalize DRAINS in-flight evaluation (`docs/guide/
+            architecture.md`: the loop drains before it finalizes); withholding on a stop left a
+            FINISHED run with the node pending and a live-activity receipt — "evaluation
+            interrupted" on a run that was over (critic 2026-09-29, driven).
+          * NOTHING DONE IS LOST. `a.next_start` names a stage only after a repair that left earlier
+            stages reusable, and that reuse point lives in this process alone: the re-dispatch after
+            the pause re-materializes the workdir and re-runs the whole pipeline — a score-only
+            repair paused in its canary re-ran an 8 h train, uncharged to the retrain cap (critic,
+            driven). Such an attempt runs on, as every attempt did before this rule. `_UNSET` (the
+            first launch, whose start the re-dispatch re-derives from the durable `rerun_stage`) and
+            None (a full re-run already owed) lose nothing.
+          * NO INTERVENTION IS PENDING. A reset, abort or operator Card drop already recorded against
+            this lifecycle owns its terminal, and a withheld return dropped it — an abort got a later
+            0-second terminal, a reset's old generation none (critic 2026-09-29). The attempt runs
+            on, and its watcher cancels it at the first tick exactly as before.
+
+        A withheld attempt returns with NO terminal, as ADMIT and DECIDE_REPAIR's pause do: the node
+        stays pending and every ledger the chain reads is durable. A passed canary is remembered by
+        code digest (`canary_already_passed`), so the re-dispatch after the pause lifts goes straight
+        to the full eval — and its seconds go uncharged, as a pause costs DECIDE_REPAIR the attempt it
+        interrupts (no durable row carries them yet: doc 69 69.12a). A pause still never kills a
+        RUNNING eval; it only refuses to START one."""
+        if a.next_start is not _UNSET and a.next_start is not None:
+            return False
+        if not fold(self.store.read_all()).paused:
+            return False
+        card_id = getattr(getattr(a.node, "idea", None), "card_id", None)
+        return self._eval_intervention_seen(a.node_id, a.generation, a.start_seq, card_id) is None
 
     def _eval_canary_due(self, a: "EvalAttempt") -> bool:
         """Does THIS attempt owe an eval canary before its full eval (`engine/eval_canary.py`)?
@@ -3582,8 +3614,9 @@ class EvaluateMixin:
     async def _eval_run_attempt(self, a: "EvalAttempt") -> str:
         """RUN_ATTEMPT — one sandboxed evaluation under the intervention watcher and both live-log
         watchdogs. Binds `a.res`, the watcher's verdict and the per-attempt signals; `PHASE_RETURN`
-        for the unenforceable-GPU-pin terminal it writes itself, and with NO terminal for a run that
-        halted while this attempt's canary ran (`_halted_before_full_eval`)."""
+        for the unenforceable-GPU-pin terminal it writes itself, and with NO terminal for an attempt a
+        pause withholds — at a later launch's head, or after a passed canary
+        (`_pause_withholds_attempt`)."""
         # `a.res` is THIS attempt's result or None, from the first line (review 2026-09-22, ENG2).
         # It was rebound only when the sandbox returned, so on a repaired node's next attempt anything
         # raised before that — a spend ceiling above all — found the PREVIOUS attempt's result still
@@ -3591,6 +3624,12 @@ class EvaluateMixin:
         # measured", wrote that stale result as this lifecycle's terminal.
         a.res = None
         a.canary_failed = False
+        if a.launches and self._pause_withholds_attempt(a):
+            a.sp.set("eval_withheld", "paused_before_launch")
+            _LOG.info("node %s: attempt %s withheld — the run was paused before it launched",
+                      a.node_id, a.attempt)
+            return PHASE_RETURN
+        a.launches += 1
         a._t0 = time.time()
         # repair/retry attempts reuse the workdir and sandbox stage logs append.
         # When anything will READ those logs, snapshot every existing one before this attempt
@@ -3642,7 +3681,10 @@ class EvaluateMixin:
                     cancel.set()
                     _tg.cancel_scope.cancel()
                     return PHASE_NEXT
-                if self._halted_before_full_eval():
+                if self._pause_withholds_attempt(a):
+                    a.sp.set("eval_withheld", "paused_after_canary")
+                    _LOG.info("node %s: full eval withheld — the run was paused while its canary "
+                              "ran; the passed canary is kept by code digest", a.node_id)
                     cancel.set()
                     _tg.cancel_scope.cancel()
                     return PHASE_RETURN

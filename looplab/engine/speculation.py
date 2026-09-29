@@ -3474,7 +3474,8 @@ class SpeculationMixin:
             # The eval-second allowance this lane committed at admission (ENG2-05) goes back FIRST,
             # before the inflight entry and the wake-up below: the next admission fill asks whether
             # one more lane fits, and it must ask with this lane's worst case already handed back —
-            # its REAL cost is in the log by now and `total_eval_seconds` charges it.
+            # its REAL cost is in the log by now and `total_eval_seconds` charges it (all but a
+            # canary a pause withheld the full eval after: `evaluate.py::_pause_withholds_attempt`).
             from looplab.engine.eval_dispatch import _release_eval_time
             _release_eval_time(self, node_id, generation)
             if reservation is not None:
