@@ -331,7 +331,11 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               (Both rows above: the branch pinned them 260 -> 262, and 263 with
 #               `max_launch_timeout_s` merged in (9b9630f6…), against a tree without origin's
 #               four host-refusal and Card-lane fields; RECOMPUTED from the merged module.)
-_EXPECTED_DIGEST = "sha256:886c2668139da74a267a0369a4842be2b1f257e7f961199aaba390b2263aac1c"
+#   2026-09-29  + external_harness (master: an external coding agent owns research and development
+#               decisions). The 'field set changed too' branch: exactly `['external_harness']` added
+#               and `[]` removed; `_EXPECTED_FIELD_COUNT` goes 267 -> 268 and both pins are re-set
+#               in the merge of master into the branch (master itself carried the stale pins).
+_EXPECTED_DIGEST = "sha256:22b828c67d14664d2f699e37e67a15157295685c74cb141e743fa84d4de75407"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -830,7 +834,8 @@ _EXPECTED_DIGEST = "sha256:886c2668139da74a267a0369a4842be2b1f257e7f961199aaba39
 #   2026-09-27  + card_select_k (the operator's Card lane width): 264 -> 265.
 #   2026-09-26  + seed_from_run (doc 67 67.2): 265 -> 266; see the digest history above.
 #   2026-09-27  + ablation_simplify (doc 67 67.5): 266 -> 267; see the digest history above.
-_EXPECTED_FIELD_COUNT = 267
+#   2026-09-29  + external_harness (master): 267 -> 268; see the digest history above.
+_EXPECTED_FIELD_COUNT = 268
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

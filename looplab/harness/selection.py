@@ -15,7 +15,7 @@ from looplab.events.replay import fold, verifier_tie_groups
 from looplab.events.types import EV_NODE_VALUE_ESTIMATED, EV_VERIFIER_GROUP_SCORED
 from looplab.engine.value_estimate import VALUE_ESTIMATE_CADENCE_CAP, VALUE_ESTIMATE_RATIONALE_CAP
 from looplab.harness.obligations import evidence_revision
-from looplab.serve.run_commands import run_generation_token
+from looplab.events.run_generation import run_generation_token
 
 
 def _groups(state) -> list[list]:

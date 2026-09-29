@@ -11,13 +11,13 @@ from fastapi import HTTPException
 from looplab.adapters.tasks import load_task
 from looplab.core.atomicio import append_jsonl_bytes_locked
 from looplab.core.models import NodeStatus
-from looplab.engine.claims_health import _valid_claim_source_row
+from looplab.engine.knowledge_views import claim_source_rows
 from looplab.engine.lesson_hygiene import distilled_claim_stance, lesson_id
 from looplab.engine.lessons_reconcile import LessonReconcileMixin
 from looplab.engine.memory import task_fingerprint, unreliable_metric_ids
 from looplab.events.eventstore import EventStore, EventStoreLockError, interprocess_lock, read_jsonl_lenient
 from looplab.events.replay import fold
-from looplab.serve.run_commands import run_generation_token
+from looplab.events.run_generation import run_generation_token
 
 
 def publish_lesson(srv, rd: Path, body) -> dict:
@@ -84,7 +84,9 @@ def publish_lesson(srv, rd: Path, body) -> dict:
                 row["run_uid"] = state.run_uid
             if body.role == "shared":
                 row.pop("role")
-            if not _valid_claim_source_row(row, research=False):
+            # the public read-model view of the same source contract (doc 25 XP-01): the one row
+            # survives it exactly when `_valid_claim_source_row` admits it
+            if len(claim_source_rows([row], research=False)) != 1:
                 raise HTTPException(400, "lesson does not meet the cross-run source contract")
 
             path = Path(memory_dir) / "lessons.jsonl"

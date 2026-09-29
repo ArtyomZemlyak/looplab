@@ -551,6 +551,8 @@ class _GateProbe:
     tested in the one direction that matters: that finalization is not even ATTEMPTED while a
     durable request head is open."""
 
+    external_harness = False   # master's external-agent finish obligations stay off here
+
     def __init__(self, *, head=False, forced_head=False, finished=False):
         self.calls: list[tuple] = []
         self._head, self._forced_head, self._finished = head, forced_head, finished

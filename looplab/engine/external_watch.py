@@ -13,9 +13,8 @@ from looplab.engine.train_monitor import (LOG_ROLE_TRAINING, _NON_TRAINING_ROLES
                                           read_stage_trajectory, read_training_tail_raw,
                                           resolve_stage_log, trajectory_vetoes_kill,
                                           training_authority_spent)
-from looplab.events.replay import fold
+from looplab.engine.shared import engine_fold as fold
 from looplab.events.types import EV_ASHA_RANK, EV_TRAIN_MONITOR_ALERT
-from looplab.harness.checkpoints import answer_for, ask
 
 
 async def observe_external_eval(engine, a, cancel, phase: str, *, final_pass: bool = False) -> None:
@@ -24,6 +23,9 @@ async def observe_external_eval(engine, a, cancel, phase: str, *, final_pass: bo
     No agent process or internal model is launched. An already finished evaluator
     must still account for each opened question before its terminal is committed.
     """
+    # the external agent's checkpoints: an engine reach into the harness taken only in an
+    # external_harness run (`tests/test_package_layering.py` DEFERRED, engine -> harness)
+    from looplab.harness.checkpoints import answer_for, ask
     from looplab.engine.evaluate import _watch_limiter
 
     last_digest = None
@@ -174,6 +176,9 @@ async def observe_external_eval(engine, a, cancel, phase: str, *, final_pass: bo
 
 async def settle_external_observations(engine, a) -> None:
     """A completed evaluator cannot silently outrun an unanswered live tick."""
+    # the external agent's checkpoints: an engine reach into the harness taken only in an
+    # external_harness run (`tests/test_package_layering.py` DEFERRED, engine -> harness)
+    from looplab.harness.checkpoints import answer_for
     from looplab.engine.evaluate import _watch_limiter
 
     if a._seen.get("kind"):

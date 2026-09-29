@@ -8,8 +8,9 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 
-# Credentials the product reads by a name that does not say API_KEY (`adapters/kaggle_dl.py`).
-CREDENTIAL_ENV_EXACT = frozenset({"LOOPLAB_KAGGLE_TOKEN", "KAGGLE_KEY"})
+# Credentials the product reads by a name that does not say API_KEY (`adapters/kaggle_dl.py`; the
+# external agent's scoped UI credential, `serve/server.py` + `harness/mcp_server.py`).
+CREDENTIAL_ENV_EXACT = frozenset({"LOOPLAB_KAGGLE_TOKEN", "KAGGLE_KEY", "LOOPLAB_HARNESS_TOKEN"})
 
 
 def live_scenarios_opted_in(environ: Mapping[str, str] | None = None) -> bool:

@@ -431,7 +431,7 @@ EV_LOG_REPAIRED = "log_repaired"                # operator `repair-log`: provena
 EV_REFLECTION_NOTE = "reflection_note"          # run-end LLM distillation: causal note + lessons + auto-skills
 # The MID-RUN half of the M4 skill promotion (BACKLOG §0.17). Diagnostic like `reflection_note` and
 # for the same reason — nothing the fold decides reads it — but it is a GATE as well as a receipt:
-# `lessons.py::maybe_promote_skills` reads its `at_node` for the cadence and its `promoted` pairs
+# `engine/lessons.py::maybe_promote_skills` reads its `at_node` for the cadence and its `promoted` pairs
 # for "which cards this run has already paid for", so a resume promotes nothing twice (invariant 3).
 # Main-task only, like every other cadence write.
 EV_SKILLS_PROMOTED = "skills_promoted"
@@ -2034,9 +2034,11 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         required=(),
         # `drain_builds`: the operator's `looplab stop --drain-builds` — builds already running
         # finish and commit before the engine exits. `drain_only`: the pause a drain-only resume
-        # (`looplab resume --drain-only`) writes when its drain ends, done or stuck.
-        optional=("attempt", "detail", "drain_builds", "drain_only", "generation", "node_id",
-                  "reason"),
+        # (`looplab resume --drain-only`) writes when its drain ends, done or stuck. `due` +
+        # `terminal_reason`: an external-harness run held at its finish while the agent still owes
+        # a report, reviews or pending nodes (`harness/obligations.py::external_finish_due`).
+        optional=("attempt", "detail", "drain_builds", "drain_only", "due", "generation",
+                  "node_id", "reason", "terminal_reason"),
     ),
     "phase_progress": PayloadContract(
         "One build/eval phase started or finished — the live activity feed's row.",

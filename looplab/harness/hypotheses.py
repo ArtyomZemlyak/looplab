@@ -18,7 +18,7 @@ from looplab.events.eventstore import (EventStore, EventStoreConcurrencyError,
 from looplab.events.replay import fold
 from looplab.events.types import EV_HYPOTHESIS_MERGED, EV_HYPOTHESIS_MERGE_REVIEWED
 from looplab.harness.obligations import evidence_revision
-from looplab.serve.run_commands import run_generation_token
+from looplab.events.run_generation import run_generation_token
 
 
 def board_revision(state) -> str:

@@ -41,6 +41,7 @@ _LAYOUT = {
     "activation": "engine",
     "advisory_payloads": "core",  # bounded canonical forms for untrusted advisory sidecars (memos/reports)
     "agent": "agents",
+    "external_harness": "agents",   # the external coding agent's brief (developer backend)
     "providers": "agents",  # the providers every agentic role shares (split out of factory 2026-09-06)
     # The four modules `roles.py` split into on 2026-09-08 (doc 25 AG-02). `roles.py` re-exports the
     # first three; `toy_roles` is named directly by its importers, because the calibration envelope
@@ -388,6 +389,7 @@ _LAYOUT = {
     "receipt": "core",   # the RECEIPT tier: a durable operation's identity/phase machine (doc 34 D-01)
     "run_deletion": "core",
     "run_discovery": "core",  # which directories under a runs root are runs, at any depth
+    "run_generation": "events",   # one event-log generation's token (moved down from serve 2026-09-29)
     "run_identity": "core",   # the two run-identity shapes: grouping vs cascade attribution
     "run_lifecycle": "engine",  # the run dir's lifecycle fences + config-write lock, moved DOWN out
                                 # of `serve/` so `tools/` takes its defaults downward (doc 25 XP-03)
@@ -453,6 +455,7 @@ _LAYOUT = {
     "loss_trajectory": "engine",
     "monitor_gates": "engine",
     "eval_log_plan": "engine",
+    "external_watch": "engine",   # live evaluation observations owned by an external coding agent
     "asha_monitor": "engine",    # per-eval ASHA live-curve rank watchdog (advisory rank + a kill switch)
     "triage": "engine",
     "repair_judgment": "engine",

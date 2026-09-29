@@ -150,7 +150,7 @@ def external_finish_due(rd, settings, state, events) -> dict:
     if not settings.external_harness:
         return {"report": False, "reviews": [], "pending_nodes": []}
     from looplab.harness.reviews import missing_reviews
-    from looplab.serve.run_commands import run_generation_token
+    from looplab.events.run_generation import run_generation_token
 
     return {
         "report": final_report_due(settings, state, events),

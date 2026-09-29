@@ -24,7 +24,7 @@ from looplab.harness.obligations import (concept_tags_required, evidence_revisio
 from looplab.harness.reviews import (cadence_reviews_due, required_reviews,
                                      review_file)
 from looplab.harness.selection import value_due, verification_due
-from looplab.serve.run_commands import run_generation_token
+from looplab.events.run_generation import run_generation_token
 
 _SIDECAR_MAX_BYTES = 16 * 1024 * 1024
 

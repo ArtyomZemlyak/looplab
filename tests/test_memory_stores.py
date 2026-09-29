@@ -48,6 +48,7 @@ NOT_MEMORY_JSONL = {
     "messages.jsonl": "an assistant session's transcript (`<run root>/assistant/<session>/`)",
     "harness.v1.jsonl": "the agent-trajectory bench fixture (`tests/data/agent_trajectory/`)",
     "harness_decisions.jsonl": "the run's idea-bound external decisions (run directory)",
+    "harness_checkpoints.jsonl": "the run's external-agent checkpoint ledger (run directory)",
     "harness_reviews.jsonl": "the run's external knowledge reviews (run directory)",
 }
 

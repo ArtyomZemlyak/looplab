@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-162 event types — 113 folded into `RunState`, 49 diagnostic; 1024 declared payload keys; 22 types whose whole payload is stored by the fold.
+162 event types — 113 folded into `RunState`, 49 diagnostic; 1026 declared payload keys; 22 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -137,7 +137,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `novelty_graded` | folded · whole | The graded-novelty verdict on a proposal the flat gate would have rejected. | — | `grade`, `level`, `literature`, `rationale`, `recommendation`, `shared_concepts`, `stance` |
 | `novelty_rejected` | folded · whole | A near-duplicate proposal the novelty gate nudged off, with the distance that decided it. | — | `action`, `distance`, `generation`, `kind`, `literature`, `node_id`, `nudged`, `original`, `reason`, `stance` |
 | `operator_request_parked` | diagnostic | A queued fork / inject / forced ablation waits for a node slot: the node budget is spent; add_nodes admits it. | `detail`, `held_by_card_requests`, `limit`, `reason`, `request`, `reserved` | `generation`, `idx`, `node_id` |
-| `pause` | folded | The run paused — by an operator, or by the engine with a stated reason. | — | `attempt`, `detail`, `drain_builds`, `drain_only`, `generation`, `node_id`, `reason` |
+| `pause` | folded | The run paused — by an operator, or by the engine with a stated reason. | — | `attempt`, `detail`, `drain_builds`, `drain_only`, `due`, `generation`, `node_id`, `reason`, `terminal_reason` |
 | `phase_progress` | diagnostic | One build/eval phase started or finished — the live activity feed's row. | `phase`, `stage`, `status` | — |
 | `plan` | folded · whole | The run's PLAN artifact: how `max_nodes` was cut into seed, search and endgame reserve. | — | `at_node`, `endgame_start`, `max_nodes`, `phases`, `reason`, `reserve`, `reserve_frac`, `source` |
 | `policy_decision` | folded | The search policy's pick among the legal actions, with the scores behind it. | `chosen`, `reason`, `scores` | — |

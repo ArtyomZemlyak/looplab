@@ -162,6 +162,9 @@ CROSS_PACKAGE_PRIVATE_IMPORTS: dict[str, dict[str, tuple[str, ...]]] = {
     },
     "serve": {
         "looplab.agents.roles": ("_CONCEPT_AUTHORING_GUIDANCE",),
+        # The governed task-facets read route reads the store through its own strict row reader
+        # (master's `/api/cross-run/task-facets`); a lenient re-read would serve rows it refuses.
+        "looplab.engine.task_facets": ("_read_task_facet_rows",),
         # `_windows_move_write_through` left this list when doc 25 SC-05 moved the durable
         # no-replace rename INTO atomicio as the public `durable_no_replace_rename` — the two serve
         # callers no longer reach past the package boundary to assemble it themselves.

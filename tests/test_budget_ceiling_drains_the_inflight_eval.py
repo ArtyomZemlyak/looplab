@@ -889,6 +889,7 @@ def test_a_run_attempt_that_never_returned_carries_no_result_from_the_attempt_be
         _train_monitor = False
         _asha_live = False
         _eval_canary = False                      # the opt-in canary (d1b4611c) stays off here
+        external_harness = False                  # master's external-agent mode stays off here
         _eval_canary_due = Engine._eval_canary_due
         store = types.SimpleNamespace(read_all=lambda: [])
 

@@ -60,12 +60,18 @@ MODULE_LEVEL: dict[str, frozenset[str]] = {
     "adapters": frozenset({"core", "tools", "agents"}),
     "engine": frozenset({"core", "events", "runtime", "tools", "trust", "search", "agents"}),
     "judgebench": frozenset({"core"}),
+    # The external coding-agent harness (2026-09-28) sits ABOVE the engine: it writes its sidecars
+    # and the agent's lesson/skill rows through the engine's own rules, and nothing below reaches it
+    # at import time. Its generation fence is `events/run_generation.py` (it used to reach
+    # `serve/run_commands.py` for it, pulling the server into the engine through
+    # `engine/external_watch.py`), and its manifest is `harness/manifest.py`, not the CLI's.
+    "harness": frozenset({"core", "events", "engine", "adapters", "tools"}),
     # `engine`: the backfills ask the engine's OWN liveness rule (`engine/run_lifecycle.py`, which
     # imports only `core` and `events`) instead of a drifting copy — review 2026-09-22, EVT-14.
     "maintenance": frozenset({"events", "runtime", "engine"}),
     "serve": frozenset({"core", "events", "tools", "trust", "engine", "adapters", "looplab"}),
     "cli": frozenset({"core", "events", "runtime", "tools", "trust", "search", "engine",
-                      "adapters", "serve", "looplab"}),
+                      "adapters", "serve", "harness", "looplab"}),
 }
 
 # Module-level edges that may reach only LEAVES of the target: modules whose OWN module-level
@@ -101,6 +107,14 @@ DEFERRED: dict[tuple[str, str], str] = {
     ("cli", "maintenance"): "the backfill scripts are loaded by their commands only",
     ("engine", "adapters"): "the engine names a task type only at the seams that need one — "
                             "holdout splits, MLE-bench grading, the toy task (doc 50 RA-10)",
+    ("engine", "harness"): "`external_watch` asks and reads the external agent's checkpoints "
+                           "only inside an `external_harness` run's live evaluation",
+    ("harness", "runtime"): "`checkpoints` reads the stage-check hard kinds when it opens a "
+                            "question about one stage",
+    ("harness", "search"): "`progress` builds the run's policy to say what it would select, "
+                           "per progress read",
+    ("harness", "serve"): "`mcp_server` validates a command against the live control tables "
+                          "per MCP call, as the UI's own route does",
     ("judgebench", "adapters"): "`bait` reads the MLE-bench extras at audit time",
     ("judgebench", "agents"): "the agent-trajectory ladder drives the real `drive_tool_loop` "
                               "inside one bench case (doc 27 §4 rungs 2/4/5); deferred so the "
@@ -118,6 +132,8 @@ DEFERRED: dict[tuple[str, str], str] = {
                          "and `operators.feature_engineering_verdicts` applies the >1-SE rule "
                          "(`trust/gate.py`) to one CV ledger row",
     ("serve", "agents"): "the assistant and preflight routes build roles per request",
+    ("serve", "harness"): "`control_validation` applies the external candidate-surface and "
+                          "research-obligation rules per command, only in an external run",
     ("serve", "runtime"): "the engine process and the runs router reach the sandbox and "
                           "`command_eval` per request",
     ("serve", "search"): "the concept routes reach the concept cluster per request",

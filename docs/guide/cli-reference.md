@@ -73,6 +73,8 @@ looplab export-sft      This run's model turns as execution-grounded SFT rows, e
 looplab harden          Grow the reward-hack exploit ruleset (hacker–fixer–solver)
 looplab tensorboard     Serve TensorBoard over per-node training logs
 looplab build-ui        Build the React UI bundle (ui/dist)
+looplab harness         Print the external-agent capability contract as JSON (read-only)
+looplab harness-mcp     Serve the live UI API to a coding agent over stdio MCP
 ```
 
 Every engine setting supplied through `run -s/--set` (and the typed setting overrides) can also come
@@ -3123,3 +3125,29 @@ looplab build-ui [--force]
 | Option | Default | Description |
 |---|---|---|
 | `--force` | off | Rebuild even if a bundle already exists |
+
+## `harness`
+
+Print the external-agent capability contract as JSON — the versioned manifest an MCP client or a
+coding agent reads first: the run modes, which decisions the agent owns and which the engine keeps,
+the decision phases, and the knowledge cadences (`harness/manifest.py::harness_manifest`; the same
+object `harness-mcp` serves). Read-only. See [External harness](external-harness.md).
+
+```bash
+looplab harness [--settings]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `--settings` | off | Include the full `Settings` JSON Schema and the curated field help |
+
+## `harness-mcp`
+
+Serve every live UI API operation to a coding agent over stdio MCP (`harness/mcp_server.py`). Needs
+`pip install 'looplab[harness,ui]'` and a running `looplab ui`; `LOOPLAB_HARNESS_URL` points it at
+another local or proxied UI, and `LOOPLAB_HARNESS_TOKEN` is the scoped agent credential (it must
+differ from `LOOPLAB_UI_TOKEN`, which remains full owner authority). No options.
+
+```bash
+looplab harness-mcp
+```

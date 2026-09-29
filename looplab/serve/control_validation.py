@@ -1182,7 +1182,7 @@ def _normalize_inject_node(ctx: _ControlIntake) -> dict:
                 "remediation": "GET then POST /api/runs/{run_id}/harness-hypotheses",
             })
         from looplab.harness.reviews import cadence_reviews_due
-        from looplab.serve.run_commands import run_generation_token
+        from looplab.events.run_generation import run_generation_token
         memory_reviews = cadence_reviews_due(ctx.rd, settings, ctx.state(),
                                              run_generation_token(events))
         if memory_reviews:
@@ -1225,7 +1225,7 @@ def _normalize_inject_node(ctx: _ControlIntake) -> dict:
                              if getattr(settings, key)],
                 "remediation": "author idea.concepts (full) or a nonempty effective delta",
             })
-        from looplab.serve.run_commands import run_generation_token
+        from looplab.events.run_generation import run_generation_token
         from looplab.harness.decisions import missing_decisions
         generation = run_generation_token(events)
         if generation and ctx.state().run_uid:
@@ -2154,11 +2154,21 @@ CONTROL_SPECS: dict[str, ControlSpec] = {
 assert set(CONTROL_SPECS) == set(CONTROL_EVENTS), "every control event needs an explicit ControlSpec"
 
 
+# The intents `_external_mode_restriction` may refuse in an externally driven run.
+_EXTERNAL_RESTRICTED_INTENTS = frozenset({EV_FORK, EV_FORCE_ABLATE, EV_DEEP_RESEARCH,
+                                          EV_NODE_RESET, EV_INJECT_NODE})
+
+
 def _external_mode_restriction(rd: Path, event_type: str, data: dict) -> None:
     """Refuse intents that would call an internal role in an externally driven run."""
     # The command service and legacy /control route share this boundary. An external run must
     # never queue an intent whose engine fulfillment invokes its old Researcher/Developer loop.
     # Read the run's snapshot, not the server's ambient config: one UI serves many run modes.
+    # Only for an intent this rule can refuse: the snapshot's own readers (a resume's admission, a
+    # budget extension's ceiling) each answer an UNREADABLE snapshot with their own coded refusal or
+    # fail-closed default, and a blanket 409 here pre-empted every one of them.
+    if event_type not in _EXTERNAL_RESTRICTED_INTENTS:
+        return
     snapshot = Path(rd) / "config.snapshot.json"
     if snapshot.is_file():
         from looplab.core.config import read_config_snapshot

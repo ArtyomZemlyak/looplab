@@ -14,7 +14,7 @@ from looplab.engine.lessons_reconcile import LessonReconcileMixin
 from looplab.engine.memory import assess_skill_statement, unreliable_metric_ids, write_auto_skill
 from looplab.events.eventstore import EventStore, EventStoreLockError, interprocess_lock, read_jsonl_lenient
 from looplab.events.replay import fold
-from looplab.serve.run_commands import run_generation_token
+from looplab.events.run_generation import run_generation_token
 from looplab.tools.skills import parse_skill_frontmatter
 
 

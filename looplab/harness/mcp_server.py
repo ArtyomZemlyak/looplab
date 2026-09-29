@@ -12,7 +12,7 @@ from urllib.parse import unquote, urlsplit
 
 import httpx
 
-from looplab.cli.harness_cmds import harness_manifest
+from looplab.harness.manifest import harness_manifest
 from looplab.harness.phases import phase_catalog, phase_detail
 
 

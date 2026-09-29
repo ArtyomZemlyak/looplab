@@ -10,7 +10,7 @@ from looplab.core.atomicio import append_jsonl_bytes_locked
 from looplab.events.eventstore import EventStore, EventStoreLockError, interprocess_lock, read_jsonl_lenient
 from looplab.events.replay import fold
 from looplab.harness.obligations import evidence_revision
-from looplab.serve.run_commands import run_generation_token
+from looplab.events.run_generation import run_generation_token
 
 
 def required_reviews(settings) -> dict[str, tuple[str, ...]]:

@@ -19,7 +19,7 @@ from looplab.core.atomicio import append_jsonl_bytes_locked
 from looplab.events.eventstore import (EventStore, EventStoreLockError, interprocess_lock,
                                        read_jsonl_lenient)
 from looplab.events.replay import fold
-from looplab.serve.run_commands import run_generation_token
+from looplab.events.run_generation import run_generation_token
 
 _MAX_LEDGER = 16 * 1024 * 1024
 _PHASES = frozenset({"stage_check", "train_monitor", "asha_live", "deadline_grace"})
