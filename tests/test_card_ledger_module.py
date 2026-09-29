@@ -41,9 +41,16 @@ _PHASES = [
     "_card_merge_aliases",
     "_card_control_ids",
     "_fold_merged_cards",
+    "_apply_unexecuted_discards",
+    "_apply_substituted_builds",
+    # Before the return since 2026-09-27: `_apply_card_returns` counts a CLAIMED build (a
+    # `node_building` marker naming the card) as the returned card's rebuild. A pure read of
+    # `st.buildings` and the merged ids, so reading it earlier changes nothing the status and
+    # readiness lanes see.
+    "_card_building_ids",
+    "_apply_card_returns",
     "_apply_card_verdicts",
     "_apply_card_drops",
-    "_card_building_ids",
     "_apply_card_status",
     "_apply_card_enrichment",
     "_apply_card_ranking",

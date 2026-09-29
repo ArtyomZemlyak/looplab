@@ -101,8 +101,8 @@ def _attempted_belief_groups(state: RunState) -> dict:
     return groups
 
 
-def attempted_board_prompt_cards(state: RunState, shown=(), *,
-                                 limit: int = BOARD_PROMPT_CARDS) -> list:
+def attempted_board_prompt_cards(state: RunState, shown=(), *, limit: int = BOARD_PROMPT_CARDS,
+                                 withheld: bool = False) -> list:
     """The board rows a proposer must CHECK AGAINST: research questions that already have work.
 
     `next_board_prompt_cards` above shows only `open_research_beliefs()` — open, **untested** cards,
@@ -137,9 +137,22 @@ def attempted_board_prompt_cards(state: RunState, shown=(), *,
     half the character budget because this half is context rather than the actionable queue. Most
     RECENT first-shown-last: the tail is what the model reads closest to its instruction, and the
     newest work is the likeliest thing it is about to repeat.
+
+    `withheld` SPLITS OFF the rows this block's own words are false about (2026-09-27): a card whose
+    one build ran something else and whose return the ledger WITHHELD because later builds on that
+    node beat it (`Card.withheld_by`). No experiment tested it and the engine will not rebuild it —
+    it is not "already has an experiment … re-attempted by the engine itself", nor claimable — so
+    `board_prompt_lines` renders it in a block of its own. A belief goes there only while EVERY live
+    card of it is withheld: a re-proposal of the idea that is building or built makes it ordinary
+    context here again, with that card as its row. With no withheld card on the board the default
+    call returns what it always did.
     """
     already = {getattr(card, "id", None) for card in (shown or ())}
     shown_beliefs = {getattr(card, "belief_id", None) for card in (shown or ())} - {None}
+    # The most a row can render beside its seed is its belief group's substitution clause — and a
+    # withheld card is always a substitution, so the same groups decide which block a belief is in.
+    groups = (_attempted_belief_groups(state)
+              if any(c.substituted_nodes for c in state.research_cards()) else {})
     rows = []
     seen_beliefs: set = set()
     for c in state.research_cards():
@@ -148,13 +161,14 @@ def attempted_board_prompt_cards(state: RunState, shown=(), *,
         belief = c.belief_id or hypothesis_statement_digest(c.seed_statement)
         if belief in shown_beliefs or belief in seen_beliefs:
             continue
+        if withheld and not (c.withheld_by and all(m.withheld_by for m in groups.get(belief, [c]))):
+            continue
+        if not withheld and c.withheld_by:
+            continue
         seen_beliefs.add(belief)
         rows.append(c)
     selected: list = []
     used = 0
-    # The most a row can render beside its seed is its belief group's substitution clause.
-    groups = (_attempted_belief_groups(state)
-              if any(c.substituted_nodes for c in state.research_cards()) else {})
     for card in reversed(rows):
         seed = card.seed_statement or ""
         cost = len(seed) + len(state.belief_substitution_brief(
@@ -303,45 +317,49 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
     # union of every live card's nodes.
     grouped = _attempted_belief_groups(state) if fit else {}
     shown_levels: set = set()
-    if attempted:
-        lines.append("Research questions ALREADY on the board (each already has an experiment — "
-                     "do NOT propose one of these again as if it were new):")
-        for card in attempted:
-            group = grouped.get(card.belief_id or hypothesis_statement_digest(card.seed_statement))
-            if group:
-                card = group[-1]
-                nodes = sorted({node for member in group for node in member.evidence})
-            else:
-                nodes = sorted(card.evidence)
-            substitution = state.belief_substitution_brief(group or [card], card)
-            # …AND WHETHER THE EXPERIMENT THAT RAN IS STILL THE ONE THIS CARD PROPOSED. The arbiter
-            # existed and nothing consumed it, which made this block quietly dangerous: a card's
-            # `params` is the receipt-bound PROPOSAL, and under `params_style: "none"` the Developer
-            # realises the idea by editing the repo, so a repair that fits a training into memory
-            # moves the numbers while the card keeps the old ones. A proposer reading "already
-            # tried" and sizing its next idea one knob off THAT is sizing it off a recipe nothing
-            # ever ran. Measured on `runs/e5small-dr-unified-v4`: six of the nine cards with an
-            # applied record disagree with their own proposal, the run's CHAMPION among them —
-            # card-132 says batch 4096 / lr 0.001 / 3 epochs and node 13 ran 2048 / 0.0005 / ONE
-            # epoch. Silent when the two agree, so the loud case stays loud.
-            drift = f"{card_drift_brief(card)} {substitution}".strip()
-            # …AND WHAT A `supported` VERDICT RESTS ON (`Settings.card_verdict_support`, doc 67 67.1):
-            # the verdict is one measurement beating its parent, and read bare it steered the next
-            # proposals as a finding even inside the eval's noise. Over the card's OWN evidence, the
-            # set its verdict was computed from (`events/card_ledger.py::verdict_support`).
-            level = None
-            if support and card.verdict == "supported":
-                from looplab.events.card_ledger import verdict_support
-                level = verdict_support(card.evidence, state, untested=card.substituted_nodes)
-                if level is not None:
-                    shown_levels.add(level)
-            lines.append(
-                f"- CARD_ID={card.id} BELIEF_ID={card.belief_id or ''} "
+
+    def _row(card) -> str:
+        """One row of either block below (a belief group's newest live card under `fit`)."""
+        group = grouped.get(card.belief_id or hypothesis_statement_digest(card.seed_statement))
+        if group:
+            card = group[-1]
+            nodes = sorted({node for member in group for node in member.evidence})
+        else:
+            nodes = sorted(card.evidence)
+        substitution = state.belief_substitution_brief(group or [card], card)
+        # …AND WHETHER THE EXPERIMENT THAT RAN IS STILL THE ONE THIS CARD PROPOSED. The arbiter
+        # existed and nothing consumed it, which made this block quietly dangerous: a card's
+        # `params` is the receipt-bound PROPOSAL, and under `params_style: "none"` the Developer
+        # realises the idea by editing the repo, so a repair that fits a training into memory
+        # moves the numbers while the card keeps the old ones. A proposer reading "already
+        # tried" and sizing its next idea one knob off THAT is sizing it off a recipe nothing
+        # ever ran. Measured on `runs/e5small-dr-unified-v4`: six of the nine cards with an
+        # applied record disagree with their own proposal, the run's CHAMPION among them —
+        # card-132 says batch 4096 / lr 0.001 / 3 epochs and node 13 ran 2048 / 0.0005 / ONE
+        # epoch. Silent when the two agree, so the loud case stays loud.
+        drift = f"{card_drift_brief(card)} {substitution}".strip()
+        # …AND WHAT A `supported` VERDICT RESTS ON (`Settings.card_verdict_support`, doc 67 67.1):
+        # the verdict is one measurement beating its parent, and read bare it steered the next
+        # proposals as a finding even inside the eval's noise. Over the card's OWN evidence, the
+        # set its verdict was computed from (`events/card_ledger.py::verdict_support`).
+        level = None
+        if support and card.verdict == "supported":
+            from looplab.events.card_ledger import verdict_support
+            level = verdict_support(card.evidence, state, untested=card.substituted_nodes)
+            if level is not None:
+                shown_levels.add(level)
+        return (f"- CARD_ID={card.id} BELIEF_ID={card.belief_id or ''} "
                 f"STATUS={state.card_status_now(card)} VERDICT={card.verdict} "
                 + (f"SUPPORT={level} " if level else "")
                 + f"NODES={nodes} "
                 + (f"{drift} " if drift else "")
                 + f"SEED_STATEMENT_JSON={json.dumps(card.seed_statement, ensure_ascii=False)}")
+
+    if attempted:
+        lines.append("Research questions ALREADY on the board (each already has an experiment — "
+                     "do NOT propose one of these again as if it were new):")
+        for card in attempted:
+            lines.append(_row(card))
         if shown_levels:
             lines.append(support_legend(shown_levels))
         if for_proposal:
@@ -368,6 +386,25 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
             lines.append("Propose a DIFFERENT question. These rows are NOT claimable — a CARD_ID "
                          "from this list is ignored. A failed experiment is re-attempted by the "
                          "engine itself, under the same card, without being asked.")
+    # …and the ideas that block must NOT hold (2026-09-27): a card the ledger WITHHELD because later
+    # builds on its substituted node beat it (`Card.withheld_by`). Rendered there — MiniOneRec
+    # inf13's card-2 — its row sat under "do NOT propose one of these again", ended in its own
+    # "propose it again only if none of those tested it", and closed on "a failed experiment is
+    # re-attempted by the engine itself", which is false for it: nothing re-elects a withheld card.
+    # Here the facts are stated once and ONE instruction holds: a re-proposal is a NEW experiment
+    # under a new card, because `bind_idea_to_board_card` never sees these rows and
+    # `engine/card_reservation.py::_plan_native_card` never reuses a card that holds evidence.
+    withheld = attempted_board_prompt_cards(state, open_hyps, withheld=True)
+    if withheld:
+        lines.append("Ideas NEVER TESTED that the engine will NOT rebuild (each card's build ran "
+                     "something else, and later builds on that node — other cards' experiments that "
+                     "tested their own ideas — beat it; each row names them):")
+        for card in withheld:
+            lines.append(_row(card))
+        if for_proposal:
+            lines.append("Propose one of these ideas again only if none of the nodes that beat it "
+                         "tested it — as a NEW experiment: it gets a card of its own, because these "
+                         "rows are NOT claimable and a CARD_ID from this list is ignored.")
     return lines
 
 

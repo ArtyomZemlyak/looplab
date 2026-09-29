@@ -1319,8 +1319,13 @@ def _selection_after_forced_gates(
     *,
     policy_state: Any | None = None,
     candidate_cards: Sequence[Card] | None = None,
+    refused_card_ids: Collection[str] = (),
 ) -> tuple[list[Card], list[Action]]:
-    """Return selected Cards plus the already-computed legacy fallback."""
+    """Return selected Cards plus the already-computed legacy fallback.
+
+    `refused_card_ids` (the plan's refusals, `SpeculativeSelectionContext.refused_card_ids`) leave
+    the candidate set BEFORE ranking, so the serial election, its claim revalidation and every
+    speculative query rank the same Cards; empty outside an endgame reserve."""
 
     # SearchPolicy is a pure required seam.  Do not conceal a policy failure as an exploratory draft;
     # only the optional Card hooks fail closed to this legacy result.  The policy view uses the SAME
@@ -1332,6 +1337,9 @@ def _selection_after_forced_gates(
         if isinstance(raw_fallback, Sequence) and not isinstance(raw_fallback, (str, bytes)) else []
 
     cards = list(candidate_cards) if candidate_cards is not None else eligible_cards(state, policy)
+    if refused_card_ids:
+        refused = _card_id_set(refused_card_ids)
+        cards = [card for card in cards if card.id not in refused]
     if not cards:
         return [], fallback
 
@@ -1694,6 +1702,14 @@ class SpeculativeSelectionContext:
     `consumed_inflight` defaults to empty, and the two ELECTION entry points leave it that way ON
     PURPOSE: election runs BEFORE the consumer admits an attempt, the freshness gate runs after. That
     is now one visible unset field at a caller instead of a missing keyword in two of five signatures.
+
+    `refused_card_ids` are the Cards the run's PLAN refuses right now (`engine/plan.py::
+    endgame_refused_card_ids`: inside an endgame reserve, every Card whose action the gate would
+    displace). They are not admissible, and — unlike `excluded_card_ids` — they are NOT reservations:
+    a refused Card owns no request or build, so it charges no slot (`_reserved_speculative_slots`
+    counts every excluded id without evidence as one). The subject a freshness query reopens, and
+    every sibling it reopens with it, is exempt: a build already bought is never refused, exactly as
+    it is never excluded. Empty outside a reserve, which is every query's historical answer.
     """
 
     scoring: "CardScoring | Mapping[str, object] | None" = None
@@ -1701,6 +1717,7 @@ class SpeculativeSelectionContext:
     ignored_pending_node_ids: Collection[int] = ()
     resource_envelope: "CardResourceEnvelope | None" = None
     consumed_inflight: Collection[tuple[int, int]] = ()
+    refused_card_ids: Collection[str] = ()
 
 
 # The "no session state" query: every field at its default. A module-level instance rather than a
@@ -1905,6 +1922,7 @@ def _speculative_selection(
     resource_envelope = context.resource_envelope
     consumed_inflight = context.consumed_inflight
     excluded = _card_id_set(context.excluded_card_ids)
+    refused = _card_id_set(context.refused_card_ids)
     ignored_pending = _node_id_set(context.ignored_pending_node_ids)
     selection_state = state
     reopened_card_ids: frozenset[str] = frozenset()
@@ -1929,6 +1947,11 @@ def _speculative_selection(
             owned_node_id for owned_node_id in ignored_pending
             if owned_node_id not in reopened_node_ids
         )
+    # A PLAN-REFUSED Card is not admissible, but it is not a reservation either: it joins the
+    # admissibility exclusion only, never `_reserved_speculative_slots` below. A reopened subject is
+    # a build already bought, and the plan refuses purchases, not builds (see the context's note).
+    refused = frozenset(card_id for card_id in refused if card_id not in reopened_card_ids)
+    not_admissible = excluded | refused
 
     # WHETHER THE MASKED POLICY VIEW WOULD ANSWER UNSOUNDLY. Computed here, where the mask is
     # settled, and CONSULTED below at the one lane that builds that view — see
@@ -1948,7 +1971,7 @@ def _speculative_selection(
         nonlocal admissible_cache
         if admissible_cache is None:
             admissible_cache = _admissible_cards(
-                selection_state, policy, excluded, resource_envelope)
+                selection_state, policy, not_admissible, resource_envelope)
         return admissible_cache
 
     # Outstanding requests and build markers reserve capacity before they become Node rows.  Committed
@@ -2198,12 +2221,17 @@ def card_selection_set(
     max_nodes: int,
     *,
     scoring: CardScoring | Mapping[str, object] | None = None,
+    refused_card_ids: Collection[str] = (),
 ) -> list[Card]:
-    """Return the current deterministic Card selection set, empty during any forced phase."""
+    """Return the current deterministic Card selection set, empty during any forced phase.
+
+    `refused_card_ids` must be the set the election that chose the lane used (`card_next_actions`),
+    or a claim revalidating that lane asks a different question and refuses it."""
 
     if forced_card_actions(state, policy, max_nodes) is not None:
         return []
-    selected, _ = _selection_after_forced_gates(state, policy, max_nodes, scoring)
+    selected, _ = _selection_after_forced_gates(
+        state, policy, max_nodes, scoring, refused_card_ids=refused_card_ids)
     return selected
 
 
@@ -2251,6 +2279,7 @@ def card_next_actions(
     max_nodes: int,
     *,
     scoring: CardScoring | Mapping[str, object] | None = None,
+    refused_card_ids: Collection[str] = (),
 ) -> list[Action]:
     """Card-driven ``next_actions`` with the legacy empty-actions/liveness contract.
 
@@ -2258,13 +2287,17 @@ def card_next_actions(
     claim.  No eligible score, an unsupported policy, or a bad optional hook falls back to the policy's
     already-computed ``next_actions``.  A buggy non-forced empty fallback cannot finish the run early:
     while effective budget remains, a draft keeps the loop live.
+
+    ``refused_card_ids`` — the Cards the run's plan refuses right now — are never elected; empty
+    outside an endgame reserve.
     """
 
     forced = forced_card_actions(state, policy, max_nodes)
     if forced is not None:
         return forced
 
-    selected, fallback = _selection_after_forced_gates(state, policy, max_nodes, scoring)
+    selected, fallback = _selection_after_forced_gates(
+        state, policy, max_nodes, scoring, refused_card_ids=refused_card_ids)
     actions: list[Action] = []
     for card in selected:
         action = card_action(card)

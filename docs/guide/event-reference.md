@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-162 event types — 113 folded into `RunState`, 49 diagnostic; 1026 declared payload keys; 22 types whose whole payload is stored by the fold.
+162 event types — 113 folded into `RunState`, 49 diagnostic; 1030 declared payload keys; 22 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -139,7 +139,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `operator_request_parked` | diagnostic | A queued fork / inject / forced ablation waits for a node slot: the node budget is spent; add_nodes admits it. | `detail`, `held_by_card_requests`, `limit`, `reason`, `request`, `reserved` | `generation`, `idx`, `node_id` |
 | `pause` | folded | The run paused — by an operator, or by the engine with a stated reason. | — | `attempt`, `detail`, `drain_builds`, `drain_only`, `due`, `generation`, `node_id`, `reason`, `terminal_reason` |
 | `phase_progress` | diagnostic | One build/eval phase started or finished — the live activity feed's row. | `phase`, `stage`, `status` | — |
-| `plan` | folded · whole | The run's PLAN artifact: how `max_nodes` was cut into seed, search and endgame reserve. | — | `at_node`, `endgame_start`, `max_nodes`, `phases`, `reason`, `reserve`, `reserve_frac`, `source` |
+| `plan` | folded · whole | The run's PLAN artifact: how `max_nodes` was cut into seed, search and endgame reserve. | — | `at_node`, `champion`, `endgame_end`, `endgame_start`, `max_nodes`, `phases`, `reason`, `reopen_cause`, `reserve`, `reserve_frac`, `source`, `stall_champions` |
 | `policy_decision` | folded | The search policy's pick among the legal actions, with the scores behind it. | `chosen`, `reason`, `scores` | — |
 | `prior_injected` | diagnostic | A cross-run prior was put in front of a role at a node — the receipt the citation instrument reads. | — | `at_node`, `case`, `notes`, `operator`, `operator_scoped`, `phase`, `quarantined_useless`, `role`, `rows`, `source` |
 | `promote` | folded · whole | The operator promoted one node to an alias (`champion` by default). | `node_id` | `alias`, `attempt`, `generation` |

@@ -36,7 +36,7 @@ from looplab.core.config import (PARALLELISM_ALIASES, canonicalize_parallelism_s
                                  governed_eval_timeout)
 from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import LLM_LANES
-from looplab.core.models import NodeStatus, RunState
+from looplab.core.models import Node, NodeStatus, RunState
 from looplab.core.prompts import PromptStore, render
 
 # The novelty-stance vocabulary (the Strategist-owned dial). Centralized so the write side
@@ -216,6 +216,47 @@ def improves_since_best(state: RunState) -> int:
                if n.id > best_id and n.operator in STALL_OPERATORS)
 
 
+def _descends_from_champion(state: RunState, champion: Node) -> set[int]:
+    """The ids built on the champion's CURRENT lifecycle, transitively over `parent_ids`.
+
+    One pass in id order: a node names only parents that existed when it was created, and ids are
+    reserved in order, so every parent precedes its child. The edge INTO the champion must carry the
+    lifecycle it has now (`Node.parent_generations`, the fold's receipt of the attempt a child was
+    built from): a child of an earlier attempt — before a reset re-scored it into the lead — was not
+    built on the champion the stall is about. An edge with no receipt is accepted."""
+    lineage: set[int] = set()
+    for node in sorted(state.nodes.values(), key=lambda n: n.id):
+        if node.id <= champion.id:
+            continue
+        for parent in node.parent_ids:
+            if parent == champion.id:
+                generation = node.parent_generations.get(str(parent))
+                if generation is None or generation == champion.attempt:
+                    lineage.add(node.id)
+                    break
+            elif parent in lineage:
+                lineage.add(node.id)
+                break
+    return lineage
+
+
+def _scored_against_champion(state: RunState, node: Node, champion: Node) -> bool:
+    """Was this node's Card SCORED against the champion's current lifecycle? The Card's
+    `scored_against` fence is written at proposal time from the champion of that moment, so it is
+    the receipt of what the proposal was trying to beat. A fence with no generation (written before
+    lifecycles were fenced) falls back to the fold's terminal ORDERING: an attempt that settled
+    before the champion's own terminal cannot have been aimed at the champion it then became."""
+    card_id = node.idea.card_id if node.idea is not None else None
+    card = state.cards.get(card_id) if isinstance(card_id, str) else None
+    if card is None or card.scored_against != champion.id:
+        return False
+    if card.scored_against_generation is not None:
+        return card.scored_against_generation == champion.attempt
+    if node.terminal_event_seq is None or champion.terminal_event_seq is None:
+        return True
+    return node.terminal_event_seq > champion.terminal_event_seq
+
+
 def stall_rung(state: RunState, stall_window: int) -> tuple[int, int]:
     """The plateau's IDENTITY for the consult trigger: `(rung, started_at)`.
 
@@ -227,15 +268,36 @@ def stall_rung(state: RunState, stall_window: int) -> tuple[int, int]:
     `at_node = len(state.nodes)` at record time, so a mark `>= started_at` is a decision recorded
     after this rung began, whatever gaps the id sequence carries.
 
+    AN ATTEMPT COUNTS ONLY IF IT WAS AN ATTEMPT ON THE CHAMPION (MiniOneRec inf13, 2026-09-27): the
+    champion is among its ancestors (`_descends_from_champion`), or its Card was scored against the
+    champion (`_scored_against_champion`). "A higher id than the leader" was the old reading, and ids
+    are reserved at BUILD START: on inf13 node 5 won at seq 8866 with a build that began at seq 2217,
+    so nodes 6-10 — builds of ideas proposed against node 2 while node 5 was still unscored — counted
+    as five failed pushes on node 5, and with node 11 (the one build actually aimed at it) they made
+    the hard stall that turned the rest of a 100,000-node budget into an endgame at node 12.
+    Re-counted, the stall at node 12 was nodes 11 alone; with 12 and 13 it is one window, not two.
+
+    NO SETTING, because the rung can only go DOWN against the historical count: the counted set is a
+    subset of the old one. Its start can only move LATER for the same reason, so on a run upgraded
+    mid-plateau the consult trigger (`engine/cadence.py::plateau_due`) may re-open one consult for
+    the rung it re-derives; the endgame's stall trigger (`engine/plan.py::replan`) only ever fires
+    later or not at all.
+
     Deterministic over the folded DAG, like `improves_since_best` above (of which it is the windowed
-    reading); `(0, 0)` when there is no leader yet or the window has not filled once.
+    reading; that count stays unfiltered because it is a prompt input); `(0, 0)` when there is no
+    leader yet or the window has not filled once.
     """
     window = max(1, int(stall_window or 0))
     best_id = state.best_node_id
     if best_id is None:
         return 0, 0
+    champion = state.nodes.get(best_id)
+    if champion is None:
+        return 0, 0
+    lineage = _descends_from_champion(state, champion)
     after = sorted(n.id for n in state.nodes.values()
-                   if n.id > best_id and n.operator in STALL_OPERATORS)
+                   if n.id > best_id and n.operator in STALL_OPERATORS
+                   and (n.id in lineage or _scored_against_champion(state, n, champion)))
     rung = len(after) // window
     if rung == 0:
         return 0, 0

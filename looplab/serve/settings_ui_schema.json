@@ -226,6 +226,13 @@
           "help": "The plan's endgame reserve (doc 52 row 18): this fraction of max_nodes is kept for the top-2 ensemble and champion sweeps proposed by the k-NN surrogate, and the dispatcher honours it. 0 = no plan (the historical dispatch)."
         },
         {
+          "key": "endgame_stall_nodes",
+          "label": "Stall endgame length",
+          "type": "int",
+          "default": 3,
+          "help": "How many nodes an endgame started by a hard stall (two stall windows without a new champion) spends on the ensemble and champion sweeps before the plan reopens to ordinary search. One episode per champion; a new champion ends it early. 0 = the stall endgame lasts to the end of the budget (the historical rule). Needs an endgame reserve above 0."
+        },
+        {
           "key": "complexity_cue",
           "label": "Complexity cue",
           "type": "bool",

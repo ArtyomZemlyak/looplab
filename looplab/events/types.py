@@ -2034,11 +2034,12 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         required=(),
         # `drain_builds`: the operator's `looplab stop --drain-builds` — builds already running
         # finish and commit before the engine exits. `drain_only`: the pause a drain-only resume
-        # (`looplab resume --drain-only`) writes when its drain ends, done or stuck. `due` +
-        # `terminal_reason`: an external-harness run held at its finish while the agent still owes
-        # a report, reviews or pending nodes (`harness/obligations.py::external_finish_due`).
-        optional=("attempt", "detail", "drain_builds", "drain_only", "due", "generation",
-                  "node_id", "reason", "terminal_reason"),
+        # (`looplab resume --drain-only`) writes when its drain ends, done or stuck.
+        # `terminal_reason` + `due`: an external harness's finish held back by its unmet obligations
+        # (`orchestrator.py`, reason `external_finish_obligations_due`) — the finish that was asked
+        # for and what is still owed.
+        optional=("attempt", "detail", "drain_builds", "drain_only", "due", "generation", "node_id",
+                  "reason", "terminal_reason"),
     ),
     "phase_progress": PayloadContract(
         "One build/eval phase started or finished — the live activity feed's row.",
@@ -2053,8 +2054,14 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # authored from the fold-read side alone, so the three keys `build_plan` returns and nothing
         # folds were simply absent — and `stored_whole` is True, which makes them undocumented
         # fields of `RunState.plan`.
-        optional=("at_node", "endgame_start", "max_nodes", "phases", "reason", "reserve",
-                  "reserve_frac", "source"),
+        # The bounded stall episode (2026-09-27, `Settings.endgame_stall_nodes`): `endgame_end` (the
+        # exclusive end `in_endgame` reads) and `champion` (the node the stall was measured against)
+        # on a row that bounds one; `stall_champions` (the champions whose one episode is spent) on
+        # every row after the first episode; `reopen_cause` on a `reopened` row. All LOAD-BEARING:
+        # `replan` reads each back off the folded `state.plan`. A run that never enables the setting
+        # writes none of them.
+        optional=("at_node", "champion", "endgame_end", "endgame_start", "max_nodes", "phases",
+                  "reason", "reopen_cause", "reserve", "reserve_frac", "source", "stall_champions"),
         stored_whole=True,
     ),
     "policy_decision": PayloadContract(

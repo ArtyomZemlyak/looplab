@@ -967,6 +967,16 @@ class Settings(BaseSettings):
     # now a durable `plan` row rather than a consult that may never fire; `EngineOptions` keeps 0.0
     # so a bare `Engine(...)` gains no dispatch authority it did not ask for.
     endgame_reserve_frac: float = Field(default=0.2, ge=0.0, le=0.9)
+    # THE STALL EPISODE'S LENGTH (`engine/plan.py::replan`): how many nodes a STALL-triggered endgame
+    # spends before the plan reopens. A hard stall (`stall_rung` at two windows) used to start the
+    # endgame for the rest of the budget: MiniOneRec inf13 (`max_nodes` 100000) entered it at node 12
+    # and reserved 99,988 nodes for merges and sweeps, forever. With K > 0 the stall row carries
+    # `endgame_end = at_node + K` and the champion it was measured against, and a `reopened` row cuts
+    # the ordinary plan again once K nodes are spent or a new champion is crowned; one episode per
+    # champion, and a budget re-cut carries a live episode. 0 = the permanent endgame, byte for byte
+    # (`EngineOptions` and a pre-field snapshot: `LEGACY_CONFIG_SNAPSHOT_DEFAULTS`). With it on, a
+    # legacy unbounded stall row is re-evaluated once. Inert without a plan (`endgame_reserve_frac` 0).
+    endgame_stall_nodes: int = Field(default=3, ge=0, le=1_000_000)
     # A0d (AIRA): inject a dynamic complexity hint into the draft/improve prompt keyed on the
     # node's child count (few children -> keep minimal; many -> escalate to ensembling/HPO).
     complexity_cue: bool = False
@@ -3761,6 +3771,13 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # doc 52 row 18: a resumed pre-plan run keeps its historical dispatch — no reserve appears
     # mid-run under a rule its first half never had.
     "endgame_reserve_frac": 0.0,
+    # THE BOUNDED STALL EPISODE, added 2026-09-27 defaulting to 3 (MiniOneRec inf13). (a) holds. (b):
+    # it changes what the dispatcher builds — a stall endgame that ended at the budget now reopens
+    # after K nodes and its breadth buys proposals and builds the first half of the run never bought,
+    # and an unbounded stall row already in the log is re-evaluated on the first turn. (c) is 0, the
+    # permanent endgame, pointable at every commit before this one. An operator opts a run in by
+    # setting it in that run's `config.snapshot.json` (or `PUT /api/runs/{id}/config`) and resuming.
+    "endgame_stall_nodes": 0,
     # THE UNTRUSTED-EVIDENCE ENVELOPE, added 2026-09-06 defaulting ON (doc 52 row 13). (a) holds.
     # (b) is `developer_probe`'s DIFFERENT-PROMPT ground exactly: the Strategist, triage and critic
     # system prompts gain a guard sentence and their user turns gain a fence around the candidate's

@@ -209,6 +209,29 @@ def _scrub_developer_credentials_for_the_whole_session(_session_isolation_patch)
         _session_isolation_patch.delenv(name, raising=False)
 
 
+# THE OWNER TOKEN IS PROCESS STATE THAT PRODUCT CODE WRITES DIRECTLY. `serve/owner_token.py` exports
+# a minted token into `os.environ["LOOPLAB_UI_TOKEN"]` ON PURPOSE (four other readers ask the
+# environment), so a test that mints one leaves every later `make_app` in the process default-denying
+# `/api/*` -- a `monkeypatch` cannot undo a write it did not make. Measured on this JupyterHub box
+# (whose environment makes the mint path live): `tests/test_durable_op_kit.py`'s module-scoped server
+# fixtures got 401 after earlier tests in the same process, and passed on their own. Every test now
+# starts and ends with the session's baseline value, whoever wrote the variable in between.
+@pytest.fixture(autouse=True, scope="session")
+def _ui_token_session_baseline(_scrub_developer_credentials_for_the_whole_session,
+                               _isolate_looplab_home_for_the_whole_session):
+    return os.environ.get("LOOPLAB_UI_TOKEN")
+
+
+@pytest.fixture(autouse=True)
+def _ui_token_does_not_leak_between_tests(_ui_token_session_baseline):
+    yield
+    if os.environ.get("LOOPLAB_UI_TOKEN") != _ui_token_session_baseline:
+        if _ui_token_session_baseline is None:
+            os.environ.pop("LOOPLAB_UI_TOKEN", None)
+        else:
+            os.environ["LOOPLAB_UI_TOKEN"] = _ui_token_session_baseline
+
+
 @pytest.fixture(autouse=True)
 def _isolate_looplab_home(_isolation_patch, tmp_path):
     """Cross-run memory and the knowledge base are ON BY DEFAULT — they point at the developer's real

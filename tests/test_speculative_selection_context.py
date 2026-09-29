@@ -40,9 +40,12 @@ from looplab.search.card_selection import (
 
 _DIGEST = "card-action:v1:" + "5" * 64
 
-# The five fields one producer/consumer session holds constant across every query it makes.
+# The six fields one producer/consumer session holds constant across every query it makes. The
+# sixth, `refused_card_ids` (2026-09-27), is the run PLAN's refusals inside an endgame reserve
+# (`engine/plan.py::endgame_refused_card_ids`): not admissible, and — unlike `excluded_card_ids` —
+# never charged as a reservation; `tests/test_endgame_admission.py` drives the difference.
 SESSION_FIELDS = ("scoring", "excluded_card_ids", "ignored_pending_node_ids",
-                  "resource_envelope", "consumed_inflight")
+                  "resource_envelope", "consumed_inflight", "refused_card_ids")
 ENTRY_POINTS = (speculative_card_selection_set, speculative_card_actions,
                 speculative_raw_actions, speculative_card_is_fresh)
 
@@ -50,7 +53,8 @@ ENTRY_POINTS = (speculative_card_selection_set, speculative_card_actions,
 # --------------------------------------------------------------- the session is declared once
 
 def test_no_entry_point_re_declares_a_session_field():
-    """The whole point: adding a sixth session field must be ONE edit, in the dataclass."""
+    """The whole point: adding a session field must be ONE edit, in the dataclass (the sixth,
+    `refused_card_ids`, was)."""
     for fn in ENTRY_POINTS:
         params = set(inspect.signature(fn).parameters)
         leaked = params.intersection(SESSION_FIELDS)

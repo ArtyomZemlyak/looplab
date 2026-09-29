@@ -148,6 +148,8 @@ class EngineKnobs:
     _concurrent_consolidate = Knob("concurrent_consolidate", bool)
     report_every = Knob("report_every", lambda v: max(0, v))
     _endgame_reserve_frac = Knob("endgame_reserve_frac", lambda v: float(v or 0.0))
+    # The stall episode's length (`engine/plan.py::replan`); 0 = the permanent stall endgame.
+    _endgame_stall_nodes = Knob("endgame_stall_nodes", lambda v: max(0, int(v or 0)))
     # doc 52 row 19: the model ARMS the bandit may route a build to — `{arm: (model, cost)}`;
     # the configured Developer model is the implicit `default` arm. Inert without
     # `operator_bandit`, which is the policy's knob, and without a declared arm.

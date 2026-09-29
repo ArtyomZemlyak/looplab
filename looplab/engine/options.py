@@ -230,6 +230,11 @@ class EngineOptions:
     report_every: int = 0                # regenerate the run report every N created nodes (0 = manual only)
     merge_mode: str = "mean"             # A0b: "mean" | "ensemble" ("auto" resolves in Engine.__init__)
     endgame_reserve_frac: float = 0.0    # doc 52 row 18: the plan's endgame reserve (0 = historical dispatch)
+    # How many nodes a STALL-triggered endgame spends before the plan reopens (`engine/plan.py::
+    # replan`). 0 = the permanent stall endgame, the historical rule; the product ships 3 — a
+    # divergence-table row (`tests/test_options_divergence.py`): a bare `Engine(...)` gains no new
+    # dispatch it did not ask for.
+    endgame_stall_nodes: int = 0
     model_arms: dict = field(default_factory=dict)   # doc 52 row 19: {arm: "model[@cost]"} the bandit may route a build to
     complexity_cue: bool = False         # A0d: breadth-keyed prompt hint
     budget_aware: bool = False           # A5: surface remaining eval budget into the prompt

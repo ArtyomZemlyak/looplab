@@ -244,7 +244,10 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   and `ablation_simplify` — a no-worse ablation probe nominates the program it ran as a node,
   //   a row because it spends a node per nomination. The Python half moved too.
   //   235 -> 236 (2026-09-29, the merge of master): master's `external_harness`.
-  assert.equal(Object.keys(schema.fieldByKey).length, 236)
+  //   236 -> 237 (2026-09-29): `endgame_stall_nodes` — how many nodes a stall-triggered endgame
+  //   spends before the plan reopens. A row because it decides what a stalled run builds; the
+  //   Python half moved too.
+  assert.equal(Object.keys(schema.fieldByKey).length, 237)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

@@ -2360,7 +2360,9 @@ def _apply_substituted_builds(st: RunState, ledger: _CardLedger) -> None:
       decides the verdict alone.
     * Once per card (`_apply_card_returns`, counted with the discards): a single forgiven node that
       is the card's whole evidence — or beside nothing but its own rebuild still in flight — leaves
-      `evidence`, so the card is `proposed`/`open` and selection-ready again.
+      `evidence`, so the card is `proposed`/`open` and selection-ready again; unless, with no
+      rebuild under way, a later build on it has beaten it (`idea_report.surpassed_by`, recorded
+      as `Card.withheld_by`).
     * At two it stays (both do): the card has twice been built as something else, which says the
       idea does not get built as proposed here, and the run stops paying for it — the card retires
       through the ordinary `work_terminal` path with its verdict still `open`, never `supported`.
@@ -2394,7 +2396,37 @@ def _apply_substituted_builds(st: RunState, ledger: _CardLedger) -> None:
         c.substituted_nodes = substituted
 
 
-def _apply_card_returns(st: RunState, ledger: _CardLedger) -> None:
+def _rebuild_in_flight(node: Node, st: RunState, *, requested: bool,
+                       claimed_by: Iterable[int]) -> bool:
+    """Is a build of this card already answering its return, before that build has a node?
+
+    `node` is the card's one forgiven node; `claimed_by` the node ids of the `node_building` markers
+    naming the card (`_card_building_ids`), `requested` whether it holds an OPEN
+    `card_build_requested` (`RunState.open_card_build_request_ids`). Either is a rebuild the run has
+    already decided on:
+
+    * A MARKER for another node is a claimed build — serial, or a speculative result being
+      committed. The forgiven node's own marker cannot be the one: it cleared on the node's
+      `node_created`, and a marker for a node that is not pending is never set
+      (`replay._on_node_building`).
+    * An OPEN REQUEST is an elected speculative build that has no node until
+      `speculation.py::_claim_requested_card_build` commits it. It is the REBUILD's request, made
+      after the return: a card cannot be elected while its node is pending or in its evidence
+      (`work_in_flight` / `work_terminal`), and a card holding an open request is not elected again
+      (`_election_excluded_card_ids`) — with ONE exception, excluded here rather than argued away: a
+      speculative node whose own `card_build_done` has not landed yet (that close is what puts it in
+      `speculative_nodes`) may still own the open request, and counting it would keep the card
+      returned with nothing rebuilding it.
+    """
+    if any(node_id != node.id for node_id in claimed_by):
+        return True
+    if not requested:
+        return False
+    return not (getattr(node, "speculative", False) is True and node.id not in st.speculative_nodes)
+
+
+def _apply_card_returns(st: RunState, ledger: _CardLedger,
+                        building_card_nodes: Mapping[str, list[int]] | None = None) -> None:
     """The once-per-card RETURN of a forgiven node, for both kinds: a never-run discard
     (`_apply_unexecuted_discards`) and a build that ran something else (`_apply_substituted_builds`).
 
@@ -2418,8 +2450,64 @@ def _apply_card_returns(st: RunState, ledger: _CardLedger) -> None:
     exactly the mixed set it always did — the one `test_the_filter_never_moves_a_card_that_also_
     holds_real_evidence` pins. A substitution that is itself trust-excluded or infeasible never
     returns (see `_apply_substituted_builds`): that would carry its card OUT of `gated`.
+
+    NOR A SUBSTITUTION A LATER BUILD ON IT HAS BEATEN (2026-09-27, `core/idea_report.py::
+    surpassed_by`): a descendant of the substituted node that is another card's experiment, tested
+    its own idea, counts under the champion's exclusions and beat the node's metric in the run's
+    direction. Measured on MiniOneRec inf13: card-2's node 2 (1.3726, `different`) was returned and
+    selection-ready although card-6's node 5, built on it `as_proposed`, had since tested card-2's
+    very claim and beaten it (4.1658) — the rebuild would have paid a Developer build for a solved
+    idea and told it "not tested yet". No field says two cards make the same claim, so the card is
+    not handed back to the automatic Card lane, which cannot tell whether that lineage answered it:
+    the node stays in `evidence` (verdict `open` — it never counts — and status `failed`, the lane a
+    card whose only evidence is a substitution already reads), the nodes that beat it are recorded
+    as `Card.withheld_by` — the decision itself, which the row clause (`card_substitution_brief`),
+    the public wire and the UI read instead of re-deriving it — and the Researcher reads the card in
+    a block of its own (`agents/state_brief.py::board_prompt_lines`): never tested, not rebuilt by
+    the engine, and re-proposable as a NEW card only if none of those nodes tested it. A PROXY, and
+    the trade-off is stated where the rule is: a descendant that tested the same claim and LOST no
+    longer blocks (the card's one rebuild may re-test it), while an unrelated descendant that WON
+    still blocks. Discards never ran, so they have no descendants.
+
+    THE WITHHOLD DOES NOT STICK. It is judged again on every fold from the winners' CURRENT state,
+    so it lifts the moment none of them counts: a winner reset to pending (`node_reset`), aborted,
+    tombstoned, or trust-flagged under an enforcing gate (it joins `breed_excluded`) leaves
+    `surpassed_by` empty, and the card is returned and selection-ready again. A return taken in that
+    window is then LOCKED IN: once the card is elected (an open `card_build_requested`) or claimed
+    (a `node_building` marker), `_rebuild_in_flight` holds it even after the winner is back and
+    beating the substitution again, so that rebuild is built and paid for — the guarantee below that
+    keeps a paid build from being thrown away, applied to a card the rule would otherwise withhold.
+
+    NEVER OVER A REBUILD ALREADY UNDER WAY — `rest` non-empty (its node, pending) or
+    `_rebuild_in_flight` (elected or claimed, no node yet). A speculative rebuild has no node until
+    it is claimed, and the claim re-folds: `_claim_requested_card_build` gives it up
+    `stale:not_selected_now` unless the card is still selected, and `card_reservation.py::
+    _prepare_existing_card_claim` refuses a card that is not `selection_ready`. So a descendant that
+    beat the substitution WHILE the rebuild was building would put the node back into `evidence`
+    (`work_terminal`) and throw the finished, paid build away. The open request or `node_building`
+    marker is the same log fact the board shows as `building` (`RunState.cards_being_built`), so the
+    fold stays a pure function of the log; a request that closes without a node stops counting and
+    the card is judged again. It is not an exclusion (the proposal `_card_building_ids` records as
+    rejected went the other way): it keeps the returned card claimable by the one servicer of that
+    request. The markers are `_card_building_ids`' (canonical: the reserved node's `card_id` links
+    into the survivor of a merge); the requests are matched on their OWN card id, because that is
+    the id `_claim_requested_card_build` commits under — a request for a card since merged away can
+    never land on the survivor, so it is no rebuild of it. `building_card_nodes` defaults to "none
+    known", so a hand-built ledger reads as before.
+
+    IT CHANGES WHICH CARDS RETURN ON A PRESERVED LOG, without a switch, as the two phases it counts
+    over do: a flag would keep a card a later build had answered on the board of a resumed run, and
+    the Developer build that return buys is the cost this clause exists to stop.
     """
+    from looplab.core.idea_report import surpassed_by
+
+    requested = st.open_card_build_request_ids()
+    claimed = building_card_nodes or {}
+    excluded = frozenset(st.breed_excluded or ())
+    aborted = frozenset(st.aborted_nodes or ())
     for c in ledger.cards.values():
+        # Stamped on EVERY card, and set by the one decision below that withholds a return.
+        c.withheld_by = []
         forgiven = sorted(set(c.discarded_nodes) | set(c.substituted_nodes))
         if len(forgiven) != 1:
             continue
@@ -2432,10 +2520,19 @@ def _apply_card_returns(st: RunState, ledger: _CardLedger) -> None:
         rest = [i for i in c.evidence if i != only]
         # "In flight" is `_apply_card_selection_readiness`' own spelling of it: pending, and neither
         # tombstoned nor aborted — a struck rebuild is not work the return can wait on.
-        if all(i > only and (other := st.nodes.get(i)) is not None
-               and other.status is NodeStatus.pending and not other.tombstoned
-               and i not in st.aborted_nodes for i in rest):
-            c.evidence = rest
+        if not all(i > only and (other := st.nodes.get(i)) is not None
+                   and other.status is NodeStatus.pending and not other.tombstoned
+                   and i not in st.aborted_nodes for i in rest):
+            continue
+        if (not rest and only in c.substituted_nodes
+                and not _rebuild_in_flight(node, st, requested=c.id in requested,
+                                           claimed_by=claimed.get(c.id, ()))):
+            beaten = surpassed_by(only, st.nodes, direction=st.direction,
+                                  excluded=excluded, aborted=aborted)
+            if beaten:
+                c.withheld_by = beaten
+                continue
+        c.evidence = rest
 
 
 def _apply_card_verdicts(
@@ -3601,10 +3698,15 @@ def derive_cards(
     control_ids = _fold_merged_cards(st, identity, ledger, aliases, control_ids)
     _apply_unexecuted_discards(st, ledger)
     _apply_substituted_builds(st, ledger)
-    _apply_card_returns(st, ledger)
+    # Read BEFORE the return, because `_apply_card_returns` counts a claimed build (a
+    # `node_building` marker naming the card) as the returned card's rebuild. A pure read of
+    # `st.buildings` and the merged card ids, which no phase between here and the status lane
+    # changes, so the status and readiness passes below see the value they saw when it was read
+    # after the drops.
+    building_card_nodes = _card_building_ids(st, ledger, aliases)
+    _apply_card_returns(st, ledger, building_card_nodes)
     _apply_card_verdicts(st, ledger, control_ids)
     dropped = _apply_card_drops(st, ledger, aliases)
-    building_card_nodes = _card_building_ids(st, ledger, aliases)
     _apply_card_status(st, ledger, dropped, building_card_nodes)
     _apply_card_applied_params(st, ledger)
     _apply_card_enrichment(st, ledger, aliases, card_enrichment_omissions)

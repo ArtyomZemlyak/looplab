@@ -292,15 +292,25 @@ class ProposalCuesMixin:
             kinds = last.get("kinds") if isinstance(last, dict) else None
             words = [_ENDGAME_KIND_WORDS[k] for k in (kinds or ())
                      if isinstance(k, str) and k in _ENDGAME_KIND_WORDS]
+            # A BOUNDED stall episode (`engine/plan.py`, `endgame_end`) ends before the budget does:
+            # its last experiment is `endgame_end - 1`, and once it is spent this proposal is not
+            # inside it. A row without the key — every row written with `endgame_stall_nodes` 0 —
+            # renders exactly the historical sentence.
+            try:
+                end = plan.get("endgame_end")
+                end = None if end is None else int(end)
+            except (TypeError, ValueError, OverflowError):
+                end = None
+            final = (min(end, limit) if end is not None else limit) - 1
             if start is not None and 0 < start < limit and words:
                 spend = " and ".join(words)
                 if used < start:
-                    hint += (f" The run's plan reserves experiments #{start}–#{limit - 1} for its "
+                    hint += (f" The run's plan reserves experiments #{start}–#{final} for its "
                              f"endgame ({spend}), so at most {start - used} more can open a new "
                              "direction before that reserve begins.")
-                else:
+                elif end is None or used < end:
                     hint += (f" This proposal falls inside the plan's endgame reserve (experiments "
-                             f"#{start}–#{limit - 1}), which the plan spends on {spend}.")
+                             f"#{start}–#{final}), which the plan spends on {spend}.")
         return hint, []
 
     def _cue_experiment_time_budget(self, state: RunState, parent, _r):

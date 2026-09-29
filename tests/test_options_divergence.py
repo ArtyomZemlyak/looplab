@@ -54,6 +54,10 @@ EXPECTED = {
     # 80 % rule as a durable `plan` row the dispatcher honours), 0 in bare-library `EngineOptions`
     # so a direct `Engine(...)` gains no authority over its caller's dispatch it did not ask for.
     "endgame_reserve_frac": (0.2, 0.0),
+    # The stall episode's length (`engine/plan.py::replan`, 2026-09-27): the product surface bounds a
+    # stall-triggered endgame to 3 nodes and then reopens the plan; the bare library keeps 0 = the
+    # permanent stall endgame, the historical dispatch, on the row above's ground.
+    "endgame_stall_nodes": (3, 0),
     "reflection_priors": (True, False),
     "report_every": (3, 0),
     "watchdog_reflection": (True, False),

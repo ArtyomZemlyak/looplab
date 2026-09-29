@@ -2987,18 +2987,26 @@ class RunState(BaseModel):
         return [c for c in self.research_cards()
                 if c.verdict == "open" and c.status != "dropped" and c.seed_statement.strip()]
 
-    def cards_being_built(self) -> set:
-        """Cards a build is already answering: an OPEN speculative build request, or a
-        `node_building` marker naming the card. Neither has a node yet, so the card still reads as
-        untested. Measured 2026-09-25 on MiniOneRec inf12: card-17 was requested at 08:25 and built
-        at 10:51; in between node 18's proposal saw it as "Untested … return its CARD_ID", claimed
-        it, and the novelty gate rejected it as a duplicate of the build already running."""
+    def open_card_build_request_ids(self) -> set:
+        """Card ids holding an OPEN speculative build request — a `card_build_requested` whose queue
+        position no `card_build_done` has closed yet. The request half of `cards_being_built`, split
+        out so the card ledger reads the same definition: a returned card whose rebuild was elected
+        but has no node yet is still being rebuilt (`events/card_ledger.py::_rebuild_in_flight`)."""
         ids: set = set()
         ahead = set(self.card_builds_done_ahead)
         for index in range(max(0, int(self.card_builds_done)), len(self.card_build_requests)):
             request = self.card_build_requests[index]
             if index not in ahead and isinstance(request, dict) and request.get("card_id"):
                 ids.add(request["card_id"])
+        return ids
+
+    def cards_being_built(self) -> set:
+        """Cards a build is already answering: an OPEN speculative build request, or a
+        `node_building` marker naming the card. Neither has a node yet, so the card still reads as
+        untested. Measured 2026-09-25 on MiniOneRec inf12: card-17 was requested at 08:25 and built
+        at 10:51; in between node 18's proposal saw it as "Untested … return its CARD_ID", claimed
+        it, and the novelty gate rejected it as a duplicate of the build already running."""
+        ids = self.open_card_build_request_ids()
         for marker in (self.buildings or {}).values():
             if isinstance(marker, dict) and marker.get("card_id"):
                 ids.add(marker["card_id"])
@@ -3012,7 +3020,11 @@ class RunState(BaseModel):
 
     def card_substitution_brief(self, card) -> str:
         """`core/idea_report.py::card_substitution_brief` over this state's nodes — "" for a card no
-        build substituted; a board row splices it in front of its next field (it ends in a space)."""
+        build substituted; a board row splices it in front of its next field (it ends in a space).
+
+        A "not returned" row names `Card.withheld_by`, the nodes the card ledger withheld the return
+        with (`events/card_ledger.py::_apply_card_returns`) — read off the card, never judged again
+        here, so the row and the ledger cannot disagree about which card was kept off the board."""
         from looplab.core.idea_report import card_substitution_brief
         return card_substitution_brief(card, self.nodes)
 

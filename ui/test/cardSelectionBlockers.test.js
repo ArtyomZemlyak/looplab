@@ -15,7 +15,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
-import { CARD_COLUMNS, cardSelectionBlock } from '../src/cardBoardModel.js'
+import { CARD_COLUMNS, WITHHELD_LABEL, cardSelectionBlock } from '../src/cardBoardModel.js'
 
 const card = (extra = {}) => ({ id: 'card-0', selection_ready: false, ...extra })
 
@@ -162,4 +162,44 @@ test('the detail pane shows the SAME chip as the lane card, not the retired bina
     'the retired binary wording must not come back on any render path')
   // Both render paths resolve through the one model.
   assert.equal((board.match(/const block = cardSelectionBlock\(card\)/g) || []).length, 2)
+})
+
+// ------------------------------------------ one blocker, two retirements (the inf13 card-2 case)
+
+test('a withheld return does not read like a card retired on two substitutions', () => {
+  // MiniOneRec inf13 card-2 as the fold publishes it since 2026-09-27: its one build ran something
+  // else, and later builds ON it (nodes 5 and 10) beat it, so the ledger did not return it. The
+  // other card is one built as something else TWICE. Status, verdict and blocker are identical on
+  // the wire; only `withheld_by` — the ledger's own decision — tells them apart.
+  const withheld = { id: 'card-2', status: 'failed', verdict: 'open', selection_ready: false,
+    selection_blockers: ['work_terminal'], evidence: [2], substituted_nodes: [2], withheld_by: [5, 10] }
+  const retired = { id: 'card-3', status: 'failed', verdict: 'open', selection_ready: false,
+    selection_blockers: ['work_terminal'], evidence: [3, 4], substituted_nodes: [3, 4], withheld_by: [] }
+  const chip = cardSelectionBlock(withheld)
+  assert.equal(chip.tone, 'lifecycle')
+  assert.equal(chip.label, WITHHELD_LABEL)
+  assert.match(chip.title, /\(#5, #10\) beat it/)
+  assert.match(chip.title, /work_terminal/, 'the raw receipt stays in the tooltip')
+  assert.equal(cardSelectionBlock(retired).label, 'its experiment has finished')
+  // A payload minted before the field reads exactly as it always did.
+  const { withheld_by: _unused, ...legacy } = withheld
+  assert.equal(cardSelectionBlock(legacy).label, 'its experiment has finished')
+  // A long list is cut, and the cut is said.
+  const many = cardSelectionBlock({ ...withheld, withheld_by: [5, 6, 7, 8, 9, 10, 11, 12, 13, 14] })
+  assert.match(many.title, /#12 and 2 more\) beat it/)
+})
+
+test('a gated or otherwise closed card never reads as beaten', () => {
+  // The fold never stamps `withheld_by` on a gated single substitution — its gate, not a winner, is
+  // why it was not returned. A closed card keeps its closure's chip even on a payload that carries
+  // the field (a withheld card the operator later dropped): `card_terminal` is the stronger fact.
+  const gated = { id: 'card-2', status: 'gated', verdict: 'open', selection_ready: false,
+    selection_blockers: ['work_terminal', 'card_terminal'], evidence: [2], substituted_nodes: [2],
+    withheld_by: [] }
+  for (const card of [gated, { ...gated, withheld_by: [5] },
+    { ...gated, status: 'dropped', withheld_by: [5] }]) {
+    const chip = cardSelectionBlock(card)
+    assert.notEqual(chip.label, WITHHELD_LABEL, card.status)
+    assert.doesNotMatch(chip.title, /beat/, card.status)
+  }
 })

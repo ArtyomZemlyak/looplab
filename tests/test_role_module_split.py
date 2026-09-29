@@ -304,8 +304,16 @@ def test_roles_is_no_longer_a_god_module():
     brief is the ONE place the Researcher reads which number every node is ranked by, so the
     `Ranked by:` line — present only while a retarget is in force — lives beside the `Goal:` line it
     qualifies. The cap moves to measured + 1.
+
+    `state_brief.py` 608 -> 645 on 2026-09-27 (critic review of 01b5b53f, the withheld return): a
+    card the ledger WITHHELD (`Card.withheld_by`) is rendered in a board block of its own instead of
+    under "ALREADY on the board … re-attempted by the engine itself", whose words are false about it.
+    `attempted_board_prompt_cards` partitions its rows with `withheld=`, the row both blocks render
+    is one nested `_row`, and the new block's header and single instruction sit beside the old
+    block's. What the board SAYS is this module's whole job, so nothing moves out; `roles.py` re-
+    exports no new name. The cap moves to measured + 1.
     """
-    caps = {"agents/roles.py": 876, "agents/role_prompts.py": 344, "agents/state_brief.py": 609,
+    caps = {"agents/roles.py": 876, "agents/role_prompts.py": 344, "agents/state_brief.py": 646,
             "agents/role_wrappers.py": 467, "agents/toy_roles.py": 128}
     sizes = {rel: len((_PKG / rel).read_text(encoding="utf-8").splitlines()) for rel in caps}
     over = {rel: (n, caps[rel]) for rel, n in sizes.items() if n >= caps[rel]}
