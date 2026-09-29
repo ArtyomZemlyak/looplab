@@ -222,6 +222,14 @@ class AblationMixin:
         if self._ablate_code_blocks and parent.code.strip():
             await self._ablate_code(parent_id, generation, ablation_id)
             return
+        if self._run_halted_now():
+            # THE PROBE PASS IS NOT STARTED ON A HALTED RUN (WP-STOP): each probe is a Developer
+            # call. Nothing is written, so an operator's forced ablation stays queued for `looplab
+            # resume`. A pass ALREADY running is let finish, deliberately: its measurements are ONE
+            # `ablate` row, and a partial row would acknowledge a forced ablation with half its
+            # probes (`forced_requests.py::_pending_forced_ablation` closes on any row), while
+            # dropping the row would lose the probes' eval seconds from the run's budget.
+            return
         base = parent.metric if parent.metric is not None else 0.0
         # None per probe when the parent has no measured metric (below): `|probe - 0.0|` is the
         # probe's own magnitude, not an impact (critic 2026-09-26, driven: a forced ablation of a
@@ -290,6 +298,10 @@ class AblationMixin:
         # nothing is written and the prompt is the historical one, byte for byte.
         note = (ablation_probe_note(parent_id, top, signed_impacts, state.direction)
                 if self._ablation_probe_hint else "")
+        if self._run_halted_now():
+            # The refinement is a NEW paid Researcher call, and the child it proposes would be
+            # refused by the reservation on a halted run anyway (WP-STOP). The row above is whole.
+            return
         if note:
             self._stamp_ablation_probe_hint(note)
         try:

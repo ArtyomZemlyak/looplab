@@ -1979,6 +1979,13 @@ class NodeBuildMixin:
             self._rebuild_simplification(node)
             return
         replacement_card = stage == "propose" and node.operator != "merge"
+        if self._run_halted_now():
+            # A RESET STARTS NO PAID WORK ON A HALTED RUN (WP-STOP). The loop head read the halt
+            # before it handed this rebuild to a worker; a stop landing since is read here, before
+            # the re-proposal and before an implement-reset's `node_building`. Nothing was paid and
+            # nothing is written: the node keeps its Card and its `rerun_from`, and `looplab resume`
+            # serves the reset again — the same outcome as the degraded-proposal refusal below.
+            return
         with self.tracer.span(
                 "create_node", new_trace=True, node_id=node.id, generation=generation,
                 operator=node.operator):
@@ -2010,6 +2017,15 @@ class NodeBuildMixin:
                 # loop drains the queue right after the offload returns.
                 if self._refuse_degraded_proposal(proposed, main_task=False):
                     self._discard_node_build_telemetry()
+                    return
+                if self._run_halted_now():
+                    # …and a STOP that landed while the re-proposal was paid for refuses it at the
+                    # same point (WP-STOP): before `_commit_rerun_card` drops the old Card and
+                    # reserves the rebuild, whose Developer call would be the next paid one. Counted
+                    # on the DIAGNOSTIC beacon; the reset stays pending for `looplab resume`.
+                    self._discard_node_build_telemetry()
+                    self._beacon_discarded_proposal("run_is_stopping", node_id=node.id,
+                                                    operator=str(node.operator or ""))
                     return
                 idea = self._canonicalize_idea_operator(proposed, node.operator)
                 if idea is None:

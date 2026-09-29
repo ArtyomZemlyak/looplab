@@ -189,3 +189,85 @@ def test_the_card_commit_is_a_tail_cas_that_replans_on_a_moved_log(tmp_path, mon
     swap = [e for e in events if e.type in _CARD_SWAP and e.seq > hint]
     assert [e.type for e in swap] == list(_CARD_SWAP)
     assert fold(events).nodes[node.id].attempt == 1
+
+
+# ------------------------------------------------------------------ the run's STOP (WP-STOP)
+def _paid_calls(eng) -> dict:
+    """Count the two paid roles a rebuild can call."""
+    calls = {"propose": 0, "implement": 0}
+    real_r, real_d = eng.researcher, eng.developer
+
+    class _R:
+        def __getattr__(self, name):
+            return getattr(real_r, name)
+
+        def propose(self, state, parent):
+            calls["propose"] += 1
+            return real_r.propose(state, parent)
+
+    class _D:
+        def __getattr__(self, name):
+            return getattr(real_d, name)
+
+        def implement(self, *args, **kwargs):
+            calls["implement"] += 1
+            return real_d.implement(*args, **kwargs)
+
+        def implement_from(self, *args, **kwargs):
+            calls["implement"] += 1
+            return real_d.implement_from(*args, **kwargs)
+
+    eng.researcher, eng.developer = _R(), _D()
+    return calls
+
+
+def test_a_reset_on_a_halted_run_starts_no_paid_work_and_stays_pending(tmp_path):
+    """The loop head reads the halt before it hands the rebuild to a worker; a stop landing since —
+    or already standing — is read again before the re-proposal (a propose reset) and before the
+    `node_building` of an implement reset. Nothing is paid, nothing is written, and the node keeps
+    its Card and its `rerun_from` for `looplab resume` — the degraded-proposal refusal's outcome."""
+    for stage in ("propose", "implement"):
+        eng, node = _evaluated_run(tmp_path / stage)
+        eng.store.append(EV_NODE_RESET, {"node_id": node.id, "from_stage": stage,
+                                         "generation": node.attempt})
+        eng.store.append(EV_PAUSE, {"reason": "operator stop (`looplab stop`)"})
+        before = [e.seq for e in eng.store.read_all()]
+        calls = _paid_calls(eng)
+        _drive_rerun(eng, node.id)
+        assert calls == {"propose": 0, "implement": 0}, (stage, calls)
+        assert [e.seq for e in eng.store.read_all()] == before, stage
+        state = fold(eng.store.read_all())
+        assert state.nodes[node.id].rerun_from == stage
+        assert state.nodes[node.id].idea.card_id == node.idea.card_id
+
+
+def test_a_stop_landing_in_the_reproposal_refuses_it_before_the_card_swap(tmp_path):
+    """The re-proposal is paid for when the stop lands, and it finishes; the Card swap and the
+    rebuild's Developer call — the next paid one — do not happen. One DIAGNOSTIC `discarded`
+    beacon counts the loss; the old Card and the reset survive."""
+    eng, node = _evaluated_run(tmp_path / "run")
+    old_card = node.idea.card_id
+    eng.store.append(EV_NODE_RESET, {"node_id": node.id, "from_stage": "propose",
+                                     "generation": node.attempt})
+    calls = _paid_calls(eng)
+    counting = eng.researcher
+
+    class _StopsWhileProposing:
+        def __getattr__(self, name):
+            return getattr(counting, name)
+
+        def propose(self, state, parent):
+            eng.store.append(EV_PAUSE, {"reason": "operator stop (`looplab stop`)"})
+            return counting.propose(state, parent)
+
+    eng.researcher = _StopsWhileProposing()
+    log = _watch_appends(eng)
+    _drive_rerun(eng, node.id)
+    assert calls == {"propose": 1, "implement": 0}, calls
+    assert not [types for _m, types, _on_main in log if set(types) & set(_CARD_SWAP)]
+    state = fold(eng.store.read_all())
+    assert state.nodes[node.id].rerun_from == "propose"
+    assert state.cards[old_card].status != "dropped"
+    discarded = [(e.data["status"], e.data.get("reason")) for e in eng.store.read_all()
+                 if e.type == "phase_progress" and e.data.get("phase") == "discarded"]
+    assert discarded == [("started", "run_is_stopping"), ("finished", "run_is_stopping")]
