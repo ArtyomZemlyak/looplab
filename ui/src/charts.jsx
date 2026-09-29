@@ -97,6 +97,7 @@ export function Trajectory({
   const evald = nodes.filter(n => nodeIsActive(n, state) && (n.metric ?? null) !== null)
     .sort((a, b) => a.id - b.id)
   const [logY, setLogY] = React.useState(false)   // interactivity: log-scale toggle (e.g. loss curves)
+  const [detailY, setDetailY] = React.useState(true)
   const [hoverId, setHoverId] = React.useState(null)   // interactivity: crosshair + tooltip on hover
   const [focusGrp, setFocusGrp] = React.useState(null)   // interactivity: click the legend to isolate one group
   const [groupBy, setGroupBy] = React.useState('operator')   // grouping dimension: operator | theme
@@ -110,14 +111,31 @@ export function Trajectory({
   const xs = evald.map(n => n.id)
   const ys = evald.map(n => n.confirmed_mean ?? n.metric)
   const minY = Math.min(...ys), maxY = Math.max(...ys)
+  // A single poor experiment can flatten every useful frontier change. Only trim a severe
+  // worse-side outlier; the best result always stays in view. The full scale remains one click away.
+  const sortedY = [...ys].sort((a, b) => a - b)
+  const quantile = p => {
+    const index = (sortedY.length - 1) * p, low = Math.floor(index)
+    return sortedY[low] + (sortedY[Math.ceil(index)] - sortedY[low]) * (index - low)
+  }
+  const iqr = sortedY.length >= 8 ? quantile(.75) - quantile(.25) : 0
+  const fence = direction === 'min' ? quantile(.75) + 3 * iqr : quantile(.25) - 3 * iqr
+  const core = iqr > 0 ? ys.filter(v => direction === 'min' ? v <= fence : v >= fence) : ys
+  const coreMin = Math.min(...core), coreMax = Math.max(...core)
+  const fullSpan = maxY - minY, coreSpan = coreMax - coreMin
+  const canFocus = core.length < ys.length && coreSpan > 0 && fullSpan > coreSpan * 3
+  const shownMin = canFocus && detailY ? coreMin : minY
+  const shownMax = canFocus && detailY ? coreMax : maxY
+  const clipped = canFocus && detailY ? ys.length - core.length : 0
   const canLog = minY > 0                           // log scale only when every value is positive
   const useLog = logY && canLog
   const tf = (v) => useLog ? Math.log10(v) : v      // value transform for the axis
-  const tMin = tf(minY), tMax = tf(maxY)
-  const pad = 34, w = width, h = height
+  const tMin = tf(shownMin), tMax = tf(shownMax)
+  const pad = 58, w = width, h = height, plotTop = 24, plotBottom = h - 34
   const x0 = Math.min(...xs), x1 = Math.max(...xs)
   const X = (id) => pad + (id - x0) / Math.max(1, x1 - x0) * (w - pad - 10)
-  const Y = (v) => h - pad - (tf(v) - tMin) / Math.max(1e-9, tMax - tMin) * (h - pad - 12)
+  const Y = (v) => tMax === tMin ? (plotTop + plotBottom) / 2
+    : plotBottom - (Math.max(tMin, Math.min(tMax, tf(v))) - tMin) / (tMax - tMin) * (plotBottom - plotTop)
   const nearest = (px) => {   // map a pixel x to the nearest evaluated node (for the hover crosshair)
     let best = null, bd = 1e9
     for (const n of evald) { const d = Math.abs(X(n.id) - px); if (d < bd) { bd = d; best = n } }
@@ -141,7 +159,7 @@ export function Trajectory({
     && (state?.reward_hacks || []).some(h => String(h.node_id) === String(bestNodeId))
   const line = bestPts.map((p, i) => (i ? 'L' : 'M') + p[0] + ' ' + p[1]).join(' ')
   const area = bestPts.length > 1
-    ? `${line} L ${bestPts[bestPts.length - 1][0]} ${h - pad} L ${bestPts[0][0]} ${h - pad} Z` : ''
+    ? `${line} L ${bestPts[bestPts.length - 1][0]} ${plotBottom} L ${bestPts[0][0]} ${plotBottom} Z` : ''
   const marks = steps || []
   const pick = onPick || null
   // Dense trajectories use one nearest-x interaction surface. Per-point 30 px hit circles overlap
@@ -175,7 +193,7 @@ export function Trajectory({
   ]
   return (
     <ChartFrame className="chart" title="Metric trajectory"
-      description={`Evaluated experiments and running ${direction === 'min' ? 'minimum' : 'maximum'}; colour, shape, fill and rings encode group and constraint status.${pick ? ' Click the plot for the nearest node; keyboard users can use View data.' : ''}`}
+      description={`Evaluated experiments and running ${direction === 'min' ? 'minimum' : 'maximum'}; markers group nodes and rings show constraints.${pick ? ' Click the plot for the nearest node; keyboard users can use View data.' : ''}`}
       columns={columns} rows={tableRows} csvName="metric-trajectory.csv">
     {({ labelledBy }) => <>
     <div className="chart-tools">
@@ -188,7 +206,13 @@ export function Trajectory({
       {canLog && <button type="button" aria-pressed={logY}
         className={'btn xs ghost' + (logY ? ' primary' : '')} onClick={() => setLogY(v => !v)}
         title="toggle a logarithmic Y axis">log Y</button>}
+      {canFocus && <button type="button"
+        className={'btn xs ghost' + (!detailY ? ' primary' : '')} onClick={() => setDetailY(v => !v)}>
+        {detailY ? 'Full range' : 'Focus on results'}</button>}
     </div>
+    {clipped > 0 && <div className="chart-scale-note" role="note">
+      Detail {fmt(shownMin)}–{fmt(shownMax)} · {clipped} worse {clipped === 1 ? 'result' : 'results'} shown as triangles at the {direction === 'min' ? 'top' : 'bottom'} edge (worst {fmt(direction === 'min' ? maxY : minY)}).
+    </div>}
     <svg width="100%" viewBox={`0 0 ${w} ${h}`} className={pick ? 'pickable' : ''}
          role="img" aria-labelledby={labelledBy}
          onClick={pick ? e => { const n = nearest(eventX(e)); if (n) pick(n.id) } : undefined}
@@ -198,8 +222,12 @@ export function Trajectory({
         <stop offset="0%" stopColor="#2ecc71" stopOpacity=".20" /><stop offset="100%" stopColor="#2ecc71" stopOpacity="0" />
       </linearGradient></defs>
       {[0, .25, .5, .75, 1].map((t, i) => {
-        const y = pad / 2 + t * (h - pad - 12)
-        return <line key={i} x1={pad} x2={w - 10} y1={y} y2={y} stroke={GRID} />
+        const y = plotTop + t * (plotBottom - plotTop)
+        const value = useLog ? 10 ** (tMax - t * (tMax - tMin)) : shownMax - t * (shownMax - shownMin)
+        return <g key={i}>
+          <line x1={pad} x2={w - 10} y1={y} y2={y} stroke={GRID} />
+          <text x={pad - 7} y={y + 3} fill={AX} fontSize="9" textAnchor="end">{fmt(value)}</text>
+        </g>
       })}
       {area && <path d={area} fill="url(#ll-traj-fill)" />}
       {selected != null && (() => {   // ring the currently-selected node so the chart tracks the Inspector
@@ -214,11 +242,12 @@ export function Trajectory({
         const dim = focusGrp && grpKey(n) !== focusGrp   // legend focus: fade the other groups
         const status = n.feasible === false ? 'infeasible' : n.feasible === true ? 'feasible' : 'unknown'
         const marker = groupMarker(grpKey(n))
-        return <PointMark key={n.id} className={'chart-pt' + (pick ? ' pick' : '')}
+        const outside = v < shownMin || v > shownMax
+        return <PointMark key={n.id} className={'chart-pt' + (pick ? ' pick' : '') + (outside ? ' chart-pt-clipped' : '')}
           x={X(n.id)} y={Y(v)} size={n.id === selected ? 5 : 4} color={c}
-          shape={marker.shape} variant={marker.variant}
+          shape={outside ? (v > shownMax ? 'triangle' : 'triangle-down') : marker.shape} variant={marker.variant}
           feasibility={status} opacity={dim ? .12 : .88}
-          title={`#${n.id} ${n.operator || ''}${theme ? ` (${theme})` : ''} → ${fmt(v)} · ${status === 'unknown' ? 'constraint status not reported' : status}`} />
+          title={`#${n.id} ${n.operator || ''}${theme ? ` (${theme})` : ''} → ${fmt(v)}${outside ? ' · outside detail scale' : ''} · ${status === 'unknown' ? 'constraint status not reported' : status}`} />
       })}
       <path d={line} fill="none" stroke="var(--fg)" strokeWidth="4" opacity=".78" />
       <path d={line} fill="none" stroke="var(--ok)" strokeWidth="2.2" />
@@ -240,7 +269,7 @@ export function Trajectory({
         const label = `#${hn.id} ${hn.operator || ''} → ${fmt(v)}`
         const tw = Math.max(64, label.length * 6.0), tx = Math.min(w - 10 - tw, Math.max(pad, hx - tw / 2))
         return <g pointerEvents="none">
-          <line x1={hx} x2={hx} y1={pad / 2} y2={h - pad} stroke={AX} strokeDasharray="3 3" opacity=".6" />
+          <line x1={hx} x2={hx} y1={plotTop} y2={plotBottom} stroke={AX} strokeDasharray="3 3" opacity=".6" />
           <circle cx={hx} cy={hy} r="5" fill="none" stroke="var(--fg)" strokeWidth="1.5" />
           <rect x={tx} y={2} width={tw} height={16} rx="3" fill="var(--bg-1)" stroke={GRID} />
           <text x={tx + tw / 2} y={13} fill="var(--fg)" fontSize="10.5" textAnchor="middle">{label}</text>

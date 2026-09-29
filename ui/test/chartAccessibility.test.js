@@ -211,13 +211,45 @@ test('dense charts pick the nearest node and keep every row in the keyboard data
     const plot = document.querySelector('svg.pickable')
     assert.ok(plot)
     plot.getBoundingClientRect = () => ({ left: 0, width: 760, right: 760, top: 0, bottom: 220, height: 220 })
-    const node73x = 34 + 72 / 99 * (760 - 34 - 10)
+    const node73x = 58 + 72 / 99 * (760 - 58 - 10)
     await act(async () => plot.dispatchEvent(new dom.window.MouseEvent('click', {
       bubbles: true, clientX: node73x,
     })))
     assert.deepEqual(picked, [73])
     assert.match(document.querySelector('.accessible-chart-description').textContent,
       /nearest node; keyboard users can use View data/)
+
+    const outlierNodes = [.062, .060, .058, .061, .063, .059, .064, .246].map((metric, index) => ({
+      id: index + 1, metric, operator: 'improve', feasible: true,
+    }))
+    await act(async () => root.render(React.createElement(Trajectory, {
+      nodes: outlierNodes, direction: 'min', onPick: id => picked.push(id),
+    })))
+    assert.match(document.querySelector('.chart-scale-note').textContent, /1 worse result shown as triangles at the top edge/)
+    assert.equal(document.querySelectorAll('.chart-pt-clipped').length, 1)
+    assert.match(document.querySelector('.chart-pt-clipped title').textContent, /0\.246 · outside detail scale/)
+    assert.equal(document.querySelectorAll('.data-table tbody tr').length, 0,
+      'the exact-data table stays collapsed until requested')
+    await act(async () => document.querySelector('button[aria-label="View Metric trajectory data"]')
+      .dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })))
+    assert.equal(document.querySelectorAll('.data-table tbody tr').length, 8)
+    assert.match(document.querySelector('.data-table tbody tr:last-child').textContent, /0\.246/)
+    const fullRange = [...document.querySelectorAll('.chart-tools button')]
+      .find(button => button.textContent === 'Full range')
+    await act(async () => fullRange.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })))
+    assert.equal(document.querySelector('.chart-scale-note'), null)
+    assert.equal(document.querySelectorAll('.chart-pt-clipped').length, 0)
+    assert.ok([...document.querySelectorAll('.chart-tools button')]
+      .some(button => button.textContent === 'Focus on results'))
+
+    await act(async () => root.render(React.createElement(Trajectory, {
+      nodes: outlierNodes.map(node => ({ ...node, metric: -node.metric })), direction: 'max',
+    })))
+    const focusResults = [...document.querySelectorAll('.chart-tools button')]
+      .find(button => button.textContent === 'Focus on results')
+    await act(async () => focusResults.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })))
+    // The max-direction view clips only the worse (lower) tail, even for negative metrics.
+    assert.match(document.querySelector('.chart-scale-note').textContent, /1 worse result shown as triangles at the bottom edge/)
 
     const steps = Array.from({ length: 150 }, (_, index) => ({
       id: index + 1, operator: 'improve', from: index ? 151 - index : null,
