@@ -516,7 +516,7 @@ def test_one_patch_of_the_gpu_envelope_is_observed_on_both_sides_of_the_split(tm
 def test_every_deletion_service_prefix_reaches_all_five_consumers():
     """A run root holds four kinds of deletion service file, and FIVE places must skip them:
     `appstate.AppState.run_dir` (refuse one as a run ID), `launch` (refuse one as a NEW run id),
-    `reset_route` (refuse one as a reset target), `run_projections.run_summaries` (do not scan one
+    `reset_route` (refuse one as a reset target), `run_projections._run_row` (do not scan one
     as a run) and `deletion_service._SERVICE_PREFIXES`. All of them used to respell
     the prefixes as string literals, and the identity sidecar — added last — reached only one of
     them. A hand-copied prefix does not go red when its writer changes; it silently stops
@@ -542,12 +542,18 @@ def test_every_deletion_service_prefix_reaches_all_five_consumers():
     for consumer in (launch, reset_route):
         assert consumer._DELETE_SERVICE_PREFIXES is appstate._DELETE_SERVICE_PREFIXES, (
             f"{consumer.__name__} must read the shared tuple, not a copy of it")
-    # `run_summaries` spells its tuple inline, so read the names it actually passes to `startswith`.
+    # The run list's row rule spells its tuple inline, so read the names it actually passes to
+    # `startswith`. It lives in `_run_row` since 2026-09-29 (doc 70 70.1), shared by
+    # `run_summaries` and `campaign_runs`, so both must still reach it.
     import ast
     import inspect
-    tree = ast.parse(inspect.getsource(run_projections.run_summaries))
+    for lister in (run_projections.run_summaries, run_projections.campaign_runs):
+        calls = {node.func.id for node in ast.walk(ast.parse(inspect.getsource(lister)))
+                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
+        assert "_run_row" in calls, f"{lister.__name__} no longer decides its rows by `_run_row`"
+    tree = ast.parse(inspect.getsource(run_projections._run_row))
     skipped = {node.id for node in ast.walk(tree)
                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
                and node.id.endswith("_PREFIX")}
     assert {getattr(run_projections, name) for name in skipped} == written, (
-        f"run_summaries skips {sorted(skipped)}, which is not the writer set")
+        f"_run_row skips {sorted(skipped)}, which is not the writer set")
