@@ -72,7 +72,8 @@ from typing import Optional
 # beacon was left open — the run was between phases" about a run that died mid-`propose`,
 # forever, with nothing red. `stop_account` lives in `events/`, so naming its own package's
 # registry costs no layering.
-from looplab.events.types import EV_PHASE_PROGRESS, PROGRESS_STARTED
+from looplab.events.types import (EV_PHASE_PROGRESS, EV_RESUME, EV_RESUME_SERVED,
+                                  EV_RUN_LOOP_EXITED, EV_RUN_STARTED, PROGRESS_STARTED)
 
 # The five dispositions, each PROVABLE from the durable record and jointly exhaustive:
 #   finished          — a `run_finished` is folded. The run ended on its own terms.
@@ -303,16 +304,36 @@ def last_record_line(events) -> Optional[str]:
     return "\n  ".join(bits)
 
 
-def open_phase_line(events) -> Optional[str]:
-    """The newest phase beacon nothing closed, as ``<label> (open since <iso ts>)``, or None.
+# The rows that bound ONE engine's life in the log: its start (`run_started`, or the `resume` /
+# `resume_served` the next owner writes before its loop) and its end (`run_loop_exited`). A beacon
+# opened before the newest of them belongs to an engine that is gone or has left its loop, and can
+# never close — so it is no answer to "what is the LIVE engine inside".
+_ENGINE_BOUNDARY_TYPES = frozenset({EV_RUN_STARTED, EV_RESUME, EV_RESUME_SERVED,
+                                    EV_RUN_LOOP_EXITED})
 
-    The run's own answer to "what is the engine inside right now", for a reader that holds the
+
+def open_phase_line(events) -> Optional[str]:
+    """The newest phase beacon the CURRENT engine opened and nothing closed, as
+    ``<label> (open since <iso ts>)``, or None.
+
+    The run's own answer to "what is the live engine inside right now", for a reader that holds the
     events and has to NAME it: `looplab stop --wait` giving up on a live engine used to say "its
     running evaluation(s)" whether or not one was running — on MiniOneRec inf13 (2026-09-29) none
     was, and the engine was inside a paid proposal the stop lets finish
     (`cli/run_cmds.py::_what_the_engine_is_finishing`).
+
+    SCOPED TO THE ROWS AFTER THE NEWEST ENGINE BOUNDARY (`_ENGINE_BOUNDARY_TYPES`), unlike
+    `last_record_line`, which is a post-mortem and wants the dead engine's open step. inf13 carries
+    four beacons nothing ever closed — node 6's propose and novelty from 09-26, node 33's propose
+    from 14:21:23 (the call the engine was killed in), node 34's implement — and a whole-log scan
+    would name one of them about an engine that had long since exited. A kill that leaves no
+    boundary row before the next owner starts can still leak one; the caller's sentence says "the
+    newest step the log shows open", not "the step the engine is in", for that residue.
     """
-    found = _open_phase([e for e in (events or ()) if getattr(e, "type", None)])
+    rows = [e for e in (events or ()) if getattr(e, "type", None)]
+    last_boundary = max((i for i, e in enumerate(rows) if e.type in _ENGINE_BOUNDARY_TYPES),
+                        default=-1)
+    found = _open_phase(rows[last_boundary + 1:])
     if found is None:
         return None
     label, since = found

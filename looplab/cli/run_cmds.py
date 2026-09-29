@@ -1398,20 +1398,24 @@ def _what_the_engine_is_finishing(state, events) -> str:
     WP-STOP (MiniOneRec inf13, 2026-09-29): `stop --wait` gave up saying the engine "exits once its
     running evaluation(s) finish" while no evaluation was running — the engine was inside a paid
     proposal, which a stop lets finish (and then refuses the result of) rather than interrupts. The
-    sentence now names the running nodes when there are any, else the newest OPEN phase beacon (a
-    proposal, a novelty check, a build), else says plainly that nothing is open."""
+    sentence now names the running nodes when there are any, else the newest OPEN phase beacon of the
+    current engine (a proposal, a novelty check, a build — `events/stop_account.py::open_phase_line`,
+    which ignores the steps a dead or exited engine left open), else says that the log shows none."""
     from looplab.events.stop_account import open_phase_line
 
     running = _in_flight_node_ids(state)
     if running:
         return (f"the engine exits once its running evaluation(s) finish "
                 f"(node {', '.join(map(str, running))})")
+    # Worded as what the LOG shows, not as a fact about the process: `open_phase_line` scopes to
+    # the current engine's rows, and a kill that left no boundary row can still leak a dead step.
     phase = open_phase_line(events)
     if phase is not None:
-        return (f"no evaluation is running — the engine is still inside {phase}, a step a stop "
-                "lets finish (its result is then refused), and exits once that returns")
-    return ("no evaluation is running and no build or proposal step is open — the engine exits "
-            "once it finishes its current turn")
+        return (f"no evaluation is running — the newest step the log shows open is {phase}, a "
+                "step a stop lets finish (its result is then refused); the engine exits once it "
+                "returns")
+    return ("no evaluation is running and the log shows no build or proposal step open — the "
+            "engine exits once it finishes its current turn")
 
 
 def _open_build_card_ids(state) -> list[str]:
@@ -1821,7 +1825,7 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
         from looplab.events.stop_account import open_phase_line
         phase = open_phase_line(store.read_all())
         return ("still waiting: no evaluation running, the engine is finishing its turn"
-                + (f" (inside {phase})" if phase else ""))
+                + (f" (the newest step the log shows open: {phase})" if phase else ""))
 
     outcome, why = await_engine_exit(target, timeout_s=limit, liveness=_probe,
                                      standing=lambda: stop_lifted(current()),

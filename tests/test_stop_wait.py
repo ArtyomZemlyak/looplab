@@ -288,21 +288,35 @@ _OPEN_PROPOSE = {"node_id": 33, "prospective": True, "operator": "improve", "sta
                  "phase": "propose", "status": "started"}
 
 
+_DEAD_ENGINE_STEP = {"node_id": 6, "prospective": True, "operator": "improve", "stage": "build",
+                     "phase": "novelty", "status": "started"}
+
+
 @FLOCK
-@pytest.mark.parametrize("in_flight,beacon,says", [
-    (True, None, "exits once its running evaluation(s) finish (node 0)"),
-    (False, _OPEN_PROPOSE, "no evaluation is running — the engine is still inside node 33 improve "
-                           "build propose (open since "),
-    (False, None, "no evaluation is running and no build or proposal step is open"),
-], ids=["evaluating", "proposing", "nothing-open"])
-def test_a_timeout_names_what_the_engine_is_really_finishing(tmp_path, in_flight, beacon, says):
+@pytest.mark.parametrize("in_flight,rows,says", [
+    (True, (), "exits once its running evaluation(s) finish (node 0)"),
+    (False, (("phase_progress", _OPEN_PROPOSE),),
+     "no evaluation is running — the newest step the log shows open is node 33 improve build "
+     "propose (open since "),
+    (False, (), "no evaluation is running and the log shows no build or proposal step open"),
+    # A step an EARLIER engine opened and never closed (it was killed inside it), then the `resume`
+    # the current engine started behind: not this engine's, so not named (MiniOneRec inf13 carries
+    # four such beacons).
+    (False, (("phase_progress", _DEAD_ENGINE_STEP), ("resume", {})),
+     "no evaluation is running and the log shows no build or proposal step open"),
+    (False, (("phase_progress", _DEAD_ENGINE_STEP), ("run_loop_exited", {"reason": "paused"}),
+             ("phase_progress", _OPEN_PROPOSE)),
+     "the newest step the log shows open is node 33 improve build propose"),
+], ids=["evaluating", "proposing", "nothing-open", "dead-engine-step", "live-after-a-dead-one"])
+def test_a_timeout_names_what_the_engine_is_really_finishing(tmp_path, in_flight, rows, says):
     """WP-STOP (MiniOneRec inf13): the line said "exits once its running evaluation(s) finish" while
     no evaluation was running — the engine was inside a paid proposal a stop lets finish. It now
-    names the running nodes, else the phase beacon still open, else that nothing is. MUTATION: the
-    old fixed sentence fails the two cases with no evaluation."""
+    names the running nodes, else the phase beacon the CURRENT engine left open (never one an
+    earlier engine died inside), else that the log shows none. MUTATION: the old fixed sentence
+    fails every case with no evaluation; an unscoped scan fails the dead-engine case."""
     rd = _run_dir(tmp_path, in_flight=in_flight)
-    if beacon is not None:
-        EventStore(rd / "events.jsonl").append("phase_progress", dict(beacon))
+    for event_type, data in rows:
+        EventStore(rd / "events.jsonl").append(event_type, dict(data))
     release, held = threading.Event(), threading.Event()
     holder = threading.Thread(target=_hold_lock, args=(rd, release, held), daemon=True)
     holder.start()
@@ -317,6 +331,7 @@ def test_a_timeout_names_what_the_engine_is_really_finishing(tmp_path, in_flight
     assert says in said, out.output
     if not in_flight:
         assert "running evaluation(s) finish" not in said
+    assert "node 6" not in said, "a step a dead engine left open was named as the live one's"
 
 
 @FLOCK
