@@ -9,7 +9,8 @@ ad-hoc script.
 
 **THE TOTAL AND THE SPLIT COME FROM DIFFERENT PLACES, AND THAT IS THE DESIGN.** `llm_usage` (the
 durable, replayable ledger) carries {cost, calls, priced_calls, prompt_tokens, completion_tokens,
-total_tokens, usage_id} — no phase, no role, no node — so it knows the TRUE total and nothing about
+total_tokens, usage_id}, plus `cached_tokens` when the provider reported prompt-cache hits (doc 69
+69.32) — no phase, no role, no node — so it knows the TRUE total and nothing about
 where it went. The `generation` spans carry `phase` and `usage` but live in `spans.jsonl`, a sidecar
 that replay does not rebuild and `serve/trace_clear.py` can destroy. So the ledger is the
 DENOMINATOR and the spans supply the ATTRIBUTION, exactly as `timings` reconciles span durations
@@ -99,6 +100,17 @@ def _tokens_of(usage) -> tuple[int, int, int]:
     # driven against each other in `tests/test_stated_token_total.py`.
     total = counted if (counted or _states_zero(stated)) else (prompt + completion)
     return total, prompt, completion
+
+
+def _cached_of(usage, prompt: int) -> int:
+    """How many of one generation's `prompt` tokens its provider served from the PROMPT CACHE.
+
+    `core/tracing.py::_norm_usage` writes `cached` only when non-zero (doc 69 69.32), so absent is 0
+    — which is also what every span written before the field says. Clamped to `prompt` here as it is
+    at write time: a hand-edited row claiming more hits than prompt tokens cannot lift the column
+    past the prompt it is a part of.
+    """
+    return min(_int(usage.get("cached")), prompt) if isinstance(usage, dict) else 0
 
 
 # The bucket for a generation whose ancestry names no card — the per-card twin of
@@ -347,8 +359,9 @@ def token_spend_by_phase(spans, ledger_total=None) -> dict:
     `spans` is any iterable of already-parsed span dicts; `ledger_total` is the durable
     `llm_usage.total_tokens` sum, or None when the event log is unreadable. Returns
     ``{rows, attributed, calls, ledger_total, residual, damaged, torn_attributes}`` where `rows` is
-    a list of ``{phase, tokens, calls, prompt, completion, share}`` sorted by tokens DESC then phase
-    ASC, so two reads of one file cannot disagree about the order.
+    a list of ``{phase, tokens, calls, prompt, completion, cached, share}`` sorted by tokens DESC
+    then phase ASC, so two reads of one file cannot disagree about the order. `cached` is the part
+    of `prompt` the provider served from its prompt cache (`_cached_of`), 0 where none was reported.
 
     `damaged` and `torn_attributes` are DIFFERENT populations and a caller must not add them into
     one sentence: `damaged` rows were not spans at all and contributed nothing, while a
@@ -387,10 +400,11 @@ def token_spend_by_phase(spans, ledger_total=None) -> dict:
         phase = str(phase) if isinstance(phase, str) and phase.strip() else PHASE_UNATTRIBUTED
         total, prompt, completion = _tokens_of(attributes.get("usage"))
         row = per.setdefault(phase, {"phase": phase, "tokens": 0, "calls": 0,
-                                     "prompt": 0, "completion": 0})
+                                     "prompt": 0, "completion": 0, "cached": 0})
         row["tokens"] += total
         row["prompt"] += prompt
         row["completion"] += completion
+        row["cached"] += _cached_of(attributes.get("usage"), prompt)
         row["calls"] += 1                             # a call with no usage still HAPPENED
     attributed = sum(r["tokens"] for r in per.values())
     rows = sorted(per.values(), key=lambda r: (-r["tokens"], r["phase"]))
@@ -405,6 +419,46 @@ def token_spend_by_phase(spans, ledger_total=None) -> dict:
         "damaged": damaged,
         "torn_attributes": torn_attributes,
     }
+
+
+def phase_table_lines(rows: list, top: int = 0) -> list[str]:
+    """The per-phase table `looplab tokens` prints: a header, one line per shown phase and, under
+    `--top N`, ONE stated line for the rest — collapsed, never dropped.
+
+    The `cached` column (the part of `prompt` the provider served from its prompt cache, doc 69
+    69.32) appears only when some span reported one, so a run on a provider that reports none
+    prints the historical table byte for byte.
+    """
+    shown = rows[:top] if top and top > 0 else rows
+    with_cache = any(row.get("cached") for row in rows)
+    head = f"  {'cached':>13}" if with_cache else ""
+    lines = [f"{'tokens':>14}  {'share':>6}  {'calls':>6}  {'prompt':>13}{head}  "
+             f"{'completion':>11}  phase"]
+    for row in shown:
+        cell = f"  {row.get('cached', 0):>13,}" if with_cache else ""
+        lines.append(f"{row['tokens']:>14,}  {100 * row['share']:>5.1f}%  {row['calls']:>6,}  "
+                     f"{row['prompt']:>13,}{cell}  {row['completion']:>11,}  {row['phase']}")
+    if len(shown) < len(rows):
+        rest = rows[len(shown):]
+        blank = f"  {'':>13}" if with_cache else ""
+        lines.append(f"{sum(r['tokens'] for r in rest):>14,}  "
+                     f"{100 * sum(r['share'] for r in rest):>5.1f}%  "
+                     f"{sum(r['calls'] for r in rest):>6,}  "
+                     f"{'':>13}{blank}  {'':>11}  ({len(rest)} more phase(s), --top {len(shown)})")
+    return lines
+
+
+def cache_hit_line(ledger) -> Optional[str]:
+    """The line `looplab tokens` prints for the provider's PROMPT-CACHE hits, off the folded ledger
+    (doc 69 69.32): what the run's prompt would cost on a provider that prices a hit below a fresh
+    token. None unless the ledger records some — a provider that reports none and a log written
+    before the field both leave it absent, and neither is a measured zero."""
+    ledger = ledger if isinstance(ledger, dict) else {}
+    cached, prompt = _int(ledger.get("cached_tokens")), _int(ledger.get("prompt_tokens"))
+    if not (cached and prompt):
+        return None
+    return (f"cache hits : {cached:>14,} of {prompt:,} prompt tokens "
+            f"({100 * cached / prompt:.1f}%) served from the provider's prompt cache")
 
 
 def spend_around_champion(events, state) -> Optional[dict]:

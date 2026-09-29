@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-162 event types — 113 folded into `RunState`, 49 diagnostic; 1033 declared payload keys; 22 types whose whole payload is stored by the fold.
+162 event types — 113 folded into `RunState`, 49 diagnostic; 1035 declared payload keys; 22 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -115,8 +115,8 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `lessons_refreshed` | folded · whole | The cross-run lesson store was re-read at a node, and whether it changed. | `at_node` | `changed`, `chars`, `error`, `skipped` |
 | `lessons_store_unavailable` | diagnostic | The lesson store could not be read this cadence; the next one retries the same unread store. | `error`, `mode` | `count`, `phase` |
 | `literature_retrieved` | folded | The papers one deep-research pass READ, beside the memo it produced. | `at_node`, `items` | `memo_id` |
-| `llm_cost` | folded · whole | The finalization roll-up of the run's provider spend. | `calls`, `completion_tokens`, `cost`, `priced_calls`, `prompt_tokens`, `total_tokens` | `finalize_scope`, `finish_seq` |
-| `llm_usage` | folded | One sanitized provider-call delta, folded cumulatively into the run's durable ledger. | — | `calls`, `completion_tokens`, `cost`, `priced_calls`, `prompt_tokens`, `total_tokens`, `usage_id` |
+| `llm_cost` | folded · whole | The finalization roll-up of the run's provider spend. | `calls`, `completion_tokens`, `cost`, `priced_calls`, `prompt_tokens`, `total_tokens` | `cached_tokens`, `finalize_scope`, `finish_seq` |
+| `llm_usage` | folded | One sanitized provider-call delta, folded cumulatively into the run's durable ledger. | — | `cached_tokens`, `calls`, `completion_tokens`, `cost`, `priced_calls`, `prompt_tokens`, `total_tokens`, `usage_id` |
 | `log_repaired` | diagnostic | The `looplab repair-log` receipt for a rewritten torn log: what was dropped, and where the backup is. | `backup`, `corrupt_line`, `dropped_lines`, `good_records`, `ts` | — |
 | `memory_read` | diagnostic | One memory / cross-run / skill tool call: the rows it showed and the digest of the exact bytes the role saw. | `args`, `invocation_id`, `result_chars`, `result_sha256`, `rows`, `tool` | `source` |
 | `metric_retarget` | folded | An operator made a declared extra metric the objective every node is ranked by (`key: null`: the task's own again). | `key` | `direction`, `goal` |

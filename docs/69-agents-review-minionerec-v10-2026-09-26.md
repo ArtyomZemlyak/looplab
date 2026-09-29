@@ -311,6 +311,7 @@ UnseenRecall@20=0.03328)» уйдёт в межпрогонные claims как 
 - **LLM-учёт (69.32, 69.33):** кэш-хиты провайдера не записываются (`_normalize_usage` отбрасывает
   cached-поля) — нельзя сказать, во что прогон обошёлся бы на тарифицированном провайдере; stderr на
   95 % — предупреждения pydantic (`model_dump()` ответа шлюза), причины ретраев LLM не пишутся.
+  *Оба закрыты — см. §9, 69.32 и 69.33.*
 
 ## 8. Среда исполнения
 
@@ -409,7 +410,7 @@ UnseenRecall@20=0.03328)» уйдёт в межпрогонные claims как 
   восемь инжектов и hint ложатся в журнал до первого решения стратега, а один resume обслуживает
   всё. Тест: `tests/test_queued_intent_on_a_stopped_run.py`.*
 - **69.31** OPEN[canary-never-reused-across-nodes] прошедшая канарейка привязана к id узла (§7). proof:`present:coerce_node_id(d) == node_id@looplab/engine/eval_canary.py`
-- **69.32** OPEN[provider-cache-hits-invisible] нормализованный usage теряет поля кэша провайдера (§7). proof:absent:cached_tokens@looplab/core/llm.py
+- **69.32** *Закрыто 2026-09-29: здесь стоял `provider-cache-hits-invisible`. `core/llm.py::_normalize_usage` сохраняет кэш-хиты провайдера как `cached_tokens` (`core/llm.py::_cached_prompt_tokens`: `prompt_tokens_details.cached_tokens` OpenAI/OpenRouter/vLLM/LiteLLM, `cache_read_input_tokens` Anthropic-совместимых шлюзов, `prompt_cache_hit_tokens` DeepSeek; первое ненулевое чистое число, не больше `prompt_tokens`). Счётчик РАЗРЕЖЕННЫЙ на всём пути — `CostAccountant`, дельта, строка `llm_usage`, запись outbox (`engine/costs.py::_OPTIONAL_COUNTER_KEYS`), свёрнутый журнал (`events/replay_journals.py::_on_llm_usage`), сводка `llm_cost`, `usage` спана генерации (`cached`, `core/tracing.py::_norm_usage`): вызов без кэш-хита пишет исторические байты, и «нет поля» значит то же, что во всех старых журналах. Попадание в локальный кэш ответов (T7) кэш-хитов провайдера не несёт — промпт там обнулён. `looplab tokens` печатает строку `cache hits` из журнала и столбец `cached` по фазам из спанов — только когда провайдер их сообщил (`tests/test_provider_cache_hits_are_recorded.py`).*
 - **69.33** *Закрыто 2026-09-27: здесь стоял `pydantic-warning-flood`. SDK строит ответ без валидации (`model_construct`), и ответ шлюза в форме, которой модели не объявляют (`content` списком, `finish_reason` вне Literal, аргументы инструмента объектом), при каждом `model_dump()` давал предупреждение сериализатора с самим значением в тексте — фильтр «один раз на место» их не складывал. Все три дампа ответа SDK (не-потоковый ответ, `usage` потока, дельта вызова инструмента) идут через `core/llm.py::_sdk_dump` — `model_dump(warnings=False)`, словарь тот же; ключевым словом, а не `warnings.catch_warnings()`, который меняет глобальное состояние под потоками движка; объект без этого ключа (дубль теста, шим провайдера) выгружается как прежде (`tests/test_openai_client.py`).*
 
 **Среда (§8)**

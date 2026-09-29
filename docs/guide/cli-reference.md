@@ -1046,6 +1046,20 @@ provider call opens two spans against one billed row, and it is reported rather 
 A generation with no phase is bucketed under `(no phase)`, never dropped — `timings` learned that
 the expensive way, having once hidden 143 of one run's 174 spans by dropping the node-less ones.
 
+**Provider prompt-cache hits** (doc 69 69.32). When the provider says how many prompt tokens it
+served from its prompt cache — OpenAI's `prompt_tokens_details.cached_tokens` (OpenRouter, vLLM and
+LiteLLM speak it too), Anthropic's `cache_read_input_tokens`, DeepSeek's `prompt_cache_hit_tokens` —
+the ledger records them as `cached_tokens` and the reconciliation gains one line:
+
+```
+cache hits : <cached> of <prompt> prompt tokens (<share>%) served from the provider's prompt cache
+```
+
+and the table a `cached` column beside `prompt` when the spans carry them too. It is what the run's
+prompt would cost on a provider that prices a cache hit below a fresh token. Neither appears when no
+hit was reported: a provider that reports none and a run recorded before the field existed both
+print the report above unchanged, and neither is a measured zero.
+
 **The ledger split at the champion.** Under the reconciliation, a run with a champion gets one more
 line — what it spent to *reach* the champion and what it spent *after* the answer was already in
 hand:

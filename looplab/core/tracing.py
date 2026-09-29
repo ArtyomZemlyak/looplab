@@ -491,8 +491,14 @@ def _sum_usage(existing, delta: dict) -> dict:
     on one attempt contributes 0 rather than taking the traced call down with it.
     """
     base = existing if type(existing) is dict else {}
-    return {key: _token_int(base.get(key)) + _token_int(delta.get(key))
-            for key in ("prompt", "completion", "total")}
+    out = {key: _token_int(base.get(key)) + _token_int(delta.get(key))
+           for key in ("prompt", "completion", "total")}
+    # Sparse, like `_norm_usage` (doc 69 69.32): a pair of attempts neither of which reported a
+    # cache hit keeps the three keys it always had.
+    cached = min(_token_int(base.get("cached")) + _token_int(delta.get("cached")), out["prompt"])
+    if cached:
+        out["cached"] = cached
+    return out
 
 
 def record_paid_call(cost, usage=None) -> bool:
@@ -689,7 +695,7 @@ def _token_int(value) -> int:
     schema says a number — a bare `int()` on that would take the traced call down with it."""
     try:
         return max(0, int(value or 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):      # OverflowError: `int(float("inf"))`
         return 0
 
 
@@ -731,13 +737,23 @@ def _stated_total(t) -> "int | None":
 
 
 def _norm_usage(tokens) -> dict:
-    """Accept either OpenAI usage ({prompt_tokens,…}) or our short form ({prompt,…})."""
+    """Accept either OpenAI usage ({prompt_tokens,…}) or our short form ({prompt,…}).
+
+    `cached` is how many of `prompt` the provider served from its PROMPT CACHE, as the normalized
+    usage carries it (`core/llm.py::_cached_prompt_tokens`, doc 69 69.32) — SPARSE, like the ledger
+    row beside it: a call that reported no cache hit writes the historical three keys, so a span
+    predating the field and one whose provider said nothing read alike. Never more than `prompt`.
+    """
     t = tokens or {}
     p = _token_int(t.get("prompt_tokens") or t.get("prompt"))
     c = _token_int(t.get("completion_tokens") or t.get("completion"))
     stated = _stated_total(t)
-    return {"prompt": p, "completion": c,
-            "total": stated if stated is not None else (p + c)}
+    out = {"prompt": p, "completion": c,
+           "total": stated if stated is not None else (p + c)}
+    cached = min(_token_int(t.get("cached_tokens") or t.get("cached")), p)
+    if cached:
+        out["cached"] = cached
+    return out
 
 
 def _redacted_error(value) -> str:

@@ -1877,7 +1877,9 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "calls", "completion_tokens", "cost", "priced_calls", "prompt_tokens",
             "total_tokens"
         ),
-        optional=("finalize_scope", "finish_seq"),
+        # `cached_tokens`: the provider's prompt-cache hits, only when the ledger holds some (doc 69
+        # 69.32; `engine/finalize.py::emit_llm_cost`).
+        optional=("cached_tokens", "finalize_scope", "finish_seq"),
         stored_whole=True,
     ),
     "llm_usage": PayloadContract(
@@ -1890,11 +1892,14 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # ledger as carrying no cost and no tokens. Optional rather than required:
         # `_row_priced_calls` already establishes that a log written before a counter existed
         # omits it.
-        optional=("calls", "completion_tokens", "cost", "priced_calls", "prompt_tokens",
-                  "total_tokens", "usage_id"),
-        # NOT whole (review 2026-09-22, EVT-05): only the six sanitized counters are added into the
-        # ledger (`replay_journals.py::_on_llm_usage`). It is `llm_cost`, the legacy SUMMARY row,
-        # whose extra keys ride into `RunState.llm_cost` — that row stays whole.
+        # `cached_tokens` (doc 69 69.32) is SPARSE: `sanitize_usage_delta` writes it only when the
+        # provider reported prompt-cache hits, at most the row's `prompt_tokens`.
+        optional=("cached_tokens", "calls", "completion_tokens", "cost", "priced_calls",
+                  "prompt_tokens", "total_tokens", "usage_id"),
+        # NOT whole (review 2026-09-22, EVT-05): only the six sanitized counters (and the sparse
+        # `cached_tokens`) are added into the ledger (`replay_journals.py::_on_llm_usage`). It is
+        # `llm_cost`, the legacy SUMMARY row, whose extra keys ride into `RunState.llm_cost` — that
+        # row stays whole.
     ),
     "log_repaired": PayloadContract(
         "The `looplab repair-log` receipt for a rewritten torn log: what was dropped, and where the backup is.",

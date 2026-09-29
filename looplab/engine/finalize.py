@@ -1063,6 +1063,11 @@ def emit_llm_cost(
             # the "$0.00" it replaced: that at least did not claim to know.
             "priced_calls": int(total.get("priced_calls", 0)),
         }
+        # The provider's prompt-cache hits ride with the roll-up only when the ledger has any
+        # (doc 69 69.32): a run on a provider that reports none writes the historical bytes.
+        cached = int(total.get("cached_tokens", 0) or 0)
+        if cached:
+            payload["cached_tokens"] = cached
         if finalize_scope is not None:
             payload["finalize_scope"] = finalize_scope
         if finish_seq is not None:

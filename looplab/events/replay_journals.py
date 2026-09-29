@@ -6,7 +6,8 @@ a reader, a projection or a replay GATE (a cadence that must not re-buy a paid s
 none of them touches a node's lifecycle, a metric or the champion:
 
 * the durable LLM spend ledger — `_on_llm_usage` over `_on_llm_cost`'s legacy summary, with the one
-  set of sanitizers (`_clean_llm_totals`, `_clean_llm_delta`, `_row_priced_calls`);
+  set of sanitizers (`_clean_llm_totals`, `_clean_llm_delta`, `_row_priced_calls`,
+  `_cached_llm_tokens`);
 * the advisory payloads a model authored — the Deep-Research memo, the literature it read and the run
   report — re-sanitized on the way in under `_FOLD_REDACTION_ENV`, the empty environment that keeps
   the fold a function of the log (EVT-02);
@@ -120,7 +121,19 @@ def _clean_llm_totals(d: dict | None) -> dict:
         "completion_tokens": _llm_counter(raw.get("completion_tokens")),
         "total_tokens": _llm_counter(raw.get("total_tokens")),
     })
+    # The provider's prompt-cache hits (doc 69 69.32): SPARSE — present only when non-zero, which
+    # is what every row written before the field already says — and never more than the prompt they
+    # are part of. Sanitized here because `out` copies every other key of a summary row verbatim.
+    cached = _cached_llm_tokens(raw, out)
+    out.pop("cached_tokens", None)
+    if cached:
+        out["cached_tokens"] = cached
     return out
+
+
+def _cached_llm_tokens(raw: dict, clean: dict) -> int:
+    """One row's `cached_tokens`, clean: a counter no larger than the row's own clean prompt."""
+    return min(_llm_counter(raw.get("cached_tokens")), int(clean["prompt_tokens"]))
 
 
 def _row_priced_calls(raw: object, clean: dict) -> int:
@@ -166,6 +179,9 @@ def _clean_llm_delta(d: dict) -> dict:
     for key in _LLM_LEDGER_COUNTERS:
         clean[key] = _llm_counter(d.get(key))
     clean["priced_calls"] = _row_priced_calls(d, clean)
+    cached = _cached_llm_tokens(d, clean)        # sparse, like the row (doc 69 69.32)
+    if cached:
+        clean["cached_tokens"] = cached
     return clean
 
 
@@ -190,6 +206,12 @@ def _on_llm_usage(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     base["cost"] = min(_MAX_LLM_COST, float(base["cost"]) + float(delta["cost"]))
     for key in _LLM_LEDGER_COUNTERS:
         base[key] = min(_MAX_LLM_COUNTER, int(base[key]) + int(delta[key]))
+    if delta.get("cached_tokens"):
+        # Added only when this row carries some, so a ledger nobody reported a cache hit into keeps
+        # its historical keys (doc 69 69.32). Each term is at most its row's prompt, so the sum is
+        # at most the summed prompt: both saturate at the same ceiling.
+        base["cached_tokens"] = min(_MAX_LLM_COUNTER, int(base.get("cached_tokens", 0))
+                                    + int(delta["cached_tokens"]))
     st.llm_cost = base
     ctx.llm_usage_seen = True
     ctx.llm_cost_clean = True

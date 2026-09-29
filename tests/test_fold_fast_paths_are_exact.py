@@ -45,6 +45,11 @@ def _reference_on_llm_usage(st, e, d, ctx):
     base["cost"] = min(replay._MAX_LLM_COST, float(base["cost"]) + float(delta["cost"]))
     for key in ("calls", "priced_calls", "prompt_tokens", "completion_tokens", "total_tokens"):
         base[key] = min(replay._MAX_LLM_COUNTER, int(base[key]) + int(delta[key]))
+    # + the sparse `cached_tokens` column (doc 69 69.32), accumulated the same SLOW way: the whole
+    # ledger re-cleaned above, then the row's own clean count added when it has one.
+    if delta.get("cached_tokens"):
+        base["cached_tokens"] = min(replay._MAX_LLM_COUNTER,
+                                    int(base.get("cached_tokens", 0)) + int(delta["cached_tokens"]))
     st.llm_cost = base
     ctx.llm_usage_seen = True
 
@@ -119,6 +124,18 @@ USAGE_LOGS = {
         ("llm_usage", {"usage_id": "u1", "calls": 1, "cost": 0.25}),
         ("llm_cost", {"cost": 99.0, "calls": 99}),                        # ignored once deltas run
         ("llm_usage", {"usage_id": "u2", "calls": 3, "cost": 0.75, "priced_calls": 2}),
+    ],
+    "cache-hits": [                                     # doc 69 69.32: the sparse column
+        ("llm_cost", {"cost": 1.0, "calls": 2, "prompt_tokens": 40, "cached_tokens": "junk"}),
+        ("llm_usage", {"usage_id": "u1", "calls": 1, "prompt_tokens": 100, "cached_tokens": 60}),
+        ("llm_usage", {"usage_id": "u1", "calls": 1, "prompt_tokens": 100, "cached_tokens": 60}),
+        ("llm_usage", {"usage_id": "u2", "calls": 1, "prompt_tokens": 10, "cached_tokens": 99}),
+        ("llm_usage", {"usage_id": "u3", "calls": 1, "prompt_tokens": 10, "cached_tokens": True}),
+        ("llm_usage", {"usage_id": "u4", "calls": 1, "prompt_tokens": 2 ** 62,
+                       "cached_tokens": 2 ** 62}),
+        ("llm_usage", {"usage_id": "u5", "calls": 1, "prompt_tokens": 2 ** 62,
+                       "cached_tokens": 2 ** 62}),                            # the counter cap
+        ("llm_usage", {"calls": 1, "prompt_tokens": 7, "cached_tokens": 3}),  # legacy: no id
     ],
     "hostile-values": [
         ("llm_usage", {"usage_id": "u1", "calls": True, "cost": float("nan"),

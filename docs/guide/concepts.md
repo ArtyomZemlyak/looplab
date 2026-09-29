@@ -602,7 +602,8 @@ at-most-once invoice guarantee.
 Observed, run-attributable LLM usage is recorded as calls return, including calls made during
 wrap-up, before finalization can complete. Each returned provider result produces a sanitized
 numeric `llm_usage` delta (cost, call count, token counts, and an opaque usage ID only—never prompts,
-responses, model URLs, or credentials). Same-ID retries are first-write-wins, covering an append that
+responses, model URLs, or credentials; `cached_tokens`, the prompt tokens the provider served from its
+prompt cache, rides along only when the provider reported a hit). Same-ID retries are first-write-wins, covering an append that
 committed and then raised. Engine roles and run-scoped boss/chat/per-run-report clients feed the run
 ledger. Before the event append, the ledger first attempts to atomically persist the exact sanitized
 delta as `.llm-usage-outbox/<usage_id>.json`; a successful outbox rename or event append is the first

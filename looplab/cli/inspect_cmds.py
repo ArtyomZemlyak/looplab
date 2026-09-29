@@ -145,7 +145,7 @@ def tokens(run_dir: Path = typer.Argument(...),
     import json as _json
 
     from looplab.events.eventstore import read_jsonl_lenient_with_health
-    from looplab.events.token_spend import token_spend_by_phase
+    from looplab.events.token_spend import cache_hit_line, phase_table_lines, token_spend_by_phase
 
     ev_path = run_dir / "events.jsonl"
     sp_path = run_dir / "spans.jsonl"
@@ -195,8 +195,14 @@ def tokens(run_dir: Path = typer.Argument(...),
             return f"ledger total: n/a ({ledger_absent})"
         return f"ledger total: {ledger_total:,} tokens"
 
+    def _echo_ledger_cache_line() -> None:    # doc 69 69.32: only when the ledger records hits
+        line = cache_hit_line(state.llm_cost if state is not None else None)
+        if line:
+            typer.echo(line)
+
     if not sp_path.exists():
         typer.echo(_ledger_total_line())
+        _echo_ledger_cache_line()
         echo_spend_around_champion(state=state, ev_path=ev_path)   # the ledger alone answers it
         typer.echo("no spans.jsonl — the ledger records totals only, so the split is unavailable.")
         raise typer.Exit(2)
@@ -218,6 +224,7 @@ def tokens(run_dir: Path = typer.Argument(...),
         # found") named the record rather than the reader and read identically to a run that simply
         # never traced. Both facts are already in hand at this point.
         typer.echo(_ledger_total_line())
+        _echo_ledger_cache_line()
         echo_spend_around_champion(state=state, ev_path=ev_path)   # the ledger alone answers it
         if unreadable or out["damaged"]:
             typer.echo(f"no generation spans could be read; {unreadable + out['damaged']} damaged "
@@ -227,17 +234,8 @@ def tokens(run_dir: Path = typer.Argument(...),
             typer.echo("no generation spans found; nothing to attribute.")
         raise typer.Exit(2)
 
-    shown = out["rows"][:top] if top and top > 0 else out["rows"]
-    typer.echo(f"{'tokens':>14}  {'share':>6}  {'calls':>6}  {'prompt':>13}  {'completion':>11}  phase")
-    for row in shown:
-        typer.echo(f"{row['tokens']:>14,}  {100 * row['share']:>5.1f}%  {row['calls']:>6,}  "
-                   f"{row['prompt']:>13,}  {row['completion']:>11,}  {row['phase']}")
-    if len(shown) < len(out["rows"]):
-        rest = out["rows"][len(shown):]
-        typer.echo(f"{sum(r['tokens'] for r in rest):>14,}  "
-                   f"{100 * sum(r['share'] for r in rest):>5.1f}%  "
-                   f"{sum(r['calls'] for r in rest):>6,}  "
-                   f"{'':>13}  {'':>11}  ({len(rest)} more phase(s), --top {len(shown)})")
+    for line in phase_table_lines(out["rows"], top):
+        typer.echo(line)
 
     typer.echo("")
     typer.echo(f"attributed : {out['attributed']:>14,} tokens over {out['calls']:,} generation spans")
@@ -245,6 +243,7 @@ def tokens(run_dir: Path = typer.Argument(...),
         typer.echo(f"ledger     :            n/a  ({ledger_absent} — no denominator)")
     else:
         typer.echo(f"ledger     : {out['ledger_total']:>14,} tokens (llm_usage, the durable record)")
+        _echo_ledger_cache_line()
         # SIGNED and never clamped: a retried provider call opens two spans against one billed row,
         # so a negative residual is a real state the operator should see rather than a rounding hide.
         typer.echo(f"residual   : {out['residual']:>14,} tokens "

@@ -541,6 +541,28 @@ def _safe_token_count(value) -> int:
     return value if 0 <= value <= _MAX_USAGE_TOKENS else 0
 
 
+def _cached_prompt_tokens(raw: dict, prompt: int) -> int:
+    """How many of the call's `prompt` tokens the provider says it served from its PROMPT CACHE,
+    clamped to `prompt` — a cache hit is a subset of the prompt, never more tokens than were sent.
+
+    Four spellings, the first NON-ZERO clean count wins: this module's own `cached_tokens` (so a
+    second pass over an already-normalized dict — `_post` hands its body back through `add` — keeps
+    it), the OpenAI shape `prompt_tokens_details.cached_tokens` (OpenRouter, vLLM and LiteLLM speak
+    it too), the Anthropic-compatible `cache_read_input_tokens`, and DeepSeek's
+    `prompt_cache_hit_tokens`. Each goes through `_safe_token_count`, so a bool, a string or a
+    negative states nothing. `_normalize_usage` used to drop all four (doc 69 69.32), so no run
+    could say what the same calls would cost on a provider that prices a cache hit below a fresh
+    prompt token."""
+    details = raw.get("prompt_tokens_details")
+    for value in (raw.get("cached_tokens"),
+                  details.get("cached_tokens") if isinstance(details, dict) else None,
+                  raw.get("cache_read_input_tokens"), raw.get("prompt_cache_hit_tokens")):
+        count = _safe_token_count(value)
+        if count:
+            return min(count, prompt)
+    return 0
+
+
 def _normalize_usage(usage) -> dict[str, int | float]:
     """Return the one bounded usage shape consumed by accounting, tracing and UI telemetry.
 
@@ -549,6 +571,10 @@ def _normalize_usage(usage) -> dict[str, int | float]:
     absent/invalid/internally contradictory total retains the historical prompt+completion
     fallback, saturated at the same signed-int64 ceiling. A provider total smaller than its two
     components is corrupt telemetry, not an independently trustworthy counter.
+
+    `cached_tokens` (`_cached_prompt_tokens`) is carried only when NON-ZERO: every call whose
+    provider reports no cache hit keeps the historical dict byte for byte, and so does every
+    ledger row, span and summary built from it (doc 69 69.32).
     """
     try:
         raw = dict(usage) if isinstance(usage, dict) else {}
@@ -564,7 +590,7 @@ def _normalize_usage(usage) -> dict[str, int | float]:
         total = reported_total
     else:
         total = component_total
-    return {
+    normalized = {
         "prompt_tokens": prompt,
         "completion_tokens": completion,
         "total_tokens": total,
@@ -575,6 +601,10 @@ def _normalize_usage(usage) -> dict[str, int | float]:
         # counter sanitizer (`sanitize_usage_delta`, `replay._llm_counter`) unchanged.
         "priced": _normalized_priced(raw),
     }
+    cached = _cached_prompt_tokens(raw, prompt)
+    if cached:
+        normalized["cached_tokens"] = cached
+    return normalized
 
 
 def _normalized_priced(raw: dict) -> int:
@@ -1662,6 +1692,9 @@ class OpenAICompatibleClient:
             usage[field] = 0
         usage["cost"] = 0.0
         usage["priced"] = 0   # no provider call, so nobody priced it — not "priced at $0"
+        # And no provider cache served it either: the stored call's cache hits are that call's, and
+        # a zero prompt cannot contain any (doc 69 69.32 — the counter is absent, never 0).
+        usage.pop("cached_tokens", None)
         cached["usage"] = usage
         # Restore the per-call telemetry a live call would have set.
         self._last_usage = usage
@@ -2463,6 +2496,11 @@ class CostAccountant:
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.total_tokens = 0
+        # How many of `prompt_tokens` the provider served from its PROMPT CACHE, as it reported them
+        # (`_cached_prompt_tokens`, doc 69 69.32): a subset of `prompt_tokens`, 0 when no provider
+        # said so. Every delta and boundary carries it only when non-zero, so a run on a provider
+        # that reports none writes the historical bytes.
+        self.cached_tokens = 0
         # The LARGEST single prompt seen = how big the model's CONTEXT WINDOW actually got. Distinct from
         # prompt_tokens (which SUMS the same context re-sent every tool-loop turn → O(turns²)); the UI
         # reads this to show "context" honestly instead of the billed re-send sum.
@@ -2521,6 +2559,7 @@ class CostAccountant:
                 "prompt_tokens": self.prompt_tokens,
                 "completion_tokens": self.completion_tokens,
                 "total_tokens": self.total_tokens,
+                **({"cached_tokens": self.cached_tokens} if self.cached_tokens else {}),
             }
 
     def add(self, cost: Optional[float], usage: Optional[dict] = None) -> float:
@@ -2541,6 +2580,10 @@ class CostAccountant:
             "completion_tokens": int(normalized["completion_tokens"]),
             "total_tokens": int(normalized["total_tokens"]),
         }
+        # Only when non-zero, like the normalized dict it comes from (doc 69 69.32).
+        cached = int(normalized.get("cached_tokens") or 0)
+        if cached:
+            delta["cached_tokens"] = cached
         with self._lock:
             # Keep every durable/public roll-up finite and bounded even after repeated individually
             # valid near-float/int ceilings. Saturation is safer than wrap/Infinity or an exception
@@ -2557,6 +2600,7 @@ class CostAccountant:
             candidate_calls = min(_MAX_USAGE_TOKENS, self.calls + 1)
             candidate_priced = min(_MAX_USAGE_TOKENS,
                                    self.priced_calls + delta["priced_calls"])
+            candidate_cached = min(_MAX_USAGE_TOKENS, self.cached_tokens + cached)
             candidate_peak = max(self.peak_prompt, delta["prompt_tokens"])
             candidate_warned = self.warned
             if (self.limit is not None and not candidate_warned
@@ -2570,6 +2614,7 @@ class CostAccountant:
             self.prompt_tokens = candidate_prompt
             self.completion_tokens = candidate_completion
             self.total_tokens = candidate_total
+            self.cached_tokens = candidate_cached
             self.peak_prompt = candidate_peak
             self.warned = candidate_warned
             sink = self.on_delta
@@ -2652,6 +2697,31 @@ class CostAccountant:
             return None if self.limit is None else max(0.0, self.limit - self.spent)
 
 
+def _litellm_cache_fields(usage) -> dict:
+    """The prompt-cache spellings `_cached_prompt_tokens` reads, lifted off a LiteLLM usage OBJECT.
+
+    LiteLLM hands back a pydantic `Usage`, not the dict `_normalize_usage` walks, so the nested
+    OpenAI `prompt_tokens_details.cached_tokens` and the flat Anthropic/DeepSeek counters are copied
+    into plain keys here and judged there (anything that is not a count states nothing). Its own
+    containment on purpose: an exotic details object costs the cache figure, never the call's
+    prompt/completion counters beside it (doc 69 69.32).
+    """
+    fields: dict = {}
+    try:
+        details = getattr(usage, "prompt_tokens_details", None)
+        cached = (details.get("cached_tokens") if isinstance(details, dict)
+                  else getattr(details, "cached_tokens", None))
+        if cached is not None:
+            fields["prompt_tokens_details"] = {"cached_tokens": cached}
+        for key in ("cache_read_input_tokens", "prompt_cache_hit_tokens"):
+            value = getattr(usage, key, None)
+            if value is not None:
+                fields[key] = value
+    except Exception:  # noqa: BLE001 — optional telemetry; the call's other counters stand
+        return {}
+    return fields
+
+
 class LiteLLMClient:
     """Optional LiteLLM adapter implementing the `parse.LLMClient` Protocol.
 
@@ -2729,6 +2799,8 @@ class LiteLLMClient:
                 "completion_tokens": getattr(u, "completion_tokens", 0),
                 "total_tokens": getattr(u, "total_tokens", 0),
             }
+            # The provider's prompt-cache hits, when LiteLLM carries them (doc 69 69.32).
+            payload.update(_litellm_cache_fields(u))
             # LiteLLM states the amount OUT OF BAND (`_hidden_params.response_cost`), so fold it in
             # here: `_normalize_usage` is where the priced/unpriced witness is minted, and a response
             # this backend DID price must not be indistinguishable from one it did not. Pre-normalize

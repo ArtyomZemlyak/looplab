@@ -43,6 +43,12 @@ _COUNTER_KEYS = ("calls", "priced_calls", "prompt_tokens", "completion_tokens", 
 # delta, i.e. crash-recovery of pending PAID usage failing closed on the very deltas that exist to
 # survive a crash.
 _LEGACY_DELTA_KEYS = frozenset({"cost", *_COUNTER_KEYS}) - {"priced_calls"}
+# Counters a delta carries only when NON-ZERO (doc 69 69.32): the provider's prompt-cache hits, a
+# subset of `prompt_tokens`. Sparse on purpose — a delta, an outbox record and an `llm_usage` row
+# from a provider that reports no cache hit keep the exact historical shape, so neither the outbox
+# shapes above nor any stored row changes, and "absent" is what every older row already says.
+# Kept OUT of `_COUNTER_KEYS`, whose members every delta must carry.
+_OPTIONAL_COUNTER_KEYS = ("cached_tokens",)
 _OUTBOX_DIRNAME = ".llm-usage-outbox"
 _OUTBOX_VERSION = 1
 # `_embedder` (review 2026-09-22, CORE-01 part 2): `Engine(embedder=...)` is the novelty gate's and
@@ -98,7 +104,7 @@ def sanitize_usage_delta(data: Any) -> dict[str, int | float]:
         raw = dict(data) if isinstance(data, dict) else {}
     except Exception:  # noqa: BLE001 - hostile provider telemetry degrades to zero
         raw = {}
-    return {
+    clean: dict[str, int | float] = {
         "cost": _safe_cost(raw.get("cost")),
         "calls": _safe_counter(raw.get("calls")),
         # How many of `calls` the provider actually priced. `cost` is a complete amount only when
@@ -108,6 +114,12 @@ def sanitize_usage_delta(data: Any) -> dict[str, int | float]:
         "completion_tokens": _safe_counter(raw.get("completion_tokens")),
         "total_tokens": _safe_counter(raw.get("total_tokens")),
     }
+    # The provider's prompt-cache hits (doc 69 69.32): present only when non-zero, and never more
+    # than the prompt they are a part of — a row claiming otherwise is not one this ledger wrote.
+    cached = min(_safe_counter(raw.get("cached_tokens")), int(clean["prompt_tokens"]))
+    if cached:
+        clean["cached_tokens"] = cached
+    return clean
 
 
 def _snapshot(accountant: object) -> dict[str, int | float]:
@@ -120,6 +132,7 @@ def _snapshot(accountant: object) -> dict[str, int | float]:
             "prompt_tokens": getattr(accountant, "prompt_tokens", 0),
             "completion_tokens": getattr(accountant, "completion_tokens", 0),
             "total_tokens": getattr(accountant, "total_tokens", 0),
+            "cached_tokens": getattr(accountant, "cached_tokens", 0),
         })
         if priced is None:
             # A legacy/third-party accountant has no such counter, and `sanitize_usage_delta` would
@@ -210,6 +223,9 @@ def _record(binding: dict[str, Any], clean: dict[str, int | float]) -> None:
     recorded["cost"] = min(_MAX_COST, float(recorded["cost"]) + float(clean["cost"]))
     for key in _COUNTER_KEYS:
         recorded[key] = min(_MAX_COUNTER, int(recorded[key]) + int(clean[key]))
+    for key in _OPTIONAL_COUNTER_KEYS:
+        if clean.get(key):
+            recorded[key] = min(_MAX_COUNTER, int(recorded.get(key, 0)) + int(clean[key]))
 
 
 def _outbox_dir(engine: object) -> Path | None:
@@ -250,12 +266,14 @@ def _decode_outbox(path: Path) -> tuple[str, dict[str, int | float]]:
     if path.name != f"{usage_id}.json":
         raise ValueError("usage outbox filename does not match its identity")
     delta = raw.get("delta")
-    if not isinstance(delta, dict) or set(delta) not in (
+    # An optional counter rides beside either shape, never instead of one
+    # (`_OPTIONAL_COUNTER_KEYS`).
+    if not isinstance(delta, dict) or set(delta) - set(_OPTIONAL_COUNTER_KEYS) not in (
             {"cost", *_COUNTER_KEYS}, _LEGACY_DELTA_KEYS):
         raise ValueError("invalid usage outbox delta")
     # Only the keys this record actually carries are held to the exact-value rule; the legacy shape
     # is short exactly `priced_calls`, which then takes `sanitize_usage_delta`'s reader-side 0.
-    present = tuple(key for key in _COUNTER_KEYS if key in delta)
+    present = tuple(key for key in (*_COUNTER_KEYS, *_OPTIONAL_COUNTER_KEYS) if key in delta)
     # Reject rather than coerce a damaged record. These are locally-written values, so any
     # difference from the sanitizer means the exact known delta can no longer be proven.
     clean = sanitize_usage_delta(delta)
@@ -263,7 +281,7 @@ def _decode_outbox(path: Path) -> tuple[str, dict[str, int | float]]:
             or not isinstance(delta.get("cost"), (int, float))
             or any(isinstance(delta.get(key), bool) or not isinstance(delta.get(key), int)
                    for key in present)
-            or any(delta.get(key) != clean[key] for key in ("cost", *present))):
+            or any(delta.get(key) != clean.get(key) for key in ("cost", *present))):
         raise ValueError("unsafe usage outbox values")
     return usage_id, clean
 
@@ -766,19 +784,21 @@ def reconcile_cost_accountants(engine: object) -> bool:
                         _MAX_COST,
                         float(pending_total["cost"]) + float(pending_delta["cost"]),
                     )
-                    for key in _COUNTER_KEYS:
+                    for key in (*_COUNTER_KEYS, *_OPTIONAL_COUNTER_KEYS):
                         pending_total[key] = min(
                             _MAX_COUNTER,
-                            int(pending_total[key]) + int(pending_delta[key]),
+                            int(pending_total.get(key, 0)) + int(pending_delta.get(key, 0)),
                         )
                 missing: dict[str, int | float] = {
                     "cost": max(0.0, float(current["cost"]) - float(baseline["cost"])
                                 - float(recorded["cost"]) - float(pending_total["cost"])),
                 }
-                for key in _COUNTER_KEYS:
+                # The optional counters by `.get`: each of these dicts carries one only when it is
+                # non-zero, and `sanitize_usage_delta` below drops a zero again.
+                for key in (*_COUNTER_KEYS, *_OPTIONAL_COUNTER_KEYS):
                     missing[key] = max(
-                        0, int(current[key]) - int(baseline[key]) - int(recorded[key])
-                        - int(pending_total[key]))
+                        0, int(current.get(key, 0)) - int(baseline.get(key, 0))
+                        - int(recorded.get(key, 0)) - int(pending_total.get(key, 0)))
                 if float(missing["cost"]) < 1e-12:
                     missing["cost"] = 0.0
                 clean = sanitize_usage_delta(missing)
@@ -856,6 +876,9 @@ def in_memory_cost_total(engine: object) -> dict[str, int | float] | None:
         total["cost"] = min(_MAX_COST, float(total["cost"]) + float(snap["cost"]))
         for key in _COUNTER_KEYS:
             total[key] = min(_MAX_COUNTER, int(total[key]) + int(snap[key]))
+        for key in _OPTIONAL_COUNTER_KEYS:     # sparse, like the snapshot it comes from
+            if snap.get(key):
+                total[key] = min(_MAX_COUNTER, int(total.get(key, 0)) + int(snap[key]))
     return total if _has_value(total) else None
 
 
