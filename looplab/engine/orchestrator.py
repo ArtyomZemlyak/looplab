@@ -3322,25 +3322,25 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 # guarantee the crash branch documents. The loop re-folds paused=True at the top
                 # and finalizes; a plain `resume` continues once the cause is fixed.
                 break
-            # THE RUN'S STOP ends the batch too (WP-STOP). A build is minutes to hours, so an
-            # operator pause, a drain pause or a finish lands INSIDE one far more often than between
-            # two, and the loop reads the halt only at its head: without this the next claimed
-            # Card's Developer (or the next raw action's Researcher) was paid for anyway. Asked
-            # only while a build remains. Each reservation this lane claimed and will not build
-            # gets its terminal, as the crash breaker's do — left open, a run that FINISHES here
-            # would carry live `node_building` markers nothing terminates — but its Card is KEPT:
-            # it is inventory this turn claimed, not minted, and dropping it would throw away a
-            # proposal already paid for, so it returns to the board for `looplab resume`.
-            if _create_index + 1 < len(creates) and self._run_halted_now():
-                for later in (_card_reservations or [])[_create_index + 1:]:
-                    self._fail_reserved_build(
-                        node_id=later.node_id,
-                        card_id=later.card_id,
-                        generation=0,
-                        error="Card build batch stopped: the run is stopping",
-                        reason="build_batch_cancelled",
-                        drop_card=False,
-                    )
+            # THE RUN'S STOP ends a RAW batch too (WP-STOP): a build is minutes to hours, so a stop
+            # lands inside one far more often than between two, and the next raw action's paid
+            # proposal must not start. Asked only while a build remains.
+            #
+            # A CLAIMED Card lane is NOT cut, under a plain stop or a drain, and that is the rule
+            # rather than an exception to it. Its reservations were appended as one tail-CAS group
+            # before the first build (`_claim_existing_card_builds`), so every node slot of the lane
+            # is ALREADY charged: `_node_reservation_slots_remaining` charges the highest id ever
+            # reserved, ids are never reused, and a reservation closed without a node is refunded
+            # by nothing (`search/card_selection.py::refunded_card_budget_node_ids`, by design).
+            # Closing the rest of the lane on a stop — the first cut of this fix — burned one of
+            # `max_nodes` per unbuilt Card for good, and `looplab resume` then claimed the same Card
+            # under a NEW id: two nodes for three slots (critic 2026-09-29, driven). And under
+            # `--drain-builds` it cancelled builds the drain exists to commit. So a reservation is
+            # built — as every other lane's is, whose build starts the moment it reserves — and a
+            # stop cuts only work that holds no reservation yet (the claim itself refuses a halted
+            # run). The nodes land pending; `looplab resume` evaluates them.
+            if (_create_index + 1 < len(creates) and not _card_reservations
+                    and self._run_halted_now()):
                 break
         return "continue", state, _no_mint_turns
 

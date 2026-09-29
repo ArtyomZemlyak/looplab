@@ -1813,16 +1813,20 @@ class _ProposesWhileStopped:
                     hypothesis=f"outer-lane hypothesis {self.calls}")
 
 
-class _StopsOnFirstImplement(_Developer):
-    """The operator's stop lands while the FIRST claimed Card is being built."""
+_DRAIN_STOP = {"reason": "operator stop (`looplab stop --drain-builds`)", "drain_builds": True}
 
-    def __init__(self, store, *, stop: bool):
+
+class _StopsOnFirstImplement(_Developer):
+    """The operator's stop (`pause`, a pause row — a plain stop or a drain) lands while the FIRST
+    claimed Card is being built; `None` is the control."""
+
+    def __init__(self, store, *, pause: dict | None):
         super().__init__()
-        self.store, self.stop = store, stop
+        self.store, self.pause = store, pause
 
     def implement(self, idea: Idea) -> str:
-        if self.stop and self.calls == 0:
-            self.store.append(EV_PAUSE, dict(_OPERATOR_STOP))
+        if self.pause is not None and self.calls == 0:
+            self.store.append(EV_PAUSE, dict(self.pause))
         return super().implement(idea)
 
 
@@ -1949,37 +1953,76 @@ def test_the_serial_card_claim_refuses_a_halted_run_and_reserves_nothing(tmp_pat
     assert [event.seq for event in engine.store.read_all()] == before
 
 
-@pytest.mark.parametrize("stop", [False, True], ids=["control", "stopped"])
-def test_a_stop_during_a_claimed_build_starts_no_second_build(tmp_path, stop):
-    """A two-Card serial lane, claimed atomically; the stop lands while card-1 is being built. That
-    build finishes (a stop never cuts a paid call short), card-2's Developer is never called, and
-    its reservation gets a terminal — left open, a run that FINISHES here would carry a
-    `node_building` marker nothing terminates. Card-2 itself is paid-for inventory the lane only
-    claimed, so it goes back to the board selectable, for `looplab resume` to build."""
-    engine, _producer = _engine(tmp_path / f"claimed-lane-{stop}", depth=0)
+@pytest.mark.parametrize("pause", [None, _OPERATOR_STOP, _DRAIN_STOP],
+                         ids=["control", "stop", "drain"])
+def test_a_stop_during_a_claimed_lane_builds_what_it_reserved_and_burns_no_slot(tmp_path, pause):
+    """A two-Card serial lane, claimed atomically — both node ids reserved before the first build;
+    the stop (a plain one or a drain) lands while card-1 is being built. The rest of the lane is
+    STILL built: its slots are already charged (`_node_reservation_slots_remaining` charges the
+    highest id ever reserved, and a reservation closed without a node is refunded by nothing), so
+    cutting it burned a slot for good and `looplab resume` then claimed the same Card under a NEW id
+    — and under `--drain-builds` it cancelled a build the drain exists to commit (critic 2026-09-29:
+    5 slots left after resume against the control's 6, for the same two nodes). Every case ends with
+    the control's two nodes and six slots, before and after the resume."""
+    engine, _producer = _engine(tmp_path / "claimed-lane", depth=0)
     engine.policy.card_select_k = 2
     _start(engine)
     _add_ready_draft(engine, "card-1", x=0.2)
     _add_ready_draft(engine, "card-2", x=0.8)
-    developer = _StopsOnFirstImplement(engine.store, stop=stop)
+    developer = _StopsOnFirstImplement(engine.store, pause=pause)
     engine.developer = developer
 
     creates, rows = _outer_create_turn(engine)
     assert sorted(action.get(META_CARD_ID) for action in creates) == ["card-1", "card-2"]
     state = fold(engine.store.read_all())
-    assert not state.buildings, "a reservation was left open"
-    if not stop:
-        assert developer.calls == 2 and len(state.nodes) == 2
+    assert developer.calls == 2, "a reserved Card was left unbuilt"
+    assert sorted(state.nodes) == [0, 1] and not state.buildings
+    assert not [row for row in rows
+                if row.type in (EV_NODE_FAILED, "card_dropped", "card_auto_dropped")]
+    assert {state.nodes[node_id].idea.card_id for node_id in (0, 1)} == {"card-1", "card-2"}
+    assert engine._node_reservation_slots_remaining(state) == 6
+    assert state.paused is (pause is not None)
+    if pause is None:
         return
-    assert developer.calls == 1, "the second claimed Card was built after the stop"
-    assert len(state.nodes) == 1
-    unbuilt = creates[1][META_CARD_ID]
-    closed = [row.data for row in rows if row.type == EV_NODE_FAILED]
-    assert [(data.get("card_id"), data["reason"]) for data in closed] == [
-        (unbuilt, "build_batch_cancelled")]
-    assert not [row for row in rows if row.type in ("card_dropped", "card_auto_dropped")]
-    assert state.cards[unbuilt].status == "proposed" and state.cards[unbuilt].selection_ready
-    assert state.paused
+    engine.store.append(EV_RESUME, {})
+    resumed = fold(engine.store.read_all())
+    assert not resumed.halted
+    assert engine._node_reservation_slots_remaining(resumed) == 6, "a slot was burned by the stop"
+    assert not [action for action in engine._select_actions(resumed)
+                if action.get(META_CARD_ID) in ("card-1", "card-2")], (
+        "a Card the stopped lane already built was elected again")
+
+
+def test_a_stop_ends_a_RAW_serial_batch_before_its_next_proposal(tmp_path, monkeypatch):
+    """The half of the serial loop a stop still cuts: raw creates hold no reservation, so the next
+    one's paid proposal must not start. Two seeds on the plain serial path (no Card inventory, no
+    fan-out); the stop lands in the first proposal, and the loop leaves before building the second —
+    `_create_node`'s own fold would refuse it too, so the loop's exit is observed at the call."""
+    from looplab.adapters.toytask import ToyTask
+
+    task = ToyTask()
+    researcher = _ProposesWhileStopped(None, stop=True)
+    engine = Engine(tmp_path / "raw-serial", task=task, researcher=researcher,
+                    developer=_Developer(), sandbox=SubprocessSandbox(),
+                    policy=GreedyTree(n_seeds=2, max_nodes=8, debug_depth=0), n_seeds=2,
+                    max_nodes=8)
+    engine._novelty_mode = "off"
+    researcher.store = engine.store
+    _start(engine)
+    builds: list[dict] = []
+    real_create = engine._create_node
+
+    def _counting_create(action, *args, **kwargs):
+        builds.append(action)
+        return real_create(action, *args, **kwargs)
+
+    monkeypatch.setattr(engine, "_create_node", _counting_create)
+    creates, rows = _outer_create_turn(engine)
+    assert len(creates) == 2 and not any(META_CARD_ID in action for action in creates)
+    assert researcher.calls == 1 and len(builds) == 1, (
+        f"{len(builds)} serial build(s) started for a lane the stop had already halted")
+    assert _discard_beacons(rows) == [("started", "run_is_stopping"),
+                                      ("finished", "run_is_stopping")]
 
 
 def test_node_created_before_done_recovery_appends_only_missing_done(tmp_path):
