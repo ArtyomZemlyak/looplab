@@ -43,9 +43,13 @@ one it is the last thing anyone can prove. Both are stated rather than guessed a
 **A WITHHELD ATTEMPT CLOSES ITS INTERVAL** (doc 69 69.12a). A pause (or a stop) that withholds a
 lifecycle's evaluation work returns with no terminal, so the node stays pending — and this module
 counted the WHOLE pause as a running evaluation, up to the re-dispatch's terminal. The engine now
-writes an `eval_attempt_withheld` row at every withhold: the busy stretch ends there, and a later
-`node_eval_started` for the same lifecycle opens the next one. A lifecycle with no such row pairs
-exactly as it always did (its first start, its first terminal), so every older log reads the same.
+writes an `eval_attempt_withheld` row at every withhold: the busy stretch ends there, and the
+lifecycle's next LAUNCH opens the next one — a `node_eval_started` when a new engine owner took it,
+and otherwise its next `eval_canary_started` or `eval_invocation_claimed`, because an owner that
+resumes its own pause writes no second start (`Node.eval_activity_started` is still set): read by
+the start row alone, the re-dispatched evaluation was not busy at all (critic 2026-09-29, driven:
+a 1.5 s eval after a same-owner resume counted 0 s). A lifecycle with no withheld row pairs exactly
+as it always did (its first start, its first terminal), so every older log reads the same.
 
 **AN INTERVAL IS ONE LIFECYCLE, NOT ONE NODE ID** (review 2026-09-22, EVT-06). A `node_reset`
 re-opens the same id and the engine evaluates it again under the next `generation`, so keying the
@@ -59,12 +63,17 @@ lifecycle, so the row is not attributed at all rather than guessed onto one.
 from __future__ import annotations
 
 from looplab.core.models import coerce_node_id
-from looplab.events.types import (EV_EVAL_ATTEMPT_WITHHELD, EV_NODE_EVAL_STARTED, EV_NODE_EVALUATED,
+from looplab.events.types import (EV_EVAL_ATTEMPT_WITHHELD, EV_EVAL_CANARY_STARTED,
+                                  EV_EVAL_INVOCATION_CLAIMED, EV_NODE_EVAL_STARTED, EV_NODE_EVALUATED,
                                   EV_NODE_FAILED)
 
 _EVAL_STARTED = EV_NODE_EVAL_STARTED
 _TERMINALS = (EV_NODE_EVALUATED, EV_NODE_FAILED)
 _WITHHELD = EV_EVAL_ATTEMPT_WITHHELD
+# The rows that mark a LAUNCH inside a lifecycle, both keyed by node and generation. They reopen a
+# stretch a withhold closed and nothing else: before the first withhold the lifecycle's start row
+# has the stretch open already, and a lifecycle with no withheld row never reads them.
+_RELAUNCHES = (EV_EVAL_CANARY_STARTED, EV_EVAL_INVOCATION_CLAIMED)
 
 
 def _field(row, name):
@@ -115,16 +124,23 @@ def _withheld_segments(sequence, last: float) -> tuple[list, int]:
     """The busy stretches of ONE lifecycle with at least one `eval_attempt_withheld` row, in log
     order.
 
-    A start opens a stretch unless one is open (a re-append is not a re-run, as above); a withhold
-    closes the open one; the FIRST terminal closes it and ends the lifecycle — later rows are
-    ignored, as the fold ignores a second terminal. A stretch still open at the end runs to `last`
-    and is counted open. A close stamped before its open (clock skew between writers) drops that
-    stretch, as the one-interval pairing drops a terminal stamped before its start."""
+    A start opens a stretch unless one is open (a re-append is not a re-run, as above), and so does a
+    relaunch row once the lifecycle has started (`_RELAUNCHES`: the same owner's next launch after a
+    withhold); a withhold closes the open one; the FIRST terminal closes it and ends the lifecycle —
+    later rows are ignored, as the fold ignores a second terminal. A stretch still open at the end
+    runs to `last` and is counted open. A close stamped before its open (clock skew between writers)
+    drops that stretch, as the one-interval pairing drops a terminal stamped before its start."""
     segments: list = []
     opened = None
+    started = False
     for kind, stamp in sequence:
         if kind == _EVAL_STARTED:
+            started = True
             if opened is None:
+                opened = stamp
+            continue
+        if kind in _RELAUNCHES:
+            if started and opened is None:
                 opened = stamp
             continue
         if opened is not None and stamp >= opened:
@@ -175,7 +191,8 @@ def eval_occupancy(events, width: int | None = None) -> dict:
         if stamp is None:
             continue
         kind = _field(e, "type")
-        if kind != _EVAL_STARTED and kind not in _TERMINALS and kind != _WITHHELD:
+        if (kind != _EVAL_STARTED and kind not in _TERMINALS and kind != _WITHHELD
+                and kind not in _RELAUNCHES):
             continue
         lifecycle = _lifecycle(e)
         if lifecycle is None:

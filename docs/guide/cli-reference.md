@@ -1054,15 +1054,18 @@ LiteLLM speak it too), Anthropic's `cache_read_input_tokens`, DeepSeek's `prompt
 the ledger records them as `cached_tokens` and the reconciliation gains one line:
 
 ```
-cache hits : <cached> of <prompt> prompt tokens (>= <share>%) served from the provider's prompt cache
+cache hits : <cached> of <prompt> prompt tokens (<share>% of the ledger's prompt total) served from the provider's prompt cache
 ```
 
 and the table a `cached` column beside `prompt` when the spans carry them too. It is the COUNT a
 price on a provider that bills a cache hit below a fresh token starts from — not a cost: cache
-WRITES, which some providers bill above a fresh token, are not recorded. The share is a floor (`>=`),
-because the ledger's prompt total also holds embedding inputs and every call whose provider reports
-no cache figure; a phase with none reported shows `-` in the column, never 0. A count larger than
-the call's own prompt (a provider counting on another base) is recorded as nothing. Neither the line
+WRITES, which some providers bill above a fresh token, are not recorded. The share is of the
+ledger's prompt total, and neither a floor nor a ceiling on a call's own hit rate: that total also
+holds embedding inputs and every call whose provider reports no cache figure, which lowers it, while
+a provider whose prompt count excludes its cache reads (Anthropic-native `input_tokens`) raises it;
+a phase with none reported shows `-` in the column, never 0. A count larger than the call's own
+prompt (a provider counting on another base) is recorded as nothing, and the next spelling is read
+instead. Neither the line
 nor the column appears when no hit was reported: a provider that reports none and a run recorded
 before the field existed both print the report above unchanged, and neither is a measured zero.
 

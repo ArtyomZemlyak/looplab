@@ -547,7 +547,9 @@ def _cached_prompt_tokens(raw: dict, prompt: int) -> int:
     another base (an Anthropic-native `input_tokens` excludes its cache reads), and clamping it to
     the prompt claimed a 100 % hit rate no provider reported (critic 2026-09-29).
 
-    Four spellings, the first NON-ZERO clean count wins: this module's own `cached_tokens` (so a
+    Four spellings, the first NON-ZERO clean count that fits the prompt wins — one larger falls
+    through to the next spelling rather than shadowing it (critic 2026-09-29): this module's own
+    `cached_tokens` (so a
     second pass over an already-normalized dict — `_post` hands its body back through `add` — keeps
     it), the OpenAI shape `prompt_tokens_details.cached_tokens` (OpenRouter, vLLM and LiteLLM speak
     it too), the Anthropic-compatible `cache_read_input_tokens`, and DeepSeek's
@@ -562,8 +564,8 @@ def _cached_prompt_tokens(raw: dict, prompt: int) -> int:
                   details.get("cached_tokens") if type(details) is dict else None,
                   raw.get("cache_read_input_tokens"), raw.get("prompt_cache_hit_tokens")):
         count = _safe_token_count(value)
-        if count:
-            return count if count <= prompt else 0
+        if count and count <= prompt:
+            return count
     return 0
 
 

@@ -1818,11 +1818,13 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
         # ONE MORE LOOK once the lock has stayed free: the log's own starters (`stop_lifted`), and
         # the server's command workers, which record a planned engine start only in `.commands/`.
         why = stop_lifted(current())
-        from looplab.serve.protocol import command_ack_index, stop_holds_queued_intents
+        from looplab.serve.protocol import (command_ack_index, standing_pause_reason,
+                                            stop_holds_queued_intents)
         state = current()
+        rows = store.read_all()
         commands = server_commands_restarting(
-            target, acked=command_ack_index(store.read_all()),
-            stopped=stop_holds_queued_intents(state), pause_reason=state.pause_reason)
+            target, acked=command_ack_index(rows), stopped=stop_holds_queued_intents(state),
+            pause_reason=standing_pause_reason(rows))
         if not why and commands["coming"]:
             why = (f"server command(s) {', '.join(commands['coming'])} will start an engine now "
                    "that " + ("this one has exited" if seen["alive"] else "no engine holds the lock")

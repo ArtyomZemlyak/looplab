@@ -25,6 +25,7 @@ from factories import command_terminal as _terminal  # noqa: E402
 from factories import post_command as _post  # noqa: E402
 from test_run_command_service import _ack_marked, _client, _Driver, _seed, _types  # noqa: E402
 
+from looplab.core.models import Event  # noqa: E402
 from looplab.events.eventstore import EventStore  # noqa: E402
 from looplab.events.replay import fold  # noqa: E402
 from looplab.serve.control_validation import CONTROL_SPECS  # noqa: E402
@@ -581,10 +582,90 @@ def test_the_tui_gives_a_drain_s_account_in_the_web_ui_s_words():
     assert "drain" in _done_suffix({"status": "succeeded", "served_by_drain": True})
 
 
-def test_stop_wait_counts_an_extension_on_the_obligations_pause(tmp_path):
-    """The wait reads the pause's own reason too: on an external run's obligations pause a budget
-    extension still starts the engine (the one paused budget stop), so the stop does not stand.
-    MUTATION: pass no `pause_reason` from `stop` -> exit 0, "stands"."""
+# ------------------------------------------------------ critic 2026-09-29 (a8774): the STANDING pause
+def _pause(seq, reason=PAUSE_REASON_EXTERNAL_OBLIGATIONS, **extra):
+    data = {"reason": reason, **extra} if reason is not None else dict(extra)
+    return Event(seq=seq, type="pause", data=data)
+
+
+def test_the_obligations_pause_holds_the_stop_only_while_it_stands_alone():
+    """`RunState.pause_reason` keeps the FIRST of two pauses on one lifecycle, and the latest pause
+    alone is the engine's obligations row when that lands after the operator's stop (it is written by
+    CAS on a log that can already hold the stop) — so the exemption folds every pause that stands.
+    MUTATIONS: "the latest pause decides" -> the second order reads obligations; "the first pause
+    decides" -> the first order does."""
+    from looplab.serve.protocol import standing_pause_reason
+
+    obligations = PAUSE_REASON_EXTERNAL_OBLIGATIONS
+    stop_on_top = [_pause(1), _pause(2, "operator")]
+    assert fold(stop_on_top).pause_reason == obligations       # the fold's first
+    assert standing_pause_reason(stop_on_top) == "operator"
+    engine_row_on_top = [_pause(1, "operator"), _pause(2)]
+    assert standing_pause_reason(engine_row_on_top) == "operator"
+    assert standing_pause_reason([_pause(1)]) == obligations
+    assert standing_pause_reason([_pause(1), _pause(2)]) == obligations
+    # A pause that names no reason (or a garbled one) still stands, and is not the obligations one.
+    assert standing_pause_reason([_pause(1), _pause(2, None)]) == ""
+    assert standing_pause_reason([_pause(1, None), _pause(2)]) == ""
+    assert standing_pause_reason([_pause(1), _pause(2, 7)]) == ""
+    # A resume, reopen, restart or finish ends every pause that stood; a later one starts afresh.
+    for ender in ("resume", "run_reopened", "restart", "run_finished"):
+        ended = [_pause(1, "operator"), Event(seq=2, type=ender, data={})]
+        assert standing_pause_reason(ended) is None, ender
+        assert standing_pause_reason(ended + [_pause(3)]) == obligations, ender
+    # Rows that move no pause change nothing.
+    assert standing_pause_reason([_pause(1), Event(seq=2, type="node_created", data={})]) == obligations
+    assert standing_pause_reason([]) is None
+
+
+def test_the_server_index_folds_the_same_rule_across_its_appends(tmp_path):
+    """The command service reads the rule off its INCREMENTAL index, one delta per observation, so
+    the reducer's state must ride from one delta to the next. MUTATION: start each delta from None
+    -> the stop appended after an observed obligations pause reads as no pause at all."""
+    from looplab.serve.command_observation import CommandObservationIndex
+
+    path = tmp_path / "events.jsonl"
+    store = EventStore(path)
+    store.append("run_started", {"run_id": "r"})
+    index = CommandObservationIndex()
+    assert index.observe(path)._standing_pause is None
+    store.append("pause", {"reason": PAUSE_REASON_EXTERNAL_OBLIGATIONS, "terminal_reason": "budget"})
+    assert index.observe(path)._standing_pause == PAUSE_REASON_EXTERNAL_OBLIGATIONS
+    store.append("pause", {"reason": "operator"})
+    assert index.observe(path)._standing_pause == "operator"
+    store.append("pause", {"reason": PAUSE_REASON_EXTERNAL_OBLIGATIONS, "terminal_reason": "budget"})
+    assert index.observe(path)._standing_pause == "operator"
+    store.append("resume", {})
+    assert index.observe(path)._standing_pause is None
+
+
+@pytest.mark.parametrize("first, second", [
+    ({"reason": PAUSE_REASON_EXTERNAL_OBLIGATIONS, "terminal_reason": "budget"},
+     {"reason": "operator"}),
+    ({"reason": "operator"},
+     {"reason": PAUSE_REASON_EXTERNAL_OBLIGATIONS, "terminal_reason": "budget"}),
+], ids=["stop-on-the-obligations-pause", "obligations-row-after-the-stop"])
+def test_an_operator_stop_beside_the_obligations_pause_holds_a_budget_extension(tmp_path, first,
+                                                                                 second):
+    """The operator stopped an external run on (or just before) its obligations pause: a budget
+    extension must wait for their resume, not start `looplab resume` over the stop — in either
+    order. MUTATIONS: read the fold's `pause_reason` again -> the first order starts an engine;
+    read the latest pause alone -> the second does."""
+    rd = _seed(tmp_path, paused=False)
+    _store(rd).append("pause", first)
+    _store(rd).append("pause", second)
+    driver = _Driver(on_spawn=lambda: _ack_marked(rd))
+    client, _srv = _client(tmp_path, driver, timeout=30.0, observation=60.0)
+    record = _terminal(client, _post(client, "budget_extend", {"add_nodes": 1}).json())
+    assert record["status"] == "succeeded" and record.get("deferred_until_resume") is True, record
+    assert driver.calls == []
+
+
+def test_stop_wait_holds_a_stop_laid_on_the_obligations_pause(tmp_path):
+    """`looplab stop` lays the operator's own pause beside an external run's obligations pause, and
+    the extension the server would re-drive now waits for their resume — so the stop stands. (It
+    once asserted the opposite, exit 1 "does not stand": the lifting this critic found.) MUTATION:
+    pass the fold's `pause_reason` from `stop` -> exit 1."""
     from typer.testing import CliRunner
 
     from looplab.cli import app
@@ -595,5 +676,6 @@ def test_stop_wait_counts_an_extension_on_the_obligations_pause(tmp_path):
                                 "terminal_reason": "budget"})
     _command_record(rd, event_type="budget_extend", policy="ensure_running")
     out = CliRunner().invoke(app, ["stop", str(rd), "--wait"])
-    assert out.exit_code == 1, out.output
-    assert "does not stand: server command(s) `budget_extend`" in out.output, out.output
+    assert "does not stand" not in out.output, out.output
+    assert out.exit_code == 0, out.output
+

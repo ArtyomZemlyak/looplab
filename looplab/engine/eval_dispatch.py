@@ -1250,6 +1250,9 @@ class EvalDispatchMixin:
     def _skip_if_aborted(self, a: dict, cur: RunState) -> bool:
         # Both explicit stop affordances close not-yet-started work at zero cost. A mid-eval abort/drop
         # is handled by EvaluateMixin's watcher and records the time already spent.
+        # ZERO for THIS dispatch, not for the lifecycle: one a pause withheld (or a dead process
+        # left mid-chain) already spent durable seconds no terminal carries, and this terminal is
+        # its last chance to charge them (`evaluate.py::_durable_prior_seconds`, critic 2026-09-29).
         node_id = a["node_id"]
         n = cur.nodes.get(node_id)
         node_aborted = node_id in cur.aborted_nodes
@@ -1257,11 +1260,14 @@ class EvalDispatchMixin:
             n is not None and self._operator_card_dropped_for_node(cur, n))
         if node_aborted or card_dropped:
             if n is not None and n.status is NodeStatus.pending:
+                from looplab.engine.evaluate import _durable_prior_seconds
                 reason = "aborted" if node_aborted else "card_dropped"
                 error = "aborted by operator" if node_aborted else "Card dropped by operator"
                 self.store.append(EV_NODE_FAILED, {
                     "node_id": node_id, "generation": n.attempt,
-                    "error": error, "reason": reason, "eval_seconds": 0.0})
+                    "error": error, "reason": reason,
+                    "eval_seconds": _durable_prior_seconds(
+                        self.store.read_all(), node_id, n.attempt)})
             return True
         return False
 

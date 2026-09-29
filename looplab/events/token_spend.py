@@ -455,15 +455,20 @@ def cache_hit_line(ledger) -> Optional[str]:
     """The line `looplab tokens` prints for the provider's PROMPT-CACHE hits, off the folded ledger
     (doc 69 69.32) — the count a price on a provider that bills a hit below a fresh token starts
     from. None unless the ledger records some: a provider that reports none and a log written
-    before the field both leave it absent, and neither is a measured zero. The share is a FLOOR and
-    says so: the ledger's prompt total also holds embedding inputs and every call whose provider
-    reports no cache figure (critic 2026-09-29)."""
+    before the field both leave it absent, and neither is a measured zero. The share is OF THE
+    LEDGER'S PROMPT TOTAL and says so — neither a floor nor a ceiling on a call's own hit rate: that
+    total also holds embedding inputs and every call whose provider reports no cache figure, which
+    lowers it, while a provider whose prompt count EXCLUDES its cache reads (Anthropic-native
+    `input_tokens`) passes a hit count no larger than its prompt and raises it —
+    `core/llm.py::_cached_prompt_tokens` can drop only a count larger than the prompt. It printed
+    `>=` until a critic priced that second case (critic 2026-09-29)."""
     ledger = ledger if isinstance(ledger, dict) else {}
     cached, prompt = _int(ledger.get("cached_tokens")), _int(ledger.get("prompt_tokens"))
     if not (cached and prompt):
         return None
     return (f"cache hits : {cached:>14,} of {prompt:,} prompt tokens "
-            f"(>= {100 * cached / prompt:.1f}%) served from the provider's prompt cache")
+            f"({100 * cached / prompt:.1f}% of the ledger's prompt total) served from the "
+            "provider's prompt cache")
 
 
 def spend_around_champion(events, state) -> Optional[dict]:

@@ -95,6 +95,16 @@ def test_a_count_larger_than_the_prompt_states_nothing():
     assert _normalize_usage(_usage(500, 50, cache_read_input_tokens=500))["cached_tokens"] == 500
 
 
+def test_a_count_larger_than_the_prompt_does_not_shadow_a_later_spelling():
+    """One spelling counted on another base states nothing about THIS prompt; a later spelling that
+    fits still does (critic 2026-09-29, a8774). MUTATION: return 0 at the first oversized count ->
+    the 400 below is lost."""
+    usage = _usage(500, 50, cached_tokens=900, prompt_tokens_details={"cached_tokens": 400})
+    assert _normalize_usage(usage)["cached_tokens"] == 400
+    assert "cached_tokens" not in _normalize_usage(_usage(500, 50, cached_tokens=900,
+                                                          cache_read_input_tokens=901))
+
+
 def test_a_details_object_that_is_not_a_plain_dict_states_nothing_and_bills_the_call():
     """JSON and the SDK's dumps give a plain dict; a subclass's own `get` could raise out of
     `CostAccountant.add` before anything was committed — the paid call unbilled."""
@@ -511,7 +521,8 @@ def _tokens(run_dir) -> str:
 
 def test_tokens_says_how_much_of_the_prompt_the_provider_cache_served(tmp_path):
     out = _tokens(_run_dir(tmp_path, cached_ledger=240, span_cached=240))
-    assert "cache hits :            240 of 300 prompt tokens (>= 80.0%)" in out
+    assert ("cache hits :            240 of 300 prompt tokens (80.0% of the ledger's prompt "
+            "total)") in out
     header = next(line for line in out.splitlines() if line.lstrip().startswith("tokens"))
     assert "cached" in header
     row = next(line for line in out.splitlines() if line.rstrip().endswith("propose"))
@@ -528,7 +539,8 @@ def test_tokens_without_spans_still_says_the_ledgers_hits(tmp_path):
     (run / "spans.jsonl").unlink()
     result = CliRunner().invoke(app, ["tokens", str(run)])
     assert result.exit_code == 2
-    assert "cache hits :            150 of 300 prompt tokens (>= 50.0%)" in result.output
+    assert ("cache hits :            150 of 300 prompt tokens (50.0% of the ledger's prompt "
+            "total)") in result.output
 
 
 # ------------------------------------------------------------ critic 2026-09-29 (9e5fe9ac), driven
@@ -618,4 +630,5 @@ def test_a_log_with_no_generation_span_still_says_the_ledger_s_hits(tmp_path):
         {"name": "op", "kind": "operation", "trace_id": "a" * 32, "span_id": "b" * 16}) + "\n")
     result = CliRunner().invoke(app, ["tokens", str(run)])
     assert result.exit_code == 2
-    assert "cache hits :            150 of 300 prompt tokens (>= 50.0%)" in result.output
+    assert ("cache hits :            150 of 300 prompt tokens (50.0% of the ledger's prompt "
+            "total)") in result.output

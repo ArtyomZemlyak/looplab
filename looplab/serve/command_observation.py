@@ -35,15 +35,16 @@ from looplab.events.replay import fold
 from looplab.events.types import (EV_CARD_DROPPED, EV_COMMAND_ACK, EV_PAUSE, EV_RESTART,
                                   EV_RESUME, EV_RUN_ABORT, EV_RUN_FINISHED, EV_RUN_REOPENED)
 from looplab.serve._log_index import LogIndexCursor, PathLocks, validated_index_bound
-from looplab.serve.protocol import (CONTROL_EVENTS, ack_observed, engine_ack_observed,
-                                    file_command_ack, file_deferred_ack, file_drain_ack,
+from looplab.serve.protocol import (CONTROL_EVENTS, PAUSE_BOUNDARY_EVENTS, ack_observed,
+                                    engine_ack_observed, file_command_ack, file_deferred_ack,
+                                    file_drain_ack, next_standing_pause,
                                     stop_holds_queued_intents)
 
 
 MAX_INDEXED_RUNS = 8
 # The rows that move a run between PAUSED and not (`drain_paused`): the latest of them says which
-# side of a pause the log is on.
-_PAUSE_BOUNDARIES = frozenset({EV_PAUSE, EV_RESUME, EV_RUN_REOPENED, EV_RESTART, EV_RUN_FINISHED})
+# side of a pause the log is on. ONE set, `protocol.py`'s, which the CLI reads too.
+_PAUSE_BOUNDARIES = PAUSE_BOUNDARY_EVENTS
 _PROBE_WINDOW_BYTES = 4 * 1024
 _PROBE_FULL_FILE_LIMIT = 3 * _PROBE_WINDOW_BYTES
 _DUPLICATE_INTENT = object()
@@ -90,6 +91,9 @@ class _Index(LogIndexCursor):
     run_finishes: tuple[Event, ...] = ()
     latest_run_abort: Optional[Event] = None
     latest_pause_boundary: Optional[Event] = None
+    # The reason that holds the run's stop, folded one row at a time (`protocol.py::
+    # next_standing_pause`): None while no pause stands.
+    standing_pause: Optional[str] = None
     materialized_revision: Optional[str] = None
     materialized_events: Optional[tuple[Event, ...]] = None
     folded_revision: Optional[str] = None
@@ -180,6 +184,7 @@ def _apply_delta(index: _Index, events: list[Event]) -> None:
     finishes: Optional[list[Event]] = None
     latest_abort = index.latest_run_abort
     latest_boundary = index.latest_pause_boundary
+    standing_pause = index.standing_pause
     max_non_control = index.max_non_control_seq
 
     for event in events:
@@ -219,6 +224,7 @@ def _apply_delta(index: _Index, events: list[Event]) -> None:
             latest_abort = event
         if event.type in _PAUSE_BOUNDARIES:
             latest_boundary = event
+            standing_pause = next_standing_pause(standing_pause, event)
 
     if intents is not None:
         index.intents = MappingProxyType(intents)
@@ -232,6 +238,7 @@ def _apply_delta(index: _Index, events: list[Event]) -> None:
         index.run_finishes = tuple(finishes)
     index.latest_run_abort = latest_abort
     index.latest_pause_boundary = latest_boundary
+    index.standing_pause = standing_pause
     index.max_non_control_seq = max_non_control
     index.event_chunks = index.event_chunks + (tuple(events),)
     index.event_count += len(events)
@@ -300,6 +307,7 @@ class CommandObservation:
     _run_finishes: tuple[Event, ...]
     _latest_run_abort: Optional[Event]
     _latest_pause_boundary: Optional[Event]
+    _standing_pause: Optional[str]
     _chunks: tuple[tuple[Event, ...], ...]
     _owner: "CommandObservationIndex" = field(repr=False, compare=False)
     _index: _Index = field(repr=False, compare=False)
@@ -338,9 +346,12 @@ class CommandObservation:
         return self.queued_intent_stop()[0]
 
     def queued_intent_stop(self) -> tuple[bool, Optional[str]]:
-        """`(stop_holds_queued_intents, the pause's own reason)` — the reason is what exempts a
-        budget extension on an external run's obligations pause
-        (`serve/protocol.py::waits_for_resume`).
+        """`(stop_holds_queued_intents, the reason that holds the stop)` — the reason is what
+        exempts a budget extension on an external run's obligations pause
+        (`serve/protocol.py::waits_for_resume`), folded by `protocol.py::next_standing_pause` over
+        every boundary row rather than read off the fold's `pause_reason`, which keeps the FIRST of
+        two pauses on one lifecycle — and rather than off the latest pause alone, which the engine's
+        obligations pause can be when it lands after the operator's stop.
 
         The FOLD decides (a scoped auto-pause a reset lifted, a pending resume request, a finish),
         read off this revision's CACHED fold like `launch_claim_fresh` — skipped only where no fold
@@ -354,7 +365,7 @@ class CommandObservation:
         if boundary is None or boundary.type in (EV_RESUME, EV_RUN_REOPENED):
             return False, None
         state = self._owner._fold(self)
-        return stop_holds_queued_intents(state), state.pause_reason
+        return stop_holds_queued_intents(state), self._standing_pause
 
     def deferred_ack_observed(self, record: dict) -> bool:
         """Whether a DRAIN acked `record`'s intent WITHOUT serving it (`deferred`): the intent is
@@ -554,6 +565,7 @@ class CommandObservationIndex:
                     _run_finishes=index.run_finishes,
                     _latest_run_abort=index.latest_run_abort,
                     _latest_pause_boundary=index.latest_pause_boundary,
+                    _standing_pause=index.standing_pause,
                     _chunks=index.event_chunks,
                     _owner=self,
                     _index=index,

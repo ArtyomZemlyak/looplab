@@ -58,8 +58,8 @@ from looplab.events.types import (
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED, EV_CONCEPT_TAG_EDITED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
     EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_METRIC_RETARGET, EV_NODE_ABORT, EV_NODE_RESET,
-    EV_PAUSE, EV_PROMOTE, EV_RESTART, EV_RESUME, EV_RUN_ABORT, EV_RUN_CONCEPTS, EV_RUN_REOPENED,
-    EV_SET_STRATEGY, EV_SPEC_APPROVED, EV_RESEARCH_COMPLETED, EV_REPORT_GENERATED)
+    EV_PAUSE, EV_PROMOTE, EV_RESTART, EV_RESUME, EV_RUN_ABORT, EV_RUN_CONCEPTS, EV_RUN_FINISHED,
+    EV_RUN_REOPENED, EV_SET_STRATEGY, EV_SPEC_APPROVED, EV_RESEARCH_COMPLETED, EV_REPORT_GENERATED)
 
 # ---- run-generation command precondition ---------------------------------------------------------
 # The read model exposes the generation currently occupying a reusable run id. A brand-new durable
@@ -264,14 +264,52 @@ def stop_holds_queued_intents(state) -> bool:
                 and not state.resume_pending())
 
 
+# The rows that move a run between PAUSED and not: the latest of them says which side of a pause the
+# log is on (`command_observation.py` indexes the same set; `next_standing_pause` folds it).
+PAUSE_BOUNDARY_EVENTS = frozenset({EV_PAUSE, EV_RESUME, EV_RUN_REOPENED, EV_RESTART, EV_RUN_FINISHED})
+
+
+def next_standing_pause(standing: Optional[str], event) -> Optional[str]:
+    """Fold one row into `standing`: None while no pause stands, else the reason that HOLDS the
+    stop — `""` for a pause that names none. A `resume`, `run_reopened`, `restart` or `run_finished`
+    ends the pauses that stood. An external run's obligations pause
+    (`PAUSE_REASON_EXTERNAL_OBLIGATIONS`) holds it only while every pause standing is one: the first
+    OTHER pause decides, whichever order the two landed in. The engine writes its obligations pause
+    by compare-and-swap on the log it just read, and that read can already hold the operator's stop,
+    so "the latest pause" let the engine's row stand in front of the stop (critic 2026-09-29)."""
+    kind = getattr(event, "type", None)
+    if kind not in PAUSE_BOUNDARY_EVENTS:
+        return standing
+    if kind != EV_PAUSE:
+        return None
+    reason = (getattr(event, "data", None) or {}).get("reason")
+    reason = reason if isinstance(reason, str) else ""
+    if standing is None or standing == PAUSE_REASON_EXTERNAL_OBLIGATIONS:
+        return reason
+    return standing
+
+
+def standing_pause_reason(events) -> Optional[str]:
+    """`next_standing_pause` over `events` — the pause reason the exemption in `waits_for_resume`
+    asks about. Not `RunState.pause_reason`, which `replay.py::_on_pause` sets only when the paused
+    node/lifecycle changes, so an operator's plain stop on top of an external run's obligations
+    pause kept the obligations reason, and a budget extension then lifted the operator's stop
+    (critic 2026-09-29, driven)."""
+    standing = None
+    for event in events or ():
+        standing = next_standing_pause(standing, event)
+    return standing
+
+
 def waits_for_resume(record, stop_holds: bool, *, own_launch_over: bool = False,
                      pause_reason: Optional[str] = None) -> bool:
     """Does re-driving `record` start NOTHING because its intent waits in its queue for the
     operator's resume (`QUEUED_WHILE_STOPPED`)? `stop_holds` is `stop_holds_queued_intents` of the
-    run as it stands and `pause_reason` its `RunState.pause_reason`; only an `engine_ack` command
-    waits — its acknowledgement is what the resumed search writes — and a budget extension does
-    not wait on an external run's obligations pause (`PAUSE_REASON_EXTERNAL_OBLIGATIONS`), the one
-    paused budget stop, which it is how the run goes on.
+    run as it stands and `pause_reason` the reason that holds it (`standing_pause_reason`); only an
+    `engine_ack` command waits — its acknowledgement is what the resumed search writes — and a
+    budget extension does not wait on an external run's obligations pause
+    (`PAUSE_REASON_EXTERNAL_OBLIGATIONS`), the one paused budget stop, which it is how the run goes
+    on — while that pause stands alone: a stop the operator laid beside it stands.
 
     Not a record whose OWN `looplab resume` child may still be starting (`spawned_by_command`
     without `spawn_claim_released`): that child is on its way and serves the intent, and settling

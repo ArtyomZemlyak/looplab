@@ -565,6 +565,23 @@ def _durable_withheld_seconds(events, node_id: int, generation: int) -> float:
     return spent
 
 
+def _durable_prior_seconds(events, node_id: int, generation: int) -> float:
+    """The eval seconds this lifecycle already spent that NO terminal carries yet: its repair
+    attempts, its dependency rounds and its withheld attempts, each off its own durable rows — the
+    ONE sum every terminal of the lifecycle charges (SEED_LEDGERS seeds `prior_repair_seconds` with
+    it for the terminal the attempt loop writes).
+
+    The zero-compute terminals ask it too — an operator abort or Card drop closing a lifecycle before
+    it starts again (`eval_dispatch.py::_skip_if_aborted`), ADMIT's `gpu_unavailable` and
+    `proxy_skipped`: each wrote `eval_seconds: 0.0`, which is right for the work THIS dispatch did and
+    wrong for a lifecycle a pause (or a dead process) left with durable spend, whose seconds then
+    reached no terminal at all (critic 2026-09-29, driven: a withheld 1 s attempt, then an abort,
+    and the run's `total_eval_seconds` read 0)."""
+    return round(_durable_repair_seconds(events, node_id, generation)
+                 + _durable_dep_round_seconds(events, node_id, generation)
+                 + _durable_withheld_seconds(events, node_id, generation), 3)
+
+
 def _durable_monitor_verdicts(events, node_id: int, generation: int) -> list[dict]:
     """This node's TRAINING-WATCHDOG verdicts as the event log records them, oldest first.
 
@@ -3071,10 +3088,18 @@ class EvaluateMixin:
         except (TypeError, ValueError):
             spent = 0.0
         spent = round(spent, 3) if math.isfinite(spent) and spent > 0 else 0.0
-        async with self._write_lock:
-            self.store.append(EV_EVAL_ATTEMPT_WITHHELD, {
-                "node_id": a.node_id, "generation": a.generation, "attempt": a.attempt,
-                "at": at, "reason": reason, "eval_seconds": spent})
+        try:
+            async with self._write_lock:
+                self.store.append(EV_EVAL_ATTEMPT_WITHHELD, {
+                    "node_id": a.node_id, "generation": a.generation, "attempt": a.attempt,
+                    "at": at, "reason": reason, "eval_seconds": spent})
+        except OSError:
+            # A DIAGNOSTIC row: failing to write it loses the seconds' record, as before 69.12a,
+            # and must not end the lifecycle — raised, `_evaluate`'s containment turned a withheld
+            # attempt that never ran into an `engine_error` terminal (critic 2026-09-29, a8774).
+            _LOG.warning("node %s: could not record its withheld attempt (%s); the lifecycle stays "
+                         "pending and those seconds are charged nowhere", a.node_id, at,
+                         exc_info=True)
 
     def _eval_canary_due(self, a: "EvalAttempt") -> bool:
         """Does THIS attempt owe an eval canary before its full eval (`engine/eval_canary.py`)?
@@ -3281,6 +3306,26 @@ class EvaluateMixin:
             _LOG.warning("could not land node %s's terminal before the spend ceiling propagated",
                          a.node_id, exc_info=True)
 
+    async def _eval_record_late_intervention(self, a: "EvalAttempt", kind, when: str) -> bool:
+        """The terminal an intervention recorded AFTER this attempt's watcher had its verdict owns,
+        where a pause would otherwise withhold the lifecycle with none (critic 2026-09-29): a reset's
+        stale-generation terminal, or an operator abort / Card drop charging what the lifecycle ran.
+        True when it wrote one; `kind` is `_eval_intervention_seen`'s verdict (or the watcher's)."""
+        if kind == "reset":
+            await self._eval_record_superseded(a)
+            return True
+        if kind not in ("abort", "card_drop"):
+            return False
+        dropped = kind == "card_drop"
+        async with self._write_lock:
+            self.store.append(EV_NODE_FAILED, {
+                "node_id": a.node_id, "generation": a.generation,
+                "error": f"{'Card dropped' if dropped else 'aborted'} by operator ({when})",
+                "reason": "card_dropped" if dropped else "aborted",
+                "eval_seconds": a.charged_eval_seconds()})
+            self._maybe_crash()
+        return True
+
     async def _eval_record_superseded(self, a: "EvalAttempt") -> None:
         """The stale-generation terminal a reset owes this lifecycle: fold-budget-only (replay
         rejects its state fields but charges `eval_seconds` once), then the workdir marker."""
@@ -3386,7 +3431,8 @@ class EvaluateMixin:
                 self.store.append(EV_NODE_FAILED, {
                     "node_id": a.node_id, "generation": a.generation,
                     "error": str(exc)[:400], "reason": "gpu_unavailable",
-                    "eval_seconds": 0.0})
+                    "eval_seconds": _durable_prior_seconds(
+                        a.events_at_start, a.node_id, a.generation)})
                 self._maybe_crash()
             return PHASE_RETURN
         # A6 proxy/predictive scoring: cheaply predict this candidate's metric from the observed
@@ -3413,7 +3459,8 @@ class EvaluateMixin:
                         self.store.append(EV_NODE_FAILED, {
                             "node_id": a.node_id, "generation": a.generation,
                             "error": "skipped by proxy scorer (predicted in the doomed bottom fraction)",
-                            "reason": "proxy_skipped", "eval_seconds": 0.0})
+                            "reason": "proxy_skipped", "eval_seconds": _durable_prior_seconds(
+                                a.events_at_start, a.node_id, a.generation)})
                         self._maybe_crash()
                 if skip:
                     return PHASE_RETURN
@@ -3631,10 +3678,7 @@ class EvaluateMixin:
         # `_durable_repair_seconds` / `repair_judgment.repair_redone_work_stop`: this is the
         # bound that reaches the repair chains `inline_repair_retrain_cap` structurally cannot
         # charge — the ones that re-run a stage without discarding a completed one.
-        a.prior_repair_seconds = (
-            _durable_repair_seconds(a.events_at_start, a.node_id, a.generation)
-            + _durable_dep_round_seconds(a.events_at_start, a.node_id, a.generation)
-            + _durable_withheld_seconds(a.events_at_start, a.node_id, a.generation))
+        a.prior_repair_seconds = _durable_prior_seconds(a.events_at_start, a.node_id, a.generation)
         # THE INVOCATIONS AN EARLIER PROCESS LEFT OPEN, from the same log and for the same reason as
         # the ledgers above: a bound (or here, a FACT) that a resume forgets is not one. An evaluator
         # may finish paid or external side effects — a training run, a submission, a remote job — and
@@ -3827,6 +3871,12 @@ class EvaluateMixin:
                     # passed canary: recorded HERE or charged nowhere (doc 69 69.12a). Before the
                     # scope is cancelled, which would cancel this await with it.
                     await self._record_eval_withheld(a, "after_canary", time.time() - a._t0)
+                    # …and an intervention the watcher saw while that row was written owns the
+                    # terminal after all (critic 2026-09-29): this attempt's seconds go on it.
+                    if a._seen.get("kind"):
+                        a.total_eval = round(a.total_eval + (time.time() - a._t0), 3)
+                        await self._eval_record_late_intervention(
+                            a, a._seen.get("kind"), "while its canary ran, on a paused run")
                     cancel.set()
                     _tg.cancel_scope.cancel()
                     return PHASE_RETURN
@@ -4266,6 +4316,15 @@ class EvaluateMixin:
                                 "repair of this node")
             return PHASE_SETTLED
         if halted.paused:
+            # AN INTERVENTION RECORDED AFTER THIS ATTEMPT'S WATCHER CLOSED owns the terminal, as at
+            # `_pause_withholds_attempt`'s third clause: a withheld return left a reset's old
+            # generation with no terminal at all, and gave an abort a later 0-second one that charged
+            # none of this chain (critic 2026-09-29).
+            _card_id = getattr(getattr(a.node, "idea", None), "card_id", None)
+            if await self._eval_record_late_intervention(
+                    a, self._eval_intervention_seen(a.node_id, a.generation, a.start_seq, _card_id),
+                    "after its attempt failed, on a paused run"):
+                return PHASE_RETURN
             # The attempt that just failed has no `node_repaired` row (no repair was bought), so its
             # seconds ride on the withheld row to the chain's next terminal (doc 69 69.12a).
             await self._record_eval_withheld(a, "decide_repair", a.attempt_eval_seconds)
