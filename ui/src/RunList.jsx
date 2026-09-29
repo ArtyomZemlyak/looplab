@@ -2877,11 +2877,10 @@ export default function RunList({ onOpen, onGlobalNavigate,
                      followClientRoute(event, () => openRun(r.run_id))
                    }}
                    aria-label={`Open run ${r.label || r.run_id}`}>
-                <div><b>{r.label || r.run_id}</b> <span className="muted">· {r.label ? r.run_id + ' · ' : ''}{r.task_id}</span>
+                <div><b>{r.label || r.run_id}</b>
                   {startOverLocked && <span className="pill warn" style={{ marginLeft: 6 }}>Start over recovery</span>}
                   {r.project_id && projName[r.project_id] && <span className="pill" style={{ marginLeft: 6 }}><OpIcon name="folder" className="t-ic" /> {projName[r.project_id]}</span>}
                   {r.supertask_id && stName[r.supertask_id] && <span className="pill st-pill" style={{ marginLeft: 6 }}><OpIcon name="target" className="t-ic" /> {stName[r.supertask_id]}</span>}</div>
-                <div className="goal">{r.goal}</div>
               </a>
               <div className="run-card-metrics" style={{ textAlign: 'right' }}>
                 {/* The receipt goes ABOVE the numbers it qualifies, not below them: `best` and

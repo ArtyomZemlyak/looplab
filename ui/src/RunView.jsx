@@ -2248,7 +2248,6 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
             </button>
           : <span className="muted" title={state.goal || state.task_id}>
               <b>{state.label || state.run_id || runId} · {displayedPhase} · gen {gen}</b>
-              {state.goal || state.task_id}
             </span>}
         <span className={'live ' + (reviewMode ? 'off' : liveStatus)}
           role={reviewMode ? undefined : 'status'} aria-live={reviewMode ? undefined : 'polite'}

@@ -3084,7 +3084,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       ? [RUN_HINTS[0], STALLED_HINT, RUN_HINTS[1], RUN_HINTS[3]] : RUN_HINTS
     : OVERVIEW_HINTS
   const runContextBanner = runId && <div className={`asst-run-context${selectedRunStatus === 'stalled' ? ' stalled' : ''}`}>
-    <strong title={selectedRun?.goal || runId}>{selectedRun?.label || selectedRun?.goal || runId}</strong>
+    <strong title={selectedRun?.goal || runId}>{selectedRun?.label || selectedRun?.run_id || runId}</strong>
     <span className="asst-run-context-state">{selectedRunStatus || 'Loading'}</span>
     {selectedRunStatus === 'stalled' && <span className="asst-run-context-help">Engine stopped · use Resume run in Lineage.</span>}
   </div>

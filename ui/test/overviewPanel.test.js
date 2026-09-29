@@ -15,7 +15,7 @@ test('Overview prioritizes measured state and keeps long hints available in a di
   try {
     const { OverviewPanel } = await vite.ssrLoadModule('/src/panels.jsx')
     const state = {
-      task_id: 'toy', goal: 'Minimize loss', direction: 'min', phase: 'finished',
+      task_id: 'toy', label: 'Toy experiment', goal: 'Minimize loss', direction: 'min', phase: 'finished',
       nodes: { 1: { id: 1, metric: 0.5 }, 2: { id: 2, status: 'failed' }, 3: { id: 3, metric: 0.4 } },
       best_node_id: 3, total_eval_seconds: 90, llm_cost: { total_tokens: 1200 },
       reward_hacks: [{}], pending_hints: [{ text: 'First **idea**' }, { text: 'Latest **idea**' }],
@@ -25,6 +25,8 @@ test('Overview prioritizes measured state and keeps long hints available in a di
       { state, maxEval: 120, phase: 'finished' })))
     try {
       const doc = dom.window.document
+      assert.match(doc.querySelector('.panel-sub').textContent, /Toy experiment/)
+      assert.doesNotMatch(doc.querySelector('.overview-panel').textContent, /Minimize loss/)
       assert.equal(doc.querySelector('.ov-best strong').textContent, '0.4')
       assert.match(doc.querySelector('.ov-run-facts').textContent, /2 evaluated.*3 nodes.*1/s)
       assert.equal(doc.querySelector('.ov-latest p').textContent, 'Latest idea')

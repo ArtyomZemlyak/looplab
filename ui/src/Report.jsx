@@ -490,8 +490,8 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
 
   return (
     <div className="report-view" aria-busy={refreshing || undefined}>
-      <h2 className="report-title">{state.goal || state.task_id}</h2>
-      <div className="report-sub muted">{state.run_id} · {state.direction} · {state.phase || (state.finished ? 'finished' : 'running')}{state.stop_reason ? ` (${state.stop_reason})` : ''}
+      <h2 className="report-title">{state.label || state.run_id || state.task_id}</h2>
+      <div className="report-sub muted">{state.label && state.label !== state.run_id ? `${state.run_id} · ` : ''}{state.direction} · {state.phase || (state.finished ? 'finished' : 'running')}{state.stop_reason ? ` (${state.stop_reason})` : ''}
         {' · '}{nodeCount} nodes ({a.nEval} evaluated, {failed.length} failed)
         {state.llm_cost && ` · ${fmtInt(state.llm_cost.total_tokens)} tokens · ${fmtCost(state.llm_cost)}`}</div>
 

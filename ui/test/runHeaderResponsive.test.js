@@ -7,10 +7,8 @@ const source = name => readFile(new URL(`../src/${name}`, import.meta.url), 'utf
 test('compact run header keeps run truth visible and historical identity exact', async () => {
   const view = await source('RunView.jsx')
   assert.match(view, /const gen = generation\?\.slice\(0, 8\) \|\| 'unknown'/)
-  // Whitespace-tolerant: the wide-viewport branch wraps the goal onto its own line now, and the
-  // compact branch above it splits the same content across labelled spans for the disclosure
-  // toggle. What must hold is that the header still states label · phase · gen AND the goal.
-  assert.match(view, /className="muted"[^>]*>\s*<b>\{state\.label \|\| state\.run_id \|\| runId\} · \{displayedPhase\} · gen \{gen\}<\/b>\s*\{state\.goal \|\| state\.task_id\}/)
+  // The wide desktop header uses the run name without repeating the full task brief.
+  assert.match(view, /className="muted"[^>]*>\s*<b>\{state\.label \|\| state\.run_id \|\| runId\} · \{displayedPhase\} · gen \{gen\}<\/b>\s*<\/span>/)
   assert.match(view, /<b id="run-goal-meta">\{state\.label \|\| state\.run_id \|\| runId\} · \{displayedPhase\} · gen \{gen\}<\/b>/,
     'the compact disclosure must carry the same identity line, not a shortened one')
   assert.equal(view.match(/Historical snapshot · gen \{gen\} · seq/g)?.length, 2,

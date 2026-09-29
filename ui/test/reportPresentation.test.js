@@ -108,11 +108,15 @@ test('Report uses semantic section headings and exposes an unambiguous operator/
   const vite = await sharedVite()
   try {
     const { default: ReportView } = await vite.ssrLoadModule('/src/Report.jsx')
+    const namedRun = { ...state('min', 10, 7), label: 'NOMAD experiment', goal: 'A long task brief that belongs in task details' }
     const markup = renderToStaticMarkup(React.createElement(ReportView, {
-      state: state('min', 10, 7), runId: 'report-min', readOnly: true,
+      state: namedRun, runId: 'report-min', readOnly: true,
     }))
     const dom = new JSDOM(markup)
     try {
+      assert.equal(dom.window.document.querySelector('.report-title').textContent, 'NOMAD experiment')
+      assert.match(dom.window.document.querySelector('.report-sub').textContent, /^report-min · min/)
+      assert.match(toMarkdown(namedRun), /^# LoopLab run report — NOMAD experiment$/m)
       const sections = [...dom.window.document.querySelectorAll('.report-view .section-h')]
       assert.ok(sections.length >= 4)
       assert.ok(sections.every(heading => heading.tagName === 'H2'))
@@ -130,6 +134,8 @@ test('Report uses semantic section headings and exposes an unambiguous operator/
     const baselineMarkup = renderToStaticMarkup(React.createElement(ReportView, {
       state: state('min', 10), runId: 'report-min', readOnly: true,
     }))
+    assert.match(baselineMarkup, /<h2 class="report-title">report-min<\/h2>/)
+    assert.doesNotMatch(baselineMarkup, /class="report-sub muted">report-min/)
     assert.match(baselineMarkup, /<h2 class="section-h">Metric baseline<\/h2>/)
     assert.doesNotMatch(baselineMarkup, /How the metric got better/)
     assert.match(baselineMarkup, /First feasible metric; no improvement is recorded yet/)

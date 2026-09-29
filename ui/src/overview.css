@@ -1,6 +1,5 @@
 /* Overview: one-screen run summary; long operator notes stay available on demand. */
 .overview-panel .panel-b { padding: 18px 22px; }
-.ov-goal { color: var(--fg-dim); margin: 0 0 18px; line-height: 1.45; max-width: 90ch; }
 .ov-summary { display: grid; grid-template-columns: minmax(230px, 1fr) minmax(0, 1.8fr); gap: 12px; }
 .ov-best, .ov-run-facts { background: var(--bg-2); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
 .ov-best { display: flex; flex-direction: column; gap: 3px; border-color: var(--line-2); }

@@ -455,8 +455,7 @@ export function OverviewPanel({ state, maxEval, phase, onClose, onOpenPanel }) {
     requestAnimationFrame(() => window.dispatchEvent(new CustomEvent('ll:focus-assistant')))
   }
   return (
-    <Panel title="Overview" sub={state.task_id || ''} onClose={onClose} wide className="overview-panel">
-      {state.goal && <p className="ov-goal">{state.goal}</p>}
+    <Panel title="Overview" sub={state.label || state.run_id || state.task_id || ''} onClose={onClose} wide className="overview-panel">
       <div className="ov-summary">
         <div className="ov-best">
           <span className="ov-label">Best metric</span>
