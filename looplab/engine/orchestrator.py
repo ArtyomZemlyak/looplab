@@ -143,7 +143,7 @@ from looplab.search.speculation_calibration import (
     SPECULATION_CALIBRATION_PROFILE_VARIANT_FIELDS,
     SPECULATION_POLICY_SCOPE,
 )
-from looplab.search.policy import SearchPolicy, exploit_forced_action
+from looplab.search.policy import META_EXPLOIT, SearchPolicy, exploit_forced_action
 # The strategist-cadence cluster (StrategyContext / make_policy / validate_strategy / coverage_signal
 # / run_phase / operator_yields / NOVELTY_STANCES …) moved to engine/strategy.py (StrategyCadenceMixin),
 # which imports those symbols from their canonical sources — so they are no longer imported here.
@@ -2938,7 +2938,19 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 # a refused lane is empty and the turn falls through to the serial path below,
                 # which builds the gate's own action; outside a reserve it is the lane unchanged.
                 from looplab.engine.plan import endgame_admitted, endgame_refused_card_ids
-                stageable = endgame_admitted(state, speculative_raw_actions(
+                #
+                # …AND A TURN THE EXPLOIT GATE DECIDED STAGES NOTHING (docs/60 B1). The gate forces
+                # a variant of the node that just finished and consults no selector, while this lane
+                # still re-derives the POLICY's action: it staged that as a paid Card, the gate
+                # forced the same turn again, the lane — now owned by that Card — answered empty, and
+                # the serial path below paid a SECOND proposal, often for the very same action.
+                # Driven on a toy Card run at `exploit_strong_node_quantile=0.5`: card-4 (improve of
+                # node 3) staged, then card-5 (improve of node 3) built serially, and 4 of 12 Cards
+                # never built. The same shape as MiniOneRec inf13's nodes 25 and 29 (card-26/card-30
+                # staged, the endgame gate's sweep then built serially), which `endgame_admitted`
+                # closed for the reserve. The gate's own action is built by the serial path below.
+                gate_decided = any(action.get(META_EXPLOIT) for action in creates)
+                stageable = [] if gate_decided else endgame_admitted(state, speculative_raw_actions(
                     state,
                     self.policy,
                     self.policy.max_nodes,
