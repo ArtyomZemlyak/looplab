@@ -20,7 +20,7 @@ import pytest
 
 from looplab.core.models import Event, Idea, NodeStatus
 from looplab.engine import settled_recovery
-from looplab.engine.evaluate import _workdir_manifest_digest, settled_ok_awaiting_terminal
+from looplab.engine.evaluate import _workdir_content_digest, settled_ok_awaiting_terminal
 from looplab.events.replay import fold
 from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_EVAL_INVOCATION_CLAIMED,
                                   EV_EVAL_INVOCATION_RECOVERED, EV_EVAL_INVOCATION_SETTLED,
@@ -181,7 +181,7 @@ def test_a_pre_record_settle_is_finalized_from_the_workdir_log_under_the_current
     # The repo path's materialization stamps the manifest it built (`stamp_workdir`); the toy
     # task's workdir holds no source, so the stamp a repo workdir carries is written here.
     node = fold(_engine(run_dir).store.read_all()).nodes[0]
-    (workdir / ".looplab-manifest").write_text(_workdir_manifest_digest(node), encoding="ascii")
+    (workdir / ".looplab-manifest").write_text(_workdir_content_digest(node), encoding="ascii")
     (workdir / "eval.log").write_text(
         'epoch 1 loss 0.3\n{"metric": 0.125, "UnseenRecall@20": 0.031}\nteardown\n',
         encoding="utf-8")

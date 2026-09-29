@@ -1042,14 +1042,37 @@ def _card_identity_spellings(state, raw_card_id) -> frozenset[str]:
 
 
 def _workdir_manifest_digest(node) -> str:
-    """Digest of the node source manifest a workdir was materialized from.
+    """Digest of the node source manifest AND lifecycle a workdir was materialized for — the eval
+    canary's `code_digest` key on its durable rows (`EV_EVAL_CANARY_STARTED`).
 
     Module-level on purpose: `_evaluate` takes a lazy `import hashlib` further down, which would make
     `hashlib` an unbound function-local for any closure defined above it.
+
+    NOT the workdir's reuse stamp any more (doc 68 68.3e): `attempt` in it made every stamp stale
+    after every `node_reset`, which is the only thing that sets `rerun_stage`, so stage reuse never
+    ran from 2026-07-28 on. The canary keeps this spelling because rows recorded under it are what
+    let a resumed process skip a canary it already paid for; `_workdir_content_digest` is the stamp.
     """
     return hashlib.sha256(orjson.dumps(
         {"attempt": node.attempt, "code": node.code,
          "files": node.files or {}, "deleted": sorted(node.deleted or [])},
+        option=orjson.OPT_SORT_KEYS)).hexdigest()
+
+
+def _workdir_content_digest(node) -> str:
+    """Digest of the BYTES a workdir was materialized from — the node's code, its files and its
+    deletions — and nothing about which lifecycle asked. The reuse stamp (`EvalAttempt.stamp_workdir`).
+
+    The stamp exists for one window: `node_repaired` is appended before the repaired files are
+    written, so a crash between them leaves a fold claiming the repair over the pre-repair source.
+    The CONTENT is what that window changes, and it is all this hashes, so a crash there still reads
+    stale and reuse is refused. What it no longer hashes is `attempt`: a stage-scoped `node_reset`
+    bumps it without touching a byte, and hashing it refused exactly the reuse the reset asked for —
+    driven, a reset from `eval` re-ran `train` (doc 68 68.3e). A stamp written under the older,
+    attempt-bearing formula reads stale once and the workdir is rebuilt: fail-closed.
+    """
+    return hashlib.sha256(orjson.dumps(
+        {"code": node.code, "files": node.files or {}, "deleted": sorted(node.deleted or [])},
         option=orjson.OPT_SORT_KEYS)).hexdigest()
 
 
@@ -1341,13 +1364,13 @@ class EvalAttempt:
 
     def stamp_workdir(self, n) -> None:
         try:
-            atomic_write_text(self._manifest_stamp, _workdir_manifest_digest(n))   # see above
+            atomic_write_text(self._manifest_stamp, _workdir_content_digest(n))   # see above
         except OSError:
             pass          # unstamped => the next reuse check fails closed and rematerializes
 
     def workdir_matches(self, n) -> bool:
         try:
-            return self._manifest_stamp.read_text(encoding="ascii").strip() == _workdir_manifest_digest(n)
+            return self._manifest_stamp.read_text(encoding="ascii").strip() == _workdir_content_digest(n)
         except (OSError, ValueError):
             return False
 

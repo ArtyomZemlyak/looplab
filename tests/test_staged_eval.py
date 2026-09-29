@@ -191,7 +191,7 @@ def test_stage_reuse_refuses_a_workdir_that_is_not_the_folded_manifest(tmp_path)
 
     from looplab.adapters.toytask import ToyTask
     from looplab.agents.toy_roles import ToyObjectiveDeveloper, ToyResearcher
-    from looplab.engine.evaluate import _workdir_manifest_digest
+    from looplab.engine.evaluate import _workdir_content_digest
     from looplab.engine.orchestrator import Engine
     from looplab.events.eventstore import EventStore
     from looplab.runtime.sandbox import SubprocessSandbox
@@ -230,7 +230,7 @@ def test_stage_reuse_refuses_a_workdir_that_is_not_the_folded_manifest(tmp_path)
     stale = type("N", (), {"attempt": 0, "code": "print('original')",
                            "files": {}, "deleted": []})()
     (workdir / ".looplab-manifest").write_text(
-        _workdir_manifest_digest(stale), encoding="ascii")
+        _workdir_content_digest(stale), encoding="ascii")
     anyio.run(engine._evaluate, 0, anyio.CapacityLimiter(1))
     assert materialized == [0], (
         "stage reuse accepted a workdir whose bytes are not the folded manifest — the repaired "
@@ -239,6 +239,99 @@ def test_stage_reuse_refuses_a_workdir_that_is_not_the_folded_manifest(tmp_path)
     # (b) A stamp that DOES match keeps the optimization: no rebuild, artifacts survive.
     materialized.clear()
     (workdir / ".looplab-manifest").write_text(
-        _workdir_manifest_digest(fold(store.read_all()).nodes[0]), encoding="ascii")
+        _workdir_content_digest(fold(store.read_all()).nodes[0]), encoding="ascii")
     anyio.run(engine._evaluate, 0, anyio.CapacityLimiter(1))
     assert materialized == [], "a matching stamp must still reuse the workdir"
+
+
+def test_a_reset_from_a_later_stage_reuses_the_earlier_stage_through_the_real_flow(tmp_path):
+    """doc 68 68.3e: stage reuse after a stage-scoped reset was dead from 2026-07-28 — the workdir
+    stamp hashed `attempt`, every `node_reset` bumps it, so the stamp the FIRST eval wrote never
+    matched and `train` re-ran behind every "re-score". The test above hand-writes its stamps from
+    the post-reset node, which the real flow never does; this one lets the engine write its own.
+    MUTATION: put `attempt` back into `_workdir_content_digest` -> "train" runs twice."""
+    import sys
+
+    import anyio
+
+    from looplab.adapters.toytask import ToyTask
+    from looplab.core.models import Idea
+    from looplab.engine.orchestrator import Engine
+    from looplab.events.eventstore import EventStore
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.search.policy import GreedyTree
+
+    ledger = tmp_path / "ledger.txt"
+    train = (f"open({str(ledger)!r}, 'a').write('train\\n')\n"
+             "open('model.bin', 'w').write('0.75')\n")
+    score = ("import json\n"
+             f"open({str(ledger)!r}, 'a').write('score\\n')\n"
+             "print(json.dumps({'m': float(open('model.bin').read())}))\n")
+
+    class _Dev:
+        last_files, last_deleted = {}, []
+
+        def implement(self, idea):
+            return "print('unused')\n"
+
+    class _Res:
+        def propose(self, state, parent):
+            return Idea(operator="x", params={"x": 1.0})
+
+    root = Path(__file__).resolve().parents[1]
+
+    def _engine(run_dir):
+        eng = Engine(run_dir, task=ToyTask.load(root / "examples" / "toy_task.json"),
+                     researcher=_Res(), developer=_Dev(), sandbox=SubprocessSandbox(),
+                     policy=GreedyTree(n_seeds=1, max_nodes=1), auto_install_deps=False,
+                     inline_repair=False)
+        eng._eval_spec = {"command": [sys.executable, "score.py"], "cwd": ".",
+                          "metric": {"kind": "stdout_json", "key": "m"}, "timeout": 120.0,
+                          "stages": [{"name": "train", "command": [sys.executable, "train.py"]},
+                                     {"name": "eval", "command": [sys.executable, "score.py"]}]}
+        return eng
+
+    run_dir = tmp_path / "run"
+    first = _engine(run_dir)
+    first.store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g",
+                                       "direction": "max"})
+    first.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {"x": 1.0}, "rationale": "seed"},
+        "code": "print('unused')\n", "files": {"train.py": train, "score.py": score}})
+    anyio.run(first._evaluate, 0, anyio.CapacityLimiter(1))
+    assert ledger.read_text().split() == ["train", "score"]
+
+    # The operator's "re-score": reset from the LATER stage. The fold keeps `train` and arms reuse.
+    first.store.append("node_reset", {"node_id": 0, "from_stage": "eval", "generation": 0})
+    state = fold(EventStore(run_dir / "events.jsonl").read_all())
+    assert state.nodes[0].rerun_stage == "eval"
+    assert [s["name"] for s in state.nodes[0].stages] == ["train"]
+
+    anyio.run(_engine(run_dir)._evaluate, 0, anyio.CapacityLimiter(1))
+    assert ledger.read_text().split() == ["train", "score", "score"], (
+        "the reset from `eval` re-ran `train`: the workdir the first eval stamped was not reused")
+    node = fold(EventStore(run_dir / "events.jsonl").read_all()).nodes[0]
+    assert node.status is NodeStatus.evaluated and node.metric == 0.75 and node.attempt == 1
+    assert [s["name"] for s in node.stages] == ["train", "eval"]
+
+
+def test_the_reuse_stamp_hashes_the_bytes_and_not_the_lifecycle():
+    """The stamp's whole rule, stated: every byte the workdir is materialized from moves it — a repo
+    task's `files` overlay and its deletions as much as `code`, because a `node_repaired` that
+    crashed before writing either leaves the same stale workdir — and a `node_reset`, which moves no
+    byte, does not (doc 68 68.3e)."""
+    from types import SimpleNamespace
+
+    from looplab.engine.evaluate import _workdir_content_digest
+
+    def node(**kw):
+        return SimpleNamespace(**{"attempt": 0, "code": "c", "files": {"a.py": "1"},
+                                  "deleted": [], **kw})
+
+    base = _workdir_content_digest(node())
+    assert _workdir_content_digest(node(attempt=3)) == base, "a reset moved the stamp"
+    assert _workdir_content_digest(node(code="d")) != base
+    assert _workdir_content_digest(node(files={"a.py": "2"})) != base
+    assert _workdir_content_digest(node(files={"a.py": "1", "b.py": "1"})) != base
+    assert _workdir_content_digest(node(deleted=["b.py"])) != base
