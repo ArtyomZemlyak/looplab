@@ -194,6 +194,26 @@ def test_there_is_one_projection_and_the_retired_keyword_cannot_select_another()
         claim_assessments(opposed, structured=True)
 
 
+@pytest.mark.parametrize("entry", ["claims_for_memory", "atlas_for_memory", "cross_run_retrieve",
+                                   "steward_claims"])
+def test_every_memory_entry_point_refuses_the_retired_keyword(tmp_path, entry):
+    """Only `claim_assessments` had its refusal pinned (review of 7b1105da, critic 2026-09-29): a
+    re-accepted `structured: bool = True` on any of the four memory entry points survived all 363
+    claims tests — the silent substitution the deletion exists to refuse. Python refuses the keyword
+    before the body runs, so nothing is read and no model is asked."""
+    from looplab.engine import claim_steward, claims, claims_retrieval
+
+    fn = {"claims_for_memory": claims.claims_for_memory,
+          "atlas_for_memory": claims.atlas_for_memory,
+          "cross_run_retrieve": claims_retrieval.cross_run_retrieve,
+          "steward_claims": claim_steward.steward_claims}[entry]
+    args = {"cross_run_retrieve": (tmp_path, "dropout"),
+            "steward_claims": (tmp_path, None)}.get(entry, (tmp_path,))
+    for value in (True, False):
+        with pytest.raises(TypeError, match="structured"):
+            fn(*args, structured=value)
+
+
 def test_the_lean_shadow_namespace_is_gone_and_the_unscoped_fallback_is_not():
     """`_scoped_key` was the loader index only the lean projection read; `_global_key` is read by
     the STRUCTURED projection's `_decision_for` as its explicitly-unscoped fallback. They were one
