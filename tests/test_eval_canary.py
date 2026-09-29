@@ -454,6 +454,42 @@ def test_no_retry_once_the_run_stopped_taking_work(tmp_path, control):
     assert "its one retry was not run" in term.data["error"]
 
 
+@pytest.mark.parametrize("control", ["pause", "run_abort"])
+def test_a_stop_during_a_passing_canary_does_not_start_the_full_eval(tmp_path, control):
+    """doc 69 69.12, driven on 26.09: a pause at 03:47:52, the node's canary passed at 03:55:01 and
+    its full eval on 4xH200 was claimed the same second. A pause or a stop recorded while the canary
+    ran means the HEAVY half is not started: no invocation claimed, no terminal, the node still
+    pending — ADMIT's own rule for a halted run. After the pause lifts, the re-dispatch goes straight
+    to the full eval: the passed canary is remembered by its code digest, not paid again.
+    MUTATION: drop the `_halted_before_full_eval` check -> "full" is in the ledger."""
+    ledger = tmp_path / "ledger.txt"
+    code = _script(ledger, canary="0.1", full="0.9")
+    run_dir = tmp_path / "run"
+    eng = _engine(run_dir, _Dev(code))
+    _seed(eng, code)
+    real_round = eng._eval_canary_round
+
+    async def _round(a, spec, digest, scratch, cancel, *, retry):
+        out = await real_round(a, spec, digest, scratch, cancel, retry=retry)
+        eng.store.append(control, {"reason": "operator"})   # the operator's control, mid-canary
+        return out
+
+    eng._eval_canary_round = _round
+    evs = _evaluate(eng)
+    assert ledger.read_text().split() == ["canary"], "the full eval started over the stop"
+    assert [f.data["passed"] for f in _of(evs, EV_EVAL_CANARY_FINISHED)] == [True]
+    assert _terminals(evs) == []
+    assert not _of(evs, "eval_invocation_claimed"), "no evaluator invocation was claimed"
+    assert 0 in {n.id for n in fold(evs).pending_nodes()}
+    if control != "pause":
+        return
+    eng.store.append("resume", {})                          # the pause lifts
+    evs = _evaluate(_engine(run_dir, _Dev(code)))           # the re-dispatch, a fresh process
+    assert ledger.read_text().split() == ["canary", "full"], "the passed canary is not paid again"
+    (term,) = _terminals(evs)
+    assert term.type == "node_evaluated" and term.data["metric"] == 0.9
+
+
 def _expired(*, timed_out: bool):
     return RunResult(exit_code=-9, stdout="", stderr="killed\n", metric=None, timed_out=timed_out)
 

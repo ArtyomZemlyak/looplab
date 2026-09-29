@@ -2904,6 +2904,20 @@ class EvaluateMixin:
         a._resource_reservation = back
         a.eval_env = self._resource_eval_env(back, inherit_host=True)
 
+    def _halted_before_full_eval(self) -> bool:
+        """Did the run pause or stop while this attempt's canary ran (doc 69 69.12)?
+
+        ADMIT refuses a halted run before any compute, and DECIDE_REPAIR re-reads the run before it
+        buys new work; the canary -> full-eval hand-off was the one boundary between them that
+        started the HEAVY half without looking. Driven on 26.09: a pause at 03:47:52, the node's
+        canary passed at 03:55:01, and its full eval on 4xH200 was claimed the same second. One
+        fresh fold and the `halted` ADMIT reads: a halted run returns with NO terminal, as ADMIT
+        does, so the node stays pending, and its passed canary is remembered by code digest
+        (`canary_already_passed`) — the re-dispatch after the pause lifts goes straight to the full
+        eval. The canary's seconds go uncharged, as a pause costs DECIDE_REPAIR the attempt it
+        interrupts. A pause still never kills a RUNNING eval; it only refuses to START one."""
+        return fold(self.store.read_all()).halted
+
     def _eval_canary_due(self, a: "EvalAttempt") -> bool:
         """Does THIS attempt owe an eval canary before its full eval (`engine/eval_canary.py`)?
 
@@ -3539,7 +3553,8 @@ class EvaluateMixin:
     async def _eval_run_attempt(self, a: "EvalAttempt") -> str:
         """RUN_ATTEMPT — one sandboxed evaluation under the intervention watcher and both live-log
         watchdogs. Binds `a.res`, the watcher's verdict and the per-attempt signals; `PHASE_RETURN`
-        only for the unenforceable-GPU-pin terminal it writes itself."""
+        for the unenforceable-GPU-pin terminal it writes itself, and with NO terminal for a run that
+        halted while this attempt's canary ran (`_halted_before_full_eval`)."""
         # `a.res` is THIS attempt's result or None, from the first line (review 2026-09-22, ENG2).
         # It was rebound only when the sandbox returned, so on a repaired node's next attempt anything
         # raised before that — a spend ceiling above all — found the PREVIOUS attempt's result still
@@ -3593,10 +3608,15 @@ class EvaluateMixin:
             # this attempt's eval seconds; on `a.eval_env`, so it runs on this lifecycle's lease. A
             # failed canary IS this attempt's result: SETTLE_OUTCOME and the repair path take it
             # from here, and the full eval is never invoked (no invocation receipt is claimed).
-            if self._eval_canary_due(a) and not await self._eval_run_canary(a, cancel):
-                cancel.set()
-                _tg.cancel_scope.cancel()
-                return PHASE_NEXT
+            if self._eval_canary_due(a):
+                if not await self._eval_run_canary(a, cancel):
+                    cancel.set()
+                    _tg.cancel_scope.cancel()
+                    return PHASE_NEXT
+                if self._halted_before_full_eval():
+                    cancel.set()
+                    _tg.cancel_scope.cancel()
+                    return PHASE_RETURN
             # Training-log monitor (ON by default in the product Settings since 2026-08-04;
             # still off in a bare `Engine(...)`/`EngineOptions`): a sibling task that tails this eval's live
             # training log on a timer while it runs in the worker thread, asks the Developer to
