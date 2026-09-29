@@ -57,15 +57,23 @@ _REPORT_PENDING_CODES = {
     "job_contact_lost", "job_authorization_lost", "job_unknown", "job_timeout", "job_protocol_error",
     "report_refresh_uncertain", "report_refresh_protocol_error",
 }
+
+
 def _done_suffix(record: Any) -> str:
-    """What a settled-OK command adds to its ✓ line: a `noop` was already satisfied, and a queued
-    intent sent to a STOPPED run waits for its resume — the server no longer starts the engine for
-    it, which lifted the stop (`serve/protocol.py::QUEUED_WHILE_STOPPED`, doc 69 69.30)."""
+    """What a settled-OK command adds to its ✓ line — the record's own account, in the order and
+    words the web UI gives it (`ui/src/commandModel.js::commandFeedback`): a drain it rode on left
+    it for the search that follows, a queued intent sent to a STOPPED run waits for its resume (the
+    server no longer starts the engine for it, which lifted the stop — `serve/protocol.py::
+    QUEUED_WHILE_STOPPED`, doc 69 69.30), a drain served it, or it was already satisfied."""
     record = record if isinstance(record, dict) else {}
-    if record.get("status") == "noop":
-        return " (already satisfied)"
+    if record.get("deferred_to_next_search") is True:
+        return " (queued — a drain does not serve it; the next search will)"
     if record.get("deferred_until_resume") is True:
         return " (queued — the run is stopped; resume it to serve this)"
+    if record.get("served_by_drain") is True:
+        return " (served by a drain; the run pauses when it finishes)"
+    if record.get("status") == "noop":
+        return " (already satisfied)"
     return ""
 
 

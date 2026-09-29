@@ -42,7 +42,7 @@ from looplab.events.types import (BACKGROUND_APPENDABLE, DIAGNOSTIC_EVENTS,
     EV_RESUME_SERVED, EV_RUN_ABORT, EV_RUN_FINISHED,
     EV_RUNG_PROMOTED,
     EV_SPEC_APPROVAL_REQUESTED,
-    EV_SPEC_APPROVED, EV_SPEC_PROPOSED)
+    EV_SPEC_APPROVED, EV_SPEC_PROPOSED, PAUSE_REASON_EXTERNAL_OBLIGATIONS)
 from looplab.engine.ablation import AblationMixin
 from looplab.engine.metric_salvage import settle_mode as settle_metric_salvage_mode
 from looplab.engine.widths import LLM_WIDTH_MAX
@@ -2337,7 +2337,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             if due["report"] or due["reviews"] or due["pending_nodes"]:
                 try:
                     self.store.append(EV_PAUSE, {
-                        "reason": "external_finish_obligations_due",
+                        "reason": PAUSE_REASON_EXTERNAL_OBLIGATIONS,
                         "terminal_reason": reason,
                         "due": due,
                     }, expected_last_seq=events[-1].seq)

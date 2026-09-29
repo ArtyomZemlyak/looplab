@@ -521,6 +521,7 @@ def _executing(client, record):
     (True, "fork", {"from_node_id": 1, "generation": 0}),
     (False, "fork", {"from_node_id": 1, "generation": 0}),
     (False, "budget_extend", {"add_nodes": 1}),
+    (False, "node_reset", {"node_id": 1, "generation": 0, "from_stage": "eval"}),
 ])
 def test_a_command_the_drain_never_acked_waits_for_the_search_and_starts_nothing(
         tmp_path, drain_pause, event_type, data):
@@ -529,17 +530,19 @@ def test_a_command_the_drain_never_acked_waits_for_the_search_and_starts_nothing
     its own pause — sat `executing` until the drain exited, locking the operator's stop out, and then
     its monitor started a plain `resume`, which lifted the drain's pause and ran the search. On the
     drain's OWN pause (`drain_only`) such a command settles `deferred_to_next_search` and nothing is
-    started. On any other pause a fork is a queued intent on a stopped run and waits for the
-    operator's resume in its own words (`deferred_until_resume`, doc 69 69.30) — while an intent
-    that asks the run to go on, a budget extension, is re-driven exactly as it always was: the
-    drain's rule does not widen to every pause."""
+    started. On any other pause a fork — and a budget extension, since 2026-09-29 — is a queued
+    intent on a stopped run and waits for the operator's resume in its own words
+    (`deferred_until_resume`, doc 69 69.30) — while an intent that asks the run to go on, a reset,
+    is re-driven exactly as it always was: the drain's rule does not widen to every pause."""
     rd, driver, client = _draining(tmp_path)
     EventStore(rd / "events.jsonl").append("pause", {
         "reason": "drain-only resume: done", **({"drain_only": True} if drain_pause else {})})
     driver.on_spawn = lambda: setattr(driver, "alive", True)       # a later child: a plain search
-    posted = _post(client, event_type, data, "late").json()
+    # Counted BEFORE the POST: admission runs in a worker thread, so a count taken after the POST
+    # returns could already include a start it made and make "nothing started" vacuous.
     spawns = len(driver.calls)
-    if event_type == "fork" and not drain_pause:
+    posted = _post(client, event_type, data, "late").json()
+    if event_type in ("fork", "budget_extend") and not drain_pause:
         settled = _terminal(client, posted)                        # settled at admission
         assert settled["status"] == "succeeded", settled
         assert settled.get("deferred_until_resume") is True, settled

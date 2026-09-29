@@ -418,14 +418,17 @@ never starts the run as a search. Only an `engine_ack` command waits so: a final
 no search that follows writes, so it starts the engine that finalizes.
 
 A STOP holds a queued intent the same way (doc 69 69.30). A fork, an inject, a forced confirm or
-ablation, a deep-research request and a strategy pin (`serve/protocol.py::QUEUED_WHILE_STOPPED`) are
-served by the search, never by an engine start of their own, so on a paused run — paused by the
-operator, a drain or the engine itself, and neither finished, finalizing nor already asked to resume
-(`serve/protocol.py::stop_holds_queued_intents`) — such a command records its intent and settles
-`succeeded` with `deferred_until_resume` at once, whether or not a stopped engine is still finishing
-an evaluation. It starts nothing: starting `looplab resume` for it lifted the stop, and the operator's
-own resume (or restart) serves the whole queue. A reset, a budget extension and an approval still
-start the engine — each asks the run to go on.
+ablation, a deep-research request, a strategy pin, a budget extension and the two approvals
+(`serve/protocol.py::QUEUED_WHILE_STOPPED`) are served by the next loop turn, never by an engine start
+of their own, so on a paused run — paused by the operator or the engine itself, and neither finished,
+finalizing nor already asked to resume (`serve/protocol.py::stop_holds_queued_intents`) — such a
+command records its intent and settles `succeeded` with `deferred_until_resume`, whether or not a
+stopped engine is still finishing an evaluation, and whether the stop landed before the command or
+after it. It starts nothing: starting `looplab resume` for it lifted the stop, and the operator's own
+resume (or restart) serves the whole queue. On a drain's OWN pause the drain's account applies
+instead (`deferred_to_next_search`, above). A reset still starts the engine — it asks the run to go on
+— and so does a budget extension on an external run's obligations pause, the one paused budget stop
+(a run its budget ended is FINISHED, and an extension there reopens it as it always did).
 
 A `metric_retarget` (`{"key": "<extra metric>", "goal": "…"}`, doc 68 68.2) makes a DECLARED extra
 metric — one an `eval.metrics` reader recorded, never a number the candidate printed for itself — the

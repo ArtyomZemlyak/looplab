@@ -521,9 +521,11 @@ submission by default). A command whose acknowledgement is already in the log st
 not counted; this check reads the acknowledgement by the server's own rule, so it can never count a
 command the server would settle `succeeded`. Nor is one past its deadline counted: the server settles
 it `timed_out` without starting anything, never driving it again. Nor is a QUEUED intent — a fork, an
-inject, a forced confirm or ablation, a deep-research request, a strategy pin — on the run this stop
-paused: the server settles it `deferred_until_resume` and starts nothing, so it waits for your resume
-(doc 69 69.30) — unless it already started a child of its own, which is counted as it always was.
+inject, a forced confirm or ablation, a deep-research request, a strategy pin, a budget extension, an
+approval — on the run this stop paused: the server settles it `deferred_until_resume` and starts
+nothing, so it waits for your resume (doc 69 69.30) — unless it already started a child of its own,
+which is counted as it always was. On a stopped run that has FINISHED the stop does not hold such an
+intent (a finished run is not paused away), so it is counted: the server starts the engine for it.
 
 A command that settled "engine start uncertain" in the last 30 s counts too, since its child may
 still be starting. So does an unsettled command past its deadline that already started a child which
@@ -1052,13 +1054,17 @@ LiteLLM speak it too), Anthropic's `cache_read_input_tokens`, DeepSeek's `prompt
 the ledger records them as `cached_tokens` and the reconciliation gains one line:
 
 ```
-cache hits : <cached> of <prompt> prompt tokens (<share>%) served from the provider's prompt cache
+cache hits : <cached> of <prompt> prompt tokens (>= <share>%) served from the provider's prompt cache
 ```
 
-and the table a `cached` column beside `prompt` when the spans carry them too. It is what the run's
-prompt would cost on a provider that prices a cache hit below a fresh token. Neither appears when no
-hit was reported: a provider that reports none and a run recorded before the field existed both
-print the report above unchanged, and neither is a measured zero.
+and the table a `cached` column beside `prompt` when the spans carry them too. It is the COUNT a
+price on a provider that bills a cache hit below a fresh token starts from — not a cost: cache
+WRITES, which some providers bill above a fresh token, are not recorded. The share is a floor (`>=`),
+because the ledger's prompt total also holds embedding inputs and every call whose provider reports
+no cache figure; a phase with none reported shows `-` in the column, never 0. A count larger than
+the call's own prompt (a provider counting on another base) is recorded as nothing. Neither the line
+nor the column appears when no hit was reported: a provider that reports none and a run recorded
+before the field existed both print the report above unchanged, and neither is a measured zero.
 
 **The ledger split at the champion.** Under the reconciliation, a run with a champion gets one more
 line — what it spent to *reach* the champion and what it spent *after* the answer was already in

@@ -332,10 +332,12 @@ def test_a_server_command_that_will_start_an_engine_means_the_stop_does_not_stan
     its worker waits for the exit and then starts `looplab resume`, which LIFTS the stop — and that
     plan is in `.commands/`, never in the log (critic 2026-09-26: "has exited", exit 0)."""
     rd = _run_dir(tmp_path, in_flight=False)
-    _command_record(rd, event_type="budget_extend", policy="ensure_running")
+    # A reset: a budget extension on the stop this wait asks for waits for the resume now (doc 69
+    # 69.30, critic 2026-09-29), while a reset still asks the run to go on.
+    _command_record(rd, event_type="node_reset", policy="ensure_running")
     out = CliRunner().invoke(app, ["stop", str(rd), "--wait"])
     assert out.exit_code == 1, out.output
-    assert "does not stand: server command(s) `budget_extend`" in out.output
+    assert "does not stand: server command(s) `node_reset`" in out.output
     assert "will start an engine now that no engine holds the lock" in out.output
 
 
@@ -929,7 +931,7 @@ def test_a_command_waiting_on_a_live_engine_is_named_after_its_exit(tmp_path):
     """The engine was SEEN holding the lock: the coming command starts an engine "now that this one
     has exited" — the branch the first two passes left undriven."""
     rd = _run_dir(tmp_path, in_flight=True)
-    _command_record(rd, event_type="budget_extend", policy="ensure_running")
+    _command_record(rd, event_type="node_reset", policy="ensure_running")
     release, held = threading.Event(), threading.Event()
     holder = threading.Thread(target=_hold_lock, args=(rd, release, held), daemon=True)
     holder.start()

@@ -48,8 +48,10 @@ from __future__ import annotations
 
 import math
 from enum import Enum
+from typing import Optional
 
 from looplab.events.types import (
+    PAUSE_REASON_EXTERNAL_OBLIGATIONS,
     EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
     EV_CARD_DROPPED, EV_CARD_EDITED, EV_CARD_REOPENED, EV_CARD_REPRIORITIZED,
     EV_CARD_RESOURCE_PINNED, EV_COMMAND_ACK,
@@ -233,14 +235,22 @@ def engine_ack_observed(record, acknowledgements) -> bool:
 # `succeeded` with `deferred_until_resume`, starting nothing: the queue waits for the operator's own
 # resume (or restart), which serves all of it at once.
 #
+# A BUDGET EXTENSION and the two APPROVALS (a champion's, an eval spec's) wait too (critic
+# 2026-09-29): each is a folded fact the next loop turn reads, and starting `looplab resume` for
+# one lifted the stop exactly as the inject did — a batch holding a budget extension re-ran the
+# incident.
+# "How a run stopped by its budget goes on" is a FINISHED run (not a stop: `stop_holds_queued_
+# intents`), and a gate waiting for approval is an exit, not a pause; the one PAUSED budget stop is
+# an external run's obligations pause, which a budget extension still lifts (`waits_for_resume`).
+#
 # NOT HERE, each on purpose: a reset (a plain one rescores inside a resumed search — its twin that
-# pauses again is the drain, doc 68 68.3b), a budget extension (how a run stopped by its budget goes
-# on), an approval (it lifts the gate it answers), and a resume, reopen or restart (they ARE the
+# pauses again is the drain, doc 68 68.3b), and a resume, reopen or restart (they ARE the
 # operator's resume). Read by the command service (`serve/run_commands.py::RunCommandService.
 # _left_for_the_operators_resume`) and by `looplab stop --wait` (`cli/run_cmds.py::
 # server_commands_restarting`), which must not count such a command as an engine start.
 QUEUED_WHILE_STOPPED: frozenset[str] = frozenset({
-    EV_FORK, EV_INJECT_NODE, EV_FORCE_CONFIRM, EV_FORCE_ABLATE, EV_DEEP_RESEARCH, EV_SET_STRATEGY})
+    EV_FORK, EV_INJECT_NODE, EV_FORCE_CONFIRM, EV_FORCE_ABLATE, EV_DEEP_RESEARCH, EV_SET_STRATEGY,
+    EV_BUDGET_EXTEND, EV_APPROVAL_GRANTED, EV_SPEC_APPROVED})
 
 
 def stop_holds_queued_intents(state) -> bool:
@@ -254,11 +264,14 @@ def stop_holds_queued_intents(state) -> bool:
                 and not state.resume_pending())
 
 
-def waits_for_resume(record, stop_holds: bool, *, own_launch_over: bool = False) -> bool:
+def waits_for_resume(record, stop_holds: bool, *, own_launch_over: bool = False,
+                     pause_reason: Optional[str] = None) -> bool:
     """Does re-driving `record` start NOTHING because its intent waits in its queue for the
     operator's resume (`QUEUED_WHILE_STOPPED`)? `stop_holds` is `stop_holds_queued_intents` of the
-    run as it stands; only an `engine_ack` command waits — its acknowledgement is what the resumed
-    search writes.
+    run as it stands and `pause_reason` its `RunState.pause_reason`; only an `engine_ack` command
+    waits — its acknowledgement is what the resumed search writes — and a budget extension does
+    not wait on an external run's obligations pause (`PAUSE_REASON_EXTERNAL_OBLIGATIONS`), the one
+    paused budget stop, which it is how the run goes on.
 
     Not a record whose OWN `looplab resume` child may still be starting (`spawned_by_command`
     without `spawn_claim_released`): that child is on its way and serves the intent, and settling
@@ -267,6 +280,9 @@ def waits_for_resume(record, stop_holds: bool, *, own_launch_over: bool = False)
     its child is definitely gone; `looplab stop --wait` cannot tell, so it counts the child)."""
     record = record or {}
     launched = bool(record.get("spawned_by_command") and not record.get("spawn_claim_released"))
+    if (record.get("event_type") == EV_BUDGET_EXTEND
+            and pause_reason == PAUSE_REASON_EXTERNAL_OBLIGATIONS):
+        return False
     return bool(stop_holds and (own_launch_over or not launched)
                 and record.get("postcondition") == "engine_ack"
                 and record.get("event_type") in QUEUED_WHILE_STOPPED)

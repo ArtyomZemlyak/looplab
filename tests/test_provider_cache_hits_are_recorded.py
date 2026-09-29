@@ -33,6 +33,7 @@ from looplab.engine.costs import (
     _decode_outbox, in_memory_cost_total, persisted_usage_deltas, reconcile_cost_accountants,
     sanitize_usage_delta)
 from looplab.engine.finalize import emit_llm_cost
+from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
 from looplab.events.token_spend import token_spend_by_phase
 from looplab.events.types import EV_LLM_COST, EV_LLM_USAGE
@@ -85,16 +86,40 @@ def test_a_cache_figure_that_is_not_a_count_states_nothing(hostile):
     assert normalized["prompt_tokens"] == 100
 
 
-def test_a_cache_hit_is_never_more_than_the_prompt_it_is_part_of():
-    """MUTATION: drop the clamp -> 900 cached tokens of a 100-token prompt reach the ledger."""
-    assert _normalize_usage(_usage(100, 5, cache_read_input_tokens=900))["cached_tokens"] == 100
+def test_a_count_larger_than_the_prompt_states_nothing():
+    """A cache hit is a subset of the prompt, so a larger count was counted on another base (an
+    Anthropic-native `input_tokens` excludes its cache reads): clamping it to the prompt claimed a
+    100 % hit rate no provider reported (critic 2026-09-29). MUTATION: clamp -> 500 of 500."""
+    assert "cached_tokens" not in _normalize_usage(_usage(500, 50, cache_read_input_tokens=20000))
     assert "cached_tokens" not in _normalize_usage(_usage(0, 5, cache_read_input_tokens=900))
+    assert _normalize_usage(_usage(500, 50, cache_read_input_tokens=500))["cached_tokens"] == 500
+
+
+def test_a_details_object_that_is_not_a_plain_dict_states_nothing_and_bills_the_call():
+    """JSON and the SDK's dumps give a plain dict; a subclass's own `get` could raise out of
+    `CostAccountant.add` before anything was committed — the paid call unbilled."""
+    class Hostile(dict):
+        def get(self, *_a, **_k):
+            raise RuntimeError("shim")
+
+    acc = CostAccountant()
+    acc.add(0.1, _usage(100, 5, prompt_tokens_details=Hostile(cached_tokens=40)))
+    assert acc.calls == 1 and acc.prompt_tokens == 100 and acc.cached_tokens == 0
+
+
+def test_the_module_s_own_spelling_is_read_first():
+    """The documented order: a second pass over a normalized dict keeps its own count.
+    MUTATION: read the own spelling last -> the nested figure wins."""
+    both = _normalize_usage(_usage(100, 5, cached_tokens=10,
+                                   prompt_tokens_details={"cached_tokens": 20}))
+    assert both["cached_tokens"] == 10
 
 
 def test_a_call_with_no_cache_hit_keeps_the_historical_dict():
     """SPARSE: the key is absent, not 0, so every row a provider without caching writes is unchanged.
 
-    MUTATION: always write the key -> every `llm_usage` row of every run changes shape."""
+    MUTATION: always write the key -> every normalized usage (a client's `_last_usage`, the span's
+    input) changes shape; the accountant's delta and the ledger sanitizer re-sparsify it."""
     for usage in (_usage(100, 5), _usage(100, 5, prompt_tokens_details={"cached_tokens": 0}),
                   _usage(100, 5, prompt_tokens_details=None), None, {}):
         assert set(_normalize_usage(usage)) == _HISTORICAL
@@ -125,8 +150,8 @@ def test_the_binding_boundary_carries_the_count_only_when_non_zero():
 def test_a_local_response_cache_replay_claims_no_provider_cache_hit(monkeypatch):
     """A T7 cache hit performs no provider work: its prompt is zeroed, and so must its cache hits be.
 
-    MUTATION: drop the `pop` in `_cache_get` -> the replay's usage says 70 cached tokens of a 0-token
-    prompt, and the span of a call nobody made carries the stored call's cache figure."""
+    MUTATION: drop the `pop` in `_cache_get` -> the replay's `_last_usage` says 70 cached tokens of
+    a 0-token prompt, for a call nobody made."""
     deltas: list[dict] = []
     accountant = CostAccountant(on_delta=deltas.append)
     client = OpenAICompatibleClient("m", base_url="http://x/v1", temperature=0,
@@ -486,7 +511,7 @@ def _tokens(run_dir) -> str:
 
 def test_tokens_says_how_much_of_the_prompt_the_provider_cache_served(tmp_path):
     out = _tokens(_run_dir(tmp_path, cached_ledger=240, span_cached=240))
-    assert "cache hits :            240 of 300 prompt tokens (80.0%)" in out
+    assert "cache hits :            240 of 300 prompt tokens (>= 80.0%)" in out
     header = next(line for line in out.splitlines() if line.lstrip().startswith("tokens"))
     assert "cached" in header
     row = next(line for line in out.splitlines() if line.rstrip().endswith("propose"))
@@ -503,4 +528,94 @@ def test_tokens_without_spans_still_says_the_ledgers_hits(tmp_path):
     (run / "spans.jsonl").unlink()
     result = CliRunner().invoke(app, ["tokens", str(run)])
     assert result.exit_code == 2
-    assert "cache hits :            150 of 300 prompt tokens (50.0%)" in result.output
+    assert "cache hits :            150 of 300 prompt tokens (>= 50.0%)" in result.output
+
+
+# ------------------------------------------------------------ critic 2026-09-29 (9e5fe9ac), driven
+def test_the_accountant_saturates_the_count():
+    """MUTATION: add without `min(_MAX_USAGE_TOKENS, …)` -> the counter passes the int64 ceiling."""
+    acc = CostAccountant()
+    acc.cached_tokens = _MAX_USAGE_TOKENS - 5
+    acc.add(0.0, _usage(100, 1, cache_read_input_tokens=50))
+    assert acc.cached_tokens == _MAX_USAGE_TOKENS
+
+
+def test_summed_billings_never_claim_more_hits_than_prompt():
+    """MUTATION: drop the clamp in `_sum_usage` -> 50 hits of a 10-token prompt."""
+    summed = tracing._sum_usage({"prompt": 10, "completion": 1, "total": 11, "cached": 50},
+                                {"prompt": 0, "completion": 0, "total": 0})
+    assert summed["cached"] == 10
+
+
+def test_the_trace_view_keeps_a_generation_s_hits():
+    """`events/traceview.py` allow-lists the span's usage keys; `cached` was dropped and booked as an
+    omitted item, so the trace API and UI never showed it."""
+    from looplab.events.traceview import _normalize_span
+
+    span = {"name": "generation", "kind": "generation", "trace_id": "a" * 32, "span_id": "b" * 16,
+            "attributes": {"usage": {"prompt": 300, "completion": 100, "total": 400,
+                                     "cached": 240}}}
+    out = _normalize_span(span)
+    assert out["attributes"]["usage"]["cached"] == 240
+
+
+def _review_client(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from looplab.serve.server import make_app
+    from test_review_capabilities import _create, _seed_run
+
+    rd = _seed_run(tmp_path)
+    EventStore(rd / "events.jsonl").append("llm_usage", {
+        "usage_id": "a" * 32, "cost": 0.1, "calls": 1, "priced_calls": 1, "prompt_tokens": 300,
+        "completion_tokens": 100, "total_tokens": 400, "cached_tokens": 240})
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-secret")
+    client = TestClient(make_app(tmp_path))
+    return client, _create(client)["token"]
+
+
+def test_a_review_link_reads_the_count_not_a_masked_credential(tmp_path, monkeypatch):
+    """MEDIUM: the review scrubber's bare `token` pattern masked `cached_tokens` as `"***"` — a
+    string where the owner reads 240 — and its cost projection left the key out."""
+    pytest.importorskip("fastapi")
+    client, token = _review_client(tmp_path, monkeypatch)
+    headers = {"X-LoopLab-Review": token}
+    state = client.get("/api/review/state", headers=headers).json()["state"]["llm_cost"]
+    assert state["cached_tokens"] == 240, state
+    cost = client.get("/api/review/cost", headers=headers).json()
+    assert cost["cached_tokens"] == 240, cost
+
+
+def _spans(run_dir, *usages):
+    run_dir.joinpath("spans.jsonl").write_text("".join(json.dumps({
+        "name": "generation", "kind": "generation", "trace_id": "a" * 32,
+        "span_id": format(i, "016x"), "run_id": "r",
+        "attributes": {"op": "chat", "model": "m", "phase": phase, "usage": usage}}) + "\n"
+        for i, (phase, usage) in enumerate(usages)))
+
+
+def test_top_keeps_the_column_and_its_blank_when_the_cached_phase_is_cut(tmp_path):
+    """MUTATIONS: the column decided over the SHOWN rows -> it disappears with `--top 1`; the rest
+    line without its blank cell -> misaligned under the header."""
+    run = _run_dir(tmp_path, cached_ledger=60, span_cached=None)
+    _spans(run, ("plan", {"prompt": 900, "completion": 100, "total": 1000}),
+           ("propose", {"prompt": 300, "completion": 100, "total": 400, "cached": 60}))
+    result = CliRunner().invoke(app, ["tokens", str(run), "--top", "1"])
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    header = next(line for line in lines if line.lstrip().startswith("tokens"))
+    assert "cached" in header
+    plan = next(line for line in lines if line.rstrip().endswith("plan"))
+    assert plan.split()[4] == "-", plan               # none reported in this phase: not a zero
+    rest = next(line for line in lines if "more phase(s)" in line)
+    assert rest.index("(1 more phase(s)") == plan.index("plan"), (rest, plan)
+
+
+def test_a_log_with_no_generation_span_still_says_the_ledger_s_hits(tmp_path):
+    """MUTATION: drop the cache line from the no-generation-spans exit -> not printed."""
+    run = _run_dir(tmp_path, cached_ledger=150, span_cached=None)
+    run.joinpath("spans.jsonl").write_text(json.dumps(
+        {"name": "op", "kind": "operation", "trace_id": "a" * 32, "span_id": "b" * 16}) + "\n")
+    result = CliRunner().invoke(app, ["tokens", str(run)])
+    assert result.exit_code == 2
+    assert "cache hits :            150 of 300 prompt tokens (>= 50.0%)" in result.output

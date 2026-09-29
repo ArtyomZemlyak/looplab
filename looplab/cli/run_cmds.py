@@ -1490,15 +1490,18 @@ def _pulse_of(value) -> float:
 
 
 def server_commands_restarting(run_dir: Path, *, now: Optional[float] = None,
-                               acked: Optional[dict] = None, stopped: bool = False) -> dict:
+                               acked: Optional[dict] = None, stopped: bool = False,
+                               pause_reason: Optional[str] = None) -> dict:
     """`{"coming", "stale", "uncertain", "unreadable"}` — the server commands that will start an
     engine into `run_dir` now that the current one has exited, those no worker is driving any more,
     those that could not tell whether they started one, and the records no server can read — each as
     printable names. `acked` is the log's acknowledgement index
     (`serve/protocol.py::command_ack_index`); `stopped` is whether the run sits on a stop only the
-    operator's resume lifts (`serve/protocol.py::stop_holds_queued_intents`). On such a stop a
-    QUEUED intent — a fork, an inject, a forced confirm or ablation, a deep-research request, a
-    strategy pin — starts nothing: a re-drive settles it `deferred_until_resume` (doc 69 69.30).
+    operator's resume lifts (`serve/protocol.py::stop_holds_queued_intents`), and `pause_reason`
+    that pause's own reason. On such a stop a QUEUED intent — a fork, an inject, a forced confirm or
+    ablation, a deep-research request, a strategy pin, a budget extension, an approval — starts
+    nothing: a re-drive settles it `deferred_until_resume` (doc 69 69.30); a budget extension on an
+    external run's obligations pause still starts one (`serve/protocol.py::waits_for_resume`).
 
     THE PRECLAIM FAMILY of engine starter (`engine/run_lifecycle.py`, "the launch-in-flight
     handshake"). A command whose policy is `ENSURE_RUNNING` (`node_reset`, `budget_extend`, …; a
@@ -1575,7 +1578,7 @@ def server_commands_restarting(run_dir: Path, *, now: Optional[float] = None,
             if (record.get("postcondition") == "engine_ack"
                     and engine_ack_observed(record, acked)):
                 continue                    # a GET settles it `succeeded`
-            if waits_for_resume(record, stopped):
+            if waits_for_resume(record, stopped, pause_reason=pause_reason):
                 continue                    # …or `deferred_until_resume`, starting nothing
             if deadline_passed(record.get("absolute_deadline_at"), now):
                 if not (record.get("spawned_by_command")
@@ -1816,9 +1819,10 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
         # the server's command workers, which record a planned engine start only in `.commands/`.
         why = stop_lifted(current())
         from looplab.serve.protocol import command_ack_index, stop_holds_queued_intents
+        state = current()
         commands = server_commands_restarting(
             target, acked=command_ack_index(store.read_all()),
-            stopped=stop_holds_queued_intents(current()))
+            stopped=stop_holds_queued_intents(state), pause_reason=state.pause_reason)
         if not why and commands["coming"]:
             why = (f"server command(s) {', '.join(commands['coming'])} will start an engine now "
                    "that " + ("this one has exited" if seen["alive"] else "no engine holds the lock")

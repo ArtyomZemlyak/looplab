@@ -3383,7 +3383,8 @@ def test_a_record_past_its_deadline_is_never_re_driven_into_a_spawn(tmp_path):
     client, srv = _client(tmp_path, driver, observation=5.0)
     real_start = srv.commands._start_worker
     srv.commands._start_worker = lambda *_args, **_kwargs: None      # the worker "dies" at once
-    pending = _post(client, "budget_extend", {"add_nodes": 1}, key="expired-redrive").json()
+    # A reset — a budget extension on this paused run waits for the resume (doc 69 69.30).
+    pending = _post(client, "node_reset", {"node_id": 0, "generation": 0, "from_stage": "eval"}, key="expired-redrive").json()
     assert pending["status"] == "accepted"
     path = rd / ".commands" / f"{pending['id']}.json"
     row = json.loads(path.read_text(encoding="utf-8"))
@@ -3402,10 +3403,10 @@ def test_a_record_past_its_deadline_is_never_re_driven_into_a_spawn(tmp_path):
     # …and it says what happened: its worker died before admission, so its intent was never
     # appended — not "command intent was recorded but …", which is what it said (critic 2026-09-26).
     assert seen["error"]["code"] == "deadline_passed_before_intent", seen
-    assert "budget_extend" not in _types(rd)
+    assert "node_reset" not in _types(rd)
     # …and one inside its deadline is still re-driven: the bound is the deadline, not the re-drive.
     srv.commands._start_worker = lambda *_args, **_kwargs: None
-    fresh = _post(client, "budget_extend", {"add_nodes": 2}, key="fresh-redrive").json()
+    fresh = _post(client, "node_reset", {"node_id": 0, "generation": 0, "from_stage": "eval"}, key="fresh-redrive").json()
     srv.commands._start_worker = real_start
     deadline = time.time() + 5.0
     while not driver.calls:
@@ -3616,14 +3617,16 @@ def test_a_deadline_that_passes_during_admission_starts_no_engine(tmp_path, monk
     client, srv = _client(tmp_path, driver, observation=0.5)
     commands = srv.commands
     monkeypatch.setattr(commands, "_start_worker", lambda *_args, **_kwargs: None)
-    pending = _post(client, "budget_extend", {"add_nodes": 1}, key="expires-mid-admission").json()
+    # A reset — a budget extension on this paused run waits for the resume (doc 69 69.30).
+    pending = _post(client, "node_reset", {"node_id": 0, "generation": 0, "from_stage": "eval"},
+                    key="expires-mid-admission").json()
     path = commands._path(rd, pending["id"])
     real_recent = commands._recent_spawn_claim
     crossed = []
 
     def the_deadline_passes_here(run_dir):
         if not crossed:
-            crossed.append(_types(rd).count("budget_extend"))
+            crossed.append(_types(rd).count("node_reset"))
             clock.now += 1.5
         return real_recent(run_dir)
 

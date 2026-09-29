@@ -435,7 +435,10 @@ def phase_table_lines(rows: list, top: int = 0) -> list[str]:
     lines = [f"{'tokens':>14}  {'share':>6}  {'calls':>6}  {'prompt':>13}{head}  "
              f"{'completion':>11}  phase"]
     for row in shown:
-        cell = f"  {row.get('cached', 0):>13,}" if with_cache else ""
+        # `-`, not 0: a span carries `cached` only when some were reported, so a phase with none
+        # cannot tell "no hit" from "a provider that reports no cache figure" (critic 2026-09-29).
+        cell = ((f"  {row['cached']:>13,}" if row.get("cached") else f"  {'-':>13}")
+                if with_cache else "")
         lines.append(f"{row['tokens']:>14,}  {100 * row['share']:>5.1f}%  {row['calls']:>6,}  "
                      f"{row['prompt']:>13,}{cell}  {row['completion']:>11,}  {row['phase']}")
     if len(shown) < len(rows):
@@ -450,15 +453,17 @@ def phase_table_lines(rows: list, top: int = 0) -> list[str]:
 
 def cache_hit_line(ledger) -> Optional[str]:
     """The line `looplab tokens` prints for the provider's PROMPT-CACHE hits, off the folded ledger
-    (doc 69 69.32): what the run's prompt would cost on a provider that prices a hit below a fresh
-    token. None unless the ledger records some — a provider that reports none and a log written
-    before the field both leave it absent, and neither is a measured zero."""
+    (doc 69 69.32) — the count a price on a provider that bills a hit below a fresh token starts
+    from. None unless the ledger records some: a provider that reports none and a log written
+    before the field both leave it absent, and neither is a measured zero. The share is a FLOOR and
+    says so: the ledger's prompt total also holds embedding inputs and every call whose provider
+    reports no cache figure (critic 2026-09-29)."""
     ledger = ledger if isinstance(ledger, dict) else {}
     cached, prompt = _int(ledger.get("cached_tokens")), _int(ledger.get("prompt_tokens"))
     if not (cached and prompt):
         return None
     return (f"cache hits : {cached:>14,} of {prompt:,} prompt tokens "
-            f"({100 * cached / prompt:.1f}%) served from the provider's prompt cache")
+            f"(>= {100 * cached / prompt:.1f}%) served from the provider's prompt cache")
 
 
 def spend_around_champion(events, state) -> Optional[dict]:

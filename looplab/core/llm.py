@@ -542,8 +542,10 @@ def _safe_token_count(value) -> int:
 
 
 def _cached_prompt_tokens(raw: dict, prompt: int) -> int:
-    """How many of the call's `prompt` tokens the provider says it served from its PROMPT CACHE,
-    clamped to `prompt` — a cache hit is a subset of the prompt, never more tokens than were sent.
+    """How many of the call's `prompt` tokens the provider says it served from its PROMPT CACHE —
+    a subset of the prompt, so a count LARGER than `prompt` states nothing: it was counted on
+    another base (an Anthropic-native `input_tokens` excludes its cache reads), and clamping it to
+    the prompt claimed a 100 % hit rate no provider reported (critic 2026-09-29).
 
     Four spellings, the first NON-ZERO clean count wins: this module's own `cached_tokens` (so a
     second pass over an already-normalized dict — `_post` hands its body back through `add` — keeps
@@ -554,12 +556,14 @@ def _cached_prompt_tokens(raw: dict, prompt: int) -> int:
     could say what the same calls would cost on a provider that prices a cache hit below a fresh
     prompt token."""
     details = raw.get("prompt_tokens_details")
+    # A PLAIN dict only (JSON and the SDK's dumps give one): a subclass's own `get` could raise out
+    # of `CostAccountant.add` before anything is committed, and the paid call would go unbilled.
     for value in (raw.get("cached_tokens"),
-                  details.get("cached_tokens") if isinstance(details, dict) else None,
+                  details.get("cached_tokens") if type(details) is dict else None,
                   raw.get("cache_read_input_tokens"), raw.get("prompt_cache_hit_tokens")):
         count = _safe_token_count(value)
         if count:
-            return min(count, prompt)
+            return count if count <= prompt else 0
     return 0
 
 

@@ -227,10 +227,13 @@ applies it at its next decision boundary and records `strategy_decision`. Before
 acting on the new policy, refresh `harness-progress.policy_preview` and wait for
 its `policy` and `policy_source=recorded_strategy` to reflect the switch; command
 success alone does not confirm application. A paused engine needs a resume to
-reach that boundary: on a paused run a `set_strategy`, `inject_node`, `fork`,
-`force_confirm`, `force_ablate` or `deep_research` command is recorded and settles
-`succeeded` with `deferred_until_resume` without starting the engine, and the
-explicit resume serves the queued intents together (doc 69 69.30). Editing the run's `policy` config takes effect on the next
+reach that boundary: on a paused run a `set_strategy`, `inject_node`,
+`force_confirm` or `budget_extend` command is recorded and settles `succeeded`
+with `deferred_until_resume` without starting the engine, and the explicit
+resume serves the queued intents together (doc 69 69.30; `fork`,
+`force_ablate` and `deep_research` are refused on an external run). A
+`budget_extend` on the engine's own obligations pause (below) still resumes
+the run. Editing the run's `policy` config takes effect on the next
 restart if no durable `set_strategy` pin overrides it. In external mode LoopLab
 uses the active policy only to schedule
 evaluations of agent-submitted nodes; the external agent still chooses and

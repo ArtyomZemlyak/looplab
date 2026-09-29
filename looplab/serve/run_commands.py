@@ -64,7 +64,8 @@ from looplab.serve.http import generation_conflict, refusal
 from looplab.serve.protocol import COLLABORATION_EVENTS, CONTROL_EVENTS
 from looplab.serve.protocol import (COMMAND_ACTIVE_STATUSES, COMMAND_TERMINAL_STATUSES,
                                     DEADLINE_PASSED_BEFORE_INTENT, ENGINE_START_UNCERTAIN,
-                                    command_intent_marker, deadline_passed, waits_for_resume)
+                                    QUEUED_WHILE_STOPPED, command_intent_marker, deadline_passed,
+                                    waits_for_resume)
 
 
 # Kept under this name — its call sites read well — but DERIVED from `serve/protocol.py`, the
@@ -2378,10 +2379,19 @@ class RunCommandService:
         startup ladder while its lease is live (`waits_for_resume`), and counts as over once
         `_recent_spawn_claim` no longer holds — the re-spawn the rule exists to refuse. Asked AFTER
         the drain's own rule wherever both can answer, so a command a drain left waiting keeps the
-        drain's account (`deferred_to_next_search`)."""
+        drain's account (`deferred_to_next_search`).
+
+        The record's TYPE first: every other command — asked on every monitor tick — pays neither
+        the fold nor the lease probe (`_recent_spawn_claim` can quarantine or unlink a lease)."""
+        if (record.get("event_type") not in QUEUED_WHILE_STOPPED
+                or record.get("postcondition") != "engine_ack"):
+            return False
+        holds, pause_reason = observation.queued_intent_stop()
+        if not holds:
+            return False
         launched = record.get("spawned_by_command") and not record.get("spawn_claim_released")
         return waits_for_resume(
-            record, observation.stop_holds_queued_intents(),
+            record, holds, pause_reason=pause_reason,
             own_launch_over=bool(launched) and not self._recent_spawn_claim(rd))
 
     def _settled_without_an_engine(self, rd: Path, path: Path, record: dict) -> bool:
@@ -4120,6 +4130,23 @@ class RunCommandService:
 
             return spec, record
 
+    def _settled_mid_watch(self, rd: Path, path: Path, record: dict, command_id: str, spec,
+                           observation: CommandObservation) -> bool:
+        """The two ways a WATCHED command settles off the log alone, asked on every `_monitor` tick
+        (split out of it at its size ceiling): a guarded-abort finish fails it with the domain's own
+        error, and a queued intent on a STOPPED run waits for the operator's resume
+        (`_settled_on_the_operators_stop`) — whatever the engine's liveness, because a stop
+        landing AFTER admission holds it too: left `executing` until a stopped engine's next loop
+        head (hours away behind an evaluation), it held the run's one driver slot and the batch's
+        next inject answered 409 `command_in_progress` (critic 2026-09-29, driven)."""
+        domain_error = (self._domain_failure(rd, record, observation)
+                        if spec.engine_policy is not EnginePolicy.NO_SPAWN else None)
+        if domain_error is not None:
+            self._clear_spawn_claim(rd, command_id)
+            self._terminal(path, record, "failed", error=domain_error)
+            return True
+        return self._settled_on_the_operators_stop(rd, path, record, observation)
+
     def _monitor(self, rd: Path, path: Path, record: dict, command_id: str, spec) -> None:
         """Watch for the postcondition until it arrives or the deadline expires (doc 25 SC-07).
 
@@ -4154,11 +4181,7 @@ class RunCommandService:
             if self._monitor_postcondition(rd, record, observation, liveness, gate):
                 self._succeeded(rd, path, record)
                 return
-            domain_error = (self._domain_failure(rd, record, observation)
-                            if spec.engine_policy is not EnginePolicy.NO_SPAWN else None)
-            if domain_error is not None:
-                self._clear_spawn_claim(rd, command_id)
-                self._terminal(path, record, "failed", error=domain_error)
+            if self._settled_mid_watch(rd, path, record, command_id, spec, observation):
                 return
 
             now = time.time()

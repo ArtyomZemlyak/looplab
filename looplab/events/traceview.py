@@ -690,7 +690,9 @@ def _normalize_span(value) -> Optional[dict]:
     usage = raw_attributes.get("usage")
     usage = dict(usage) if isinstance(usage, dict) else {}
     safe_usage = {}
-    for key in ("prompt", "completion", "total", "context"):
+    # `cached`: the provider's prompt-cache hits a generation span carries when some were reported
+    # (`core/tracing.py::_norm_usage`, doc 69 69.32) — dropped here, it was booked `omitted_items`.
+    for key in ("prompt", "completion", "total", "context", "cached"):
         if key in usage:
             safe_usage[key] = _safe_token_count(usage[key])
     if "usage" in raw_attributes:

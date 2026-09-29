@@ -79,13 +79,16 @@ _SUMMARY_OMIT_KEYS = {
 _BENIGN_SECRET_KEYS = {
     "tokenizer", "max_tokens", "num_tokens", "n_tokens", "total_tokens", "prompt_tokens",
     "completion_tokens", "tokens",
+    # The ledger's provider cache hits (doc 69 69.32): a COUNT, which the bare `token` pattern
+    # below masked as a credential — `"***"`, a string, where the owner's own read shows 240.
+    "cached_tokens",
 }
 _SECRET_KEY = re.compile(
     r"(?:api[_-]?key|secret|access[_-]?key|token|password|passwd|credential)", re.IGNORECASE)
 _MAX_METRIC_SERIES = 64
 _MAX_METRIC_POINTS = 5_000
 _REVIEW_COST_KEYS = ("cost", "calls", "priced_calls",
-                     "prompt_tokens", "completion_tokens", "total_tokens")
+                     "prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens")
 # Detail is an opt-in source-evidence projection, not a serialized Node passthrough.  Keep an explicit
 # allow-list so future model fields (especially logs, prompts, trace data, or host paths) cannot become
 # reviewer-visible merely because they were added to ``Node``.

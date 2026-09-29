@@ -334,18 +334,27 @@ class CommandObservation:
     def stop_holds_queued_intents(self) -> bool:
         """Whether the run sits on a stop only the operator's resume lifts
         (`serve/protocol.py::stop_holds_queued_intents`, doc 69 69.30) — a queued intent then waits
-        for that resume instead of starting an engine.
+        for that resume instead of starting an engine."""
+        return self.queued_intent_stop()[0]
+
+    def queued_intent_stop(self) -> tuple[bool, Optional[str]]:
+        """`(stop_holds_queued_intents, the pause's own reason)` — the reason is what exempts a
+        budget extension on an external run's obligations pause
+        (`serve/protocol.py::waits_for_resume`).
 
         The FOLD decides (a scoped auto-pause a reset lifted, a pending resume request, a finish),
-        and is read off this revision's CACHED fold like `launch_claim_fresh` — but only once the
-        latest row that moves the run between paused and not is a `pause`: the fold sets `paused`
-        only at a `pause` row or a `restart` (which asks to resume, so the stop does not hold), so
-        any other latest boundary answers False without the full fold a busy run's growing log
-        would otherwise cost per ask."""
+        read off this revision's CACHED fold like `launch_claim_fresh` — skipped only where no fold
+        can say the stop holds: no boundary row at all, or a latest `resume`/`run_reopened`, each of
+        which clears `paused`. NOT skipped after a `run_finished` or a `restart`: a reset reopens a
+        finalized stopped run without clearing `paused` (`_on_node_reset` clears `finished` and
+        `stop_requested` only), and a restart's replacement may be served without a `resume` — the
+        skip that read any non-`pause` boundary as "no stop" let a queued inject there start the
+        search over it (critic 2026-09-29, driven)."""
         boundary = self._latest_pause_boundary
-        if boundary is None or boundary.type != EV_PAUSE:
-            return False
-        return stop_holds_queued_intents(self._owner._fold(self))
+        if boundary is None or boundary.type in (EV_RESUME, EV_RUN_REOPENED):
+            return False, None
+        state = self._owner._fold(self)
+        return stop_holds_queued_intents(state), state.pause_reason
 
     def deferred_ack_observed(self, record: dict) -> bool:
         """Whether a DRAIN acked `record`'s intent WITHOUT serving it (`deferred`): the intent is

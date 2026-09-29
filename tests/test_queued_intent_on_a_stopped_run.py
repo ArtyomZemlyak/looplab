@@ -7,8 +7,10 @@ landed after the Strategist's first decision. A fork, an inject, a forced confir
 deep-research request and a strategy pin are served by the SEARCH, never by an engine start of their
 own (`serve/protocol.py::QUEUED_WHILE_STOPPED`): on a stopped run their command records the intent,
 settles `succeeded` with `deferred_until_resume`, and starts nothing — the operator's resume serves
-the whole queue at once. Everything else keeps its policy: a reset or a budget extension still
-starts the engine it asks for.
+the whole queue at once. A budget extension and the two approvals wait the same way (critic
+2026-09-29: a batch holding a budget extension re-ran the incident), except a budget extension on an
+external run's obligations pause — the one paused budget stop. A reset still starts the engine it
+asks for.
 """
 from __future__ import annotations
 
@@ -28,6 +30,7 @@ from looplab.events.replay import fold  # noqa: E402
 from looplab.serve.control_validation import CONTROL_SPECS  # noqa: E402
 from looplab.serve.protocol import (  # noqa: E402
     QUEUED_WHILE_STOPPED, EnginePolicy, stop_holds_queued_intents, waits_for_resume)
+from looplab.events.types import PAUSE_REASON_EXTERNAL_OBLIGATIONS  # noqa: E402
 
 _IDEA = {"operator": "manual", "params": {"x": 1.0}, "rationale": "queued while stopped"}
 # One valid payload per queued intent, on `_seed`'s node 0 (generation 0).
@@ -38,7 +41,10 @@ _QUEUED = {
     "force_ablate": {"node_id": 0, "generation": 0},
     "deep_research": {},
     "set_strategy": {"strategy": {"policy": "mcts"}},
+    "budget_extend": {"add_nodes": 1},
 }
+# …and the two approvals, which need the gate they answer to be open (`_approval_seed`).
+_APPROVALS = ("approval_granted", "spec_approved")
 
 
 def _store(rd):
@@ -50,15 +56,15 @@ def _store(rd):
 def test_the_queued_set_is_exactly_the_search_served_intents():
     """Pinned as a set, so widening or narrowing it is a decision the diff shows. Every member is
     an `ENSURE_RUNNING` + `engine_ack` command (its ack is what the resumed search writes); the
-    intents that ASK the run to go on — the resume family, a reset, a budget extension, an approval —
-    are not queued, and nor is anything that starts no engine anyway."""
-    assert QUEUED_WHILE_STOPPED == set(_QUEUED)
+    intents that ASK the run to go on — the resume family and a reset — are not queued, and nor is
+    anything that starts no engine anyway. MUTATION: drop `budget_extend` -> the incident again."""
+    assert QUEUED_WHILE_STOPPED == set(_QUEUED) | set(_APPROVALS)
     for event_type in QUEUED_WHILE_STOPPED:
         spec = CONTROL_SPECS[event_type]
         assert (spec.engine_policy, spec.postcondition) == (
             EnginePolicy.ENSURE_RUNNING, "engine_ack"), event_type
-    for goes_on in ("resume", "run_reopened", "restart", "node_reset", "budget_extend",
-                    "approval_granted", "spec_approved", "run_abort", "pause", "hint"):
+    for goes_on in ("resume", "run_reopened", "restart", "node_reset", "run_abort", "pause",
+                    "hint"):
         assert goes_on not in QUEUED_WHILE_STOPPED, goes_on
 
 
@@ -85,7 +91,12 @@ def test_what_waits_for_the_resume_is_a_stated_rule():
     assert waits_for_resume(inject, True) is True
     assert waits_for_resume(inject, False) is False, "a run that is not stopped starts its engine"
     assert waits_for_resume({"event_type": "node_reset", **ack}, True) is False
-    assert waits_for_resume({"event_type": "budget_extend", **ack}, True) is False
+    extend = {"event_type": "budget_extend", **ack}
+    assert waits_for_resume(extend, True) is True
+    assert waits_for_resume(extend, True, pause_reason="operator stop") is True
+    # …but an external run's obligations pause is a budget stop, and the extension is how it goes on.
+    assert waits_for_resume(extend, True, pause_reason=PAUSE_REASON_EXTERNAL_OBLIGATIONS) is False
+    assert waits_for_resume(inject, True, pause_reason=PAUSE_REASON_EXTERNAL_OBLIGATIONS) is True
     assert waits_for_resume({"event_type": "inject_node"}, True) is False, "only an ack waits"
     assert waits_for_resume(None, True) is False
     # A child THIS command launched may still be starting: its own ladder accounts for it, unless
@@ -185,20 +196,48 @@ def test_every_queued_intent_waits_on_a_stopped_run(tmp_path, event_type):
     assert event_type in _types(rd) and fold(_store(rd).read_all()).paused
 
 
-@pytest.mark.parametrize("event_type, data", [
-    ("budget_extend", {"add_nodes": 1}),
-    ("node_reset", {"node_id": 0, "generation": 0, "from_stage": "eval"}),
-])
-def test_an_intent_that_asks_the_run_to_go_on_still_starts_it(tmp_path, event_type, data):
-    """The control group: a reset rescores inside a resumed search and an extension is how a run
-    stopped by its budget goes on — each still starts the engine it asks for."""
-    rd = _seed(tmp_path, paused=True)
+@pytest.mark.parametrize("event_type, data, pause", [
+    ("node_reset", {"node_id": 0, "generation": 0, "from_stage": "eval"}, None),
+    ("budget_extend", {"add_nodes": 1}, {"reason": PAUSE_REASON_EXTERNAL_OBLIGATIONS,
+                                         "terminal_reason": "budget"}),
+], ids=["reset", "extension-on-the-obligations-pause"])
+def test_an_intent_that_asks_the_run_to_go_on_still_starts_it(tmp_path, event_type, data, pause):
+    """The control group: a reset rescores inside a resumed search, and an extension is how an
+    external run its engine paused on the budget (its finish obligations due) goes on — each still
+    starts the engine it asks for. MUTATION: drop the obligations exemption -> no engine."""
+    rd = _seed(tmp_path, paused=pause is None)
+    if pause is not None:
+        _store(rd).append("pause", pause)
     driver = _Driver()
     driver.on_spawn = lambda: (setattr(driver, "alive", True), _ack_marked(rd))
     client, _srv = _client(tmp_path, driver, timeout=30.0, observation=60.0)
     record = _terminal(client, _post(client, event_type, data).json())
     assert record["status"] == "succeeded" and "deferred_until_resume" not in record, record
     assert len(driver.calls) == 1
+
+
+def _approval_seed(rd, event_type):
+    """Open the gate `event_type` answers on node 0, as the engine does before it exits."""
+    if event_type == "approval_granted":
+        _store(rd).append("approval_requested", {"node_id": 0, "generation": 0, "metric": 1.0})
+        return {"node_id": 0, "generation": 0}
+    _store(rd).append("spec_proposed", {"spec": {"command": ["python", "eval.py"]}})
+    _store(rd).append("spec_approval_requested", {})
+    return {}
+
+
+@pytest.mark.parametrize("event_type", _APPROVALS)
+def test_an_approval_sent_to_a_stopped_run_waits_for_the_resume(tmp_path, event_type):
+    """The gate an approval answers is an EXIT, not a pause: a paused run awaiting it was stopped
+    by its operator, and starting `looplab resume` for the approval lifted that stop (critic
+    2026-09-29). MUTATION: drop the approval from `QUEUED_WHILE_STOPPED` -> one engine start."""
+    rd = _seed(tmp_path, paused=True)
+    data = _approval_seed(rd, event_type)
+    driver = _Driver(on_spawn=lambda: _ack_marked(rd))
+    client, _srv = _client(tmp_path, driver, timeout=30.0, observation=60.0)
+    record = _terminal(client, _post(client, event_type, data).json())
+    assert record["status"] == "succeeded" and record.get("deferred_until_resume") is True, record
+    assert driver.calls == [] and fold(_store(rd).read_all()).paused
 
 
 def test_a_queued_intent_on_a_running_run_starts_its_engine_as_before(tmp_path):
@@ -375,3 +414,186 @@ def test_the_assistant_is_not_told_a_queued_intent_completed():
         name="inject_node", run_id="demo", completed="inject_node for demo")
     assert "completed" not in queued and "not yet applied" in queued
     assert "run is stopped" in queued and "resumed" in queued and "cmd_1" in queued
+
+
+# ------------------------------------------------------------ critic 2026-09-29 (8d8bece8), driven
+
+def test_a_command_admitted_before_the_stop_does_not_hold_the_slot_while_the_engine_lives(tmp_path):
+    """MEDIUM: inject #1 rode a running search whose loop was busy (no loop head, so no ack); the
+    operator stopped the run to batch the rest, and the engine stayed alive finishing its work. The
+    rule was asked only in the monitor's `not alive` rung, so inject #1 stayed `executing` and the
+    batch's next inject answered 409 `command_in_progress`. It is asked on every tick now.
+    MUTATION: drop the per-tick ask (`_settled_mid_watch`) -> 409."""
+    rd = _seed(tmp_path)
+    driver = _Driver(alive=True)
+    client, _srv = _client(tmp_path, driver, timeout=30.0, observation=60.0)
+    first = _executing(client, _post(client, "inject_node", _QUEUED["inject_node"], key="first")
+                       .json())
+    assert first["status"] == "executing", first
+    _store(rd).append("pause", {"reason": "operator stop (`looplab stop`)"})
+    settled = _terminal(client, first)
+    assert settled["status"] == "succeeded" and settled.get("deferred_until_resume") is True, settled
+    second = _post(client, "inject_node", {**_QUEUED["inject_node"], "code": "print(2)"},
+                   key="second")
+    assert second.status_code == 200, second.text
+    assert _terminal(client, second.json()).get("deferred_until_resume") is True
+    driver.alive = False
+    assert driver.calls == []
+
+
+def _stopped_finish_reopened_by_a_reset(rd):
+    store = _store(rd)
+    store.append("run_abort", {"reason": "finalized"})
+    store.append("run_finished", {"reason": "finalized"})
+    # A reset re-opens a finished run (`_on_node_reset` clears finished + stop_requested) and leaves
+    # the operator's pause alone — and it is not one of the pause boundaries.
+    store.append("node_reset", {"node_id": 0, "generation": 0, "from_stage": "eval"})
+
+
+def test_the_prefilter_folds_when_a_reset_reopened_a_stopped_finish(tmp_path):
+    """LOW-MEDIUM: the latest boundary is `run_finished`, and the pre-filter read any non-`pause`
+    boundary as "no stop" while the fold says the operator's stop holds — so a queued inject there
+    started the search over it. MUTATION: the old `!= EV_PAUSE` skip -> False."""
+    rd = _seed(tmp_path, paused=True)
+    _stopped_finish_reopened_by_a_reset(rd)
+    state = fold(_store(rd).read_all())
+    assert state.paused and not state.finished and not state.stop_requested
+    assert stop_holds_queued_intents(state) is True
+    _unused, srv = _client(tmp_path, _Driver())
+    assert srv.commands._observe(rd).stop_holds_queued_intents() is True
+    driver = _Driver()
+    driver.on_spawn = lambda: (setattr(driver, "alive", True), _ack_marked(rd))
+    client, _srv = _client(tmp_path, driver, timeout=30.0, observation=60.0)
+    record = _terminal(client, _post(client, "inject_node", _QUEUED["inject_node"]).json())
+    assert driver.calls == [] and record.get("deferred_until_resume") is True, record
+
+
+def test_a_resumed_runs_command_pays_no_fold(tmp_path, monkeypatch):
+    """The pre-filter's cost claim on a run that WAS paused: a latest `resume` clears `paused`, so
+    no fold can say the stop holds. MUTATION: fold whenever any boundary exists -> the fold runs."""
+    rd = _seed(tmp_path, paused=True)
+    _store(rd).append("resume", {})
+    _unused, srv = _client(tmp_path, _Driver())
+    observation = srv.commands._observe(rd)
+    monkeypatch.setattr(type(observation._owner), "_fold",
+                        lambda *_a, **_k: pytest.fail("folded on a resumed run"))
+    assert observation.stop_holds_queued_intents() is False
+
+
+def test_a_redriven_queued_intent_needs_no_lock_verdict_at_admission(tmp_path):
+    """LOW: re-driving (`/retry`) a queued intent onto a stopped run whose lock cannot be read must
+    hold the queue, not fail `engine_unknown`. MUTATION: ask the lock before the stop -> failed."""
+    rd = _seed(tmp_path)
+    snapshot = (rd / "task.snapshot.json").read_text(encoding="utf-8")
+    (rd / "task.snapshot.json").unlink()            # the spawn fails BEFORE the Popen boundary
+    driver = _Driver()
+    client, srv = _client(tmp_path, driver, timeout=30.0, observation=60.0)
+    failed = _terminal(client, _post(client, "inject_node", _QUEUED["inject_node"]).json())
+    assert failed["status"] == "failed" and failed["error"]["code"] == "spawn_failed", failed
+    (rd / "task.snapshot.json").write_text(snapshot, encoding="utf-8")
+    _store(rd).append("pause", {"reason": "operator stop (`looplab stop`)"})
+    srv.commands._engine_state = lambda _rd: None   # the lock cannot be read from here on
+    retried = client.post(f"/api/runs/demo/commands/{failed['id']}/retry")
+    assert retried.status_code == 200, retried.text
+    settled = _terminal(client, retried.json())
+    assert settled["status"] == "succeeded" and settled.get("deferred_until_resume") is True
+    assert driver.calls == []
+
+
+def test_stop_wait_counts_an_inject_the_server_would_drive_on_a_stopped_finished_run(tmp_path):
+    """LOW: `looplab stop --wait` reads the SAME rule the server re-drives by. On a stopped FINISHED
+    run the stop does not hold a queued intent (a finished run is not paused away), so the server
+    starts `looplab resume` for an unacked inject — and the wait must say the stop does not stand.
+    MUTATION: `stopped=True` or `stopped=bool(current().paused)` -> exit 0, "stands"."""
+    from typer.testing import CliRunner
+
+    from looplab.cli import app
+    from test_stop_wait import _command_record, _run_dir
+
+    rd = _run_dir(tmp_path, in_flight=False)
+    _store(rd).append("run_finished", {"reason": "done"})
+    _command_record(rd, event_type="inject_node", policy="ensure_running")
+    out = CliRunner().invoke(app, ["stop", str(rd), "--wait"])
+    assert out.exit_code == 1, out.output
+    assert "does not stand: server command(s) `inject_node`" in out.output, out.output
+
+
+def test_the_rule_asks_nothing_for_a_type_that_can_never_wait(tmp_path, monkeypatch):
+    """NIT: the record's TYPE first — a reset, asked on every monitor tick, pays neither the fold nor
+    the lease probe (which can quarantine or unlink a lease)."""
+    rd = _seed(tmp_path, paused=True)
+    _unused, srv = _client(tmp_path, _Driver())
+    svc = srv.commands
+    observation = svc._observe(rd)
+    probed, folded = [], []
+    monkeypatch.setattr(svc, "_recent_spawn_claim", lambda _rd: probed.append(_rd) or True)
+    real_fold = type(observation._owner)._fold
+    monkeypatch.setattr(type(observation._owner), "_fold",
+                        lambda self, obs: folded.append(obs) or real_fold(self, obs))
+    reset = {"event_type": "node_reset", "postcondition": "engine_ack", "spawned_by_command": True}
+    assert svc._left_for_the_operators_resume(rd, reset, observation) is False
+    assert (len(probed), len(folded)) == (0, 0), (len(probed), len(folded))
+
+
+def _tui_with(fake_api):
+    from test_tui import _command_tui
+
+    return _command_tui(fake_api)
+
+
+class _QueuedApi:
+    """A command API whose every command settles waiting for the resume."""
+
+    def _record(self, event_type="inject_node"):
+        return {"id": "cmd_" + "1" * 32, "status": "succeeded", "event_type": event_type,
+                "deferred_until_resume": True}
+
+    def run_command(self, run_id, event_type, data, **_kwargs):
+        return self._record(event_type)
+
+    def get_run_command(self, run_id, command_id):
+        return self._record()
+
+
+@pytest.mark.parametrize("site", ["control", "plan", "reconcile"])
+def test_every_tui_site_says_the_intent_waits(site):
+    """LOW: only `_done_suffix` was tested, so each of its three call sites could drop it.
+    MUTATION: any site back on the old inline noop-only suffix -> no "queued"."""
+    app = _tui_with(_QueuedApi())
+    if site == "control":
+        app._control("demo", "inject_node", dict(_QUEUED["inject_node"]))
+    elif site == "plan":
+        app._apply_plan("demo", [], [{"type": "inject_node", "data": dict(_QUEUED["inject_node"]),
+                                      "label": "inject"}])
+    else:
+        history = [{"role": "action", "status": "pending",
+                    "action": {"type": "inject_node", "data": {}, "label": "inject"},
+                    "command": {"id": "cmd_" + "1" * 32, "event_type": "inject_node"}}]
+        app._persist_command_status = lambda *_a, **_k: None
+        assert app._reconcile_pending("demo", history) is True
+    assert "queued" in app.console.file.getvalue(), app.console.file.getvalue()
+
+
+def test_the_tui_gives_a_drain_s_account_in_the_web_ui_s_words():
+    from looplab.serve.tui import _done_suffix
+
+    assert "next search" in _done_suffix({"status": "succeeded", "deferred_to_next_search": True})
+    assert "drain" in _done_suffix({"status": "succeeded", "served_by_drain": True})
+
+
+def test_stop_wait_counts_an_extension_on_the_obligations_pause(tmp_path):
+    """The wait reads the pause's own reason too: on an external run's obligations pause a budget
+    extension still starts the engine (the one paused budget stop), so the stop does not stand.
+    MUTATION: pass no `pause_reason` from `stop` -> exit 0, "stands"."""
+    from typer.testing import CliRunner
+
+    from looplab.cli import app
+    from test_stop_wait import _command_record, _run_dir
+
+    rd = _run_dir(tmp_path, in_flight=False)
+    _store(rd).append("pause", {"reason": PAUSE_REASON_EXTERNAL_OBLIGATIONS,
+                                "terminal_reason": "budget"})
+    _command_record(rd, event_type="budget_extend", policy="ensure_running")
+    out = CliRunner().invoke(app, ["stop", str(rd), "--wait"])
+    assert out.exit_code == 1, out.output
+    assert "does not stand: server command(s) `budget_extend`" in out.output, out.output

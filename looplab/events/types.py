@@ -294,6 +294,10 @@ EV_RESUME_SERVED = "resume_served"
 #     it to keep the historical import path alive), and the control section of `replay.fold`). ---
 EV_RUN_ABORT = "run_abort"
 EV_PAUSE = "pause"
+# The `reason` of the pause an EXTERNAL run's engine writes at its terminal gate when its finish
+# obligations (report, reviews, pending nodes) are due (`engine/orchestrator.py`) — a budget stop in
+# disguise, and the one stop a budget extension still lifts (`serve/protocol.py::waits_for_resume`).
+PAUSE_REASON_EXTERNAL_OBLIGATIONS = "external_finish_obligations_due"
 # Server-owned pause-and-resume handoff. Unlike a client-side ``pause`` then ``resume`` saga, this
 # ONE durable intent both freezes the current owner and leaves an unfulfilled resume watermark. The
 # command worker (or startup reconciler after a crash/restart) launches a replacement only after the
