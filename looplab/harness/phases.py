@@ -80,7 +80,7 @@ PHASES: tuple[Phase, ...] = (
           "Choose a change and parent candidates, including question and concept links.",
           ("GET /api/runs/{run_id}/state", "GET /api/runs/{run_id}/concepts",
            "GET /api/memory"), ("command:inject_node",),
-          ("researcher_system", "tool_researcher_system")),
+          ("researcher_system", "tool_researcher_system", "tool_researcher_alternative")),
     Phase("novelty", "Idea/NoveltyGrade", "engine/novelty.py; search/novelty_recall.py",
           "Compare an idea with prior attempts; decide to revise, skip or submit.",
           ("POST /api/runs/{run_id}/novelty-preview", "GET /api/runs/{run_id}/state"),

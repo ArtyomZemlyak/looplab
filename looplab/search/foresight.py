@@ -35,7 +35,7 @@ from pydantic import BaseModel, Field
 
 from looplab.agents.roles import (
     BOARD_SEED_CHARS_MAX, WrapsResearcher, bind_idea_to_board_card, forward_hints,
-    next_board_prompt_cards,
+    is_researcher_fallback, next_board_prompt_cards, researcher_budget_exhausted,
 )
 from looplab.core.llm import BudgetExceeded
 from looplab.core.config import MAX_FORESIGHT_VERIFY_SAMPLES
@@ -355,19 +355,47 @@ class ForesightPanelResearcher(WrapsResearcher):
     Behind the same `Researcher` Protocol, so it drops into `_engine`'s researcher-wrapper chain with
     no orchestrator change (parity with `PanelResearcher`). K=1 or a missing client is a transparent
     pass-through. Replay-safe: the chosen idea is recorded in `node_created`; replay never re-ranks.
+
+    ALTERNATIVES (2026-09-29, `alternatives=` / `Settings.foresight_alternatives`). Off, the K
+    candidates are K independent `propose` calls — for the agentic Researcher, K full research
+    sessions from one identical prompt, which converge (MiniOneRec inf13: 86 + 100 minutes for two
+    candidates the ranker called "effectively the same bet"). On, and when the base can hand back
+    its session (`agents/agent.py::ToolUsingResearcher.propose_with_session`, directly or through
+    the unified facade — never through the surrogate, whose warmed-up point makes no call),
+    candidate 1 is that session and candidates 2..K CONTINUE it (`propose_alternative`): one more
+    turn each, asking for a different mechanism, bound to the board window candidate 1 was shown.
+    A base with no session for the call (the one-shot Researcher) still samples independently. An
+    alternative that fails is simply absent — never replaced by a full `propose`, never a degraded
+    `fallback (…)` Idea for the ranker to pick; a degraded candidate is dropped BEFORE ranking, and
+    with fewer than two left there is nothing to rank. Two effects to know, both by design:
+      * under the Strategist's `explore` stance (`_novelty_rank_directive`) the ranker prefers the
+        MORE DIVERGENT of close candidates — which is now the alternative, researched in a few
+        turns on top of candidate 1's investigation rather than in a session of its own;
+      * the base's board rotation (`_board_prompt_attempt`, the tail slot of
+        `agents/state_brief.py::next_board_prompt_cards`) advances ONCE per proposal instead of K
+        times, because only candidate 1 renders the board.
+    The telemetry marks each ranked candidate (`alternatives`), and the budget receipt the engine
+    reads (`roles.RESEARCHER_OUTPUT_ATTRS`) is the CHOSEN candidate's, not the last call's.
     """
 
     # A CLASS default, not only an instance one: this panel is a `__getattr__` proxy, so a bare
     # `__new__`-built instance that never ran `__init__` would otherwise answer this name from the
     # WRAPPED role — a different object's switch. OFF here is the historical ranker call.
     evidence_envelope = False
+    # …and the same for the alternatives switch: OFF (K independent sessions) is the historical call.
+    alternatives = False
 
     def __init__(self, base, k: int = 2, *, client=None, bounds=None,
                  parser: Optional[str] = None, prompts=None, tools=None,
                  min_confidence: float = 0.0, verify_score: bool = False,
-                 verify_samples: int = 3, evidence_envelope: bool = False):
+                 verify_samples: int = 3, evidence_envelope: bool = False,
+                 alternatives: bool = False):
         self.base = base
         self.k = max(1, k)
+        # Candidates 2..K CONTINUE candidate 1's research session (see the class docstring). OFF at
+        # the constructor like every flag that changes a prompt and the paid calls; the ONE Settings
+        # reader is `search/researcher_stack.py::with_foresight_panel`.
+        self.alternatives = bool(alternatives)
         # §1 confidence gate: below this predicted confidence the K->1 pick is NOT acted on (fall back
         # to the first proposal). 0.0 (default) = off — byte-identical to the historical behavior.
         self.min_confidence = max(0.0, float(min_confidence))
@@ -563,7 +591,8 @@ class ForesightPanelResearcher(WrapsResearcher):
         window derived from its own `_board_prompt_attempt`; re-binding here against a window from
         this panel's independent `_board_attempt_cursor` therefore stripped valid claims whenever
         the two cursors had drifted — and they drift as a matter of course, because the base
-        advances k per panel propose while the panel advances 1, and `_prioritize_board` skips its
+        advances k per panel propose while the panel advances 1 (under `alternatives` the base
+        advances 1 too: only candidate 1 renders the board), and `_prioritize_board` skips its
         increment on a <2-belief board. With more than 5 open beliefs the two 5-card rotations
         differ in the rotated slot (reproduced: attempts 3 vs 1 over 7 cards), so a card the model
         was legitimately SHOWN went missing and the proposal fell back to statement-hash linkage —
@@ -594,6 +623,9 @@ class ForesightPanelResearcher(WrapsResearcher):
         # Forward hints FIRST, even on the no-client pass-through: the engine setattrs them on THIS
         # wrapper (the active researcher), so skipping the mirror would shadow them (P2).
         self._forward_hints()
+        # A budget receipt this panel published for an EARLIER call must never answer for this one
+        # (`_chosen`); without one of its own the engine's read falls through to the base's, as ever.
+        self.__dict__.pop("last_propose_budget_exhausted", None)
         if self.client is None:
             self._board_attempt_cursor += 1
             return self._bind_base_proposal(state, parent)
@@ -602,7 +634,59 @@ class ForesightPanelResearcher(WrapsResearcher):
         self._prioritize_board(state, parent)            # rank the open-hypothesis board, steer the base
         if self.k == 1:
             return self._bind_base_proposal(state, parent)
+        if (self.alternatives and callable(getattr(self.base, "propose_with_session", None))
+                and callable(getattr(self.base, "propose_alternative", None))):
+            return self._propose_alternatives(state, parent)
         ideas = [self._bind_base_proposal(state, parent) for _ in range(self.k)]
+        return self._pick(state, parent, ideas)
+
+    def _propose_alternatives(self, state, parent):
+        """Candidate 1 as a session, candidates 2..K as alternatives continuing it (class docstring).
+
+        The per-candidate budget receipt is read right after each call, because the base's copy is
+        overwritten by the next one — and the ENGINE must read the chosen candidate's: with the
+        alternatives' turn cap a converged candidate 1 would otherwise be logged TRUNCATED whenever
+        an alternative after it was cut (`engine/node_build.py::_prepare_node_idea`'s `_link`)."""
+        first, session = self.base.propose_with_session(state, parent)
+        cards = getattr(session, "visible_board_cards", None)
+        window = list(cards) if isinstance(cards, list) else self._base_board_window(state)
+        ideas = [bind_idea_to_board_card(first, window)]
+        alternative, receipts = [False], [researcher_budget_exhausted(self.base)]
+        for _ in range(self.k - 1):
+            if session is None:
+                # The base holds no session for this call (a one-shot Researcher behind the unified
+                # facade): independent sampling, exactly as without the switch.
+                ideas.append(self._bind_base_proposal(state, parent))
+                alternative.append(False)
+            else:
+                alt = self.base.propose_alternative(state, parent, session, list(ideas))
+                if alt is None:
+                    break           # a failed continuation ends it; nothing is paid to replace it
+                ideas.append(bind_idea_to_board_card(alt, window))
+                alternative.append(True)
+            receipts.append(researcher_budget_exhausted(self.base))
+        # A degraded candidate is the ABSENCE of a proposal: ranked first it would pause the run
+        # (`orchestrator.py::_refuse_degraded_proposal`). Only when nothing else is left is it
+        # returned — so a dead provider still reaches that circuit breaker.
+        kept = [index for index, idea in enumerate(ideas) if not is_researcher_fallback(idea)]
+        if len(kept) < 2:
+            self.last_foresight = None
+            return self._chosen(ideas, kept[0] if kept else 0, receipts)
+        return self._pick(state, parent, [ideas[i] for i in kept],
+                          alternative=[alternative[i] for i in kept],
+                          receipts=[receipts[i] for i in kept])
+
+    def _chosen(self, ideas, index: int, receipts):
+        """Return `ideas[index]`, publishing its own budget receipt when the call gathered them."""
+        if receipts is not None:
+            self.last_propose_budget_exhausted = receipts[index]
+        return ideas[index]
+
+    def _pick(self, state, parent, ideas, *, alternative=None, receipts=None):
+        """Rank `ideas` with the world model, record the pick, return it (the first on abstain).
+
+        `alternative` / `receipts` come from `_propose_alternatives` and are None on the historical
+        path, whose telemetry and returned Idea are byte-identical to before they existed."""
         # Slice 3: the Strategist's novelty stance biases the K->1 pick. "balanced" (default) leaves
         # the ranking a pure predicted-metric choice — byte-identical to today; "explore" appends a
         # directive so that when candidates are close the ranker PREFERS the more novel/divergent one
@@ -615,7 +699,7 @@ class ForesightPanelResearcher(WrapsResearcher):
                        goal=state.goal, direction=state.direction)
         if r is None:
             self.last_foresight = None
-            return ideas[0]
+            return self._chosen(ideas, 0, receipts)
         order, conf, reason = r
         best = ideas[order[0]]
         # PART IV 2c: replace the self-reported confidence (Pearson≈0 with outcome, §21.12) with a
@@ -634,17 +718,21 @@ class ForesightPanelResearcher(WrapsResearcher):
         # 0.0 (default) = off: conf >= 0 is always true, so the behavior is byte-identical to before.
         if conf is not None and conf < self.min_confidence:
             self.last_foresight = None
-            return ideas[0]
+            return self._chosen(ideas, 0, receipts)
         # Telemetry the engine reads after propose() to emit `foresight_selected` (engine = sole event
         # writer): WHICH of the K generated ideas won + the discarded alternatives + confidence + the
         # model's analysis trace + the novelty stance in force. Without it only the winner survives.
+        # `alternatives` (the switch's path only): per ranked candidate, whether it CONTINUED
+        # candidate 1's session — what a track record comparing pick quality before/after reads.
         _tid, _sid = getattr(self, "_last_rank_ids", (None, None))
         self.last_foresight = {
             "kind": "idea", "method": "foresight", "n": len(ideas), "k": self.k,
             "chosen": order[0], "order": order, "confidence": conf, "reason": reason,
             "confidence_source": conf_source, "novelty_stance": stance,
             "candidates": [" ".join(_idea_prose(i).split())[:160] for i in ideas],
+            **({"alternatives": list(alternative)} if alternative is not None else {}),
             "_trace_id": _tid, "_span_id": _sid}   # stamped onto the foresight_selected event by the engine
+        # "of N" is the number RANKED — `self.k` on the historical path, where every call yields one.
         best.rationale = (best.rationale
-                          + f" [foresight: predicted best of {self.k} pre-execution]").strip()
-        return best
+                          + f" [foresight: predicted best of {len(ideas)} pre-execution]").strip()
+        return self._chosen(ideas, order[0], receipts)

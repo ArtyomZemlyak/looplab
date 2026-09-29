@@ -176,6 +176,30 @@ class UnifiedAgent(WrapsDeveloper):
             self._mirror_propose_receipt()
         return idea
 
+    # THE FORESIGHT PANEL'S ALTERNATIVES (2026-09-29, `Settings.foresight_alternatives`). Under the
+    # shipped `unified_agent=True` the panel wraps THIS facade, which has no catch-all `__getattr__`,
+    # so the two session methods of `agents/agent.py::ToolUsingResearcher` reach the panel only
+    # through these — each exactly `propose`'s shape: hints forwarded first, the per-call receipt
+    # mirrored in a `finally`. An inner researcher with no session (the one-shot `LLMResearcher`)
+    # answers `(idea, None)` / `None`, and the panel then samples independently, as it always has.
+    def propose_with_session(self, state: RunState, parent: Optional[Node]):
+        forward_hints(self, self.researcher)
+        inner = getattr(self.researcher, "propose_with_session", None)
+        try:
+            if callable(inner):
+                return inner(state, parent)
+            return self.researcher.propose(state, parent), None
+        finally:
+            self._mirror_propose_receipt()
+
+    def propose_alternative(self, state: RunState, parent: Optional[Node], session, prior_ideas):
+        forward_hints(self, self.researcher)
+        inner = getattr(self.researcher, "propose_alternative", None)
+        try:
+            return inner(state, parent, session, prior_ideas) if callable(inner) else None
+        finally:
+            self._mirror_propose_receipt()
+
     def _mirror_propose_receipt(self) -> None:
         """Mirror the inner researcher's per-call propose receipt onto this facade."""
         # WHICH BOUND ENDED THIS PROPOSE: mirror the inner researcher's per-call receipt onto the

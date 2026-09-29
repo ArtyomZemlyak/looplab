@@ -427,6 +427,13 @@ EVIDENCE_CONSUMERS: dict[str, EvidenceConsumer] = {
         EvidenceConsumer(FENCED, "Run introspection, the repo reader, knowledge, memory, skills and"
                          " the literature/web tools." + _ROLE,
                          _T + "test_the_researcher_reads_the_run_fenced_when_the_envelope_is_on"),
+    "agents/agent.py::ToolUsingResearcher.propose_alternative -> run_phase":
+        EvidenceConsumer(FENCED, "The foresight panel's continuation of the propose session: the"
+                         " SAME toolset as `propose` (the transcript it continues was fenced by it),"
+                         " and the candidate list its new turn restates rides the same fence."
+                         + _ROLE,
+                         "tests/test_foresight_alternatives.py::"
+                         "test_an_alternative_reads_the_run_fenced_when_the_envelope_is_on"),
     "agents/deep_research.py::DeepResearcher.research -> drive_tool_loop":
         EvidenceConsumer(FENCED, "The Researcher's providers plus web fetch/search (which also"
                          " stamp their own results; the fence is idempotent over them)." + _ROLE,

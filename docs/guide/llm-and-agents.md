@@ -1135,6 +1135,7 @@ stripped). A missing file falls back to the built-in default.
 | `repo_developer_system_body` | The in-house repo-editing Developer (`LLMRepoDeveloper`): the body of its system prompt |
 | `repo_onboarder_system` | The run-start, pre-search repo onboarding stage that authors a ratifiable `read_metric(workdir)` adapter |
 | `tool_researcher_system` | The tool-using Researcher — the default agentic Researcher |
+| `tool_researcher_alternative` | The tool-using Researcher's continuation turn under `foresight_alternatives`: after candidate 1's session emitted, one more turn asks for ONE alternative testing a different mechanism; `$candidates` lists what was already proposed |
 | `strategist_system` | The plain LLM Strategist (meta-control decisions) |
 | `tool_strategist_system` | The agent (tool-using) Strategist |
 | `pilot_system` | The unified agent's action pilot (chooses the next macro action) |
