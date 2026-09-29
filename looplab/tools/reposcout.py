@@ -20,10 +20,12 @@ to the model (possibly a REMOTE provider):
 """
 from __future__ import annotations
 
+import io
 from fnmatch import fnmatch
 from pathlib import Path
 
 from looplab.core import _pathsafe
+from looplab.core.node_evidence import read_bounded_regular_file
 from looplab.tools._base import (   # shared schema builder, bounded renderers, the loop's cap
     RESULT_CAP, capabilities_for_specs, fit_rows, fn_spec)
 
@@ -267,8 +269,8 @@ class RepoScoutTools:
                      "Returns file:line snippets. Use this to CONFIRM an exact flag/name in the real "
                      "code instead of guessing it.",
                      {"pattern": {"type": "string", "description": "regex (or a plain substring)"},
-                      "root": {"type": "string", "description": "dir to search under (optional; "
-                               "defaults to the repo)"},
+                      "root": {"type": "string", "description": "a directory to search under, or ONE "
+                               "file to search (optional; defaults to the repo)"},
                       "glob": {"type": "string", "description": "file filter (optional): a file-name "
                                "glob like *.py, or a repo-relative path glob like src/*.py (* stays "
                                "inside one directory, **/ spans any)"},
@@ -331,14 +333,21 @@ class RepoScoutTools:
         used to read its OWN just-written file (`…/nodes/node_59/test_looplab.py`) ends with the overlay's
         repo-relative key (`test_looplab.py`), so it now resolves to the staged content instead of missing
         to disk — the read/write 'split' that left an agent unable to read what it had just written."""
+        key = self._overlay_key(path)
+        return None if key is None else self._overlay[key]
+
+    def _overlay_key(self, path: str):
+        """The overlay KEY `_overlay_get` resolves `path` to, or None — the same rule, returning
+        where it landed, so a caller that labels what it found (a single-file `grep` root) names the
+        staged file by the key a hit round-trips through."""
         if not self._overlay or not path:
             return None
         norm = str(path).replace("\\", "/")
         key = norm.lstrip("./")
         if norm in self._overlay:
-            return self._overlay[norm]
+            return norm
         if key in self._overlay:
-            return self._overlay[key]
+            return key
         # Suffix match ONLY for an ABSOLUTE / workdir-prefixed request (norm starts with "/" or a
         # Windows drive): strip the workdir prefix to reach the repo-relative overlay key. A RELATIVE
         # request (e.g. "src/test.py") must NOT suffix-match a SHORTER key ("test.py") — that returned a
@@ -357,18 +366,42 @@ class RepoScoutTools:
                 if rp and (norm == rp or norm.startswith(rp + "/")):
                     rel = norm[len(rp) + 1:]
                     # Multi-editable overlays are keyed `<name>/<rel>` (mirroring RepoWriteTools).
-                    return self._overlay.get(f"{name}/{rel}" if name else rel)
+                    staged = f"{name}/{rel}" if name else rel
+                    return staged if staged in self._overlay else None
             # OUTSIDE every root: the sandbox/workdir COPY case this branch exists for (the agent
             # reads its own just-written file through an absolute node-workdir path). Keep matching by
             # suffix, but take the LONGEST matching key so the most specific staged path wins instead
             # of whichever one the dict happened to yield first.
-            best_key, best_value = None, None
-            for k, v in self._overlay.items():
+            best_key = None
+            for k in self._overlay:
                 kk = str(k).replace("\\", "/")
-                if kk and norm.endswith("/" + kk) and (best_key is None or len(kk) > len(best_key)):
-                    best_key, best_value = kk, v
-            return best_value
+                if kk and norm.endswith("/" + kk) and (best_key is None or len(kk) > len(str(best_key))):
+                    best_key = k
+            return best_key
         return None
+
+    def _overlay_key_path(self, key: str):
+        """Where a staged KEY sits in the tree on disk (whether or not a file is there), or None when
+        no root owns it — the inverse of `_disp`: `<name>/rel` under that named editable, anything
+        else under the default root. With named roots and no default one (every mount named), an
+        unprefixed key — the workspace's own `looplab_stages.json` — lives under no mount, so it is
+        None rather than a guess."""
+        k = str(key or "").replace("\\", "/")
+        while k.startswith("./"):
+            k = k[2:]
+        for name, root in self._named_roots:
+            if name and name != "." and (k == name or k.startswith(name + "/")):
+                return root / k[len(name) + 1:] if k != name else root
+        base = self._default_root or (self._roots[0] if self._roots and not self._named_roots
+                                      else None)
+        return base / k if base is not None and k else None
+
+    def _key_within(self, key: str, base: Path) -> bool:
+        """Is the staged `key` inside the directory `base` — i.e. part of what a walk of `base`
+        covers? `_grep` asks this so a `root`-scoped search does not report staged files from
+        outside the root it was given."""
+        where = self._overlay_key_path(key)
+        return where is not None and (where == base or base in where.parents)
 
     def read_file_checked(self, path: str, start_line=0, lines=0) -> tuple[bool, str]:
         """`(ok, text)` — the STRUCTURED form of `_read_file` for callers that must tell a refusal
@@ -579,6 +612,86 @@ class RepoScoutTools:
                          f"... ({'; '.join(notes)} — narrow `pattern`/`root` for the rest)"
                          if notes else "")
 
+    def _grep_target(self, root: str):
+        """What a `grep` ROOT names, resolved EXACTLY as `_read_file` resolves a path (WP-TOOLS T2).
+
+        `root` had to be a directory, so a model that knew WHICH file it wanted — the usual case —
+        was told `(grep: X is not a searchable directory)` and retried on the parent: 219 turns on
+        MiniOneRec inf13, 123 of them in `plan_step`. A file is now searched as itself, and in
+        `_read_file`'s ORDER, because the Developer's scout overlays the code it is editing: a
+        disk-first resolution would grep the pristine base copy of `service/latency_engine.py` — 102
+        of the 175 Developer roots, a file every lineage node had rewritten — and hand its stale
+        line numbers to `edit_file`, while the 39 roots that exist only staged would still fail.
+        Staged key → staged deletion → `_resolve` → regular file → secret → readable type → size. A
+        `.git` component is refused first: the walk prunes `.git`, and a NAMED root bypasses the
+        prune. Returns `("staged", key)`, `("file", path)`, `("dir", path)` or `("refused",
+        receipt)` — each refusal says what the root IS, never "not a directory" about a file."""
+        internals = f"(grep: {root} is inside repository internals (.git) — not searched)"
+        if ".git" in Path(str(root).replace("\\", "/")).parts:
+            return "refused", internals
+        key = self._overlay_key(root)
+        if key is not None:
+            return "staged", key
+        if self._is_deleted(root):
+            return "refused", f"(grep: {root} was deleted this session — there is nothing to search)"
+        p = self._resolve(root)
+        if p is None:
+            return "refused", (f"(grep: {root} is outside the searchable roots — pass a directory "
+                               "or a file inside the repo)")
+        if ".git" in Path(self._disp(p)).parts:
+            return "refused", internals
+        if p.is_dir():
+            return "dir", p
+        if not p.exists():
+            return "refused", f"(grep: no such file or directory: {root})"
+        if not p.is_file():
+            return "refused", f"(grep: {root} is not a regular file or a directory — not searched)"
+        if _looks_secret(p):
+            return "refused", (f"(grep: refused: {p.name} looks like a credential/secret file — "
+                               "not searched)")
+        if not _readable(p):
+            return "refused", f"(grep: {root} is an unsupported/binary file type — not searched)"
+        try:
+            size = p.stat().st_size
+        except OSError as e:
+            return "refused", f"(grep: could not read {root}: {e})"
+        if size > 2_000_000:
+            return "refused", (f"(grep: {root} is {size}b, over grep's 2000000b per-file limit — "
+                               "read it in windows with read_file instead)")
+        return "file", p
+
+    def _grep_one(self, rx, cap: int, pattern: str, kind: str, target,
+                  glob: str, where: str) -> GrepResult:
+        """`_grep` over the ONE file `_grep_target` admitted: a staged key, or a regular file read
+        through `core/node_evidence.py::read_bounded_regular_file` — the one reader of a file a
+        candidate can write, which a triage scout rooted at a node's workdir is looking at. `glob`
+        is ignored unless it EXCLUDES this file, and then the answer is the no-file receipt."""
+        shown = str(target) if kind == "staged" else self._disp(target)
+        if not glob_admits(glob, shown):
+            return GrepResult(no_file_receipt(where, glob), "no_file")
+        if kind == "staged":
+            lines = str(self._overlay[target]).splitlines()
+        else:
+            data = read_bounded_regular_file(target, 2_000_001)
+            if data is None:
+                return GrepResult(f"(grep: could not read {where} — not a readable regular file)",
+                                  "refused")
+            if len(data) > 2_000_000:
+                return GrepResult(f"(grep: {where} is over grep's 2000000b per-file limit — read it "
+                                  "in windows with read_file instead)", "refused")
+            # The walk's own line model (a text-mode file iterator), so a hit's line number is the
+            # one the same file gets when a directory walk reaches it.
+            lines = list(io.StringIO(data.decode("utf-8", errors="replace"), newline=None))
+        hits: list[str] = []
+        for i, line in enumerate(lines, 1):
+            if rx.search(line):
+                hits.append(f"{shown}:{i}: {line.strip()[:200]}")
+                if len(hits) >= cap:
+                    return GrepResult(_fit_rows("", hits, f"(capped at {cap} hits)"), "hits")
+        if hits:
+            return GrepResult(_fit_rows("", hits), "hits")
+        return GrepResult(f"(grep: {pattern!r} not found in {shown})", "not_found")
+
     def _grep(self, pattern: str, root: str, glob: str, max_hits, *,
               skip_hidden: bool = True, label: str | None = None) -> GrepResult:
         """`skip_hidden=False` keeps DOTTED directories in the walk (doc 25 TO-06).
@@ -591,12 +704,14 @@ class RepoScoutTools:
         two walkers.
 
         WHAT IT ANSWERS (WP-TOOLS, 2026-09-29) is a `GrepResult`: the text every caller has always
-        read, and its KIND. Two things changed in it. `glob` is path-aware (`glob_admits`, T1). And a
+        read, and its KIND. Three things changed in it. `glob` is path-aware (`glob_admits`, T1). A
         search that searched NO file says so (`no_file_receipt`) instead of "not found" — counted
         over the files actually searched, after the symlink, secret and deletion gates and staged
         files included, so a glob naming only a credential file is indistinguishable from one
-        naming nothing. `label` is how a receipt names the searched place when the caller's `root`
-        is a path the model never saw (`RepoTools` hands over absolute mount roots).
+        naming nothing. And `root` may name ONE file (`_grep_target`, T2), while a named directory
+        now scopes the STAGED files too, which used to be searched whatever `root` said. `label` is
+        how a receipt names the searched place when the caller's `root` is a path the model never
+        saw (`RepoTools` hands over absolute mount roots).
         """
         import os as _os
         import re as _re
@@ -610,9 +725,18 @@ class RepoScoutTools:
         cap = max(1, min(int(max_hits) if max_hits else 40, 200))   # clamp: a model-supplied max can't disable the cap
         glob = glob or "*"
         where = label if label is not None else (root or "repo")
-        base = self._resolve(root) if root else (self._default_root or (self._roots[0] if self._roots else None))
-        if base is None or not base.is_dir():
-            return GrepResult(f"(grep: {root or 'repo'} is not a searchable directory)", "refused")
+        within = None               # a NAMED directory: the staged files searched are the ones in it
+        if root:
+            kind, target = self._grep_target(root)
+            if kind == "refused":
+                return GrepResult(target, "refused")
+            if kind != "dir":
+                return self._grep_one(rx, cap, pattern, kind, target, glob, where)
+            base = within = target
+        else:
+            base = self._default_root or (self._roots[0] if self._roots else None)
+            if base is None or not base.is_dir():
+                return GrepResult(f"(grep: {root or 'repo'} is not a searchable directory)", "refused")
         bare, path_glob, _anchored = _path_glob(glob)
         hits: list[str] = []
         # STAGED overlay first — the code the caller is EDITING wins over disk, and its paths dedup the
@@ -620,6 +744,8 @@ class RepoScoutTools:
         staged_rel = set()
         searched = 0
         for rel, content in sorted(self._overlay.items()):
+            if within is not None and not self._key_within(rel, within):
+                continue                            # staged, but outside the `root` asked for
             if not glob_admits(glob, rel):
                 continue
             staged_rel.add(rel)
