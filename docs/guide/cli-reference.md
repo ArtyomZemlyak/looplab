@@ -459,6 +459,16 @@ while the stop is pending: it stays pending with no terminal, and `looplab resum
 full where its repair chain stood. So `stop` is already "stop after the current node": `--wait` is how
 you wait for it, instead of watching the log or the process table.
 
+**Nor does it cut short a paid call already running** — a Researcher proposal, a novelty check, a
+build: it finishes, and its result is refused. What the stop refuses is every NEW paid call, and not
+only at the loop's next iteration: a create turn asks before each proposal, each foresight-panel
+member and ranking, each novelty re-proposal and each build, so the turn that was in flight when the
+stop landed returns without buying anything more. A proposal that was paid for and then refused is
+counted as one `phase_progress` beacon (`stage: build`, `phase: discarded`,
+`reason: run_is_stopping`); nothing folded is written for it. If `--wait --timeout` gives up, it
+names what the engine is still inside — the running evaluations, else the open step (e.g.
+`node 33 improve build propose`), else that nothing is open.
+
 **A plain stop does throw away Card builds still running**: a halted head is closed
 `run_is_stopping` and the finished result is discarded. `--drain-builds` keeps them — every build
 already running finishes and **commits** its node (it lands pending; `looplab resume` evaluates it),

@@ -303,6 +303,22 @@ def last_record_line(events) -> Optional[str]:
     return "\n  ".join(bits)
 
 
+def open_phase_line(events) -> Optional[str]:
+    """The newest phase beacon nothing closed, as ``<label> (open since <iso ts>)``, or None.
+
+    The run's own answer to "what is the engine inside right now", for a reader that holds the
+    events and has to NAME it: `looplab stop --wait` giving up on a live engine used to say "its
+    running evaluation(s)" whether or not one was running — on MiniOneRec inf13 (2026-09-29) none
+    was, and the engine was inside a paid proposal the stop lets finish
+    (`cli/run_cmds.py::_what_the_engine_is_finishing`).
+    """
+    found = _open_phase([e for e in (events or ()) if getattr(e, "type", None)])
+    if found is None:
+        return None
+    label, since = found
+    return f"{label} (open since {_iso(since)})"
+
+
 def _open_phase(rows):
     """`(label, started_ts)` for the newest unclosed `phase_progress`, or None.
 

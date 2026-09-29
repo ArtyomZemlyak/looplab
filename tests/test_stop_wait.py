@@ -284,6 +284,41 @@ def test_a_timeout_exits_nonzero_and_leaves_the_stop_recorded(tmp_path):
     assert fold(EventStore(rd / "events.jsonl").read_all()).paused, "the stop itself stands"
 
 
+_OPEN_PROPOSE = {"node_id": 33, "prospective": True, "operator": "improve", "stage": "build",
+                 "phase": "propose", "status": "started"}
+
+
+@FLOCK
+@pytest.mark.parametrize("in_flight,beacon,says", [
+    (True, None, "exits once its running evaluation(s) finish (node 0)"),
+    (False, _OPEN_PROPOSE, "no evaluation is running — the engine is still inside node 33 improve "
+                           "build propose (open since "),
+    (False, None, "no evaluation is running and no build or proposal step is open"),
+], ids=["evaluating", "proposing", "nothing-open"])
+def test_a_timeout_names_what_the_engine_is_really_finishing(tmp_path, in_flight, beacon, says):
+    """WP-STOP (MiniOneRec inf13): the line said "exits once its running evaluation(s) finish" while
+    no evaluation was running — the engine was inside a paid proposal a stop lets finish. It now
+    names the running nodes, else the phase beacon still open, else that nothing is. MUTATION: the
+    old fixed sentence fails the two cases with no evaluation."""
+    rd = _run_dir(tmp_path, in_flight=in_flight)
+    if beacon is not None:
+        EventStore(rd / "events.jsonl").append("phase_progress", dict(beacon))
+    release, held = threading.Event(), threading.Event()
+    holder = threading.Thread(target=_hold_lock, args=(rd, release, held), daemon=True)
+    holder.start()
+    assert held.wait(5)
+    try:
+        out = CliRunner().invoke(app, ["stop", str(rd), "--wait", "--timeout", "0.5"])
+    finally:
+        release.set()
+        holder.join(5)
+    assert out.exit_code == 1, out.output
+    said = " ".join(out.output.split())
+    assert says in said, out.output
+    if not in_flight:
+        assert "running evaluation(s) finish" not in said
+
+
 @FLOCK
 def test_without_wait_it_does_not_block_even_on_a_held_lock(tmp_path):
     """The default is unchanged: `stop` records the pause and returns while an engine is still
