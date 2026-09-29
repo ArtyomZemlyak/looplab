@@ -934,6 +934,8 @@ textarea.text.card-control-statement { min-height: 48px; max-height: 120px; resi
 .chart { position: relative; }
 .chart-tools { display: flex; justify-content: flex-end; gap: 6px; margin-bottom: 2px; min-height: 18px; }
 .chart-scale-note { margin: 2px 0 5px; color: var(--fg-dim); font-size: 11px; line-height: 1.4; text-align: right; }
+.waterfall-context { margin: 3px 0 7px; padding: 7px 10px; border-left: 2px solid var(--accent);
+  background: var(--bg-2); color: var(--fg-dim); font-size: 12px; line-height: 1.45; }
 .hyp-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; margin-top: 5px; }
 .hyp-empty { font-size: 11px; text-align: center; padding: 4px 0; }
 @media (max-width: 900px) { .hyp-board { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

@@ -293,13 +293,24 @@ export function Trajectory({
 // Waterfall of the key improvements: each bar is the metric the frontier reached at that step;
 // the baseline is the first best, and each subsequent bar's coloured segment is the gain it added.
 export function ImprovementWaterfall({ steps, direction, width = 760 }) {
+  const [showLater, setShowLater] = React.useState(true)
   if (!steps || !steps.length) return <Empty>no improvement steps yet</Empty>
   // Bound only the visual layer: the named table and CSV below retain every exact row. Keeping the
   // baseline plus the latest 99 steps gives long runs a useful endpoint without an unbounded SVG.
-  const shown = steps.length > 100 ? [steps[0], ...steps.slice(-99)] : steps
+  const change = step => Number.isFinite(step?.from) && Number.isFinite(step?.to)
+    ? step.to - step.from : 0
+  const firstChange = change(steps[1])
+  const laterMax = steps.slice(2).reduce((max, step) => Math.max(max, Math.abs(change(step))), 0)
+  const firstImproved = direction === 'min' ? firstChange < 0 : firstChange > 0
+  const canFocus = steps.length >= 4 && firstImproved && laterMax > 0
+    && Math.abs(firstChange) > laterMax * 3
+  const focused = canFocus && showLater
+  const candidates = focused ? steps.slice(2) : steps
+  const shown = candidates.length > 100
+    ? focused ? candidates.slice(-100) : [candidates[0], ...candidates.slice(-99)] : candidates
   const vals = shown.flatMap(s => [s.from, s.to]).filter(Number.isFinite)
   const lo = Math.min(...vals), hi = Math.max(...vals)
-  const pad = 40, plotW = Math.max(width, pad * 2 + shown.length * 32)
+  const pad = 52, plotW = Math.max(width, pad * 2 + shown.length * 32)
   const slot = (plotW - 2 * pad) / shown.length
   const bw = Math.max(4, Math.min(64, slot - 8))
   const h = 200, base = h - 26
@@ -307,10 +318,12 @@ export function ImprovementWaterfall({ steps, direction, width = 760 }) {
     : 16 + (1 - (v - lo) / (hi - lo)) * (base - 16)
   const rows = steps.map(step => ({ node: step.id, operator: step.operator || '—',
     from: step.from, to: step.to, delta: step.delta }))
+  const displayMetric = value => fmt(value)
   const columns = [
     { key: 'node', label: 'Node', firstColumnHeader: true, render: value => `#${value}` },
-    { key: 'operator', label: 'Operator' }, { key: 'from', label: 'Previous', numeric: true },
-    { key: 'to', label: 'Metric', numeric: true }, { key: 'delta', label: 'Delta', numeric: true },
+    { key: 'operator', label: 'Operator' }, { key: 'from', label: 'Previous', numeric: true, render: displayMetric },
+    { key: 'to', label: 'Metric', numeric: true, render: displayMetric },
+    { key: 'delta', label: 'Delta', numeric: true, render: displayMetric },
   ]
   const baselineOnly = steps.length === 1 && steps[0].from == null
   const labelEvery = Math.max(1, Math.ceil(48 / slot))
@@ -320,14 +333,24 @@ export function ImprovementWaterfall({ steps, direction, width = 760 }) {
     <ChartFrame title={baselineOnly ? 'Metric baseline' : 'Improvement waterfall'}
       description={baselineOnly
         ? 'First feasible metric; no improvement is recorded yet.'
-        : `Frontier changes for a ${direction === 'min' ? 'minimization' : 'maximization'} objective.`}
+        : focused ? 'Later frontier changes on their own metric scale; baseline and first gain are noted below.'
+          : `Frontier changes for a ${direction === 'min' ? 'minimization' : 'maximization'} objective.`}
       columns={columns} rows={rows} csvName="improvement-waterfall.csv">
     {({ labelledBy }) => <>
-      {shown.length < steps.length && <div className="muted" role="note">
-        Showing the baseline and latest 99 of {steps.length} steps; View data and CSV include all {steps.length}.
+      {canFocus && <div className="chart-tools"><button type="button" className="btn xs ghost"
+        onClick={() => setShowLater(value => !value)}>{focused ? 'All steps' : 'Later gains'}</button></div>}
+      {focused && <div className="waterfall-context" role="note">
+        Baseline #{steps[0].id} {fmt(steps[0].to)} → first gain #{steps[1].id} {fmt(steps[1].to)} (Δ {fmt(firstChange)}). Bars below use the later metric range.
+      </div>}
+      {shown.length < candidates.length && <div className="muted" role="note">
+        {focused ? `Showing latest 100 of ${candidates.length} later steps` : `Showing the baseline and latest 99 of ${steps.length} steps`}; View data and CSV include all {steps.length}.
       </div>}
       <svg width={plotW} viewBox={`0 0 ${plotW} ${h}`} role="img" aria-labelledby={labelledBy}>
-      <line x1={pad} x2={plotW - pad} y1={base} y2={base} stroke={GRID} />
+      {[0, .5, 1].map((t, i) => <g key={i}>
+        <line x1={pad} x2={plotW - pad} y1={16 + t * (base - 16)} y2={16 + t * (base - 16)} stroke={GRID} />
+        {hi !== lo && <text x={pad - 6} y={19 + t * (base - 16)} fill={AX} fontSize="9" textAnchor="end">
+          {fmt(hi - t * (hi - lo))}</text>}
+      </g>)}
       {shown.map((s, i) => {
         const x = pad + i * slot + (slot - bw) / 2
         const yTo = Y(s.to), yFrom = s.from == null ? base : Y(s.from)

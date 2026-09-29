@@ -57,7 +57,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // 2026-09-29 Overview: 572,588 B JS / 54,447 B CSS. The summary adds budget truth,
     // review signals and bounded hint history. Its 982 B CSS chunk loads with panels only;
     // initial-shell CSS fell to 36,358 B. Keep <1 KiB headroom on each total.
-    js: { gzip: 560 * KIB },
+    // 2026-09-29 Report later gains: measured 573,716 B JS after the bounded two-scale
+    // waterfall view. The 561 KiB ceiling leaves 748 B; route/reachability gates still apply.
+    js: { gzip: 561 * KIB },
     css: { gzip: 54 * KIB },
   },
   individual: {

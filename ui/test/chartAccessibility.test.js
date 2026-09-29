@@ -174,6 +174,25 @@ test('dense trajectory and waterfall visuals stay legible while exact data remai
     }))
     const baselineHeight = Number(/class="waterfall-bar"[^>]*height="([^"]+)"/.exec(baseline)?.[1])
     assert.ok(baselineHeight >= 3, 'a constant-range baseline must remain visible')
+
+    const lateMetrics = [.0626, .05929, .05902, .05897, .05891, .05887, .05879, .05874, .05858]
+    const lateSteps = lateMetrics.map((to, index) => ({
+      id: [0, 1, 27, 33, 41, 51, 55, 61, 128][index],
+      from: index ? lateMetrics[index - 1] : null, to,
+      delta: index ? to - lateMetrics[index - 1] : null,
+    }))
+    const later = renderToStaticMarkup(React.createElement(ImprovementWaterfall, {
+      steps: lateSteps, direction: 'min',
+    }))
+    assert.match(later, /Bars below use the later metric range/)
+    assert.equal((later.match(/class="waterfall-bar"/g) || []).length, 7)
+    assert.match(later, /Baseline #0 0\.0626 → first gain #1 0\.05929/)
+    const laterMax = renderToStaticMarkup(React.createElement(ImprovementWaterfall, {
+      steps: lateSteps.map(step => ({ ...step, from: step.from == null ? null : -step.from,
+        to: -step.to, delta: step.delta == null ? null : -step.delta })), direction: 'max',
+    }))
+    assert.equal((laterMax.match(/class="waterfall-bar"/g) || []).length, 7,
+      'maximization focuses the same large-first-gain pattern')
   } finally {
     await vite.close()
   }
@@ -263,6 +282,27 @@ test('dense charts pick the nearest node and keep every row in the keyboard data
     await act(async () => viewData.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })))
     assert.equal(document.querySelectorAll('.data-table tbody tr').length, 150)
     assert.equal(document.querySelector('.data-table tbody tr:last-child th').textContent, '#150')
+
+    const metrics = [.0626, .05929, .05902, .05897, .05891, .05887, .05879, .05874, .05858]
+    const lateSteps = metrics.map((to, index) => ({ id: index, from: index ? metrics[index - 1] : null,
+      to, delta: index ? to - metrics[index - 1] : null }))
+    await act(async () => root.render(React.createElement(ImprovementWaterfall, {
+      key: 'later-gains', steps: lateSteps, direction: 'min',
+    })))
+    assert.equal(document.querySelectorAll('.waterfall-bar').length, 7)
+    await act(async () => document.querySelector('button[aria-label="View Improvement waterfall data"]')
+      .dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })))
+    assert.equal(document.querySelectorAll('.data-table tbody tr').length, 9,
+      'the focused visual does not remove baseline or first gain from the data table')
+    assert.match(document.querySelector('.data-table tbody tr:last-child').textContent, /-1\.60e-4/,
+      'displayed deltas do not expose floating-point noise')
+    await act(async () => [...document.querySelectorAll('.chart-tools button')]
+      .find(button => button.textContent === 'All steps')
+      .dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })))
+    assert.equal(document.querySelectorAll('.waterfall-bar').length, 9)
+    assert.equal(document.querySelector('.waterfall-context'), null)
+    assert.ok([...document.querySelectorAll('.chart-tools button')]
+      .some(button => button.textContent === 'Later gains'))
   } finally {
     if (root) {
       const { act } = await import('react')
