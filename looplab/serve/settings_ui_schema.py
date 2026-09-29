@@ -29,7 +29,7 @@ SETTINGS_UI_SCHEMA_VERSION = 2
 # here reading as if 207 were derived while it is typed, which is the drift it warns about. The
 # unforgeable gate is `SETTINGS_UI_SCHEMA_KEYSET_REVISION` further down; this integer is the
 # human-readable half the docs sentence quotes, and `_load_schema` refuses when the two disagree.
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 238
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 239
 # On the KEYSET REVISION below: DERIVED, and deliberately no longer a hand-pinned review gate: a
 # bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
@@ -359,7 +359,13 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # improves instead of always the run's starting code. A row on the different-PROMPT ground (it
 # changes what a paid role is shown) and OFF is the historical tools. Re-derived by INTERSECTION:
 # the 237 previous keys (digest `3ddaa2cd…`) plus exactly that one, none removed.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "4b786388ee6248eaeae6239a941a9783ea0c064f0899bfcde5c8cd28395c4535"
+# 238 -> 239 on 2026-09-29: `foresight_alternatives`, beside `foresight_panel` — whether the
+# panel's candidates 2..K continue candidate 1's research session instead of K fresh sessions
+# (`search/foresight.py::ForesightPanelResearcher`). A row on the different-prompt ground (a new
+# continuation turn) and the spend ground (it changes which paid calls a proposal makes), ON by
+# default. Re-derived by INTERSECTION: the 238 previous keys (digest `4b786388…`, which already hold `researcher_repo_view_follows_node`) plus exactly that
+# one, none removed.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "6c4c3d30b6753627a877f68312c814ef904d841e87eea31e731f2a298b6b3afc"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

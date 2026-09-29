@@ -100,7 +100,10 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 238
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 239
+    # 238 -> 239 on 2026-09-29: `foresight_alternatives` -- whether the foresight panel's
+    # candidates 2..K continue candidate 1's research session. Verified by INTERSECTION: 238
+    # keys common to the previous keyset plus exactly that one.
     # 233 -> 235 on 2026-09-27 (the merge of the branch): `seed_from_run` (doc 67 67.2, a ROW on
     # the LAUNCH ground) and `ablation_simplify` (doc 67 67.5, a ROW on the SPEND ground, OFF by
     # default). The branch pinned 228 -> 231 against a tree without the four rows below; verified
@@ -500,7 +503,8 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # 272 -> 273 on 2026-09-29: `researcher_repo_view_follows_node` (WP-TOOLS T3; a curated row, so
     # both counts move). A diff of `Settings.model_fields` against the pre-change tree reports
     # exactly `['researcher_repo_view_follows_node']` added and `[]` removed.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 273
+    # 273 -> 274 on 2026-09-29: `foresight_alternatives` (a curated row, so both counts move).
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 274
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

@@ -927,6 +927,26 @@ would multiply every prefetch's paid calls, and its ranking receipt could not be
 producer's worker. Under the shipped `unified_agent=true` the pooled Researcher is therefore the
 bare facade while the primary is the foresight panel around it.
 
+**The foresight panel's candidates 2..K are alternatives, not K sessions (2026-09-29,
+`foresight_alternatives`).** The panel used to ask its Researcher for K candidates with K full
+proposals; for the agentic Researcher that is K research sessions from one identical prompt, and on
+MiniOneRec inf13 one proposal cost 86 + 100 minutes for two candidates the ranker itself called
+"effectively the same bet". Now candidate 1 is one session
+(`agents/agent.py::ToolUsingResearcher.propose_with_session`, reached through the unified facade)
+and each further candidate CONTINUES it (`propose_alternative`): one more turn on the transcript that
+already holds every read, asking for a different mechanism, capped at 8 tool turns, with a copy of an
+earlier candidate bounced. The transcript is repaired first (the accepted emit's `tool_call_id` is
+answered, so a strict endpoint does not refuse it), no earlier-phase note is spliced in and no second
+handoff summary is bought. A failed alternative is simply absent — never replaced by a full proposal,
+never a degraded `fallback (…)` candidate for the ranker to pick — and a one-shot Researcher or a
+surrogate still samples independently. Two effects are by design: under the Strategist's `explore`
+stance the ranker prefers the more divergent — now the less-researched — candidate, and the board's
+rotating tail slot advances once per proposal instead of K times. `foresight_selected.alternatives`
+marks each ranked candidate, and the budget receipt the proposal funnel reads is the chosen
+candidate's. A ranking the card-staging lane made is no longer thrown away either: it is recorded as
+a diagnostic `card_ranking_staged` row and published (`foresight_selected` with its `card_id`,
+`hypothesis_ranked`, `card_ranked`) when the Card's node is created.
+
 **The three empirical predictors spend the same uncertainty (2026-09-06).** `core/numeric.py::knn_idw`
 returns `(prediction, nearest_distance)`, and the distance to the nearest evaluated point is the
 only uncertainty proxy the search layer has. The surrogate proposer always spent it as a UCB term;

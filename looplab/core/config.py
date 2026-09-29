@@ -2169,6 +2169,21 @@ class Settings(BaseSettings):
     # surrogate (researcher_panel) is blind to, primed with the data profile + memory (the synergy).
     # >1 enables it (LLM backend only; needs `foresight` on); 2 = on by default at modest cost, 1 = off.
     foresight_panel: int = 2
+    # THE PANEL'S CANDIDATES 2..K AS ALTERNATIVES (2026-09-29). ON: candidate 1 is a full research
+    # session as before, and each further candidate CONTINUES that session — one more turn asking for
+    # a different mechanism, at most 8 tool turns
+    # (`agents/agent.py::ToolUsingResearcher.propose_alternative`) — instead of a fresh session from
+    # the identical prompt. Measured on MiniOneRec inf13: one proposal cost 86 + 100 min for two
+    # candidates the ranker called "effectively the same bet", and `Researcher·propose` was 21.6 h of
+    # an 82 h run against 1.66 h of GPU evaluation. Only a base that holds a session continues (the
+    # tool-using Researcher, directly or behind the unified facade); a one-shot Researcher and a
+    # surrogate still sample independently, and a failed alternative is ranked without, never
+    # replaced by a full propose. Under the Strategist's `explore` stance the ranker prefers the MORE
+    # DIVERGENT candidate, now the less-researched alternative; the board's rotating tail slot
+    # advances once per proposal, not K times. OFF = K independent sessions, the historical calls
+    # byte for byte, and what a pre-field snapshot resumes with (`LEGACY_CONFIG_SNAPSHOT_DEFAULTS`).
+    # Read once, by `search/researcher_stack.py::with_foresight_panel`.
+    foresight_alternatives: bool = True
     # AGENTIC foresight: run the ranking (hypothesis-board prioritization + K-idea pick) as a TOOL-USING
     # loop that can pull actual experiment results / data facts before deciding, instead of a one-shot
     # prediction from a pre-baked report. ON by default (needs foresight + a client; falls back to the
@@ -3784,6 +3799,13 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # permanent endgame, pointable at every commit before this one. An operator opts a run in by
     # setting it in that run's `config.snapshot.json` (or `PUT /api/runs/{id}/config`) and resuming.
     "endgame_stall_nodes": 0,
+    # THE FORESIGHT PANEL'S ALTERNATIVES, added 2026-09-29 defaulting ON. (a) holds. (b) is both
+    # grounds at once: a NEW PROMPT TURN (`tool_researcher_alternative`) and different paid calls —
+    # candidates 2..K become a bounded continuation of candidate 1's session instead of K-1 full
+    # research sessions — so a resumed run would change how its proposals are made mid-log. (c) is
+    # `False`, pointable at every commit before this one: K independent `propose` calls, which
+    # `search/foresight.py::ForesightPanelResearcher`'s constructor default reproduces byte for byte.
+    "foresight_alternatives": False,
     # THE UNTRUSTED-EVIDENCE ENVELOPE, added 2026-09-06 defaulting ON (doc 52 row 13). (a) holds.
     # (b) is `developer_probe`'s DIFFERENT-PROMPT ground exactly: the Strategist, triage and critic
     # system prompts gain a guard sentence and their user turns gain a fence around the candidate's

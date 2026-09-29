@@ -250,7 +250,10 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   237 -> 238 (2026-09-29): `researcher_repo_view_follows_node` (WP-TOOLS T3) — the
   //   Researcher's repo tools show the tree of the node a proposal improves. A row because it
   //   changes what a paid role is shown and OFF is the historical tools; the Python half moved too.
-  assert.equal(Object.keys(schema.fieldByKey).length, 238)
+  //   238 -> 239 (2026-09-29): `foresight_alternatives` — whether the foresight panel's candidates
+  //   2..K continue candidate 1's research session instead of K fresh ones. The Python half
+  //   moved too.
+  assert.equal(Object.keys(schema.fieldByKey).length, 239)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

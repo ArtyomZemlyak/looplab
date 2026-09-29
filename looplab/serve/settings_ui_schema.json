@@ -1389,6 +1389,13 @@
           "help": "Generate K candidate ideas per proposal and keep the one predicted best pre-execution (ranks structural/text ideas the numeric surrogate is blind to). >1 enables it (LLM backend); 1 = off."
         },
         {
+          "key": "foresight_alternatives",
+          "label": "↳ panel alternatives",
+          "type": "bool",
+          "default": true,
+          "help": "Candidates 2..K CONTINUE candidate 1's research session — one more turn asking for a different mechanism (at most 8 tool turns) — instead of K fresh sessions that re-read the same files. Only the tool-using Researcher continues; a one-shot Researcher still samples independently. Off = K independent sessions (the historical calls)."
+        },
+        {
           "key": "foresight_agentic",
           "label": "↳ agentic foresight",
           "type": "bool",

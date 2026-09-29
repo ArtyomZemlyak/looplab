@@ -393,6 +393,7 @@ _SPECULATION_CALIBRATION_PROFILE_OVERRIDES: dict[str, object] = {
     "best_of_n_listwise": False,
     "foresight": False,
     "foresight_panel": 1,
+    "foresight_alternatives": False,
     "foresight_agentic": False,
     "foresight_verify": False,
     "unified_agent": False,

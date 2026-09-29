@@ -18,6 +18,7 @@ EXTERNAL_POLICY_FIELDS = frozenset({
     "concept_pivot", "concept_run_base", "cross_run_concepts", "track_hypotheses",
     "deep_research_every", "novelty_mode", "novelty_gate", "novelty_epsilon",
     "novelty_semantic", "novelty_semantic_threshold", "foresight", "foresight_panel",
+    "foresight_alternatives",
     "foresight_min_confidence", "foresight_verify", "foresight_verify_samples",
     "foresight_agentic", "best_of_n", "best_of_n_listwise", "strategist_every",
     "report_every", "reflection_priors", "memory_dir", "lessons_every",

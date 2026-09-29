@@ -33,10 +33,13 @@ from looplab.agents.roles import (RESEARCHER_ACTION_ATTRS, is_researcher_fallbac
                                   next_board_prompt_cards, researcher_budget_exhausted)
 from looplab.agents.tool_loop import _handoff_ctx
 from looplab.agents.unified_agent import UnifiedAgent
+from looplab.core.config import (LEGACY_CONFIG_SNAPSHOT_DEFAULTS, Settings,
+                                 settings_from_snapshot)
 from looplab.core.errors import BudgetExceeded, LLMError, PhaseCancelled
 from looplab.core.evidence import EVIDENCE_CONSUMERS, EVIDENCE_LABEL, FENCED, fence_untrusted
 from looplab.core.models import Card, CardSelectionProvenance, Idea, RunState
 from looplab.search.foresight import ForesightPanelResearcher
+from looplab.search.researcher_stack import with_foresight_panel, wrap_researcher
 from looplab.search.surrogate import SurrogateResearcher
 
 # A phrase of the continuation turn's default text (`agents/agent.py::_ALTERNATIVE_TURN`).
@@ -175,6 +178,39 @@ def _alt_request(model) -> list:
 
 def _asks_for_alternative(messages) -> bool:
     return any(m.get("role") == "user" and _ALT_MARK in str(m.get("content")) for m in messages)
+
+
+# ------------------------------------------------------------------ (1) ONE continuation request
+
+def test_1_the_unified_chain_continues_candidate_1s_session_in_ONE_request():
+    """Through the stack the CLI builds (`wrap_researcher` over the unified facade): candidate 2 is
+    one more request on candidate 1's transcript — its messages START with candidate 1's final
+    request byte for byte (the provider's cached prefix), there is one system root, and no note was
+    spliced in. MUTATION: continue from a fresh `propose` -> a second system root and no prefix."""
+    model = _Model([_turn(_read("r1")), _turn(_emit("e1", "cache the per-depth scorer")),
+                    _turn(_emit("e2", "batch the shared prompt pages", x=2.0))], order=(1, 0))
+    researcher = ToolUsingResearcher(model, _Tools())
+    agent = UnifiedAgent(researcher=researcher, developer=_Developer(model))
+    panel, developer = wrap_researcher(agent, agent, settings=Settings(
+        backend="llm", foresight_verify=False), tools=None)
+    assert isinstance(panel, ForesightPanelResearcher) and panel is developer
+    assert panel.alternatives is True, "the product default is ON"
+
+    chosen = panel.propose(_state(), None)
+
+    assert len(model.chats) == 3, "two turns for candidate 1, ONE request for the alternative"
+    first_final, alternative = model.chats[1], model.chats[2]
+    assert json.dumps(alternative[:len(first_final)]) == json.dumps(first_final), (
+        "the continuation must be candidate 1's final request plus what followed it")
+    assert [m["role"] for m in alternative].count("system") == 1
+    assert not any(_NOTES_MARK in str(m.get("content")) for m in alternative)
+    tail = alternative[len(first_final):]
+    assert [m["role"] for m in tail] == ["assistant", "tool", "user"]
+    assert tail[0]["tool_calls"][0]["id"] == "e1" and tail[1]["tool_call_id"] == "e1"
+    assert _ALT_MARK in tail[2]["content"] and "cache the per-depth scorer" in tail[2]["content"]
+    assert chosen.params == {"x": 2.0} and "[foresight: predicted best of 2" in chosen.rationale
+    assert panel.last_foresight["alternatives"] == [False, True]
+    assert panel.last_foresight["n"] == 2
 
 
 # ------------------------------------------------------------------ (2) a strict endpoint
@@ -552,6 +588,40 @@ def test_9_a_model_that_keeps_copying_yields_no_alternative():
     chosen = panel.propose(_state(), None)
     assert chosen.params == {"x": 1.0} and panel.last_foresight is None
     assert model.rank_requests == []
+
+
+# ------------------------------------------------------------------ (10) defaults, one reader
+
+def test_10_constructor_off_product_on_legacy_off_and_one_settings_reader():
+    base = ToolUsingResearcher(_Model([]), _Tools())
+    assert ForesightPanelResearcher(base, k=2).alternatives is False, "OFF at the constructor"
+    bare = ForesightPanelResearcher.__new__(ForesightPanelResearcher)
+    bare.__dict__["base"] = type("_B", (), {"alternatives": True})()
+    assert bare.alternatives is False, "a CLASS default: never the wrapped role's attribute"
+
+    assert Settings().foresight_alternatives is True, "the product default is ON"
+    assert LEGACY_CONFIG_SNAPSHOT_DEFAULTS["foresight_alternatives"] is False
+    resumed = settings_from_snapshot({"max_nodes": 8, "direction": "min", "backend": "toy"})
+    assert resumed.foresight_alternatives is False, "a pre-field snapshot resumes independent"
+    kept = settings_from_snapshot(Settings(foresight_alternatives=True).masked_snapshot())
+    assert kept.foresight_alternatives is True, "a snapshot that carries the key is untouched"
+
+    assert with_foresight_panel(base, Settings(), None).alternatives is True
+    assert with_foresight_panel(base, Settings(foresight_alternatives=False),
+                                None).alternatives is False
+
+    from _source_scan import PKG, iter_trees
+
+    readers = []
+    for path, tree in iter_trees():
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr == "foresight_alternatives":
+                readers.append(path.relative_to(PKG).as_posix())
+            elif (isinstance(node, ast.Call) and getattr(node.func, "id", None) == "getattr"
+                  and len(node.args) >= 2 and isinstance(node.args[1], ast.Constant)
+                  and node.args[1].value == "foresight_alternatives"):
+                readers.append(path.relative_to(PKG).as_posix())
+    assert readers == ["search/researcher_stack.py"], readers
 
 
 # ------------------------------------------------------------------ (11) the guard registries
