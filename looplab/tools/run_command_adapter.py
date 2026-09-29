@@ -5,8 +5,10 @@ question — what did the command service actually do with the intent we handed 
 are deliberately paranoid: a transport failure after acceptance, a differently-keyed conflict, and
 an unobserved terminal status are three different outcomes and the model is told which one it got.
 
-`_local_run_generation` stays a local re-derivation of `serve/run_commands.py::run_generation_token`
-rather than an import, because `tools` sits below `serve` in the package graph (doc 25 TO-03).
+`_local_run_generation` was a hand-copied re-derivation of the command service's generation token,
+because the token lived in `serve/` and `tools` sits below it (doc 25 TO-03). It is now a call: the
+token moved to `events/run_generation.py`, which `tools` may import, so the preimage the two sides
+fence on is one function, not two spellings (doc 50 TO-09).
 """
 from __future__ import annotations
 
@@ -25,20 +27,12 @@ _COMMAND_FAILED = frozenset({"failed", "rejected", "timed_out"})
 
 
 def _local_run_generation(rd: Path) -> str:
-    """Compute the same first-event identity as RunCommandService without a tools -> serve import."""
+    """The run's generation token from its own log — the SAME function the command service fences
+    on (`events/run_generation.py::run_generation_token`), read without a tools -> serve import."""
     from looplab.events.eventstore import EventStore
+    from looplab.events.run_generation import run_generation_token
 
-    events = EventStore(rd / "events.jsonl").read_all()
-    if not events:
-        return ""
-    first = events[0]
-    raw = json.dumps({
-        "seq": first.seq,
-        "ts": first.ts,
-        "type": first.type,
-        "run_id": (first.data or {}).get("run_id"),
-    }, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()
+    return run_generation_token(EventStore(rd / "events.jsonl").read_all())
 
 
 def _deletion_operation_id(key: str) -> str:

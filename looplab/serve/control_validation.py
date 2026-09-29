@@ -62,6 +62,7 @@ from looplab.events.types import (
     EV_PAUSE, EV_PROMOTE, EV_RESTART, EV_RESUME, EV_RUN_ABORT, EV_RUN_CONCEPTS, EV_RUN_REOPENED,
     EV_SET_STRATEGY, EV_SPEC_APPROVED, EV_RESEARCH_COMPLETED, EV_REPORT_GENERATED)
 from looplab.serve.engine_proc import _resolve_task_file
+from looplab.serve.http import refusal
 # `EnginePolicy` is DEFINED in `serve/protocol.py` (2026-09-26) and imported here as the same class:
 # its values are persisted on every durable command record (`engine_policy`), and `looplab stop
 # --wait` reads those records to tell whether a command will start an engine after the current one
@@ -423,7 +424,14 @@ def _normalize_run_abort(ctx: _ControlIntake) -> dict:
     if snapshot.is_file():
         from looplab.core.config import read_config_snapshot
         from looplab.harness.obligations import external_finish_due
-        settings = read_config_snapshot(snapshot)
+        try:
+            settings = read_config_snapshot(snapshot)
+        except (OSError, ValueError) as exc:
+            # A damaged snapshot hides whether the finish obligations apply, so the finish is
+            # REFUSED with the coded answer, never a 500 carrying the parse error (critic
+            # 2026-09-29, driven). A live external engine reads the same file at its own terminal
+            # gate (`orchestrator.py`, `external_finish_due`); `pause` reads none and still stops it.
+            raise refusal("config_snapshot_unreadable") from exc
         if not settings.external_harness:
             return ctx.data
         from looplab.events.eventstore import EventStore
@@ -2154,9 +2162,37 @@ CONTROL_SPECS: dict[str, ControlSpec] = {
 assert set(CONTROL_SPECS) == set(CONTROL_EVENTS), "every control event needs an explicit ControlSpec"
 
 
-# The intents `_external_mode_restriction` may refuse in an externally driven run.
-_EXTERNAL_RESTRICTED_INTENTS = frozenset({EV_FORK, EV_FORCE_ABLATE, EV_DEEP_RESEARCH,
-                                          EV_NODE_RESET, EV_INJECT_NODE})
+# The `node_reset` stages whose fulfilment is an INTERNAL role: the fold drops the node's code and
+# flags `rerun_from` (`events/replay.py::_on_node_reset`), and an external engine never re-develops
+# (`orchestrator.py` skips its `_resets` batch), so admitted, the node would sit pending with no
+# code. Every other stage — `eval`, or a pipeline stage such as `score` — is an evaluation the
+# engine owns, and the harness manifest publishes exactly this pair as the refused one.
+_EXTERNAL_REFUSED_RESET_STAGES = frozenset({"propose", "implement"})
+
+
+def external_intent_refusal(event_type: str, data: dict) -> Optional[HTTPException]:
+    """The refusal an EXTERNALLY driven run gives this control intent, or None to admit it.
+
+    PURE: whether the run IS external is the caller's question (`_external_mode_restriction` reads
+    the snapshot, and only for an intent this answers non-None), so the rule is a truth table over
+    the intent alone (`tests/test_external_intent_refusal.py`). It runs BEFORE the event's
+    normalizer, so a stage is compared as that normalizer will store it (stripped)."""
+    if event_type in (EV_FORK, EV_FORCE_ABLATE, EV_DEEP_RESEARCH):
+        return HTTPException(409, "external harness owns this decision; submit a ready-made "
+                             "inject_node with parent_id and code/files for a new candidate")
+    if event_type == EV_NODE_RESET:
+        stage = data.get("from_stage", "eval")
+        if isinstance(stage, str) and stage.strip() in _EXTERNAL_REFUSED_RESET_STAGES:
+            return HTTPException(409, "external harness refuses node_reset from propose or "
+                                 "implement; reset from eval (or a later pipeline stage) to "
+                                 "remeasure, or submit a corrected ready-made inject_node")
+        return None
+    if event_type == EV_INJECT_NODE and not (data.get("code") or data.get("files") or
+                                              data.get("deleted") or
+                                              (data.get("source_run") and
+                                               data.get("source_node") is not None)):
+        return HTTPException(400, "external harness requires code or files for inject_node")
+    return None
 
 
 def _external_mode_restriction(rd: Path, event_type: str, data: dict) -> None:
@@ -2164,10 +2200,14 @@ def _external_mode_restriction(rd: Path, event_type: str, data: dict) -> None:
     # The command service and legacy /control route share this boundary. An external run must
     # never queue an intent whose engine fulfillment invokes its old Researcher/Developer loop.
     # Read the run's snapshot, not the server's ambient config: one UI serves many run modes.
-    # Only for an intent this rule can refuse: the snapshot's own readers (a resume's admission, a
-    # budget extension's ceiling) each answer an UNREADABLE snapshot with their own coded refusal or
-    # fail-closed default, and a blanket 409 here pre-empted every one of them.
-    if event_type not in _EXTERNAL_RESTRICTED_INTENTS:
+    # The RULE first, and the snapshot only for an intent it would refuse: the snapshot's own
+    # readers (a resume's admission, a budget extension's ceiling) each answer an UNREADABLE
+    # snapshot with their own coded refusal or fail-closed default, and a blanket refusal here
+    # pre-empted every one of them — as it did a reset from `eval`, which no mode refuses. Asking
+    # the rule itself, rather than a hand-kept list of the intents it covers, is what keeps a
+    # refusal added to the rule from being gated out before it runs (critic 2026-09-29).
+    refused = external_intent_refusal(event_type, data)
+    if refused is None:
         return
     snapshot = Path(rd) / "config.snapshot.json"
     if snapshot.is_file():
@@ -2175,19 +2215,12 @@ def _external_mode_restriction(rd: Path, event_type: str, data: dict) -> None:
         try:
             external = read_config_snapshot(snapshot).external_harness
         except (OSError, ValueError) as exc:
-            raise HTTPException(409, "cannot verify the run mode from its config snapshot") from exc
+            # The run mode is unknowable: refused, with the one coded answer every serve reader gives
+            # an unreadable snapshot (`serve/http.py::REFUSALS`), never its parse error.
+            raise refusal("config_snapshot_unreadable") from exc
         if external:
-            if event_type in (EV_FORK, EV_FORCE_ABLATE, EV_DEEP_RESEARCH):
-                raise HTTPException(409, "external harness owns this decision; submit a ready-made "
-                                    "inject_node with parent_id and code/files for a new candidate")
-            if event_type == EV_NODE_RESET and data.get("from_stage", "eval") != "eval":
-                raise HTTPException(409, "external harness supports node_reset from eval only; "
-                                    "submit a corrected ready-made inject_node for a new candidate")
-            if event_type == EV_INJECT_NODE and not (data.get("code") or data.get("files") or
-                                                      data.get("deleted") or
-                                                      (data.get("source_run") and
-                                                       data.get("source_node") is not None)):
-                raise HTTPException(400, "external harness requires code or files for inject_node")
+            raise refused
+
 
 def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
     """Validate/normalize one control payload for both /control and /commands.

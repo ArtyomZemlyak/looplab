@@ -213,6 +213,31 @@ def test_a_damaged_snapshot_is_refused_without_its_text(tmp_path):
     assert _log_bytes(rd) == before and engine.spawns == []
 
 
+@pytest.mark.parametrize("alive", [False, True])
+def test_a_finish_over_a_damaged_snapshot_is_a_coded_refusal_not_a_500(tmp_path, alive):
+    """`run_abort`'s intake reads the snapshot to learn whether the external finish obligations
+    apply (`control_validation.py::_normalize_run_abort`), and a damaged one escaped as a 500 with
+    the parse error — for a LIVE engine too, where no admission preflight reads the file (critic
+    2026-09-29, driven). The run mode is unknowable, so the finish is refused with the one coded
+    answer — a REJECTED record, the `/commands` protocol's refusal — nothing appended and nothing
+    spawned. MUTATION: drop the `except` around that read -> the parse error escapes the route."""
+    rd = _seed(tmp_path, snapshot=_snapshot("not json"))
+    engine = _Engine(alive=alive)
+    client, _srv = _client(tmp_path, engine)
+    before = _log_bytes(rd)
+
+    response = post_command(client, "run_abort", {"reason": "finalized"},
+                            f"finish-damaged-{alive}")
+
+    assert response.status_code == 200, response.text
+    record = response.json()
+    assert record["status"] == "rejected", record
+    assert record["error"]["code"] == "config_snapshot_unreadable"
+    assert record.get("event_seq") is None
+    assert str(tmp_path) not in response.text and "Expecting" not in response.text
+    assert _log_bytes(rd) == before and engine.spawns == []
+
+
 def _ack_the_marked_intent(rd: Path, command_id: str) -> None:
     """What a real engine appends once it has folded the command's marked intent."""
     deadline = time.time() + 30

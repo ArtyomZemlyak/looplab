@@ -1578,7 +1578,7 @@ class EvalStagesMixin:
         import math
         import time
 
-        from looplab.harness.checkpoints import ask, answer_for
+        from looplab.harness.checkpoints import CheckpointSubjectGone, ask, answer_for
 
         try:
             cap = float(getattr(self, "eval_deadline_grace_s", -1.0) or 0.0)
@@ -1601,6 +1601,11 @@ class EvalStagesMixin:
                                    stage=stage_name() if stage_name is not None else "",
                                    expectation="one bounded extension or stop at the declared deadline",
                                    observation=str(observed)[-4000:])
+                except CheckpointSubjectGone:
+                    # No pending lifecycle to ask about (a confirm or noise-floor re-run of an
+                    # evaluated node, or an abandoned attempt): nobody can answer, and a missing
+                    # answer is never permission to extend. Retrying it spun forever.
+                    return 0.0
                 except Exception:  # noqa: BLE001 — a ledger failure cannot grant an extension
                     time.sleep(0.5)
             while cancel is None or not cancel.is_set():
@@ -1626,7 +1631,7 @@ class EvalStagesMixin:
         from looplab.engine.train_monitor import (eval_log_plan, snapshot_training_logs,
                                                   stage_check_trajectory,
                                                   trajectory_acquits_stage_check)
-        from looplab.harness.checkpoints import ask, answer_for
+        from looplab.harness.checkpoints import CheckpointSubjectGone, ask, answer_for
         from looplab.runtime.command_eval import STAGE_CHECK_INCONCLUSIVE, StageCheckVerdict
 
         plan = eval_log_plan(stages)
@@ -1647,6 +1652,13 @@ class EvalStagesMixin:
                     question = ask(self.run_dir, node.id, node.attempt, "stage_check",
                                    stage=stage_name, expectation=expect,
                                    observation=str(observed)[-4000:])
+                except CheckpointSubjectGone:
+                    # Nobody CAN answer (a confirm or noise-floor re-run of an evaluated node, or an
+                    # abandoned attempt), so the check is RECORDED inconclusive on the stage row —
+                    # not skipped silently, and not a spin: retrying it never ended.
+                    return StageCheckVerdict(
+                        STAGE_CHECK_INCONCLUSIVE,
+                        "external checkpoint not asked: the node has no pending lifecycle")
                 except Exception:  # noqa: BLE001 — never skip a required stage check
                     time.sleep(0.5)
             while cancel is None or not cancel.is_set():

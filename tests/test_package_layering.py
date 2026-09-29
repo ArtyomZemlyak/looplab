@@ -107,14 +107,16 @@ DEFERRED: dict[tuple[str, str], str] = {
     ("cli", "maintenance"): "the backfill scripts are loaded by their commands only",
     ("engine", "adapters"): "the engine names a task type only at the seams that need one — "
                             "holdout splits, MLE-bench grading, the toy task (doc 50 RA-10)",
-    ("engine", "harness"): "`external_watch` asks and reads the external agent's checkpoints "
-                           "only inside an `external_harness` run's live evaluation",
-    ("harness", "runtime"): "`checkpoints` reads the stage-check hard kinds when it opens a "
-                            "question about one stage",
+    ("engine", "harness"): "only inside an `external_harness` run: `external_watch` and "
+                           "`eval_stages` ask and read the agent's checkpoints during an eval, "
+                           "`node_build` asks the candidate-surface rule of a ready-made inject, "
+                           "`orchestrator` asks the finish obligations at its terminal gate",
+    ("harness", "runtime"): "`checkpoints.respond` validates an agent's stage-check answer "
+                            "against the runtime's hard failure kinds, per answer",
     ("harness", "search"): "`progress` builds the run's policy to say what it would select, "
                            "per progress read",
-    ("harness", "serve"): "`mcp_server` validates a command against the live control tables "
-                          "per MCP call, as the UI's own route does",
+    ("harness", "serve"): "`mcp_server.phase_info` describes a phase's command fields from the "
+                          "live control tables, per MCP call",
     ("judgebench", "adapters"): "`bait` reads the MLE-bench extras at audit time",
     ("judgebench", "agents"): "the agent-trajectory ladder drives the real `drive_tool_loop` "
                               "inside one bench case (doc 27 §4 rungs 2/4/5); deferred so the "
@@ -132,8 +134,10 @@ DEFERRED: dict[tuple[str, str], str] = {
                          "and `operators.feature_engineering_verdicts` applies the >1-SE rule "
                          "(`trust/gate.py`) to one CV ledger row",
     ("serve", "agents"): "the assistant and preflight routes build roles per request",
-    ("serve", "harness"): "`control_validation` applies the external candidate-surface and "
-                          "research-obligation rules per command, only in an external run",
+    ("serve", "harness"): "`control_validation` applies the external candidate-surface, "
+                          "obligation and finish rules per command, and `routers/runs.py` serves "
+                          "the harness routes and the config GET's external policy fields, per "
+                          "request",
     ("serve", "runtime"): "the engine process and the runs router reach the sandbox and "
                           "`command_eval` per request",
     ("serve", "search"): "the concept routes reach the concept cluster per request",

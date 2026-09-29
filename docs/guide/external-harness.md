@@ -343,7 +343,8 @@ refused.
 The API rejects `fork`, `force_ablate`, `deep_research`, code-less `inject_node`
 and `node_reset` from `propose` or `implement` in external mode: those commands
 would otherwise start internal agent work. Submit a ready-made child candidate
-instead. `node_reset` from `eval` can remeasure unchanged code. In external mode,
+instead. `node_reset` from `eval`, or from a later pipeline stage such as `score`,
+can remeasure unchanged code. In external mode,
 failed evaluations become terminal evidence for the external agent; inline repair,
 training-log judges, ASHA judges and inter-stage model checks do not run. The
 operator's declared artifact checks and score reader continue to apply.
@@ -372,7 +373,12 @@ The MCP adapter forwards JSON API requests and limits a response to 256 KiB and
 a request body to 1 MiB. Query narrow routes for larger outputs; binary uploads
 need their dedicated API or CLI flow. A dedicated harness token can read and
 control launched runs but cannot change operator defaults, launch new runs,
-drive the owner assistant, or reset/delete runs. Legacy configurations passing `LOOPLAB_UI_TOKEN` still give
+drive the owner assistant, or reset/delete runs. The refusal of commands that start
+internal agent work (fork, forced ablation, deep research, a code-less inject) applies
+only to runs launched with `external_harness`: on an INTERNAL run served by the same
+UI, the harness token can still queue them, and a live engine builds them with its
+own Developer. Do not hand the harness token to an agent on a server that also
+drives internal runs (doc 70, item 70.8). Legacy configurations passing `LOOPLAB_UI_TOKEN` still give
 the agent full UI owner authority; keep that owner credential out of its environment
 when operator policy must remain separate. Agent reasoning and model token cost
 happen outside LoopLab's ledger; the event log records the submitted candidate,

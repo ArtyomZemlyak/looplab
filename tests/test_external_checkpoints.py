@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 import anyio
+import pytest
 
 from looplab.core.config import Settings
 from looplab.engine.eval_stages import EvalStagesMixin
@@ -16,7 +17,7 @@ from looplab.engine.eval_log_plan import eval_log_plan, snapshot_training_logs
 from looplab.engine.external_watch import observe_external_eval
 from looplab.engine.asha_monitor import IntermediateSample
 from looplab.events.eventstore import EventStore
-from looplab.harness.checkpoints import answer_for, ask
+from looplab.harness.checkpoints import CheckpointSubjectGone, answer_for, ask
 from looplab.runtime.command_eval import run_command_eval
 from looplab.serve.run_commands import run_generation_token
 from looplab.serve.server import make_app
@@ -105,6 +106,37 @@ def test_external_deadline_grace_waits_for_agent_and_never_uses_internal_judge(t
                 assert (math.isinf(result) if verdict == "extend" else result == 0.0)
         finally:
             cancel.set()
+
+
+def test_a_re_measurement_of_an_evaluated_node_asks_no_question_nobody_can_answer(tmp_path):
+    """A confirm or noise-floor re-run of an EVALUATED node runs the same stage chain, and `ask`
+    refuses its lifecycle. Both callbacks retried that refusal forever — the noise floor passes no
+    cancel, and confirm's cancel fires only when the lifecycle MOVES — so a checked stage or a
+    deadline wedged the pass (critic 2026-09-29, driven). MUTATION: drop either
+    `except CheckpointSubjectGone` -> its call never returns before the cancel below."""
+    rd, store, _client = seeded(tmp_path)
+    store.append("node_evaluated", {"node_id": 0, "metric": 1.0})
+    with pytest.raises(CheckpointSubjectGone):
+        ask(rd, 0, 0, "stage_check", stage="train")
+    assert issubclass(CheckpointSubjectGone, ValueError)   # every earlier catcher still catches it
+    worker = SimpleNamespace(run_dir=rd, external_harness=True, eval_deadline_grace_s=1.0,
+                             _redact=lambda text: text)
+    node = SimpleNamespace(id=0, attempt=0)
+    cancel = threading.Event()
+    check = EvalStagesMixin._external_stage_check_fn(
+        worker, node, rd, [{"name": "train", "check": True}], cancel)
+    grace = EvalStagesMixin._external_deadline_grace_fn(worker, node, cancel)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        try:
+            verdict = pool.submit(check, "train", "Saved checkpoint").result(timeout=5)
+            extension = pool.submit(grace, "training near end").result(timeout=5)
+        finally:
+            cancel.set()   # a mutant's spin ends here instead of hanging the session
+    # RECORDED inconclusive on the stage row (never a silent pass, never a failure it did not see),
+    # and no extension: a missing answer is never permission to extend.
+    assert verdict.kind == "inconclusive" and "no pending lifecycle" in verdict.concern
+    assert extension == 0.0
+    assert not (rd / "harness_checkpoints.jsonl").exists(), "no question was published"
 
 
 def test_agent_deadline_answer_changes_real_stage_outcome_and_records_grace(tmp_path):

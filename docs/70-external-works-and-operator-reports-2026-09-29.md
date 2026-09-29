@@ -232,6 +232,15 @@ read-only*, источник *Process environment*. Это не ошибка д�
   лежит внутри записанного множества, с долей таких шагов (раздел 3). proof:missing:looplab/search/policy_replay.py
 - **70.7** OPEN[no-cluster-executor] исполнение — subprocess/Docker на одной машине; нет исполнителя
   для Slurm/PBS/облачного бэкенда, так что GPU-кластер недоступен без внешней обвязки (раздел 3). proof:absent:sbatch@looplab/runtime/sandbox.py
+- **70.8** OPEN[harness-token-is-owner-on-internal-runs] агентский токен `LOOPLAB_HARNESS_TOKEN`
+  штампуется принципалом `owner` (`serve/server.py`), а отказ «внутренним» интентам
+  (`serve/control_validation.py::external_intent_refusal`) действует только на ране с
+  `external_harness`. На ВНУТРЕННЕМ ране держатель агентского токена ставит `fork` через
+  `/commands` — принято и записано в журнал (прогнано 2026-09-29, критик), и живой движок строит его
+  платным Developer, хотя манифест обещает «scoped agent requests cannot … invoke LoopLab's owner
+  model workflows». Нужен собственный вид принципала или отказ этих интентов агентскому токену на
+  любом ране — решение владельца: принципал решает и доступ к портфелю
+  (`serve/principal.py::portfolio_access`). proof:`present:OWNER_PRINCIPAL if (_owner_authenticated(request) or harness_auth)@looplab/serve/server.py`
 
 ## 9. Рекомендуемый порядок
 
@@ -242,3 +251,5 @@ read-only*, источник *Process environment*. Это не ошибка д�
 4. **70.4** — экономия бюджета на застрявших ранах; флаг по умолчанию выключен.
 5. **70.6** — инструмент для настройки политики.
 6. **70.7** — только по запросу владельца.
+7. **70.8** — после решения владельца о виде принципала агентского токена; до него агентский
+   токен не стоит выдавать на сервер с внутренними ранами.

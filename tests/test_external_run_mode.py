@@ -78,6 +78,16 @@ def test_external_mode_requires_offline_backend():
     assert Settings(backend="toy", external_harness=True).external_harness
 
 
+def test_external_mode_refuses_a_seed_run():
+    """The seed's launch preflight asks the engine's inject validation as an INTERNAL run would, so
+    an external run admitted a seed its own engine then refused at runtime (critic 2026-09-29,
+    driven). Refused where every surface reads Settings; a blank (or blank-after-strip) seed is off."""
+    with pytest.raises(ValueError, match="seed_from_run is not available with external_harness"):
+        Settings(backend="toy", external_harness=True, seed_from_run="prior-run")
+    assert Settings(backend="toy", external_harness=True, seed_from_run="   ").seed_from_run == ""
+    assert Settings(backend="toy", seed_from_run="prior-run").seed_from_run == "prior-run"
+
+
 def test_external_concept_base_is_due_after_first_scored_authored_node():
     settings = Settings(backend="toy", external_harness=True)
     state = RunState(task_id="task", run_id="demo", goal="g", direction="min")

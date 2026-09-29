@@ -1337,7 +1337,7 @@ def _resolve_reset_target(
         if not expected_generation:
             # No durable generation identity yet (an empty or torn first line). Accepting a mutation
             # here would re-open the very reset race the token exists to close — see
-            # `run_commands.run_generation_token`.
+            # `events/run_generation.py::run_generation_token`.
             raise HTTPException(409, {
                 "code": "run_generation_unknown",
                 "message": "The run has no durable generation identity to fence Replay against.",

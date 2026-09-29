@@ -3286,6 +3286,13 @@ class Settings(BaseSettings):
         self._check_llm_profiles()
         if self.external_harness and self.backend != "toy":
             raise ValueError("external_harness requires backend=toy; the external agent owns reasoning")
+        # The seed's launch preflight asks the engine's inject validation as an INTERNAL run would
+        # (`engine/seed_from_run.py::_engine_refusal`), so an external run admitted a seed its own
+        # engine then refused at runtime (critic 2026-09-29, driven). In external mode the agent
+        # submits its first candidate itself — an `inject_node` carrying the prior node's files.
+        if self.external_harness and self.seed_from_run:
+            raise ValueError("seed_from_run is not available with external_harness; submit the prior "
+                             "node's files as the first inject_node instead")
         return self
 
     # The SET-valued sibling of `_ENUM_FIELDS`: a field whose value is a collection every MEMBER of

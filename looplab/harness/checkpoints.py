@@ -25,6 +25,18 @@ _MAX_LEDGER = 16 * 1024 * 1024
 _PHASES = frozenset({"stage_check", "train_monitor", "asha_live", "deadline_grace"})
 
 
+class CheckpointSubjectGone(ValueError):
+    """`ask` refused because the node is not a PENDING lifecycle at the asked generation.
+
+    No answer could ever be matched to such a question (`pending` lists only pending lifecycles),
+    and the state does not heal: a lifecycle leaves `pending` only through a terminal or a reset,
+    and a reset bumps the generation. Two callers meet it on purpose — a confirm or noise-floor
+    RE-MEASUREMENT of an evaluated node runs the same stage chain — and one by accident, an attempt
+    a reset or abort abandoned mid-eval. A caller that retried it would spin until cancelled, and
+    those re-measurements pass no cancel (critic 2026-09-29, driven): so it is a TYPE, apart from
+    the transient ledger errors a caller does retry."""
+
+
 def _claim_seq(events, node_id: int, node_generation: int) -> int:
     """The latest evaluator invocation, even after a crash/reclaim of the same ID."""
     return max((event.seq for event in events if event.type == "eval_invocation_claimed"
@@ -62,7 +74,7 @@ def ask(rd: Path, node_id: int, node_generation: int, phase_id: str,
     state = fold(events)
     node = state.nodes.get(node_id)
     if node is None or node.attempt != node_generation or node.status != "pending":
-        raise ValueError("node lifecycle changed before checkpoint")
+        raise CheckpointSubjectGone("node lifecycle changed before checkpoint")
     row = {"type": "question", "checkpoint_id": uuid.uuid4().hex,
            "run_uid": state.run_uid, "run_generation": run_generation_token(events),
            "node_id": node_id, "node_generation": node_generation,
