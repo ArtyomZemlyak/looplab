@@ -276,7 +276,8 @@ def test_a_proposal_the_stop_refused_before_the_stager_is_named_run_stopping(tmp
     the `discarded` beacon. The session lane then named the same loss `proposal_refused` — the
     novelty/degraded word — so its counter and the beacon disagreed about one paid call. It now says
     `run_stopping`, the fence's own word for the stop, and the beacon is not written twice.
-    Control: a genuine refusal from the same real producer still reads `proposal_refused`."""
+    Its control is `test_a_REFUSED_proposal_from_the_real_producer_is_named_proposal_refused`
+    above: a genuine refusal from the same real producer still reads `proposal_refused`."""
     from looplab.events.replay import fold
     from factories import make_engine
 
