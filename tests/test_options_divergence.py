@@ -98,6 +98,10 @@ EXPECTED = {
     # in place of the 500-character stderr tail. ON in the product surface, OFF in the bare library
     # on the row above's ground — it changes the failure TEXT the repair and the triage judge read.
     "canary_failure_account": (True, False),
+    # A Card's builds run the whole rationale (doc 69 69.4, 2026-09-29), not the board's 400
+    # characters: ON in the product surface, OFF in the bare library — a PROMPT flag that also adds a
+    # key to the `card_added` row, so a direct `Engine(...)` keeps both byte for byte.
+    "card_full_rationale": (True, False),
     # The proposal prompt's NODE-BUDGET line (Q-3, the Researcher's context audit, 2026-09-23): ON
     # in the product surface, OFF in the bare library on `evidence_envelope`'s ground — it changes a
     # PROMPT, and a prompt flag defaults off at every constructor, so a direct `Engine(...)` keeps

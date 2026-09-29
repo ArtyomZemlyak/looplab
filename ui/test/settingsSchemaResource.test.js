@@ -252,7 +252,9 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   the Python half moved too.
   //   238 -> 239 (2026-09-29): `canary_failure_account` — a failed canary's own account (its header
   //   and both stream tails) is what the judge and the repair read. The Python half moved too.
-  assert.equal(Object.keys(schema.fieldByKey).length, 239)
+  //   239 -> 240 (2026-09-29): `card_full_rationale` — a Card's builds run the Researcher's whole
+  //   rationale instead of the board's 400 characters. The Python half moved too.
+  assert.equal(Object.keys(schema.fieldByKey).length, 240)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

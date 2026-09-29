@@ -284,6 +284,17 @@ def canary_failure_account(engine) -> bool:
     return bool(getattr(engine, "_canary_failure_account", False))
 
 
+def card_full_rationale(engine) -> bool:
+    """`Settings.card_full_rationale` as the Card writer reads it — the ONE reading.
+
+    Asked by every caller of `card_reservation.py::CardReservationMixin._plan_native_card` and of the
+    rejected-proposal mint in `_reserve_node_build`: whether a `card_added` row carries the whole
+    rationale beside its 400-character one, for a later claim to execute (doc 69 69.4). On
+    `repair_context_record`'s ground (OFF when absent): stubs that never ran `Engine.__init__` write
+    the historical row."""
+    return bool(getattr(engine, "_card_full_rationale", False))
+
+
 class SharedEngineMixin:
     """Cross-cluster members, mixed into `Engine` like every other mixin. In here `self` IS the
     Engine, exactly as in the concern mixins."""

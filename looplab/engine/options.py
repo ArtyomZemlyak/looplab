@@ -256,6 +256,10 @@ class EngineOptions:
     # (`Settings.card_verdict_support`). A divergence-table row on `node_budget_cue`'s ground: a
     # prompt flag, OFF here so a bare `Engine(...)` keeps the historical bytes.
     card_verdict_support: bool = False
+    # doc 69 69.4 (2026-09-29): a claimed Card's build runs the whole rationale
+    # (`Settings.card_full_rationale`). A divergence-table row on `node_budget_cue`'s ground: a
+    # prompt flag, OFF here so a bare `Engine(...)` keeps the historical bytes and rows.
+    card_full_rationale: bool = False
     # doc 67 67.4 (2026-09-26): the ablation refiner's prompt carries its probes' signed results
     # (`Settings.ablation_probe_hint`). A divergence-table row on `node_budget_cue`'s ground: a
     # prompt flag, OFF here so a bare `Engine(...)` keeps the historical bytes.

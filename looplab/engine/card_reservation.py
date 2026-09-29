@@ -60,6 +60,7 @@ from looplab.core.models import (CARD_IDEA_CONCEPT_FIELDS, CARD_STATEMENT_MAX_CH
                                  hypothesis_statement_digest, idea_proposal_ref,
                                  normalize_researcher_footprint)
 from looplab.engine.proposal_cues import normalize_steering_context
+from looplab.engine.shared import card_full_rationale
 from looplab.events.eventstore import EventStoreConcurrencyError, retry_tail_cas
 from looplab.events.card_ledger import _drop_author
 from looplab.events.types import (EV_CARD_ADDED, EV_CARD_AUTO_DROPPED, EV_CARD_DROPPED, EV_CARD_REOPENED,
@@ -206,6 +207,15 @@ def _fold(events):
 # Never raises: a receipt may not cost a build its refusal. Anything unreadable becomes "" and the
 # row still carries the disposition, which is the part that makes the discard countable.
 _DISCARDED_PROPOSAL_TEXT_MAX = 400
+
+# THE CARD'S OWN RATIONALE BOUND — the 400 characters its `card_added` row, the ledger
+# (`card_ledger.py::_CARD_REPLAY_RATIONALE_MAX`) and the board brief keep — and the WHOLE rationale's
+# bound beside it (`Settings.card_full_rationale`, doc 69 69.4): what a later claim of the Card
+# executes. 8,000 characters is ~3x the longest cut measured (card-4 of `minionerec-backbones-v10`,
+# 2,410) and keeps one durable row bounded; a text longer still is cut WITH a sentence saying so,
+# never silently, because a Developer handed a cut recipe cannot tell it was cut.
+CARD_RATIONALE_MAX = 400
+CARD_RATIONALE_FULL_MAX = 8_000
 
 
 def _discarded_proposal_text(idea) -> str:
@@ -671,11 +681,40 @@ class CardReservationMixin:
             "footprint": footprint,
         }
 
+    @staticmethod
+    def _full_rationale_field(idea: Idea) -> dict:
+        """`{"rationale_full": ...}` when the Card's 400-character rationale CUT the Idea's, else
+        `{}` — so a proposal that fits writes the historical row byte for byte (doc 69 69.4). Beside
+        the receipt, never inside `action`: `_rebuilt_claim_idea`'s round trip proves only the action
+        and the statement, and the ownership digest covers the action alone."""
+        text = idea.rationale or ""
+        if len(text) <= CARD_RATIONALE_MAX:
+            return {}
+        if len(text) > CARD_RATIONALE_FULL_MAX:
+            note = (f"\n[rationale cut here: the Researcher's was {len(text):,} characters; "
+                    f"the Card keeps the first {CARD_RATIONALE_FULL_MAX:,}]")
+            text = text[:CARD_RATIONALE_FULL_MAX] + note
+        return {"rationale_full": text}
+
+    @staticmethod
+    def _claim_rationale(card, registration: dict) -> str:
+        """The rationale a claim of `card` executes: the whole one its own mint row carries
+        (`_full_rationale_field`), when that row's text extends the Card's bounded rationale — a
+        row whose `rationale_full` does not begin with it is not this Card's text and is ignored —
+        else the Card's 400 characters, which is what every row written without it holds."""
+        full = registration.get("rationale_full") if isinstance(registration, dict) else None
+        bounded = card.rationale or ""
+        if (isinstance(full, str) and len(full) > len(bounded) and full.startswith(bounded)
+                and len(full) <= CARD_RATIONALE_FULL_MAX + 200):
+            return full
+        return bounded
+
     @classmethod
     def _card_added_payload(cls, card_id: str, statement: str, action: dict, idea: Idea, *,
                             source: str, at_node: int,
                             implementation_ref: Optional[str] = None,
-                            steering_context=(), cross_run_receipt=None) -> dict:
+                            steering_context=(), cross_run_receipt=None,
+                            full_rationale: bool = False) -> dict:
         receipt = card_ownership_receipt(card_id, statement, action)
         proposal_ref = idea_proposal_ref(idea)
         bounded_steering = normalize_steering_context(steering_context)
@@ -685,7 +724,9 @@ class CardReservationMixin:
                 or source != source.strip() or not source.isprintable()
                 or type(at_node) is not int or not 0 <= at_node <= (1 << 31) - 1):
             raise ValueError("prepared idea cannot form a bounded native card receipt")
-        rationale = (idea.rationale or "")[:400]
+        rationale = (idea.rationale or "")[:CARD_RATIONALE_MAX]
+        # The whole rationale, beside the receipt, when the switch is on and the cut above applied.
+        full = cls._full_rationale_field(idea) if full_rationale else {}
         # THE ROUND TRIP, PROVED WHERE THE RECEIPT IS MINTED — the one invariant that makes a Card
         # claimable at all. `receipt` above digests THIS `action`; `_prepare_existing_card_claim`
         # re-derives that digest by rebuilding the Idea from the durable Card and calling
@@ -706,7 +747,7 @@ class CardReservationMixin:
         # skipped the concept envelope is what let the claim quietly execute a different Idea.
         card_concepts = cls._authored_card_concepts(idea)
         rebuilt = cls._rebuilt_claim_idea(
-            card_id, statement, action, rationale,
+            card_id, statement, action, full.get("rationale_full", rationale),
             concepts=cls._claim_concept_envelope(card_concepts))
         rebuilt_action = cls._card_action(
             rebuilt, list(action.get("parent_ids") or []),
@@ -730,6 +771,9 @@ class CardReservationMixin:
             "source": source,
             "at_node": at_node,
             "rationale": rationale,
+            # The whole rationale a later claim executes (`_claim_rationale`), OUTSIDE `idea` and the
+            # receipt: present only when it differs from `rationale` above (doc 69 69.4).
+            **full,
             # Deliberately narrow: replay treats any future executable member in this block as an
             # incomplete v1 action rather than silently blessing lossy semantics.
             # The concept envelope is the ONE exception, and it is not one invented at this call site:
@@ -775,7 +819,8 @@ class CardReservationMixin:
     @classmethod
     def _card_event_matches(cls, data: dict, idea: Idea, action: dict, *, source: str,
                             at_node: int, implementation_ref: Optional[str],
-                            steering_context=(), cross_run_receipt=None) -> bool:
+                            steering_context=(), cross_run_receipt=None,
+                            full_rationale: bool = False) -> bool:
         """True only for the exact writer shape used by a crash-prefix card reservation."""
         card_id = data.get("id")
         if cls._engine_card_number(card_id) is None:
@@ -787,7 +832,7 @@ class CardReservationMixin:
         expected = cls._card_added_payload(
             card_id, statement, action, rebound, source=source, at_node=at_node,
             implementation_ref=implementation_ref, steering_context=steering_context,
-            cross_run_receipt=cross_run_receipt,
+            cross_run_receipt=cross_run_receipt, full_rationale=full_rationale,
         )
         if data == expected:
             return True
@@ -1057,7 +1102,8 @@ class CardReservationMixin:
                           implementation_ref: Optional[str] = None, excluded=(),
                           steering_context=(), cross_run_receipt=None,
                           superseded_card_id: Optional[str] = None,
-                          retry_attach: bool = False) -> _CardReservationPlan:
+                          retry_attach: bool = False,
+                          full_rationale: bool = False) -> _CardReservationPlan:
         """Resolve exact live dedupe, crash-prefix reuse, a retry attach, or a fresh engine id.
 
         `retry_attach` is OPT-IN per call site, not a global policy, because only a caller that can
@@ -1122,7 +1168,7 @@ class CardReservationMixin:
                         event.data, idea, action, source=source, at_node=at_node,
                         implementation_ref=implementation_ref,
                         steering_context=steering_context,
-                        cross_run_receipt=cross_run_receipt):
+                        cross_run_receipt=cross_run_receipt, full_rationale=full_rationale):
                     matches.append(cid)
             except (TypeError, ValueError, OverflowError):
                 continue
@@ -1196,6 +1242,7 @@ class CardReservationMixin:
                         attach_card_id, statement, action, attached_idea, source=source,
                         at_node=at_node, implementation_ref=implementation_ref,
                         steering_context=steering_context, cross_run_receipt=cross_run_receipt,
+                        full_rationale=full_rationale,
                     )
                 except (TypeError, ValueError, OverflowError):
                     return _CardReservationPlan("invalid", None, None, None)
@@ -1207,7 +1254,7 @@ class CardReservationMixin:
             payload = cls._card_added_payload(
                 card_id, statement, action, reserved_idea, source=source, at_node=at_node,
                 implementation_ref=implementation_ref, steering_context=steering_context,
-                cross_run_receipt=cross_run_receipt,
+                cross_run_receipt=cross_run_receipt, full_rationale=full_rationale,
             )
         except (TypeError, ValueError, OverflowError):
             return _CardReservationPlan("invalid", None, None, None)
@@ -1301,6 +1348,7 @@ class CardReservationMixin:
                     implementation_ref=implementation_ref, steering_context=steering_context,
                     cross_run_receipt=cross_run_receipt,
                     retry_attach=retry_attach,
+                    full_rationale=card_full_rationale(self),
                 )
                 if plan.disposition == "invalid":
                     self._append_proposal_event(EV_NOVELTY_REJECTED, {
@@ -1613,6 +1661,7 @@ class CardReservationMixin:
                 # INVENTORY, and in `runs/rubertlite-dr-unified-v5` it is the lane that wrote card-3
                 # (a `card_added` with no `node_building` beside it, then `card_build_requested`).
                 retry_attach=True,
+                full_rationale=card_full_rationale(self),
             )
             if plan.disposition == "attach":
                 # A re-attempt is not INVENTORY. Staging exists to publish a selection-ready Card the
@@ -2005,7 +2054,8 @@ class CardReservationMixin:
             # construction rather than by hand-syncing two copies of this constructor. `receipt_action`
             # is `_card_claim_receipt_action(card)`, i.e. exactly the action shape the mint digested.
             idea = self._rebuilt_claim_idea(
-                card.id, card.seed_statement, receipt_action, card.rationale,
+                card.id, card.seed_statement, receipt_action,
+                self._claim_rationale(card, registrations[0].data),
                 concepts=calibration_concepts)
         except Exception:  # noqa: BLE001 — hostile/future Card data cannot escape the closed Idea schema
             return None
@@ -2347,6 +2397,7 @@ class CardReservationMixin:
                         card_id, statement, action, reserved, source=source,
                         at_node=self._node_id_ceiling(events, state),
                         steering_context=bounded_steering,
+                        full_rationale=card_full_rationale(self),
                     )
                 except (TypeError, ValueError, OverflowError):
                     return None

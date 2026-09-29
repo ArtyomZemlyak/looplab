@@ -30,7 +30,7 @@ from looplab.core.models import (NODE_CONCEPT_PROVENANCE_CLASSIFIER,
                                   idea_proposal_digest, idea_proposal_ref)
 from looplab.agents.roles import researcher_budget_exhausted
 from looplab.engine.card_reservation import discarded_proposal_receipt
-from looplab.engine.shared import effective_researcher_eval_timeout
+from looplab.engine.shared import card_full_rationale, effective_researcher_eval_timeout
 from looplab.core.text import tokenize
 from looplab.core.tracing import current_ids
 from looplab.events.types import EV_CROSS_RUN_PRIOR, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED
@@ -1063,6 +1063,7 @@ class NoveltyGateMixin:
                 scored_against=state.best_node_id, source="researcher",
                 at_node=prospective_base + slot, excluded=used_card_ids,
                 steering_context=getattr(self.researcher, "_steering_context", []),
+                full_rationale=card_full_rationale(self),
             )
             if plan.disposition == "invalid":
                 self._append_proposal_event(EV_NOVELTY_REJECTED, {

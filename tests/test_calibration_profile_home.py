@@ -352,7 +352,12 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               removed; `_EXPECTED_FIELD_COUNT` goes 270 -> 271 and both pins are re-set (the
 #               pre-change tree re-derives d65707b2…). INERT for a calibration replicate unless it
 #               runs the eval canary: it changes only a failed canary's failure text.
-_EXPECTED_DIGEST = "sha256:1514ffe42c2cd19be84f5ccecd0daf981e26e8e7b1bd33017178e1d5cf7462be"
+#   2026-09-29  + card_full_rationale (a Card's builds run the whole rationale, doc 69 69.4). The
+#               'field set changed too' branch: exactly `['card_full_rationale']` added and `[]`
+#               removed; `_EXPECTED_FIELD_COUNT` goes 271 -> 272 and both pins are re-set (the
+#               pre-change tree re-derives 1514ffe4…). NOT inert in principle: a Card-driven
+#               replicate's builds read the Researcher's rationale.
+_EXPECTED_DIGEST = "sha256:6b06df4d2317f5bd7695ea9a0bc4550ea43731bc779046b591b24300063cbcdc"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -855,7 +860,8 @@ _EXPECTED_DIGEST = "sha256:1514ffe42c2cd19be84f5ccecd0daf981e26e8e7b1bd33017178e
 #               `external_harness`: 267 -> 269; see the digest history.
 #   2026-09-29  + agent_stuck_stale_streak (doc 69 69.3): 269 -> 270; see the digest history.
 #   2026-09-29  + canary_failure_account (doc 69 69.7): 270 -> 271; see the digest history.
-_EXPECTED_FIELD_COUNT = 271
+#   2026-09-29  + card_full_rationale (doc 69 69.4): 271 -> 272; see the digest history.
+_EXPECTED_FIELD_COUNT = 272
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

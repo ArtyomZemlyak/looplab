@@ -406,6 +406,9 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         # …and a failed canary's own account (doc 69 69.7, 2026-09-29), a prompt flag on the same
         # frozen ground.
         canary_failure_account=settings.canary_failure_account,
+        # …and a Card's builds running the whole rationale (doc 69 69.4), a prompt flag on the same
+        # frozen ground.
+        card_full_rationale=settings.card_full_rationale,
         # …and the proposal prompt's node-budget line (Q-3, 2026-09-23), ON in Settings and OFF in
         # the bare library for the same reason (a prompt flag).
         node_budget_cue=settings.node_budget_cue,

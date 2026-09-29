@@ -1066,6 +1066,22 @@ class Settings(BaseSettings):
     # (`engine/proposal_cues.py::ProposalCuesMixin._stamp_brief_switches`). It moves no metric,
     # champion, selection or violation.
     card_verdict_support: bool = True
+    # THE WHOLE IDEA REACHES A CARD'S BUILDS (doc 69 §3.3, 69.4). A native Card's `card_added` row
+    # keeps its rationale to 400 characters — the board brief, the ledger and the ownership round trip
+    # read that bounded text — and a CLAIM of the Card rebuilt the executed Idea from it, so the
+    # Developer ran a cut idea. On the Card-driven lane EVERY build is a claim (driven: every
+    # Card-built node of a real run carried the first 400 characters), and so is a re-queue after
+    # `developer_stuck`. `minionerec-backbones-v10`: card-4's recipe went 2,410 -> 400 (the
+    # prefix-CSV workaround it had already worked out included), card-5's reached the plan as "No
+    # code change needed", card-6/7 lost what to change and where. ON, the row also carries
+    # `rationale_full` — beside the receipt, OUTSIDE `action` and every digest, written only when the
+    # rationale was cut, capped at `card_reservation.py::CARD_RATIONALE_FULL_MAX` and saying so when
+    # that cut it — and the claim executes it when its first 400 characters are the Card's own
+    # rationale. It changes the Developer's PROMPT on a claimed Card and buys no call, so `false`
+    # reproduces the historical bytes (and writes the historical row), every constructor defaults it
+    # OFF, and a pre-field snapshot resumes OFF (its `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row). Read
+    # through ONE reader, `engine/shared.py::card_full_rationale`.
+    card_full_rationale: bool = True
     # THE LEADERS WERE NOT ALL MEASURED ON ONE RULER (doc 68 68.1a, 2026-09-26). A run can score its
     # search on `smoke` and its endgame on `full`, edit its host scorer mid-run or promote a fix into
     # the editable repo; the champion then carries `mixed_comparability` on every operator surface,
@@ -3847,6 +3863,12 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # tails instead of the 500-character stderr tail, so a resumed run would change what both roles
     # are told mid-log. (c) is `False`, the historical tail, pointable at every commit before this one.
     "canary_failure_account": False,
+    # THE WHOLE IDEA REACHES A CARD'S BUILDS, added 2026-09-29 defaulting ON (doc 69 69.4). (a)
+    # holds. (b) is the DIFFERENT-PROMPT ground: ON, a claimed Card's build runs the Researcher's full
+    # rationale instead of its first 400 characters, and the `card_added` row gains a key — so a
+    # resumed run would change what its Developer is told mid-log, and write rows its own earlier
+    # crash-prefix mints would no longer match. (c) is `False`, pointable at every commit before this.
+    "card_full_rationale": False,
     # THE NODE BUDGET CUE, added 2026-09-23 defaulting ON (Q-3, the Researcher's context audit).
     # (a) holds. (b) is the rows above's DIFFERENT-PROMPT ground: ON, every proposal prompt gains a
     # line stating the run's remaining node budget and its plan phase, so a resumed run would change

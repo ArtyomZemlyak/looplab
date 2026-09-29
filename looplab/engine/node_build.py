@@ -46,6 +46,7 @@ from looplab.engine.plan import META_SWEEP
 from looplab.engine.proposal_cues import normalize_steering_context
 # Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`. The
 # build spine's re-folds are what `monkeypatch.setattr(orch, "fold", …)` is written to intercept.
+from looplab.engine.shared import card_full_rationale
 from looplab.engine.shared import engine_fold as fold
 from looplab.events.eventstore import retry_tail_cas
 from looplab.events.types import (EV_AGENT_DECISION, EV_CARD_ADDED, EV_NODE_BUILDING,
@@ -1038,6 +1039,7 @@ class NodeBuildMixin:
                 # between them; the commit pass is the authority and now RESOLVES that race instead
                 # of returning None and losing the turn in silence (see the fence there).
                 retry_attach=True,
+                full_rationale=card_full_rationale(self),
             )
             if plan.disposition == "invalid":
                 self._append_proposal_event(EV_NOVELTY_REJECTED, {
@@ -1859,6 +1861,7 @@ class NodeBuildMixin:
                     scored_against=latest.best_node_id, source="researcher", at_node=node_id,
                     steering_context=steering_context,
                     superseded_card_id=current.idea.card_id,
+                    full_rationale=card_full_rationale(self),
                 )
                 if plan.disposition not in {"mint", "reuse"}:
                     return _RerunCardCommit("rejected", latest, plan)

@@ -1415,7 +1415,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         optional=(
             "action", "at_node", "concepts", "footprint", "generation", "id", "idea", "node_id",
             "ownership_receipt", "parent_card_id", "parent_generations", "parent_id",
-            "parent_ids", "rationale", "scored_against", "scored_against_empty",
+            "parent_ids", "rationale", "rationale_full", "scored_against", "scored_against_empty",
             "scored_against_generation", "source", "statement", "steering_context"
         ),
         # NOT whole (review 2026-09-22, EVT-05): `_on_card_added` keeps the BOUNDED receipt
