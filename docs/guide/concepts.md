@@ -1672,7 +1672,12 @@ experiment is the engine's own (the `debug` attach above), not something a propo
 same brief also feeds the crash-triage judge and the macro-action chooser, whose replies are a verdict
 and an index; they see the board's content without either claim contract. Until 2026-08-12 only the
 first list existed, so a card disappeared from the Researcher's view the moment it got a node,
-including a node still running.
+including a node still running. Since 2026-09-27 a third list holds what neither of those describes:
+an idea whose only build ran something else and whose card the ledger did not return because later
+builds on that node — other cards' tested experiments — beat it (`Card.withheld_by`). Nothing tested
+it and the engine will not rebuild it, so it is neither claimable nor "already has an experiment";
+its block's one instruction is to propose it again, as a new experiment under a new card, only if
+none of the nodes that beat it tested it (`agents/state_brief.py::board_prompt_lines`).
 
 **The Researcher can now RECORD a question it is not pursuing** — `Idea.open_questions`, with
 `Idea.question_concepts` aligned by position, both carried on the emit schema the proposer reads.

@@ -411,7 +411,9 @@ idea it answers about. Only the build's LAST plan step answers (an intermediate 
 the minimum), and neither a parent's nor a previous build's report is carried into a new build. A
 `different` / `not_implemented` node keeps its metric but is not a test of its card: the card's
 verdict ignores it and the idea goes back on the board once — unless a later build on the node has
-since tested its own idea and beaten it (`Card.substituted_nodes`; the Cards bullet
+since tested its own idea and beaten it, in which case the Researcher reads the idea in a board
+block of its own and may re-propose it as a new card (`Card.substituted_nodes` /
+`Card.withheld_by`; the Cards bullet
 of [the UI guide](ui.md#what-it-does)), and every surface that shows the node's rationale labels it
 `NOT A TEST OF card-N's IDEA`. A repair whose only change is the report moved no code: it is not an
 edit, so it neither re-evaluates identical code nor invalidates a reusable stage checkpoint.

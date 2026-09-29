@@ -2361,7 +2361,8 @@ def _apply_substituted_builds(st: RunState, ledger: _CardLedger) -> None:
     * Once per card (`_apply_card_returns`, counted with the discards): a single forgiven node that
       is the card's whole evidence — or beside nothing but its own rebuild still in flight — leaves
       `evidence`, so the card is `proposed`/`open` and selection-ready again; unless, with no
-      rebuild under way, a later build on it has beaten it (`idea_report.surpassed_by`).
+      rebuild under way, a later build on it has beaten it (`idea_report.surpassed_by`, recorded
+      as `Card.withheld_by`).
     * At two it stays (both do): the card has twice been built as something else, which says the
       idea does not get built as proposed here, and the run stops paying for it — the card retires
       through the ordinary `work_terminal` path with its verdict still `open`, never `supported`.
@@ -2459,11 +2460,23 @@ def _apply_card_returns(st: RunState, ledger: _CardLedger,
     idea and told it "not tested yet". No field says two cards make the same claim, so the card is
     not handed back to the automatic Card lane, which cannot tell whether that lineage answered it:
     the node stays in `evidence` (verdict `open` — it never counts — and status `failed`, the lane a
-    card whose only evidence is a substitution already reads), and the board row names the nodes
-    that beat it (`card_substitution_brief`), so the Researcher re-proposes the idea if none of them
-    tested it. A PROXY, and the trade-off is stated where the rule is: a descendant that tested the
-    same claim and LOST no longer blocks (the card's one rebuild may re-test it), while an unrelated
-    descendant that WON still blocks. Discards never ran, so they have no descendants.
+    card whose only evidence is a substitution already reads), the nodes that beat it are recorded
+    as `Card.withheld_by` — the decision itself, which the row clause (`card_substitution_brief`),
+    the public wire and the UI read instead of re-deriving it — and the Researcher reads the card in
+    a block of its own (`agents/state_brief.py::board_prompt_lines`): never tested, not rebuilt by
+    the engine, and re-proposable as a NEW card only if none of those nodes tested it. A PROXY, and
+    the trade-off is stated where the rule is: a descendant that tested the same claim and LOST no
+    longer blocks (the card's one rebuild may re-test it), while an unrelated descendant that WON
+    still blocks. Discards never ran, so they have no descendants.
+
+    THE WITHHOLD DOES NOT STICK. It is judged again on every fold from the winners' CURRENT state,
+    so it lifts the moment none of them counts: a winner reset to pending (`node_reset`), aborted,
+    tombstoned, or trust-flagged under an enforcing gate (it joins `breed_excluded`) leaves
+    `surpassed_by` empty, and the card is returned and selection-ready again. A return taken in that
+    window is then LOCKED IN: once the card is elected (an open `card_build_requested`) or claimed
+    (a `node_building` marker), `_rebuild_in_flight` holds it even after the winner is back and
+    beating the substitution again, so that rebuild is built and paid for — the guarantee below that
+    keeps a paid build from being thrown away, applied to a card the rule would otherwise withhold.
 
     NEVER OVER A REBUILD ALREADY UNDER WAY — `rest` non-empty (its node, pending) or
     `_rebuild_in_flight` (elected or claimed, no node yet). A speculative rebuild has no node until
@@ -2493,6 +2506,8 @@ def _apply_card_returns(st: RunState, ledger: _CardLedger,
     excluded = frozenset(st.breed_excluded or ())
     aborted = frozenset(st.aborted_nodes or ())
     for c in ledger.cards.values():
+        # Stamped on EVERY card, and set by the one decision below that withholds a return.
+        c.withheld_by = []
         forgiven = sorted(set(c.discarded_nodes) | set(c.substituted_nodes))
         if len(forgiven) != 1:
             continue
@@ -2511,10 +2526,12 @@ def _apply_card_returns(st: RunState, ledger: _CardLedger,
             continue
         if (not rest and only in c.substituted_nodes
                 and not _rebuild_in_flight(node, st, requested=c.id in requested,
-                                           claimed_by=claimed.get(c.id, ()))
-                and surpassed_by(only, st.nodes, direction=st.direction,
-                                 excluded=excluded, aborted=aborted)):
-            continue
+                                           claimed_by=claimed.get(c.id, ()))):
+            beaten = surpassed_by(only, st.nodes, direction=st.direction,
+                                  excluded=excluded, aborted=aborted)
+            if beaten:
+                c.withheld_by = beaten
+                continue
         c.evidence = rest
 
 

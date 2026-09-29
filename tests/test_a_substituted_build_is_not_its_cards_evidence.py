@@ -191,6 +191,8 @@ def test_a_second_substitution_of_the_same_card_retires_it_with_an_honest_verdic
     assert card.verdict == "open" and card.best_delta is None
     row = next(line for line in prompt.splitlines() if "CARD_ID=card-2" in line)
     assert "VERDICT=open" in row and "built as something else twice, so retired" in row
+    # A retirement is not a withheld return (`Card.withheld_by`, section 7): nothing beat it.
+    assert card.withheld_by == []
     # A third turn buys nothing.
     assert engine._request_card_build() is False
 
@@ -458,8 +460,9 @@ def test_the_deprecated_hypotheses_rows_list_only_the_nodes_that_tested_the_card
 # Measured 2026-09-27 on MiniOneRec inf13: card-2's node 2 (1.3726, `different`) was returned and
 # selection-ready although node 5 — card-6, built on node 2 `as_proposed` — had tested card-2's very
 # claim and beaten it (4.1658). `_apply_card_returns` now keeps such a card off the automatic lane
-# (`core/idea_report.py::surpassed_by`), except over a rebuild already under way. The toy run below
-# MINIMIZES, so a later build "beats" the substitution with a LOWER metric.
+# (`core/idea_report.py::surpassed_by`), except over a rebuild already under way, records the nodes
+# as `Card.withheld_by`, and the Researcher reads the card in a board block of its own. The toy run
+# below MINIMIZES, so a later build "beats" the substitution with a LOWER metric.
 
 def _child(engine, parent: int, files: dict, *, card_id: str, metric=None) -> int:
     """A later build that took `parent`'s code as its base, filed under ANOTHER card — inf13's node
@@ -496,23 +499,106 @@ def test_a_substitution_another_cards_build_on_it_beat_is_not_returned(tmp_path)
     state = fold(engine.store.read_all())
     card = state.cards["card-2"]
     assert card.substituted_nodes == [sub] and card.evidence == [sub]
+    assert card.withheld_by == [running]                              # the decision, on the card
     assert card.verdict == "open" and card.best_delta is None        # never tested, never supported
     assert card.status == "failed" and card.status_nodes == [sub]
     assert card.selection_ready is False and "work_terminal" in card.selection_blockers
     assert "card-2" not in [c.id for c in cs.eligible_cards(state, engine.policy)]
     claimable, attempted, _prompt = _board(state)
-    assert "card-2" not in claimable and "card-2" in attempted
+    assert "card-2" not in claimable and "card-2" not in attempted
+    assert [c.id for c in roles_mod.attempted_board_prompt_cards(state, withheld=True)] == ["card-2"]
     row = _row(state, "card-2")
     assert "VERDICT=open" in row
+    # FACTS ONLY: what the Researcher may do about it is its block's one instruction (next test).
     assert (f"NOT TESTED by node {sub} built instead: {_INSTEAD} — not returned: node(s) "
-            f"[{running}] built on node {sub} and beat it; its idea was never tested — propose it "
-            "again only if none of those tested it." in row)
-    assert "UNTESTED and back on the board" not in row
+            f"[{running}] built on node {sub} and beat it; its idea was never tested. " in row)
+    assert "UNTESTED and back on the board" not in row and "propose" not in row.lower()
+    # The operator's wire carries the same decision beside `substituted_nodes`.
+    published = public_cards(state.cards)["card-2"]
+    assert published["withheld_by"] == [running] and published["evidence"] == [sub]
     # …and no Developer build is bought for it: nothing else on this board is electable.
     assert engine._request_card_build() is False
     # The winner's own card is untouched by any of this.
     assert state.cards["card-6"].evidence == [running]
-    assert state.cards["card-6"].substituted_nodes == []
+    assert state.cards["card-6"].substituted_nodes == [] and state.cards["card-6"].withheld_by == []
+
+
+_ALREADY_HEADER = ("Research questions ALREADY on the board (each already has an experiment — do NOT "
+                   "propose one of these again as if it were new):")
+_ALREADY_RULE = ("Propose a DIFFERENT question. These rows are NOT claimable — a CARD_ID from this "
+                 "list is ignored. A failed experiment is re-attempted by the engine itself, under "
+                 "the same card, without being asked.")
+_WITHHELD_HEADER = ("Ideas NEVER TESTED that the engine will NOT rebuild (each card's build ran "
+                    "something else, and later builds on that node — other cards' experiments that "
+                    "tested their own ideas — beat it; each row names them):")
+_WITHHELD_RULE = ("Propose one of these ideas again only if none of the nodes that beat it tested it "
+                  "— as a NEW experiment: it gets a card of its own, because these rows are NOT "
+                  "claimable and a CARD_ID from this list is ignored.")
+
+
+def _withheld_shape(tmp_path, name: str):
+    """inf13's card-2 / card-6: a substitution, and another card's tested build on it that beat it.
+    card-6 is a native card with a seed, as it was on inf13, so its row renders on the board."""
+    engine, producer = _setup(tmp_path, name)
+    sub = _build(engine, producer, "card-2", _report("different"), x=0.3)
+    _evaluate(engine, sub, 0.9)
+    _add_ready_draft(engine, "card-6", x=0.5)
+    winner = _child(engine, sub, _report("as_proposed", ""), card_id="card-6", metric=0.7)
+    return engine, sub, winner
+
+
+def test_the_researcher_reads_a_withheld_card_in_a_block_of_its_own(tmp_path):
+    """The BLOCK, not only the row (critic 2026-09-27, rendered on inf13): card-2's row sat under
+    "ALREADY on the board … do NOT propose one of these again", ended in its own "propose it again
+    only if none of those tested it", and the block closed on "a failed experiment is re-attempted by
+    the engine itself" — false for a card nothing re-elects. It is now its own block, whose ONE
+    instruction is true, in both row shapes (historical and `propose_brief_fit`) and at the very end
+    of the brief the proposer reads."""
+    from looplab.agents.state_brief import _state_brief, next_board_prompt_cards
+    from looplab.core.models import Idea
+
+    engine, sub, winner = _withheld_shape(tmp_path, "withheld-block")
+    state = fold(engine.store.read_all())
+    card = state.cards["card-2"]
+    row = (f"- CARD_ID=card-2 BELIEF_ID={card.belief_id} STATUS=failed VERDICT=open NODES=[{sub}] "
+           f"NOT TESTED by node {sub} built instead: {_INSTEAD} — not returned: node(s) [{winner}] "
+           f"built on node {sub} and beat it; its idea was never tested. "
+           f"SEED_STATEMENT_JSON={json.dumps(card.seed_statement)}")
+    for fit in (False, True):
+        lines = roles_mod.board_prompt_lines(state, fit=fit)
+        already, withheld = lines.index(_ALREADY_HEADER), lines.index(_WITHHELD_HEADER)
+        # The ALREADY block holds the winner's card and closes on its own rule; card-2 is not in it.
+        assert already < withheld and lines[withheld - 1] == _ALREADY_RULE, fit
+        assert any(line.startswith("- CARD_ID=card-6 ") for line in lines[already:withheld]), fit
+        assert not any("CARD_ID=card-2 " in line for line in lines[:withheld]), fit
+        # The withheld block is its header, card-2's row and its one instruction — nothing else.
+        assert lines[withheld:] == [_WITHHELD_HEADER, row, _WITHHELD_RULE], fit
+    # The prompt the proposer actually reads ENDS on that instruction.
+    assert _state_brief(state, None, fit=True).splitlines()[-1] == _WITHHELD_RULE
+    # A reader with no Idea to return (the deep-research memo, triage) gets the facts, no contract.
+    assert roles_mod.board_prompt_lines(state, for_proposal=False, fit=True)[-2:] == [
+        _WITHHELD_HEADER, row]
+    # The instruction's two claims hold. A CARD_ID from the block binds to nothing…
+    claim = roles_mod.bind_idea_to_board_card(
+        Idea(operator="draft", params={"x": 0.3}, card_id="card-2"), next_board_prompt_cards(state))
+    assert claim.card_id is None
+    # …and the idea proposed again — the card's own action and seed, verbatim — gets a NEW card: a
+    # card that holds evidence is never reused (`_plan_native_card`).
+    again = Idea(operator="draft", params={"x": 0.3, "y": -1.0},
+                 rationale="use queued proposal card-2", hypothesis=card.seed_statement)
+    reservation = engine._reserve_node_build({"kind": "draft"}, idea=again)
+    assert reservation is not None and reservation.card_id not in {"card-2", "card-6"}
+    state = fold(engine.store.read_all())
+    fresh = state.cards[reservation.card_id]
+    assert fresh.seed_statement == card.seed_statement and fresh.belief_id == card.belief_id
+    # Once that re-proposal is live, the idea is ordinary ALREADY context again — the re-proposal is
+    # its row, card-2 rides on it by id — and the withheld block, whose invitation it answered, is gone.
+    assert state.cards["card-2"].withheld_by == [winner]
+    lines = roles_mod.board_prompt_lines(state, fit=True)
+    assert _WITHHELD_HEADER not in lines and _WITHHELD_RULE not in lines
+    [grouped] = [line for line in lines if f"BELIEF_ID={card.belief_id}" in line]
+    assert grouped.startswith(f"- CARD_ID={reservation.card_id} ") and "STATUS=building" in grouped
+    assert f"card-2: NOT TESTED by node {sub}" in grouped and f"node(s) [{winner}]" in grouped
 
 
 def test_a_later_build_that_did_not_beat_the_substitution_leaves_the_card_returned(tmp_path):
@@ -528,9 +614,68 @@ def test_a_later_build_that_did_not_beat_the_substitution_leaves_the_card_return
            metric=0.1)                                                                  # not a test
     state = fold(engine.store.read_all())
     card = state.cards["card-2"]
-    assert card.evidence == [] and card.selection_ready is True
+    assert card.evidence == [] and card.selection_ready is True and card.withheld_by == []
     assert "card-2" in [c.id for c in cs.eligible_cards(state, engine.policy)]
     assert "UNTESTED and back on the board" in _row(state, "card-2")
+
+
+def test_a_gated_substitution_a_later_build_beat_never_reads_as_beaten(tmp_path):
+    """The other shape that leaves ONE substitution as its card's whole evidence: an infeasible (or
+    trust-excluded) build is gated and never returned, whatever beat it later. What kept it off the
+    board is its gate, not a winner, so `withheld_by` stays [] — on the card and on the wire — its
+    clause says "gated", and it is no row of the withheld block (nor of any Researcher block)."""
+    from looplab.core.idea_report import card_substitution_brief, surpassed_by
+
+    engine, producer = _setup(tmp_path, "gated-beaten")
+    sub = _build(engine, producer, "card-2", _report("different"), x=0.3)
+    engine.store.append("node_evaluated", {
+        "node_id": sub, "generation": 0, "metric": 0.9, "eval_seconds": 1.0, "extra_metrics": {},
+        "stdout_tail": "", "trials": [],
+        "violations": [{"name": "mem", "value": 2.0, "max": 1.0, "min": None}]})
+    winner = _child(engine, sub, _report("as_proposed", ""), card_id="card-6", metric=0.7)
+    state = fold(engine.store.read_all())
+    assert surpassed_by(sub, state.nodes, direction=state.direction) == [winner]   # it WAS beaten
+    card = state.cards["card-2"]
+    assert card.status == "gated" and card.evidence == [sub] and card.withheld_by == []
+    assert public_cards(state.cards)["card-2"]["withheld_by"] == []
+    brief = card_substitution_brief(card, state.nodes)
+    assert "beat" not in brief and "twice" not in brief
+    assert "not returned: that build is gated (infeasible or trust-excluded)" in brief
+    assert roles_mod.attempted_board_prompt_cards(state, withheld=True) == []
+    assert "CARD_ID=card-2 " not in "\n".join(roles_mod.board_prompt_lines(state, fit=True))
+
+
+def test_the_withhold_does_not_stick_and_a_rebuild_elected_in_the_gap_is_kept(tmp_path):
+    """Stated beside the trade-off (`_apply_card_returns`, "THE WITHHOLD DOES NOT STICK"): the rule is
+    asked again on every fold, so it lifts the moment the winner stops counting — reset to pending,
+    aborted, or trust-flagged under an enforcing gate — and a rebuild elected in that window is kept
+    by `_rebuild_in_flight` even once the winner is back and beating the substitution again."""
+    engine, sub, winner = _withheld_shape(tmp_path, "reset")
+    engine.store.append("node_reset", {"node_id": winner, "generation": 0, "from_stage": "eval"})
+    card = fold(engine.store.read_all()).cards["card-2"]
+    assert card.withheld_by == [] and card.evidence == [] and card.selection_ready is True
+    assert _request(engine)["card_id"] == "card-2"             # elected in the window…
+    engine.store.append("node_evaluated", {                     # …and the winner lands again
+        "node_id": winner, "generation": 1, "metric": 0.7, "eval_seconds": 1.0,
+        "extra_metrics": {}, "stdout_tail": "", "trials": [], "violations": []})
+    state = fold(engine.store.read_all())
+    assert state.nodes[winner].metric == 0.7
+    card = state.cards["card-2"]
+    assert card.withheld_by == [] and card.evidence == [] and card.selection_ready is True
+    assert state.card_status_now(card) == "building"           # the rebuild keeps its return
+
+    engine, sub, winner = _withheld_shape(tmp_path, "aborted")
+    engine.store.append("node_abort", {"node_id": winner, "generation": 0})
+    card = fold(engine.store.read_all()).cards["card-2"]
+    assert card.withheld_by == [] and card.evidence == [] and card.selection_ready is True
+
+    engine, sub, winner = _withheld_shape(tmp_path, "flagged")
+    engine.store.append("reward_hack_suspected", {"node_id": winner, "generation": 0,
+                                                  "signals": [{"signal": "leakage"}]})
+    assert fold(engine.store.read_all()).cards["card-2"].withheld_by == [winner]  # audit: it counts
+    engine.store.append("trust_gate_changed", {"trust_gate": "gate"})
+    card = fold(engine.store.read_all()).cards["card-2"]
+    assert card.withheld_by == [] and card.evidence == [] and card.selection_ready is True
 
 
 def test_a_rebuild_in_flight_when_a_later_build_beats_the_substitution_is_committed(tmp_path):
@@ -691,7 +836,7 @@ def test_the_withheld_return_is_a_function_of_the_log(tmp_path):
     sub = _build(engine, producer, "card-2", _report("different"), x=0.3)
     _evaluate(engine, sub, 0.9)
     request = _request(engine)
-    _child(engine, sub, _report("as_proposed", ""), card_id="card-6", metric=0.7)
+    winner = _child(engine, sub, _report("as_proposed", ""), card_id="card-6", metric=0.7)
     assert engine._append_card_build_done(request, skipped="stale",
                                           skipped_reason="not_selected_now") is True
 
@@ -710,3 +855,5 @@ def test_the_withheld_return_is_a_function_of_the_log(tmp_path):
         want = [sub] if cut > closed_at else []
         assert card.evidence == want, (cut, events[cut - 1].type, card.evidence)
         assert card.selection_ready is (cut <= closed_at), (cut, events[cut - 1].type)
+        # …and the recorded decision moves with the evidence, never ahead of or behind it.
+        assert card.withheld_by == ([winner] if cut > closed_at else []), (cut, card.withheld_by)

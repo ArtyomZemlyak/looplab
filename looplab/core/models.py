@@ -3022,13 +3022,11 @@ class RunState(BaseModel):
         """`core/idea_report.py::card_substitution_brief` over this state's nodes — "" for a card no
         build substituted; a board row splices it in front of its next field (it ends in a space).
 
-        Judged with the run's direction and the champion's exclusions, the same three the card
-        ledger withheld the return with (`events/card_ledger.py::_apply_card_returns`), so a "not
-        returned" row names exactly the nodes that kept the card off the board."""
+        A "not returned" row names `Card.withheld_by`, the nodes the card ledger withheld the return
+        with (`events/card_ledger.py::_apply_card_returns`) — read off the card, never judged again
+        here, so the row and the ledger cannot disagree about which card was kept off the board."""
         from looplab.core.idea_report import card_substitution_brief
-        return card_substitution_brief(card, self.nodes, direction=self.direction,
-                                       excluded=frozenset(self.breed_excluded or ()),
-                                       aborted=frozenset(self.aborted_nodes or ()))
+        return card_substitution_brief(card, self.nodes)
 
     def belief_substitution_brief(self, members, row) -> str:
         """The clause for a board row that stands for a whole BELIEF group (`propose_brief_fit`): the

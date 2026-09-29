@@ -115,6 +115,17 @@ const BLOCKER_LIFECYCLE_BY_STATUS = {
   work_in_flight: { coded: 'its experiment is built and has not started' },
 }
 
+// …AND ONE BLOCKER, TWO RETIREMENTS (2026-09-27). `work_terminal` on a Failed card with its verdict
+// `open` is what BOTH of these look like on the wire: a card whose build twice ran something else
+// (retired, `card_ledger.py::_apply_card_returns`' bound), and a card whose one substitution the
+// ledger did not return because later builds on it beat it — MiniOneRec inf13's card-2, whose idea
+// is left to the Researcher. Both read "its experiment has finished". The fold names the second in
+// `Card.withheld_by` (the nodes that beat it), and this reads THAT rather than re-deriving the rule,
+// so the chip cannot disagree with the ledger — a gated single substitution keeps `[]` and never
+// reads as beaten. A card the ledger closed (`card_terminal`: dropped, gated, abandoned) keeps its
+// ordinary chip: its closure is the stronger fact.
+export const WITHHELD_LABEL = 'not returned — a later build on it beat it'
+
 /**
  * The chip for a card the queue will not pick up: `{tone, label, title}`, or null when it will.
  *
@@ -139,6 +150,15 @@ export function cardSelectionBlock(card) {
   }
   if (lifecycle.length) {
     const name = lifecycle[0]
+    const beaten = name === 'work_terminal' && !blockers.includes('card_terminal')
+      ? cardNodes(card.withheld_by) : []
+    if (beaten.length) {
+      const named = beaten.slice(0, 8).map(id => `#${id}`).join(', ')
+        + (beaten.length > 8 ? ` and ${beaten.length - 8} more` : '')
+      return { tone: 'lifecycle', label: WITHHELD_LABEL,
+        title: `${detail} — its build ran something else, and later builds on it (${named}) beat `
+          + 'it, so the engine will not rebuild it; the idea is left to the Researcher' }
+    }
     const label = BLOCKER_LIFECYCLE_BY_STATUS[name]?.[cardStatus(card)] || BLOCKER_LIFECYCLE[name]
     return { tone: 'lifecycle', label, title: detail }
   }

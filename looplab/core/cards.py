@@ -1388,6 +1388,18 @@ class Card(BaseModel):
     # stay in `evidence` and the card retires (`failed`, verdict `open`); a mixed set keeps them
     # there too.
     substituted_nodes: list[int] = Field(default_factory=list)
+    # WHY a single substitution was NOT returned (2026-09-27): the node ids of the later builds ON it
+    # that beat it (`core/idea_report.py::surpassed_by`), exactly the list `card_ledger.py::
+    # _apply_card_returns` withheld the return with. DERIVED, stamped [] on every card and set only
+    # by that decision — so a two-substitution retirement and a GATED single substitution (the two
+    # other shapes that leave a substitution as a card's whole evidence) keep [] and never read
+    # "beaten". The Researcher's board (`agents/state_brief.py::board_prompt_lines`, which renders
+    # these cards in a block of their own), the row clause (`idea_report.py::
+    # card_substitution_brief`), the public wire and the UI chip all read THIS rather than
+    # re-deriving the rule, so none of them can disagree with the ledger about which card it withheld.
+    # Not sticky: it is re-derived on every fold (see `_apply_card_returns` for when the card comes
+    # back).
+    withheld_by: list[int] = Field(default_factory=list)
     best_delta: Optional[float] = None                  # best improvement-over-parent among evidence (audit)
     # --- The RESEARCH-DIRECTION facet's own identity (DERIVED; `events/card_ledger.py`).
     # `id` is the WORK-ITEM identity and `identity.action_digest` binds the executable action; neither

@@ -186,7 +186,12 @@ def surpassed_by(node_id: int, nodes: Mapping, *, direction: str,
     refuted claim, or one its build broke) does not block, so the card comes back and its one
     rebuild may re-test a claim the run already answered — bounded, because that rebuild spends the
     card's forgiveness; and an unrelated descendant that happens to win does block, leaving the idea
-    to the Researcher, whose board row names the nodes (`card_substitution_brief`)."""
+    to the Researcher, who reads the card in a board block of its own with these nodes named
+    (`Card.withheld_by`, `card_substitution_brief`). NOR DOES THE BLOCK STICK: the answer is asked
+    again on every fold, so a winner reset to pending (`node_reset`), aborted, tombstoned or
+    trust-flagged under an enforcing gate stops counting and the card comes back — and a rebuild
+    elected or claimed in that window is then kept even once the winner beats it again
+    (`_apply_card_returns`, "THE WITHHOLD DOES NOT STICK")."""
     from looplab.core.fitness import counts_toward_best, is_better, is_usable_metric
 
     root = nodes.get(node_id)
@@ -219,16 +224,17 @@ def surpassed_by(node_id: int, nodes: Mapping, *, direction: str,
     return sorted(found)
 
 
-def card_substitution_brief(card, nodes: Mapping, *, direction: str,
-                            excluded: Collection[int] = frozenset(),
-                            aborted: Collection[int] = frozenset()) -> str:
+def card_substitution_brief(card, nodes: Mapping) -> str:
     """One clause for a board row — "" for a Card no build ever substituted, else what the board must
     not launder: which nodes built something else, and what that means for the Card now.
 
-    `direction` / `excluded` / `aborted` are the run's — the three the card ledger judged the return
-    with (`RunState.card_substitution_brief` passes them). A card whose one substitution stayed in
-    its evidence because later builds on it beat it (`surpassed_by`) says so and names them, so the
-    Researcher, the one role that reads claims, can tell whether one of them tested this idea.
+    FACTS ONLY. A card the ledger WITHHELD names the later builds on its substitution that beat it,
+    read off `Card.withheld_by` — the list `events/card_ledger.py::_apply_card_returns` decided
+    with, never re-derived here, so a row cannot call a card "beaten" that the ledger kept off the
+    board for another reason: a GATED single substitution says it is gated. What the Researcher may
+    DO about a withheld card is said once, by the block the board renders it in
+    (`agents/state_brief.py::board_prompt_lines`) — the first cut of this clause carried its own
+    "propose it again only if…" and sat under a block that said "do NOT propose one of these again".
 
     Ends with a space when non-empty so a row can splice it in front of its next field unchanged."""
     ids = [nid for nid in (getattr(card, "substituted_nodes", None) or []) if isinstance(nid, int)]
@@ -240,18 +246,20 @@ def card_substitution_brief(card, nodes: Mapping, *, direction: str,
         parts.append(f"node {nid} built " + (f"instead: {built[:120]}" if built else "something else"))
     evidence = list(getattr(card, "evidence", None) or [])
     counted = [nid for nid in evidence if nid not in ids]
-    # The shape a WITHHELD return leaves a card in (`events/card_ledger.py::_apply_card_returns`):
-    # its one forgiven node is this substitution, and it is still the card's whole evidence.
-    later = (surpassed_by(ids[0], nodes, direction=direction, excluded=excluded, aborted=aborted)
-             if evidence == ids and len(ids) == 1 and not getattr(card, "discarded_nodes", None)
-             else [])
+    beaten = [nid for nid in (getattr(card, "withheld_by", None) or []) if isinstance(nid, int)]
     if counted:
         tail = "not counted in this card's verdict"
     elif not evidence:
         tail = "this card's idea is UNTESTED and back on the board"
-    elif later:
-        tail = (f"not returned: node(s) {later[:4]} built on node {ids[0]} and beat it; its idea "
-                "was never tested — propose it again only if none of those tested it")
+    elif beaten:
+        more = f" and {len(beaten) - 4} more" if len(beaten) > 4 else ""
+        tail = (f"not returned: node(s) {beaten[:4]}{more} built on node {ids[0]} and beat it; its "
+                "idea was never tested")
+    elif len(ids) == 1:
+        # The one other shape that leaves a SINGLE substitution as the card's whole evidence: it is
+        # infeasible or trust-excluded, and a gated build is never returned.
+        tail = ("not returned: that build is gated (infeasible or trust-excluded); its idea was "
+                "never tested")
     else:
         tail = "built as something else twice, so retired — its idea was never tested"
     return f"NOT TESTED by {'; '.join(parts)} — {tail}. "
