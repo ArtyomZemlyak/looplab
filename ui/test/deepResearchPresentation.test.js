@@ -296,7 +296,9 @@ test('shared memo presentation keeps takeaway and trust visible while detail sta
       state: reportState, runId: 'run', readOnly: true,
     }))
     assert.ok(reportMarkup.indexOf('New report memo') < reportMarkup.indexOf('Old report memo'),
-      'the report should put the open newest memo before history')
+      'the report should put the newest memo before history')
+    assert.equal((reportMarkup.match(/class="research-memo-region" hidden=""/g) || []).length, 2,
+      'the long memo bodies start collapsed in the report')
 
     // A reset may reuse a node id for a new attempt. Verifier evidence must continue to identify
     // the exact historical attempt rather than offering a bare-id jump into the current attempt.
