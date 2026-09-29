@@ -387,6 +387,7 @@ _LAYOUT = {
     "router_wiring": "serve",   # router mount order + the late-bound `srv.*_fn` registry (doc 25 XP-05)
     "receipt": "core",   # the RECEIPT tier: a durable operation's identity/phase machine (doc 34 D-01)
     "run_deletion": "core",
+    "run_discovery": "core",  # which directories under a runs root are runs, at any depth
     "run_identity": "core",   # the two run-identity shapes: grouping vs cascade attribution
     "run_lifecycle": "engine",  # the run dir's lifecycle fences + config-write lock, moved DOWN out
                                 # of `serve/` so `tools/` takes its defaults downward (doc 25 XP-03)

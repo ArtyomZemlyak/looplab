@@ -1550,7 +1550,7 @@ looplab belief-key-split RUNS_ROOT [--limit 20] [--json]
 
 | Option | Default | Description |
 |---|---|---|
-| `RUNS_ROOT` | `runs` | The runs root (one subdirectory per run), or a single run directory. One `fold` per run |
+| `RUNS_ROOT` | `runs` | The runs root (runs found at any depth, the walk stopping at a run), or a single run directory. One `fold` per run |
 | `--limit` | `20` | How many split groups to print, widest first |
 | `--json` | off | Emit the whole report as JSON |
 
@@ -2374,7 +2374,7 @@ looplab memory-orphans MEMORY_DIR [--runs-root runs] [--apply] [--limit 25] [--j
 | Option | Default | Description |
 |---|---|---|
 | `MEMORY_DIR` | *(required)* | Cross-run memory dir (holds `cases.jsonl`, `lessons.jsonl`, …) |
-| `--runs-root DIR` | `runs` | The run root that decides which runs still exist |
+| `--runs-root DIR` | `runs` | The run root that decides which runs still exist — walked to any depth (`runs/<campaign>/<seed>` is a live run), and a subtree it cannot list or that is deeper than the bound makes the survey fail closed |
 | `--apply` | off | Actually purge. Without it, nothing is written. **Irreversible** |
 | `--limit N` | `25` | How many contributing runs to list |
 | `--json` | off | Emit the survey as JSON |

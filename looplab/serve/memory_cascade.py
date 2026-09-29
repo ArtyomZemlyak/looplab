@@ -54,6 +54,7 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
+from looplab.core.run_discovery import DEFAULT_MAX_DEPTH, discover_run_dirs, is_run_dir
 from looplab.core.run_identity import row_belongs_to_run
 from looplab.core.jsonlio import (
     read_jsonl_lenient, replace_jsonl_rows_atomic_preserving_quarantine)
@@ -352,15 +353,22 @@ def known_memory_dirs(runs_root: str | Path, *, fallback_memory_dir: str = "") -
         entries = sorted(root.iterdir()) if root.is_dir() else []
     except OSError:
         entries = []
-    for rd in entries:
-        if not rd.is_dir() or rd.name.startswith("."):
-            continue
+    def _add_snapshot(rd: Path) -> None:
         try:
             cfg = json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))
         except Exception:  # noqa: BLE001 — a run with no readable snapshot names no store
-            continue
+            return
         if isinstance(cfg, dict):
             _add(_text(cfg.get("memory_dir")))
+
+    for rd in entries:
+        if not rd.is_dir() or rd.name.startswith("."):
+            continue
+        _add_snapshot(rd)
+        if not is_run_dir(rd):
+            # the runs a campaign directory holds name their stores too (`core/run_discovery.py`)
+            for inner in discover_run_dirs(rd, max_depth=DEFAULT_MAX_DEPTH - 1).runs:
+                _add_snapshot(inner)
     return known
 
 
@@ -777,19 +785,33 @@ def surviving_run_identities(runs_root: str | Path) -> dict:
         entries = sorted(root.iterdir())
     except OSError:
         return {"names": names, "uids": uids, "unreadable": ["<runs root unreadable>"]}
-    for run_dir in entries:
-        try:
-            if not run_dir.is_dir() or run_dir.name.startswith("."):
-                continue
-        except OSError:
-            continue
+    def _record(run_dir: Path, label: str) -> None:
         names.add(run_dir.name)
         identity = run_memory_identity(run_dir)
         if identity["run_uid"]:
             uids.add(identity["run_uid"])
         elif identity["run_uid_source"] == "unreadable":
             # We cannot say this run has no uid — only that we could not look. See above.
-            unreadable.append(run_dir.name)
+            unreadable.append(label)
+
+    for run_dir in entries:
+        try:
+            if not run_dir.is_dir() or run_dir.name.startswith("."):
+                continue
+        except OSError:
+            continue
+        _record(run_dir, run_dir.name)
+        if is_run_dir(run_dir):
+            continue
+        # A directory that is not a run may HOLD runs (`runs/<campaign>/<seed>`, any `--out`).
+        # Listing only the root's children left such a live run's uid unknown, so every row it
+        # wrote read as an orphan here (`core/run_discovery.py`). A subtree the walk could not
+        # list, or that is deeper than its bound, is an unknown too, and fails closed like one.
+        nested = discover_run_dirs(run_dir, max_depth=DEFAULT_MAX_DEPTH - 1)
+        for inner in nested.runs:
+            _record(inner, inner.relative_to(root).as_posix())
+        unreadable.extend(f"{path.relative_to(root).as_posix()} (not walked)"
+                          for path in nested.unwalked)
     return {"names": names, "uids": uids, "unreadable": unreadable}
 
 

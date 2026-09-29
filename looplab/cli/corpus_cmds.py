@@ -43,24 +43,40 @@ from looplab.cli import app
 # What a run directory IS, for the walk: the event log. Every instrument here folds it, so a
 # directory without one is not a run this command can say anything about.
 _EVENTS = "events.jsonl"
-_RUNS_ROOT_HINT = ("Pass the runs ROOT (the directory holding one subdirectory per run), or a "
+_RUNS_ROOT_HINT = ("Pass the runs ROOT (the directory holding the runs, at any depth), or a "
                    "single run directory.")
 
 
 def _run_dirs(runs_root: Path) -> list[Path]:
-    """Every run directory under `runs_root`, sorted by name; the root itself if IT is a run.
+    """Every run directory under `runs_root`, sorted by path; the root itself if IT is a run.
 
-    Deliberately ONE level deep and not a recursive walk: a run's own per-node workdirs sit under it
-    and a nested `events.jsonl` there would be counted as a second run. The single-directory case is
-    admitted because "does this run have a curve?" is a fair question to ask of one run, and
-    refusing it would push the operator into inventing a temporary root.
+    At any depth (`core/run_discovery.py`): a campaign written as `<root>/<campaign>/<seed>` was
+    invisible to the one-level listing, so every instrument here under-counted it in silence. The
+    walk stops AT a run, so a run's own per-node workdirs are never counted as a second run — the
+    reason the listing used to stay one level deep. What the walk could not list is said on stderr,
+    never dropped. The single-directory case is admitted because "does this run have a curve?" is a
+    fair question to ask of one run, and refusing it would push the operator into inventing a
+    temporary root.
     """
-    if (runs_root / _EVENTS).exists():
-        return [runs_root]
-    if not runs_root.is_dir():
+    from looplab.core.run_discovery import discover_run_dirs, is_run_dir
+
+    if not is_run_dir(runs_root) and not runs_root.is_dir():
         return []
-    return sorted((child for child in runs_root.iterdir()
-                   if child.is_dir() and (child / _EVENTS).exists()), key=lambda p: p.name)
+    found = discover_run_dirs(runs_root)
+    for path in found.unwalked:
+        typer.echo(f"  ! {path}: not walked (unreadable, or deeper than the discovery bound) — "
+                   "runs under it are not counted", err=True)
+    return found.runs
+
+
+def _run_label(runs_root: Path, run_dir: Path) -> str:
+    """The run's name, or its path under the root when it is nested, so two campaigns' `seed1` stay
+    two rows."""
+    try:
+        relative = run_dir.relative_to(runs_root).as_posix()
+    except ValueError:
+        return run_dir.name
+    return relative if relative not in ("", ".") else run_dir.name
 
 
 def _folded(runs_root: Path) -> Iterator[tuple[str, object, Path, list]]:
@@ -76,10 +92,11 @@ def _folded(runs_root: Path) -> Iterator[tuple[str, object, Path, list]]:
     from looplab.events.replay import fold
 
     for run_dir in _run_dirs(runs_root):
+        label = _run_label(runs_root, run_dir)
         try:
             events = EventStore(run_dir / _EVENTS).read_all()
         except (OSError, EventLogCorruptionError) as exc:
-            typer.echo(f"  ! {run_dir.name}: unreadable event log ({type(exc).__name__}) — skipped",
+            typer.echo(f"  ! {label}: unreadable event log ({type(exc).__name__}) — skipped",
                        err=True)
             continue
         # A log damaged part-way READS as its valid prefix — `EventLogCorruptionError` fires on an
@@ -87,11 +104,11 @@ def _folded(runs_root: Path) -> Iterator[tuple[str, object, Path, list]]:
         # every pooled figure (critic 2026-09-26, driven). The receipt's contract is "we cannot show
         # you this run", not a footnote on numbers printed anyway (`eventstore.py::log_integrity`),
         # so the run is SKIPPED, in the one wording every text surface prints for it.
-        sentence = integrity_sentence(log_integrity(run_dir / _EVENTS), run_label=run_dir.name)
+        sentence = integrity_sentence(log_integrity(run_dir / _EVENTS), run_label=label)
         if sentence:
             typer.echo(f"  ! {sentence} Skipped.", err=True)
             continue
-        yield run_dir.name, fold(events), run_dir, events
+        yield label, fold(events), run_dir, events
 
 
 def _emit_json(payload: dict) -> None:
