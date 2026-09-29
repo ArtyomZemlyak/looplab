@@ -1284,6 +1284,12 @@ function _CardKanban({
   const { work: laneCards, questions: laneQuestions } = splitBoardByKind(visibleCards)
   const filteredLaneCards = laneQuery.trim()
     ? laneCards.filter(card => cardMatchesQuery(card, laneQuery)) : laneCards
+  const laneGroups = lanes.map(([key, label, hint]) => ({
+    key, label, hint,
+    rows: filteredLaneCards.filter(card => _cardStatus(card) === key).sort(_cardOrder),
+  }))
+  const occupiedLanes = laneGroups.filter(lane => lane.rows.length)
+  const emptyLanes = laneGroups.filter(lane => !lane.rows.length)
   // Said where the lanes are, not where the questions went: an operator who sees fewer rows than the
   // board's own total needs the reconciliation on the surface that shrank.
   const questionNotice = laneQuestions.length > 0 && grouping === 'lanes'
@@ -1318,21 +1324,27 @@ function _CardKanban({
     </div>
   const board = laneQuery.trim() && !filteredLaneCards.length
     ? <div className="card-filter-empty" role="status">No work items match this search.</div>
-    : <div className="card-board" role="region" aria-label="Card lifecycle kanban">
-    {lanes.map(([key, label, hint]) => {
-      const rows = filteredLaneCards.filter(card => _cardStatus(card) === key).sort(_cardOrder)
-      const tone = _CARD_FROZEN_STATUSES.has(key) ? ` card-${key}` : ''
-      const laneId = `card-lane-${encodeURIComponent(key)}`
-      return <section key={key} className={'card-col' + tone + (rows.length ? '' : ' empty')}
-        aria-labelledby={laneId}>
-        <h3 id={laneId} className="card-col-h" title={hint}>
-          {label} <span className="muted">{rows.length}</span>
-        </h3>
-        {rows.map(renderCard)}
-        {rows.length === 0 && <div className="muted card-empty">—</div>}
-      </section>
-    })}
-  </div>
+    : <>
+      {emptyLanes.length > 0 && <div className="card-empty-lanes" role="group"
+        aria-label={laneQuery.trim() ? 'Statuses without matching work items' : 'Empty lifecycle statuses'}>
+        <span className="card-empty-lanes-label">{laneQuery.trim() ? 'No matches in' : 'Empty now'}</span>
+        {emptyLanes.map(({ key, label, hint }) => <span key={key} className="card-empty-lane"
+          title={hint}>{label} <span className="muted">0</span></span>)}
+      </div>}
+      <div className="card-board" role="region" aria-label="Card lifecycle kanban">
+        {occupiedLanes.length === 0 && <div className="card-filter-empty">No work items yet.</div>}
+        {occupiedLanes.map(({ key, label, hint, rows }) => {
+          const tone = _CARD_FROZEN_STATUSES.has(key) ? ` card-${key}` : ''
+          const laneId = `card-lane-${encodeURIComponent(key)}`
+          return <section key={key} className={'card-col' + tone} aria-labelledby={laneId}>
+            <h3 id={laneId} className="card-col-h" title={hint}>
+              {label} <span className="muted">{rows.length}</span>
+            </h3>
+            {rows.map(renderCard)}
+          </section>
+        })}
+      </div>
+    </>
   if (view) {
     // The workspace shape the modal could never have: lanes keep the whole left column (and their own
     // horizontal scroll when occupied lanes exceed it), and the
@@ -1340,7 +1352,8 @@ function _CardKanban({
     // RunView already owns for the graph inspector — same width, same persisted `ll.sideW`, same
     // splitter, same compact drawer — so the board inherits the workspace's behaviour instead of
     // growing a second, subtly different one.
-    return <div className={'main run-workspace card-workspace' + (pane?.compact ? ' compact' : '')}>
+    return <div className={'main run-workspace card-workspace'
+      + (pane?.compact ? ' compact' : '') + (detailOpen ? ' detail-open' : '')}>
       <div className="card-lanes-wrap">
         <div className="card-lanes-head">
           <span className="muted">{sub}</span>

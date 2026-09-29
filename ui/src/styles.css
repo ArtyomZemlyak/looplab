@@ -631,8 +631,7 @@ button { font: inherit; }
 .hyp-stmt { min-width: 0; font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; }
 .hyp-src { display: inline-flex; vertical-align: -1px; color: var(--fg-dim); }
 
-/* Keep empty lifecycle lanes visible but narrow, so the first occupied lane stays on screen beside
-   Assistant. Populated lanes retain a reading width and scroll horizontally when needed. */
+/* Keep every status visible while giving the available width to work that actually exists. */
 .card-projection-note { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; padding: 6px 8px;
   border: 1px solid color-mix(in srgb, var(--working) 55%, var(--line)); border-radius: 7px;
   background: color-mix(in srgb, var(--working) 7%, var(--bg-2)); color: var(--working-text); font-size: 11px; }
@@ -640,9 +639,12 @@ button { font: inherit; }
 .card-board { display: flex; gap: 10px;
   align-items: start; overflow-x: auto; overscroll-behavior-inline: contain; padding: 1px 1px 8px; }
 .card-col { background: var(--bg-2); border: 1px solid var(--border); border-radius: 8px; padding: 10px;
-  min-height: 80px; min-width: 0; flex: 0 0 270px; }
-.card-col.empty { flex-basis: 116px; }
-.card-col:not(.empty) { flex-grow: 1; max-width: 520px; }
+  min-height: 80px; min-width: 280px; flex: 1 0 280px; max-width: 640px; }
+.card-empty-lanes { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 7px;
+  margin: 0 0 10px; color: var(--fg-dim); font-size: 11px; }
+.card-empty-lanes-label { margin-right: 2px; }
+.card-empty-lane { border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px;
+  background: var(--bg-2); white-space: nowrap; }
 .card-col-h { font-weight: 650; font-size: 12px; margin: 0 0 10px;
   text-transform: uppercase; letter-spacing: .03em; }
 .card-col.card-building .card-col-h, .card-col.card-running .card-col-h { color: var(--working-text); }
@@ -850,6 +852,9 @@ button { font: inherit; }
   body.asst-side-open .card-workspace .card-detail-side { position: absolute; inset: 0 0 0 auto;
     z-index: 32; width: min(560px, 68%) !important; box-shadow: var(--shadow);
     border-left-color: var(--line-2); }
+  /* The detail floats over the board here. Keep the first lane inside the exposed reading strip. */
+  body.asst-side-open .card-workspace.detail-open .card-col {
+    max-width: min(640px, calc(100% - min(560px, 68%))); }
 }
 
 .card-kanban-controls { margin-top: 7px; border-top: 1px solid var(--line); padding-top: 5px; }

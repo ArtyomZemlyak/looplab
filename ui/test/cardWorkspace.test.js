@@ -202,6 +202,24 @@ test('the view layout renders the board without a modal dialog wrapper', () => {
   assert.doesNotMatch(html, /card-detail-side/)
 })
 
+test('empty statuses stay visible without narrowing occupied Card lanes', () => {
+  const html = render()
+  assert.equal((html.match(/<section class="card-col(?: |")/g) || []).length, 3)
+  assert.match(html, /aria-label="Empty lifecycle statuses"/)
+  assert.match(html, /Proposed <span class="muted">0<\/span>/)
+  const one = render({ state: { ...STATE, cards: { 'card-many': STATE.cards['card-many'] } } })
+  assert.equal((one.match(/<section class="card-col(?: |")/g) || []).length, 1)
+  assert.match(one, /Evaluated <span class="muted">1<\/span>/)
+  assert.match(one, /Dropped <span class="muted">0<\/span>/)
+})
+
+test('an empty Card board still explains its state and shows the lifecycle', () => {
+  const html = render({ state: { ...STATE, cards: {} } })
+  assert.match(html, /No work items yet\./)
+  assert.match(html, /aria-label="Empty lifecycle statuses"/)
+  assert.doesNotMatch(html, /<section class="card-col/)
+})
+
 test('a Card link outside the loaded board explains the missing detail and can be cleared', () => {
   const html = render({ pane: { compact: false, width: 420 }, selectedCardId: 'card-omitted' })
   assert.ok(html.includes('Card <code>card-omitted</code> is not in the loaded board.'))
@@ -229,6 +247,7 @@ test('wide workspace opens details only after a Card is picked', () => {
   const closed = render({ pane: { compact: false, width: 420 } })
   assert.doesNotMatch(closed, /card-detail-side/)
   const open = render({ pane: { compact: false, width: 420 }, selectedCardId: 'card-many' })
+  assert.match(open, /class="main run-workspace card-workspace detail-open"/)
   assert.match(open, /card-detail-side/)
   assert.match(open, /class="card-detail-heading">Log-transform the target<\/h2>/)
   assert.ok(open.indexOf('card-detail-heading') < open.indexOf('card-attempts'))
