@@ -271,3 +271,95 @@ def test_the_compatibility_build_gates_exactly_what_did_not_cross_the_gate(tmp_p
     assert gates == [1], "an EQUAL copy has not crossed the gate"
     engine._create_node({"kind": "draft"}, preproposed=third)
     assert gates == [1, 1], "no capability without the holder's statement"
+
+
+# ------------------------------------------------------------------ the run's stop (WP-STOP)
+
+def test_a_stop_during_the_chunks_batch_proposal_buys_no_further_roll_and_reserves_nothing(
+        tmp_path):
+    """Every roll of a batch is its own paid proposal. A stop landing in roll 1 ends the batch
+    there — its idea is refused before the novelty gate and counted once on the DIAGNOSTIC
+    `discarded` beacon — and the chunk then reserves nothing and writes no folded audit row for
+    nodes that will never exist; the next chunk's fresh fold ends the lane."""
+    engine = _chunk_engine(tmp_path / "run")
+    scripted = engine.researcher
+    real_propose = scripted.propose
+
+    def _stops_in_the_first_roll(state, parent):
+        idea = real_propose(state, parent)
+        if scripted.calls == 1:
+            engine.store.append("pause", {"reason": "operator stop (`looplab stop`)"})
+        return idea
+
+    scripted.propose = _stops_in_the_first_roll
+    gates = _count_gates(engine)
+    batches: list[int] = []
+    real_batch = engine._await_batch_proposal
+
+    async def _counting_batch(state, width):
+        batches.append(width)
+        return await real_batch(state, width)
+
+    engine._await_batch_proposal = _counting_batch
+    anyio.run(engine.run)
+    events = engine.store.read_all()
+
+    assert scripted.calls == 1, f"{scripted.calls} rolls paid for; the stop landed in the first"
+    assert gates == [], "the refused roll's novelty gate was paid for after the stop"
+    assert len(batches) == 1, "the next chunk's batch proposal started after the stop"
+    assert not [e for e in events if e.type in (EV_CARD_ADDED, EV_NODE_BUILDING,
+                                                "policy_decision", "rung_promoted")]
+    discarded = [(e.data["status"], e.data.get("reason")) for e in events
+                 if e.type == "phase_progress" and e.data.get("phase") == "discarded"]
+    assert discarded == [("started", "run_is_stopping"), ("finished", "run_is_stopping")]
+    assert fold(events).paused and not fold(events).finished
+
+
+def test_a_stop_landing_after_the_chunks_batch_returned_refuses_each_idea_before_any_row(tmp_path):
+    """The stop lands once the batch has returned its ideas: each was paid for, so each is counted
+    on the DIAGNOSTIC beacon — and none reaches a reservation, whose fence would refuse it `halted`
+    only after the chunk's folded audit rows had been written for nodes that will never exist."""
+    engine = _chunk_engine(tmp_path / "run")
+    real_batch = engine._await_batch_proposal
+    returned: list[int] = []
+
+    async def _stop_after_the_batch(state, width):
+        ideas, telemetry, dropped = await real_batch(state, width)
+        returned.append(len(ideas))
+        engine.store.append("pause", {"reason": "operator stop (`looplab stop`)"})
+        return ideas, telemetry, dropped
+
+    engine._await_batch_proposal = _stop_after_the_batch
+    reservations: list[int] = []
+    real_reserve = engine._reserve_node_build
+
+    def _counting_reserve(*args, **kwargs):
+        reservations.append(1)
+        return real_reserve(*args, **kwargs)
+
+    engine._reserve_node_build = _counting_reserve
+    anyio.run(engine.run)
+    events = engine.store.read_all()
+
+    assert returned == [2], returned
+    assert reservations == [], "a paid idea reached the reservation after the stop"
+    assert not [e for e in events if e.type in (EV_NODE_BUILDING, "policy_decision",
+                                                "rung_promoted")]
+    discarded = [(e.data["status"], e.data.get("reason")) for e in events
+                 if e.type == "phase_progress" and e.data.get("phase") == "discarded"]
+    assert discarded == [("started", "run_is_stopping"), ("finished", "run_is_stopping")] * 2
+
+
+def test_a_batch_proposal_on_a_halted_fold_rolls_nothing(tmp_path):
+    """Every roll is a NEW paid proposal: `_propose_batch` asks the run's stop before each one, the
+    first included (a native batch that yields nothing falls through to these rolls)."""
+    engine = make_engine(tmp_path / "run", n_seeds=3, max_nodes=6)
+    engine.store.append("run_started", {"run_id": "r", "task_id": "toy", "direction": "min"})
+    engine.store.append("pause", {"reason": "operator stop (`looplab stop`)"})
+    engine._novelty_mode = "off"
+    scripted = _ScriptedResearcher()
+    engine.researcher = scripted
+
+    proposal = engine._propose_batch(fold(engine.store.read_all()), 3)
+
+    assert scripted.calls == 0 and proposal.ideas == []

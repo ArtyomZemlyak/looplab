@@ -958,6 +958,11 @@ class NodeBuildMixin:
         IDENTITY test (review 2026-09-22, ENG1-12). It was an engine list this method consumed.
         """
         kind = action["kind"]
+        if state.halted:
+            # The ONE funnel every proposal crosses asks the stop too (WP-STOP): no paid propose is
+            # started on a halted fold, whichever lane handed it here. Nothing was paid, so nothing
+            # is recorded.
+            return None
         events = list(proposal_events) if proposal_events is not None else self.store.read_all()
         try:
             setattr(researcher, "_steering_context", [])
@@ -967,6 +972,21 @@ class NodeBuildMixin:
         if parent_snapshot is None:
             return None
         _kind, parents, parent_generations = parent_snapshot
+
+        def _stopped_after_paying() -> bool:
+            """Did the run STOP while the proposal just returned was paid for? (WP-STOP)
+
+            Asked on a FRESH fold after the propose and before the novelty gate, which may buy an
+            adjudication and then a whole second proposal: on MiniOneRec inf13 the gate ran 95 s
+            after the operator's pause, for an idea every fence downstream refused anyway. The idea
+            is dropped here, never handed on ungated, and the paid call it cost is counted on the
+            DIAGNOSTIC `discarded` beacon — this runs in a worker, where invariant #1 allows exactly
+            that. The in-flight propose itself was allowed to finish; no new call starts."""
+            if not self._run_halted_now():
+                return False
+            self._beacon_discarded_proposal("run_is_stopping", node_id=prospective_node_id,
+                                            prospective=True, operator=str(kind or ""))
+            return True
 
         def _link(candidate, *, proposed: bool = True, receipt_from=None) -> Optional[Idea]:
             if candidate is None:
@@ -1093,6 +1113,8 @@ class NodeBuildMixin:
                 return linked
             if already_gated:
                 return linked
+            if _stopped_after_paying():
+                return None
             # Direct callers may supply a concrete proposal without a batch reservation. Resolve its
             # final writer-owned Card id first, then run the same proposal-bound novelty sidecar as the
             # ordinary draft/improve path. Reserved parallel batches bypass this helper entirely: their
@@ -1110,14 +1132,21 @@ class NodeBuildMixin:
             with self.tracer.span("propose") as _span:
                 idea = _link(self._canonicalize_draft_idea(researcher.propose(state, None)))
                 stamp_proposal_span(_span, idea, node_id=prospective_node_id)
-            if idea is None:
+            if idea is None or _stopped_after_paying():
                 return None
+
+            def _repropose_draft():
+                if self._run_halted_now():
+                    # The gate's second proposal is a NEW paid call (WP-STOP): a stop that landed
+                    # during the adjudication starts none. `None` keeps the original idea.
+                    return None
+                return _link(self._canonicalize_draft_idea(researcher.propose(state, None)))
+
             with self._paid_progress(PROGRESS_STAGE_BUILD, "novelty",
                                      node_id=prospective_node_id, prospective=True, operator=kind):
                 final = self._apply_novelty_gate(
                     state, idea,
-                    repropose=lambda: _link(self._canonicalize_draft_idea(
-                        researcher.propose(state, None))),
+                    repropose=_repropose_draft,
                     researcher=researcher, prospective_node_id=prospective_node_id,
                     drop_repeated_duplicate=drop_repeated_duplicate)
             return _link(final)
@@ -1161,6 +1190,10 @@ class NodeBuildMixin:
         answered_by = [proposer]
 
         def _repropose(p=parent):
+            if self._run_halted_now():
+                # The gate's second proposal is a NEW paid call (WP-STOP): a stop that landed during
+                # the adjudication starts none. `None` keeps the original, which the fences refuse.
+                return None
             answered_by[0] = researcher
             return _link(self._canonicalize_idea_operator(
                 researcher.propose(state, p), authoritative_operator))
@@ -1169,7 +1202,7 @@ class NodeBuildMixin:
             idea = _link(self._canonicalize_idea_operator(
                 proposer.propose(state, parent), authoritative_operator), receipt_from=proposer)
             stamp_proposal_span(_span, idea, node_id=prospective_node_id)
-        if idea is None:
+        if idea is None or _stopped_after_paying():
             return None
         with self._paid_progress(PROGRESS_STAGE_BUILD, "novelty",
                                  node_id=prospective_node_id, prospective=True, operator=kind):
@@ -1243,6 +1276,8 @@ class NodeBuildMixin:
         # the shared researcher already proposed + novelty-gated in the batch pass (`_propose_batch`), so
         # the fan-out only IMPLEMENTS it. All default to the serial behaviour.
         researcher, developer = roles if roles is not None else (self.researcher, self.developer)
+        # WHY the reservation below made none (`RESERVATION_REFUSALS`), for the discard receipt.
+        refusal: list = []
         if reserved is None:
             # `folded` is `_create_node`'s own `(events, state)` for this build (EVT-04): the same
             # prefix this line used to re-read and re-fold. The gap it widens is a few statements
@@ -1253,6 +1288,14 @@ class NodeBuildMixin:
             else:
                 proposal_events = self.store.read_all()
                 proposal_state = fold(proposal_events)
+            if proposal_state.halted:
+                # NO PAID PROPOSE ON A HALTED FOLD (WP-STOP). The reservation below refuses a halted
+                # run — AFTER the proposal it reserves was paid for; on MiniOneRec inf13 that was the
+                # second full foresight proposal of one stopped turn. RETURN, never raise: this runs
+                # in an `_offload_build` worker, where a raise does not end the run the way the
+                # loop's own gates do (`tests/test_node_open_budget_floor.py`). Nothing was paid, so
+                # nothing is recorded; the loop's next head reads the same halt and exits.
+                return
             # Both halves of the score fence, from THIS fold — the paid propose below runs between
             # here and the reservation. See `card_reservation.scored_anchor`.
             _proposal_anchor_id, _proposal_anchor_attempt = scored_anchor(proposal_state)
@@ -1292,7 +1335,7 @@ class NodeBuildMixin:
                     # asks becomes another node under card-N instead of a byte-identical twin. Spelled
                     # here rather than defaulted inside the reservation: four other callers reach that
                     # method and none of them may attach (see `_plan_native_card`).
-                    retry_attach=True)
+                    retry_attach=True, refusal=refusal)
         if reserved is None:
             # A RECEIPT, because this branch spends money and used to leave nothing behind.
             # `_reserve_node_build` returns None when a control/research/lifecycle row won its CAS,
@@ -1303,13 +1346,11 @@ class NodeBuildMixin:
             # the fact. `offloaded-serial-build-reserves-off-the-main-task` is the loss itself;
             # this only makes it countable.
             self._discard_node_build_telemetry(researcher=researcher, developer=developer)
-            # `_progress` is a CONTEXT MANAGER: a bare call builds a generator and emits nothing.
-            # The first cut of this receipt was exactly that no-op, and it was caught by driving it
-            # rather than reading it — which is the same lesson this file's own guard rules state.
-            with self._progress(PROGRESS_STAGE_BUILD, "discarded",
-                                operator=str(action.get("kind") or ""),
-                                reason="reservation_lost_the_cas"):
-                pass
+            # A `halted` refusal is the run's STOP landing while the proposal was paid for (WP-STOP),
+            # not a lost race, and the receipt says which — the Card session lane's word for it.
+            self._beacon_discarded_proposal(
+                "run_is_stopping" if refusal == ["halted"] else "reservation_lost_the_cas",
+                operator=str(action.get("kind") or ""))
             return
         state = reserved.state
         node_id = reserved.node_id

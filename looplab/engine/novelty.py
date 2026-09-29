@@ -1089,6 +1089,17 @@ class NoveltyGateMixin:
                     plan.disposition, prospective_base + slot, linked, lane="batch_planner"))
             return plan.idea if plan.disposition in {"mint", "reuse"} else None
 
+        def _stopped_after_paying(slot: int) -> bool:
+            """WP-STOP: did the run halt while the roll just returned was paid for? Then that idea is
+            refused HERE, before its novelty gate buys an adjudication (and maybe a re-proposal) for
+            an idea the fences downstream refuse anyway — counted once on the DIAGNOSTIC `discarded`
+            beacon, which this worker may append. `node_build.py::_prepare_node_idea`'s twin."""
+            if not self._run_halted_now():
+                return False
+            self._beacon_discarded_proposal("run_is_stopping", node_id=prospective_base + slot,
+                                            prospective=True, operator="draft")
+            return True
+
         if callable(native):
             try:
                 from itertools import islice
@@ -1100,6 +1111,8 @@ class NoveltyGateMixin:
                 produced = list(islice(native(state, n) or (), n))
 
                 def _native_repropose():
+                    if self._run_halted_now():
+                        return None        # WP-STOP: the gate's re-proposal is a NEW paid call
                     replacement = list(islice(native(state, 1) or (), 1))
                     return (_link_card(self._canonicalize_draft_idea(replacement[0]), len(ideas))
                             if replacement else None)
@@ -1110,6 +1123,8 @@ class NoveltyGateMixin:
                     idea = _link_card(self._canonicalize_draft_idea(idea), len(ideas))
                     if idea is None:
                         continue
+                    if _stopped_after_paying(len(ideas)):
+                        break
                     idea = self._apply_novelty_gate(
                         state,
                         idea,
@@ -1159,6 +1174,11 @@ class NoveltyGateMixin:
         attempts, max_attempts = 0, n * 2 + 2
         try:
             while len(ideas) < n and attempts < max_attempts:
+                if self._run_halted_now():
+                    # WP-STOP: every roll is a NEW paid proposal, so a run that halted — before
+                    # this batch, or while an earlier roll was paid for — starts no further roll.
+                    # The ideas already accepted go back to the caller, whose fences refuse them.
+                    break
                 attempts += 1
                 if ideas:
                     taken = "; ".join(filter(None, (self._idea_text(x)[:200] for x in ideas)))
@@ -1188,12 +1208,20 @@ class NoveltyGateMixin:
                 idea = _link_card(self._canonicalize_draft_idea(idea), len(ideas))
                 if idea is None:
                     continue
+                if _stopped_after_paying(len(ideas)):
+                    break
+
+                def _repropose_roll():
+                    if self._run_halted_now():
+                        return None        # WP-STOP: the gate's re-proposal is a NEW paid call
+                    return _link_card(self._canonicalize_draft_idea(
+                        self.researcher.propose(state, None)), len(ideas))
+
                 # Normal vs-history novelty gate (one informed re-propose on a semantic hit), exactly as
                 # the serial draft path runs it — then drop an intra-batch near-duplicate.
                 idea = self._apply_novelty_gate(
                     state, idea,
-                    repropose=lambda: _link_card(self._canonicalize_draft_idea(
-                        self.researcher.propose(state, None)), len(ideas)),
+                    repropose=_repropose_roll,
                     prospective_node_id=prospective_base + len(ideas))
                 idea = _link_card(idea, len(ideas))
                 if idea is None:

@@ -490,6 +490,110 @@ def test_mint_and_build_claim_tail_cas_rejects_a_pause_winning_after_plan(
     assert not any(event.type in {EV_CARD_ADDED, EV_NODE_BUILDING} for event in events)
 
 
+@pytest.mark.parametrize("halt", [("pause", {"reason": "operator stop (`looplab stop`)"}),
+                                  ("pause", {"reason": "drain", "drain_builds": True}),
+                                  ("run_abort", {"reason": "finalized"}),
+                                  ("run_finished", {"reason": "done"})],
+                         ids=["stop", "drain", "abort", "finish"])
+def test_a_serial_create_on_a_halted_fold_proposes_nothing_and_returns(tmp_path, halt):
+    """WP-STOP: the reservation fence above refuses a halted run — AFTER the proposal it reserves
+    was paid for. `_create_node` asks the halt on its own proposal fold first and RETURNS (it runs
+    in an `_offload_build` worker, where a raise does not end the run), so neither role is called
+    and nothing is written: an unpaid skipped try has no loss to record. Every halt counts — an
+    operator stop, a drain stop, a requested finish, a finished run."""
+    developer = _Developer()
+    engine = _engine(tmp_path / "halted-serial", idea=_idea("never proposed", 0.5),
+                     developer=developer)
+    _start(engine)
+    engine.store.append(*halt)
+    assert fold(engine.store.read_all()).halted
+    before = [event.seq for event in engine.store.read_all()]
+
+    assert engine._create_node({"kind": "draft"}) is None
+
+    assert engine.researcher.calls == 0, "a proposal was paid for on a halted fold"
+    assert developer.calls == 0
+    assert [event.seq for event in engine.store.read_all()] == before, (
+        "an unpaid skipped try must write nothing — not even a DIAGNOSTIC discard")
+
+
+def test_a_stop_landing_during_the_serial_propose_is_counted_once_and_nothing_is_minted(tmp_path):
+    """The other half: the propose ALREADY in flight when the stop lands finishes, and its result is
+    refused before the novelty gate can buy anything more — one DIAGNOSTIC `discarded` beacon naming
+    the stop, no Card, no reservation, no Developer call."""
+    developer = _Developer()
+    engine = _engine(tmp_path / "stop-mid-serial", idea=_idea("paid, then stopped", 0.5),
+                     developer=developer)
+    _start(engine)
+    fixed = engine.researcher
+
+    class _StopsWhileProposing:
+        calls = 0
+
+        def propose(self, state, parent):
+            type(self).calls += 1
+            engine.store.append(EV_PAUSE, {"reason": "operator stop (`looplab stop`)"})
+            return fixed.propose(state, parent)
+
+    engine.researcher = _StopsWhileProposing()
+    engine._novelty_mode = "llm"          # the gate would run (and could re-propose) if reached
+    engine._create_node({"kind": "draft"})
+
+    events = engine.store.read_all()
+    assert _StopsWhileProposing.calls == 1 and developer.calls == 0
+    assert not any(e.type in {EV_CARD_ADDED, EV_NODE_BUILDING, EV_NODE_CREATED,
+                              EV_NOVELTY_REJECTED, EV_NOVELTY_GRADED} for e in events)
+    discarded = [e.data for e in events
+                 if e.type == "phase_progress" and e.data.get("phase") == "discarded"]
+    assert [(d["status"], d["reason"]) for d in discarded] == [
+        ("started", "run_is_stopping"), ("finished", "run_is_stopping")], discarded
+    assert not any(e.type == "phase_progress" and e.data.get("phase") == "novelty"
+                   for e in events), "the novelty gate was entered on a halted fold"
+
+
+def test_the_proposal_funnel_starts_no_propose_on_a_halted_fold(tmp_path):
+    """`_prepare_node_idea` is the ONE funnel every proposal crosses, whichever lane handed it a fold;
+    handed a halted one it proposes nothing and records nothing (nothing was paid)."""
+    engine = _engine(tmp_path / "funnel-halted", idea=_idea("never proposed", 0.5))
+    _start(engine)
+    engine.store.append(EV_PAUSE, {"reason": "operator stop (`looplab stop`)"})
+    before = [event.seq for event in engine.store.read_all()]
+    state = fold(engine.store.read_all())
+    assert engine._prepare_node_idea({"kind": "draft"}, state, researcher=engine.researcher,
+                                     prospective_node_id=0, source="researcher") is None
+    assert engine.researcher.calls == 0
+    assert [event.seq for event in engine.store.read_all()] == before
+
+
+def test_a_stop_during_the_novelty_gate_buys_no_reproposal_and_the_receipt_names_it(
+        tmp_path, monkeypatch):
+    """The gate's re-proposal is a whole second paid Researcher call. A stop that lands while the gate
+    adjudicates starts none — the closure hands back `None`, which keeps the original — and the
+    reservation then refuses the idea `halted`; the discard receipt names the STOP
+    (`run_is_stopping`), not a lost race (`reservation_lost_the_cas`)."""
+    developer = _Developer()
+    engine = _engine(tmp_path / "stop-in-gate", idea=_idea("paid, then gated", 0.5),
+                     developer=developer)
+    _start(engine)
+    reproposed: list = []
+
+    def _gate_sees_the_stop(state, idea, repropose=None, **_kwargs):
+        engine.store.append(EV_PAUSE, {"reason": "operator stop (`looplab stop`)"})
+        reproposed.append(repropose())
+        return idea
+
+    monkeypatch.setattr(engine, "_apply_novelty_gate", _gate_sees_the_stop)
+    engine._create_node({"kind": "draft"})
+
+    events = engine.store.read_all()
+    assert reproposed == [None] and engine.researcher.calls == 1 and developer.calls == 0
+    assert not any(e.type in {EV_CARD_ADDED, EV_NODE_BUILDING, EV_NODE_CREATED} for e in events)
+    discarded = [e.data for e in events
+                 if e.type == "phase_progress" and e.data.get("phase") == "discarded"]
+    assert [(d["status"], d["reason"]) for d in discarded] == [
+        ("started", "run_is_stopping"), ("finished", "run_is_stopping")], discarded
+
+
 def test_invalid_long_and_oversized_batch_ideas_do_not_strand_a_valid_sibling(tmp_path):
     long_statement = _idea("placeholder", 1.0)
     # From the shared constant, not a literal: the engine producers used to hardcode a

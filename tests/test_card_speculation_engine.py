@@ -1790,6 +1790,198 @@ def engine_gates_stopping(engine, session) -> bool:
     return engine._session_gates(engine._session_state(), session).stopping
 
 
+# ------------------------------------------------ the OUTER lane's twins of the session-lane stops
+# WP-STOP (MiniOneRec inf13, 2026-09-29). The session lane above closes on `gates.stopping`; the
+# outer create branch — raw staging, its serial compatibility try, the serial Card claim — read the
+# halt only at the loop head, so a stop landing inside a paid call was followed by ANOTHER one.
+
+_OPERATOR_STOP = {"reason": "operator stop (`looplab stop`)"}
+
+
+class _ProposesWhileStopped:
+    """A healthy Researcher whose paid propose may be in flight when the operator stops the run."""
+
+    def __init__(self, store, *, stop: bool):
+        self.store, self.stop, self.calls = store, stop, 0
+
+    def propose(self, _state, _parent):
+        self.calls += 1
+        if self.stop:
+            self.store.append(EV_PAUSE, dict(_OPERATOR_STOP))
+        return Idea(operator="draft", params={"x": 0.3 + self.calls / 10, "y": -1.0},
+                    rationale=f"outer-lane proposal {self.calls}",
+                    hypothesis=f"outer-lane hypothesis {self.calls}")
+
+
+class _StopsOnFirstImplement(_Developer):
+    """The operator's stop lands while the FIRST claimed Card is being built."""
+
+    def __init__(self, store, *, stop: bool):
+        super().__init__()
+        self.store, self.stop = store, stop
+
+    def implement(self, idea: Idea) -> str:
+        if self.stop and self.calls == 0:
+            self.store.append(EV_PAUSE, dict(_OPERATOR_STOP))
+        return super().implement(idea)
+
+
+def _outer_create_turn(engine: Engine) -> tuple[list[dict], list]:
+    """One OUTER create turn as the run loop takes it — the selector's lane handed to
+    `_handle_create_actions` — returning that lane and the rows the turn appended."""
+    events = engine.store.read_all()
+    before = events[-1].seq
+    state = fold(events)
+    creates = [action for action in engine._select_actions(state)
+               if action.get("kind") in ("draft", "improve", "merge")]
+    signal, _state, _turns = anyio.run(lambda: engine._handle_create_actions(
+        creates, state, created_no_terminal=0, no_mint_turns=0, decision_seq=before,
+        max_es=None, max_s=None, start=0.0))
+    assert signal == "continue"
+    return creates, [event for event in engine.store.read_all() if event.seq > before]
+
+
+def _discard_beacons(rows) -> list[tuple]:
+    return [(row.data["status"], row.data.get("reason")) for row in rows
+            if row.type == "phase_progress" and row.data.get("phase") == "discarded"]
+
+
+@pytest.mark.parametrize("stop_lands", [None, "propose", "novelty"])
+def test_an_outer_staging_turn_the_stop_refused_buys_no_serial_compatibility_try(
+        tmp_path, monkeypatch, stop_lands):
+    """The incident's own shape. A stop landing in the paid propose (the idea is dropped before the
+    novelty gate) or in the gate after it (staging refuses it `run_stopping`) must hand the loop back
+    — never fall through to the serial try, which proposed AGAIN (paid) only for the reservation
+    fence to refuse that one too. `None` is the control: the same turn stages its Card, so the
+    stopped cases are not green by never reaching the stager. Mutation: drop the create branch's
+    halt check and the turn enters the serial try (on HEAD before this fix, the `novelty` case
+    then paid a second proposal)."""
+    engine, _producer = _engine(tmp_path / f"outer-stop-{stop_lands}", depth=0)
+    _start(engine)
+    researcher = _ProposesWhileStopped(engine.store, stop=stop_lands == "propose")
+    engine.researcher = researcher
+    serial_tries: list[dict] = []
+    real_create = engine._create_node
+
+    def _counting_create(action, *args, **kwargs):
+        serial_tries.append(action)
+        return real_create(action, *args, **kwargs)
+
+    monkeypatch.setattr(engine, "_create_node", _counting_create)
+    if stop_lands == "novelty":
+        def _gate_then_stop(_state, idea, *_args, **_kwargs):
+            engine.store.append(EV_PAUSE, dict(_OPERATOR_STOP))
+            return idea
+
+        monkeypatch.setattr(engine, "_apply_novelty_gate", _gate_then_stop)
+
+    creates, rows = _outer_create_turn(engine)
+    assert creates and not any(META_CARD_ID in action for action in creates), (
+        "precondition: a RAW lane, the one the staging branch serves")
+    types = [row.type for row in rows]
+    assert researcher.calls == 1, f"{researcher.calls} paid proposals in one turn"
+    assert serial_tries == [], "the turn fell through to the serial compatibility try"
+    assert EV_NODE_BUILDING not in types, "no build may be reserved from a raw staging turn"
+    if stop_lands is None:
+        assert types.count("card_added") == 1 and _discard_beacons(rows) == []
+        return
+    assert "card_added" not in types
+    assert _discard_beacons(rows) == [("started", "run_is_stopping"),
+                                      ("finished", "run_is_stopping")], (
+        "the paid proposal the stop refused is counted exactly once, on a DIAGNOSTIC row")
+    assert fold(engine.store.read_all()).paused
+
+
+def test_a_stop_in_the_first_of_two_staged_proposals_starts_no_second(tmp_path):
+    """The per-action staging lane pays one Researcher call per action, serially, each minutes long.
+    A stop landing in the first ends the lane: the second proposal is never started (its fold is the
+    one from BEFORE the stop, so the funnel's own check cannot see it), and the one already paid for
+    is counted once."""
+    engine, _producer = _engine(tmp_path / "per-action-stop", depth=0)
+    _start(engine)
+    _seed_evaluated_node_zero(engine)
+    engine.store.append(EV_NODE_EVALUATED, {"node_id": 0, "generation": 0, "metric": 1.0,
+                                            "violations": []})
+    researcher = _ProposesWhileStopped(engine.store, stop=True)
+    engine.researcher = researcher
+    state = fold(engine.store.read_all())
+    before = engine.store.read_all()[-1].seq
+    improves = [{"kind": "improve", "parent_id": 0}, {"kind": "improve", "parent_id": 0}]
+
+    assert anyio.run(engine._stage_card_creates, improves, state) == []
+    rows = [event for event in engine.store.read_all() if event.seq > before]
+    assert researcher.calls == 1, f"{researcher.calls} paid proposals after the stop landed"
+    assert _discard_beacons(rows) == [("started", "run_is_stopping"),
+                                      ("finished", "run_is_stopping")]
+    assert "card_added" not in [row.type for row in rows]
+
+
+def test_a_halted_fold_stages_nothing_and_proposes_nothing(tmp_path):
+    """Before any paid call: `_stage_card_creates` on a halted fold returns at once — no proposal,
+    no beacon (nothing was paid), no Card."""
+    engine, _producer = _engine(tmp_path / "outer-halted", depth=0)
+    _start(engine)
+    researcher = _ProposesWhileStopped(engine.store, stop=False)
+    engine.researcher = researcher
+    engine.store.append(EV_PAUSE, dict(_OPERATOR_STOP))
+    before = [event.seq for event in engine.store.read_all()]
+    state = fold(engine.store.read_all())
+
+    assert anyio.run(engine._stage_card_creates, [{"kind": "draft"}], state) == []
+    assert researcher.calls == 0
+    assert [event.seq for event in engine.store.read_all()] == before
+
+
+def test_the_serial_card_claim_refuses_a_halted_run_and_reserves_nothing(tmp_path):
+    """The outer twin of `test_the_claim_path_refuses_a_stopping_run_but_not_a_draining_one`: the
+    serial claim's Developer work is the next paid call, and `_reserve_node_build` already refuses a
+    halted run. Named, so the stall diagnosis can say why."""
+    engine, _producer = _engine(tmp_path / "claim-halted", depth=0)
+    _start(engine)
+    _add_ready_draft(engine, "card-1", x=0.2)
+    actions = engine._select_actions(fold(engine.store.read_all()))
+    assert [action.get(META_CARD_ID) for action in actions] == ["card-1"]
+    engine.store.append(EV_PAUSE, dict(_OPERATOR_STOP))
+    before = [event.seq for event in engine.store.read_all()]
+
+    assert engine._claim_existing_card_builds(actions) is None
+    assert "stopping" in (engine._card_claim_refusal or "")
+    assert [event.seq for event in engine.store.read_all()] == before
+
+
+@pytest.mark.parametrize("stop", [False, True], ids=["control", "stopped"])
+def test_a_stop_during_a_claimed_build_starts_no_second_build(tmp_path, stop):
+    """A two-Card serial lane, claimed atomically; the stop lands while card-1 is being built. That
+    build finishes (a stop never cuts a paid call short), card-2's Developer is never called, and
+    its reservation gets a terminal — left open, a run that FINISHES here would carry a
+    `node_building` marker nothing terminates. Card-2 itself is paid-for inventory the lane only
+    claimed, so it goes back to the board selectable, for `looplab resume` to build."""
+    engine, _producer = _engine(tmp_path / f"claimed-lane-{stop}", depth=0)
+    engine.policy.card_select_k = 2
+    _start(engine)
+    _add_ready_draft(engine, "card-1", x=0.2)
+    _add_ready_draft(engine, "card-2", x=0.8)
+    developer = _StopsOnFirstImplement(engine.store, stop=stop)
+    engine.developer = developer
+
+    creates, rows = _outer_create_turn(engine)
+    assert sorted(action.get(META_CARD_ID) for action in creates) == ["card-1", "card-2"]
+    state = fold(engine.store.read_all())
+    assert not state.buildings, "a reservation was left open"
+    if not stop:
+        assert developer.calls == 2 and len(state.nodes) == 2
+        return
+    assert developer.calls == 1, "the second claimed Card was built after the stop"
+    assert len(state.nodes) == 1
+    unbuilt = creates[1][META_CARD_ID]
+    closed = [row.data for row in rows if row.type == EV_NODE_FAILED]
+    assert [(data.get("card_id"), data["reason"]) for data in closed] == [
+        (unbuilt, "build_batch_cancelled")]
+    assert not [row for row in rows if row.type in ("card_dropped", "card_auto_dropped")]
+    assert state.cards[unbuilt].status == "proposed" and state.cards[unbuilt].selection_ready
+    assert state.paused
+
+
 def test_node_created_before_done_recovery_appends_only_missing_done(tmp_path):
     run_dir = tmp_path / "created-prefix"
     first, _producer = _engine(run_dir)

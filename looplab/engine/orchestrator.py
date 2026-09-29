@@ -2736,6 +2736,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                     limiter.release()
                     break
                 state = fold(self.store.read_all())
+                if state.halted:
+                    # The run's STOP starts no new lane (WP-STOP): the next proposal is itself a
+                    # paid call, and the lanes already building still join below.
+                    limiter.release()
+                    break
                 ideas, telemetry, dropped = await self._await_batch_proposal(state, 1)
                 if not ideas:
                     self._record_dropped_batch_cards(dropped)
@@ -2752,17 +2757,28 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                     self._record_dropped_batch_cards(dropped)
                     limiter.release()
                     break
+                if self._run_halted_now():
+                    # …and a STOP that landed while this proposal was paid for (WP-STOP) refuses it
+                    # before the folded audit rows below are written for a node that will never
+                    # exist. The loss is counted on the DIAGNOSTIC beacon; no new lane starts.
+                    self._beacon_discarded_proposal(
+                        "run_is_stopping", operator=str(action.get("kind") or ""))
+                    self._record_dropped_batch_cards(dropped)
+                    limiter.release()
+                    break
                 if "_scores" in action:
                     self.store.append(EV_POLICY_DECISION,
                                       {"scores": action["_scores"], "chosen": action.get("_chosen"),
                                        "reason": action.get("_reason")})
                 self._append_rung_promotion(action)
                 anchor_id, anchor_attempt = scored_anchor(state)
+                refused: list = []
                 reservation = self._reserve_node_build(
                     action, idea, scored_against=anchor_id,
                     scored_against_attempt=anchor_attempt, source="researcher",
                     steering_context=((telemetry_row or {}).get("_steering_context", [])
-                                      if isinstance(telemetry_row, dict) else []))
+                                      if isinstance(telemetry_row, dict) else []),
+                    refusal=refused)
                 # THE REJECTS GET THEIR NODE-LESS CARDS HERE, on the SUCCESS path too — exactly as
                 # the chunked path does after its reservations are durable. Without this a lane
                 # that proposed one idea and rejected three recorded only the one: the three drops
@@ -2773,6 +2789,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 # iteration as a live gate bypass, because nothing of this proposal outlives it.
                 self._record_dropped_batch_cards(dropped)
                 if reservation is None:
+                    if refused == ["halted"]:
+                        # The same stop, landing between that check and the CAS (the operator's is
+                        # another process): counted too, and the next iteration's fold ends the lane.
+                        self._beacon_discarded_proposal(
+                            "run_is_stopping", operator=str(action.get("kind") or ""))
                     limiter.release()
                     continue
                 pair = free_pairs.pop()
@@ -2944,11 +2965,19 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                     lane = stageable if not self._speculation_enabled() else stageable[:1]
                     if await self._stage_card_creates(lane, state):
                         return "continue", state, _no_mint_turns
-                    if self._create_paused:
+                    if self._create_paused or self._run_halted_now():
                         # …but a staging attempt that GATED the run is not a "rejected" one. The
                         # serial compatibility try below would propose again against the same dead
                         # provider and pay for a second identical refusal. Hand the loop back so it
                         # re-folds, sees `paused`, and stops.
+                        #
+                        # …and neither is one the RUN'S STOP refused (WP-STOP). `_create_paused` is
+                        # set only by the engine's own breakers, never by an operator `pause`, a
+                        # drain pause or a finish, so on MiniOneRec inf13 a `run_stopping` refusal at
+                        # 14:21:21 fell through to the try below and started another paid proposal
+                        # two seconds later — which the reservation fence then refused as well, after
+                        # paying. A FRESH fold, because this turn's own fold predates the paid propose
+                        # the stop landed in; nothing is recorded here, since the try is never paid.
                         return "continue", state, _no_mint_turns
                     # A rejected staging attempt gets one ordinary serial compatibility try;
                     # it must not poll the same paid proposal outside the runaway accounting.
@@ -3088,8 +3117,14 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 # built in multiple chunks; earlier chunks' nodes are now in the log, so re-folding
                 # lets THIS chunk's vs-history novelty gate see them and not re-propose their ideas
                 # (the serial path gets this for free — each node lands before the next proposes).
+                # …and the SAME fresh fold is where a STOP ends the batch (WP-STOP): the chunk's paid
+                # batch proposal must not start once the run has halted — the first chunk included,
+                # since this turn's own fold was read before the build that preceded it.
+                _fresh = fold(self.store.read_all())
+                if _fresh.halted:
+                    break
                 if _i:
-                    state = fold(self.store.read_all())
+                    state = _fresh
                 # MAIN TASK, before the paid batch proposal and before any reservation: the
                 # node-OPEN floor for this whole chunk (`_refuse_node_open_below_floor`).
                 self._refuse_node_open_below_floor(f"a build chunk of {len(_chunk)} node(s)")
@@ -3110,6 +3145,16 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                     self._record_dropped_batch_cards(_dropped_batch)
                     break
                 _chunk = _chunk[:len(_ideas)]
+                # A STOP THAT LANDED WHILE THE BATCH WAS PROPOSING refuses its ideas here, before the
+                # folded audit rows below are written for nodes that will never exist — the
+                # reservation fence would refuse each of them `halted` anyway. They were paid for,
+                # so each is counted on the DIAGNOSTIC `discarded` beacon (WP-STOP).
+                if self._run_halted_now():
+                    for _a in _chunk:
+                        self._beacon_discarded_proposal(
+                            "run_is_stopping", operator=str(_a.get("kind") or ""))
+                    self._record_dropped_batch_cards(_dropped_batch)
+                    break
                 for _a in _chunk:               # surface the audit events only for what we build
                     if "_scores" in _a:
                         self.store.append(EV_POLICY_DECISION,
@@ -3126,6 +3171,10 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 # case the generation is in the receipt to catch. The stale ID is not the defect and
                 # is deliberately kept: see `scored_anchor`.
                 _anchor_id, _anchor_attempt = scored_anchor(state)
+                # WHY each reservation was refused, one list per idea (`RESERVATION_REFUSALS`): a
+                # stop landing between the check above and the CAS is the operator's other process,
+                # and a paid idea it refuses is counted like the ones above.
+                _refusals: list[list] = [[] for _ in _chunk]
                 _reserved = [
                     # `retry_attach` stays off (default): these Ideas came from the shared batch
                     # proposal and never crossed `_prepare_node_idea._link`, so no earlier pass
@@ -3147,9 +3196,14 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                         steering_context=(
                             (_tel or {}).get("_steering_context", [])
                             if isinstance(_tel, dict) else []),
+                        refusal=_refused,
                     )
-                    for _a, _idea, _tel in zip(_chunk, _ideas, _telem)
+                    for _a, _idea, _tel, _refused in zip(_chunk, _ideas, _telem, _refusals)
                 ]
+                for _a, _refused in zip(_chunk, _refusals):
+                    if _refused == ["halted"]:
+                        self._beacon_discarded_proposal(
+                            "run_is_stopping", operator=str(_a.get("kind") or ""))
                 # Accepted preplanned ids are durable first. Node-less rejects then receive fresh
                 # closed Card ids without shifting any reservation the workers are about to use.
                 self._record_dropped_batch_cards(_dropped_batch)
@@ -3250,6 +3304,26 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 # retry/backoff on each — honouring the "PAUSE on the FIRST developer_crash"
                 # guarantee the crash branch documents. The loop re-folds paused=True at the top
                 # and finalizes; a plain `resume` continues once the cause is fixed.
+                break
+            # THE RUN'S STOP ends the batch too (WP-STOP). A build is minutes to hours, so an
+            # operator pause, a drain pause or a finish lands INSIDE one far more often than between
+            # two, and the loop reads the halt only at its head: without this the next claimed
+            # Card's Developer (or the next raw action's Researcher) was paid for anyway. Asked
+            # only while a build remains. Each reservation this lane claimed and will not build
+            # gets its terminal, as the crash breaker's do — left open, a run that FINISHES here
+            # would carry live `node_building` markers nothing terminates — but its Card is KEPT:
+            # it is inventory this turn claimed, not minted, and dropping it would throw away a
+            # proposal already paid for, so it returns to the board for `looplab resume`.
+            if _create_index + 1 < len(creates) and self._run_halted_now():
+                for later in (_card_reservations or [])[_create_index + 1:]:
+                    self._fail_reserved_build(
+                        node_id=later.node_id,
+                        card_id=later.card_id,
+                        generation=0,
+                        error="Card build batch stopped: the run is stopping",
+                        reason="build_batch_cancelled",
+                        drop_card=False,
+                    )
                 break
         return "continue", state, _no_mint_turns
 

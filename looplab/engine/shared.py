@@ -23,7 +23,8 @@ from typing import Optional
 from looplab.core.config import governed_eval_timeout
 from looplab.core.evidence import EVIDENCE_LABEL
 from looplab.engine.cadence import cadence_due
-from looplab.events.types import DIAGNOSTIC_EVENTS, EV_PHASE_PROGRESS, assert_progress_phase
+from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_PHASE_PROGRESS, PROGRESS_STAGE_BUILD,
+                                  assert_progress_phase)
 
 # INVARIANT #1's APPEND-SITE ASSERTION, which every other concurrent-diagnostic writer carries
 # (`evaluate.py`, `eval_dispatch.py`, both watchdogs). `_progress` appends `EV_PHASE_PROGRESS`
@@ -450,6 +451,37 @@ class SharedEngineMixin:
                 else contextlib.nullcontext())
         with span, self._progress(stage, phase, **detail) as learned:
             yield learned
+
+    def _run_halted_now(self) -> bool:
+        """`RunState.halted` on a FRESH fold — asked by every lane about to START a paid role call.
+
+        WP-STOP (MiniOneRec inf13, 2026-09-29). The loop reads the halt only at its head, and a create
+        turn can outlive that read by hours: an operator `pause` landed at 13:09:29 inside a 3.2 h
+        propose, staging refused the idea `run_stopping` at 14:21:21, and two seconds later the same
+        turn started ANOTHER paid proposal through its serial compatibility try, which the reservation
+        fence then refused after paying. A halt (a pause of any kind, a finish, a requested stop) means
+        no NEW paid call may start; one already in flight finishes and the existing fences refuse its
+        result. The fold is the ONE spelling of the question (`RunState.halted`), never a second one,
+        and it is fresh on purpose: the decision fold the turn carries is exactly what is stale.
+
+        Called from worker threads too (the funnel's post-propose check): the store's `read_all`
+        holds its own lock and the fold is pure."""
+        return engine_fold(self.store.read_all()).halted
+
+    def _beacon_discarded_proposal(self, reason: str, **detail) -> None:
+        """Count one PAID proposal that produced no node: the `build`/`discarded` beacon.
+
+        DIAGNOSTIC, never folded, so it moves no fence and no replay (invariant #1); a worker may
+        append it. `reason` names why: `reservation_lost_the_cas` (a control/research/lifecycle row
+        won the reservation's CAS) or `run_is_stopping` (the run halted while the proposal was paid
+        for — the Card session lane's word for the same fact,
+        `speculation.py::CARD_BUILD_SKIP_REASONS`). An UNPAID skipped try gets nothing: there is no
+        loss to count."""
+        # `_progress` is a CONTEXT MANAGER: a bare call builds a generator and emits nothing.
+        # The first cut of this receipt was exactly that no-op, and it was caught by driving it
+        # rather than reading it — which is the same lesson this file's own guard rules state.
+        with self._progress(PROGRESS_STAGE_BUILD, "discarded", reason=reason, **detail):
+            pass
 
     # The shared since-last node-count gate (report/distill/refresh/strategist/coverage cadences).
     # `engine/cadence.py` states why since-last and not `n % every == 0`; the NAME lives here because
