@@ -53,7 +53,7 @@ from looplab.engine.finalize import incomplete_finalize_scope, is_guarded_abort
 from looplab.engine.shared import engine_fold as fold
 from looplab.engine.widths import (EVAL_WIDTH_MAX, LLM_WIDTH_MAX, operator_width_axes,
                                    settled_width_refusal)
-from looplab.events.types import EV_LESSONS_STORE_UNAVAILABLE, EV_TASK_CHANGED
+from looplab.events.types import EV_LESSONS_STORE_UNAVAILABLE, EV_RUN_STARTED, EV_TASK_CHANGED
 from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROFILE_DIGEST,
                                                     SPECULATION_POLICY_SCOPE)
 
@@ -522,26 +522,50 @@ class ReentryMixin:
     def _record_task_change(self, events, entry: RunState) -> None:
         """THE TASK THIS RUN STARTED ON, compared at every re-entry (doc 69 69.19).
 
-        `run_started.config_hash` is the task identity a resume compares its own config against
-        (`core/setup_identity.py::setup_config_hash`) — and nothing compared it: an operator who
-        edited the task (a `--task-file`, or `task.snapshot.json` by hand) changed what every later
-        node is measured against and left no trace. RECORDED, NEVER REFUSED: the edit may be meant.
-        The rows chain like `workspace_changed`'s — `was` is the last row's `now`, or the hash the run
-        started on — read off the raw log, since the row is fold-ignored. The hash is of the task AS
-        THIS BUILD READS IT, so a build that reads the same document differently moves it too; the
-        row says the two readings differ, never who changed what."""
-        started = getattr(entry, "config_hash", "")
-        if not (entry.run_id and isinstance(started, str) and started):
+        An operator who edited the task (a `--task-file`, or `task.snapshot.json` by hand) changed
+        what every later node is measured against and left no trace. RECORDED, NEVER REFUSED: the
+        edit may be meant. The rows chain like `workspace_changed`'s — `was` is the last row's `now`,
+        or the identity the run started on — read off the raw log, since the row is fold-ignored.
+
+        THE IDENTITY IS THE AUTHOR'S TASK (`core/setup_identity.py::task_identity`: defaults left
+        out), never `config_hash`, the full dump: a build that only adds a defaulted field moved that
+        hash on the same document, and every resume across such an upgrade recorded an edit nobody
+        made (critic 2026-09-27, driven: nine such fields since 2026-08-17). `run_started` records
+        it since this change; a run started before it is compared against its own
+        `task.snapshot.json` read by THIS build, and with neither there is nothing to compare —
+        no row. What the document POINTS AT (a scorer script, the data) is not the document, and
+        no row speaks for it."""
+        started_row = next((e.data for e in events
+                            if e.type == EV_RUN_STARTED and isinstance(e.data, dict)), None)
+        if not (entry.run_id and started_row):
             return
-        from looplab.core.setup_identity import setup_config_hash
-        last = started
+        from looplab.core.setup_identity import task_identity
+        last = started_row.get("task_identity")
+        if not (isinstance(last, str) and last):
+            last = self._snapshot_task_identity()
+            if not last:
+                return
         for e in events:
             now = e.data.get("now") if e.type == EV_TASK_CHANGED and isinstance(e.data, dict) else None
             if isinstance(now, str) and now:
                 last = now
-        now = setup_config_hash(self.task.model_dump(mode="json"))
-        if now != last:
+        now = task_identity(self.task)
+        if now and now != last:
             self.store.append(EV_TASK_CHANGED, {"was": last, "now": now})
+
+    def _snapshot_task_identity(self) -> str:
+        """`task_identity` of the run's own `task.snapshot.json`, read by THIS build the way a resume
+        reads it (`adapters/tasks.py::load_task(existing_run=True)`); "" when there is none or it no
+        longer loads — a baseline this build cannot read is no baseline."""
+        from looplab.core.setup_identity import task_identity
+        snapshot = self.run_dir / "task.snapshot.json"
+        if not snapshot.is_file():
+            return ""
+        try:
+            from looplab.adapters.tasks import load_task
+            return task_identity(load_task(snapshot, existing_run=True))
+        except Exception:  # noqa: BLE001 — a snapshot this build cannot load is no baseline; no row
+            return ""
 
     def _reentry_repin(self) -> bool:
         _events = self.store.read_all()
@@ -551,8 +575,12 @@ class ReentryMixin:
         # re-reads a tail another writer may have extended.
         self._repin_settled_widths(_entry)
         self._require_pinned_speculation_receipt(_entry)
-        self._record_task_change(_events, _entry)
         self._pending_finalize_scope = incomplete_finalize_scope(_events)
+        # Not on an entry that only FINISHES the run: the finalize recovery keys on what the log
+        # holds between its durable report and `run_finished`, and a row landed there republished
+        # the report (critic 2026-09-27, driven). A finished run that is CONTINUED is still asked.
+        if not (_entry.stop_requested or self._pending_finalize_scope is not None):
+            self._record_task_change(_events, _entry)
         # A failed finalize attempt is recorded as a guarded-abort finish (`error`, or the ceiling's
         # `budget_exhausted`) by the CLI guard, but its durable stop is still pending. Treat that as
         # NOT already finalized so the retry below can write run_finished(aborted) and re-run

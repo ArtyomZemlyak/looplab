@@ -135,7 +135,8 @@ EV_SPEC_PROPOSED = "spec_proposed"
 EV_SPEC_APPROVAL_REQUESTED = "spec_approval_requested"
 EV_SPEC_DRIFT = "spec_drift"
 EV_WORKSPACE_CHANGED = "workspace_changed"
-# The TASK a re-entry reads hashes differently from the one the run started on (doc 69 69.19):
+# The TASK a re-entry reads differs from the last one recorded — the run's start or the previous row
+# (doc 69 69.19):
 # DIAGNOSTIC — recorded, never refused, and read by nothing that decides (`engine/reentry.py`).
 EV_TASK_CHANGED = "task_changed"
 EV_ENV_CHANGED = "env_changed"           # P0-5: the Python/lib environment differs from run start (resume)
@@ -2205,6 +2206,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "speculation_calibration_seed", "speculation_depth", "speculation_depth_auto",
             "speculation_gate_receipt_digest", "speculation_implementation_digest",
             "speculation_policy_scope", "speculation_runtime_scope_sha256", "split_salt",
+            "task_identity",
             "task_id", "trust_gate", "verifier_ci_tie", "workspace"
         ),
     ),
@@ -2352,8 +2354,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         optional=(),
     ),
     "task_changed": PayloadContract(
-        "A re-entry read a task hashing differently from the last recorded (the run's start, or "
-        "the previous row's `now`).",
+        "A re-entry read a task whose identity (defaults left out) differs from the last recorded "
+        "one: the run's start, or the previous row's `now`.",
         required=("now", "was"),
         optional=(),
     ),

@@ -52,7 +52,8 @@ from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT
 from looplab.core.models import RunState
 from looplab.core.profile import profile_dataset
 from looplab.core.headroom import normalized_reference
-from looplab.core.setup_identity import setup_config_hash, setup_manifest_digest
+from looplab.core.setup_identity import (setup_config_hash, setup_manifest_digest,
+                                         task_identity)
 from looplab.engine.shared import engine_fold as fold
 from looplab.events.types import (EV_DATA_PROFILED, EV_DATA_PROVENANCE, EV_ENV_CHANGED,
                                   EV_HOST_GRADING, EV_RUN_STARTED, EV_SETUP_FINISHED,
@@ -215,6 +216,9 @@ class SetupPhaseMixin:
                             "goal": self.task.goal,
                             "direction": self.task.direction,
                             "config_hash": cfg_hash,
+                            # The author's task, defaults left out — what a re-entry compares its
+                            # own task against (`reentry.py::_record_task_change`, doc 69 69.19).
+                            "task_identity": task_identity(self.task),
                             "workspace": wf,
                             # P0-5 environment identity: pin the interpreter + key-lib versions so a
                             # resume can flag a library upgrade that breaks bit-reproducibility.

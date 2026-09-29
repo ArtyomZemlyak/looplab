@@ -31,6 +31,17 @@ def setup_config_hash(task_payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(orjson.dumps(task_payload)).hexdigest()[:12]
 
 
+def task_identity(task) -> str:
+    """The task AS ITS AUTHOR WROTE IT: `setup_config_hash` over the dump with every field at its
+    default left out, so a build that only ADDS a defaulted field reads the same document to the same
+    identity (doc 69 69.19; critic 2026-09-27: nine such fields since 2026-08-17 made every resume
+    across an upgrade record a task change nobody made). `""` for anything that is no pydantic model."""
+    dump = getattr(task, "model_dump", None)
+    if not callable(dump):
+        return ""
+    return setup_config_hash(dump(mode="json", exclude_defaults=True))
+
+
 def setup_manifest_digest(
     task_payload: Mapping[str, Any],
     workspace: Mapping[str, Any],

@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import anyio
+import pytest
 
 from looplab.engine.orchestrator import Engine, _dir_fingerprint
 from looplab.search.policy import GreedyTree
@@ -249,13 +250,16 @@ def test_a_task_edited_between_entries_is_recorded_and_the_rows_chain(tmp_path):
         return [e.data for e in EventStore(run_dir / "events.jsonl").read_all()
                 if e.type == EV_TASK_CHANGED]
 
-    started = enter("maximize the metric").config_hash
+    enter("maximize the metric")
+    started = next(e.data["task_identity"] for e in EventStore(run_dir / "events.jsonl").read_all()
+                   if e.type == "run_started")
     assert started and rows() == [], "a fresh run records its own task, no change"
     enter("maximize the metric")
     assert rows() == [], "the same task: nothing"
     enter("maximize the metric on the filtered split")
     enter("maximize the metric on the filtered split")
     enter("maximize the metric on the held-out split")
+    enter("maximize the metric on the held-out split")   # MUTATION: chain off the FIRST row -> a 3rd
     first, second = rows()
     assert first["was"] == started and first["now"] != started
     assert second["was"] == first["now"] and second["now"] not in (started, first["now"])
@@ -273,6 +277,104 @@ def test_a_task_edited_between_entries_is_recorded_and_the_rows_chain(tmp_path):
                     sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1))
     engine._record_task_change(legacy.read_all(), fold(legacy.read_all()))
     assert not [e for e in legacy.read_all() if e.type == EV_TASK_CHANGED]
+
+
+def _task_entry(tmp_path, goal="g"):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    repo = _repo(tmp_path, 'import json; print(json.dumps({"metric": 1.0}))\n')
+    t = RepoTask(id="w", goal=goal, direction="max", editable_path=str(repo), edit_surface=["*.txt"],
+                 eval=EvalSpec(command=[sys.executable, "run.py"], metric=_M))
+    r, d = t.build_roles()
+    return t, Engine(tmp_path / "run", task=t, researcher=r, developer=d,
+                     sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1))
+
+
+def test_a_build_that_only_adds_a_defaulted_field_records_no_task_change(tmp_path, monkeypatch):
+    """Critic 2026-09-27 (driven): the same task document hashed differently under a build that
+    added defaulted task fields — nine since 2026-08-17 — and every resume across an upgrade wrote
+    a `task_changed` nobody made. The identity leaves defaults out (`core/setup_identity.py::
+    task_identity`). MUTATION: hash the full dump -> the added field reads as an edit."""
+    from looplab.core import setup_identity
+    from looplab.events.eventstore import EventStore
+    from looplab.events.replay import fold
+
+    t, engine = _task_entry(tmp_path)
+    store = EventStore(tmp_path / "run" / "events.jsonl")
+    store.append("run_started", {"run_id": "run", "task_id": "w", "goal": "g", "direction": "max",
+                                 "task_identity": setup_identity.task_identity(t)})
+    real_dump = type(t).model_dump
+
+    def _upgraded_dump(self, **kw):        # a new build: one more field, at its default
+        out = real_dump(self, **kw)
+        if not kw.get("exclude_defaults"):
+            out["a_field_added_later"] = 0
+        return out
+
+    monkeypatch.setattr(type(t), "model_dump", _upgraded_dump)
+    engine._record_task_change(store.read_all(), fold(store.read_all()))
+    assert not [e for e in store.read_all() if e.type == "task_changed"]
+
+
+def test_a_run_started_before_the_identity_reads_its_own_snapshot(tmp_path):
+    """A log whose `run_started` records no `task_identity` is compared against its own
+    `task.snapshot.json`, read by THIS build; an edit to the task is still a row."""
+    import json
+
+    from looplab.events.eventstore import EventStore
+    from looplab.events.replay import fold
+
+    repo = _repo(tmp_path, 'import json; print(json.dumps({"metric": 1.0}))\n')
+
+    def engine_for(goal):
+        t = RepoTask(id="w", goal=goal, direction="max", editable_path=str(repo),
+                     edit_surface=["*.txt"],
+                     eval=EvalSpec(command=[sys.executable, "run.py"], metric=_M))
+        r, d = t.build_roles()
+        return t, Engine(tmp_path / "run", task=t, researcher=r, developer=d,
+                         sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1))
+
+    t, same = engine_for("the goal it started on")
+    (tmp_path / "run" / "task.snapshot.json").write_text(
+        json.dumps(t.model_dump(mode="json")), encoding="utf-8")
+    store = same.store
+    store.append("run_started", {"run_id": "run", "task_id": "w", "goal": "g", "direction": "max",
+                                 "config_hash": "0" * 12})
+    same._record_task_change(store.read_all(), fold(store.read_all()))
+    assert not [e for e in store.read_all() if e.type == "task_changed"], "same document: no row"
+    _, edited = engine_for("an edited goal")
+    edited._record_task_change(store.read_all(), fold(store.read_all()))
+    assert len([e for e in EventStore(store.path).read_all() if e.type == "task_changed"]) == 1
+
+
+@pytest.mark.parametrize("why", ["finished", "stop_requested", "refused"])
+def test_no_task_row_where_a_reader_keys_on_position_or_the_entry_is_refused(tmp_path, monkeypatch,
+                                                                             why):
+    """A re-entry that only FINISHES the run writes no `task_changed`: finalize recovery keys on what
+    lies between its durable report and `run_finished`, and a row there republished the report
+    (critic 2026-09-27, driven). A finished run CONTINUED is still asked. And the check sits AFTER
+    the receipt fence: an entry refused there writes nothing (MUTATION: call it first -> a row,
+    then the refusal)."""
+    from looplab.engine.reentry import RunStartPinError
+    from looplab.events.eventstore import EventStore
+
+    _, engine = _task_entry(tmp_path, goal="an edited goal")
+    store = engine.store
+    store.append("run_started", {"run_id": "run", "task_id": "w", "goal": "g", "direction": "max",
+                                 "task_identity": "0" * 12})
+    if why == "finished":
+        store.append("run_finished", {"reason": "budget"})
+    elif why == "stop_requested":
+        store.append("run_abort", {"reason": "operator"})
+    else:
+        def _refuse(entry):
+            raise RunStartPinError("refused")
+        monkeypatch.setattr(engine, "_require_pinned_speculation_receipt", _refuse)
+    try:
+        engine._reentry_repin()
+    except RunStartPinError:
+        assert why == "refused"
+    rows = [e for e in EventStore(store.path).read_all() if e.type == "task_changed"]
+    assert len(rows) == (1 if why == "finished" else 0), why
 
 
 def test_a_source_is_compared_with_the_last_reading_of_its_own_kind():
