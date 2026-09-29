@@ -122,24 +122,23 @@ def test_lesson_and_research_claim_unify_on_the_same_statement():
 def test_the_deleted_lean_identity_no_longer_merges_across_a_task_boundary():
     # The LEGACY lean projection (`structured=False`) grouped by the shipped lesson
     # `normalize_statement` (whitespace+case), so a lesson in task `t` and an UNSCOPED memo claim
-    # collapsed into one row. It is deleted (doc 25 EM-06, 2026-09-08) and the retired keyword now
-    # projects the structured key, under which an unscoped memo claim is not evidence about task `t`.
+    # collapsed into one row. It is deleted (doc 25 EM-06, 2026-09-08), and so is the keyword that
+    # selected it (2026-09-29): the structured key is the only projection, under which an unscoped
+    # memo claim is not evidence about task `t`.
     rows = [_lesson("Distillation  helps", "refuted", [2])]
     research = [{"statement": "distillation helps", "node_ids": [8],
                  "verification": {"verdict": "supported", "method": "llm"}}]
-    out = claim_assessments(rows, research_claims=research, structured=False)
+    out = claim_assessments(rows, research_claims=research)
     assert len(out) == 2 and sorted(row["scope"] for row in out) == ["", "t"]
-    assert out == claim_assessments(rows, research_claims=research)
 
     # The lean key did not strip a trailing period — it was deliberately the SAME identity as the
     # lesson store's `normalize_statement` (we do not fork a divergent claim normalizer), so these
     # stayed two claims. The structured key stems the subject instead, which is why it collapses
-    # them, under either spelling of the retired keyword.
+    # them.
     period = [_lesson("distillation helps", "supported", [1]),
               _lesson("distillation helps.", "supported", [2])]
     structured = claim_assessments(period)
     assert len(structured) == 1 and set(structured[0]["support"]) == {"r1:1", "r1:2"}
-    assert claim_assessments(period, structured=False) == structured
 
 
 def test_ranking_most_evidenced_and_contested_first():
@@ -621,7 +620,7 @@ def test_cli_claim_decide_rejects_future_stale_and_non_cas_targets(tmp_path):
 
     path = tmp_path / "lessons.jsonl"
     path.write_bytes(orjson.dumps(_lesson("observed claim", "supported", [1])) + b"\n")
-    observed = claims_for_memory(tmp_path, structured=True)[0]
+    observed = claims_for_memory(tmp_path)[0]
 
     def decide(statement, uid, digest, revision, action):
         return CliRunner().invoke(app, [
@@ -644,7 +643,7 @@ def test_cli_claim_decide_rejects_future_stale_and_non_cas_targets(tmp_path):
     assert stale.exit_code == 2 and "claim_evidence_changed" in stale.output
     assert claim_governance_revision(tmp_path) == 0
 
-    current = claims_for_memory(tmp_path, structured=True)[0]
+    current = claims_for_memory(tmp_path)[0]
     accepted = decide(
         "observed claim", current["claim_uid"], current["evidence_digest"], 0,
         "cli-current")
@@ -874,7 +873,7 @@ def test_forged_receipt_claim_fields_never_reach_lean_structured_retrieval_or_at
     # The primary fence quarantines the row and lowers source authority.
     for structured in (False, True):
         projected = claims_module.claim_assessments(
-            [], research_claims=[forged], structured=structured)
+            [], research_claims=[forged])
         assert projected == []
         assert projected.claim_source["source_complete"] is False
         assert projected.claim_source["research"]["invalid_rows"] == 1
@@ -885,14 +884,13 @@ def test_forged_receipt_claim_fields_never_reach_lean_structured_retrieval_or_at
         claims_module, "_valid_claim_source_row", lambda _row, *, research: True)
     for structured in (False, True):
         assert claims_module.claim_assessments(
-            [], research_claims=[forged], structured=structured) == []
+            [], research_claims=[forged]) == []
     atlas = claims_module.portfolio_atlas(
-        [], [], research_claims=[forged], structured=True)
+        [], [], research_claims=[forged])
     assert atlas["n_claims"] == atlas["n_contested"] == 0
     assert atlas["contradictions"] == [] and atlas["context_pack"]["claims"] == []
     retrieval = claims_module.cross_run_retrieve(
-        tmp_path, "forged support", lessons=[], capsules=[], research_claims=[forged],
-        structured=True)
+        tmp_path, "forged support", lessons=[], capsules=[], research_claims=[forged])
     assert not [hit for hit in retrieval["results"] if hit.get("kind") == "claim"]
     assert retrieval["receipt"]["n_corpus"] == retrieval["receipt"]["n_indexed"] == 0
 
@@ -927,7 +925,7 @@ def test_d8_producer_cap_receipt_withholds_positive_when_opposition_tail_is_unkn
     } for row in retained)
     assert omitted_opposite["statement"] not in {row["statement"] for row in retained}
 
-    claims = claim_assessments([], research_claims=retained, structured=True)
+    claims = claim_assessments([], research_claims=retained)
     target = next(row for row in claims if row["statement"] == positive["statement"])
     assert target["support"] == ["r-cap:1"]
     assert target["epistemic"] == "inconclusive"
@@ -987,7 +985,7 @@ def test_legacy_persisted_d8_source_is_unknown_and_fails_positive_closed(tmp_pat
     }) + b"\n")
 
     loaded = load_research_claims(tmp_path)
-    claim = claims_for_memory(tmp_path, research_claims=loaded, structured=True)[0]
+    claim = claims_for_memory(tmp_path, research_claims=loaded)[0]
     assert claim["support"] == ["legacy:4"]
     assert claim["epistemic"] == "inconclusive"
     assert claim["research_source"]["producer_receipt_known"] is False
@@ -1030,7 +1028,7 @@ def test_claim_sources_quarantine_malformed_future_and_incomplete_v3_rows(tmp_pa
 
     research = load_research_claims(tmp_path)
     assert len(research) == 1 and research[0]["statement"] == "stable research"
-    claims = claims_for_memory(tmp_path, structured=True)
+    claims = claims_for_memory(tmp_path)
     by_statement = {row["statement"]: row for row in claims}
     assert by_statement["stable lesson"]["epistemic"] == "inconclusive"
     assert by_statement["stable research"]["epistemic"] == "inconclusive"
@@ -1133,7 +1131,7 @@ def test_allowed_research_tail_survives_internal_redaction_and_stales_digests(tm
     loaded = load_research_claims(tmp_path)
     assert len(loaded[0]["node_ids"]) == 96 and loaded[0]["node_ids"][-1] == 999_998
     assert len(loaded[0]["urls"]) == 64 and len(loaded[0]["fingerprint"]) == 256
-    first = claims_for_memory(tmp_path, structured=True)
+    first = claims_for_memory(tmp_path)
     claim = first[0]
     assert claim["n_support"] == 96 and len(claim["support"]) == 64
     assert claim["nested_omitted"]["support"] == 32
@@ -1144,7 +1142,7 @@ def test_allowed_research_tail_survives_internal_redaction_and_stales_digests(tm
     # Same row/receipt/counts and same outward first 64 refs; only an allowed tail ref changes. Every
     # internal source/governance identity must still change.
     path.write_bytes(orjson.dumps(_wide_row(999_999)) + b"\n")
-    second = claims_for_memory(tmp_path, structured=True)
+    second = claims_for_memory(tmp_path)
     assert second[0]["support"] == claim["support"]
     assert second.claim_source["snapshot_digest"] != first_source_digest
     assert second.research_source["snapshot_digest"] != first_research_digest
@@ -1191,13 +1189,13 @@ def test_nested_extensions_cannot_displace_research_contract_fields(tmp_path):
         "v": 1, "claims_total": 1, "claims_retained": 1,
         "claims_omitted": 0, "producer_complete": True,
     }
-    first = claims_for_memory(tmp_path, structured=True)
+    first = claims_for_memory(tmp_path)
     assert first[0]["epistemic"] == "supported"
     assert first.research_source["source_complete"] is True
 
     # Unknown nested extensions are not consumed semantics and therefore do not stale governance.
     path.write_bytes(orjson.dumps(_extended_row("ignored-b")) + b"\n")
-    second = claims_for_memory(tmp_path, structured=True)
+    second = claims_for_memory(tmp_path)
     assert second.claim_source["snapshot_digest"] == first.claim_source["snapshot_digest"]
     assert second[0]["evidence_digest"] == first[0]["evidence_digest"]
 
@@ -1300,7 +1298,7 @@ def test_structured_merges_paraphrases_within_a_scope():
     out = claim_assessments([
         _lesson("hard negative mining improves recall", "supported", [1], run_id="rA"),
         _lesson("hard negative mining improved recall greatly", "supported", [2], run_id="rB"),
-    ], structured=True)
+    ])
     assert len(out) == 1 and out[0]["n_support"] == 2 and out[0]["runs"] == ["rA", "rB"]
 
 
@@ -1308,7 +1306,7 @@ def test_structured_does_not_merge_opposite_polarity_it_contradicts():
     out = claim_assessments([
         _lesson("dropout improves generalization", "supported", [1], run_id="rA"),
         _lesson("dropout never improves generalization", "supported", [2], run_id="rB"),
-    ], structured=True)
+    ])
     assert len(out) == 2                              # two SEPARATE assertions, not one merged claim
     # each is marked contested and names the other as a contradiction (unreachable from the lean merge)
     assert all(c["epistemic"] == "mixed" and c["contradicts"] for c in out)
@@ -1320,9 +1318,9 @@ def test_structured_evidence_digest_changes_with_proof_not_governance(tmp_path):
     statement = "dropout improves generalization"
     path = tmp_path / "lessons.jsonl"
     _write_lessons(path, [_lesson(statement, "supported", [1], run_id="r1")])
-    first = claims_for_memory(tmp_path, structured=True)[0]["evidence_digest"]
+    first = claims_for_memory(tmp_path)[0]["evidence_digest"]
     record_claim_decision(tmp_path, statement=statement, scope="t", decision="pinned")
-    governed_row = claims_for_memory(tmp_path, structured=True)[0]
+    governed_row = claims_for_memory(tmp_path)[0]
     governed = governed_row["evidence_digest"]
     assert governed == first
     # Direct CLI decisions predate the HTTP evidence fence, so freshness is explicitly unknown.
@@ -1331,7 +1329,7 @@ def test_structured_evidence_digest_changes_with_proof_not_governance(tmp_path):
         _lesson(statement, "supported", [1], run_id="r1"),
         _lesson(statement, "supported", [2], run_id="r2"),
     ])
-    assert claims_for_memory(tmp_path, structured=True)[0]["evidence_digest"] != first
+    assert claims_for_memory(tmp_path)[0]["evidence_digest"] != first
 
 
 def test_stale_evidence_is_disclosed_without_implicitly_clearing_operator_policy(tmp_path):
@@ -1345,7 +1343,7 @@ def test_stale_evidence_is_disclosed_without_implicitly_clearing_operator_policy
     statement = "dropout improves generalization"
     path = tmp_path / "lessons.jsonl"
     _write_lessons(path, [_lesson(statement, "supported", [1], run_id="r1")])
-    original = claims_for_memory(tmp_path, structured=True)[0]
+    original = claims_for_memory(tmp_path)[0]
     record_claim_decision(
         tmp_path, statement=statement, scope="t", decision="ratified",
         evidence_digest=original["evidence_digest"], action_id="ratify-original",
@@ -1355,7 +1353,7 @@ def test_stale_evidence_is_disclosed_without_implicitly_clearing_operator_policy
         _lesson(statement, "supported", [1], run_id="r1"),
         _lesson(statement, "supported", [2], run_id="r2"),
     ])
-    stale_ratification = claims_for_memory(tmp_path, structured=True)[0]
+    stale_ratification = claims_for_memory(tmp_path)[0]
     assert stale_ratification["maturity"] == "operator-ratified"
     assert stale_ratification["decision_fresh"] is False
     rendered = render_context_pack(build_context_pack([stale_ratification]))
@@ -1371,7 +1369,7 @@ def test_stale_evidence_is_disclosed_without_implicitly_clearing_operator_policy
         _lesson(statement, "supported", [2], run_id="r2"),
         _lesson(statement, "supported", [3], run_id="r3"),
     ])
-    stale_rejection = claims_for_memory(tmp_path, structured=True)[0]
+    stale_rejection = claims_for_memory(tmp_path)[0]
     assert stale_rejection["maturity"] == "operator-rejected"
     assert stale_rejection["decision_fresh"] is False
     assert build_context_pack([stale_rejection])["claims"] == []
@@ -1385,10 +1383,10 @@ def test_rejecting_an_opposite_changes_live_contradiction_not_evidence_digest(tm
         _lesson(positive, "supported", [1], run_id="r1"),
         _lesson(negative, "supported", [2], run_id="r2"),
     ])
-    before = {row["statement"]: row for row in claims_for_memory(tmp_path, structured=True)}
+    before = {row["statement"]: row for row in claims_for_memory(tmp_path)}
     record_claim_decision(tmp_path, statement=negative, scope="t", decision="rejected",
                           evidence_digest=before[negative]["evidence_digest"])
-    after = {row["statement"]: row for row in claims_for_memory(tmp_path, structured=True)}
+    after = {row["statement"]: row for row in claims_for_memory(tmp_path)}
     assert after[positive]["contradicts"] == []
     assert after[positive]["evidence_digest"] == before[positive]["evidence_digest"]
     assert after[negative]["evidence_digest"] == before[negative]["evidence_digest"]
@@ -1399,7 +1397,7 @@ def test_structured_scope_separates_same_words_across_tasks():
     out = claim_assessments([
         _lesson("distillation helps", "supported", [1], run_id="rA", task_id="retrieval"),
         _lesson("distillation helps", "refuted", [2], run_id="rB", task_id="classification"),
-    ], structured=True)
+    ])
     assert len(out) == 2                              # different tasks => different claims (not a mixed merge)
     assert {c["epistemic"] for c in out} == {"supported", "refuted"}
 
@@ -1410,7 +1408,7 @@ def test_structured_metric_identity_separates_same_task_claims():
                 fingerprint=["metric:recall"]),
         _lesson("adapter tuning improves score", "refuted", [2], run_id="rB",
                 fingerprint=["metric:precision"]),
-    ], structured=True)
+    ])
     assert len(out) == 2
     assert {(c["metric"], c["epistemic"]) for c in out} == {
         ("recall", "supported"), ("precision", "refuted")}
@@ -1426,7 +1424,7 @@ def test_rejected_opposite_does_not_poison_live_structured_claim(tmp_path):
     ])
     record_claim_decision(str(tmp_path), statement=negative, decision="rejected",
                           scope="t", metric="recall")
-    out = {c["statement"]: c for c in claims_for_memory(str(tmp_path), structured=True)}
+    out = {c["statement"]: c for c in claims_for_memory(str(tmp_path))}
     assert out[positive]["epistemic"] == "supported" and out[positive]["contradicts"] == []
     assert out[negative]["maturity"] == "operator-rejected"
     assert out[negative]["epistemic"] == "supported" and out[negative]["contradicts"] == []
@@ -1438,8 +1436,7 @@ def test_refuted_or_unverified_opposite_is_not_live_contradictory_evidence():
     out = {c["statement"]: c for c in claim_assessments([
         _lesson(positive, "supported", [1], run_id="rA"),
         _lesson(negative, "refuted", [2], run_id="rB"),
-    ], research_claims=[{"statement": negative, "task_id": "t", "run_id": "rC", "node_ids": [3]}],
-        structured=True)}
+    ], research_claims=[{"statement": negative, "task_id": "t", "run_id": "rC", "node_ids": [3]}])}
     assert out[positive]["epistemic"] == "supported" and out[positive]["contradicts"] == []
     assert out[negative]["epistemic"] == "refuted"
 
@@ -1449,7 +1446,7 @@ def test_structured_atlas_and_context_pack_expose_mutation_identity(tmp_path):
     _write_lessons(tmp_path / "lessons.jsonl", [
         _lesson("augmentation improves retrieval recall", "supported", [1], run_id="rA",
                 task_id="taskA", fingerprint=["metric:recall"])])
-    atlas = atlas_for_memory(str(tmp_path), structured=True)
+    atlas = atlas_for_memory(str(tmp_path))
     claim = atlas["context_pack"]["claims"][0]
     assert claim["claim_uid"].startswith("clm_")
     assert claim["scope"] == "taskA" and claim["metric"] == "recall" and claim["polarity"] == 1
@@ -1474,7 +1471,7 @@ def test_metric_decision_precedence_exact_then_scope_then_global(tmp_path):
     record_claim_decision(str(tmp_path), statement=statement, decision="rejected",
                           scope="taskA", metric="recall")
     out = {(c["scopes"][0], c["metric"]): c["maturity"]
-           for c in claims_for_memory(str(tmp_path), structured=True)}
+           for c in claims_for_memory(str(tmp_path))}
     assert out[("taskA", "recall")] == "operator-rejected"
     assert out[("taskA", "precision")] == "operator-pinned"
     assert out[("taskB", "recall")] == "operator-pinned"
@@ -1488,7 +1485,7 @@ def test_structured_governance_is_scope_precise(tmp_path):
         _lesson("adapter tuning helps", "supported", [2], run_id="rB", task_id="taskB")])
     # reject the claim ONLY in taskA
     record_claim_decision(str(tmp_path), statement="adapter tuning helps", decision="rejected", scope="taskA")
-    out = {c["scopes"][0]: c["maturity"] for c in claims_for_memory(str(tmp_path), structured=True)}
+    out = {c["scopes"][0]: c["maturity"] for c in claims_for_memory(str(tmp_path))}
     assert out["taskA"] == "operator-rejected" and out["taskB"] == "machine-proposed"
 
 
@@ -1500,7 +1497,7 @@ def test_scopeless_decision_applies_in_structured_mode(tmp_path):
         _lesson("dense retrieval helps", "supported", [1], run_id="rA", task_id="taskA"),
         _lesson("dense retrieval helps", "supported", [2], run_id="rB", task_id="taskB")])
     record_claim_decision(str(tmp_path), statement="dense retrieval helps", decision="rejected")  # NO scope
-    out = {c["scopes"][0]: c["maturity"] for c in claims_for_memory(str(tmp_path), structured=True)}
+    out = {c["scopes"][0]: c["maturity"] for c in claims_for_memory(str(tmp_path))}
     assert out["taskA"] == "operator-rejected" and out["taskB"] == "operator-rejected"   # applies everywhere
 
 
@@ -1510,7 +1507,7 @@ def test_scoped_decision_still_does_not_leak_via_legacy_key(tmp_path):
         _lesson("mnr helps", "supported", [1], run_id="rA", task_id="taskA"),
         _lesson("mnr helps", "supported", [2], run_id="rB", task_id="taskB")])
     record_claim_decision(str(tmp_path), statement="mnr helps", decision="rejected", scope="taskA")
-    out = {c["scopes"][0]: c["maturity"] for c in claims_for_memory(str(tmp_path), structured=True)}
+    out = {c["scopes"][0]: c["maturity"] for c in claims_for_memory(str(tmp_path))}
     assert out["taskA"] == "operator-rejected" and out["taskB"] == "machine-proposed"   # no leak to taskB
 
 
@@ -1552,10 +1549,10 @@ def test_global_decision_survives_a_later_scoped_decision_in_structured_mode(tmp
     from looplab.engine.claims import claims_for_memory, record_claim_decision
     record_claim_decision(str(tmp_path), statement="dropout helps", decision="rejected")            # global
     record_claim_decision(str(tmp_path), statement="dropout helps", decision="ratified", scope="taskA")
-    outB = claims_for_memory(str(tmp_path), structured=True,
+    outB = claims_for_memory(str(tmp_path),
                              lessons=[_lesson("dropout helps", "supported", [0], run_id="rB", task_id="taskB")])
     assert outB[0]["maturity"] == "operator-rejected", outB          # taskB keeps the GLOBAL rejection
-    outA = claims_for_memory(str(tmp_path), structured=True,
+    outA = claims_for_memory(str(tmp_path),
                              lessons=[_lesson("dropout helps", "supported", [1], run_id="rA", task_id="taskA")])
     assert outA[0]["maturity"] == "operator-ratified", outA          # taskA keeps its own scoped ratify
 
@@ -1625,8 +1622,8 @@ def test_claim_projection_caps_nested_evidence_but_keeps_full_counts_and_digest(
         for index in range(80)
     ]
 
-    projected = claim_assessments(lessons, structured=True)[0]
-    complete = claim_assessments(lessons, structured=True, bounded=False)[0]
+    projected = claim_assessments(lessons)[0]
+    complete = claim_assessments(lessons, bounded=False)[0]
 
     assert projected["n_support"] == complete["n_support"] == 80
     assert len(projected["support"]) == len(projected["runs"]) == 64
@@ -1655,7 +1652,7 @@ def test_claim_readers_quarantine_malformed_persisted_rows(tmp_path):
     (tmp_path / "research_claims.jsonl").write_bytes(
         b"[]\n" + b"\n".join(orjson.dumps(row) for row in research) + b"\n")
 
-    rows = claims_for_memory(tmp_path, structured=True)
+    rows = claims_for_memory(tmp_path)
     by_statement = {row["statement"]: row for row in rows}
 
     assert set(by_statement) == {"usable lesson", "usable research"}

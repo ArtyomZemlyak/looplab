@@ -154,17 +154,14 @@ def test_the_projection_does_not_re_inline_the_walk(fn):
 
 def test_the_projection_agrees_with_the_walk_on_stance_and_verification():
     """An end-to-end cross-check: a supported research claim and an `improved` lesson must land in
-    the buckets the walk above puts them in, whichever spelling of the retired `structured` keyword
-    the caller uses (there is one projection since doc 25 EM-06, 2026-09-08)."""
+    the buckets the walk above puts them in (there is one projection since doc 25 EM-06, and the
+    retired `structured` keyword that once chose between two is deleted)."""
     from looplab.engine.claims_assessments import claim_assessments
 
     lessons = [_lesson(outcome="improved", evidence=[1])]
     research = [_research(node_ids=[2])]
-    for structured in (False, True):
-        rows = claim_assessments(lessons, research_claims=research, decisions={},
-                                 structured=structured)
-        assert rows, f"structured={structured} produced no claims"
-        assert any(row.get("n_support", 0) > 0 for row in rows), (
-            f"structured={structured} lost the supporting evidence")
-        assert all(row.get("n_oppose", 0) == 0 for row in rows), (
-            f"structured={structured} turned supporting evidence into opposition")
+    rows = claim_assessments(lessons, research_claims=research, decisions={})
+    assert rows, "the projection produced no claims"
+    assert any(row.get("n_support", 0) > 0 for row in rows), "it lost the supporting evidence"
+    assert all(row.get("n_oppose", 0) == 0 for row in rows), (
+        "it turned supporting evidence into opposition")

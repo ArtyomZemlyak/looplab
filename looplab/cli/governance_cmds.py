@@ -983,7 +983,7 @@ def claims_cmd(
             # HTTP pair (`/api/cross-run/claims?scope_task=` + POST claim-decide `scope`) already did.
             claims = claims_for_memory(
                 base, lessons=lessons, research_claims=research, scope_task=scope,
-                decisions=governance["decisions"], structured=structured)
+                decisions=governance["decisions"])
             research_source = safe_research_source_summary(
                 getattr(claims, "research_source", None)) or {}
             claim_source = safe_claim_source_summary(

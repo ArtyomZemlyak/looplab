@@ -190,7 +190,7 @@ def test_render_names_structured_opposite_assertion():
          "evidence": [1], "run_id": "r1", "task_id": "t"},
         {"statement": "dropout never improves generalization", "outcome": "supported",
          "evidence": [2], "run_id": "r2", "task_id": "t"},
-    ], structured=True)
+    ])
     text = render_context_pack(build_context_pack(claims, max_claims=1))
     assert "contradicts=" in text
 

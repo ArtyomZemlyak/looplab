@@ -4,6 +4,8 @@ same-worded claims across tasks, and the O(n) exact-key grouping never bridges t
 """
 from __future__ import annotations
 
+import pytest
+
 from looplab.engine.claim_key import CLAIM_KEY_VERSION, claim_signature, claim_uid
 
 
@@ -156,9 +158,10 @@ def test_the_one_identity_is_documented_where_a_reviewer_reads_them():
 def test_there_is_one_projection_and_the_retired_keyword_cannot_select_another():
     """The DEFAULT is driven, not pinned, and so is the retirement. Two facts decide what a caller
     gets: the same words in two different TASKS are two claims, and two opposite-polarity assertions
-    in one task are a CONTRADICTION rather than two unrelated rows. Passing the retired
-    `structured=False` — the lean normalized-statement projection, deleted 2026-09-08 (doc 25
-    EM-06) — changes NEITHER, byte for byte.
+    in one task are a CONTRADICTION rather than two unrelated rows. The retired `structured=`
+    keyword — `False` selected the lean normalized-statement projection, deleted 2026-09-08 (doc 25
+    EM-06) — is itself deleted (2026-09-29): asking for the lean identity is a TypeError, never a
+    silent substitution.
 
     That is the EM-06 flip and then its close. The task boundary is the half that matters for
     governance: under the lean projection a caller merged task A's evidence into task B's claim and
@@ -176,13 +179,10 @@ def test_there_is_one_projection_and_the_retired_keyword_cannot_select_another()
     assert sorted(c["scope"] for c in default) == ["A", "B"]
     assert len({c["claim_uid"] for c in default}) == 2, "the default projection carries no scope-precise uid"
 
-    # The keyword survives its ENGINE relay (the `EngineOptions` field that carried the pinned-False
-    # Settings value through `proposal_cues`/`strategy` left on 2026-09-22, review ENG3-08) because
-    # `serve/routers/cross_run.py`, `tools/cross_run_tools.py`, the CLI and the suite still pass it.
-    # Accepting it is safe ONLY while both values name the same projection, which is what this drives.
-    assert claim_assessments(across_tasks, structured=False) == default, (
-        "`structured=False` produced a different projection — the lean read path is back, or the "
-        "retired keyword selects something again")
+    # The keyword outlived its ENGINE relay (review 2026-09-22, ENG3-08) while its last callers still
+    # passed `True`; they moved and it went. A caller that still asks for the lean identity is refused.
+    with pytest.raises(TypeError):
+        claim_assessments(across_tasks, structured=False)
 
     opposed = [{"statement": "dropout helps accuracy", "outcome": "supported",
                 "evidence": [1], "run_id": "r", "task_id": "t"},
@@ -190,7 +190,8 @@ def test_there_is_one_projection_and_the_retired_keyword_cannot_select_another()
                 "evidence": [2], "run_id": "r", "task_id": "t"}]
     contested = claim_assessments(opposed)
     assert all(c["contradicts"] for c in contested), "the default projection lost the contradiction"
-    assert claim_assessments(opposed, structured=False) == contested
+    with pytest.raises(TypeError):
+        claim_assessments(opposed, structured=True)
 
 
 def test_the_lean_shadow_namespace_is_gone_and_the_unscoped_fallback_is_not():

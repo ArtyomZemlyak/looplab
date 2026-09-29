@@ -377,7 +377,7 @@ def record_claim_decision(memory_dir, *, statement: str, decision: str, note: st
                 research_snapshot = load_research_claims(memory_dir)
                 evidence_snapshot = claim_assessments(
                     lessons_snapshot, research_claims=research_snapshot,
-                    decisions=governance["decisions"], structured=True,
+                    decisions=governance["decisions"],
                 ).with_evidence_sources(
                     lessons=lessons_snapshot, research_claims=research_snapshot,
                     decisions=governance["decisions"])
@@ -444,7 +444,7 @@ def record_observed_claim_decision(
             memory_dir, lessons=sources.lessons,
             research_claims=sources.research_claims,
             decisions=sources.decisions,
-            scope_task=scope, structured=True,
+            scope_task=scope,
         )
         current = next((candidate for candidate in current_projection
                         if candidate.get("claim_uid") == observed_uid), None)
@@ -775,13 +775,14 @@ def load_claim_lessons(memory_dir) -> list[dict]:
 
 
 def claims_for_memory(memory_dir, *, lessons=None, research_claims=None, decisions=None,
-                      scope_task: str = "", structured: bool = True) -> list[dict]:
+                      scope_task: str = "") -> list[dict]:
     """Convenience: `claim_assessments` over a memory dir — lessons.jsonl (or a pre-filtered `lessons`) +
     the persisted D8 research claims + the operator-decision overlay. One call so every read path applies
-    research claims AND decisions consistently. `structured` is a RETIRED keyword (doc 25 EM-06,
-    2026-09-08): there is ONE claim identity — the scope+polarity-safe structured claim key, the same
-    projection `record_claim_decision` validates an operator's `evidence_digest` against — and both
-    values project it; `scope_task` filters the D8 research claims to the bound task so a task-scoped caller
+    research claims AND decisions consistently. There is ONE claim identity (doc 25 EM-06) — the
+    scope+polarity-safe structured claim key, the same projection `record_claim_decision` validates an
+    operator's `evidence_digest` against; the retired `structured=` keyword that once selected between
+    two was deleted 2026-09-29 and is now a TypeError. `scope_task` filters the D8 research claims to the
+    bound task so a task-scoped caller
     does not re-read another task's research claims (mega-review) — the decisions overlay is applied
     scope-safely by `claim_assessments`."""
     if lessons is None:
@@ -792,16 +793,15 @@ def claims_for_memory(memory_dir, *, lessons=None, research_claims=None, decisio
     lessons, _capsules, research = scope_cross_run_sources(
         task_id=scope_task, lessons=lessons, research=research)
     dec = load_claim_decisions(memory_dir) if decisions is None else decisions
-    return claim_assessments(lessons, research_claims=research, decisions=dec,
-                             structured=structured)
+    return claim_assessments(lessons, research_claims=research, decisions=dec)
 
 
 def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims=None,
                      decisions=None, scope_task: str = "", max_items: int = 8,
-                     structured: bool = True, _governance: Optional[dict] = None) -> dict:
+                     _governance: Optional[dict] = None) -> dict:
     """Convenience: `portfolio_atlas` over a memory dir with EVERY overlay loaded — lessons + D8 research
     claims + operator decisions + concept aliases + splits. One call so every atlas surface is consistent.
-    `structured` is retired and inert (doc 25 EM-06); `scope_task` filters the D8 research claims to
+    The retired `structured=` keyword is deleted (doc 25 EM-06); `scope_task` filters the D8 research claims to
     the bound task so a task-scoped caller does not surface another task's claims/contradictions
     (mega-review)."""
     from pathlib import Path
@@ -815,7 +815,7 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims
             lambda governance: atlas_for_memory(
                 memory_dir, lessons=lessons, capsules=capsules,
                 research_claims=research_claims, decisions=decisions,
-                scope_task=scope_task, max_items=max_items, structured=structured,
+                scope_task=scope_task, max_items=max_items,
                 _governance=governance,
             ),
             include_concepts=True,
@@ -843,7 +843,7 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims
         lessons, capsules, max_items=max_items,
         decisions=(governance["decisions"] if decisions is None else decisions),
         research_claims=research, aliases=governance["aliases"],
-        splits=governance["splits"], structured=structured)
+        splits=governance["splits"])
     if decisions is None:
         atlas["governance"] = {
             "status": "complete", "complete": True,

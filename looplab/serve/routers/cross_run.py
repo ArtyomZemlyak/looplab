@@ -587,7 +587,7 @@ def build_router(srv) -> APIRouter:
         memory_dir, portfolio_id = _portfolio()
         def _project(governance):
             payload = atlas_for_memory(memory_dir, scope_task=scope_task, max_items=limit,
-                                       structured=True, _governance=governance)
+                                       _governance=governance)
             payload.update({
                 "projection": "live",
                 "scope_task": cross_run_text(
@@ -630,8 +630,7 @@ def build_router(srv) -> APIRouter:
         memory_dir, portfolio_id = _portfolio()
         def _project(governance):
             rows = claims_for_memory(
-                memory_dir, scope_task=scope_task,
-                structured=True, decisions=governance["decisions"])
+                memory_dir, scope_task=scope_task, decisions=governance["decisions"])
             research_source = safe_research_source_summary(
                 getattr(rows, "research_source", None)) or {}
             claim_source = safe_claim_source_summary(

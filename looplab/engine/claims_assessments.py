@@ -293,19 +293,19 @@ def _structured_assessments(lessons, research_claims, decisions, *,
 
 
 def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dict]] = None,
-                      decisions: Optional[dict] = None,
-                      structured: bool = True, bounded: bool = True) -> list[dict]:
+                      decisions: Optional[dict] = None, bounded: bool = True) -> list[dict]:
     """Project distilled `lessons` (+ optional D8 `research_claims`) into evidence-grounded claim
     assessments. Each claim carries `support`/`oppose` node-id evidence, contributing `runs`/`scopes`,
     and an `epistemic` state. `decisions` (from `load_claim_decisions`) overlays an operator `maturity`
     (`operator-ratified`/`operator-rejected`/`operator-pinned`, else `machine-proposed`) — the §22.4
     governance overlay. Sorted most-evidenced first. Pure.
 
-    `structured` is a RETIRED keyword (doc 25 EM-06, 2026-09-08). There is ONE claim identity — the
-    SCOPE+POLARITY-safe structured claim key (`claim_key.claim_signature`): claims from different tasks
-    never merge, opposite polarity ("X helps" vs "X never helps") is a CONTRADICTION not a merge, and
-    paraphrase/inflection variants collapse by exact structured key (O(n), no transitive over-merge).
-    Both values of the keyword project it."""
+    There is ONE claim identity (doc 25 EM-06) — the SCOPE+POLARITY-safe structured claim key
+    (`claim_key.claim_signature`): claims from different tasks never merge, opposite polarity ("X
+    helps" vs "X never helps") is a CONTRADICTION not a merge, and paraphrase/inflection variants
+    collapse by exact structured key (O(n), no transitive over-merge). The retired `structured=`
+    keyword that once selected the lean projection is deleted (2026-09-29): passing it is a TypeError,
+    so nothing can ask for another identity."""
     # THE ONE IDENTITY, and the overlay key its governance decisions arrive under — the table doc 25
     # EM-06 asked for, now that there is no longer anything to select between:
     #
@@ -327,17 +327,17 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
     # under it could never be decided on anyway: a lean row carried no `claim_uid` and no
     # `evidence_digest`, and `record_claim_decision` validates against the structured projection.
     #
-    # WHY THE KEYWORD SURVIVES THE PATH IT SELECTED. `fuzzy=` was deleted outright, because a
-    # silently-accepted `fuzzy=True` would have read as "paraphrases still merge". `structured=`
-    # cannot follow it yet. Its ENGINE relay is gone (review 2026-09-22, ENG3-08): the
-    # `EngineOptions` field that carried the pinned-False Settings value into
-    # `engine/proposal_cues.py` and `engine/strategy.py` was deleted, so no run passes `False` any
-    # more. What still passes the keyword — always `True` — is `serve/routers/cross_run.py` (the
-    # atlas and claims routes), `tools/cross_run_tools.py`, `engine/curation_protocol.py`, the CLI
-    # `claims --structured` flag and ~60 test call sites; refusing it would break those, and
-    # accepting it is safe only because every value names the SAME projection. Removing the keyword
-    # is what is left of EM-06, beside the Settings-field retirement (config, the calibration digest,
-    # the settings catalogue) — not a claims change.
+    # THE KEYWORD FOLLOWED THE PATH IT SELECTED (2026-09-29). `fuzzy=` was deleted outright, because
+    # a silently-accepted `fuzzy=True` would have read as "paraphrases still merge". `structured=`
+    # outlived its ENGINE relay (review 2026-09-22, ENG3-08: the `EngineOptions` field that carried
+    # the pinned-False Settings value into `engine/proposal_cues.py` and `engine/strategy.py`) only
+    # while `serve/routers/cross_run.py` (the atlas and claims routes), `tools/cross_run_tools.py`,
+    # `engine/curation_protocol.py`, the CLI and ~60 test call sites still passed `True`. They moved in
+    # one change and the keyword went, so a caller asking for the lean identity now fails loudly
+    # instead of being handed the structured one in silence. The CLI's `claims --structured` FLAG stays
+    # accepted and inert: that is a shell script's contract, not a Python signature. What is left of
+    # EM-06 is the Settings-field retirement (config, the calibration digest, the settings catalogue)
+    # — not a claims change.
     lessons = _valid_claim_source_rows(lessons, research=False)
     research_claims = _valid_claim_source_rows(research_claims, research=True)
     research_source = _research_source_summary(research_claims)

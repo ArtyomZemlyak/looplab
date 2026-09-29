@@ -246,7 +246,7 @@ def test_finalize_claim_curation_gating(tmp_path):
         RunState(run_id="r", task_id="t")) == "proposed"
     assert (tmp_path / "claim_curation_log.jsonl").exists()
     from looplab.engine.claims import claims_for_memory
-    got = {c["statement"]: c["maturity"] for c in claims_for_memory(str(tmp_path), structured=True)}
+    got = {c["statement"]: c["maturity"] for c in claims_for_memory(str(tmp_path))}
     assert got["reranking helps"] == "machine-proposed"
     rec = json.loads((tmp_path / "claim_curation_log.jsonl").read_text().splitlines()[0])
     assert rec["outcome"] == "proposed" and rec["auto"] is False and rec["auto_requested"] is True

@@ -700,7 +700,7 @@ class CurationProtocolMixin:
                 propose_claim_curation,
             )
 
-            claims, input_digest = claim_curation_snapshot(self._e.memory_dir, structured=True)
+            claims, input_digest = claim_curation_snapshot(self._e.memory_dir)
 
             def propose(client):
                 proposals = propose_claim_curation(

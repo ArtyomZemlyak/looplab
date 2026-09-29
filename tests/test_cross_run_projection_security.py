@@ -81,7 +81,7 @@ def test_opaque_run_and_task_ids_keep_unicode_identity_through_claim_projection(
     rows = claim_assessments([
         {**_lesson("dropout improves generalization", run_id="Ａ"), "task_id": "Ａ"},
         {**_lesson("dropout improves generalization", run_id="A"), "task_id": "A"},
-    ], structured=True)
+    ])
 
     assert len(rows) == 2
     assert {row["scope"] for row in rows} == {"Ａ", "A"}

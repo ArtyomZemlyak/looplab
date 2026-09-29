@@ -683,7 +683,7 @@ class CrossRunTools:
         claims = claims_for_memory(
             self.dir, lessons=self._role_lessons(),
             research_claims=self._role_research_claims(),
-            decisions=_governance["decisions"], structured=True)
+            decisions=_governance["decisions"])
         claim_source = safe_claim_source_summary(getattr(claims, "claim_source", None)) or {}
         research_source = safe_research_source_summary(
             getattr(claims, "research_source", None)) or {}
@@ -747,7 +747,7 @@ class CrossRunTools:
         scope_receipt = self._capsule_scope_receipt
         atlas = atlas_for_memory(self.dir, lessons=self._role_lessons(),
                                  capsules=scoped_capsules,
-                                 research_claims=self._role_research_claims(), structured=True,
+                                 research_claims=self._role_research_claims(),
                                  _governance=_governance)
         lines = [f"Bounded live projection: {atlas['n_runs']} run(s), {atlas['n_concepts']} concept(s), "
                  f"{atlas['n_claims']} claim record(s), {atlas['n_contested']} mixed-evidence."]
@@ -897,7 +897,7 @@ class CrossRunTools:
         r = cross_run_retrieve(self.dir, query, lessons=self._role_lessons(),
                                capsules=scoped_capsules,
                                research_claims=self._role_research_claims(),
-                               intent=intent, structured=True,
+                               intent=intent,
                                scope_receipt=scope_receipt, _governance=_governance)
         hits = r["results"][:8]
         rc = r.get("receipt") or {}

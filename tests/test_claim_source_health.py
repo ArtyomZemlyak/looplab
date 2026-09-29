@@ -50,7 +50,7 @@ def test_poisoned_lesson_semantics_quarantine_whole_row_and_lower_authority(
     (tmp_path / "lessons.jsonl").write_bytes(
         orjson.dumps(poisoned) + b"\n" + orjson.dumps(good) + b"\n")
 
-    rows = claims_for_memory(tmp_path, structured=True)
+    rows = claims_for_memory(tmp_path)
 
     assert [row["statement"] for row in rows] == ["retained evidence"]
     assert rows[0]["support"] == ["good-run:1"]
@@ -75,7 +75,7 @@ def test_bounded_integer_string_node_source_remains_legacy_compatible(tmp_path):
     row = {**_lesson("numeric-string evidence", "legacy-run"), "evidence": ["42", "7"]}
     (tmp_path / "lessons.jsonl").write_bytes(orjson.dumps(row) + b"\n")
 
-    claims = claims_for_memory(tmp_path, structured=True)
+    claims = claims_for_memory(tmp_path)
 
     assert claims[0]["support"] == ["legacy-run:42", "legacy-run:7"]
     assert claims.claim_source["source_complete"] is True
@@ -87,7 +87,7 @@ def test_bounded_integer_string_node_source_remains_legacy_compatible(tmp_path):
     signed.mkdir()
     (signed / "lessons.jsonl").write_bytes(
         orjson.dumps({**_lesson("signed evidence", "legacy-run"), "evidence": ["-42"]}) + b"\n")
-    rejected = claims_for_memory(signed, structured=True)
+    rejected = claims_for_memory(signed)
     assert list(rejected) == []
     assert rejected.claim_source["source_complete"] is False
 
@@ -213,7 +213,7 @@ def test_claim_decision_holds_both_evidence_locks_through_fsync(tmp_path, monkey
 
     lesson_path = tmp_path / "lessons.jsonl"
     lesson_path.write_bytes(orjson.dumps(_lesson("locked evidence", "r")) + b"\n")
-    claim = claims_for_memory(tmp_path, structured=True)[0]
+    claim = claims_for_memory(tmp_path)[0]
     active: set[str] = set()
     mutexes: dict[str, threading.Lock] = {}
     mutation_started = threading.Event()

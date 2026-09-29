@@ -401,7 +401,7 @@ def _preselect_retrieval_docs(docs, query: str, limit: int):
 
 def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, capsules=None,
                        research_claims=None, scope_task: str = "", contradiction_quota: float = 0.34,
-                       max_corpus: int = 2000, structured: bool = True, intent: Optional[str] = None,
+                       max_corpus: int = 2000, intent: Optional[str] = None,
                        scope_receipt: Optional[dict] = None,
                        _governance: Optional[dict] = None) -> dict:
     """CR2a retrieval planner (§21.20.5, full CR): RRF-fuse the portfolio's cross-run KNOWLEDGE — claims
@@ -436,7 +436,7 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
                 memory_dir, query, k=k, lessons=lessons, capsules=capsules,
                 research_claims=research_claims, scope_task=scope_task,
                 contradiction_quota=contradiction_quota, max_corpus=max_corpus,
-                structured=structured, intent=intent, scope_receipt=scope_receipt,
+                intent=intent, scope_receipt=scope_receipt,
                 _governance=governance,
             ),
             include_concepts=True,
@@ -460,7 +460,7 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
     governance = _governance
     claims = filter_claim_assessments(
         claim_assessments(lessons, research_claims=research,
-                          decisions=governance["decisions"], structured=structured),
+                          decisions=governance["decisions"]),
         lambda c: c.get("maturity") != "operator-rejected")
     claim_source = (safe_claim_source_summary(claims.claim_source)
                     or _claim_source_summary(lessons, research, research_source=research_source))
@@ -677,8 +677,7 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
 
 def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int = 8,
                     decisions: Optional[dict] = None, research_claims: Optional[list[dict]] = None,
-                    aliases: Optional[dict] = None, splits: Optional[dict] = None,
-                    structured: bool = True) -> dict:
+                    aliases: Optional[dict] = None, splits: Optional[dict] = None) -> dict:
     """The Research Atlas DATA payload (§21.20 Step 6): one structured bounded observation/mixed-evidence
     view, composing the concept overview (Step 3), the claim
     assessments (Step 4) and the bounded context pack (Step 5). Pure/deterministic — the read-model a
@@ -699,7 +698,7 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
     # Keep the complete internal sets for exact run totals and the governance evidence digest. Only the
     # outward contradictions/context projections are capped below.
     claims = claim_assessments(lessons, research_claims=research_claims, decisions=decisions,
-                               structured=structured, bounded=False)
+                               bounded=False)
     research_source = (safe_research_source_summary(getattr(claims, "research_source", None))
                        or _research_source_summary(
                            _valid_claim_source_rows(research_claims, research=True)))

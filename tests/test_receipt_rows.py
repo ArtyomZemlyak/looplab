@@ -267,7 +267,7 @@ def test_a_malformed_research_line_survives_the_load_projection_and_the_scope_fi
     assert scoped.read_health["read_complete"] is False, (
         "scoping to the row's OWN task must not repair the file's quarantine")
 
-    assessed = claims_for_memory(tmp_path, scope_task="t1", structured=True)
+    assessed = claims_for_memory(tmp_path, scope_task="t1")
     assert assessed.claim_source["read_complete"] is False
     assert assessed.claim_source["source_complete"] is False
 

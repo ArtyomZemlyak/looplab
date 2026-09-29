@@ -74,7 +74,7 @@ def test_finalize_preserves_invalid_claim_slots_but_legacy_support_is_unverified
     }
     # The retained positive citation stays drillable, but an omitted producer tail cannot establish a
     # one-sided durable verdict (CODEX AGENT).
-    claim = claim_assessments([], research_claims=rows, structured=True)[0]
+    claim = claim_assessments([], research_claims=rows)[0]
     assert claim["support"] == []
     assert claim["unverified"] == ["run-finalize:7"]
     assert claim["epistemic"] == "inconclusive"
@@ -199,7 +199,7 @@ def test_finalize_persists_only_generation_bound_verified_evidence(tmp_path):
         "claims_receipt_known": True, "evidence_complete": True,
         "producer_complete": True,
     }
-    claim = claim_assessments([], research_claims=rows, structured=True)[0]
+    claim = claim_assessments([], research_claims=rows)[0]
     assert claim["support"] == ["run-finalize:0"]
 
 
@@ -218,7 +218,7 @@ def test_finalize_downgrades_verification_when_node_lifecycle_changes(tmp_path, 
     assert rows[0]["verification"]["verdict"] == "unverified"
     assert rows[0]["verification"]["note"] == "verification evidence lifecycle is stale"
     assert rows[0]["source_receipt"]["producer_complete"] is False
-    claim = claim_assessments([], research_claims=rows, structured=True)[0]
+    claim = claim_assessments([], research_claims=rows)[0]
     assert claim["support"] == []
     assert claim["unverified"] == ["run-finalize:0"]
 
@@ -252,7 +252,7 @@ def test_finalize_rejects_supported_verdict_with_subset_identity_receipt(tmp_pat
     assert rows[0]["verification"]["note"] \
         == "verification evidence identity does not cover the complete claim"
     assert rows[0]["source_receipt"]["producer_complete"] is False
-    assert claim_assessments([], research_claims=rows, structured=True)[0]["support"] == []
+    assert claim_assessments([], research_claims=rows)[0]["support"] == []
 
 
 def test_finalize_carries_more_than_64_claims_into_authoritative_omission_receipt(tmp_path):

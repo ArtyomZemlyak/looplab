@@ -138,7 +138,7 @@ def claim_curation_input_digest(claims, *, max_proposals: int = _MAX_PROPOSALS) 
     return hashlib.sha256(encoded).hexdigest()
 
 
-def claim_curation_snapshot(memory_dir, *, lessons=None, structured: bool = True,
+def claim_curation_snapshot(memory_dir, *, lessons=None,
                             max_proposals: int = _MAX_PROPOSALS,
                             _governance: dict | None = None) -> tuple[list[dict], str]:
     """Freeze one claim projection and its exact prompt digest before a durable paid claim."""
@@ -149,7 +149,7 @@ def claim_curation_snapshot(memory_dir, *, lessons=None, structured: bool = True
         return governed_projection(
             memory_dir,
             lambda governance: claim_curation_snapshot(
-                memory_dir, lessons=lessons, structured=structured,
+                memory_dir, lessons=lessons,
                 max_proposals=max_proposals, _governance=governance),
             # The research store is ALWAYS governed here: this projection loads it itself whatever
             # the caller passed, so it is a fixed name rather than an `unsupplied` entry.
@@ -158,8 +158,7 @@ def claim_curation_snapshot(memory_dir, *, lessons=None, structured: bool = True
         )
 
     claims = claims_for_memory(
-        memory_dir, lessons=lessons, decisions=_governance["decisions"],
-        structured=structured)
+        memory_dir, lessons=lessons, decisions=_governance["decisions"])
     return claims, claim_curation_input_digest(claims, max_proposals=max_proposals)
 
 
@@ -304,11 +303,11 @@ def _validate(out, known: set, *, id_to_claim: dict | None = None, max_proposals
 def curation_is_empty(curation: dict) -> bool:
     return not (curation.get("decisions"))
 def steward_claims(memory_dir, client, *, lessons=None, apply: bool = False, by: str = "steward",
-                   at: str = "", structured: bool = True, max_proposals: int = _MAX_PROPOSALS,
+                   at: str = "", max_proposals: int = _MAX_PROPOSALS,
                    raise_on_failure: bool = False) -> dict:
     """One-call agentic claim steward over a memory dir: load the claim assessments (always the
-    structured key, so decisions are scope-precise; `structured` is retired and inert since doc 25
-    EM-06, 2026-09-08) and ask the LLM to propose decisions for review. The deprecated
+    structured key, so decisions are scope-precise — the only identity since doc 25 EM-06) and ask
+    the LLM to propose decisions for review. The deprecated
     ``apply`` argument is retained only for call compatibility and is rejected before memory reads or LLM work.
     Returns `{"proposals", "receipt"}` with a permanently-null receipt; never writes governance state."""
     if apply:
@@ -318,7 +317,7 @@ def steward_claims(memory_dir, client, *, lessons=None, apply: bool = False, by:
         )
     try:
         claims, _ = claim_curation_snapshot(
-            memory_dir, lessons=lessons, structured=structured, max_proposals=max_proposals)
+            memory_dir, lessons=lessons, max_proposals=max_proposals)
     except Exception:  # noqa: BLE001 — interactive inspection remains best-effort
         if raise_on_failure:
             raise
