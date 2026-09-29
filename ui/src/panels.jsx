@@ -32,8 +32,8 @@ import { timelineEventKey } from './timelineModel.js'
 import { queuedGenerationControls } from './queue.js'
 import Panel from './PanelShell.jsx'
 import { DataTable, downloadBlob } from './accessibility.jsx'
-import { normalizeResearchMemos } from './researchMemoModel.js'
-import ResearchMemoCard from './ResearchMemoCard.jsx'
+import { memoLead, normalizeResearchMemos } from './researchMemoModel.js'
+import ResearchMemoCard, { researchMemoTrust } from './ResearchMemoCard.jsx'
 import { deadlineRequest } from './requestDeadline.js'
 import { installNavigationLossGuard } from './navigationLossGuard.js'
 import { createInspectorDraftStore, useInspectorDraftField } from './inspectorDraftStore.js'
@@ -471,20 +471,20 @@ export function OverviewPanel({ state, maxEval, onClose, onOpenPanel }) {
   )
 }
 
-// Deep-research drawer: every memo in one place (instead of scrolling the timeline feed), with
-// ACTIONABLE directions — "steer →" posts a hint the Researcher folds into the next proposal. Deep
-// research is no longer a DAG node; this drawer + the Dock timeline marker are its home.
+// Deep-research drawer: keep history reachable while reading a long memo. Directions post standing
+// hints for the next proposal; they do not start an experiment.
 export function ResearchPanel({ state, runId, onToast, onClose, onSelect, onSelectEvidence }) {
   const memoProjection = useMemo(() => normalizeResearchMemos(state.research), [state.research])
   const memos = [...memoProjection.memos].reverse()   // newest retained first
   const newestMemoIndex = memos[0]?.sourceIndex ?? null
-  const [openMemo, setOpenMemo] = useState(newestMemoIndex)
+  const [selectedMemoIndex, setSelectedMemoIndex] = useState(newestMemoIndex)
+  const readingRef = useRef(null)
   const seenNewestMemo = useRef(newestMemoIndex)
   const [steeringDirection, setSteeringDirection] = useState('')
   useEffect(() => {
     if (newestMemoIndex === seenNewestMemo.current) return
     seenNewestMemo.current = newestMemoIndex
-    setOpenMemo(newestMemoIndex)
+    setSelectedMemoIndex(newestMemoIndex)
   }, [newestMemoIndex])
   const steer = async (text) => {
     if (steeringDirection) return
@@ -498,8 +498,25 @@ export function ResearchPanel({ state, runId, onToast, onClose, onSelect, onSele
       setSteeringDirection('')
     }
   }
+  const selectedMemo = memos.find(memo => memo.sourceIndex === selectedMemoIndex) || memos[0]
+  const selectMemo = (sourceIndex) => {
+    setSelectedMemoIndex(sourceIndex)
+    readingRef.current?.scrollTo({ top: 0 })
+  }
+  const discussMemo = () => {
+    const historical = selectedMemo.sourceIndex !== newestMemoIndex
+    const lead = memoLead(selectedMemo.summary)
+    const text = `Discuss deep research memo #${selectedMemo.sourceIndex + 1} for this run${lead ? ` ("${lead}")` : ''}. ${historical
+      ? 'Compare it with newer research and measured results before suggesting a next step.'
+      : 'Which conclusions are supported by measured results, what remains uncertain, and what should we test next?'}`
+    onClose?.()
+    requestAnimationFrame(() => window.dispatchEvent(new CustomEvent('ll:focus-assistant', { detail: { text } })))
+  }
+  const latestSelected = selectedMemo?.sourceIndex === newestMemoIndex
+  const finished = state.phase === 'finished'
   return (
-    <Panel title="Deep research" sub={memos.length ? `${memos.length} memo${memos.length === 1 ? '' : 's'}` : 'none yet'} onClose={onClose} wide>
+    <Panel title="Deep research" sub={memos.length ? `${memos.length} memo${memos.length === 1 ? '' : 's'}` : 'none yet'} onClose={onClose}
+      size={memos.length ? 'board' : undefined} className={`research-panel${memos.length ? '' : ' empty'}`}>
       {!memos.length && <div className="research-empty-state" role="status">
         <div><OpIcon name="search" size={16} /><strong>No research memos yet</strong></div>
         <p>Deep research runs on the configured cadence or when the Strategist requests it.</p>
@@ -511,15 +528,42 @@ export function ResearchPanel({ state, runId, onToast, onClose, onSelect, onSele
       {memoProjection.omitted > 0 && <div className="muted">
         Showing {memos.length} of {memoProjection.total} newest valid memos; older, malformed, or over-budget entries are omitted.
       </div>}
-      <div className="research-memo-stack">{memos.map((memo, index) => (
-        // Append-only sourceIndex is stable while the newest card is inserted at the top.
-        <ResearchMemoCard key={memo.sourceIndex} memo={memo} memoNumber={memo.sourceIndex + 1}
-          latest={index === 0} open={openMemo === memo.sourceIndex}
-          onToggle={() => setOpenMemo(current => current === memo.sourceIndex ? null : memo.sourceIndex)}
-          variant="panel" normalized
-          onSteer={steer} steeringDirection={steeringDirection} onSelectNode={onSelect}
+      {selectedMemo && <div className={`research-workspace${memos.length === 1 ? ' single' : ''}`}>
+        {memos.length > 1 && <nav className="research-history" aria-label="Research memos">
+          <div className="research-history-title">Memo history <span>{memos.length}</span></div>
+          {memos.map((memo, index) => {
+            const trust = researchMemoTrust(memo)
+            return <button type="button" key={memo.sourceIndex}
+              className={`research-history-item${memo.sourceIndex === selectedMemo.sourceIndex ? ' selected' : ''}`}
+              aria-current={memo.sourceIndex === selectedMemo.sourceIndex ? 'true' : undefined}
+              onClick={() => selectMemo(memo.sourceIndex)}>
+              <span className="research-history-meta">#{memo.sourceIndex + 1}{index === 0 ? ' · latest' : ''}
+                {memo.at_node != null ? ` · after ${memo.at_node} experiments` : ''}</span>
+              <span className="research-history-lead">{memoLead(memo.summary) || 'No conclusion was recorded.'}</span>
+              <span className={`research-history-trust tone-${trust.tone}`}>{trust.label}</span>
+            </button>
+          })}
+        </nav>}
+        <div className="research-reading" ref={readingRef}>
+          <div className="research-reading-toolbar">
+            <span>Memo #{selectedMemo.sourceIndex + 1} of {memoProjection.total}</span>
+            <button type="button" className="btn sm" onClick={discussMemo}>
+              <OpIcon name="chat" size={14} /> Discuss in Assistant
+            </button>
+          </div>
+          {!latestSelected && <p className="research-history-notice" role="note">
+            Historical memo. Newer research may supersede these directions; select the latest memo to steer.
+          </p>}
+          <ResearchMemoCard key={selectedMemo.sourceIndex} memo={selectedMemo}
+          memoNumber={selectedMemo.sourceIndex + 1} latest={latestSelected}
+          staticOpen variant="panel" normalized
+          onSteer={latestSelected && !finished ? steer : undefined}
+          steeringNote={latestSelected && finished
+            ? 'This run is finished. Resume it before choosing a direction for a future proposal.' : undefined}
+          steeringDirection={steeringDirection} onSelectNode={onSelect}
           onSelectEvidence={onSelectEvidence} />
-      ))}</div>
+        </div>
+      </div>}
     </Panel>
   )
 }

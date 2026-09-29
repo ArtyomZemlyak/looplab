@@ -1,5 +1,5 @@
 import React, { useId, useMemo, useState } from 'react'
-import Markdown from './markdown.jsx'
+import Markdown, { stripMd } from './markdown.jsx'
 import { OpIcon } from './icons.jsx'
 import { memoLead, memoLeadIsPartial, normalizeResearchMemo } from './researchMemoModel.js'
 import { safeExternalHref } from './urlSafety.js'
@@ -202,7 +202,7 @@ function SourceDisclosure({ sources }) {
 }
 
 export function ResearchMemoBody({ memo, onSteer, steeringDirection = '', onSelectNode,
-  onSelectEvidence, showSummary = false, compact = false, normalized = false }) {
+  onSelectEvidence, showSummary = false, compact = false, normalized = false, steeringNote }) {
   // Collection owners already applied the bounded projection. Re-projecting that derived shape
   // would discard its omission receipts (`claimsTotal` / `claim.evidence`) because raw payloads use
   // different receipt field names.
@@ -223,14 +223,16 @@ export function ResearchMemoBody({ memo, onSteer, steeringDirection = '', onSele
       <SectionHeading icon="compass" meta={plural(value.recommended_directions.length, 'action')}>
         Next actions
       </SectionHeading>
+      {(steeringNote || onSteer) && <p className="research-action-note">{steeringNote
+        || 'Using a direction queues a hint for the next proposal. It does not start an experiment.'}</p>}
       <ol className="research-direction-list">{value.recommended_directions.map((direction, index) => {
         const busy = steeringDirection === direction
         return <li key={index}>
-          <span>{direction}</span>
+          <span>{stripMd(direction)}</span>
           {onSteer && <button type="button" className="btn sm ghost"
             disabled={!!steeringDirection} aria-busy={busy || undefined}
-            aria-label={`Steer next proposal: ${direction}`}
-            onClick={() => onSteer(direction)}>{busy ? 'steering…' : 'steer →'}</button>}
+            aria-label={`Use for next proposal: ${stripMd(direction)}`}
+            onClick={() => onSteer(direction)}>{busy ? 'Queueing…' : 'Use direction'}</button>}
         </li>
       })}</ol>
     </section>}
@@ -248,12 +250,13 @@ export function ResearchMemoBody({ memo, onSteer, steeringDirection = '', onSele
 
 export default function ResearchMemoCard({ memo, memoNumber = 1, open, onToggle,
   defaultOpen = false, latest = false, variant = 'panel', keepMounted = false,
-  onSteer, steeringDirection = '', onSelectNode, onSelectEvidence, normalized = false }) {
+  staticOpen = false, onSteer, steeringDirection = '', steeringNote,
+  onSelectNode, onSelectEvidence, normalized = false }) {
   const value = useMemo(() => normalized ? memo : normalizeResearchMemo(memo), [memo, normalized])
   const trust = researchMemoTrust(value)
   const [internalOpen, setInternalOpen] = useState(defaultOpen)
   const controlled = typeof open === 'boolean'
-  const expanded = controlled ? open : internalOpen
+  const expanded = staticOpen || (controlled ? open : internalOpen)
   const reactId = useId().replace(/:/g, '')
   const headingId = `research-memo-${reactId}-heading`
   const bodyId = `research-memo-${reactId}-body`
@@ -265,10 +268,14 @@ export default function ResearchMemoCard({ memo, memoNumber = 1, open, onToggle,
     'research-memo-card', variant === 'report' ? 'memo-card' : 'rsch-memo',
     `tone-${trust.tone}`, expanded ? 'open' : 'closed',
   ].join(' ')
+  const HeaderTag = staticOpen ? 'span' : 'button'
+  const headerProps = staticOpen
+    ? { className: 'research-memo-toggle static' }
+    : { type: 'button', className: 'research-memo-toggle disclosure-button',
+        'aria-expanded': expanded, 'aria-controls': bodyId, onClick: toggle }
   return <article className={classes} aria-labelledby={headingId}>
     <h3 className="research-memo-heading" id={headingId}>
-      <button type="button" className="research-memo-toggle disclosure-button"
-        aria-expanded={expanded} aria-controls={bodyId} onClick={toggle}>
+      <HeaderTag {...headerProps}>
         <span className="research-memo-chevron">
           <OpIcon name={expanded ? 'chevron-up' : 'chevron-down'} size={13} />
         </span>
@@ -279,28 +286,27 @@ export default function ResearchMemoCard({ memo, memoNumber = 1, open, onToggle,
             {value.trigger && <span>{triggerLabel(value.trigger)}</span>}
             {value.at_node != null && <span>after {plural(value.at_node, 'experiment')}</span>}
           </span>
-          {/* A LEAD, not the paragraph. A real memo's summary is ~1,600 characters, and rendering
-              it verbatim here made a list of memos a stack of walls — the "wall of text" report.
-              The full text is the body's Conclusion section, where a paragraph belongs. */}
-          <span className="research-memo-summary" title={value.summary || undefined}>
+          {/* Accordion headers show a lead; the static reading header goes straight to Conclusion. */}
+          {!staticOpen && <span className="research-memo-summary" title={value.summary || undefined}>
             {memoLead(value.summary) || 'No conclusion was recorded.'}
             {memoLeadIsPartial(value.summary)
               && <span className="research-memo-more"> — full conclusion below</span>}
-          </span>
+          </span>}
         </span>
         <span className="research-memo-overview">
           <TrustBadge trust={trust} />
-          <span>{plural(value.claimsTotal || value.verification?.totalVerdicts || 0, 'claim')}</span>
-          <span>{plural(value.sources.length, 'research step')}</span>
+          {(value.claimsTotal || value.verification?.totalVerdicts) > 0
+            && <span>{plural(value.claimsTotal || value.verification?.totalVerdicts, 'claim')}</span>}
+          {value.sources.length > 0 && <span>{plural(value.sources.length, 'research step')}</span>}
         </span>
-      </button>
+      </HeaderTag>
     </h3>
     {(expanded || keepMounted) && <div id={bodyId} role="region" aria-labelledby={headingId}
       className="research-memo-region" hidden={!expanded}>
       {/* `showSummary` because the header now shows only a lead: without it the full conclusion
           would exist nowhere on this card. */}
       <ResearchMemoBody memo={value} normalized showSummary onSteer={onSteer}
-        steeringDirection={steeringDirection} onSelectNode={onSelectNode}
+        steeringDirection={steeringDirection} steeringNote={steeringNote} onSelectNode={onSelectNode}
         onSelectEvidence={onSelectEvidence} />
     </div>}
   </article>

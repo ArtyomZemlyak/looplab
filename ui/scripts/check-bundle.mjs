@@ -51,8 +51,11 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // search across ideas/ids/concepts and a readable detail heading; route closures remain lazy.
     // 2026-09-28 Research map: 570,105 B before, 570,610 B after. The 505 B adds
     // question search with visible ancestry and collapsible evidence; route closures remain lazy.
-    js: { gzip: 558 * KIB },
-    css: { gzip: 52 * KIB },
+    // 2026-09-29 Deep research workspace: 571,934 B JS / 53,522 B CSS measured after
+    // adding persistent memo navigation, chat handoff and a larger reading surface.
+    // Route closures remain lazy.
+    js: { gzip: 559 * KIB },
+    css: { gzip: 53 * KIB },
   },
   individual: {
     js: { raw: 450 * KIB, gzip: 110 * KIB },

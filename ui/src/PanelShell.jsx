@@ -19,12 +19,12 @@ const PANEL_WIDTHS = { wide: 'min(1100px, 95%)', board: 'min(1560px, 96%)' }
 export const PanelPresentationContext = createContext('overlay')
 
 /** Shared modal shell kept separate so a small public-safe panel need not download the owner hub. */
-export default function PanelShell({ title, sub, onClose, children, wide, size }) {
+export default function PanelShell({ title, sub, onClose, children, wide, size, className = '' }) {
   const page = useContext(PanelPresentationContext) === 'page'
   const dialogRef = useRef(null)
   useDialogFocus(dialogRef, onClose, !page)
   const width = PANEL_WIDTHS[size] || (wide ? PANEL_WIDTHS.wide : null)
-  if (page) return <section className="panel panel-page" aria-label={title}>
+  if (page) return <section className={`panel panel-page ${className}`} aria-label={title}>
     <div className="panel-h"><span className="ttl panel-title">{title}</span>
       {sub && <span className="pill panel-sub" title={typeof sub === 'string' ? sub : undefined}>{sub}</span>}
       <span className="right" />
@@ -33,7 +33,7 @@ export default function PanelShell({ title, sub, onClose, children, wide, size }
   </section>
   return <div className="overlay"
     onMouseDown={event => { if (event.target === event.currentTarget) onClose?.() }}>
-    <div ref={dialogRef} className="panel" role="dialog" aria-modal="true" aria-label={title}
+    <div ref={dialogRef} className={`panel ${className}`} role="dialog" aria-modal="true" aria-label={title}
       tabIndex={-1} style={width ? { width } : {}}>
       <div className="panel-h"><span className="ttl panel-title">{title}</span>
         {sub && <span className="pill panel-sub" title={typeof sub === 'string' ? sub : undefined}>{sub}</span>}<span className="right" />

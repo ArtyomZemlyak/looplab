@@ -298,7 +298,9 @@ test('MemoCard and Report SSR stay bounded for 10k-entry and malformed payloads'
     assert.match(panelMarkup, /panel memo 9999/)
     assert.doesNotMatch(panelMarkup, /panel memo 0/)
     assert.doesNotMatch(panelMarkup, /href="javascript:/)
-    assert.equal((panelMarkup.match(/class="research-memo-card rsch-memo/g) || []).length,
+    assert.equal((panelMarkup.match(/class="research-memo-card rsch-memo/g) || []).length, 1,
+      'the reading pane mounts only the selected memo')
+    assert.equal((panelMarkup.match(/class="research-history-item/g) || []).length,
       RESEARCH_MEMO_LIMITS.memos)
     assert.ok(panelMarkup.length < 250_000)
   } finally {
