@@ -489,6 +489,32 @@ def test_either_clock_buys_the_retry(tmp_path, shape):
     assert researcher.triaged == []
 
 
+def test_a_kill_at_the_eval_s_OWN_timeout_is_not_the_canary_s_clock(tmp_path):
+    """The chain runs at `min(own, cap)`: an eval whose own timeout (30 s) is under the canary cap
+    (60 s) is killed at 30 s under the doubled cap too, so the retry was pure waste and "nor within
+    120s on its one retry" was false (critic 2026-09-29). It takes the ordinary path, in its own
+    words. MUTATION: drop `own is None` from `clocked` -> a second canary runs."""
+    ledger = tmp_path / "ledger.txt"
+    code = _script(ledger, canary="0.1", full="0.9")
+    researcher = _Researcher(repairs=0)
+    eng = _engine(tmp_path / "run", _Dev(code), researcher=researcher)
+    eng._eval_spec["timeout"] = 30.0
+    _seed(eng, code)
+    caps: list = []
+
+    def _stub(a, spec, scratch, cancel):
+        caps.append(spec["timeout"])
+        return _expired(timed_out=True), False
+
+    eng._run_canary_in_scratch = _stub
+    evs = _evaluate(eng)
+    assert caps == [60.0], "a retry that cannot outlast the eval's own clock was run"
+    (finished,) = _of(evs, EV_EVAL_CANARY_FINISHED)
+    assert "own 30s timeout" in finished.data["error"]
+    (term,) = _terminals(evs)
+    assert term.data.get("reason") != "canary_timeout" and len(researcher.triaged) == 1
+
+
 @pytest.mark.parametrize("when", ["during", "after_expiry"])
 def test_an_operator_intervention_is_never_retried(tmp_path, when):
     """`during`: the operator's intervention stopped the canary before any clock — it is not the

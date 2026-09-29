@@ -43,7 +43,13 @@ def task_identity(task) -> str:
 
     if not isinstance(task, BaseModel):
         return ""
-    return setup_config_hash(task.model_dump(mode="json", exclude_defaults=True))
+    # The KIND rides beside the non-default fields: every adapter's `kind` is its own class default,
+    # so `exclude_defaults` dropped it, and a timeseries, a regression and a quadratic task with the
+    # same goal hashed alike — swapping the whole adapter recorded no change (critic 2026-09-29,
+    # driven). A class with no `kind` field is named by its class.
+    kind = getattr(task, "kind", None)
+    kind = kind if isinstance(kind, str) and kind else type(task).__name__
+    return setup_config_hash({"kind": kind, **task.model_dump(mode="json", exclude_defaults=True)})
 
 
 def setup_manifest_digest(

@@ -197,8 +197,9 @@ def test_an_empty_object_in_prose_never_outranks_the_model_s_own_object():
     `cfg = {}` in a snippet or a `"{}".format` placeholder after the model's own wrong-shaped object
     then won, and validated into the all-default answer 69.17 is about — the report path published
     an empty report as the model's (critic 2026-09-27, driven). Only the schema's own ECHO ranks
-    below `{}`; the model's wrong shape ties with it, wins as the first typed, and is refused, so
-    the caller's fallback decides. MUTATION: rank every non-answer below `{}` -> `{}` is returned."""
+    below `{}`; the model's wrong shape OUTRANKS it wherever it is typed and is refused, so the
+    caller's fallback decides — tied, a `{}` typed first still won (critic 2026-09-29, driven).
+    MUTATION: rank every non-answer below `{}` -> `{}` is returned."""
     from looplab.core.parse import ParseError, _standing
 
     for reply in ('{"title": "recall improved 12%", "body": "the champion wins"}\nNote: '
@@ -206,12 +207,17 @@ def test_an_empty_object_in_prose_never_outranks_the_model_s_own_object():
                   '{"summary_line": "recall improved"}  (render with "{}".format(x))'):
         with pytest.raises(ParseError):
             _extract_json(reply, _SCHEMA)
-    # `{}` typed FIRST is still the first candidate, as it always was.
-    assert _extract_json('Defaults are {}. {"summary_line": "recall improved"}', _SCHEMA) == {}
-    # The echo test is every name a JSON-Schema keyword — one foreign name makes a wrong shape.
+    # ...and a `{}` typed FIRST no longer wins the tie either: the wrong shape is refused.
+    for reply in ('Defaults are {}. {"summary_line": "recall improved"}',
+                  # a wrong shape made only of METADATA keywords is not the schema's echo
+                  'Given cfg = {} I write: {"title": "recall", "description": "improved"}'):
+        with pytest.raises(ParseError):
+            _extract_json(reply, _SCHEMA)
+    # The echo test is every name a JSON-Schema keyword, one of them STRUCTURAL.
     assert _standing({"type": "object", "title": "T", "properties": {}}, (0, False)) == 0
-    assert _standing({"title": "x", "body": "y"}, (0, False)) == 1
-    assert _standing({}, (0, False)) == 1 and _standing({"operator": "x"}, (0, True)) == 1
+    assert _standing({"title": "x", "description": "y"}, (0, False)) == 2
+    assert _standing({"title": "x", "body": "y"}, (0, False)) == 2
+    assert _standing({}, (0, False)) == 1 and _standing({"operator": "x"}, (0, True)) == 2
 
 
 def test_a_field_s_alias_is_its_own_spelling_never_drift():

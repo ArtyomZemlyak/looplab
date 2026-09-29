@@ -69,6 +69,8 @@ const invalidPayload = () => { throw new ConceptContractError('Invalid concept p
 // What a failed concept read failed OF, so the error card names it instead of promising a retry.
 export const conceptFailure = error => error instanceof ConceptContractError
   ? { kind: 'contract' }
+  // a 200 whose body is not JSON at all (a proxy's HTML page): the server was reached
+  : error instanceof SyntaxError ? { kind: 'malformed' }
   : Number.isInteger(error?.status)
     ? { kind: 'http', status: error.status, message: String(error.message || '').slice(0, 200) }
     : { kind: 'transport' }
@@ -79,6 +81,10 @@ export const conceptErrorBody = (timeout, failure) => {
     return 'The server answered, but this UI refused the concept projection as inconsistent '
       + '(a UI/server version mismatch or a projection bug). Run unchanged; a retry reads the '
       + 'same frame — rebuild the UI or report it.'
+  }
+  if (failure?.kind === 'malformed') {
+    return 'The concept read returned something that is not JSON (a proxy or login page?). '
+      + 'Run unchanged; check what answers /api on this origin.'
   }
   if (failure?.kind === 'http') {
     return `Concept projection refused (HTTP ${failure.status}${failure.message

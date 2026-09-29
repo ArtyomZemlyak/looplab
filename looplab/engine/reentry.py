@@ -534,7 +534,9 @@ class ReentryMixin:
         it since this change; a run started before it is compared against its own
         `task.snapshot.json` read by THIS build, and with neither there is nothing to compare —
         no row. What the document POINTS AT (a scorer script, the data) is not the document, and
-        no row speaks for it."""
+        no row speaks for it. KNOWN LIMIT (critic 2026-09-29): a run started before the identity
+        was recorded has its snapshot as the only baseline, so a hand edit of THAT file is the new
+        baseline at the next re-entry and no row is written for it."""
         started_row = next((e.data for e in events
                             if e.type == EV_RUN_STARTED and isinstance(e.data, dict)), None)
         if not (entry.run_id and started_row):

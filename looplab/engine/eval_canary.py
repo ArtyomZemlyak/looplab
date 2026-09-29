@@ -155,10 +155,31 @@ def canary_passed(res, *, expired: bool = False) -> bool:
             and getattr(res, "exit_code", 1) == 0)
 
 
-def canary_failure_detail(res, *, expired: bool, timeout: float) -> str:
+def own_timeout_fired(res, *, expired: bool, own_timeouts: dict, cap: float):
+    """The timed-out stage's OWN declared timeout when that — not the canary's cap — is the clock
+    that fired, else None. `capped_pipeline` runs a stage at `min(own, cap)`, so a stage whose own
+    timeout is at or under the cap is killed at the same second under a longer canary cap too: the
+    doubled-cap retry was pure waste and its sentence ("nor within 2x s") was false (critic
+    2026-09-29). `own_timeouts` maps stage name -> declared timeout, `None` -> the single command's."""
+    if expired or res is None or not getattr(res, "timed_out", False):
+        return None
+    own = own_timeouts.get(getattr(res, "failed_stage", None) or None)
+    try:
+        own = float(own)
+    except (TypeError, ValueError):
+        return None
+    return own if 0 < own <= cap else None
+
+
+def canary_failure_detail(res, *, expired: bool, timeout: float, own_timeout=None) -> str:
     """One sentence naming HOW the canary failed, from the engine's own record of it."""
     if res is None:
         return "the canary produced no result"
+    if own_timeout is not None and not expired:
+        stage = getattr(res, "failed_stage", None)
+        whose = f"stage {stage!r} hit its" if stage else "the eval hit its"
+        return (f"the canary's {whose} own {own_timeout:g}s timeout (under the canary's "
+                f"{timeout:g}s cap)")
     if expired or getattr(res, "timed_out", False):
         return f"the canary did not finish within its {timeout:g}s cap"
     stage = getattr(res, "failed_stage", None)

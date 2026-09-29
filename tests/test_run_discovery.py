@@ -106,3 +106,70 @@ def test_the_corpus_instruments_count_a_nested_run(tmp_path):
     result = CliRunner().invoke(app, ["card-ladder", str(tmp_path), "--json"])
     assert result.exit_code == 0, result.output
     assert "campaign/seed1" in result.output and "solo" in result.output
+
+
+def _store(tmp_path, *rows):
+    store = tmp_path / "memory"
+    store.mkdir(exist_ok=True)
+    (store / "lessons.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+    return store
+
+
+def test_a_blind_survey_proposes_no_row_with_or_without_a_uid(tmp_path):
+    """BLIND protected only uid-carrying rows: a pre-uid run past the bound — or under a hidden
+    directory — had no NAME in the live set either, and `--apply` purged its rows while the survey
+    said BLIND (critic 2026-09-29, driven). A mistyped runs root is the same unknown."""
+    from looplab.serve.memory_cascade import orphan_survey, purge_orphan_identities
+
+    for layout in ("a/b/c/d/legacyrun", "camp/.wip/legacyrun"):
+        runs = tmp_path / layout.split("/")[0] / "root"
+        _run(runs / layout)
+        store = _store(tmp_path, {"run_id": "legacyrun", "task_id": "t", "lesson": "x"})
+        survey = orphan_survey(store, runs)
+        assert survey["blind"] and survey["identities"] == [], layout
+        assert purge_orphan_identities(store, survey["identities"])["deleted"] == 0
+    survey = orphan_survey(_store(tmp_path, {"run_id": "r", "task_id": "t", "lesson": "x"}),
+                           tmp_path / "no-such-root")
+    assert survey["blind"] and survey["identities"] == []
+
+
+def test_a_gone_run_sharing_a_live_run_s_name_is_purged_by_uid_only(tmp_path):
+    """`campA/seed1` gone (uid rows), `campB/seed1` live and pre-uid: the survey counted the live
+    row live, then the purge's name fallback deleted it too (critic 2026-09-29, driven)."""
+    from looplab.serve.memory_cascade import orphan_survey, purge_orphan_identities
+
+    runs = tmp_path / "runs"
+    _run(runs / "campB" / "seed1")
+    store = _store(tmp_path,
+                   {"run_id": "seed1", "task_id": "t", "lesson": "live, pre-uid"},
+                   {"run_id": "seed1", "run_uid": GONE_UID, "task_id": "t", "lesson": "gone"})
+    survey = orphan_survey(store, runs)
+    assert survey["identities"] == [
+        {"run_id": "seed1", "run_uid": GONE_UID, "rows": 1, "uid_only": True}]
+    assert purge_orphan_identities(store, survey["identities"])["deleted"] == 1
+    left = [json.loads(line)["lesson"]
+            for line in (store / "lessons.jsonl").read_text().splitlines() if line.strip()]
+    assert left == ["live, pre-uid"]
+
+
+def test_a_run_s_markers_stop_the_walk_and_its_workdirs_blind_nothing(tmp_path):
+    """A run directory whose log is gone (or not written yet) keeps its markers; its node workdirs
+    are deep trees that sat past the bound and blinded the survey for good (critic 2026-09-29)."""
+    from looplab.serve.memory_cascade import orphan_survey
+
+    runs = tmp_path / "runs"
+    leftover = runs / "camp" / "leftover"
+    (leftover / "node_1" / "repo" / "pkg" / "sub" / "deeper").mkdir(parents=True)
+    (leftover / "config.snapshot.json").write_text("{}")
+    found = discover_run_dirs(runs)
+    assert found.marked == [leftover] and found.unwalked == [] and found.runs == []
+    survey = orphan_survey(_store(tmp_path, {"run_id": "gone", "run_uid": GONE_UID,
+                                             "task_id": "t", "lesson": "x"}), runs)
+    assert not survey["blind"] and survey["identities"][0]["run_uid"] == GONE_UID
+
+
+@pytest.mark.posix_only("symlink")
+def test_a_symlinked_alias_of_a_run_is_one_run(tmp_path):
+    run = _run(tmp_path / "group" / "r1")
+    os.symlink(run, tmp_path / "group" / "alias")
+    assert len(discover_run_dirs(tmp_path).runs) == 1

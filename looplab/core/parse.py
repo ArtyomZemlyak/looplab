@@ -231,8 +231,8 @@ def _extract_json(text: str, schema=None) -> dict:
             # driven). NOT "an answer outranks any non-answer", which was the first cut: an empty
             # `{}` anywhere in the reply — a `cfg = {}` in a snippet, a `"{}".format` — then beat
             # the model's own wrong-shaped object and validated into the all-default answer 69.17
-            # is about (critic 2026-09-27, driven); tied, the wrong shape wins as the first typed,
-            # and is refused below.
+            # is about (critic 2026-09-27, driven). The wrong shape now OUTRANKS `{}` wherever it is
+            # typed and is refused below: tied, a `{}` typed first still won (critic 2026-09-29).
             rank = (*fit, _standing(obj, fit))
             if rank > best_rank:                # strictly better only — the first candidate wins ties
                 best, best_rank = obj, rank
@@ -283,13 +283,28 @@ _JSON_SCHEMA_KEYWORDS = frozenset({
 })
 
 
+# A schema DOCUMENT says what it describes: an echo carries at least one of these. An object made
+# only of metadata keywords (`{"title": …, "description": …}`) is a model's wrong-shaped answer that
+# happens to use two common words, and ranking it as an echo let a stray `{}` beat it (critic
+# 2026-09-29, driven).
+_JSON_SCHEMA_STRUCTURE = frozenset({"type", "properties", "required", "$defs", "definitions",
+                                    "$schema", "$ref", "items", "anyOf", "allOf", "oneOf"})
+
+
 def _standing(obj: dict, fit: tuple[int, bool]) -> int:
     """A candidate's rank among those of the same `_schema_fit`: 0 for the schema's own ECHO (a
-    non-empty object whose every name is a JSON-Schema keyword and none a declared one), 1 for any
-    other — an answer, `{}`, or a wrong-shaped object, which then tie and the first typed wins."""
-    if fit[0] or fit[1] or not obj:
+    non-empty object whose every name is a JSON-Schema keyword, at least one of them structural,
+    and none a declared one), 1 for `{}`, 2 for any other object — a wrong shape, which then
+    outranks `{}` wherever it is typed and is refused (critic 2026-09-29: `cfg = {}` typed BEFORE
+    the model's wrong-shaped object still won the tie and validated into all defaults, the 69.17
+    shape). An answer's fit outranks all three."""
+    if fit[0] or fit[1]:
+        return 2
+    if not obj:
         return 1
-    return 0 if all(isinstance(k, str) and k in _JSON_SCHEMA_KEYWORDS for k in obj) else 1
+    echo = (all(isinstance(k, str) and k in _JSON_SCHEMA_KEYWORDS for k in obj)
+            and any(k in _JSON_SCHEMA_STRUCTURE for k in obj))
+    return 0 if echo else 2
 
 
 def _answers(obj: dict, fit: tuple[int, bool]) -> bool:

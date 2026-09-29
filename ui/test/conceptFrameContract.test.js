@@ -71,6 +71,10 @@ test('the error card names what failed instead of promising that a retry helps',
     assert.deepEqual(transport, { kind: 'transport' })
     assert.match(conceptErrorBody(false, transport), /unreachable/)
     assert.match(conceptErrorBody(true, contract), /timed out/)
+    // a 200 whose body is not JSON reached SOMETHING: neither a contract refusal nor unreachable
+    const malformed = conceptFailure(new SyntaxError('Unexpected token < in JSON'))
+    assert.deepEqual(malformed, { kind: 'malformed' })
+    assert.match(conceptErrorBody(false, malformed), /not JSON/)
   } finally {
     await vite.close()
   }

@@ -330,6 +330,18 @@ def test_a_duck_typed_task_has_no_identity_and_does_not_raise():
     assert setup_identity.task_identity(object()) == ""
 
 
+def test_a_change_of_task_KIND_is_a_change_of_identity():
+    """Every adapter's `kind` is its own class default, so `exclude_defaults` dropped it and three
+    kinds with one goal hashed alike (critic 2026-09-29, driven). MUTATION: hash the dump alone."""
+    from looplab.adapters.tasks import validate_task
+    from looplab.core.setup_identity import task_identity
+
+    spec = {"goal": "g", "direction": "max"}
+    ids = {task_identity(validate_task({**spec, "kind": kind}))
+           for kind in ("timeseries", "regression", "quadratic")}
+    assert len(ids) == 3
+
+
 def test_a_run_started_before_the_identity_reads_its_own_snapshot(tmp_path):
     """A log whose `run_started` records no `task_identity` is compared against its own
     `task.snapshot.json`, read by THIS build; an edit to the task is still a row."""

@@ -1071,7 +1071,9 @@ eval seconds.
   a defect the engine saw, so it is not in the default `inline_repair_reasons` and buys no triage and
   no repair (list it there to have them back — a real hang in the canary path ends unrepaired too,
   because one clock cannot tell it from a slow model). A retry is new work, so it is skipped once
-  the run is paused or stopping.
+  the run is paused or stopping. A stage killed at its **own** declared `timeout` — one at or under
+  the canary's cap, which a longer canary cap cannot raise — is not the canary's clock: it takes the
+  failing-canary path above, in words naming that stage's timeout, with no retry.
 - **Canary passes**: the full evaluation runs in the same attempt. The canary's own metric is
   discarded — it is never the node's metric and never reaches selection. A pass that used 75 % or
   more of its cap is marked `near_cap` on its `eval_canary_finished` row and logged at WARNING: the

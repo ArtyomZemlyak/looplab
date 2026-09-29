@@ -121,9 +121,12 @@ class RunIdentity:
     the best identity there is, and where the ambiguity is disclosed rather than hidden.
     """
 
-    def __init__(self, run_id: str, run_uid: str = "") -> None:
+    def __init__(self, run_id: str, run_uid: str = "", *, uid_only: bool = False) -> None:
         self.run_id = _text(run_id)
         self.run_uid = _text(run_uid)
+        # Match by uid ONLY — never by the name fallback — when a LIVE run shares this directory
+        # name (`orphan_survey`); meaningless without a uid, so it cannot turn a purge into nothing.
+        self.uid_only = bool(uid_only) and bool(self.run_uid)
 
     def owns(self, row: dict) -> bool:
         """Was `row` written by this run? THE shared predicate, not a second reading of it.
@@ -150,6 +153,8 @@ class RunIdentity:
         readers do. The COMMENTS stay, because the cost is accepted for a different reason on each
         side, and only this side is destructive.
         """
+        if self.uid_only and not (isinstance(row, dict) and _text(row.get("run_uid"))):
+            return False
         return row_belongs_to_run(row, run_uid=self.run_uid, run_id=self.run_id)
 
     def name_matched(self, row: dict) -> bool:
@@ -367,7 +372,8 @@ def known_memory_dirs(runs_root: str | Path, *, fallback_memory_dir: str = "") -
         _add_snapshot(rd)
         if not is_run_dir(rd):
             # the runs a campaign directory holds name their stores too (`core/run_discovery.py`)
-            for inner in discover_run_dirs(rd, max_depth=DEFAULT_MAX_DEPTH - 1).runs:
+            nested = discover_run_dirs(rd, max_depth=DEFAULT_MAX_DEPTH - 1)
+            for inner in (*nested.runs, *nested.marked):
                 _add_snapshot(inner)
     return known
 
@@ -469,7 +475,9 @@ def lesson_keep_reason(row: dict, run: "RunIdentity") -> str:
         if ref_uid:
             self_reference = bool(run.run_uid) and ref_uid == run.run_uid
         elif ref_id:
-            self_reference = bool(run.run_id) and ref_id == run.run_id
+            # Under `uid_only` a LIVE run shares this name, so a bare-name ref may be that run's
+            # corroboration: kept, never guessed to be ours (critic 2026-09-29).
+            self_reference = bool(run.run_id) and not run.uid_only and ref_id == run.run_id
         else:
             continue
         if not self_reference:
@@ -807,8 +815,10 @@ def surviving_run_identities(runs_root: str | Path) -> dict:
         # Listing only the root's children left such a live run's uid unknown, so every row it
         # wrote read as an orphan here (`core/run_discovery.py`). A subtree the walk could not
         # list, or that is deeper than its bound, is an unknown too, and fails closed like one.
-        nested = discover_run_dirs(run_dir, max_depth=DEFAULT_MAX_DEPTH - 1)
-        for inner in nested.runs:
+        nested = discover_run_dirs(run_dir, max_depth=DEFAULT_MAX_DEPTH - 1, hidden="report")
+        # A `marked` directory (a run's markers, no log yet or any more) is recorded like a top-level
+        # one: its NAME is live, and it has no uid to be read (critic 2026-09-29).
+        for inner in (*nested.runs, *nested.marked):
             _record(inner, inner.relative_to(root).as_posix())
         unreadable.extend(f"{path.relative_to(root).as_posix()} (not walked)"
                           for path in nested.unwalked)
@@ -863,11 +873,13 @@ def orphan_survey(memory_dir: str | Path, runs_root: str | Path) -> dict:
         for row in rows:
             uid = _text(row.get("run_uid"))
             name = _text(row.get("run_id"))
+            # FAIL CLOSED while any surviving run's identity is unknown — for a uid-less row too:
+            # a run the walk could not reach has no NAME in `live` either, and its pre-uid rows
+            # were proposed and purged while the survey said BLIND (critic 2026-09-29, driven).
             if uid:
-                # FAIL CLOSED while any surviving run's uid is unknown.
                 is_live = uid in live["uids"] or blind
             else:
-                is_live = name in live["names"]
+                is_live = name in live["names"] or blind
             if is_live:
                 live_count += 1
             else:
@@ -877,8 +889,13 @@ def orphan_survey(memory_dir: str | Path, runs_root: str | Path) -> dict:
         result["live_rows"] += live_count
         result["stores"].append({"store": label, "file": filename,
                                  "orphan_rows": orphan, "live_rows": live_count})
+    # A gone run whose directory NAME a live run also carries (`campA/seed1` gone, `campB/seed1`
+    # live — ordinary once runs nest) is purged by its uid ONLY: the name fallback of
+    # `row_belongs_to_run` would otherwise take the live run's uid-less rows with it, rows this
+    # survey had just counted live (critic 2026-09-29, driven). Its own uid-less rows, if any, stay.
     result["identities"] = [
-        {"run_id": run_id, "run_uid": uid, "rows": count}
+        {"run_id": run_id, "run_uid": uid, "rows": count,
+         **({"uid_only": True} if uid and run_id in live["names"] else {})}
         for (run_id, uid), count in sorted(groups.items(), key=lambda kv: (-kv[1], kv[0]))]
     return result
 
@@ -940,7 +957,7 @@ def unreadable_identity_receipt(run_id: str, reason: str) -> dict:
 
 
 def purge_attributable_memory(memory_dir: str | Path | None, run_id: str,
-                              run_uid: str = "") -> dict:
+                              run_uid: str = "", *, uid_only: bool = False) -> dict:
     """Delete exactly the rows `attributable_memory` reports as deletable. Idempotent.
 
     Each store is rewritten under its own interprocess lock — the one its own writers take — with
@@ -953,7 +970,7 @@ def purge_attributable_memory(memory_dir: str | Path | None, run_id: str,
     failed. An UNREADABLE store is one of those failures — it used to read as "nothing of ours here"
     and produce a clean success having done nothing.
     """
-    run = RunIdentity(run_id, run_uid)
+    run = RunIdentity(run_id, run_uid, uid_only=uid_only)
     base = Path(memory_dir) if memory_dir else None
     # WHICH store this ran against, echoed for the same reason `run_uid` is. A retry arrives after the
     # run directory is gone and can only pass back what the receipt told it, and `memory_dir` is a
@@ -1061,7 +1078,8 @@ def purge_orphan_identities(memory_dir, identities) -> dict:
     deleted = kept = 0
     failures: list[dict] = []
     for identity in identities:
-        receipt = purge_attributable_memory(memory_dir, identity["run_id"], identity["run_uid"])
+        receipt = purge_attributable_memory(memory_dir, identity["run_id"], identity["run_uid"],
+                                            uid_only=bool(identity.get("uid_only")))
         deleted += receipt["deleted"]
         kept += receipt["kept"]
         failures.extend(receipt["failures"])
@@ -1085,7 +1103,7 @@ def render_orphan_survey(survey: dict, *, limit: int = 25) -> list[str]:
     if survey["blind"]:
         out.append(f"  BLIND: could not read the identity of {len(survey['unreadable_runs'])} "
                    f"surviving run(s) — {', '.join(survey['unreadable_runs'][:5])}. "
-                   f"Rows naming a run_uid are NOT being called orphaned.")
+                   f"No row is being called orphaned.")
     for store in survey["stores"]:
         if store.get("unreadable"):
             out.append(f"  {store['store']:<18} UNREADABLE")
@@ -1100,7 +1118,9 @@ def render_orphan_survey(survey: dict, *, limit: int = 25) -> list[str]:
     out.append(f"\n  {len(survey['identities'])} contributing run(s) no longer on disk:")
     for identity in survey["identities"][:limit]:
         uid = identity["run_uid"] or "(no uid — pre-2026-08-11 run)"
-        out.append(f"    {identity['rows']:>4} rows  {identity['run_id']:<24} {uid}")
+        shared = ("  (a live run shares this name: purged by uid only)"
+                  if identity.get("uid_only") else "")
+        out.append(f"    {identity['rows']:>4} rows  {identity['run_id']:<24} {uid}{shared}")
     if len(survey["identities"]) > limit:
         out.append(f"    … and {len(survey['identities']) - limit} more")
     return out

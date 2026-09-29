@@ -975,7 +975,7 @@ from looplab.runtime.sandbox import GpuPinUnenforceable
 from looplab.engine.eval_canary import (CANARY_NEAR_CAP_FRACTION, CANARY_RETRY_CAP_FACTOR,
                                        CanaryClock, canary_already_passed, canary_failure_detail,
                                        canary_failure_result, canary_near_cap, canary_passed,
-                                       canary_spec)
+                                       canary_spec, own_timeout_fired)
 from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_CARD_DROPPED, EV_DEPS_INSTALLED,
                                   EV_EVAL_INVOCATION_CLAIMED, EV_EVAL_INVOCATION_RECOVERED,
                                   EV_EVAL_INVOCATION_SETTLED, EV_WORKSPACE_SEEDED,
@@ -2913,6 +2913,20 @@ class EvaluateMixin:
                                  canary=spec)
         return res, clock.expired
 
+    def _canary_own_timeouts(self, a: "EvalAttempt", scratch) -> dict:
+        """The chain's DECLARED timeouts, uncapped — stage name -> seconds, `None` -> the single
+        command's — asked of the one derivation (`eval_stages.py::_eval_pipeline`), which has no side
+        effects. `{}` when it cannot say, which keeps the canary-clock reading of a timeout."""
+        try:
+            _cmd, timeout, stages, _protocol = self._eval_pipeline(a.node, str(scratch))
+        except Exception:  # noqa: BLE001 — a planner question; unknown = the pre-existing clock reading
+            return {}
+        out = {None: timeout}
+        for stage in stages or ():
+            if isinstance(stage, dict) and stage.get("name"):
+                out[stage["name"]] = stage.get("timeout")
+        return out
+
     async def _eval_run_canary(self, a: "EvalAttempt", cancel) -> bool:
         """Run this attempt's eval canary; True = the full eval may start.
 
@@ -3001,7 +3015,13 @@ class EvaluateMixin:
             fault = f"{type(exc).__name__}: {exc}"[:300]
         passed = fault is None and canary_passed(res, expired=expired)
         interrupted = cancel.is_set() and not expired
-        clocked = (fault is None and not passed and not interrupted
+        # A stage killed at its OWN declared timeout (at or under the canary's cap) is not the
+        # canary's clock: a longer cap runs into the same second, so it takes the ordinary failure
+        # path with its own words instead of the retry (critic 2026-09-29).
+        own = (None if fault is not None or passed or interrupted else
+               own_timeout_fired(res, expired=expired, own_timeouts=self._canary_own_timeouts(a,
+                                 scratch), cap=float(spec["timeout"])))
+        clocked = (fault is None and not passed and not interrupted and own is None
                    and bool(expired or getattr(res, "timed_out", False)))
         seconds = round(time.time() - t0, 3)
         row = {"node_id": a.node_id, "generation": a.generation, "attempt": a.attempt,
@@ -3024,7 +3044,8 @@ class EvaluateMixin:
             row["error"] = f"canary could not run (engine side; the full eval proceeds): {fault}"
         elif not passed:
             detail = ("interrupted by an operator intervention" if interrupted else
-                      canary_failure_detail(res, expired=expired, timeout=spec["timeout"]))
+                      canary_failure_detail(res, expired=expired, timeout=spec["timeout"],
+                                            own_timeout=own))
             row["error"] = detail
         async with self._write_lock:
             self.store.append(EV_EVAL_CANARY_FINISHED, row)
