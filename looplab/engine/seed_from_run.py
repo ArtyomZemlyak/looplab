@@ -177,6 +177,11 @@ def _engine_refusal(payload: dict) -> Optional[str]:
     class _ParentlessInject:
         _build_parent_snapshot = staticmethod(CardReservationMixin._build_parent_snapshot)
         _implementation_ref = staticmethod(CardReservationMixin._implementation_ref)
+        # The engine's external-harness branch (master 2026-09-29) reads these first. A seed carries
+        # its own ready-made files, so the harness's "needs a Developer" rule has nothing to refuse;
+        # the candidate-surface rule is the engine's at launch, over the run's own repo spec.
+        external_harness = False
+        _repo_spec = None
 
     try:
         NodeBuildMixin._prepare_injected_node(
