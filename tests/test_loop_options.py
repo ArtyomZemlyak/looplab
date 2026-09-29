@@ -48,7 +48,7 @@ FULL = LoopOptions(max_turns=5, time_budget_s=60.0, context_budget_chars=1_000_0
                    stuck_detection=True, stuck_repeat=4, stuck_alternate=4,
                    self_plan=True, plan_reinject_every=5, auto_summary=True,
                    summary_client=None, emit_after=300, emit_force=500,
-                   read_loop_nudge_after=25)
+                   read_loop_nudge_after=25, stuck_stale_streak=12)
 
 
 def _tool_call(name: str, args: dict) -> dict:
@@ -181,10 +181,17 @@ def test_the_settings_bundle_still_spreads_exactly_the_keys_it_always_did():
     the same literal `drive_tool_loop` has always used, so every loop receives exactly the value it
     already had. What moved is that an operator can now select another one — the option shipped with
     no `Settings` field at all, so the `0 = off` its own docstring offered was unreachable.
+
+    `stuck_stale_streak` joined on 2026-09-29 (doc 69 69.3) and DOES change behaviour: it is the
+    StuckDetector's long-cycle rule, new in the same change, so there was no former value to keep.
+    What is pinned for it is the other half of the same property — the bundle and the loop's own
+    default agree, so a loop built with the configured bundle and one built without it end a long
+    cycle at the same call.
     """
     opts = loop_opts_from_settings(Settings())
     assert dict(opts) == {
         "stuck_detection": True, "stuck_repeat": 4, "stuck_alternate": 4,
+        "stuck_stale_streak": 12,
         "self_plan": True, "plan_reinject_every": 5, "auto_summary": True,
         "emit_after": 300, "emit_force": 500,
         "read_loop_nudge_after": 25,
@@ -196,8 +203,8 @@ def test_the_settings_bundle_still_spreads_exactly_the_keys_it_always_did():
     import inspect
 
     from looplab.agents.tool_loop import drive_tool_loop
-    assert (inspect.signature(drive_tool_loop).parameters["read_loop_nudge_after"].default
-            == dict(opts)["read_loop_nudge_after"])
+    for name in ("read_loop_nudge_after", "stuck_stale_streak"):
+        assert inspect.signature(drive_tool_loop).parameters[name].default == dict(opts)[name], name
 
     class _Bare:
         pass

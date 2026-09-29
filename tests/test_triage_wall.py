@@ -17,7 +17,7 @@ transcript grew 14,548 -> 160,671 prompt tokens and all 206 calls re-sent it.
 WHY NOTHING ALREADY IN THE TREE STOPPED IT — each of these was checked against that session, not
 assumed, because the cheap fix in each case would have been to retune one of them:
 
-* `StuckDetector` catches 1-cycles and 2-cycles and says so in its own docstring. The longest
+* `StuckDetector` caught 1-cycles and 2-cycles and said so in its own docstring. The longest
   CONSECUTIVE identical (action, observation) run in the session was **2**, against a threshold of 4.
 * Generalising it to exact adjacent p-cycles would not have helped: other tools interleave, so the
   first exact repeat at ANY period 1..20 lands at tool call **248 of 278**.

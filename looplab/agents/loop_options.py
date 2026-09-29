@@ -86,6 +86,9 @@ class LoopOptions(Mapping):
     stuck_detection: bool | _Unset = UNSET
     stuck_repeat: int | _Unset = UNSET
     stuck_alternate: int | _Unset = UNSET
+    # The StuckDetector's long-cycle rule (doc 69 §3.2): calls in a row that each re-ran an
+    # already-seen call+result. A threshold like its two siblings, so it rides the bundle.
+    stuck_stale_streak: int | _Unset = UNSET
     self_plan: bool | _Unset = UNSET
     plan_reinject_every: int | _Unset = UNSET
     auto_summary: bool | _Unset = UNSET

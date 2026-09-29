@@ -1152,6 +1152,14 @@
           "help": "How many ping-pong cycles between two calls count as “stuck” (min 2)."
         },
         {
+          "key": "agent_stuck_stale_streak",
+          "label": "↳ long-cycle threshold",
+          "type": "int",
+          "default": 12,
+          "placeholder": "12",
+          "help": "How many calls in a row, each re-running a call+result already seen in this loop, count as “stuck” — a cycle of three or more calls (e.g. the same seven config files read round and round), once each has been re-run twice on average. 0 = off."
+        },
+        {
           "key": "agent_self_plan",
           "label": "Self-plan checklist",
           "type": "bool",

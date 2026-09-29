@@ -247,7 +247,10 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   236 -> 237 (2026-09-29): `endgame_stall_nodes` — how many nodes a stall-triggered endgame
   //   spends before the plan reopens. A row because it decides what a stalled run builds; the
   //   Python half moved too.
-  assert.equal(Object.keys(schema.fieldByKey).length, 237)
+  //   237 -> 238 (2026-09-29): `agent_stuck_stale_streak` — the stuck detector's long-cycle rule,
+  //   calls in a row that each re-ran an already-seen call+result. A row like its two siblings;
+  //   the Python half moved too.
+  assert.equal(Object.keys(schema.fieldByKey).length, 238)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

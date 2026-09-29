@@ -2742,6 +2742,21 @@ class Settings(BaseSettings):
     agent_stuck_detection: bool = True
     agent_stuck_repeat: int = 4        # identical calls in a row that count as "stuck" (>=2)
     agent_stuck_alternate: int = 4     # ping-pong cycles between two calls that count as "stuck" (>=2)
+    # THE LONG-CYCLE RULE (doc 69 §3.2, 69.3): calls in a row, EACH re-running a call+result
+    # already seen in this loop, that count as "stuck" — over at least three distinct pairs (the
+    # two knobs above own 1- and 2-cycles) and twice each on average
+    # (`agents/stuck.py::StuckDetector._stale_cycle`). 0 = off. `minionerec-backbones-v10`'s
+    # card-4 plan phase read seven `config/rl_*.yaml` files round and round for its last 104
+    # calls; the short rules saw no cycle, the repeat and read-loop notes went out 156 times
+    # unheeded, and `agent_emit_after` stopped it at turn 300. "12 in a row", replayed over that
+    # run's spans, fired in two phases, saved 32.4 M tokens (16 %) and nothing healthy; the two
+    # floors only make it fire later. No `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row, on
+    # `triage_time_budget_s`'s ground: it only ever ENDS a loop through the existing stuck exit
+    # (the same nudge and forced emit `agent_emit_after`/`agent_emit_force` would reach later), so
+    # a resumed run gains no call and no treatment it never consented to. A threshold measured on
+    # ONE run, and it says so; every firing reaches the caller's `on_budget` observer as a `stuck`
+    # cutoff whose detail opens "re-ran N calls in a row", so its rate can be read off later runs.
+    agent_stuck_stale_streak: int = Field(default=12, ge=0)
     # C1 · Self-plan (TodoWrite-style): expose an `update_plan` tool so a long-running agent keeps its
     # OWN working TODO and re-surfaces it every `agent_plan_reinject_every` turns — keeps the goal in
     # view across a long loop so the agent "writes its own context" (Claude Code style). ON by default.
@@ -2782,9 +2797,10 @@ class Settings(BaseSettings):
     #
     # FOUR EXISTING BOUNDS, EACH MEASURABLY OUT OF REACH, which is why this is a new one and not a
     # retune of an old one:
-    #   * `StuckDetector` catches 1-cycles and 2-cycles; its docstring says so out loud. The longest
-    #     CONSECUTIVE identical (action, observation) run in that session was 2, against a threshold
-    #     of 4. It could not fire.
+    #   * `StuckDetector` caught 1-cycles and 2-cycles; its docstring said so out loud (its
+    #     long-cycle rule, `agent_stuck_stale_streak`, joined on 2026-09-29). The longest
+    #     CONSECUTIVE identical (action, observation) run in that session was 2, against a
+    #     threshold of 4. It could not fire.
     #   * Exact adjacent p-cycle detection would not have helped either: other tools interleave, so
     #     the first exact repeat at ANY period 1..20 lands at tool call 248 of 278.
     #   * The round-robin gap was already known and answered with a NUDGE — `tool_loop._REPEAT_NOTE`,

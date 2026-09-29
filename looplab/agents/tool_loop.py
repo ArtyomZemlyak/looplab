@@ -354,8 +354,10 @@ _TRUNC_NOTE = ("\n…[truncated by the tool-result cap — {n} chars omitted; "
 
 # Appended to the 3rd+ consecutive IDENTICAL-RESULT repeat of an exact (tool, canonical-args) call
 # within ONE loop invocation. The G2 read-dedup removal (P3 — see the always-execute comment in
-# drive_tool_loop) left a B1 gap: a 3+-call read ROUND-ROBIN (A B C A B C …) never trips the
-# StuckDetector, which only catches 1- and 2-cycles. No caching, no suppression — the repeated call
+# drive_tool_loop) left a B1 gap: a 3+-call read ROUND-ROBIN (A B C A B C …) never tripped the
+# StuckDetector, which caught only 1- and 2-cycles (its long-cycle rule, `stuck_stale_streak`, has
+# ENDED such a loop since 2026-09-29, but only two laps in — this note speaks from the third
+# identical result on, long before). No caching, no suppression — the repeated call
 # still fully executes and returns fresh, complete content (the operator's always-re-read decision
 # stands); we only TELL the model it is repeating itself so it can stop on its own. Keyed on the
 # RESULT too, not just the call: a cursor tool (read_output) legitimately repeats the same args and
@@ -976,7 +978,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     finalize=None, fallback=None, on_budget=None,
                     on_plan=None, phase_label: str = "",
                     stuck_detection: bool = True,
-                    stuck_repeat: int = 4, stuck_alternate: int = 4,
+                    stuck_repeat: int = 4, stuck_alternate: int = 4, stuck_stale_streak: int = 12,
                     self_plan: bool = False, plan_reinject_every: int = 5,
                     auto_summary: bool = False, summary_client=None, on_step=None, on_text=None,
                     cancel_check=None, on_tool_result=None,
@@ -1014,6 +1016,11 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     ping-pongs between two, or keeps hitting the SAME error) with no progress, we force the final
     emit and finish instead of spinning forever. Thresholds are config-driven (`stuck_repeat` /
     `stuck_alternate`); a FRESH detector is built per call so state never leaks across loops.
+    `stuck_stale_streak` (12; 0 = off) is its long-cycle rule (doc 69 §3.2): that many calls in a
+    row, each re-running a call+result already seen in THIS loop, over at least three distinct
+    ones and twice each on average, end the loop through the same exit — a plan phase that read
+    seven config files round and round for 104 calls saw neither short rule fire. An `update_plan`
+    call neither extends nor breaks that streak (see `agents/stuck.py`).
 
       - `read_loop_nudge_after` (25; 0 = off): reads of ONE file inside this loop after which every
         further read of it carries `_READ_LOOP_NOTE` — the path-keyed net for a model walking a file
@@ -1104,7 +1111,9 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     stuck = None
     if stuck_detection:                 # a FRESH detector per call — never share state across loops
         from looplab.agents.stuck import StuckDetector
-        stuck = StuckDetector(repeat_threshold=stuck_repeat, alternate_threshold=stuck_alternate)
+        stuck = StuckDetector(repeat_threshold=stuck_repeat, alternate_threshold=stuck_alternate,
+                              stale_threshold=stuck_stale_streak,
+                              neutral_tools=(_PLAN_TOOL_NAME,) if self_plan else ())
     # STATELESS per-loop repeat ledger (see _REPEAT_NOTE): for each exact (tool, canonical-args)
     # call, the previous CAPPED result and the length of the current identical-result streak — for
     # THIS invocation only, a fresh dict per call, like the StuckDetector, so nothing leaks across
@@ -1865,6 +1874,7 @@ def loop_opts_from_settings(settings) -> LoopOptions:
         stuck_detection=bool(g(settings, "agent_stuck_detection", True)),
         stuck_repeat=int(g(settings, "agent_stuck_repeat", 4)),
         stuck_alternate=int(g(settings, "agent_stuck_alternate", 4)),
+        stuck_stale_streak=int(g(settings, "agent_stuck_stale_streak", 12)),
         self_plan=bool(g(settings, "agent_self_plan", True)),
         plan_reinject_every=int(g(settings, "agent_plan_reinject_every", 5)),
         auto_summary=bool(g(settings, "agent_auto_summary", True)),

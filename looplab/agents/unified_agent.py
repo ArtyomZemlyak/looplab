@@ -342,7 +342,7 @@ class UnifiedAgent(WrapsDeveloper):
 
         `wall_when_unbounded` is the OTHER half of that sentence, and it exists because the half above
         was measured wrong for one caller. Those two backstops are TURN counts (300/500) sized for the
-        pilot's self-driving loop, and the stuck detector catches 1- and 2-cycles only; a triage judge
+        pilot's self-driving loop, and the stuck detector then caught 1-/2-cycles only; a triage judge
         that swept one 663-line file six times spent 206 turns and 88 minutes inside all three of them
         with the GPU dark behind it (`Settings.triage_time_budget_s` carries the numbers). So a caller
         may name a wall to apply ONLY WHEN THE LOOP IS OTHERWISE UNWALLED. It is not a `min()` with the

@@ -95,6 +95,7 @@ owned-контрфактуала, гейт — через `speculative_card_is_f
 повторов результата в конец фазы (не запрет перечитывать); перенос прочитанного между stages → plan →
 шаги. **Критика:** порог подобран на одном прогоне; более сильная модель может не зацикливаться; при
 `$0` реальная цена — задержка и занятые полосы.
+*69.3 (эскалация повторов в конец фазы) закрыт — см. §9, 69.3.*
 
 ### 3.3 Идея исследователя доходит до Developer'а обрезанной до 400 символов (69.4)
 
@@ -344,7 +345,7 @@ UnseenRecall@20=0.03328)» уйдёт в межпрогонные claims как 
 **Сборка (§3)**
 - **69.1** OPEN[stuck-rebuild-always-superseded] контрфактуал owned-состояния не вычитает отброшенный неисполненный узел — пересборка после `developer_stuck` обречена гейтом свежести (§3.1). proof:`present:or card.evidence != [node_id]@looplab/search/card_selection.py`
 - **69.2** OPEN[no-session-token-budget] у агентной сессии нет бюджета в токенах; при `cost = 0` объём plan-фазы ничем не ограничен (§3.2). proof:absent:token_budget@looplab/agents/loop_options.py
-- **69.3** OPEN[stuck-detector-misses-long-read-cycles] детектор застревания ловит только 1- и 2-циклы, 7-файловый цикл чтения не виден (§3.2). proof:`present:return self._repeated_pair() or self._alternating_actions()@looplab/agents/stuck.py`
+- **69.3** *Закрыто 2026-09-29: здесь стоял `stuck-detector-misses-long-read-cycles`. У детектора застревания третье правило — длинный цикл (`agents/stuck.py::StuckDetector._stale_cycle`, `Settings.agent_stuck_stale_streak`, по умолчанию 12, `0` — выкл.): серия вызовов подряд, каждый из которых повторяет пару «вызов + результат», уже виденную в этом цикле. Правило из симуляции §3.2 («12 подряд») сделано строже двумя полами, поэтому срабатывать оно может только позже, а не там, где симуляция не срабатывала: ключ — ПАРА, как у двух коротких правил; в серии не меньше трёх разных пар (1- и 2-циклы остаются своим порогам, поднятый `agent_stuck_repeat` не перебивается) и каждая повторена в среднем дважды — однократное перечитывание того, что выбросило сжатие истории, не срабатывает. Новая пара обрывает серию, `update_plan` нейтрален (не удлиняет и не обрывает). Выход — тот же stuck (подсказка, затем принудительный emit), поэтому строки `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` нет — по основанию `triage_time_budget_s`. Цикл §3.2 из семи файлов кончается на 21-м вызове вместо 300-го хода. Порог измерен на ОДНОМ прогоне — это сказано у поля (`tests/test_stuck_long_cycle.py`).*
 - **69.4** OPEN[researcher-rationale-cut-to-400] rationale идеи обрезается до 400 символов до того, как её увидит Developer (§3.3). proof:`present:rationale = (idea.rationale or "")[:400]@looplab/engine/card_reservation.py`
 - **69.5** OPEN[stage-prompt-claims-scorer-protected] промпт STAGES называет скорер FIXED/PROTECTED без проверки, заморожен ли он (§3.4). proof:absent:scorer_frozen@looplab/adapters/repo_developer.py
 - **69.6** OPEN[salvage-refuses-scored-then-crashed] ненулевой exit исключает salvage даже при уже напечатанной полной строке метрик (§3.5). proof:`line:getattr(res, "exit_code", 0) != 0&&not getattr(res, "stalled", False)@looplab/engine/metric_salvage.py`

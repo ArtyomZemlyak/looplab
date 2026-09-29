@@ -29,7 +29,7 @@ SETTINGS_UI_SCHEMA_VERSION = 2
 # here reading as if 207 were derived while it is typed, which is the drift it warns about. The
 # unforgeable gate is `SETTINGS_UI_SCHEMA_KEYSET_REVISION` further down; this integer is the
 # human-readable half the docs sentence quotes, and `_load_schema` refuses when the two disagree.
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 237
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 238
 # On the KEYSET REVISION below: DERIVED, and deliberately no longer a hand-pinned review gate: a
 # bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
@@ -354,7 +354,12 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # what the dispatcher builds for the rest of a stalled run, and it is the per-run lever an
 # operator sets to let a run out of a permanent endgame. RE-DERIVED by INTERSECTION over the
 # merged keyset: the 236 previous keys plus exactly that one, none removed.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "3ddaa2cd289ac22d88a0658a35023a625eaccccaf4ae7e7f936602605f3be5d8"
+# 237 -> 238 on 2026-09-29: `agent_stuck_stale_streak`, beside `agent_stuck_alternate` — the
+# StuckDetector's long-cycle rule (doc 69 69.3), calls in a row that each re-ran an already-seen
+# call+result. A row for the reason its two siblings are: it decides when an agent's loop is ended
+# for it, and 0 is the operator's off switch. Verified by INTERSECTION: the 237 previous keys plus
+# exactly that one, none removed.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "59949ba42294d5c7053e777dacf4b1b43fa276e2cb703c135f1f2e461732e82c"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

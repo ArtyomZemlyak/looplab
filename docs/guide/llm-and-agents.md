@@ -505,7 +505,12 @@ the ledger, so the call would be wasted).
 There is deliberately **no read cache**: every read tool call executes and returns fresh content
 (a result that exceeds the ~4000-char tool-result cap is truncated with an explicit
 `…[truncated by the tool-result cap …]` marker so the agent knows to re-request a narrower range);
-the `StuckDetector` remains the safety net against true repeat loops. A parallel node build gets its own
+the `StuckDetector` remains the safety net against true repeat loops — a repeated call, a
+ping-pong, and (`agent_stuck_stale_streak`, 12) a longer cycle: that many calls in a row, each
+re-running a call+result already seen in the loop, over three or more distinct ones and twice each
+on average. A single new call+result ends such a streak, so re-reads scattered through real work never
+add up; a plan phase that read seven config files round and round for 104 calls is what it ends
+(doc 69 §3.2). A parallel node build gets its own
 scope; every phase runs through the shared `run_phase` wrapper, so with the setting off it's
 byte-identical to a plain `drive_tool_loop`.
 
@@ -727,8 +732,9 @@ it discards the confidence signal entirely instead of counting it.
 The turn grant that came with those tools is additive **over a finite budget**, and the shipped
 configuration on this box is `agent_max_turns = 0`. What was left bounding the triage loop was
 `agent_emit_after`/`agent_emit_force` — 300/500 **turns**, sized for the pilot's self-driving loop —
-and the `StuckDetector`, which by its own docstring catches 1-cycles and 2-cycles and leaves "exotic
-longer cycles" to those backstops.
+and the `StuckDetector`, which by its own docstring then caught 1-cycles and 2-cycles and left "exotic
+longer cycles" to those backstops (its long-cycle rule, `agent_stuck_stale_streak`, joined on
+2026-09-29).
 
 `runs/e5small-dr-unified-v8` node 2 fell straight through all three. Its `train` stage timed out at
 09:07:19 and the engine did not return to work until 11:07:32: **88.3 min of triage (206 provider
