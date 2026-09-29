@@ -243,7 +243,8 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   prior run's node, a row because the web start route is where an operator reaches for it —
   //   and `ablation_simplify` — a no-worse ablation probe nominates the program it ran as a node,
   //   a row because it spends a node per nomination. The Python half moved too.
-  assert.equal(Object.keys(schema.fieldByKey).length, 235)
+  //   235 -> 236 (2026-09-29, the merge of master): master's `external_harness`.
+  assert.equal(Object.keys(schema.fieldByKey).length, 236)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

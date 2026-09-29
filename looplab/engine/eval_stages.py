@@ -1517,6 +1517,8 @@ class EvalStagesMixin:
         # own wall, and are not knowable here — the engine threads ONE cap for the whole pipeline.
         # Testing `cap <= 0` (what this said while the feature was opt-in) would read AUTO as OFF
         # and silently ship the new default as no change at all.
+        if getattr(self, "external_harness", False):
+            return None  # external evaluations use an agent-owned checkpoint instead
         import math
         try:
             # The default is the AUTO -1.0 a real Engine settles to, not the opt-in era's 0.0: that
@@ -1566,6 +1568,112 @@ class EvalStagesMixin:
             return float("inf") if parse_deadline_reply(out) else 0.0
 
         return _judge
+
+    def _external_deadline_grace_fn(self, node, cancel, stage_name=None):
+        """Ask the external agent once at a real command deadline, without an internal model.
+
+        The runtime owns the actual extension cap and records any seconds granted on
+        the stage row. A missing answer cannot silently mean permission to extend.
+        """
+        import math
+        import time
+
+        from looplab.harness.checkpoints import ask, answer_for
+
+        try:
+            cap = float(getattr(self, "eval_deadline_grace_s", -1.0) or 0.0)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(cap) or cap == 0:
+            return None
+
+        def _review(tail: str) -> float:
+            if cancel is not None and cancel.is_set():
+                return 0.0
+            question = None
+            while question is None:
+                if cancel is not None and cancel.is_set():
+                    return 0.0
+                try:
+                    redactor = getattr(self, "_redact", None)
+                    observed = redactor(tail) if callable(redactor) else tail
+                    question = ask(self.run_dir, node.id, node.attempt, "deadline_grace",
+                                   stage=stage_name() if stage_name is not None else "",
+                                   expectation="one bounded extension or stop at the declared deadline",
+                                   observation=str(observed)[-4000:])
+                except Exception:  # noqa: BLE001 — a ledger failure cannot grant an extension
+                    time.sleep(0.5)
+            while cancel is None or not cancel.is_set():
+                try:
+                    answer = answer_for(self.run_dir, question["checkpoint_id"])
+                except Exception:  # noqa: BLE001 — wait for the durable answer, never assume consent
+                    answer = None
+                if answer is not None:
+                    return float("inf") if answer["verdict"] == "extend" else 0.0
+                time.sleep(0.3)
+            return 0.0
+
+        return _review
+
+    def _external_stage_check_fn(self, node, workdir, stages, cancel):
+        """Block between checked stages until the external agent answers this attempt.
+
+        A restarted attempt opens a new checkpoint. The existing runtime still applies
+        its physical-failure vocabulary and declared-condition veto to the answer.
+        """
+        import time
+
+        from looplab.engine.train_monitor import (eval_log_plan, snapshot_training_logs,
+                                                  stage_check_trajectory,
+                                                  trajectory_acquits_stage_check)
+        from looplab.harness.checkpoints import ask, answer_for
+        from looplab.runtime.command_eval import STAGE_CHECK_INCONCLUSIVE, StageCheckVerdict
+
+        plan = eval_log_plan(stages)
+        snapshot = snapshot_training_logs(workdir)
+
+        def _check(stage_name, tail, expect: str = ""):
+            if cancel is not None and cancel.is_set():
+                return None
+            # Publication is mandatory: on a transient ledger error retry rather than
+            # treating the stage as checked and silently running the next command.
+            question = None
+            while question is None:
+                if cancel is not None and cancel.is_set():
+                    return None
+                try:
+                    redactor = getattr(self, "_redact", None)
+                    observed = redactor(tail) if callable(redactor) else tail
+                    question = ask(self.run_dir, node.id, node.attempt, "stage_check",
+                                   stage=stage_name, expectation=expect,
+                                   observation=str(observed)[-4000:])
+                except Exception:  # noqa: BLE001 — never skip a required stage check
+                    time.sleep(0.5)
+            while cancel is None or not cancel.is_set():
+                try:
+                    answer = answer_for(self.run_dir, question["checkpoint_id"])
+                except Exception:  # noqa: BLE001 — keep waiting for the durable answer
+                    answer = None
+                if answer is not None:
+                    if answer["verdict"] == "proceed":
+                        return None
+                    if answer["verdict"] == "inconclusive":
+                        return StageCheckVerdict(STAGE_CHECK_INCONCLUSIVE, answer["reason"][:300])
+                    kind = answer["failure_kind"]
+                    try:
+                        trajectory = stage_check_trajectory(
+                            workdir, stage_name, plan=plan, snapshot=snapshot)
+                        acquitted, note = trajectory_acquits_stage_check(kind, trajectory)
+                    except (OSError, ValueError):
+                        acquitted, note = False, ""
+                    if acquitted:
+                        return StageCheckVerdict(STAGE_CHECK_INCONCLUSIVE,
+                                                 f"{note} | agent: {answer['reason'][:100]}"[:300])
+                    return StageCheckVerdict(kind, answer["reason"][:300])
+                time.sleep(0.3)
+            return None
+
+        return _check
 
     def _stage_check_fn(self, node, workdir=None, stages=None):
         """Phase 3 inter-stage verify: a callback (stage_name, log_tail, expect="") -> verdict|None that

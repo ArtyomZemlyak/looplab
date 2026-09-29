@@ -40,13 +40,15 @@ POST /api/cross-run/concept-split	tests/test_cross_run_server.py
 POST /api/cross-run/concept-split-clear	tests/test_cross_run_server.py
 POST /api/cross-run/concept-steward	tests/test_cross_run_server.py
 GET /api/cross-run/curation-log	tests/test_cross_run_server.py
+GET /api/cross-run/task-facets	tests/test_cross_run_server.py
+POST /api/cross-run/task-facets	tests/test_cross_run_server.py
 POST /api/genesis	tests/test_assistant_endpoint.py tests/test_evidence_consumer_fences.py tests/test_provider_error_redaction.py tests/test_report.py tests/test_router_wiring.py tests/test_serve_prompt_review.py tests/test_server.py tests/test_tui.py
 GET /api/genesis/{job_id}	tests/test_report.py
 GET /api/gpu	tests/test_server.py
 GET /api/health	tests/test_owner_token.py tests/test_server.py tests/test_startup_resume_scan_prefilter.py
 GET /api/jobs/{job_id}	tests/test_assistant_endpoint.py tests/test_concept_lens_durability.py tests/test_evidence_consumer_fences.py tests/test_jobs.py tests/test_report.py tests/test_server.py
 POST /api/llm/health	tests/test_provider_error_redaction.py tests/test_server.py
-GET /api/memory	tests/test_concept_shelf.py tests/test_memory_endpoint.py tests/test_route_coverage.py tests/test_server.py
+GET /api/memory	tests/test_concept_shelf.py tests/test_external_run_mode.py tests/test_memory_endpoint.py tests/test_route_coverage.py tests/test_server.py
 GET /api/projects	tests/test_projects.py
 POST /api/projects	tests/test_projects.py tests/test_report.py tests/test_server.py
 DELETE /api/projects/{pid}	tests/test_projects.py
@@ -70,7 +72,7 @@ POST /api/runs/{run_id}/chat	tests/test_collaboration.py tests/test_provider_err
 GET /api/runs/{run_id}/chat-log	tests/test_provider_error_redaction.py tests/test_server.py
 POST /api/runs/{run_id}/chat-log	tests/test_provider_error_redaction.py tests/test_report.py tests/test_server.py
 POST /api/runs/{run_id}/command	tests/test_evidence_consumer_fences.py tests/test_provider_error_redaction.py tests/test_report.py tests/test_serve_prompt_review.py tests/test_server.py
-POST /api/runs/{run_id}/commands	tests/test_admission_refuses_a_snapshot_the_child_would_refuse.py tests/test_collaboration.py tests/test_concept_tag_command.py tests/test_fork_from_seq.py tests/test_refusal_vocabulary.py tests/test_run_command_service.py tests/test_server.py tests/test_stalled_finalization_affordance.py
+POST /api/runs/{run_id}/commands	tests/test_admission_refuses_a_snapshot_the_child_would_refuse.py tests/test_collaboration.py tests/test_concept_tag_command.py tests/test_external_run_mode.py tests/test_fork_from_seq.py tests/test_refusal_vocabulary.py tests/test_run_command_service.py tests/test_server.py tests/test_stalled_finalization_affordance.py
 GET /api/runs/{run_id}/commands/{command_id}	tests/test_admission_refuses_a_snapshot_the_child_would_refuse.py tests/test_run_command_service.py tests/test_stalled_finalization_affordance.py
 POST /api/runs/{run_id}/commands/{command_id}/retry	tests/test_collaboration.py tests/test_run_command_service.py
 GET /api/runs/{run_id}/comments	tests/test_collaboration.py tests/test_refusal_vocabulary.py
@@ -86,6 +88,10 @@ GET /api/runs/{run_id}/cost	tests/test_refusal_vocabulary.py tests/test_seq_gap_
 POST /api/runs/{run_id}/deletions	tests/test_deletion_identity_leak.py tests/test_durable_op_kit.py tests/test_finalization_stall_deletion.py tests/test_projects.py tests/test_report.py tests/test_review_fixes.py tests/test_run_command_service.py tests/test_run_deletion_memory_cascade.py tests/test_run_deletion_quarantine_residue.py tests/test_server.py tests/test_start_idempotency.py
 GET /api/runs/{run_id}/deletions/{operation_id}	tests/test_deletion_identity_leak.py
 GET /api/runs/{run_id}/events	tests/test_card_public_projection.py tests/test_collaboration.py tests/test_server.py tests/test_state_delta.py tests/test_trace_facts_and_sse_offload.py
+GET /api/runs/{run_id}/harness-contract	tests/test_external_run_mode.py
+POST /api/runs/{run_id}/harness-decisions	tests/test_external_run_mode.py
+POST /api/runs/{run_id}/harness-reviews	tests/test_external_run_mode.py
+POST /api/runs/{run_id}/lessons	tests/test_external_run_mode.py
 GET /api/runs/{run_id}/lifecycle	tests/test_seq_gap_visibility.py tests/test_server.py
 GET /api/runs/{run_id}/log	tests/test_fork_from_seq.py tests/test_log_pages.py tests/test_refusal_vocabulary.py tests/test_server.py
 GET /api/runs/{run_id}/log-page	tests/test_log_pages.py tests/test_refusal_vocabulary.py tests/test_seq_gap_visibility.py
@@ -98,6 +104,7 @@ GET /api/runs/{run_id}/nodes/{nid}/episodes	tests/test_span_index.py tests/test_
 GET /api/runs/{run_id}/nodes/{nid}/logs	tests/test_node_sidecar_reads.py tests/test_serve_prompt_review.py tests/test_server.py tests/test_span_index.py tests/test_trace_facts_and_sse_offload.py tests/test_trace_projection_security.py
 GET /api/runs/{run_id}/nodes/{nid}/metrics	tests/test_node_sidecar_reads.py tests/test_server.py tests/test_span_index.py
 GET /api/runs/{run_id}/nodes/{nid}/trace	tests/test_refusal_vocabulary.py tests/test_span_index.py tests/test_trace_episode_seek.py tests/test_trace_facts_and_sse_offload.py tests/test_trace_projection_security.py tests/test_trace_projection_transport.py
+POST /api/runs/{run_id}/novelty-preview	tests/test_external_run_mode.py
 POST /api/runs/{run_id}/project	tests/test_report.py tests/test_server.py
 GET /api/runs/{run_id}/prov	tests/test_fork_from_seq.py tests/test_prov_claims.py tests/test_refusal_vocabulary.py tests/test_server.py
 POST /api/runs/{run_id}/report_refresh	tests/test_evidence_consumer_fences.py tests/test_provider_error_redaction.py tests/test_report.py tests/test_server.py
@@ -106,8 +113,9 @@ POST /api/runs/{run_id}/resolve-activity-claims	tests/test_run_command_service.p
 GET /api/runs/{run_id}/reviews	tests/test_review_capabilities.py
 POST /api/runs/{run_id}/reviews	tests/test_card_public_projection.py tests/test_collaboration.py tests/test_concept_lens_durability.py tests/test_log_pages.py tests/test_refusal_vocabulary.py tests/test_review_capabilities.py tests/test_server_code_freshness.py
 DELETE /api/runs/{run_id}/reviews/{link_id}	tests/test_review_capabilities.py
+POST /api/runs/{run_id}/skill-candidates	tests/test_external_run_mode.py
 GET /api/runs/{run_id}/spans/{sid}	tests/test_server.py tests/test_span_index.py tests/test_trace_delta.py tests/test_trace_file_security.py tests/test_trace_projection_security.py
-GET /api/runs/{run_id}/state	tests/test_admission_refuses_a_snapshot_the_child_would_refuse.py tests/test_card_public_projection.py tests/test_collaboration.py tests/test_concept_tag_command.py tests/test_evidence_consumer_fences.py tests/test_fork_from_seq.py tests/test_log_pages.py tests/test_provider_error_redaction.py tests/test_refusal_vocabulary.py tests/test_report.py tests/test_request_fold_memo.py tests/test_review_capabilities.py tests/test_review_fixes.py tests/test_run_command_service.py tests/test_seq_gap_visibility.py tests/test_server.py tests/test_server_code_freshness.py tests/test_stalled_finalization_affordance.py tests/test_state_delta.py tests/test_tui.py
+GET /api/runs/{run_id}/state	tests/test_admission_refuses_a_snapshot_the_child_would_refuse.py tests/test_card_public_projection.py tests/test_collaboration.py tests/test_concept_tag_command.py tests/test_evidence_consumer_fences.py tests/test_external_run_mode.py tests/test_fork_from_seq.py tests/test_log_pages.py tests/test_provider_error_redaction.py tests/test_refusal_vocabulary.py tests/test_report.py tests/test_request_fold_memo.py tests/test_review_capabilities.py tests/test_review_fixes.py tests/test_run_command_service.py tests/test_seq_gap_visibility.py tests/test_server.py tests/test_server_code_freshness.py tests/test_stalled_finalization_affordance.py tests/test_state_delta.py tests/test_tui.py
 POST /api/runs/{run_id}/suggest	tests/test_collaboration.py tests/test_provider_error_redaction.py tests/test_report.py tests/test_server.py
 POST /api/runs/{run_id}/supertask	tests/test_server.py
 GET /api/runs/{run_id}/trace	tests/test_server.py tests/test_span_index.py tests/test_trace_facts_and_sse_offload.py tests/test_trace_file_security.py tests/test_trace_projection_security.py tests/test_trace_projection_transport.py
@@ -119,7 +127,7 @@ POST /api/scope-report-actions/{action_id}/abandon	tests/test_report.py
 GET /api/scope-report/{scope_type}/{scope_id:path}	tests/test_report.py
 POST /api/scope-report/{scope_type}/{scope_id:path}/generate	tests/test_comparison_contract_pipeline.py tests/test_report.py
 GET /api/settings	tests/test_provider_error_redaction.py tests/test_secret_settings.py tests/test_server.py
-PUT /api/settings	tests/test_concept_shelf.py tests/test_memory_endpoint.py tests/test_server.py
+PUT /api/settings	tests/test_concept_shelf.py tests/test_external_run_mode.py tests/test_memory_endpoint.py tests/test_server.py
 GET /api/settings/schema/{version}	tests/test_server.py tests/test_settings_ui_schema.py
 PUT /api/settings/secret	tests/test_secret_settings.py tests/test_server.py
 POST /api/start	tests/test_launch_preflight.py tests/test_report.py tests/test_run_proposal_schema.py tests/test_serve_prompt_review.py tests/test_server.py tests/test_start_idempotency.py tests/test_tui.py

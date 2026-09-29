@@ -118,6 +118,7 @@ const OverviewPanel = lazyNamed(loadPanels, 'OverviewPanel')
 const ResearchPanel = lazyNamed(loadPanels, 'ResearchPanel')
 const ArtifactsPanel = lazyNamed(loadPanels, 'ArtifactsPanel')
 const QueuePanel = lazyNamed(loadPanels, 'QueuePanel')
+const HarnessProgressPanel = lazyNamed(loadPanels, 'HarnessProgressPanel')
 
 // The panel bar, grouped by importance then process order (Report is the [Search|Report] toggle, and
 // the deep-research/policy/strategist "why" cards now live in the chat — so those panels are gone).
@@ -154,7 +155,7 @@ const QueuePanel = lazyNamed(loadPanels, 'QueuePanel')
 // `?panel=hypotheses` links still work — `runRouteState.js::LEGACY_PANEL_VIEWS` migrates them to
 // `?view=cards` rather than reporting an unknown panel.
 const HUBS = [
-  ['Progress', [['queue', 'Queue'], ['research', 'Research'], ['failures', 'Failures']]],
+  ['Progress', [['queue', 'Queue'], ['research', 'Research'], ['agent', 'Agent cycle'], ['failures', 'Failures']]],
   ['Trust', [['trust', 'Trust'], ['pareto', 'Pareto / diversity'], ['data', 'Data quality']]],
   ['Analysis', [['compare', 'Compare'], ['sensitivity', 'Sensitivity'], ['importance', 'Importance'], ['crossrun', 'Cross-run']]],
   ['Lab', [['artifacts', 'Files'], ['registry', 'Registry'], ['collab', 'Comments & sharing'], ['events', 'Events']]],
@@ -2054,7 +2055,10 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   // The hook already fences the resource to the current key, so there is no second `activeResource`
   // read here. A retry keeps the verdict the operator can see (error stays 'error', stale stays
   // 'stale') and announces itself through `pending`, which is what this notice reports as "Retrying".
-  const maxEval = configResource.data?.max_eval_seconds
+  // A live engine retains its launch settings even if the saved snapshot is edited. Only a
+  // folded override is an authoritative live ceiling; the snapshot is usable after it stops.
+  const maxEval = state.budget_overrides?.max_eval_seconds
+    ?? (live.engine_running === false && !historyActive ? configResource.data?.max_eval_seconds : null)
   const configNoticeStatus = configResource.pending === 'retry'
     ? 'retrying'
     : ['error', 'stale'].includes(configResource.status) ? configResource.status : null
@@ -2244,7 +2248,6 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
             </button>
           : <span className="muted" title={state.goal || state.task_id}>
               <b>{state.label || state.run_id || runId} · {displayedPhase} · gen {gen}</b>
-              {state.goal || state.task_id}
             </span>}
         <span className={'live ' + (reviewMode ? 'off' : liveStatus)}
           role={reviewMode ? undefined : 'status'} aria-live={reviewMode ? undefined : 'polite'}
@@ -2259,7 +2262,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
             to Overview. Compact layouts trade those optional chips for canvas space, while urgent
             reward-hack alerts remain visible and every metric is one tap away through Overview. */}
         {evalSec > 0 && <button type="button" className="chip run-metric-chip" disabled={historyActive}
-          title={historyActive ? 'Historical mode — return live to open Overview' : 'eval time — open Overview for the budget bar'}
+          title={historyActive ? 'Historical mode — return live to open Overview'
+            : maxEval != null ? 'eval time — open Overview for the budget bar' : 'eval time — open Overview'}
           onClick={event => { panelReturnFocusRef.current = event.currentTarget; setPanel('overview') }}>
           <span className="k">eval</span> {fmtElapsedSeconds(evalSec)}{maxEval != null ? ` / ${fmtElapsedSeconds(maxEval)}` : ''}</button>}
         {cost && <button type="button" className="chip run-metric-chip" disabled={historyActive}
@@ -2474,7 +2478,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                   onBlur={event => {
                     if (event.relatedTarget !== hubTriggerRef.current && !event.currentTarget.contains(event.relatedTarget)) closeHub(false)
                   }}>
-                  {items.map(([k, l]) => <button type="button" role="menuitem" tabIndex={-1}
+                  {items.filter(([k]) => k !== 'agent' || configResource.data?.external_harness === true)
+                    .map(([k, l]) => <button type="button" role="menuitem" tabIndex={-1}
                     key={k} className={'mi' + (panel === k ? ' on' : '')}
                     disabled={!panelAllowed(k)}
                     title={!panelAllowed(k)
@@ -2592,12 +2597,15 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         // and this pane answers it, borrowing the SAME `.side` chrome as the graph inspector and the
         // Card board's pane (and the same persisted `ll.sideW`), because a third pane width would
         // drift from both. `renderNodeInspector` is the one Inspector, not a third copy.
-        ? <div className={'main run-workspace' + (compactWorkspace ? ' compact' : '')}>
+        ? <div className={'main run-workspace concept-workspace'
+            + (selectedId == null ? ' concept-no-selection' : '')
+            + (compactWorkspace ? ' compact' : '')}>
             <LazyBoundary label="concept tree"
               resetKey={`${runId}:${generation || 'pending'}:${historyActive ? viewSeq : 'live'}`}>
               <ConceptView runId={runId} generation={generation}
                 sequence={historyActive ? viewSeq : null} state={state}
-                selectedNodeId={selectedId} onPickNode={inspectFromConcepts} />
+                selectedNodeId={selectedId} onPickNode={inspectFromConcepts}
+                onOpenLineage={() => setView('dag')} />
             </LazyBoundary>
             {conceptPaneCollapsed
               // Narrow screens keep the tree unobstructed until asked, exactly as the graph does;
@@ -2783,13 +2791,18 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {panel && panelAllowed(panel) && <LazyBoundary label={`${HUB_OF[panel] || panel} panel`}
         mode="overlay" resetKey={`${panel}:${runId}@${generation || 'pending'}`} onClose={closePanel}>
       <>
-      {panel === 'overview' && panelAllowed('overview') && <OverviewPanel state={state} maxEval={maxEval} onClose={closePanel}
+      {panel === 'overview' && panelAllowed('overview') && <OverviewPanel state={state} maxEval={maxEval}
+        phase={displayedPhase} runState={liveLabel} onClose={closePanel}
         onOpenPanel={p => { if (panelAllowed(p)) setPanel(p, { mode: 'replace' }) }} />}
       {panel === 'research' && panelAllowed('research') && <ResearchPanel state={state} runId={runId}
         onToast={showToast} onClose={closePanel} onSelect={selectNodeFromPanel}
         onSelectEvidence={selectEvidenceFromPanel} />}
       {panel === 'trust' && panelAllowed('trust') && <TrustPanel state={state} runId={runId} onSelect={selectNodeFromPanel} onToast={showToast} onClose={closePanel} readOnly={mutationReadOnlyMode} />}
       {panel === 'queue' && panelAllowed('queue') && <QueuePanel state={state} runId={runId} onSelect={selectNodeFromPanel} onToast={showToast} onClose={closePanel} />}
+      {panel === 'agent' && panelAllowed('agent') && <HarnessProgressPanel runId={runId}
+        expectedGeneration={generation} externalMode={configResource.data?.external_harness}
+        configStatus={configResource.status} onOpenEvents={() => setPanel('events')}
+        onClose={closePanel} />}
       {panel === 'sensitivity' && panelAllowed('sensitivity') && <SensitivityPanel state={state} onSelect={selectNodeFromPanel} onClose={closePanel} />}
       {panel === 'importance' && panelAllowed('importance') && <HyperImportancePanel state={state} onClose={closePanel} />}
       {panel === 'failures' && panelAllowed('failures') && <FailuresPanel state={state} onSelect={selectNodeFromPanel} onClose={closePanel} />}

@@ -851,7 +851,7 @@ class StrategyCadenceMixin:
         return fold(self.store.read_all())
 
     @in_llm_lane("enrichment")
-    def _maybe_consult_strategist(self, state: RunState) -> RunState:
+    def _maybe_consult_strategist(self, state: RunState, *, allow_consult: bool = True) -> RunState:
         """Operator/boss pin first (HITL parity), then the bounded-cadence Strategist consult.
         Records a `strategy_decision` and re-folds only when the strategy actually changes.
 
@@ -873,7 +873,7 @@ class StrategyCadenceMixin:
             "llm_lane_limits", "card_scoring")
                    if pin.get(k) is not None}
         n = len(state.nodes)
-        consulting = (self.strategist is not None
+        consulting = (allow_consult and self.strategist is not None
                       and self._should_consult(
                           state, marks=state.strategy_history,
                           # The plateau memo (doc 52 row 7): the `(leader, rung)` this process last

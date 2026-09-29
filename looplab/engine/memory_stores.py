@@ -130,6 +130,11 @@ MEMORY_STORES: tuple[MemoryStore, ...] = (
         reason="auto-skills are promoted only across two differently-fingerprinted tasks",
         writer="engine/lessons_distill.py::LessonDistillMixin.promote_settled_skills"),
     MemoryStore(
+        "skill_candidate_actions.jsonl", "external skill action receipts", PRESERVED,
+        key="run_uid + action_id", names_run=True, group="skill_receipts",
+        reason="the skill outlives its source run; its idempotency and authorship receipts must too",
+        writer="harness/skills.py::publish_skill_candidate"),
+    MemoryStore(
         "concept_curation_log.jsonl", "concept curation log", PRESERVED,
         key="curation_key (the paid input's digest); run_id of the finalize that paid",
         names_run=True, group="curation_logs", reason="append-only governance audit",

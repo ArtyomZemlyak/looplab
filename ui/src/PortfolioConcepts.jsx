@@ -53,16 +53,19 @@ function BestMetric({ best }) {
   </span>
 }
 
-function ConceptRow({ row, selected, expanded, onToggle, onSelect, setRef }) {
+function ConceptRow({ row, selected, matched, expanded, forcedOpen, onToggle, onSelect, setRef }) {
   const node = row.node
-  return <li className="pc-row" style={{ paddingLeft: 4 + row.depth * 17 }}>
+  return <li className={'pc-row' + (row.depth === 0 ? ' pc-root' : '')}
+    style={{ paddingLeft: 4 + row.depth * 17 }}>
     {row.hasChildren
       ? <button type="button" className="pc-twist" aria-expanded={expanded}
+          disabled={forcedOpen} title={forcedOpen ? 'Clear search to collapse this path' : undefined}
           aria-label={`${expanded ? 'Collapse' : 'Expand'} ${row.id}`}
           onClick={() => onToggle(row.id)}>{expanded ? '▾' : '▸'}</button>
       : <span className="pc-twist pc-twist-leaf" aria-hidden="true">·</span>}
     <button ref={setRef} type="button" data-concept-id={row.id}
-      className={'pc-name' + (selected ? ' on' : '') + (node.tagged ? '' : ' pc-grouping')}
+      className={'pc-name' + (selected ? ' on' : '') + (matched ? ' pc-match' : '')
+        + (node.tagged ? '' : ' pc-grouping')}
       aria-pressed={selected} title={row.id} onClick={() => onSelect(row.id)}>
       <span className="pc-label">{node.label}</span>
       {/* A materialized ancestor is OUR grouping, not something a run said. Saying so is the
@@ -135,42 +138,43 @@ function _ConceptMemory({ memory, id, onRetry = null }) {
   </>
 }
 
-export function ConceptDetail({ forest, cooccurrence, id, runsById, onOpenRun, onClose,
+export function ConceptDetail({ forest, cooccurrence, id, runsById, onOpenRun, onClose, detailRef,
   memory = null, onMemoryRetry = null }) {
   const node = id && forest.nodes[id]
   if (!node) return null
   const shown = node.runIds.slice(0, MAX_DETAIL_RUNS)
-  return <aside className="pc-detail" aria-label={`Concept ${id}`}>
+  return <aside ref={detailRef} tabIndex={-1} className="pc-detail" aria-label={`Concept ${id}`}>
     <div className="pc-detail-h">
       <code className="pc-detail-id">{id}</code>
-      <button type="button" className="btn xs" onClick={onClose}>Close</button>
+      <button type="button" className="btn xs" onClick={onClose}>Back to map</button>
     </div>
     <dl className="pc-facts">
-      <div><dt>Runs</dt><dd>{node.runs}</dd>
-        <p className="muted">Distinct runs tagged with this concept or anything below it.</p></div>
+      <div><dt>Runs</dt><dd>{node.runs}</dd><small>this branch</small></div>
       <div><dt>Experiments</dt>
         <dd>{node.tagged ? node.directExperiments : '—'}</dd>
-        {/* No subtree experiment total, on purpose: one experiment carries several tags, so summing
-            a subtree counts it once per tag (measured on this corpus: 8 experiments, 21 tag pairs).
-            There is nothing in the run-list payload that could de-duplicate it. */}
-        <p className="muted">{node.tagged
-          ? 'Experiments tagged with exactly this id. A subtree total is not shown — one experiment '
-            + 'carries several tags, so summing a subtree would count it more than once.'
-          : 'No run tagged this id itself; it exists because a deeper id spells it as an ancestor.'}</p>
+        <small>{node.tagged ? 'exact tag' : 'grouping only'}</small>
       </div>
       <div><dt>Best metric</dt>
         <dd>{node.best
           ? `${node.best.direction === 'min' ? '↓' : '↑'} ${node.best.value}`
           : 'not shown'}</dd>
-        <p className="muted">{node.best
-          ? `Best robust metric below this concept, over ${node.best.runs} run(s) of `
-            + `${node.best.taskId} (${node.best.direction})`
-            + (node.best.objective ? ` — ranked by ${node.best.objective}, an operator retarget, `
-              + 'not the task’s own metric.' : '.')
-          : 'The runs under this concept do not share one task and one objective direction, or none '
-            + 'of them scored. A single number here would compare two different objectives.'}</p>
+        {node.best && <small>{`${node.best.taskId} · ${node.best.direction}`
+          + (node.best.objective ? ` · ranked by ${node.best.objective}` : '')}</small>}
       </div>
     </dl>
+    {!node.best && <p className="muted pc-fact-warning">The runs do not share one task and objective
+      direction, or none scored. A single metric would compare different objectives.</p>}
+    <details className="pc-method">
+      <summary>How these counts are defined</summary>
+      <p>Runs count distinct runs tagged with this concept or anything below it.</p>
+      <p>{node.tagged
+        ? 'Experiments count only this exact tag. A subtree total would count experiments with several tags more than once.'
+        : 'No run tagged this id itself; a deeper id spells it as an ancestor.'}</p>
+      {node.best && <p>{`Best robust metric below this concept, over ${node.best.runs} run(s) of `
+        + `${node.best.taskId} (${node.best.direction})`
+        + (node.best.objective ? ` — ranked by ${node.best.objective}, an operator retarget, `
+          + 'not the task’s own metric.' : '.')}</p>}
+    </details>
     <h4>Evidence</h4>
     <ul className="pc-detail-runs">
       {shown.map(runId => {
@@ -205,6 +209,8 @@ export default function PortfolioConcepts({
   const [memory, setMemory] = useState(null)
   const [memoryNonce, setMemoryNonce] = useState(0)
   const rowRefs = useRef(new Map())
+  const treeRef = useRef(null)
+  const detailRef = useRef(null)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -269,26 +275,38 @@ export default function PortfolioConcepts({
     if (!search) return null
     return new Set(Object.keys(forest.nodes).filter(id => id.includes(search)))
   }, [search, forest])
-  const openSet = useMemo(() => {
-    if (!matches) return expanded
-    const out = new Set(expanded)
-    for (const id of matches) for (const step of forestPathTo(id)) out.add(step)
+  const forcedOpen = useMemo(() => {
+    const out = new Set()
+    if (matches) for (const id of matches) for (const step of forestPathTo(id)) out.add(step)
     return out
-  }, [matches, expanded])
+  }, [matches])
+  const openSet = useMemo(() => matches ? new Set([...expanded, ...forcedOpen]) : expanded,
+    [matches, expanded, forcedOpen])
 
   const rows = useMemo(() => visibleForestRows(forest, openSet), [forest, openSet])
+  const firstMatch = search ? rows.find(row => matches?.has(row.id))?.id : null
   const toggle = id => setExpanded(current => {
     const next = new Set(current)
     next.has(id) ? next.delete(id) : next.add(id)
     return next
   })
-  const expandAll = () => setExpanded(new Set(Object.keys(forest.nodes)))
-  const collapseAll = () => { setExpanded(new Set()); setQuery('') }
+  const expandAll = () => { setExpanded(new Set(Object.keys(forest.nodes))); setSelected('') }
+  const collapseAll = () => { setExpanded(new Set()); setQuery(''); setSelected('') }
   useEffect(() => {
     // A concept can leave the scope while its detail panel is open (a filter changed, a run finished
     // and was re-tagged). Drop the selection rather than render a panel about nothing.
     if (selected && !forest.nodes[selected]) setSelected('')
   }, [forest, selected])
+  useEffect(() => {
+    if (!selected) return undefined
+    const frame = requestAnimationFrame(() => detailRef.current?.focus({ preventScroll: true }))
+    return () => cancelAnimationFrame(frame)
+  }, [selected])
+  const closeDetail = () => {
+    const previous = selected
+    setSelected('')
+    requestAnimationFrame(() => (rowRefs.current.get(previous) || treeRef.current)?.focus())
+  }
 
   // The heading names the population the TREE is folded from, which is `active` — not the number of
   // boxes ticked in List. The rule is in the model (`conceptScopeClaim`) because this state is behind
@@ -322,11 +340,26 @@ export default function PortfolioConcepts({
         <label className="pc-search">
           <span className="sr-only">Find a concept</span>
           <input type="search" value={query} placeholder="find a concept…"
-            onChange={event => setQuery(event.target.value.slice(0, 120))} />
+            onChange={event => {
+              setQuery(event.target.value.slice(0, 120))
+              setSelected('')
+            }}
+            onKeyDown={event => {
+              if (event.key === 'Escape') setQuery('')
+              if (event.key === 'Enter' && firstMatch) {
+                event.preventDefault()
+                setSelected('')
+                requestAnimationFrame(() => rowRefs.current.get(firstMatch)?.focus())
+              }
+            }} />
         </label>
         <button type="button" className="btn sm" onClick={expandAll}>Expand all</button>
         <button type="button" className="btn sm" onClick={collapseAll}>Collapse all</button>
       </div>
+      {search && <p className="pc-search-result" role="status">
+        {matches.size} matching concept{matches.size === 1 ? '' : 's'} highlighted in the tree.
+        {matches.size > 0 && ' Matching paths stay open until search is cleared. Press Enter to focus the first match.'}
+      </p>}
     </div>
 
     {/* The coverage sentence goes ABOVE the tree, not under it. A tree drawn from 15 of 46 runs is a
@@ -363,7 +396,7 @@ export default function PortfolioConcepts({
       && (governance.unrepresentedRuns > 0 || governance.capsuleIdsOmitted > 0)
       && <div className="notice resource-warning" role="status">
         Durable cross-run concept memory does not cover this whole list: {governance.unrepresentedRuns}
-        visible run(s) have no retained capsule
+        {' '}visible run(s) have no retained capsule
         {governance.capsuleIdsOmitted > 0 && <>; {governance.capsuleIdsOmitted} capsule id(s) were omitted from the policy receipt</>}.
         The tree still shows their run-authored tags, but the agent priors may use a smaller population.
       </div>}
@@ -392,7 +425,7 @@ export default function PortfolioConcepts({
         (<code>looplab concept-merge</code>) is applied here once the revisioned policy is available.</p>
     </details>}
 
-    <div className="pc-body">
+    <div className={'pc-body' + (selected ? ' pc-has-selection' : '')}>
       <div className="pc-tree-shell">
         {coverage?.empty
           ? <div className="notice resource-empty">
@@ -400,16 +433,29 @@ export default function PortfolioConcepts({
               {coverage.runs > 0 && <> All {coverage.runs} of them ran; none was tagged, which is a
                 fact about tagging and not about what was learned.</>}
             </div>
-          : <ul className="pc-tree" aria-label="Concept tree">
+          : <ul ref={treeRef} tabIndex={-1} className="pc-tree" aria-label="Concept tree">
               {rows.map(row => <ConceptRow key={row.id} row={row}
                 selected={selected === row.id}
+                matched={!!matches?.has(row.id)}
                 expanded={openSet.has(row.id)}
+                forcedOpen={forcedOpen.has(row.id)}
                 onToggle={toggle} onSelect={setSelected}
                 setRef={node => node
                   ? rowRefs.current.set(row.id, node) : rowRefs.current.delete(row.id)} />)}
             </ul>}
         {search && matches?.size === 0
           && <div className="notice" role="status">No concept id contains “{search}”.</div>}
+      </div>
+
+      {selected
+        ? <ConceptDetail forest={forest} cooccurrence={cooccurrence} id={selected} runsById={runsById}
+            onOpenRun={onOpenRun} onClose={closeDetail} detailRef={detailRef} memory={memory}
+            onMemoryRetry={() => setMemoryNonce(n => n + 1)} />
+        : <aside className="pc-detail pc-detail-idle">
+            <p className="muted">Pick a concept to see which runs are evidence for it, and what the lab has learned about it.</p>
+          </aside>}
+
+      <div className="pc-secondary">
 
         {/* Always rendered, even at zero. Its absence would read as "everything is tagged", and the
             count being zero is exactly the signal that says this tree covers the whole scope —
@@ -484,14 +530,6 @@ export default function PortfolioConcepts({
             pairs touching the other {cooccurrence.pairSourceNodesPruned} are unknown, not absent.</p>}
         </section>}
       </div>
-
-      {selected
-        ? <ConceptDetail forest={forest} cooccurrence={cooccurrence} id={selected} runsById={runsById}
-            onOpenRun={onOpenRun} onClose={() => setSelected('')} memory={memory}
-            onMemoryRetry={() => setMemoryNonce(n => n + 1)} />
-        : <aside className="pc-detail pc-detail-idle">
-            <p className="muted">Pick a concept to see which runs are evidence for it, and what the lab has learned about it.</p>
-          </aside>}
     </div>
   </div>
 }

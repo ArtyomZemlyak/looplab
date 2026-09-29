@@ -20,7 +20,9 @@ let CardWorkspace
 let cardAttempts
 let cardAttemptIndex
 let cardAttemptCoverage
+let cardLatestMeasuredEvidence
 let cardAttemptSummary
+let cardMatchesQuery
 let nodeCardId
 let route
 
@@ -30,9 +32,9 @@ test.before(async () => {
     server: { middlewareMode: true },
   })
   ;({ CardWorkspace } = await vite.ssrLoadModule('/src/CardBoard.jsx'))
-  ;({ cardAttempts, cardAttemptSummary, nodeCardId } =
+  ;({ cardAttempts, cardAttemptSummary, cardMatchesQuery, nodeCardId } =
     await vite.ssrLoadModule('/src/cardBoardModel.js'))
-  ;({ cardAttemptIndex, cardAttemptCoverage } =
+  ;({ cardAttemptIndex, cardAttemptCoverage, cardLatestMeasuredEvidence } =
     await vite.ssrLoadModule('/src/cardBoardViewModel.js'))
   route = await vite.ssrLoadModule('/src/runRouteState.js')
 })
@@ -197,7 +199,88 @@ test('the view layout renders the board without a modal dialog wrapper', () => {
   // The board is a VIEW now: an aria-modal shell would make the header's own view-toggle inert.
   assert.doesNotMatch(html, /aria-modal/)
   assert.match(html, /class="card-board"/)
-  assert.match(html, /card-detail/)
+  assert.match(html, /aria-label="Find work items"/)
+  assert.doesNotMatch(html, /card-detail-side/)
+})
+
+test('the visible measured outcome comes only from present, evaluated Card evidence', () => {
+  const attempts = cardAttemptIndex(STATE, Object.values(STATE.cards)).get('card-many')
+  assert.deepEqual(cardLatestMeasuredEvidence(attempts), { nodeId: 9, metric: 0.9 })
+  assert.equal(cardLatestMeasuredEvidence([
+    ...attempts,
+    { nodeId: 100, present: true, evidence: false, node: { status: 'evaluated', metric: 0.1 } },
+    { nodeId: 101, present: true, evidence: true, substituted: true,
+      node: { status: 'evaluated', metric: 0.1 } },
+    { nodeId: 102, present: false, evidence: true,
+      node: { status: 'evaluated', metric: 0.1 } },
+  ]).nodeId, 9)
+  assert.match(render(), /Measured · #9/)
+  assert.match(render({ selectedCardId: 'card-many' }), /Latest measured evidence/)
+})
+
+test('empty statuses stay visible without narrowing occupied Card lanes', () => {
+  const html = render()
+  assert.equal((html.match(/<section class="card-col(?: |")/g) || []).length, 3)
+  assert.match(html, /aria-label="Empty lifecycle statuses"/)
+  assert.match(html, /Proposed <span class="muted">0<\/span>/)
+  const one = render({ state: { ...STATE, cards: { 'card-many': STATE.cards['card-many'] } } })
+  assert.equal((one.match(/<section class="card-col(?: |")/g) || []).length, 1)
+  assert.match(one, /Evaluated <span class="muted">1<\/span>/)
+  assert.match(one, /Dropped <span class="muted">0<\/span>/)
+})
+
+test('an empty Card board still explains its state and shows the lifecycle', () => {
+  const html = render({ state: { ...STATE, cards: {} } })
+  assert.match(html, /No work items yet\./)
+  assert.match(html, /aria-label="Empty lifecycle statuses"/)
+  assert.doesNotMatch(html, /<section class="card-col/)
+})
+
+test('a long single-status board keeps its Card order in the wider scan layout', () => {
+  const cards = Object.fromEntries(Array.from({ length: 5 }, (_, i) => [
+    `card-${i}`, { id: `card-${i}`, status: 'evaluated', statement: `Idea ${i}` },
+  ]))
+  const html = render({ state: { ...STATE, cards } })
+  assert.match(html, /class="card-board dense-lane"/)
+  assert.equal((html.match(/<section class="card-col(?: |")/g) || []).length, 1)
+  assert.ok([0, 1, 2, 3, 4].every((i, index) =>
+    index === 0 || html.indexOf(`Idea ${i - 1}`) < html.indexOf(`Idea ${i}`)))
+  assert.doesNotMatch(render(), /card-board dense-lane/)
+})
+
+test('a Card link outside the loaded board explains the missing detail and can be cleared', () => {
+  const html = render({ pane: { compact: false, width: 420 }, selectedCardId: 'card-omitted' })
+  assert.ok(html.includes('Card <code>card-omitted</code> is not in the loaded board.'))
+  assert.ok(html.includes('Clear selection'))
+  assert.ok(!html.includes('aria-label="Work item details"'))
+  const clipped = render({ selectedCardId: 'card-omitted',
+    state: { ...STATE, cards_projection: { ...STATE.cards_projection,
+      total: 5, returned: 4, omitted: 1, complete: false } } })
+  assert.ok(clipped.includes('1 work item was omitted from this snapshot.'))
+})
+
+test('work-item search finds ideas, ids, operators and concepts without using status as a match', () => {
+  const card = { id: 'card-12', statement: 'Try cosine learning-rate decay',
+    operator: 'improve', concept_tags: ['optimization/warmup'], status: 'evaluated' }
+  for (const query of ['COSINE', 'card-12', 'Improve', 'WARMUP']) {
+    assert.equal(cardMatchesQuery(card, query), true, query)
+  }
+  assert.equal(cardMatchesQuery(card, 'evaluated'), false)
+  assert.equal(cardMatchesQuery(card, 'missing'), false)
+  assert.equal(cardMatchesQuery(card, ''), true)
+  assert.equal(cardMatchesQuery(null, 'cosine'), false)
+})
+
+test('wide workspace opens details only after a Card is picked', () => {
+  const closed = render({ pane: { compact: false, width: 420 } })
+  assert.doesNotMatch(closed, /card-detail-side/)
+  const open = render({ pane: { compact: false, width: 420 }, selectedCardId: 'card-many' })
+  assert.match(open, /class="main run-workspace card-workspace detail-open"/)
+  assert.match(open, /card-detail-side/)
+  assert.match(open, /class="card-detail-heading">Log-transform the target<\/h2>/)
+  assert.ok(open.indexOf('card-detail-heading') < open.indexOf('card-attempts'))
+  assert.match(open, /these 3 experiments tested/)
+  assert.match(open, />Close<\/button>/)
 })
 
 test('compact workspace leaves the board reachable until a Card is opened', () => {

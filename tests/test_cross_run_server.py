@@ -1,8 +1,8 @@
 """PART V §22 — the cross-run HTTP surface: Research Atlas data (read) + operator claim decisions (write).
 
 Through FastAPI's TestClient: GET atlas/claims read the portfolio; POST claim-decide is the operator
-governance write, honored on the next read (rejected → maturity operator-rejected). Agents never use this
-router — it is the human/UI surface (§22.4).
+governance write, honored on the next read (rejected → maturity operator-rejected). The external
+harness also uses these guarded routes through MCP (§22.4).
 """
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from looplab.serve.server import make_app  # noqa: E402
 
 _GOVERNED_BODY_PATHS = frozenset({
     "/api/cross-run/claim-decide",
+    "/api/cross-run/task-facets",
     "/api/cross-run/concept-merge",
     "/api/cross-run/concept-purge",
     "/api/cross-run/concept-alias-clear",
@@ -62,6 +63,28 @@ def _initialize_memory():
     return md
 
 
+def test_agent_task_facets_share_strict_governance_with_operator(tmp_path):
+    memory = _initialize_memory()
+    client = TestClient(make_app(tmp_path))
+    start = client.get("/api/cross-run/task-facets")
+    assert start.status_code == 200 and start.json()["revision"] == 0
+    body = {"task_id": "retrieval-task", "facets": {"domain": "information-retrieval"},
+            "expected_revision": 0, "action_id": "facet-1"}
+    saved = client.post("/api/cross-run/task-facets", json=body)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["revision"] == 1
+    assert client.post("/api/cross-run/task-facets", json=body).json() == saved.json()
+    assert client.get("/api/cross-run/task-facets").json()["facets"] == {
+        "retrieval-task": {"domain": "information-retrieval"}}
+    assert client.post("/api/cross-run/task-facets", json={
+        **body, "action_id": "facet-2"}).status_code == 409
+    assert client.post("/api/cross-run/task-facets", json={
+        **body, "facets": {"domain": "different"}}).status_code == 409
+    assert client.post("/api/cross-run/task-facets", json={
+        **body, "facets": {"unspecified": "quietly-dropped"}}).status_code == 422
+    assert len((memory / "task_facets.jsonl").read_text().splitlines()) == 1
+
+
 def _seed_memory(statement="hard-neg helps"):
     md = _initialize_memory()
     (md / "lessons.jsonl").write_bytes(orjson.dumps(
@@ -93,6 +116,8 @@ def test_part_iv_v_openapi_publishes_response_envelopes_and_governance_inputs(tm
         ("/api/cross-run/concept-merge", "post"): "ConceptAliasResponse",
         ("/api/cross-run/concept-split", "post"): "ConceptSplitResponse",
         ("/api/cross-run/curation-log", "get"): "CurationLogResponse",
+        ("/api/cross-run/task-facets", "get"): "TaskFacetsResponse",
+        ("/api/cross-run/task-facets", "post"): "TaskFacetsSetResponse",
         ("/api/cross-run/concept-steward", "post"): "StewardProposalResponse",
         # The canonicalization table a BROWSER applies. An empty `{}` schema here would let a
         # generated client fail open on the one payload whose whole job is to be applied literally:

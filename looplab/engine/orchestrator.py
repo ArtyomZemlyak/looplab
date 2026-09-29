@@ -754,6 +754,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # "drifts" forever, and without this the strategy path rebuilt the whole StrategyContext on
         # every loop pass to re-derive the same no-op. Nothing durable keys off it — see there.
         self._invalid_pin_verdict: Optional[tuple] = None
+        # Recheck deterministic Card enrichment from the event log on resume.
+        self._external_enrichment_seq: Optional[int] = None
         # In-process abstention memo for the value-estimate cadence (docs/BACKLOG.md §0.1 row 17):
         # the `(node_id, attempt)` pairs whose estimate came back unusable. Declared HERE rather
         # than minted on first use so it takes no row in `engine/attribute_sites.py`'s shrink-only
@@ -1391,7 +1393,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         report or record an ambiguous attempt, but can never buy it again. The successful report event
         remains immediately before ``run_finished`` as required by replay.
         """
-        report_planned = self.report_writer is not None and self.report_every > 0
+        report_planned = (not self.external_harness and self.report_writer is not None
+                          and self.report_every > 0)
         if not report_planned:
             return self._finish_if_quiescent(data, after_seq=after_seq)
 
@@ -1906,7 +1909,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                        if n.rerun_from in ("implement", "propose")
                        and n.status is NodeStatus.pending and not n.tombstoned
                        and n.id not in state.aborted_nodes]
-            if _resets:
+            if _resets and not self.external_harness:
                 # One rebuild per fold. A developer crash can auto-pause the first node, and a reset/
                 # abort can change the rest while it is building; never process a stale whole batch.
                 # OFF the loop thread (doc 52 row 12), like every other build: the rebuild is a paid
@@ -1939,7 +1942,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             # drain re-scoring the one node the operator fixed on a run whose other nodes all failed
             # was FINISHED here as a systemic failure, the owed node left pending (critic
             # 2026-09-26, driven). The drain pauses on its own terms below.
-            _systemic = (None if self._drain_only
+            _systemic = (None if self._drain_only or self.options.external_harness
                          else systemic_failure_stop_reason(state, self.systemic_failure_stop))
             if _systemic is not None:
                 # Through the SAME ladder as every other terminal gate, not a bare finish. This gate
@@ -1950,7 +1953,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 if self._settle_terminal_gate(state, _systemic, decision_seq=decision_seq) == "break":
                     break
                 continue
-            _signal = self._run_spec_gates(state)
+            _signal = None if self.external_harness else self._run_spec_gates(state)
             if _signal == "break":
                 break
             if _signal == "continue":
@@ -1990,10 +1993,44 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             # an operator's live `budget_extend` is already in force and the axis it owns is visibly
             # theirs; BEFORE the speculation block so the depth settle and every gate under it read
             # one width rather than two.
-            if self._settle_proposal_width(state):
+            if not self.external_harness and self._settle_proposal_width(state):
                 continue
 
             if await self._serve_forced_requests(state):
+                continue
+
+            if self.external_harness:
+                # The external agent owns every think/plan/propose turn. Only READY-MADE injected
+                # nodes enter this lane; the existing policy's evaluation eligibility is reused
+                # without consulting its create actions or any in-process agent selector. Do not
+                # run cadences, speculation, research overlap or the empty-action finalizer. A
+                # durable command wakes this bounded poll; pause/finalize/budget gates above it
+                # remain authoritative and replayable.
+                # Apply explicit set_strategy pins even though the internal Strategist cadence is
+                # skipped. The pin writes strategy_decision and changes the LIVE evaluation policy;
+                # re-fold before scheduling under it. No internal Strategist is consulted.
+                before_strategy = state
+                state = self._maybe_consult_strategist(state, allow_consult=False)
+                if state is not before_strategy:
+                    continue
+                # Evidence reconciliation is deterministic here: it retires a lesson after a
+                # reset/remeasurement changes its cited node, without re-distilling it.
+                state = self._maybe_reconcile_lessons(state)
+                # Preserve the deterministic breadth and concept-coverage read models in
+                # external mode. The concept graph is rebuilt from the agent's authored
+                # memberships; no internal classifier or reflector is invoked.
+                state = self._maybe_snapshot_coverage(state)
+                state = self._maybe_snapshot_concept_coverage(state)
+                # Keep ref-only Card evidence current without scanning the whole
+                # board on every idle poll. All enrichment inputs are in the log.
+                if getattr(self, "_external_enrichment_seq", None) != decision_seq:
+                    state = self._sync_card_enrichments(state)
+                    self._external_enrichment_seq = decision_seq
+                evals = [a for a in self.policy.next_actions(state) if a["kind"] == "evaluate"]
+                if evals:
+                    await self._dispatch_evals(evals, state, max_es, research=False)
+                else:
+                    await anyio.sleep(0.5)
                 continue
 
             if self._speculation_enabled():
@@ -2288,6 +2325,25 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             state, reason=reason,
         ):
             return "continue"
+        if self.external_harness and reason != "aborted":
+            # The first fold may precede an in-flight evaluation. Only the fresh
+            # durable prefix can decide whether its report and reviews still hold.
+            from looplab.core.config import read_config_snapshot
+            from looplab.harness.obligations import external_finish_due
+            events = self.store.read_all()
+            due = external_finish_due(self.run_dir,
+                                      read_config_snapshot(self.run_dir / "config.snapshot.json"),
+                                      fold(events), events)
+            if due["report"] or due["reviews"] or due["pending_nodes"]:
+                try:
+                    self.store.append(EV_PAUSE, {
+                        "reason": "external_finish_obligations_due",
+                        "terminal_reason": reason,
+                        "due": due,
+                    }, expected_last_seq=events[-1].seq)
+                    return "break"
+                except EventStoreConcurrencyError:
+                    return "continue"
         if self._finish_with_report_if_quiescent(
                 state, {"reason": reason}, after_seq=decision_seq):
             return "break"

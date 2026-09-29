@@ -31,9 +31,11 @@ import VirtualTimeline from './VirtualTimeline.jsx'
 import { timelineEventKey } from './timelineModel.js'
 import { queuedGenerationControls } from './queue.js'
 import Panel from './PanelShell.jsx'
+import './overview.css'
+import './report-trust-polish.css'
 import { DataTable, downloadBlob } from './accessibility.jsx'
-import { normalizeResearchMemos } from './researchMemoModel.js'
-import ResearchMemoCard from './ResearchMemoCard.jsx'
+import { memoLead, normalizeResearchMemos } from './researchMemoModel.js'
+import ResearchMemoCard, { researchMemoTrust } from './ResearchMemoCard.jsx'
 import { deadlineRequest } from './requestDeadline.js'
 import { installNavigationLossGuard } from './navigationLossGuard.js'
 import { createInspectorDraftStore, useInspectorDraftField } from './inspectorDraftStore.js'
@@ -48,6 +50,15 @@ import {
 export { default as Panel } from './PanelShell.jsx'
 
 const Stat = ({ n, l }) => <div className="stat"><div className="n">{n}</div><div className="l">{l}</div></div>
+
+function overviewHintPreview(text) {
+  const plain = stripMd(text || '').trim()
+  const firstDirection = (plain.split(/[;\n]+/).map(part => part.trim()).find(Boolean) || plain)
+    .replace(/^deep-research directions:\s*/i, '')
+  if (firstDirection.length <= 200) return firstDirection
+  const cut = firstDirection.slice(0, 200).replace(/\s+\S*$/, '').trimEnd()
+  return `${cut || firstDirection.slice(0, 200)}…`
+}
 
 const MetricGauge = ({ value, max = 100, hot = false, label, valueText }) => {
   const numericValue = typeof value === 'number' && Number.isFinite(value) ? value : null
@@ -432,59 +443,101 @@ function PanelResourceNotice({ resource, label, onRetry }) {
   </div>
 }
 
-// Overall-info tab (round-8): the run's at-a-glance metrics, lifted out of the cramped top bar so the
-// header stays a single line. Everything derives from the folded state (+ maxEval from config).
-export function OverviewPanel({ state, maxEval, onClose, onOpenPanel }) {
+// At-a-glance run facts derive from the folded state; RunView supplies the authoritative eval ceiling.
+export function OverviewPanel({ state, maxEval, phase, runState, onClose, onOpenPanel }) {
   const nodes = Object.values(state.nodes || {})
   const evaluated = nodes.filter(n => n.metric != null).length
   const failed = nodes.filter(n => n.status === 'failed').length
   const best = state.best_node_id != null ? (state.nodes || {})[state.best_node_id] : null
-  const evalSec = state.total_eval_seconds || 0
+  const evalSec = Number.isFinite(state.total_eval_seconds) && state.total_eval_seconds >= 0
+    ? state.total_eval_seconds : null
+  const evalLimit = Number.isFinite(maxEval) && maxEval >= 0 ? maxEval : null
+  const evalPercent = evalLimit > 0 && evalSec != null ? Math.min(100, evalSec / evalLimit * 100) : null
   const cost = state.llm_cost
   const strat = state.active_strategy
-  const hints = state.pending_hints || []
+  const hints = Array.isArray(state.pending_hints) ? state.pending_hints : []
+  const hintText = hint => typeof hint?.text === 'string' ? hint.text : typeof hint === 'string' ? hint : ''
+  const latestHint = hintText(hints.at(-1))
+  const latestHintPlain = stripMd(latestHint).trim()
+  const latestHintLead = overviewHintPreview(latestHint)
+  const rewardFlags = state.reward_hacks?.length || 0
+  const duplicates = state.novelty_events?.length || 0
+  const discuss = () => {
+    onClose?.()
+    requestAnimationFrame(() => window.dispatchEvent(new CustomEvent('ll:focus-assistant')))
+  }
   return (
-    <Panel title="Overview" sub={state.task_id || ''} onClose={onClose}>
-      {state.goal && <div className="ov-goal">{state.goal}</div>}
-      <div className="stat-grid">
-        <Stat n={best ? fmt(best.confirmed_mean ?? best.metric) : '—'} l="best metric" />
-        <Stat n={state.direction || '—'} l="direction" />
-        <Stat n={nodes.length} l="nodes" />
-        <Stat n={evaluated} l="evaluated" />
-        <Stat n={failed} l="failed" />
-        <Stat n={fmtElapsedSeconds(evalSec) + (maxEval != null ? ' / ' + fmtElapsedSeconds(maxEval) : '')} l="eval time" />
-        {cost && <Stat n={fmtInt(cost.total_tokens)} l="tokens" />}
-        {state.paused ? <Stat n="paused" l="status" /> : null}
+    <Panel title="Overview" sub={state.label || state.run_id || state.task_id || ''} onClose={onClose} wide className="overview-panel">
+      <div className="ov-summary">
+        <div className="ov-best">
+          <span className="ov-label">Best metric</span>
+          <strong>{best ? fmt(best.confirmed_mean ?? best.metric) : '—'}</strong>
+          <span className="ov-sub">{best ? `Node #${best.id ?? state.best_node_id} · ${best.confirmed_mean != null ? 'confirmed mean' : 'observed result'}` : 'No measured result yet'}
+            {state.direction && ` · ${state.direction === 'min' ? 'minimize' : state.direction === 'max' ? 'maximize' : state.direction}`}</span>
+        </div>
+        <div className="ov-run-facts">
+          <div><span className="ov-label">Run state</span><strong>{runState || (state.paused ? 'paused' : state.finished ? 'finished' : '—')}</strong></div>
+          <div><span className="ov-label">Phase</span><strong>{phase || state.phase || '—'}</strong></div>
+          <div><span className="ov-label">Experiments</span><strong>{evaluated} evaluated <span className="ov-fact-muted">/ {nodes.length} nodes</span></strong></div>
+          <div><span className="ov-label">Failures</span><strong>{failed}</strong></div>
+        </div>
       </div>
-      {strat && <div className="ov-row"><span className="k"><OpIcon name="compass" className="t-ic" /> strategy</span>{' '}
-        {(strat.policy || 'greedy') + (strat.fidelity ? '/' + strat.fidelity : '')}
-        {strat.rationale && <div className="muted ov-why">{strat.rationale}</div>}</div>}
-      {hints.length > 0 && <div className="ov-row"><span className="k"><OpIcon name="bulb" className="t-ic" /> hints ({hints.length})</span>
-        <ul className="ov-hints">{hints.map((h, i) => <li key={(h.text || '') + i}>{h.text || JSON.stringify(h)}</li>)}</ul></div>}
-      {(state.novelty_events?.length > 0 || state.reward_hacks?.length > 0) && <div className="ov-row ov-alerts">
-        {state.novelty_events?.length > 0 && <span className="chip" title="near-duplicate proposals nudged to diversify (E1)"><OpIcon name="replay" className="t-ic" /> dedup {state.novelty_events.length}</span>}
-        {state.reward_hacks?.length > 0 && <button type="button" className="chip alarm run-metric-chip"
-          title="suspicious wins flagged (B5)" onClick={() => onOpenPanel?.('trust')}>
-          <OpIcon name="alert" size={11} /> hack? {state.reward_hacks.length}</button>}
-      </div>}
+      <section className="ov-section ov-budget" aria-label="Evaluation time">
+        <div className="ov-section-head"><h3>Evaluation time</h3>
+          <strong>{evalSec == null ? '—' : fmtElapsedSeconds(evalSec)}{evalLimit != null && ` / ${fmtElapsedSeconds(evalLimit)}`}</strong></div>
+        {evalPercent != null && <div className="ov-budget-bar" role="progressbar" aria-label="Evaluation budget used"
+          aria-valuemin={0} aria-valuemax={evalLimit} aria-valuenow={Math.min(evalSec, evalLimit)}
+          aria-valuetext={`${fmtElapsedSeconds(evalSec)} of ${fmtElapsedSeconds(evalLimit)} used`}>
+          <span style={{ width: `${evalPercent}%` }} /></div>}
+        <div className="ov-budget-note">{evalLimit == null ? 'Evaluation-time limit unavailable' : evalSec == null
+          ? 'Remaining time unavailable' : evalSec > evalLimit
+          ? `Over limit by ${fmtElapsedSeconds(evalSec - evalLimit)}`
+          : `${fmtElapsedSeconds(Math.max(0, evalLimit - evalSec))} remaining`}
+          {cost?.total_tokens != null && <span> · {fmtInt(cost.total_tokens)} tokens</span>}</div>
+      </section>
+      {(rewardFlags > 0 || duplicates > 0) && <section className="ov-section ov-signals" aria-label="Review signals">
+        <h3>Review signals</h3>
+        <div className="ov-signal-list">
+          {rewardFlags > 0 && <button type="button" className="ov-signal ov-signal-alert" onClick={() => onOpenPanel?.('trust')}>
+            <OpIcon name="alert" size={15} /> {rewardFlags} suspicious {rewardFlags === 1 ? 'result' : 'results'} <span>Open Trust →</span></button>}
+          {duplicates > 0 && <div className="ov-signal"><OpIcon name="replay" size={15} /> {duplicates} near-duplicate {duplicates === 1 ? 'proposal' : 'proposals'}</div>}
+        </div>
+      </section>}
+      {hints.length > 0 && <section className="ov-section ov-directions" aria-label="Saved hints">
+        <div className="ov-section-head"><h3><OpIcon name="bulb" size={15} /> Saved hints</h3><span className="ov-count">{hints.length}</span></div>
+        <div className="ov-latest"><span className="ov-label">Latest hint</span>
+          <p>{latestHintLead || 'No text available'}</p></div>
+        {hints.length > 1 && <details className="ov-details"><summary>Show all {hints.length} hints</summary>
+          <ol className="ov-hints">{hints.map((hint, i) => <li key={i}>{stripMd(hintText(hint)) || 'No text available'}</li>)}</ol>
+        </details>}
+        {hints.length === 1 && latestHintLead !== latestHintPlain && <details className="ov-details"><summary>Read full hint</summary>
+          <p className="ov-hint-full">{latestHintPlain}</p></details>}
+      </section>}
+      {strat && <section className="ov-section ov-strategy" aria-label="Search strategy">
+        <div className="ov-section-head"><h3><OpIcon name="compass" size={15} /> Search strategy</h3>
+          <strong>{(strat.policy || 'greedy') + (strat.fidelity ? ' / ' + strat.fidelity : '')}</strong></div>
+        {strat.rationale && <details className="ov-details"><summary>Why this strategy?</summary>
+          <p className="ov-why">{strat.rationale}</p></details>}
+      </section>}
+      <div className="ov-footer"><button type="button" className="btn" onClick={discuss}>Discuss in Assistant</button></div>
     </Panel>
   )
 }
 
-// Deep-research drawer: every memo in one place (instead of scrolling the timeline feed), with
-// ACTIONABLE directions — "steer →" posts a hint the Researcher folds into the next proposal. Deep
-// research is no longer a DAG node; this drawer + the Dock timeline marker are its home.
+// Deep-research drawer: keep history reachable while reading a long memo. Directions post standing
+// hints for the next proposal; they do not start an experiment.
 export function ResearchPanel({ state, runId, onToast, onClose, onSelect, onSelectEvidence }) {
   const memoProjection = useMemo(() => normalizeResearchMemos(state.research), [state.research])
   const memos = [...memoProjection.memos].reverse()   // newest retained first
   const newestMemoIndex = memos[0]?.sourceIndex ?? null
-  const [openMemo, setOpenMemo] = useState(newestMemoIndex)
+  const [selectedMemoIndex, setSelectedMemoIndex] = useState(newestMemoIndex)
+  const readingRef = useRef(null)
   const seenNewestMemo = useRef(newestMemoIndex)
   const [steeringDirection, setSteeringDirection] = useState('')
   useEffect(() => {
     if (newestMemoIndex === seenNewestMemo.current) return
     seenNewestMemo.current = newestMemoIndex
-    setOpenMemo(newestMemoIndex)
+    setSelectedMemoIndex(newestMemoIndex)
   }, [newestMemoIndex])
   const steer = async (text) => {
     if (steeringDirection) return
@@ -498,8 +551,25 @@ export function ResearchPanel({ state, runId, onToast, onClose, onSelect, onSele
       setSteeringDirection('')
     }
   }
+  const selectedMemo = memos.find(memo => memo.sourceIndex === selectedMemoIndex) || memos[0]
+  const selectMemo = (sourceIndex) => {
+    setSelectedMemoIndex(sourceIndex)
+    readingRef.current?.scrollTo({ top: 0 })
+  }
+  const discussMemo = () => {
+    const historical = selectedMemo.sourceIndex !== newestMemoIndex
+    const lead = memoLead(selectedMemo.summary)
+    const text = `Discuss deep research memo #${selectedMemo.sourceIndex + 1} for this run${lead ? ` ("${lead}")` : ''}. ${historical
+      ? 'Compare it with newer research and measured results before suggesting a next step.'
+      : 'Which conclusions are supported by measured results, what remains uncertain, and what should we test next?'}`
+    onClose?.()
+    requestAnimationFrame(() => window.dispatchEvent(new CustomEvent('ll:focus-assistant', { detail: { text } })))
+  }
+  const latestSelected = selectedMemo?.sourceIndex === newestMemoIndex
+  const finished = state.phase === 'finished'
   return (
-    <Panel title="Deep research" sub={memos.length ? `${memos.length} memo${memos.length === 1 ? '' : 's'}` : 'none yet'} onClose={onClose} wide>
+    <Panel title="Deep research" sub={memos.length ? `${memos.length} memo${memos.length === 1 ? '' : 's'}` : 'none yet'} onClose={onClose}
+      size={memos.length ? 'board' : undefined} className={`research-panel${memos.length ? '' : ' empty'}`}>
       {!memos.length && <div className="research-empty-state" role="status">
         <div><OpIcon name="search" size={16} /><strong>No research memos yet</strong></div>
         <p>Deep research runs on the configured cadence or when the Strategist requests it.</p>
@@ -511,15 +581,42 @@ export function ResearchPanel({ state, runId, onToast, onClose, onSelect, onSele
       {memoProjection.omitted > 0 && <div className="muted">
         Showing {memos.length} of {memoProjection.total} newest valid memos; older, malformed, or over-budget entries are omitted.
       </div>}
-      <div className="research-memo-stack">{memos.map((memo, index) => (
-        // Append-only sourceIndex is stable while the newest card is inserted at the top.
-        <ResearchMemoCard key={memo.sourceIndex} memo={memo} memoNumber={memo.sourceIndex + 1}
-          latest={index === 0} open={openMemo === memo.sourceIndex}
-          onToggle={() => setOpenMemo(current => current === memo.sourceIndex ? null : memo.sourceIndex)}
-          variant="panel" normalized
-          onSteer={steer} steeringDirection={steeringDirection} onSelectNode={onSelect}
+      {selectedMemo && <div className={`research-workspace${memos.length === 1 ? ' single' : ''}`}>
+        {memos.length > 1 && <nav className="research-history" aria-label="Research memos">
+          <div className="research-history-title">Memo history <span>{memos.length}</span></div>
+          {memos.map((memo, index) => {
+            const trust = researchMemoTrust(memo)
+            return <button type="button" key={memo.sourceIndex}
+              className={`research-history-item${memo.sourceIndex === selectedMemo.sourceIndex ? ' selected' : ''}`}
+              aria-current={memo.sourceIndex === selectedMemo.sourceIndex ? 'true' : undefined}
+              onClick={() => selectMemo(memo.sourceIndex)}>
+              <span className="research-history-meta">#{memo.sourceIndex + 1}{index === 0 ? ' · latest' : ''}
+                {memo.at_node != null ? ` · after ${memo.at_node} experiments` : ''}</span>
+              <span className="research-history-lead">{memoLead(memo.summary) || 'No conclusion was recorded.'}</span>
+              <span className={`research-history-trust tone-${trust.tone}`}>{trust.label}</span>
+            </button>
+          })}
+        </nav>}
+        <div className="research-reading" ref={readingRef}>
+          <div className="research-reading-toolbar">
+            <span>Memo #{selectedMemo.sourceIndex + 1} of {memoProjection.total}</span>
+            <button type="button" className="btn sm" onClick={discussMemo}>
+              <OpIcon name="chat" size={14} /> Discuss in Assistant
+            </button>
+          </div>
+          {!latestSelected && <p className="research-history-notice" role="note">
+            Historical memo. Newer research may supersede these directions; select the latest memo to steer.
+          </p>}
+          <ResearchMemoCard key={selectedMemo.sourceIndex} memo={selectedMemo}
+          memoNumber={selectedMemo.sourceIndex + 1} latest={latestSelected}
+          staticOpen variant="panel" normalized
+          onSteer={latestSelected && !finished ? steer : undefined}
+          steeringNote={latestSelected && finished
+            ? 'This run is finished. Resume it before choosing a direction for a future proposal.' : undefined}
+          steeringDirection={steeringDirection} onSelectNode={onSelect}
           onSelectEvidence={onSelectEvidence} />
-      ))}</div>
+        </div>
+      </div>}
     </Panel>
   )
 }
@@ -563,6 +660,25 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly 
   const leakState = leakageStatus(leak)
   const driftState = driftStatus(state.drifts, cfg, evald.length)
   const hackState = rewardHackStatus(state.reward_hacks, cfg, evald.length)
+  const rewardSignalsRef = useRef(null)
+  const flaggedCount = state.reward_hacks?.length || 0
+  const trustSummaryTone = [leakState, driftState, hackState].some(item => item.tone === 'alarm')
+    ? 'alarm' : !state.host_grading || robust?.confirmed_mean == null
+      || [leakState, driftState, hackState].some(item => item.tone !== 'ok')
+      ? 'warn' : 'ok'
+  const trustSummary = {
+    tone: trustSummaryTone,
+    label: trustSummaryTone === 'alarm' ? 'Review flagged evidence before using this result'
+      : trustSummaryTone === 'warn' ? 'Trust coverage needs review'
+        : 'Recorded trust checks found no flagged issue',
+    detail: [
+      robust ? `Winner: ${robust.confirmed_mean != null ? 'multi-seed confirmed' : 'single evaluation'}`
+        : 'Winner: unavailable',
+      `Leakage: ${leakState.label.toLowerCase()}`,
+      `Cross-check: ${driftState.label.toLowerCase()}`,
+      `Suspicious results: ${flaggedCount}`,
+    ].join(' · '),
+  }
   return (
     <Panel title="Trust & rigor" sub="evidence and coverage" onClose={onClose} wide>
       <div className="trust-panel-body">
@@ -570,16 +686,25 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly 
       {configResource.status === 'error' && !configLoading && <TrustState
         value={{ tone: 'unknown', label: 'Detector configuration unavailable', detail: `Coverage cannot be verified: ${configResource.error}` }}
         action={<button className="btn sm" onClick={() => configResource.retry()}>Retry</button>} />}
-
-      <div className="cardgrid">
-        <Stat n={cfg?.trust_mode || (configLoading ? 'Loading…' : 'Unknown')} l="sandbox tier" />
-        <Stat n={cfg?.eval_trust_mode || (configLoading ? 'Loading…' : 'Unknown')} l="eval trust mode" />
-        <Stat n={state.host_grading ? 'host-side' : 'self-reported'} l="metric scoring" />
-        <Stat n={state.workspace_changed ? 'changed' : 'no change flag'} l="workspace drift" />
+      <div className="trust-overview">
+        <TrustState value={trustSummary} action={flaggedCount > 0
+          ? <button type="button" className="btn sm"
+              onClick={() => rewardSignalsRef.current?.scrollIntoView({ block: 'start' })}>
+              Review {flaggedCount} flagged {flaggedCount === 1 ? 'node' : 'nodes'}
+            </button> : null} />
       </div>
       {state.host_grading
         ? <TrustState value={{ tone: 'ok', label: 'Host-side grading recorded', detail: `The candidate writes predictions only; ${state.host_grading.scorer || 'the host scorer'} evaluates ${state.host_grading.n_labels ?? 'held-out'} labels outside the candidate process.` }} />
         : <TrustState value={{ tone: 'warn', label: 'Metric is not host-graded', detail: 'This run does not record an out-of-process grader, so the displayed metric may be self-reported by the candidate process.' }} />}
+      <details className="trust-config-details">
+        <summary>Detector configuration</summary>
+        <div className="cardgrid">
+          <Stat n={cfg?.trust_mode || (configLoading ? 'Loading…' : 'Unknown')} l="sandbox tier" />
+          <Stat n={cfg?.eval_trust_mode || (configLoading ? 'Loading…' : 'Unknown')} l="eval trust mode" />
+          <Stat n={state.host_grading ? 'host-side' : 'self-reported'} l="metric scoring" />
+          <Stat n={state.workspace_changed ? 'changed' : 'no change flag'} l="workspace drift" />
+        </div>
+      </details>
 
       <div className="section-h">Seed-luck and robustness</div>
       {robust && naive
@@ -615,7 +740,7 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly 
           {state.drifts.map((d, i) => <tr key={i}><td className="flag">#{d.node_id}</td><td>{fmt(d.primary)}</td><td>{fmt(d.cross)}</td><td>{fmt(d.tolerance)}</td></tr>)}</tbody></table></DataTable>
         : null}
 
-      <div className="section-h">Reward-hacking monitor (B5) {(state.reward_hacks || []).length > 0 && <span className="chip alarm">{state.reward_hacks.length} flagged</span>}</div>
+      <div className="section-h" ref={rewardSignalsRef}>Reward-hacking monitor (B5) {(state.reward_hacks || []).length > 0 && <span className="chip alarm">{state.reward_hacks.length} flagged</span>}</div>
       <TrustState value={hackState} />
       {/* Folded state is the enforcement truth (it applies trust_gate_changed events);
           the config snapshot alone can claim a gate the fold never engages. */}
@@ -671,6 +796,128 @@ export function FailuresPanel({ state, onClose, onSelect }) {
       </tbody></table></DataTable>
     </Panel>
   )
+}
+
+// External decisions live in three durable sidecars, not in the folded event log. This read model
+// keeps the intermediate reasoning receipts inspectable after a client/server restart and labels
+// old evidence explicitly; it never pretends that a receipt for one Idea satisfies another Idea.
+export function HarnessProgressPanel({ runId, expectedGeneration, externalMode, configStatus,
+  onOpenEvents, onClose }) {
+  const [offset, setOffset] = useState(0)
+  const validGeneration = RUN_GENERATION_RE.test(expectedGeneration || '')
+  const scope = validGeneration && externalMode === true
+    ? `${runId}:${expectedGeneration}:${offset}` : ''
+  const resource = useScopedResource(signal => get(
+    runApiPath(runId, '/harness-progress')
+      + `?expected_generation=${expectedGeneration}&offset=${offset}&limit=20`,
+    { cache: 'no-store', signal }).then(value => {
+    if (!isRecord(value) || value.generation !== expectedGeneration
+        || !isRecord(value.history) || !isRecord(value.source_health)
+        || !isRecord(value.candidate_requirements)
+        || !Array.isArray(value.candidate_blockers_if_expanding)
+        || !Array.isArray(value.finish_pending_nodes)
+        || !Array.isArray(value.pending_checkpoints)
+        || ['decisions', 'reviews', 'checkpoints'].some(
+          kind => !isRecord(value.history[kind]) || !Array.isArray(value.history[kind].items)
+            || !Number.isSafeInteger(value.history[kind].total)
+            || !isRecord(value.source_health[kind])
+            || !Number.isSafeInteger(value.source_health[kind].accepted_rows))) {
+      invalidPanelPayload()
+    }
+    return value
+  }), { scope, gate: scope ? null : 'idle', timeout: PANEL_REQUEST_TIMEOUT_MS, pollMs: 10_000 })
+  const progress = resource.data
+  const history = progress?.history
+  const blockers = progress?.candidate_blockers_if_expanding || []
+  const perIdea = Object.entries(progress?.candidate_decisions_per_idea || {})
+  const hasMore = ['decisions', 'reviews', 'checkpoints'].some(kind => history?.[kind]?.has_more)
+  const historyRow = (kind, row, index) => {
+    const receipt = kind === 'checkpoints' ? row.question : row
+    const answer = kind === 'checkpoints' ? row.answer : null
+    return <li key={`${kind}-${receipt.action_id || receipt.checkpoint_id || index}`} className="ov-row">
+      <b>{receipt.phase_id || kind}</b>{' '}
+      <span className="chip">{row.status || row.validity || 'recorded'}</span>{' '}
+      {row.lifecycle === 'superseded' && <span className="chip">old evaluator attempt</span>}
+      {receipt.at_node != null && <span className="muted">at node {receipt.at_node} · </span>}
+      {receipt.stage && <span>{receipt.stage} · </span>}
+      {receipt.decision || answer?.verdict || ''}
+      {(receipt.reason || answer?.reason) && <div>{receipt.reason || answer.reason}</div>}
+      {(receipt.expectation || receipt.observation) && <details>
+        <summary>Observed checkpoint</summary>
+        {receipt.expectation && <p>Expected: {receipt.expectation}</p>}
+        {receipt.observation && <pre className="log-tail">{receipt.observation}</pre>}
+      </details>}
+      <div className="muted">{receipt.action_id || receipt.checkpoint_id}
+        {receipt.action_ref ? ` · action ${receipt.action_ref}` : ''}</div>
+    </li>
+  }
+  return <Panel title="External agent cycle" sub={progress ? `event #${progress.event_seq}` : runId}
+    onClose={onClose} wide>
+    {configStatus === 'ready' && externalMode !== true && <p role="status">
+      This run uses LoopLab's built-in agent cycle. The external agent journals apply to runs
+      launched with external_harness=true.</p>}
+    {configStatus !== 'ready' && <p role="status">Waiting for run settings…</p>}
+    {!validGeneration && <p className="muted" role="status">Waiting for a durable run generation…</p>}
+    {scope && <PanelResourceNotice resource={resource} label="Agent cycle"
+      onRetry={() => resource.retry()} />}
+    {progress && <>
+      {!progress.complete && <div className="report-inline-state error" role="alert">
+        An event, decision, review or checkpoint journal has damaged rows. History below may be partial;
+        inspect source health before treating a missing receipt as never written.
+        <pre>{JSON.stringify(progress.source_health, null, 2)}</pre>
+      </div>}
+      <p className="muted">Measured prefix: {progress.at_node} nodes, event #{progress.event_seq}.
+        This is a read of several durable journals; refresh after a new event or response.</p>
+      <p className="muted">Journal rows: decisions {progress.source_health.decisions.accepted_rows},
+        reviews {progress.source_health.reviews.accepted_rows}, checkpoints
+        {' '}{progress.source_health.checkpoints.accepted_rows}. The event timeline records
+        node and command transitions separately.{' '}
+        <button type="button" className="btn sm ghost" onClick={onOpenEvents}>Open events</button></p>
+      <h3>Before another candidate</h3>
+      {blockers.length ? <ul>{blockers.map((item, index) => <li key={`${item.phase_id}-${index}`}>
+        <b>{item.phase_id}</b> · {item.action.replaceAll('{run_id}', runId)}
+      </li>)}</ul> : <p>No current external-cycle gate. Candidate-specific checks, budgets and
+        the task's edit surface still apply.</p>}
+      <h3>For each proposed Idea</h3>
+      {progress.candidate_requirements.effective_concepts && <p>Effective concept tags are
+        required on every submitted candidate.</p>}
+      {progress.candidate_requirements.hypothesis_statement && <p>A nonempty hypothesis statement
+        is required on every submitted candidate; injection creates a new Card.</p>}
+      {perIdea.length ? <ul>{perIdea.map(([name, count]) => <li key={name}>
+        {name}: review {count} option{count === 1 ? '' : 's'} for the exact Idea
+      </li>)}</ul> : <p>No configured idea-specific review at this node count.</p>}
+      <h3>Evaluation questions</h3>
+      <p>{progress.pending_checkpoint_count} pending. Answers remain in the checkpoint history below.</p>
+      {progress.pending_checkpoints.map(row => <div key={row.question.checkpoint_id} className="ov-row">
+        <b>{row.question.phase_id}</b> · node {row.question.node_id} · {row.question.stage || 'live observation'}
+        {row.question.expectation && <div>{row.question.expectation}</div>}
+      </div>)}
+      {progress.pending_checkpoints_truncated && <p className="muted">More questions: use the
+        harness-checkpoints API.</p>}
+      <h3>Before finalizing</h3>
+      {progress.finish_pending_nodes.length > 0 && <p>Wait for or explicitly abort pending nodes:
+        {' '}{progress.finish_pending_nodes.join(', ')}.</p>}
+      <p>{progress.finish_report_due ? 'Current run report required. ' : ''}
+        {progress.finish_reviews_due.length
+          ? `Reviews due: ${progress.finish_reviews_due.join(', ')}`
+          : 'No knowledge reviews due at this measured prefix.'}</p>
+      <h3>Recorded intermediate actions</h3>
+      <p className="muted">A current decision is still bound to its exact Idea and implementation.
+        Superseded receipts remain visible for audit.</p>
+      {['decisions', 'reviews', 'checkpoints'].map(kind => <section key={kind}>
+        <h4>{kind} · {history[kind].total}</h4>
+        {history[kind].items.length ? <ul>{history[kind].items.map((row, index) =>
+          historyRow(kind, row, index))}</ul> : <p className="muted">No entries on this page.</p>}
+      </section>)}
+      <div className="panel-actions">
+        <button type="button" className="btn sm" disabled={offset === 0}
+          onClick={() => setOffset(Math.max(0, offset - 20))}>Newer</button>
+        <button type="button" className="btn sm" disabled={!hasMore}
+          onClick={() => setOffset(offset + 20)}>Older</button>
+        <span className="muted">Page {Math.floor(offset / 20) + 1} of each journal</span>
+      </div>
+    </>}
+  </Panel>
 }
 
 // U1 · experiment queue: the search's planned/in-flight work, made VISIBLE and cancelable. Pending

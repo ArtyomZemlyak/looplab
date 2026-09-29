@@ -27,9 +27,10 @@ import {
   cardReopenable as _cardReopenable,
   cardText as _cardText, cardLessons as _cardLessons, cardOrigin as _cardOrigin,
   cardSelectionBlock,
+  cardMatchesQuery,
   resolveSelectedCard,
 } from './cardBoardModel.js'
-import { cardAttemptCoverage, cardAttemptIndex } from './cardBoardViewModel.js'
+import { cardAttemptCoverage, cardAttemptIndex, cardLatestMeasuredEvidence } from './cardBoardViewModel.js'
 import { CARD_KIND_DIRECTION, cardIsDirection, cardLineageViews,
   cardProposalDrift, rollupChips, splitBoardByKind } from './cardLineageModel.js'
 import ResearchView from './ResearchView.jsx'
@@ -38,6 +39,7 @@ import { nodeTraceSubject } from './traceSurfaceModel.js'
 import { isRecord, PANEL_REQUEST_TIMEOUT_MS, RUN_GENERATION_RE } from './panelPrimitives.js'
 import { traceReadDeadlineMs } from './traceScrollModel.js'
 import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
+import './card-workspace-polish.css'
 
 // Legacy direction board retained as a graceful fallback for pre-Card logs. Current runs use the
 // bounded public Card DTO and four generation-fenced, server-stamped operator controls below.
@@ -216,6 +218,7 @@ function _CardKanbanCard({
   const priority = _cardNumber(card.priority)
   const novelty = isRecord(card.novelty_verdict) ? _cardText(card.novelty_verdict.grade) : null
   const omissionCount = isRecord(receipt?.omissions) ? Object.keys(receipt.omissions).length : 0
+  const latestMeasured = cardLatestMeasuredEvidence(attempts)
   const declaredResources = footprintKnown
     ? _cardResourceSummary(baseFootprint) : 'resource projection unavailable'
   const configuredResources = _cardResourceSummary(configuredFootprint)
@@ -319,7 +322,6 @@ function _CardKanbanCard({
     return <article className={'card-kanban-card card-lane-card' + (selected ? ' on' : '')}
       data-card-id={card.id} aria-busy={ownPending ? 'true' : undefined}>
       <button type="button" className="card-lane-open" aria-pressed={selected}
-        aria-label={`Open Card ${card.id}: ${statement}`}
         onClick={event => onOpen?.(card.id, event.currentTarget)}>
         <span className="card-kanban-stmt">
           <span className="hyp-src" title={source ? `source: ${source}` : 'source unavailable'}>
@@ -327,8 +329,13 @@ function _CardKanbanCard({
           </span>
           <span>{statement}</span>
         </span>
+        {latestMeasured && <span className="card-lane-result"
+          title={`Measured metric from evaluated evidence experiment #${latestMeasured.nodeId}; this is separate from the research verdict`}>
+          <span>Measured · #{latestMeasured.nodeId}</span>
+          <strong>{fmt(latestMeasured.metric)}</strong>
+        </span>}
         <span className="card-kanban-meta">
-          <span className="chip xs" title="durable Card identity">{card.id}</span>
+          <span className="chip xs">{card.id}</span>
           {verdict && verdict !== 'open' && <span
             className={'chip xs ' + (verdict === 'supported' ? 'ok' : verdict === 'abandoned' ? 'warn' : '')}
             title={`research verdict: ${verdict} (distinct from the work status)`}>{verdict}</span>}
@@ -349,7 +356,8 @@ function _CardKanbanCard({
               lifecycle fact as an alarm. `cardSelectionBlock` splits the two and says which. */}
           {(() => {
             const block = cardSelectionBlock(card)
-            return block && <span className={`chip xs${block.tone === 'fault' ? ' warn' : ' quiet'}`}
+            return block && !(block.tone === 'lifecycle' && _cardStatus(card) === 'evaluated')
+              && <span className={`chip xs${block.tone === 'fault' ? ' warn' : ' quiet'}`}
               title={block.title}>{block.label}</span>
           })()}
           {receipt && receipt.complete !== true && <span className="chip xs warn"
@@ -397,7 +405,8 @@ function _CardKanbanCard({
         : card.selection_ready === false
           ? (() => {
             const block = cardSelectionBlock(card)
-            return block && <span className={`chip xs${block.tone === 'fault' ? ' warn' : ' quiet'}`}
+            return block && !(block.tone === 'lifecycle' && _cardStatus(card) === 'evaluated')
+              && <span className={`chip xs${block.tone === 'fault' ? ' warn' : ' quiet'}`}
               title={block.title}>{block.label}</span>
           })()
           : <span className="chip xs" title="selection readiness was not present in the public projection">readiness unknown</span>}
@@ -706,7 +715,9 @@ function _CardAttempts({ attempts, selectedNodeId, onOpenNode, coverage = null, 
         title="these attempts are not present in the snapshot being displayed (a historical fold, or trimmed live state)">
         {roll.missing} unavailable</span>}
     </h3>
-    <p className="muted card-attempts-note">
+    <details className="card-attempts-explain" open={roll.total === 0}>
+      <summary>How Cards and experiments relate</summary>
+      <p className="muted card-attempts-note">
       {roll.total === 0
         // A card with no node at all is a real, reachable state, not an empty-list placeholder:
         // `engine/card_reservation.py::_record_node_less_card` mints and immediately closes a
@@ -717,7 +728,8 @@ function _CardAttempts({ attempts, selectedNodeId, onOpenNode, coverage = null, 
           // A substituted build ran under the card and did not test it; "tested" was false for it.
           + (roll.substituted ? ` ${roll.substituted === 1 ? 'One of them' : `${roll.substituted} of them`}`
             + ' built something else instead of its idea and is not a test of it.' : '')}
-    </p>
+      </p>
+    </details>
     {attempts.length > 0 && <ul className="card-attempt-list">
       {attempts.map(entry => {
         const node = entry.node
@@ -922,7 +934,15 @@ function _CardDetailPane({
       {renderInspector(selectedNodeId)}
     </div>
   }
+  const latestMeasured = cardLatestMeasuredEvidence(attempts)
   return <div className="card-detail">
+    <h2 className="card-detail-heading">{_cardText(card.statement) || `Card ${card.id}`}</h2>
+    <div className="card-detail-summary" role="group" aria-label="Card result summary">
+      <div><span>Research verdict</span><strong>{_cardText(card.verdict) || 'Open'}</strong></div>
+      <div><span>Latest measured evidence</span><strong>{latestMeasured
+        ? <>{fmt(latestMeasured.metric)} <small>#{latestMeasured.nodeId}</small></>
+        : 'No measured score'}</strong></div>
+    </div>
     <_CardAttempts attempts={attempts} selectedNodeId={selectedNodeId} onOpenNode={onOpenNode}
       coverage={cardAttemptCoverage(attempts, receipt)} state={state} />
     <_CardKanbanCard card={card} receipt={receipt} presentation="full" state={state}
@@ -956,6 +976,9 @@ function _CardKanban({
   // Not persisted deliberately: this is a way of LOOKING at the current board, not a preference —
   // an operator who opened the run to see what is running should find the lanes, every time.
   const [grouping, setGrouping] = useState('lanes')
+  const [laneQuery, setLaneQuery] = useState('')
+  const laneSearchRef = useRef(null)
+  useEffect(() => { setLaneQuery('') }, [runId])
   const inFlight = useRef(new Set())
   const activeRef = useRef(true)
   useEffect(() => {
@@ -969,6 +992,7 @@ function _CardKanban({
   const detailCloseRef = useRef(null)
   const detailDrawerRef = useRef(null)
   const detailReturnFocusRef = useRef(null)
+  const laneScrollRef = useRef(null)
   const cardsById = new Map(cards.map(card => [card.id, card]))
   const cardsByIdRef = useRef(cardsById)
   cardsByIdRef.current = cardsById
@@ -1216,6 +1240,7 @@ function _CardKanban({
   // on a board the wire already lets reach 256 cards.
   const attemptsByCard = view ? cardAttemptIndex(state, visibleCards) : null
   const selectedCard = view ? resolveSelectedCard(visibleCards, selectedCardId) : null
+  const missingCardId = view && !selectedCard ? _cardText(selectedCardId) : null
   const closeDetails = () => {
     onSelectCard?.(null)
     window.requestAnimationFrame(() => detailReturnFocusRef.current?.focus?.())
@@ -1224,7 +1249,7 @@ function _CardKanban({
     detailReturnFocusRef.current = trigger || detailReturnFocusRef.current
     onSelectCard?.(cardId)
   }
-  const detailOpen = view && (!pane?.compact || !!selectedCard)
+  const detailOpen = view && !!selectedCard
   // ESCAPE GOES THROUGH THE PRIORITY SYSTEM, like every other dialog. A raw window keydown that
   // unconditionally `preventDefault()`s and closes sat outside `DIALOG_PRIORITY` arbitration, so
   // with a nested prioritized dialog open inside `renderInspector` — the destructive trace-clear
@@ -1272,11 +1297,33 @@ function _CardKanban({
   // The question ladder. `visibleCards` and `renderCard` are the SAME inputs the other two views
   // draw from, so a filter or a control applied on one board reaches this one too rather than the
   // view growing its own quietly-different population.
-  const researchBoard = <ResearchView cards={visibleCards} state={state} renderCard={renderCard} />
+  const researchBoard = <ResearchView cards={visibleCards} state={state} renderCard={renderCard}
+    onShowLanes={() => setGrouping('lanes')}
+    onDiscuss={() => window.dispatchEvent(new CustomEvent('ll:focus-assistant', {
+      detail: { text: 'Help me frame the first research question for this run. Review the existing experiment Cards and propose a question that organizes the evidence.' },
+    }))} />
   // The lanes are a LIFECYCLE view and a question has no lifecycle of its own — see
   // `splitBoardByKind`. The questions are not dropped: the count and the way to them ride above the
   // lanes, because "five questions await an experiment" and "the board is empty" are different runs.
   const { work: laneCards, questions: laneQuestions } = splitBoardByKind(visibleCards)
+  const filteredLaneCards = laneQuery.trim()
+    ? laneCards.filter(card => cardMatchesQuery(card, laneQuery)) : laneCards
+  const laneGroups = lanes.map(([key, label, hint]) => ({
+    key, label, hint,
+    rows: filteredLaneCards.filter(card => _cardStatus(card) === key).sort(_cardOrder),
+  }))
+  const occupiedLanes = laneGroups.filter(lane => lane.rows.length)
+  const emptyLanes = laneGroups.filter(lane => !lane.rows.length)
+  const denseLane = occupiedLanes.length === 1 && occupiedLanes[0].rows.length >= 4
+  useEffect(() => {
+    if (!view || !detailOpen || !denseLane) return
+    // Opening details changes this long lane from two columns to one. Keep the picked Card in view
+    // after that reflow so the board and the record still point to the same visible item.
+    const frame = window.requestAnimationFrame(() =>
+      laneScrollRef.current?.querySelector('.card-lane-card.on')
+        ?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' }))
+    return () => window.cancelAnimationFrame(frame)
+  }, [view, detailOpen, denseLane, selectedCardId])
   // Said where the lanes are, not where the questions went: an operator who sees fewer rows than the
   // board's own total needs the reconciliation on the surface that shrank.
   const questionNotice = laneQuestions.length > 0 && grouping === 'lanes'
@@ -1290,39 +1337,72 @@ function _CardKanban({
     : null
   const groupingBar = <div className="toolbar card-grouping" role="group"
     aria-label="Group the board by">
-    {[['lanes', 'Lanes', 'lifecycle status — what the machine is doing now'],
-      ['research', 'Research', 'the ladder of questions, each one narrowing the one above it'],
+    {[['lanes', 'Lanes', 'Work by status'],
+      ['research', 'Research', 'Questions and experiments'],
     ].map(([key, label, hint]) => <button key={key} type="button" title={hint}
       className={'btn sm' + (grouping === key ? ' primary' : '')}
       aria-pressed={grouping === key} onClick={() => setGrouping(key)}>{label}</button>)}
   </div>
-  const board = <div className="card-board" role="region" aria-label="Card lifecycle kanban">
-    {lanes.map(([key, label, hint]) => {
-      const rows = laneCards.filter(card => _cardStatus(card) === key).sort(_cardOrder)
-      const tone = _CARD_FROZEN_STATUSES.has(key) ? ` card-${key}` : ''
-      const laneId = `card-lane-${encodeURIComponent(key)}`
-      return <section key={key} className={'card-col' + tone} aria-labelledby={laneId}>
-        <h3 id={laneId} className="card-col-h" title={hint}>
-          {label} <span className="muted">{rows.length}</span>
-        </h3>
-        {rows.map(renderCard)}
-        {rows.length === 0 && <div className="muted card-empty">—</div>}
-      </section>
-    })}
-  </div>
+  const searchBar = view && grouping === 'lanes' && <div className="card-filter" role="search">
+      <input ref={laneSearchRef} className="text" type="search" aria-label="Find work items"
+        placeholder="Find by idea, ID or concept" maxLength={120} value={laneQuery}
+        onChange={event => {
+          const next = event.target.value
+          setLaneQuery(next)
+          if (selectedCard && !cardMatchesQuery(selectedCard, next)) onSelectCard?.(null)
+        }} />
+      {laneQuery && <button type="button" className="btn sm ghost"
+        onClick={() => { setLaneQuery(''); laneSearchRef.current?.focus() }}>Clear</button>}
+      {laneQuery.trim() && <span className="card-filter-count" role="status">
+        {filteredLaneCards.length} of {laneCards.length} shown</span>}
+    </div>
+  const board = laneQuery.trim() && !filteredLaneCards.length
+    ? <div className="card-filter-empty" role="status">No work items match this search.</div>
+    : <>
+      {emptyLanes.length > 0 && <div className="card-empty-lanes" role="group"
+        aria-label={laneQuery.trim() ? 'Statuses without matching work items' : 'Empty lifecycle statuses'}>
+        <span className="card-empty-lanes-label">{laneQuery.trim() ? 'No matches in' : 'Empty now'}</span>
+        {emptyLanes.map(({ key, label, hint }) => <span key={key} className="card-empty-lane"
+          title={hint}>{label} <span className="muted">0</span></span>)}
+      </div>}
+      <div className={'card-board' + (denseLane ? ' dense-lane' : '')}
+        role="region" aria-label="Card lifecycle kanban">
+        {occupiedLanes.length === 0 && <div className="card-filter-empty">No work items yet.</div>}
+        {occupiedLanes.map(({ key, label, hint, rows }) => {
+          const tone = _CARD_FROZEN_STATUSES.has(key) ? ` card-${key}` : ''
+          const laneId = `card-lane-${encodeURIComponent(key)}`
+          return <section key={key} className={'card-col' + tone} aria-labelledby={laneId}>
+            <h3 id={laneId} className="card-col-h" title={hint}>
+              {label} <span className="muted">{rows.length}</span>
+            </h3>
+            <div className="card-col-cards">{rows.map(renderCard)}</div>
+          </section>
+        })}
+      </div>
+    </>
   if (view) {
     // The workspace shape the modal could never have: lanes keep the whole left column (and their own
-    // horizontal scroll, so six lanes at the 225px floor no longer have to fit the window), and the
+    // horizontal scroll when occupied lanes exceed it), and the
     // Card's full record moves into a resizable pane on the right. `pane` carries the pane chrome
     // RunView already owns for the graph inspector — same width, same persisted `ll.sideW`, same
     // splitter, same compact drawer — so the board inherits the workspace's behaviour instead of
     // growing a second, subtly different one.
-    return <div className={'main run-workspace card-workspace' + (pane?.compact ? ' compact' : '')}>
-      <div className="card-lanes-wrap">
+    return <div className={'main run-workspace card-workspace'
+      + (pane?.compact ? ' compact' : '') + (detailOpen ? ' detail-open' : '')}>
+      <div ref={laneScrollRef} className="card-lanes-wrap">
         <div className="card-lanes-head">
           <span className="muted">{sub}</span>
           <_CardProjectionNotice projection={projection} cards={visibleCards} />
+          {missingCardId && <div className="notice resource-warning card-selection-missing" role="status">
+            Card <code>{missingCardId}</code> is not in the loaded board.
+            {(_cardInt(projection?.omitted) ?? 0) > 0
+              ? ` ${projection.omitted} work item${projection.omitted === 1 ? '' : 's'} `
+                + `${projection.omitted === 1 ? 'was' : 'were'} omitted from this snapshot.`
+              : ' This link may be stale.'}
+            <button type="button" className="btn sm ghost" onClick={closeDetails}>Clear selection</button>
+          </div>}
           {groupingBar}
+          {searchBar}
           {questionNotice}
         </div>
         {addBar}
@@ -1338,12 +1418,12 @@ function _CardKanban({
         data-route-focus-guard={pane?.compact ? 'true' : undefined}
         role={pane?.compact ? 'dialog' : 'complementary'} aria-label="Work item details">
         <div className="pane-grip">
-          <span className="muted">{selectedCard ? selectedCard.id : 'work item'}</span>
+          <strong>{selectedCard?.id}</strong>
           <span className="spacer" style={{ flex: 1 }} />
           {selectedCard && <button ref={detailCloseRef} className="btn sm ghost" title="close details"
             data-dialog-initial-focus={pane?.compact ? true : undefined}
             aria-label={`Close details for ${selectedCard.id}`}
-            onClick={closeDetails}>⟩</button>}
+            onClick={closeDetails}>Close</button>}
         </div>
         {/* `runGeneration`, NOT `state?.generation`. The folded run state has no run-level
             `generation` field at all — the generation is an envelope SIBLING of `state` in the
@@ -1365,9 +1445,8 @@ function _CardKanban({
     </div>
   }
   // `size="board"`, not `wide`: `wide` is a READING width (~1100px) and the kanban's intrinsic
-  // minimum GROWS with the data — `grid-auto-flow: column` at a 225px floor needs ~1390px for six
-  // lanes, so the board overflowed its own panel at every viewport (measured 1623px of lanes
-  // inside a 1070px content box). Still a percentage-capped `min()`, so the JupyterHub proxy's
+  // minimum grows with occupied lanes, so the board can overflow a 1070px content box.
+  // Still a percentage-capped `min()`, so the JupyterHub proxy's
   // narrower window gets a panel that fits rather than one clipped by the browser edge.
   return <Panel title="Cards" sub={sub} onClose={onClose} size="board">
     <_CardProjectionNotice projection={projection} cards={visibleCards} />

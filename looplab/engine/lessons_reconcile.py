@@ -399,7 +399,8 @@ class LessonReconcileMixin:
         actually moved and the LLM only when a lesson is genuinely stale. Best-effort — a reconcile
         failure never fails the run. Offline mode still retires proven-stale evidence but cannot replace it;
         reflection-memory-off remains a no-op."""
-        if not (self._e._reflection_priors and self._e.memory_dir):
+        if not (self._e.memory_dir and (
+                self._e._reflection_priors or getattr(self._e, "external_harness", False))):
             return state
         # Change-gate: only scan when some node's outcome sig moved since the last look. A node_reset
         # re-eval that alters a metric/status flips the hash; plain forward progress (a new terminal)
@@ -464,12 +465,18 @@ class LessonReconcileMixin:
             return state
         # Re-derivation is optional; retirement is not. A stale lesson must stop steering future runs even
         # when the model is unavailable or raises. The locked retirement below is the authority boundary.
-        try:
-            client = self._e._reflect_client()
-            client_failed = False
-        except Exception:  # noqa: BLE001
+        if getattr(self._e, "external_harness", False):
+            # Retire drifted agent-authored lessons deterministically. A changed measurement
+            # cannot authorize LoopLab's reflector to rewrite the agent's conclusion.
             client = None
-            client_failed = True
+            client_failed = False
+        else:
+            try:
+                client = self._e._reflect_client()
+                client_failed = False
+            except Exception:  # noqa: BLE001 — an unavailable reflector skips its optional update; deterministic retirement still runs
+                client = None
+                client_failed = True
         fresh_reflect: list = []
         comp: list = []
         pairs_used: list = []

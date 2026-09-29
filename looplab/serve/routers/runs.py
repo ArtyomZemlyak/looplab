@@ -14,13 +14,13 @@ import stat
 import threading
 import time
 from pathlib import Path
-from typing import Annotated, Any, NamedTuple, Optional
+from typing import Annotated, Any, Literal, NamedTuple, Optional
 
 import anyio
 import orjson
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import PlainTextResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator
 
 from looplab.core.atomicio import (atomic_write_text, file_identity, same_file_entry,
                                    same_file_kind)
@@ -645,6 +645,131 @@ def _encode_state_frame(payload: dict, last_payload: Optional[dict], same_genera
     return kind, body, json.loads(full)
 
 
+class ExternalLessonBody(BaseModel):
+    """Agent-authored conclusion; scope and evidence signatures are derived by the server."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    expected_generation: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    action_id: str = Field(min_length=1, max_length=160)
+    statement: str = Field(min_length=1, max_length=1000)
+    outcome: Literal["supported", "tested", "abandoned", "failed", "refuted", "noted"]
+    role: Literal["researcher", "developer", "shared"] = "shared"
+    evidence: list[StrictInt] = Field(min_length=1, max_length=32)
+    confidence: float = Field(default=0.6, ge=0, le=1)
+
+
+class ExternalSkillBody(BaseModel):
+    """A technique from an existing measured lesson, never a client-authored promotion."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    expected_generation: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    action_id: str = Field(min_length=1, max_length=160)
+    lesson_action_id: str = Field(min_length=1, max_length=160)
+    body: str = Field(min_length=1, max_length=16000)
+
+
+class ExternalDecisionBody(BaseModel):
+    """A reviewed, idea-bound decision at the current node count."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    expected_generation: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    action_id: str = Field(min_length=1, max_length=160)
+    phase_id: Literal["novelty", "foresight", "candidate_ranking", "strategy"]
+    idea: dict[str, Any]
+    decision: Literal["submit", "reject"]
+    alternatives: list[dict[str, Any]] = Field(default_factory=list, max_length=63)
+    implementations: list[dict[str, Any]] = Field(default_factory=list, max_length=64)
+    selected_index: int = Field(default=0, ge=0, le=63)
+    reason: str = Field(min_length=1, max_length=1200)
+
+
+class ExternalReviewBody(BaseModel):
+    """Evidence-aware review of one configured run-end knowledge cycle."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    expected_generation: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    action_id: str = Field(min_length=1, max_length=160)
+    phase_id: Literal["concept_merge", "claim_curation", "task_facets",
+                      "concept_ratification", "lessons", "skill_candidates"]
+    decision: Literal["completed", "no_applicable_action"]
+    reason: str = Field(min_length=12, max_length=1200)
+    evidence: list[StrictInt] = Field(default_factory=list, max_length=32)
+    action_ref: str = Field(default="", max_length=160)
+
+
+class ExternalCheckpointAnswer(BaseModel):
+    """One live evaluation decision; checkpoint_id identifies the observed stage/tick."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    expected_generation: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    checkpoint_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    action_id: str = Field(min_length=1, max_length=160)
+    verdict: Literal["proceed", "inconclusive", "fail", "continue", "watch", "abort",
+                     "extend", "stop"]
+    failure_kind: str = Field(default="", max_length=80)
+    reason: str = Field(min_length=1, max_length=1200)
+
+
+class ExternalHypothesisReview(BaseModel):
+    """Merge live pure beliefs, or record an explicit no-merge review of this board."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    expected_generation: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    expected_board_sha256: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    action_id: str = Field(min_length=1, max_length=160)
+    decision: Literal["merge", "no_merge"]
+    canonical: str = Field(default="", max_length=256)
+    aliases: list[str] = Field(default_factory=list, max_length=32)
+    statement: str = Field(default="", max_length=600)
+    reason: str = Field(min_length=12, max_length=1200)
+
+
+class ExternalVerifierMember(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    node_id: StrictInt = Field(ge=0)
+    generation: StrictInt = Field(ge=0)
+    evidence_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    samples: list[StrictBool] = Field(min_length=1, max_length=32)
+
+
+class ExternalVerifierBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_generation: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    action_id: str = Field(min_length=1, max_length=160)
+    members: list[ExternalVerifierMember] = Field(min_length=2)
+
+
+class ExternalValueMember(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False, str_strip_whitespace=True)
+    node_id: StrictInt = Field(ge=0)
+    generation: StrictInt = Field(ge=0)
+    value: float = Field(ge=0, le=1)
+    rationale: str = Field(min_length=12, max_length=240)
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def _reject_boolean_value(cls, value):
+        if isinstance(value, bool):
+            raise ValueError("headroom must be a number")
+        return value
+
+
+class ExternalValueBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_generation: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    expected_evidence_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+    action_id: str = Field(min_length=1, max_length=160)
+    estimates: list[ExternalValueMember] = Field(min_length=1, max_length=6)
+
+
+class NoveltyPreviewBody(BaseModel):
+    """Candidate idea to compare with the current run; this call never admits it."""
+
+    model_config = ConfigDict(extra="forbid")
+    expected_generation: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    idea: dict[str, Any]
+
+
 def build_router(srv) -> APIRouter:
     router = APIRouter()
     log_pages = EventLogPager()
@@ -885,6 +1010,151 @@ def build_router(srv) -> APIRouter:
         projection as the live state, SSE, and review surfaces.
         """
         return _state_payload(_run_dir(run_id), seq)
+
+    @router.get("/api/runs/{run_id}/harness-contract")
+    def get_harness_contract(run_id: str):
+        """Effective choices and enforced task constraints for this run incarnation."""
+        from looplab.adapters.tasks import load_task
+        from looplab.harness.obligations import run_obligations
+
+        rd = _run_dir(run_id)
+        events = EventStore(rd / "events.jsonl").read_all()
+        generation = run_generation_token(events)
+        if not generation:
+            raise HTTPException(409, "run has not started")
+        try:
+            settings = settings_from_snapshot(json.loads((rd / "config.snapshot.json").read_bytes()))
+            task = load_task(rd / "task.snapshot.json", existing_run=True)
+        except (OSError, ValueError, KeyError) as exc:
+            raise refusal("config_snapshot_unreadable") from exc
+        return run_obligations(task, settings, generation=generation)
+
+    @router.get("/api/runs/{run_id}/harness-progress")
+    def get_harness_progress(run_id: str, expected_generation: str = Query(...),
+                             offset: int = Query(0, ge=0, le=1_000_000),
+                             limit: int = Query(20, ge=1, le=100)):
+        """Live external obligations, pending questions and paged decision histories.
+
+        The three sidecar histories are independent durable sources. Each has
+        its own total and source-health receipt; the event_seq identifies the
+        measured prefix used to mark old reviews as superseded.
+        """
+        from looplab.harness.progress import snapshot
+        if _RUN_GENERATION_RE.fullmatch(expected_generation) is None:
+            raise HTTPException(400, "expected_generation must be a SHA-256 token")
+        return snapshot(_run_dir(run_id), expected_generation, offset=offset, limit=limit)
+
+    @router.get("/api/runs/{run_id}/harness-checkpoints")
+    def get_harness_checkpoints(run_id: str, expected_generation: str = Query(...)):
+        """Pending mandatory stage checks and live training/rank observations."""
+        from looplab.harness.checkpoints import pending
+        if _RUN_GENERATION_RE.fullmatch(expected_generation) is None:
+            raise HTTPException(400, "expected_generation must be a SHA-256 token")
+        try:
+            return {"pending": pending(_run_dir(run_id), expected_generation)}
+        except OSError as exc:
+            raise HTTPException(503, "checkpoint ledger unavailable") from exc
+
+    @router.post("/api/runs/{run_id}/harness-checkpoints")
+    def answer_harness_checkpoint(run_id: str, body: ExternalCheckpointAnswer):
+        """Answer exactly one checkpoint; the engine applies the verdict before advancing."""
+        from looplab.harness.checkpoints import respond
+        return respond(srv, _run_dir(run_id), body)
+
+    @router.get("/api/runs/{run_id}/harness-hypotheses")
+    def get_harness_hypotheses(run_id: str, expected_generation: str = Query(...)):
+        """Live pure-belief board and whether configured duplicate review is due."""
+        from looplab.harness.hypotheses import board_status
+        if _RUN_GENERATION_RE.fullmatch(expected_generation) is None:
+            raise HTTPException(400, "expected_generation must be a SHA-256 token")
+        return board_status(_run_dir(run_id), expected_generation)
+
+    @router.post("/api/runs/{run_id}/harness-hypotheses")
+    def review_harness_hypotheses(run_id: str, body: ExternalHypothesisReview):
+        """Record a duplicate review; a merge and its receipt append atomically."""
+        from looplab.harness.hypotheses import review_board
+        return review_board(srv, _run_dir(run_id), body)
+
+    @router.get("/api/runs/{run_id}/harness-selection")
+    def get_harness_selection(run_id: str, expected_generation: str = Query(...)):
+        """Current selector ties and MCTS branches requiring an agent judgment."""
+        from looplab.harness.selection import status
+        if _RUN_GENERATION_RE.fullmatch(expected_generation) is None:
+            raise HTTPException(400, "expected_generation must be a SHA-256 token")
+        return status(_run_dir(run_id), expected_generation)
+
+    @router.post("/api/runs/{run_id}/harness-selection/verify")
+    def verify_harness_selection(run_id: str, body: ExternalVerifierBody):
+        """Score one complete live selector tie against its evidence digests."""
+        from looplab.harness.selection import verify_group
+        return verify_group(srv, _run_dir(run_id), body)
+
+    @router.post("/api/runs/{run_id}/harness-selection/values")
+    def estimate_harness_values(run_id: str, body: ExternalValueBody):
+        """Estimate remaining headroom for the complete live MCTS candidate batch."""
+        from looplab.harness.selection import estimate_values
+        return estimate_values(srv, _run_dir(run_id), body)
+
+    @router.post("/api/runs/{run_id}/lessons")
+    def publish_external_lesson(run_id: str, body: ExternalLessonBody):
+        """Record an external agent's evidence-linked cross-run lesson idempotently.
+
+        Read the run state for expected_generation and terminal node IDs, then submit
+        a generalizable conclusion. The server stamps task scope, run identity and
+        node lifecycle signatures; retry a lost response with the same action_id.
+        """
+        from looplab.harness.lessons import publish_lesson
+        return publish_lesson(srv, _run_dir(run_id), body)
+
+    @router.post("/api/runs/{run_id}/skill-candidates")
+    def publish_external_skill(run_id: str, body: ExternalSkillBody):
+        """Draft an auto-skill from a fresh supported lesson; promotion is server-derived."""
+        from looplab.harness.skills import publish_skill_candidate
+        return publish_skill_candidate(srv, _run_dir(run_id), body)
+
+    @router.post("/api/runs/{run_id}/harness-decisions")
+    def record_harness_decision(run_id: str, body: ExternalDecisionBody):
+        """Record a reviewed choice for an enabled phase, bound to the submitted idea."""
+        from looplab.harness.decisions import publish_decision
+        return publish_decision(srv, _run_dir(run_id), body)
+
+    @router.post("/api/runs/{run_id}/harness-reviews")
+    def record_harness_review(run_id: str, body: ExternalReviewBody):
+        """Record a configured end-of-run review, including a reason for no action."""
+        from looplab.harness.reviews import publish_review
+        return publish_review(srv, _run_dir(run_id), body)
+
+    @router.post("/api/runs/{run_id}/novelty-preview")
+    def novelty_preview(run_id: str, body: NoveltyPreviewBody):
+        """Compare an idea with tried nodes using LoopLab's pure graded novelty rubric.
+
+        This is advisory: concept tags may be agent-authored, and the agent decides whether
+        to submit, revise or abandon a candidate. It does not call an internal model.
+        """
+        from looplab.core.models import Idea
+        from looplab.search.concept_tagging import graph_from_node_concepts
+        from looplab.search.graded_novelty import grade_novelty
+
+        rd = _run_dir(run_id)
+        events = EventStore(rd / "events.jsonl").read_all()
+        generation = run_generation_token(events)
+        if not generation or generation != body.expected_generation.lower():
+            raise generation_conflict("The run changed before novelty was inspected.",
+                                      expected=body.expected_generation, current=generation or None,
+                                      remediation="Reload run state and inspect the new generation.")
+        try:
+            idea = Idea.model_validate(body.idea)
+        except Exception as exc:
+            raise HTTPException(400, "invalid candidate idea") from exc
+        state = fold(events)
+        graph, tags = graph_from_node_concepts(state.node_concepts)
+        for cid in idea.concepts:
+            graph.ensure(cid)
+        grade = grade_novelty(state, idea, graph, tags=tags,
+                              idea_tags=frozenset(idea.concepts))
+        return {"generation": generation, "advisory": True,
+                "concept_source": "authored tags (not independent classifier evidence)",
+                "grade": grade.__dict__}
 
     @router.get("/api/runs/{run_id}/lifecycle")
     def get_lifecycle(run_id: str):
@@ -2843,6 +3113,7 @@ def build_router(srv) -> APIRouter:
             if effective.get("eval_env") != _recorded_env:
                 mismatches = sorted([*mismatches, "eval_env"])
             effective["eval_env"] = dict(_recorded_env)
+        from looplab.harness.obligations import EXTERNAL_POLICY_FIELDS
         effective["_looplab_config_meta"] = {
             "config_revision": _run_config_revision(snapshot),
             "run_start_pinned_fields": sorted(pinned),
@@ -2858,7 +3129,9 @@ def build_router(srv) -> APIRouter:
             # `search/speculation_quality.py`, and this key is ABSENT from that payload whenever no
             # environment was declared, which is every calibration run. So the refusal is stated
             # here instead of inherited, and the PUT enforces it explicitly below.
-            "run_read_only_fields": ["eval_env", "profile"],
+            "run_read_only_fields": ["eval_env", "profile", "external_harness",
+                                     *(sorted(EXTERNAL_POLICY_FIELDS)
+                                       if effective.get("external_harness") else [])],
         }
         return effective
 
@@ -2917,6 +3190,10 @@ def build_router(srv) -> APIRouter:
             )
 
         updated = dict(current)
+        if ("external_harness" in incoming
+                and incoming["external_harness"] != updated.get("external_harness", False)):
+            raise HTTPException(422, "external_harness is a run-start mode; start a new run "
+                                     "to change which agent owns search and repairs")
         # Repair snapshots written by older servers. These values are not a new policy decision: the
         # RUN-START RECORD has always been the authority used by replay/re-entry, and GET already
         # overlays it.
@@ -2982,6 +3259,24 @@ def build_router(srv) -> APIRouter:
                     and updated.get(key) != value):
                 updated[key] = value
                 changed[key] = value
+        if ("policy" in changed and settings_from_snapshot(current).external_harness
+                and (folded.pending_strategy or {}).get("policy") is not None):
+            raise HTTPException(409, {
+                "code": "external_strategy_pin_active",
+                "message": "A durable set_strategy pin owns the live policy; use set_strategy to switch it.",
+            })
+        if settings_from_snapshot(current).external_harness:
+            from looplab.harness.obligations import EXTERNAL_POLICY_FIELDS
+            before_policy = settings_from_snapshot(current)
+            after_policy = settings_from_snapshot(updated)
+            policy_changes = sorted(key for key in EXTERNAL_POLICY_FIELDS
+                                    if getattr(before_policy, key) != getattr(after_policy, key))
+            if policy_changes:
+                raise HTTPException(422, {
+                    "code": "external_policy_fixed",
+                    "fields": policy_changes,
+                    "message": "Enabled external agent obligations are fixed for this run; start a new run to change them.",
+                })
         # Validate the merged config before persistence. Optional fields may deliberately be cleared
         # with null; required fields remain protected by Settings' schema.
         try:

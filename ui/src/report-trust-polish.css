@@ -12,6 +12,16 @@
   background: color-mix(in srgb, var(--bg) 94%, transparent);
   backdrop-filter: blur(10px);
 }
+.report-sections { display: flex; flex: 1 0 100%; align-items: center; flex-wrap: wrap;
+  gap: 4px 6px; padding-top: 7px; border-top: 1px solid var(--line); }
+.report-sections-label { margin-right: 5px; color: var(--fg-mut); font-size: 11px;
+  font-weight: 650; text-transform: uppercase; letter-spacing: .05em; }
+.report-sections button { padding: 4px 8px; border: 1px solid transparent; border-radius: 6px;
+  background: transparent; color: var(--fg-dim); font: inherit; font-size: 12px; cursor: pointer; }
+.report-sections button:hover, .report-sections button:focus-visible {
+  border-color: var(--line-2); background: var(--bg-2); color: var(--fg); }
+.report-sections button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.report-view :is(.report-title, .section-h)[id], .report-view #agent-report-heading { scroll-margin-top: 105px; }
 
 .report-view .report-title { font-size: clamp(20px, 2.2vw, 27px); line-height: 1.2; letter-spacing: -.015em; }
 .report-view .report-sub { color: var(--fg-dim); line-height: 1.55; }
@@ -20,6 +30,30 @@
 .report-view .tbl th { color: var(--fg-dim); font-weight: 650; }
 .report-view .tbl td { padding-block: 7px; vertical-align: top; }
 .report-view .champion-card { box-shadow: var(--shadow-card); }
+.champion-params summary, .report-step-changes summary { width: fit-content; color: var(--accent-text);
+  cursor: pointer; font-weight: 600; }
+.champion-params .champion-params-hide,
+.champion-params[open] .champion-params-show { display: none; }
+.champion-params[open] .champion-params-hide { display: inline; }
+.champion-params summary:focus-visible, .report-step-changes summary:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 3px; }
+.champion-params-list { display: grid; grid-template-columns: minmax(130px, 220px) minmax(0, 1fr);
+  gap: 0 12px; margin: 8px 0 2px; border-top: 1px solid var(--line); font-size: 12px; }
+.champion-params-list dt, .champion-params-list dd { min-width: 0; margin: 0; padding: 5px 0;
+  border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.champion-params-list dt { color: var(--fg-dim); }
+.report-view .report-steps-table { table-layout: fixed; min-width: 760px; }
+.report-steps-table th:nth-child(1) { width: 40px; }
+.report-steps-table th:nth-child(2) { width: 66px; }
+.report-steps-table th:nth-child(3) { width: 210px; }
+.report-steps-table th:nth-child(4) { width: 100px; }
+.report-steps-table th:nth-child(5) { width: 105px; }
+.report-steps-table :is(th, td):nth-child(1),
+.report-steps-table :is(th, td):nth-child(2),
+.report-steps-table :is(th, td):nth-child(4),
+.report-steps-table :is(th, td):nth-child(5) { white-space: nowrap; }
+.report-steps-table td:last-child { overflow-wrap: anywhere; }
+.report-step-changes > span { display: block; margin-top: 5px; line-height: 1.5; }
 
 /* Agent/provider prose may contain an unbroken identifier or URL. Keep every narrative flex/grid
    child shrinkable and wrap the text instead of widening the report at phone widths. */
@@ -115,6 +149,13 @@
 .inspector-trust .section-h { margin-top: 18px; }
 .trust-panel-body .cardgrid { margin-bottom: 6px !important; }
 .trust-panel-body .stat .n { overflow-wrap: anywhere; }
+.trust-overview .trust-state { padding: 14px 16px; background: var(--bg-2); }
+.trust-overview .trust-state strong { font-size: 15px; }
+.trust-overview .trust-state span { font-size: 12px; }
+.trust-config-details { margin: 4px 0 12px; }
+.trust-config-details summary { width: fit-content; padding: 5px 0; color: var(--accent-text);
+  font-size: 12px; font-weight: 650; cursor: pointer; }
+.trust-config-details .cardgrid { margin-top: 8px; }
 
 .trust-state {
   display: grid;
@@ -172,6 +213,8 @@
   .report-inline-state > .btn { min-height: 44px; flex: 1 1 140px; justify-content: center; }
   .report-view { padding-inline: 14px; }
   .report-view .report-toolbar { position: static; align-items: stretch; }
+  .report-sections { overflow-x: auto; flex-wrap: nowrap; }
+  .report-sections button, .report-sections-label { white-space: nowrap; }
   .report-view .report-toolbar .btn { min-height: 44px; justify-content: center; flex: 1 1 130px; }
   .report-view .caveat-chip { min-height: 44px; }
   .report-view .tbl { display: block; overflow-x: auto; }
@@ -206,6 +249,10 @@
     max-width: none; padding: 0; color: var(--fg); background: var(--bg); color-scheme: light;
   }
   .report-view .tbl { display: table; overflow: visible; width: 100%; }
+  .report-view .report-steps-table { min-width: 0; }
+  .champion-params summary, .report-step-changes summary { display: none; }
+  .champion-params:not([open]) > .champion-params-list { display: grid !important; }
+  .report-step-changes:not([open]) > span { display: block !important; }
   .report-view pre, .report-view code { white-space: pre-wrap; overflow-wrap: anywhere; }
   .report-view pre.code { max-height: none !important; overflow: visible !important; }
   .report-view .verdict-banner,

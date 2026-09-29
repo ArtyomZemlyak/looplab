@@ -323,7 +323,8 @@ class SetupPhaseMixin:
                 _md_caps = task_runtime_caps(self.task, auto_install=self._auto_install_deps,
                                              gpu=detect_gpu() if self._auto_install_deps else None)
                 (self.run_dir / "AGENTS.md").write_text(
-                    generate_agents_md(self.task, runtime_caps=_md_caps), encoding="utf-8")
+                    generate_agents_md(self.task, runtime_caps=_md_caps,
+                                       external_harness=self.external_harness), encoding="utf-8")
                 _ev("agents_md")
                 _su_step("wrote AGENTS.md")
                 # D4 data provenance: pin a content hash of every task asset/dataset into the run so a

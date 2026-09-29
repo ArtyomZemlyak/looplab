@@ -108,15 +108,31 @@ test('Report uses semantic section headings and exposes an unambiguous operator/
   const vite = await sharedVite()
   try {
     const { default: ReportView } = await vite.ssrLoadModule('/src/Report.jsx')
+    const namedRun = { ...state('min', 10, 7), label: 'NOMAD experiment', goal: 'A long task brief that belongs in task details' }
+    namedRun.nodes[0].idea.params = { depth: 4, trees: 100, seed: 1, learning_rate: 0.1 }
+    namedRun.nodes[1].idea.params = { depth: 6, trees: 200, seed: 2, learning_rate: 0.05 }
     const markup = renderToStaticMarkup(React.createElement(ReportView, {
-      state: state('min', 10, 7), runId: 'report-min', readOnly: true,
+      state: namedRun, runId: 'report-min', readOnly: true,
     }))
     const dom = new JSDOM(markup)
     try {
+      assert.equal(dom.window.document.querySelector('.report-title').textContent, 'NOMAD experiment')
+      assert.match(dom.window.document.querySelector('.report-sub').textContent, /^report-min · min/)
+      assert.match(toMarkdown(namedRun), /^# LoopLab run report — NOMAD experiment$/m)
       const sections = [...dom.window.document.querySelectorAll('.report-view .section-h')]
       assert.ok(sections.length >= 4)
       assert.ok(sections.every(heading => heading.tagName === 'H2'))
       assert.equal(sections[1].textContent, 'How the metric got better')
+      const jumps = [...dom.window.document.querySelectorAll('.report-sections button')]
+      assert.deepEqual(jumps.map(button => button.textContent),
+        ['Summary', 'Champion', 'Trajectory', 'Failures', 'Solution'])
+      assert.ok(sections.every(heading => heading.id && heading.tabIndex === -1))
+      assert.equal(dom.window.document.querySelector('.report-steps-table').tagName, 'TABLE')
+      assert.equal(dom.window.document.querySelector('.report-step-changes summary')?.textContent,
+        '4 parameter changes')
+      assert.equal(dom.window.document.querySelector('.champion-params summary')?.textContent,
+        '4 parameters · show valueshide values')
+      assert.equal(dom.window.document.querySelector('.champion-params').hasAttribute('open'), false)
 
       const identities = [...dom.window.document.querySelectorAll('.report-step-kind')]
       assert.ok(identities.every(identity => identity.getAttribute('aria-hidden') === 'true'))
@@ -130,7 +146,9 @@ test('Report uses semantic section headings and exposes an unambiguous operator/
     const baselineMarkup = renderToStaticMarkup(React.createElement(ReportView, {
       state: state('min', 10), runId: 'report-min', readOnly: true,
     }))
-    assert.match(baselineMarkup, /<h2 class="section-h">Metric baseline<\/h2>/)
+    assert.match(baselineMarkup, /<h2 id="report-section-summary" tabindex="-1" class="report-title">report-min<\/h2>/)
+    assert.doesNotMatch(baselineMarkup, /class="report-sub muted">report-min/)
+    assert.match(baselineMarkup, /<h2 id="report-section-trajectory" tabindex="-1" class="section-h">Metric baseline<\/h2>/)
     assert.doesNotMatch(baselineMarkup, /How the metric got better/)
     assert.match(baselineMarkup, /First feasible metric; no improvement is recorded yet/)
   } finally {
@@ -141,6 +159,8 @@ test('Report uses semantic section headings and exposes an unambiguous operator/
 test('print CSS removes the screen-only code viewport limit', async () => {
   const css = await readFile(new URL('../src/report-trust-polish.css', import.meta.url), 'utf8')
   assert.match(css, /@media print[\s\S]*?\.report-view pre\.code\s*\{[^}]*max-height:\s*none\s*!important;[^}]*overflow:\s*visible\s*!important;/)
+  assert.match(css, /@media print[\s\S]*?\.champion-params:not\(\[open\]\) > \.champion-params-list\s*\{[^}]*display:\s*grid\s*!important;/)
+  assert.match(css, /@media print[\s\S]*?\.report-step-changes:not\(\[open\]\) > span\s*\{[^}]*display:\s*block\s*!important;/)
   assert.match(css, /@media print[\s\S]*?\.report-view \.report-provenance\s*\{[^}]*break-inside:\s*avoid;/)
   assert.match(css, /@media print[\s\S]*?\.attention-trigger, \.attention-layer,[\s\S]*?display:\s*none\s*!important;/)
   assert.match(css, /@media print[\s\S]*?\.report-view\s*\{[\s\S]*?--bg:\s*#fff;[\s\S]*?--fg:\s*#111827;[\s\S]*?--line:\s*#d1d5db;[\s\S]*?color-scheme:\s*light;/,

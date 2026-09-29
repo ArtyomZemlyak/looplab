@@ -211,7 +211,7 @@ test('public-link verification fences authority while unknown truth preserves lo
   assert.match(source, /const onFocusAssistant = event => \{\s*if \(openSessionPendingRef\.current\)/)
   assert.match(source, /const onNewRun = \(event\) => \{\s*event\.preventDefault\(\)\s*if \(openSessionPendingRef\.current\)/)
   assert.match(source, /const chooseSuggestion = [\s\S]*?\{\s*if \(openSessionPendingRef\.current\) return/)
-  assert.match(source, /className="asst-hint"\s*disabled=\{composerEditingPaused\}[\s\S]*?if \(openSessionPendingRef\.current\) return/)
+  assert.match(source, /className="asst-hint"\s*disabled=\{historical \|\| composerEditingPaused\}[\s\S]*?if \(openSessionPendingRef\.current\) return/)
   assert.match(source, /aria-label=\{`Detach experiment \$\{id\}`\} disabled=\{composerEditingPaused\}[\s\S]*?if \(openSessionPendingRef\.current\) return/,
     'every draft shortcut must honor the same synchronous session-opening fence as the inputs')
   assert.match(source, /aria-label=\{sessionOpening \? 'Opening selected Assistant chat'[\s\S]*?turnStarting \? 'Starting Assistant response'[\s\S]*?'Verify public-link status before sending'/,

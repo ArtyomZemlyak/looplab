@@ -430,7 +430,7 @@ export function toMarkdown(state, _best, context = {}) {
   const ctx = reportContext(context)
   const champion = v.best || null
   const L = []
-  L.push(`# LoopLab run report — ${state.goal || state.task_id}`)
+  L.push(`# LoopLab run report — ${state.label || state.run_id || state.task_id}`)
   L.push('')
   // Conclusion-first and authority-first: provider prose can explain, never replace, this verdict.
   L.push(`## Verdict`)

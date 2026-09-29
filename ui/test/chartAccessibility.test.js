@@ -174,6 +174,25 @@ test('dense trajectory and waterfall visuals stay legible while exact data remai
     }))
     const baselineHeight = Number(/class="waterfall-bar"[^>]*height="([^"]+)"/.exec(baseline)?.[1])
     assert.ok(baselineHeight >= 3, 'a constant-range baseline must remain visible')
+
+    const lateMetrics = [.0626, .05929, .05902, .05897, .05891, .05887, .05879, .05874, .05858]
+    const lateSteps = lateMetrics.map((to, index) => ({
+      id: [0, 1, 27, 33, 41, 51, 55, 61, 128][index],
+      from: index ? lateMetrics[index - 1] : null, to,
+      delta: index ? to - lateMetrics[index - 1] : null,
+    }))
+    const later = renderToStaticMarkup(React.createElement(ImprovementWaterfall, {
+      steps: lateSteps, direction: 'min',
+    }))
+    assert.match(later, /Bars below use the later metric range/)
+    assert.equal((later.match(/class="waterfall-bar"/g) || []).length, 7)
+    assert.match(later, /Baseline #0 0\.0626 → first gain #1 0\.05929/)
+    const laterMax = renderToStaticMarkup(React.createElement(ImprovementWaterfall, {
+      steps: lateSteps.map(step => ({ ...step, from: step.from == null ? null : -step.from,
+        to: -step.to, delta: step.delta == null ? null : -step.delta })), direction: 'max',
+    }))
+    assert.equal((laterMax.match(/class="waterfall-bar"/g) || []).length, 7,
+      'maximization focuses the same large-first-gain pattern')
   } finally {
     await vite.close()
   }
@@ -211,13 +230,45 @@ test('dense charts pick the nearest node and keep every row in the keyboard data
     const plot = document.querySelector('svg.pickable')
     assert.ok(plot)
     plot.getBoundingClientRect = () => ({ left: 0, width: 760, right: 760, top: 0, bottom: 220, height: 220 })
-    const node73x = 34 + 72 / 99 * (760 - 34 - 10)
+    const node73x = 58 + 72 / 99 * (760 - 58 - 10)
     await act(async () => plot.dispatchEvent(new dom.window.MouseEvent('click', {
       bubbles: true, clientX: node73x,
     })))
     assert.deepEqual(picked, [73])
     assert.match(document.querySelector('.accessible-chart-description').textContent,
       /nearest node; keyboard users can use View data/)
+
+    const outlierNodes = [.062, .060, .058, .061, .063, .059, .064, .246].map((metric, index) => ({
+      id: index + 1, metric, operator: 'improve', feasible: true,
+    }))
+    await act(async () => root.render(React.createElement(Trajectory, {
+      nodes: outlierNodes, direction: 'min', onPick: id => picked.push(id),
+    })))
+    assert.match(document.querySelector('.chart-scale-note').textContent, /1 worse result shown as triangles at the top edge/)
+    assert.equal(document.querySelectorAll('.chart-pt-clipped').length, 1)
+    assert.match(document.querySelector('.chart-pt-clipped title').textContent, /0\.246 · outside detail scale/)
+    assert.equal(document.querySelectorAll('.data-table tbody tr').length, 0,
+      'the exact-data table stays collapsed until requested')
+    await act(async () => document.querySelector('button[aria-label="View Metric trajectory data"]')
+      .dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })))
+    assert.equal(document.querySelectorAll('.data-table tbody tr').length, 8)
+    assert.match(document.querySelector('.data-table tbody tr:last-child').textContent, /0\.246/)
+    const fullRange = [...document.querySelectorAll('.chart-tools button')]
+      .find(button => button.textContent === 'Full range')
+    await act(async () => fullRange.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })))
+    assert.equal(document.querySelector('.chart-scale-note'), null)
+    assert.equal(document.querySelectorAll('.chart-pt-clipped').length, 0)
+    assert.ok([...document.querySelectorAll('.chart-tools button')]
+      .some(button => button.textContent === 'Focus on results'))
+
+    await act(async () => root.render(React.createElement(Trajectory, {
+      nodes: outlierNodes.map(node => ({ ...node, metric: -node.metric })), direction: 'max',
+    })))
+    const focusResults = [...document.querySelectorAll('.chart-tools button')]
+      .find(button => button.textContent === 'Focus on results')
+    await act(async () => focusResults.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })))
+    // The max-direction view clips only the worse (lower) tail, even for negative metrics.
+    assert.match(document.querySelector('.chart-scale-note').textContent, /1 worse result shown as triangles at the bottom edge/)
 
     const steps = Array.from({ length: 150 }, (_, index) => ({
       id: index + 1, operator: 'improve', from: index ? 151 - index : null,
@@ -231,6 +282,27 @@ test('dense charts pick the nearest node and keep every row in the keyboard data
     await act(async () => viewData.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })))
     assert.equal(document.querySelectorAll('.data-table tbody tr').length, 150)
     assert.equal(document.querySelector('.data-table tbody tr:last-child th').textContent, '#150')
+
+    const metrics = [.0626, .05929, .05902, .05897, .05891, .05887, .05879, .05874, .05858]
+    const lateSteps = metrics.map((to, index) => ({ id: index, from: index ? metrics[index - 1] : null,
+      to, delta: index ? to - metrics[index - 1] : null }))
+    await act(async () => root.render(React.createElement(ImprovementWaterfall, {
+      key: 'later-gains', steps: lateSteps, direction: 'min',
+    })))
+    assert.equal(document.querySelectorAll('.waterfall-bar').length, 7)
+    await act(async () => document.querySelector('button[aria-label="View Improvement waterfall data"]')
+      .dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })))
+    assert.equal(document.querySelectorAll('.data-table tbody tr').length, 9,
+      'the focused visual does not remove baseline or first gain from the data table')
+    assert.match(document.querySelector('.data-table tbody tr:last-child').textContent, /-1\.60e-4/,
+      'displayed deltas do not expose floating-point noise')
+    await act(async () => [...document.querySelectorAll('.chart-tools button')]
+      .find(button => button.textContent === 'All steps')
+      .dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })))
+    assert.equal(document.querySelectorAll('.waterfall-bar').length, 9)
+    assert.equal(document.querySelector('.waterfall-context'), null)
+    assert.ok([...document.querySelectorAll('.chart-tools button')]
+      .some(button => button.textContent === 'Later gains'))
   } finally {
     if (root) {
       const { act } = await import('react')

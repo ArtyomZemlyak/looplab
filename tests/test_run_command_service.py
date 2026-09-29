@@ -281,7 +281,7 @@ def test_every_control_event_has_one_explicit_engine_policy():
         # `card_reopened` is `card_dropped`'s twin — one lifecycle switch, both folded, neither
         # spawning — and it landed without being added here, so this guard was red on master.
         "card_reprioritized", "card_edited", "card_resource_pinned", "card_dropped",
-        "card_reopened",
+        "card_reopened", "research_completed", "report_generated",
         # doc 68 68.2: a retarget re-ranks every node in the FOLD; a stopped run needs no engine.
         "metric_retarget",
     }

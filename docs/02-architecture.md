@@ -143,6 +143,25 @@ Impls (selected per role by `config.roles.<role>.backend`):
 1. **Delegate the *step*, own the *loop*.** The agent backs only the inner implement/refine/debug step (one bounded invocation per operator application, `scope: step`); the search, operators, evaluator, leakage checker, variance gate, and budget stay ours. Don't let one agent own a whole node/search (cost 10–100×; bypasses rigor).
 2. **Constraints by construction + adjudication, not instruction:** throwaway **git worktree** → `git diff` + reject out-of-surface hunks; run the **agent process inside the sandbox** (§10); **we** make the lineage commit; **fold the agent's event stream** into `events.jsonl` (namespaced, raw in `store/`); pin `{agent_version, model, temp, seed}`; budget via CLI caps **+** external SIGKILL watchdog. *(The committed diff is the reproducible artifact, not the trajectory.)*
 
+### Implemented decision modes and shared domain surface
+
+The RoleBackend sketch above describes delegation of the Developer only. The
+implemented external harness additionally transfers the **outer decision loop**
+to Codex, Claude Code, or any MCP client. `external_harness=true` with `backend=toy`
+waits for generation-fenced commands; the standard mode continues to invoke its
+in-process roles and cadences. Both paths write the same domain event types and
+read the same projections. `looplab/harness/phases.py` maps decision phases to
+their internal owners, entity, evidence reads, prompt keys, and external writes;
+`looplab harness` and the MCP `phases`/`phase_info` tools expose that contract.
+
+An external `research_completed` command writes a sanitized, identity-stamped
+ResearchMemo with deterministic claim verification. `report_generated` writes to
+the ordinary RunReport projection. Candidate admission, hypothesis/Card controls,
+concept governance, lessons and configuration retain their existing validation
+boundaries. The agent chooses whether to invoke optional phases. LoopLab alone
+executes candidates and records measured metrics. See
+[the operational guide](guide/external-harness.md) for concrete commands.
+
 ### 3.5 Execution Sandbox / Runner
 **Responsibility:** run a candidate solution in isolation, enforce budgets, capture everything.
 ```python

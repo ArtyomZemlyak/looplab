@@ -199,6 +199,20 @@ def _seed_copy_ignore(seed_root: str | Path) -> Callable[[str, list[str]], set[s
 # OpenCode: `opencode run "<prompt>" --model <provider>/<model>`; reads the Ollama
 # provider from an opencode.json the caller drops in the workdir (see make_roles).
 PRESETS: dict[str, CliAgentSpec] = {
+    # Native agent authentication/configuration belongs to the installed CLI. Keep Codex's
+    # workspace sandbox on; Claude's acceptEdits mode permits file edits without granting the
+    # agent unattended shell/network permissions. LoopLab evaluates the resulting diff itself.
+    "codex": CliAgentSpec(
+        name="codex",
+        argv=["codex", "exec", "--sandbox", "workspace-write", "--skip-git-repo-check",
+              "{message}"],
+        needs_git=True,
+    ),
+    "claude": CliAgentSpec(
+        name="claude",
+        argv=["claude", "--print", "--permission-mode", "acceptEdits", "{message}"],
+        needs_git=True,
+    ),
     "opencode": CliAgentSpec(
         name="opencode",
         argv=["opencode", "run", "{message}", "--model", "{model}"],

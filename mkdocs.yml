@@ -151,6 +151,7 @@ nav:
       - Tasks: guide/tasks.md
       - Generating code: guide/generating-code.md
       - LLM & coding agents: guide/llm-and-agents.md
+      - External coding agents: guide/external-harness.md
       - Memory & knowledge: guide/memory.md
       - Web UI: guide/ui.md
       - Deployment: guide/deployment.md

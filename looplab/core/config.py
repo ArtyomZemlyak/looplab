@@ -402,7 +402,9 @@ def governed_eval_timeout(requested, ceiling) -> float | None:
 # The authority is not lost, it is inverted: `agents/cli_agent.py` asserts its PRESETS match this
 # set, and `tests/test_developer_backend_registry.py` checks BOTH directions. Adding a preset
 # without adding it here is a red test, not a backend that silently downgrades to the default.
-DEVELOPER_BACKENDS: tuple[str, ...] = ("default", "aider", "continue", "goose", "opencode")
+DEVELOPER_BACKENDS: tuple[str, ...] = (
+    "default", "aider", "claude", "codex", "continue", "goose", "opencode",
+)
 
 # Runtime-only ALIASES of a backend above — the extra spellings a LIVE Developer swap accepts, which
 # `Settings` deliberately does NOT (`developer_backend="llm"` is still a refusal, because an alias has
@@ -2126,8 +2128,12 @@ class Settings(BaseSettings):
     # "toy" default is exactly how a run could silently never call the model (see the live-scenario
     # harness, which forgot backend="llm" and scored a row-count placeholder for three nodes).
     backend: str = "llm"
+    # External session owns candidate choice and reasoning. The engine waits for ready-made
+    # inject_node commands, evaluates them, and never starts its own proposal/cadence loop.
+    # `backend=toy` is required so optional in-process LLM consumers are not preflighted.
+    external_harness: bool = False
     # Developer backend (ADR-7): "default" (templated/LLM from the task) or an external
-    # CLI coding agent: "opencode" | "aider" | "goose" | "continue". A CLOSED enum ("default" +
+    # CLI coding agent: "codex" | "claude" | "opencode" | "aider" | "goose" | "continue". A CLOSED enum ("default" +
     # cli_agent.PRESETS keys), validated loudly in `_check_enum_fields` — an unknown value used to reach
     # adapters/tasks.py (`developer_backend not in PRESETS`) and silently wire the DEFAULT in-house
     # developer, the same silent downgrade the `backend` guard closes.
@@ -3278,6 +3284,8 @@ class Settings(BaseSettings):
         self._check_case_insensitive_enum_fields()
         self._check_member_fields()
         self._check_llm_profiles()
+        if self.external_harness and self.backend != "toy":
+            raise ValueError("external_harness requires backend=toy; the external agent owns reasoning")
         return self
 
     # The SET-valued sibling of `_ENUM_FIELDS`: a field whose value is a collection every MEMBER of

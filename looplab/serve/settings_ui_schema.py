@@ -29,7 +29,7 @@ SETTINGS_UI_SCHEMA_VERSION = 2
 # here reading as if 207 were derived while it is typed, which is the drift it warns about. The
 # unforgeable gate is `SETTINGS_UI_SCHEMA_KEYSET_REVISION` further down; this integer is the
 # human-readable half the docs sentence quotes, and `_load_schema` refuses when the two disagree.
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 235
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 236
 # On the KEYSET REVISION below: DERIVED, and deliberately no longer a hand-pinned review gate: a
 # bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
@@ -346,7 +346,9 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # node and an evaluation per nomination. The branch pinned 228 -> 231 against a tree without the
 # four rows above; RE-DERIVED by INTERSECTION over the merged keyset: the 233 previous keys plus
 # exactly those two, none removed.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "ee71524ce71d14d3abf6af58cdc04542b31df1c344b36905b3ed511fb3c26a28"
+# 235 -> 236 on 2026-09-29 (the merge of master into the branch): master's `external_harness`
+# (233 -> 234 there: an operator-visible choice of reasoning owner) beside the branch's two.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "87d20174dfe6b2007db9cb28119b8706d716f30968bbf56e2ac2a7f455c4fbd1"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

@@ -547,10 +547,17 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
     # fails closed by MINTING a token rather than serving the control plane to
     # any same-origin page. That module states why, and what it costs.
     ui_token, ui_token_source = resolve_owner_token(bind_host)
+    harness_token = os.environ.get("LOOPLAB_HARNESS_TOKEN", "")
+    if harness_token and ui_token and hmac.compare_digest(harness_token, ui_token):
+        raise ValueError("LOOPLAB_HARNESS_TOKEN must differ from LOOPLAB_UI_TOKEN")
 
     def _owner_authenticated(request: "Request") -> bool:
         supplied = request.headers.get("X-LoopLab-Token", "")
         return bool(ui_token) and hmac.compare_digest(supplied, ui_token)
+
+    def _harness_authenticated(request: "Request") -> bool:
+        supplied = request.headers.get("X-LoopLab-Token", "")
+        return bool(harness_token) and hmac.compare_digest(supplied, harness_token)
 
     def _review_denial(detail: str, kind: str, status_code: int) -> "JSONResponse":
         """A review denial is capability-specific and must never be reused for another bearer.
@@ -575,7 +582,7 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
     # chose). One witness, both branches.
     if on_shared_origin(bind_host):
         log_owner_token_decision(ui_token, ui_token_source, bind_host)
-    if ui_token:
+    if ui_token or harness_token:
         @app.middleware("http")
         async def _require_token(request: "Request", call_next):
             # A non-stripping reverse proxy leaves its mount prefix in scope.path while Starlette
@@ -605,14 +612,30 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
 
             # Default-deny every owner API request except the tiny explicit unauthenticated surface.
             # OPTIONS is a side-effect-free CORS preflight and must reach CORSMiddleware.
+            harness_auth = _harness_authenticated(request)
             if (request.method != "OPTIONS" and p.startswith("/api/")
                     and not _unauth_api_ok(p)
-                    and not _owner_authenticated(request)):
+                    and not _owner_authenticated(request) and not harness_auth):
                 return JSONResponse({"detail": "unauthorized (missing/invalid UI token)"},
                                     status_code=401)
+            if (harness_auth and request.method in ("POST", "PUT", "PATCH", "DELETE")
+                    and (p.startswith("/api/settings") or p == "/api/genesis"
+                         or p == "/api/start" or p.startswith("/api/start/")
+                         or p.startswith("/api/assistant/")
+                         # These owner workflows invoke LoopLab's own model. An external
+                         # agent must author the equivalent domain decisions itself.
+                         or p in ("/api/research", "/api/llm/health",
+                                  "/api/cross-run/concept-steward",
+                                  "/api/cross-run/claim-steward")
+                         or re.fullmatch(r"/api/runs/[^/]+/(chat|suggest|command|report_refresh)", p)
+                         or (p.startswith("/api/scope-report/") and p.endswith("/generate"))
+                         or re.fullmatch(r"/api/runs/[^/]+/(reset|deletions)", p)
+                         or (request.method == "DELETE" and re.fullmatch(r"/api/runs/[^/]+", p)))):
+                return JSONResponse({"detail": "harness token cannot change operator defaults, launch or reset/delete a run, or invoke an internal model workflow"},
+                                    status_code=403)
             # WHO THIS IS (`serve/principal.py`): the token holder is the `owner` principal; a request
             # on the small open surface that presented nothing is `anonymous` — never promoted.
-            _stamp_principal(request, OWNER_PRINCIPAL if _owner_authenticated(request)
+            _stamp_principal(request, OWNER_PRINCIPAL if (_owner_authenticated(request) or harness_auth)
                              else ANONYMOUS_PRINCIPAL)
             response = await call_next(request)
             # Keep authenticated API responses out of shared/browser caches, but do not defeat the

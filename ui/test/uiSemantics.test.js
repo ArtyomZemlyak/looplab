@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readSource as readFile } from './_source.js'
 
 import { RUN_ROUTE_VIEWS } from '../src/runRouteState.js'
 
@@ -251,9 +251,9 @@ test('route changes update title and move focus to a named main landmark', async
 
 test('compact Assistant blocks background pointers and traps focus in the side drawer', async () => {
   const [assistant, css] = await Promise.all([source('AssistantBar.jsx'), source('styles.css')])
-  assert.match(assistant, /ASSISTANT_OVERLAY_MAX_PX = 1439/)
+  assert.match(assistant, /ASSISTANT_OVERLAY_MAX_PX = 1199/)
   assert.match(assistant, /useMediaQuery\(`\(max-width: \$\{ASSISTANT_OVERLAY_MAX_PX\}px\)`\)/)
-  assert.match(assistant, /assistantMaxWidth = compact => Math\.max\(320, window\.innerWidth - \(compact \? 120 : 880\)\)/)
+  assert.match(assistant, /assistantMaxWidth = compact => Math\.max\(320, window\.innerWidth - \(compact \? 120 : 620\)\)/)
   // The call gained an explicit layer priority, which is what keeps the Assistant drawer from
   // trapping focus underneath a modal opened above it — exactly the property this test is named
   // for. A regex ending at the third argument could not see it.
@@ -290,7 +290,7 @@ test('compact Assistant blocks background pointers and traps focus in the side d
   assert.ok(backdrop < sidePanel && sidePanel < overlay,
     `stacking inverted: backdrop ${backdrop}, side panel ${sidePanel}, modal overlay ${overlay} — a `
     + 'modal must cover the Assistant drawer, and the drawer must cover its own backdrop')
-  assert.match(css, /@media \(max-width: 1439px\)[\s\S]*?body\.asst-side-open \.app-shell-main \{ margin-right: 0; \}/)
+  assert.match(css, /@media \(max-width: 1199px\)[\s\S]*?body\.asst-side-open \.app-shell-main \{ margin-right: 0; \}/)
 })
 
 test('Assistant run links hand off modal routes without breaking native modified clicks', async () => {
@@ -471,7 +471,7 @@ test('Assistant clears stale run-scoped toast immediately when the route run cha
 test('moving pending or failed command UI to side/full re-arms status focus', async () => {
   const assistant = await source('AssistantBar.jsx')
   assert.match(assistant, /const openCommandView = \(next\) => \{[\s\S]*?if \(commandBusy \|\| directFailure\) commandFocusRequestedRef\.current = true[\s\S]*?setAssistantView\(next\)/)
-  assert.match(assistant, /const openSide = \(\) => openCommandView\('side'\)/)
+  assert.match(assistant, /const openSide = \(\) => \{ storageSet\('ll\.asstCollapsed', 'false'\); openCommandView\('side'\) \}/)
   assert.match(assistant, /const openFull = \(\) => openCommandView\('full'\)/)
   assert.match(assistant, /const collapseToBar = \(\) => \{[\s\S]*?if \(commandBusy \|\| directFailure\) commandFocusRequestedRef\.current = true[\s\S]*?setAssistantView\('bar'\)/)
   assert.match(assistant, /\[directPending\?\.record\?\.id,[\s\S]*?busy, view\]/)

@@ -260,13 +260,25 @@ test('shared memo presentation keeps takeaway and trust visible while detail sta
     }))
     const panel = new JSDOM(panelMarkup).window.document
     const panelCards = [...panel.querySelectorAll('.research-memo-card')]
-    assert.equal(panelCards.length, 2)
+    assert.equal(panelCards.length, 1)
     assert.match(panelCards[0].textContent, /Newest conclusion/)
-    assert.match(panelCards[1].textContent, /Older conclusion/)
-    assert.deepEqual(panelCards.map(card => card.querySelector('button')?.getAttribute('aria-expanded')),
-      ['true', 'false'])
-    assert.equal(panelCards[1].querySelector('.research-memo-region'), null,
-      'collapsed history should not mount its heavy body in the drawer')
+    assert.equal(panel.querySelector('.research-memo-region') != null, true)
+    const history = [...panel.querySelectorAll('.research-history-item')]
+    assert.equal(history.length, 2)
+    assert.match(history[0].textContent, /Newest conclusion/)
+    assert.match(history[1].textContent, /Older conclusion/)
+    assert.equal(history[0].getAttribute('aria-current'), 'true')
+    assert.equal(history[1].getAttribute('aria-current'), null)
+    assert.doesNotMatch(panel.querySelector('.research-reading').textContent, /Older conclusion/,
+      'older memo body should not mount until selected')
+    assert.ok(panel.querySelector('.research-reading-toolbar button')?.textContent.includes('Discuss in Assistant'))
+
+    const finishedPanel = new JSDOM(renderToStaticMarkup(React.createElement(ResearchPanel, {
+      state: { phase: 'finished', research: [richMemo('Finished conclusion')] }, runId: 'run',
+    }))).window.document
+    assert.match(finishedPanel.querySelector('.research-action-note')?.textContent || '', /Resume it/)
+    assert.equal(finishedPanel.querySelector('.research-direction-list button'), null,
+      'a finished run must not present a next-proposal action before resume')
 
     const dockMarkup = renderToStaticMarkup(React.createElement(ResearchDetail, {
       d: { memo: { summary: 'Timeline conclusion', findings: 'malformed', sources: [null] } },
@@ -284,7 +296,9 @@ test('shared memo presentation keeps takeaway and trust visible while detail sta
       state: reportState, runId: 'run', readOnly: true,
     }))
     assert.ok(reportMarkup.indexOf('New report memo') < reportMarkup.indexOf('Old report memo'),
-      'the report should put the open newest memo before history')
+      'the report should put the newest memo before history')
+    assert.equal((reportMarkup.match(/class="research-memo-region" hidden=""/g) || []).length, 2,
+      'the long memo bodies start collapsed in the report')
 
     // A reset may reuse a node id for a new attempt. Verifier evidence must continue to identify
     // the exact historical attempt rather than offering a bare-id jump into the current attempt.
@@ -373,18 +387,23 @@ test('shared memo presentation keeps takeaway and trust visible while detail sta
       assert.match(dockAlignmentMarkup, /Claim-to-verifier alignment is incomplete/, key)
     }
 
-    for (const markup of [
-      renderToStaticMarkup(React.createElement(ResearchPanel, {
+    for (const [surfaceKind, markup] of [
+      ['panel', renderToStaticMarkup(React.createElement(ResearchPanel, {
         state: { research: alignmentCases.map(row => row.memo) }, runId: 'run',
-      })),
-      renderToStaticMarkup(React.createElement(ReportView, {
+      }))],
+      ['report', renderToStaticMarkup(React.createElement(ReportView, {
         state: { ...reportState, research: alignmentCases.map(row => row.memo) },
         runId: 'run', readOnly: true,
-      })),
+      }))],
     ]) {
       const surface = new JSDOM(markup).window.document
       const cards = [...surface.querySelectorAll('.research-memo-card')]
-      assert.equal(cards.length, alignmentCases.length)
+      assert.equal(cards.length, surfaceKind === 'panel' ? 1 : alignmentCases.length)
+      if (surfaceKind === 'panel') {
+        const history = [...surface.querySelectorAll('.research-history-item')]
+        assert.equal(history.length, alignmentCases.length)
+        for (const item of history) assert.match(item.textContent, /Check incomplete/)
+      }
       for (const card of cards) {
         assert.match(card.querySelector('.research-memo-toggle').textContent, /Check incomplete/)
         assert.doesNotMatch(card.querySelector('.research-memo-toggle').textContent, /Checked/)

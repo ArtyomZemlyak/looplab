@@ -34,6 +34,7 @@ decision records, roadmap), see [`../00-INDEX.md`](../00-INDEX.md).
 | **[Concepts](concepts.md)** | Event log & replay, sandbox & trust tiers, operators, gates, confirmation, cross-run memory, search policies |
 | **[Memory & knowledge](memory.md)** | Every memory type (cases, lessons, meta-notes, skills, KB, belief cards, research), what each is for, the methodologies, and agentic retrieval |
 | **[LLM & coding agents](llm-and-agents.md)** | OpenAI-compatible backends, external coding agents, per-role models, reasoning, knowledge & skills |
+| **[External coding agents](external-harness.md)** | Codex/Claude Developer integration, capability discovery and the external-harness migration |
 
 ## Operating it
 

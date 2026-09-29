@@ -114,6 +114,95 @@ def test_critic_no_false_positive_on_computed_metric():
     assert any(i["issue"] == "hardcoded_metric" for i in critique(idea, hard))
 
 
+def test_computed_variable_cannot_hide_a_literal_serialized_score():
+    idea = Idea(operator="draft")
+    cheat = ("import json\naccuracy = run_validation()\n"
+             "print(json.dumps({'accuracy': 0.95, 'samples': 400}))\n")
+    assert any(i["issue"] == "hardcoded_metric" for i in critique(
+        idea, cheat, metric_key="accuracy"))
+    placeholder = ("import json\nresult = {'accuracy': 0.0}\n"
+                   "result['accuracy'] = run_validation()\nprint(json.dumps(result))\n")
+    assert not any(i["issue"] == "hardcoded_metric" for i in critique(
+        idea, placeholder, metric_key="accuracy"))
+    unused = ("import json\naccuracy = run_validation()\n"
+              "debug_payload = json.dumps({'accuracy': 0.95})\n"
+              "print(json.dumps({'accuracy': accuracy}))\n")
+    assert not any(i["issue"] == "hardcoded_metric" for i in critique(
+        idea, unused, metric_key="accuracy"))
+    # A multi-file trust scan is not one parseable Python module once YAML is
+    # concatenated after the program; the authored Python source remains checkable.
+    combined = cheat + "\n# --- config.yaml ---\nlearning_rate: 0.2\n"
+    assert any(i["issue"] == "hardcoded_metric" for i in critique(
+        idea, combined, metric_key="accuracy",
+        source_units=(cheat, "learning_rate: 0.2\n")))
+
+
+def test_serialized_literal_score_emitted_through_a_local_variable():
+    idea = Idea(operator="draft")
+    cheat = ("import json\naccuracy = run_validation()\n"
+             "payload = json.dumps({'accuracy': 0.95, 'samples': 400})\n"
+             "print(payload)\n")
+    assert any(i["issue"] == "hardcoded_metric" for i in critique(
+        idea, cheat, metric_key="accuracy"))
+    overwritten = ("import json\naccuracy = run_validation()\n"
+                   "payload = json.dumps({'accuracy': 0.95})\n"
+                   "payload = json.dumps({'accuracy': accuracy})\n"
+                   "print(payload)\n")
+    assert not any(i["issue"] == "hardcoded_metric" for i in critique(
+        idea, overwritten, metric_key="accuracy"))
+
+
+def test_literal_score_dictionary_emitted_after_serialization():
+    idea = Idea(operator="draft")
+    cheat = ("import json\naccuracy = run_validation()\n"
+             "payload = {'accuracy': 0.95, 'samples': 400}\n"
+             "print(json.dumps(payload))\n")
+    assert any(i["issue"] == "hardcoded_metric" for i in critique(
+        idea, cheat, metric_key="accuracy"))
+    cheat_two_steps = cheat.replace("print(json.dumps(payload))",
+                                    "output = json.dumps(payload)\nprint(output)")
+    assert any(i["issue"] == "hardcoded_metric" for i in critique(
+        idea, cheat_two_steps, metric_key="accuracy"))
+    with_extra_field = cheat.replace("print(json.dumps(payload))",
+                                     "payload['extra'] = 1\nprint(json.dumps(payload))")
+    assert any(i["issue"] == "hardcoded_metric" for i in critique(
+        idea, with_extra_field, metric_key="accuracy"))
+    with_extra_update = cheat.replace("print(json.dumps(payload))",
+                                      "payload.update({'extra': 1})\n"
+                                      "print(json.dumps(payload))")
+    assert any(i["issue"] == "hardcoded_metric" for i in critique(
+        idea, with_extra_update, metric_key="accuracy"))
+    updated = cheat.replace("print(json.dumps(payload))",
+                            "payload['accuracy'] = accuracy\nprint(json.dumps(payload))")
+    assert not any(i["issue"] == "hardcoded_metric" for i in critique(
+        idea, updated, metric_key="accuracy"))
+    updated_with_method = cheat.replace("print(json.dumps(payload))",
+                                        "payload.update({'accuracy': accuracy})\n"
+                                        "print(json.dumps(payload))")
+    assert not any(i["issue"] == "hardcoded_metric" for i in critique(
+        idea, updated_with_method, metric_key="accuracy"))
+    captured_update = cheat.replace("print(json.dumps(payload))",
+                                    "ignored = payload.update({'accuracy': accuracy})\n"
+                                    "print(json.dumps(payload))")
+    assert not any(i["issue"] == "hardcoded_metric" for i in critique(
+        idea, captured_update, metric_key="accuracy"))
+    computed_then_replaced = ("import json\naccuracy = run_validation()\n"
+                              "payload = {'accuracy': accuracy}\n"
+                              "payload['accuracy'] = 0.95\nprint(json.dumps(payload))\n")
+    assert any(i["issue"] == "hardcoded_metric" for i in critique(
+        idea, computed_then_replaced, metric_key="accuracy"))
+    computed_then_updated = computed_then_replaced.replace(
+        "payload['accuracy'] = 0.95", "payload.update({'accuracy': 0.95})")
+    assert any(i["issue"] == "hardcoded_metric" for i in critique(
+        idea, computed_then_updated, metric_key="accuracy"))
+    stdout_alias = ("import json, sys\ndef score():\n"
+                    "    accuracy = run_validation()\n"
+                    "    payload = json.dumps({'accuracy': 0.95})\n"
+                    "    sys.stdout.write(payload)\n")
+    assert any(i["issue"] == "hardcoded_metric" for i in critique(
+        idea, stdout_alias, metric_key="accuracy"))
+
+
 def test_hardcoded_metric_not_masked_by_a_symmetric_substring():
     # Regression: the `computed` guard matched `metric` as a SUFFIX of any identifier, so a throwaway
     # line whose name ends in "metric" (`is_symmetric = True`, `asymmetric`, `parametric`, ...) made

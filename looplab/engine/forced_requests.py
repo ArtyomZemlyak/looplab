@@ -106,6 +106,8 @@ class ForcedRequestsMixin:
             req = state.fork_requests[state.forks_done]
             pid = req.get("from_node_id")
             generation = req.get("generation")
+            if self.external_harness:
+                return None
             current = state.nodes.get(pid)
             servable = (current is not None and not current.tombstoned
                         and pid not in state.aborted_nodes
@@ -337,6 +339,11 @@ class ForcedRequestsMixin:
             req = state.fork_requests[state.forks_done]
             pid = req.get("from_node_id")
             generation = req.get("generation")
+            if self.external_harness:
+                self.store.append(EV_FORK_DONE, {"idx": state.forks_done,
+                                  "from_node_id": pid, "generation": generation,
+                                  "skipped": "external_harness_requires_ready_candidate"})
+                return True
             current = state.nodes.get(pid)
             # Unstamped queued-before-create requests are historical and bind when their node appears.
             # Every modern producer stamps, so explicit generations remain strict CAS.
@@ -413,6 +420,10 @@ class ForcedRequestsMixin:
             return True
         forced_ablate = self._pending_forced_ablation(state)
         if forced_ablate is not None:
+            if self.external_harness:
+                # New external-mode commands are refused at intake. Legacy hand-authored
+                # ablation intents must not launch an internal Researcher/Developer loop.
+                return False
             # Ablation probes culminate in one new refine_block Node. Avoid both the paid probes and a
             # false completion while that physical reservation has no budget slot.
             if (parked := await self._park_for_node_budget(state)) is not None:

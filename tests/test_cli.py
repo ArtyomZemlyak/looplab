@@ -728,12 +728,12 @@ def test_finalize_refuses_the_same_unknown_key_instead_of_wrapping_up_without_it
         "a refused finalize wrote to the run")
 
 
-def test_finalize_refuses_an_unreadable_snapshot_before_writing_and_its_no_op_still_reads_none(
+def test_finalize_refuses_an_unreadable_snapshot_even_without_task(
         tmp_path):
     """The other refusal the strict read makes (a snapshot that is not JSON) is refused before the
-    write too, and a run with no task snapshot — no wrap-up here to spend — still has its intent
-    recorded for a running engine to wrap up under its own settings. (The already-finalized exit
-    is pinned in `tests/test_finalization_recovery.py`.)"""
+    write too. Even without a task snapshot, the run's policy must be read before
+    appending a stop intent: it may be an external run with mandatory final work.
+    (The already-finalized exit is pinned in `tests/test_finalization_recovery.py`.)"""
     from looplab.events.eventstore import EventStore
 
     run_dir = tmp_path / "corrupt-snapshot-finalize"
@@ -748,8 +748,8 @@ def test_finalize_refuses_an_unreadable_snapshot_before_writing_and_its_no_op_st
 
     (run_dir / "task.snapshot.json").unlink()
     marked = runner.invoke(app, ["finalize", str(run_dir)])
-    assert marked.exit_code == 0 and "marked" in marked.output, marked.output
-    assert [e.type for e in EventStore(run_dir / "events.jsonl").read_all()][-1] == "run_abort"
+    assert marked.exit_code == REFUSAL_EXIT_CODE, marked.output
+    assert [e.type for e in EventStore(run_dir / "events.jsonl").read_all()][-1] != "run_abort"
 
 
 def test_a_read_only_loader_keeps_the_recorded_snapshot_and_a_retired_key_resumes(tmp_path):

@@ -40,11 +40,15 @@ def _validate_task_facet_row(row: dict) -> str | None:
     from looplab.engine.governance_health import validate_revision_fields
 
     required = {"task_id", "facets", "by", "at"}
-    if not required.issubset(row) or set(row) - (required | {"revision"}):
+    if not required.issubset(row) or set(row) - (required | {"revision", "action_id"}):
         return "unsupported_schema"
     if reason := validate_revision_fields(row):
         return reason
     task_id, actor, at = row.get("task_id"), row.get("by"), row.get("at")
+    action_id = row.get("action_id")
+    if action_id is not None and (not isinstance(action_id, str) or not 1 <= len(action_id) <= 160
+                                  or _contains_control(action_id)):
+        return "invalid_record"
     for value, maximum, required_text in (
             (task_id, _MAX_TASK_ID, True), (actor, _MAX_ACTOR, True), (at, _MAX_AT, False)):
         if (not isinstance(value, str) or len(value) > maximum or _contains_control(value)
@@ -160,7 +164,8 @@ def propose_task_facets(goal: str, kind: str, client, *, parser: str = "tool_cal
         return {}
 
 
-def record_task_facets(memory_dir, *, task_id: str, facets: dict, by: str = "steward", at: str = "") -> dict:
+def record_task_facets(memory_dir, *, task_id: str, facets: dict, by: str = "steward", at: str = "",
+                       expected_revision: int | None = None, action_id: str = "") -> dict:
     """Persist a task's facets (append-only, last-write-wins per task_id) to `task_facets.jsonl`. Only
     known FACET_AXES with a non-empty value are kept. Returns the stored record. Raises on no task_id/dir."""
     from looplab.engine.concept_registry import normalize_key
@@ -187,7 +192,11 @@ def record_task_facets(memory_dir, *, task_id: str, facets: dict, by: str = "ste
     # needs an explicit typed action; whitespace/control-only CLI values must not manufacture one.
     if not clean:
         raise ValueError("give at least one non-empty facet axis")
-    rec = {"task_id": tid, "facets": clean, "by": actor, "at": recorded_at}
+    if action_id and (not isinstance(action_id, str) or len(action_id) > 160
+                      or _contains_control(action_id)):
+        raise ValueError("action_id must be bounded printable text")
+    rec = {"task_id": tid, "facets": clean, "by": actor, "at": recorded_at,
+           **({"action_id": action_id} if action_id else {})}
     path = Path(memory_dir) / "task_facets.jsonl"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -197,7 +206,11 @@ def record_task_facets(memory_dir, *, task_id: str, facets: dict, by: str = "ste
     # facets are operator meaning too. Refuse an append when any historical row is unknown;
     # a fresh last-write-wins record must never make a torn/corrupt decision appear repaired.
     return append_governance(
-        path, rec, read_rows=_read_task_facet_rows, require_durable=True)
+        path, rec, read_rows=_read_task_facet_rows, require_durable=True,
+        expected_revision=expected_revision,
+        replay_payload=lambda row: json.dumps(
+            {"task_id": row.get("task_id"), "facets": row.get("facets")},
+            ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 
 
 def load_task_facets(memory_dir) -> dict:

@@ -44,6 +44,16 @@ test('owner Concepts view survives copy, reload, and history route round-trips',
   assert.equal(hashWithRunRouteState(hash, parsed.state), hash)
 })
 
+test('owner external agent cycle link keeps its run generation', () => {
+  const hash = `#/run/demo?gen=${GEN}&panel=agent`
+  const parsed = parseRunRouteState(hash)
+  assert.deepEqual(parsed.issues, [])
+  assert.equal(parsed.state.panel, 'agent')
+  assert.equal(hashWithRunRouteState(hash, parsed.state), hash)
+  const review = parseRunRouteState(`#/rv_opaque?gen=${GEN}&panel=agent`, { reviewMode: true })
+  assert.equal(reviewRouteStateForScope(review.state).panel, null)
+})
+
 test('route parsing separates encoded run ids from diagnostic parameters', () => {
   const hash = '#/run/a%20b%2F%25%3F%23?node=2'
   assert.deepEqual(splitRouteHash(hash), { path: '/run/a%20b%2F%25%3F%23', query: 'node=2' })

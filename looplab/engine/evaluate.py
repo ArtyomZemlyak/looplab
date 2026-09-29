@@ -1273,6 +1273,8 @@ class EvalAttempt:
     invocation_id: str = ""
     _log_snapshot: Any = None
     _log_plan: Any = None
+    _live_questions: list = field(default_factory=list)
+    _external_observed_phases: set = field(default_factory=set)
     _seen: dict = field(default_factory=dict)          # the intervention watcher's one verdict
     kill_signal: dict = field(default_factory=dict)
     res: Any = None
@@ -1800,7 +1802,8 @@ class EvaluateMixin:
             from looplab.trust.leakage import code_leakage_findings
             sigs += code_leakage_findings(scan_src)
         if TRUST_DETECTOR_CRITIC in detectors:
-            from looplab.trust.critic import critic_findings, scorer_is_in_tree
+            from looplab.trust.critic import (candidate_only_configuration,
+                                              critic_findings, scorer_is_in_tree)
             # Host-graded tasks (MLE-bench &c.) score a submission file out-of-process,
             # so the critic's in-code `metric` checks don't apply — hand it the expected
             # submission filename so it checks the right output contract instead.
@@ -1809,10 +1812,24 @@ class EvaluateMixin:
             # `looplab_eval.py --solver solver.py`) has no in-code output contract at all —
             # the candidate is a library. `scorer_is_in_tree` answers that from the task the
             # engine already holds; `getattr` keeps the `Engine.__new__` unit engines working.
+            # A config-only patch cannot print the metric either: the fixed scorer
+            # owns that output, even when its protected entrypoint is inside the repo.
+            configuration_only = candidate_only_configuration(
+                getattr(node, "code", None), getattr(node, "files", None))
+            eval_spec = getattr(self, "_eval_spec", None)
+            metric_spec = eval_spec.get("metric") if isinstance(eval_spec, dict) else None
+            metric_key = metric_spec.get("key", "metric") if isinstance(metric_spec, dict) else "metric"
+            source_units = tuple(source for source in (
+                getattr(node, "code", None), *((getattr(node, "files", None) or {}).values()))
+                if isinstance(source, str))
             sigs += critic_findings(node.idea, scan_src,
                                     submission_file=self._graded_output_name(),
-                                    scorer_in_tree=scorer_is_in_tree(
-                                        getattr(self, "task", None)))
+                                    scorer_in_tree=(scorer_is_in_tree(
+                                        getattr(self, "task", None))
+                                        and not configuration_only),
+                                    configuration_only=configuration_only,
+                                    metric_key=metric_key,
+                                    source_units=source_units)
         return sigs
 
     def _trust_scan_surface(self, node) -> str:
@@ -2405,7 +2422,8 @@ class EvaluateMixin:
         AND the durable tail (`_commit_salvaged_cause_fix`), because the tail is I/O and the callers
         this paragraph names use `try/FINALLY` rather than `try/except`.
         """
-        if not (getattr(self, "metric_salvage_repair", True) and self._inline_repair
+        if not (not self.external_harness and getattr(self, "metric_salvage_repair", True)
+                and self._inline_repair
                 and reason in self._inline_repair_reasons
                 and callable(getattr(self.developer, "repair", None))
                 and (node.code or node.files or self._repo_spec)):
@@ -3560,6 +3578,8 @@ class EvaluateMixin:
         # nothing inside it consults them.
         a._seen: dict = {}
         a.kill_signal: dict = {}       # filled by the training monitor if it kills a broken run (Phase 3)
+        a._live_questions = []         # opened external observations must be answered before terminal
+        a._external_observed_phases = set()
         # The Card identity this worker can be dropped through, read while `node` is still
         # the fold this attempt started from — it is not rebound until after the group.
         _card_id = getattr(getattr(a.node, "idea", None), "card_id", None)
@@ -3584,7 +3604,8 @@ class EvaluateMixin:
             # Cancelled with the eval by `_tg.cancel_scope.cancel()` below. Gated on the
             # command-eval path (`_eval_spec`): only those write the per-stage `<stage>.log` the
             # monitor tails — the solution.py path (toy/dataset) has no live log to watch.
-            if getattr(self, "_train_monitor", False) and getattr(self, "_eval_spec", None):
+            if (not self.external_harness and getattr(self, "_train_monitor", False)
+                    and getattr(self, "_eval_spec", None)):
                 _idea = getattr(a.node, "idea", None)
                 _rationale = (getattr(_idea, "rationale", "") or "")[:400] if _idea else ""
                 _mkey = ((self._eval_spec.get("metric") or {}).get("key", "metric")
@@ -3597,7 +3618,8 @@ class EvaluateMixin:
             # 2026-08-04; still off in a bare `Engine(...)`): a sibling task that reads the live
             # log's latest INTERMEDIATE metric and ranks it against finished siblings; advisory
             # unless asha_live_kill. Same command-eval gate (needs a live log + the metric spec).
-            if getattr(self, "_asha_live", False) and isinstance(getattr(self, "_eval_spec", None), dict):
+            if (not self.external_harness and getattr(self, "_asha_live", False)
+                    and isinstance(getattr(self, "_eval_spec", None), dict)):
                 _mspec = self._eval_spec.get("metric") or {}
                 _tg.start_soon(self._monitor_asha, a.node_id, a.generation, a.workdir, cancel,
                                _mspec, a.state.direction, a.kill_signal, a._log_snapshot, a._log_plan)
@@ -3621,6 +3643,12 @@ class EvaluateMixin:
                 run_ref(getattr(a.state, "run_uid", ""), getattr(a.state, "run_id", "")),
                 a.node_id, a.generation, a.attempt)
             await self._claim_eval_invocation(a)
+            if self.external_harness and getattr(self, "_eval_spec", None):
+                from looplab.engine.external_watch import observe_external_eval
+                for _phase, _enabled in (("train_monitor", getattr(self, "_train_monitor", False)),
+                                         ("asha_live", getattr(self, "_asha_live", False))):
+                    if _enabled:
+                        _tg.start_soon(observe_external_eval, self, a, cancel, _phase)
             try:
                 a.res = await anyio.to_thread.run_sync(
                     self._run_eval, a.node, str(a.workdir), a.eval_env, None, cancel, a.next_start
@@ -3670,6 +3698,19 @@ class EvaluateMixin:
                 return PHASE_RETURN
             cancel.set()                  # eval finished on its own …
             _tg.cancel_scope.cancel()     # … stop the watcher now (no poll-interval latency)
+        if self.external_harness and getattr(self, "_eval_spec", None) and not a._seen.get("kind"):
+            # A short command evaluation can finish before the first live-monitor tick.
+            # Inspect its final attributed log once so enabled monitoring cannot vanish merely
+            # because the configured cadence was longer than the evaluation. A phase already
+            # observed live is not questioned twice. This still never starts an internal model.
+            from looplab.engine.external_watch import observe_external_eval
+            for phase, enabled in (("train_monitor", getattr(self, "_train_monitor", False)),
+                                   ("asha_live", getattr(self, "_asha_live", False))):
+                if enabled:
+                    await observe_external_eval(self, a, threading.Event(), phase, final_pass=True)
+        if self.external_harness and a._live_questions:
+            from looplab.engine.external_watch import settle_external_observations
+            await settle_external_observations(self, a)
         return PHASE_NEXT
 
     async def _eval_settle_outcome(self, a: "EvalAttempt") -> str:
@@ -3989,6 +4030,11 @@ class EvaluateMixin:
         if halted.finished or halted.stop_requested:
             a.triage_outcome = ("abandon", "the run is stopping (a finalize was requested): no further "
                                 "repair of this node")
+            return PHASE_SETTLED
+        if self.external_harness:
+            # The external session reads the terminal failure and decides whether to submit a
+            # corrected candidate. No internal triage judge, dependency retry or Developer repair.
+            a.triage_outcome = ("abandon", "external harness: agent decides the next candidate")
             return PHASE_SETTLED
         # Environment self-prep (deps.py): a crash that is purely a missing KNOWN library is
         # not a bad idea — install it (trusted_local only) and re-run BEFORE the crash-triage
@@ -5422,4 +5468,3 @@ class EvaluateMixin:
                     data["failure_signature"] = a.repeated_failure
                 self.store.append(EV_NODE_FAILED, data)
             self._maybe_crash()
-

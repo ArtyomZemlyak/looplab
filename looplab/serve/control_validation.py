@@ -60,7 +60,7 @@ from looplab.events.types import (
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
     EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_METRIC_RETARGET, EV_NODE_ABORT, EV_NODE_RESET,
     EV_PAUSE, EV_PROMOTE, EV_RESTART, EV_RESUME, EV_RUN_ABORT, EV_RUN_CONCEPTS, EV_RUN_REOPENED,
-    EV_SET_STRATEGY, EV_SPEC_APPROVED)
+    EV_SET_STRATEGY, EV_SPEC_APPROVED, EV_RESEARCH_COMPLETED, EV_REPORT_GENERATED)
 from looplab.serve.engine_proc import _resolve_task_file
 # `EnginePolicy` is DEFINED in `serve/protocol.py` (2026-09-26) and imported here as the same class:
 # its values are persisted on every durable command record (`engine_policy`), and `looplab stop
@@ -419,6 +419,35 @@ def _normalize_run_abort(ctx: _ControlIntake) -> dict:
     # silently do nothing while the command lifecycle reports success.
     if ctx.data.get("reason") is not None:
         ctx.data["reason"] = ctx.text("reason", limit=256)
+    snapshot = ctx.rd / "config.snapshot.json"
+    if snapshot.is_file():
+        from looplab.core.config import read_config_snapshot
+        from looplab.harness.obligations import external_finish_due
+        settings = read_config_snapshot(snapshot)
+        if not settings.external_harness:
+            return ctx.data
+        from looplab.events.eventstore import EventStore
+        events = EventStore(ctx.rd / "events.jsonl").read_all()
+        # The report/review evidence and node lifecycle must come from the same
+        # prefix; a live evaluation can append between two independent folds.
+        from looplab.events.replay import fold
+        due = external_finish_due(ctx.rd, settings, fold(events) if events else ctx.state(), events)
+        if due["pending_nodes"]:
+            raise HTTPException(409, {
+                "code": "external_pending_evaluations",
+                "node_ids": due["pending_nodes"],
+                "message": "wait for pending candidates to settle or explicitly abort them before finalizing",
+            })
+        if due["report"]:
+            raise HTTPException(409, {
+                "code": "external_report_required",
+                "message": "report_every is enabled; publish a report covering the latest candidate before finishing",
+            })
+        if due["reviews"]:
+            raise HTTPException(409, {
+                "code": "external_reviews_required", "phases": due["reviews"],
+                "message": "review each enabled cross-run phase before finishing",
+            })
     return ctx.data
 
 
@@ -1104,6 +1133,111 @@ def _normalize_inject_node(ctx: _ControlIntake) -> dict:
     if not isinstance(deleted, list):
         raise HTTPException(400, "deleted must be a list of relative path strings")
     data["deleted"] = [_relative_file_name(name, "deleted") for name in deleted]
+    from looplab.core.config import read_config_snapshot
+    snapshot = ctx.rd / "config.snapshot.json"
+    if snapshot.is_file() and read_config_snapshot(snapshot).external_harness:
+        from looplab.adapters.tasks import load_task
+        from looplab.harness.contract import candidate_surface_refusal
+        task_snapshot = ctx.rd / "task.snapshot.json"
+        if not task_snapshot.is_file():
+            raise HTTPException(409, "external candidate requires the run's task snapshot")
+        try:
+            task = load_task(task_snapshot, existing_run=True)
+            repo_spec = task.repo_spec() if callable(getattr(task, "repo_spec", None)) else None
+        except (OSError, ValueError) as exc:
+            raise HTTPException(409, "cannot verify the external candidate's task surface") from exc
+        refusal = candidate_surface_refusal(repo_spec, normalized_files, data["deleted"])
+        if refusal:
+            raise HTTPException(400, refusal)
+        # A configured concept workflow is an obligation in external mode, not
+        # an advisory prompt. Check effective membership after surface checks.
+        from looplab.harness.obligations import candidate_concepts, concept_tags_required
+        settings = read_config_snapshot(snapshot)
+        from looplab.harness.obligations import research_due
+        from looplab.events.eventstore import EventStore
+        events = EventStore(ctx.rd / "events.jsonl").read_all()
+        if research_due(settings, ctx.state(), events):
+            raise HTTPException(409, {
+                "code": "external_research_required",
+                "message": "deep_research_every is enabled; publish research_completed at this node count before submitting a candidate",
+            })
+        from looplab.harness.obligations import report_cadence_due
+        if report_cadence_due(settings, ctx.state(), events):
+            raise HTTPException(409, {
+                "code": "external_report_cadence_required",
+                "message": "report_every is enabled; publish a current report before another candidate",
+                "remediation": "command:report_generated",
+            })
+        from looplab.harness.obligations import run_base_due
+        if run_base_due(settings, ctx.state()):
+            raise HTTPException(409, {
+                "code": "external_run_base_required",
+                "message": "concept_run_base is enabled; seed run_concepts from the first scored node's authored tags before the next candidate",
+            })
+        from looplab.harness.hypotheses import merge_due
+        if merge_due(settings, ctx.state(), events):
+            raise HTTPException(409, {
+                "code": "external_hypothesis_merge_review_required",
+                "message": "review the open pure-belief board and merge duplicates or record no_merge before another candidate",
+                "remediation": "GET then POST /api/runs/{run_id}/harness-hypotheses",
+            })
+        from looplab.harness.reviews import cadence_reviews_due
+        from looplab.serve.run_commands import run_generation_token
+        memory_reviews = cadence_reviews_due(ctx.rd, settings, ctx.state(),
+                                             run_generation_token(events))
+        if memory_reviews:
+            raise HTTPException(409, {
+                "code": "external_memory_cadence_review_required",
+                "phases": memory_reviews,
+                "message": "lessons_every is enabled; record each due lesson/skill review before another candidate",
+                "remediation": "POST /api/runs/{run_id}/harness-reviews",
+            })
+        from looplab.harness.selection import verification_due, value_due
+        if verification_due(settings, ctx.state()):
+            raise HTTPException(409, {
+                "code": "external_selection_verifier_required",
+                "message": "select_verifier is enabled; score the current tied group before proposing another candidate",
+                "remediation": "GET /api/runs/{run_id}/harness-selection then POST /api/runs/{run_id}/harness-selection/verify",
+            })
+        if value_due(settings, ctx.state()):
+            raise HTTPException(409, {
+                "code": "external_mcts_value_required",
+                "message": "MCTS value_weight is enabled; estimate the current branch batch before proposing another candidate",
+                "remediation": "GET /api/runs/{run_id}/harness-selection then POST /api/runs/{run_id}/harness-selection/values",
+            })
+        if normalized_idea.card_id:
+            raise HTTPException(400, {
+                "code": "external_card_link_unsupported",
+                "message": "injected candidates mint a new Card; remove idea.card_id and supply idea.hypothesis when required",
+            })
+        if settings.track_hypotheses and not (normalized_idea.hypothesis or "").strip():
+            raise HTTPException(400, {
+                "code": "external_hypothesis_required",
+                "message": "track_hypotheses is enabled; give this candidate a hypothesis statement (injected candidates mint their own Card)",
+            })
+        if concept_tags_required(settings) and not candidate_concepts(
+                normalized_idea, ctx.state(), parents):
+            raise HTTPException(400, {
+                "code": "external_concepts_required",
+                "message": "enabled concept settings require nonempty effective concepts on each candidate",
+                "settings": [key for key in
+                             ("concept_pivot", "concept_run_base", "cross_run_concepts")
+                             if getattr(settings, key)],
+                "remediation": "author idea.concepts (full) or a nonempty effective delta",
+            })
+        from looplab.serve.run_commands import run_generation_token
+        from looplab.harness.decisions import missing_decisions
+        generation = run_generation_token(events)
+        if generation and ctx.state().run_uid:
+            missing = missing_decisions(ctx.rd, settings, ctx.state(), normalized_idea, generation,
+                                        code=data.get("code"), files=normalized_files,
+                                        deleted=data["deleted"])
+            if missing:
+                raise HTTPException(409, {
+                    "code": "external_decisions_required", "phases": missing,
+                    "message": "enabled decision phases require idea-bound review receipts before admission",
+                    "remediation": "POST /api/runs/{run_id}/harness-decisions for this idea",
+                })
     # `origin` IS SERVER-DERIVED PROVENANCE, exactly like the fork receipt's stamped half, and it was
     # the one the client could write. `_import_cross_run_source` mints it from the source node it
     # just read — run id, node id, that node's `robust_metric`, its lifecycle generation — and the
@@ -1158,6 +1292,57 @@ def _normalize_hypothesis_updated(ctx: _ControlIntake) -> dict:
         raise HTTPException(400, "hypothesis status must be open, abandoned, or deleted")
     data["status"] = status
     return data
+
+
+def _normalize_research_completed(ctx: _ControlIntake) -> dict:
+    """Author a memo through the same sanitized projection as the built-in researcher.
+
+    IDs, verification, trigger and node count are server-derived. A memo cannot self-certify
+    its claims or pretend to be a paid internal research attempt.
+    """
+    from looplab.core.advisory_payloads import (
+        sanitize_research_memo_payload, stamp_research_memo)
+    from looplab.core.models import ResearchMemo
+    from looplab.trust.memo_verify import verify_memo
+
+    raw = ctx.data.get("memo")
+    if not isinstance(raw, dict):
+        raise HTTPException(400, "research_completed.memo must be an object")
+    allowed = set(ResearchMemo.model_fields) - {"at_node", "trigger", "claims_receipt"}
+    unknown = set(raw) - allowed
+    if unknown:
+        raise HTTPException(400, f"research_completed.memo has unknown field(s): {', '.join(sorted(unknown))}")
+    if not any(raw.get(key) for key in ("summary", "findings", "claims", "open_questions",
+                                        "next_experiments", "recommended_directions")):
+        raise HTTPException(400, "research_completed.memo needs a conclusion or direction")
+    state = ctx.state()
+    at_node = len(state.nodes)
+    memo = sanitize_research_memo_payload({**raw, "at_node": at_node, "trigger": "external"})
+    if memo.get("claims"):
+        verdict = verify_memo(memo, state, client=None)
+        if verdict is not None:
+            memo["verification"] = verdict
+    memo, memo_id = stamp_research_memo(memo)
+    return {"memo": memo, "at_node": at_node, "trigger": "external", "served_manual": False,
+            **({"memo_id": memo_id} if memo_id else {})}
+
+
+def _normalize_report_generated(ctx: _ControlIntake) -> dict:
+    from looplab.core.advisory_payloads import sanitize_report_payload
+
+    raw = ctx.data.get("content")
+    if not isinstance(raw, dict):
+        raise HTTPException(400, "report_generated.content must be an object")
+    allowed = set(sanitize_report_payload({})) - {"at_node", "trigger"}
+    unknown = set(raw) - allowed
+    if unknown:
+        raise HTTPException(400, f"report_generated.content has unknown field(s): {', '.join(sorted(unknown))}")
+    if not any(raw.get(key) for key in ("headline", "summary", "verdict", "champion_summary")):
+        raise HTTPException(400, "report_generated.content needs a narrative")
+    at_node = len(ctx.state().nodes)
+    return {"content": sanitize_report_payload({**raw, "at_node": at_node,
+                                                "trigger": "external"}),
+            "at_node": at_node, "trigger": "external"}
 
 
 # ------------------------------------------------------------------ collaboration normalizers
@@ -1733,6 +1918,8 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
         "forked_from",
         "source_run", "source_node"}),
     EV_DEEP_RESEARCH: frozenset(),
+    EV_RESEARCH_COMPLETED: frozenset({"memo"}),
+    EV_REPORT_GENERATED: frozenset({"content"}),
     EV_APPROVAL_GRANTED: frozenset({"node_id", "generation"}),
     EV_SPEC_APPROVED: frozenset(),
     EV_ANNOTATION: frozenset({"node_id", "text"}),
@@ -1755,6 +1942,13 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
     EV_CARD_REOPENED: frozenset({"id", "reason"}),
 }
 assert set(CONTROL_DATA_FIELDS) == set(CONTROL_EVENTS), "every control event needs a data allowlist"
+# These keys are required on the EVENT but deliberately absent from the REQUEST. The command
+# normalizers derive them from the folded run; accepting them from an agent would let it forge
+# a paid internal research attempt or a report's publication trigger.
+CONTROL_SERVER_DERIVED_FIELDS: dict[str, frozenset[str]] = {
+    EV_RESEARCH_COMPLETED: frozenset({"at_node", "served_manual", "trigger"}),
+    EV_REPORT_GENERATED: frozenset({"at_node", "trigger"}),
+}
 assert _INJECT_IMPORT_FIELDS <= CONTROL_DATA_FIELDS[EV_INJECT_NODE], (
     "the cross-run import fields must be accepted by inject_node's payload allowlist")
 
@@ -1778,6 +1972,8 @@ _CONTROL_NORMALIZERS: dict[str, Optional[Callable]] = {
     EV_FORK: _normalize_fork,
     EV_INJECT_NODE: _normalize_inject_node,
     EV_DEEP_RESEARCH: None,
+    EV_RESEARCH_COMPLETED: _normalize_research_completed,
+    EV_REPORT_GENERATED: _normalize_report_generated,
     EV_APPROVAL_GRANTED: _normalize_approval_granted,
     EV_SPEC_APPROVED: _normalize_spec_approved,
     EV_ANNOTATION: _normalize_annotation,
@@ -1819,6 +2015,8 @@ _CONTROL_PRECONDITIONS: dict[str, Optional[Callable]] = {
     EV_FORK: None,
     EV_INJECT_NODE: None,
     EV_DEEP_RESEARCH: None,
+    EV_RESEARCH_COMPLETED: None,
+    EV_REPORT_GENERATED: None,
     EV_APPROVAL_GRANTED: None,
     EV_SPEC_APPROVED: None,
     EV_ANNOTATION: None,
@@ -1861,6 +2059,8 @@ _CONTROL_DECISIONS: dict[str, Optional[Callable]] = {
     EV_FORK: None,
     EV_INJECT_NODE: None,
     EV_DEEP_RESEARCH: None,
+    EV_RESEARCH_COMPLETED: None,
+    EV_REPORT_GENERATED: None,
     EV_APPROVAL_GRANTED: _decide_approval_granted,
     EV_SPEC_APPROVED: _decide_spec_approved,
     EV_ANNOTATION: None,
@@ -1920,6 +2120,8 @@ _CONTROL_POLICIES: dict[str, tuple[EnginePolicy, str]] = {
     EV_FORK: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
     EV_INJECT_NODE: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
     EV_DEEP_RESEARCH: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
+    EV_RESEARCH_COMPLETED: (EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_REPORT_GENERATED: (EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_APPROVAL_GRANTED: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
     EV_SPEC_APPROVED: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
     EV_ANNOTATION: (EnginePolicy.NO_SPAWN, "folded_intent"),
@@ -1952,15 +2154,36 @@ CONTROL_SPECS: dict[str, ControlSpec] = {
 assert set(CONTROL_SPECS) == set(CONTROL_EVENTS), "every control event needs an explicit ControlSpec"
 
 
+def _external_mode_restriction(rd: Path, event_type: str, data: dict) -> None:
+    """Refuse intents that would call an internal role in an externally driven run."""
+    # The command service and legacy /control route share this boundary. An external run must
+    # never queue an intent whose engine fulfillment invokes its old Researcher/Developer loop.
+    # Read the run's snapshot, not the server's ambient config: one UI serves many run modes.
+    snapshot = Path(rd) / "config.snapshot.json"
+    if snapshot.is_file():
+        from looplab.core.config import read_config_snapshot
+        try:
+            external = read_config_snapshot(snapshot).external_harness
+        except (OSError, ValueError) as exc:
+            raise HTTPException(409, "cannot verify the run mode from its config snapshot") from exc
+        if external:
+            if event_type in (EV_FORK, EV_FORCE_ABLATE, EV_DEEP_RESEARCH):
+                raise HTTPException(409, "external harness owns this decision; submit a ready-made "
+                                    "inject_node with parent_id and code/files for a new candidate")
+            if event_type == EV_NODE_RESET and data.get("from_stage", "eval") != "eval":
+                raise HTTPException(409, "external harness supports node_reset from eval only; "
+                                    "submit a corrected ready-made inject_node for a new candidate")
+            if event_type == EV_INJECT_NODE and not (data.get("code") or data.get("files") or
+                                                      data.get("deleted") or
+                                                      (data.get("source_run") and
+                                                       data.get("source_node") is not None)):
+                raise HTTPException(400, "external harness requires code or files for inject_node")
+
 def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
     """Validate/normalize one control payload for both /control and /commands.
 
-    This is the old route's node-reset and cross-run-import logic extracted verbatim enough that the
-    compatibility endpoint and command service cannot drift into accepting different commands.
-
-    The shared preamble (known type, JSON object, allow-listed fields) and the shared tail (finite,
-    encodable, bounded JSON) are the parts EVERY event shares; everything between them is the
-    event's own `ControlSpec.normalize`.
+    The common preamble and tail serve every registered ControlSpec. External mode restrictions
+    apply before the event-specific normalizer and before any durable append.
     """
     spec = CONTROL_SPECS.get(event_type)
     if spec is None:
@@ -1974,6 +2197,7 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
     if unknown:
         raise HTTPException(
             400, f"{event_type} has unknown field(s): {', '.join(sorted(unknown))}")
+    _external_mode_restriction(rd, event_type, data)
 
     if spec.normalize is not None:
         data = spec.normalize(_ControlIntake(srv, rd, event_type, data))

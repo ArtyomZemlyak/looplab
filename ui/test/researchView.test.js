@@ -43,6 +43,16 @@ test('ResearchView compiles, and addedConcepts reports only the narrowing concep
   }
 })
 
+test('bulk collapse targets visible branches, not leaves that may gain children later', async () => {
+  const { branchKeys } = await loadView()
+  const rows = latticeRows([
+    q('root', ['distill']), q('child', ['distill', 'llm']), q('leaf', ['calibration']),
+  ])
+  assert.deepEqual([...branchKeys(rows)], ['root'])
+  assert.deepEqual([...branchKeys(rows.filter(row => row.id !== 'child'))], [],
+    'filtered-away children do not leave a control that cannot change the visible tree')
+})
+
 test('the ladder RENDERS: nesting, the added concept, the best, and the mixed-comparability mark', async () => {
   // Stronger than "it compiles". The rules are driven in `questionLattice.test.js`; what this adds
   // is that they SURVIVE the render — a number derived correctly and then dropped by the JSX is the
@@ -89,13 +99,24 @@ test('the ladder RENDERS: nesting, the added concept, the best, and the mixed-co
   }
 })
 
-test('before the opening memo the view says so, rather than reading as an empty board', async () => {
+test('before any question is registered the view shows an informative empty state', async () => {
   {
     const { default: ResearchView } = await loadView()
     const markup = renderToStaticMarkup(React.createElement(ResearchView, {
-      cards: [{ id: 'e1', card_kind: 'experiment' }], state: { nodes: {} }, renderCard: () => null,
+      cards: [
+        { id: 'e1', card_kind: 'experiment' },
+        { id: 'e2', card_kind: 'experiment', parent_card_id: 'question-outside-page' },
+      ], state: { nodes: {} },
+      renderCard: card => React.createElement('span', { key: card.id }, card.id),
+      onShowLanes: () => {}, onDiscuss: () => {},
     }))
-    assert.ok(markup.includes('no research question registered yet'))
+    assert.ok(markup.includes('No research question registered yet'))
+    assert.ok(markup.includes('Discuss a question in Assistant'))
+    assert.ok(markup.includes('View work items in Lanes'))
+    assert.ok(markup.includes('1 experiment not filed under a question'))
+    assert.ok(markup.includes('>e1<'), 'unfiled experiment remains inspectable in Research')
+    assert.ok(markup.includes('1 experiment whose question is not on this page'))
+    assert.ok(markup.includes('>e2<'), 'an off-page parent does not hide its experiment')
   }
 })
 

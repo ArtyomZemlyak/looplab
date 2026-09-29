@@ -10,7 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-133 routes on 119 paths; 10 deprecated; 25 with a declared response model.
+149 routes on 132 paths; 10 deprecated; 27 with a declared response model.
 
 ### `/api`
 
@@ -75,6 +75,8 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `POST` | `/api/cross-run/concept-split-clear` | Undo the active split while preserving the append-only history. | `ConceptSplitResponse` |  |
 | `POST` | `/api/cross-run/concept-steward` | Run a proposal-only taxonomy review; typed operator actions apply selected proposals. | `StewardProposalResponse` |  |
 | `GET` | `/api/cross-run/curation-log` | *Curation Log* (no docstring) | `CurationLogResponse` |  |
+| `GET` | `/api/cross-run/task-facets` | Read strict governed task facets and the revision needed to update them. | `TaskFacetsResponse` |  |
+| `POST` | `/api/cross-run/task-facets` | Record an agent-authored facet decision using the existing strict ledger. | `TaskFacetsSetResponse` |  |
 
 ### `/api/genesis`
 
@@ -178,6 +180,18 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `POST` | `/api/runs/{run_id}/deletions` | Delete one exact run generation through an operation-bound durable transaction. | — |  |
 | `GET` | `/api/runs/{run_id}/deletions/{operation_id}` | *Observe Run Deletion* (no docstring) | — |  |
 | `GET` | `/api/runs/{run_id}/events` | Stream canonical public state frames — a full `state` frame first, then `state_delta` | — |  |
+| `GET` | `/api/runs/{run_id}/harness-checkpoints` | Pending mandatory stage checks and live training/rank observations. | — |  |
+| `POST` | `/api/runs/{run_id}/harness-checkpoints` | Answer exactly one checkpoint; the engine applies the verdict before advancing. | — |  |
+| `GET` | `/api/runs/{run_id}/harness-contract` | Effective choices and enforced task constraints for this run incarnation. | — |  |
+| `POST` | `/api/runs/{run_id}/harness-decisions` | Record a reviewed choice for an enabled phase, bound to the submitted idea. | — |  |
+| `GET` | `/api/runs/{run_id}/harness-hypotheses` | Live pure-belief board and whether configured duplicate review is due. | — |  |
+| `POST` | `/api/runs/{run_id}/harness-hypotheses` | Record a duplicate review; a merge and its receipt append atomically. | — |  |
+| `GET` | `/api/runs/{run_id}/harness-progress` | Live external obligations, pending questions and paged decision histories. | — |  |
+| `POST` | `/api/runs/{run_id}/harness-reviews` | Record a configured end-of-run review, including a reason for no action. | — |  |
+| `GET` | `/api/runs/{run_id}/harness-selection` | Current selector ties and MCTS branches requiring an agent judgment. | — |  |
+| `POST` | `/api/runs/{run_id}/harness-selection/values` | Estimate remaining headroom for the complete live MCTS candidate batch. | — |  |
+| `POST` | `/api/runs/{run_id}/harness-selection/verify` | Score one complete live selector tie against its evidence digests. | — |  |
+| `POST` | `/api/runs/{run_id}/lessons` | Record an external agent's evidence-linked cross-run lesson idempotently. | — |  |
 | `GET` | `/api/runs/{run_id}/lifecycle` | Bounded identity/liveness probe used after a terminal SSE stream closes. | — |  |
 | `GET` | `/api/runs/{run_id}/log` | Raw event envelopes (for the activity feed + event/span explorer). `since` = exclusive | — | yes |
 | `GET` | `/api/runs/{run_id}/log-page` | Bounded timeline transport. Cursors survive append and fail closed across run reset. | — |  |
@@ -190,6 +204,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `GET` | `/api/runs/{run_id}/nodes/{nid}/logs` | Live training/eval logs for a node — the streamed stdout/stderr of its eval + setup | — |  |
 | `GET` | `/api/runs/{run_id}/nodes/{nid}/metrics` | Online metric SERIES a node's training logged — every scalar (loss, each recall@k, grad | — |  |
 | `GET` | `/api/runs/{run_id}/nodes/{nid}/trace` | The LIGHT trace tree for ONE node — the hot path for expanding a node's trace card. Reads | — |  |
+| `POST` | `/api/runs/{run_id}/novelty-preview` | Compare an idea with tried nodes using LoopLab's pure graded novelty rubric. | — |  |
 | `POST` | `/api/runs/{run_id}/project` | *Assign Run* (no docstring) | — |  |
 | `GET` | `/api/runs/{run_id}/prov` | W3C-PROV-style provenance of the search DAG AND of what the run claimed: each node's | — |  |
 | `POST` | `/api/runs/{run_id}/report_refresh` | Force a high-quality regeneration of the agent-authored run report NOW. Appends a | — |  |
@@ -198,6 +213,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `GET` | `/api/runs/{run_id}/reviews` | *List Reviews* (no docstring) | — |  |
 | `POST` | `/api/runs/{run_id}/reviews` | *Create Review* (no docstring) | — |  |
 | `DELETE` | `/api/runs/{run_id}/reviews/{link_id}` | *Revoke Review* (no docstring) | — |  |
+| `POST` | `/api/runs/{run_id}/skill-candidates` | Draft an auto-skill from a fresh supported lesson; promotion is server-derived. | — |  |
 | `GET` | `/api/runs/{run_id}/spans/{sid}` | Bounded, redacted I/O projection for one observation; raw diagnostics stay in spans.jsonl. | — |  |
 | `GET` | `/api/runs/{run_id}/state` | Return the bounded public run state. | `PublicRunStateResponse` |  |
 | `POST` | `/api/runs/{run_id}/suggest` | Turn the chat discussion (or a free-form instruction) into a CONCRETE experiment idea | — | yes |

@@ -11,7 +11,7 @@ import { useToast } from './useToast.js'
 import { getRunAccess } from './runMode.js'
 import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
 import { AttentionLauncher, openAttentionCenter, useAttentionIndicator } from './attentionIndicator.jsx'
-import { pendingApprovalTarget } from './runIndex.js'
+import { effectiveRunStatus, pendingApprovalTarget } from './runIndex.js'
 import { assistantErrorInfo, assistantPreview } from './assistantErrors.js'
 import { reconcilePendingPermissions } from './assistantPermission.js'
 import {
@@ -147,19 +147,23 @@ const normalizedFailureText = (value) => {
 const safeErrorNotice = (value) => assistantErrorInfo(`Assistant error: ${String(value || '')}`)?.title || 'Assistant request failed'
 
 
-// Popular one-tap prompts surfaced in the full view (and side view when empty). Keep short + generic.
-const HINTS = [
-  { label: 'Summarize my runs', text: 'Summarize my runs: best results, active work, and failures.' },
-  { label: 'Start a new run', text: '/new ' },
-  { label: 'Explain the best result', text: 'Explain the best experiment and why it works.' },
-  { label: "What's next?", text: 'Propose the highest-value next experiment and why.' },
+// Empty-chat prompts must match the destination of the composer. A run-bound draft should ask about
+// that run, while the Runs overview may ask about the portfolio or begin a new run.
+const NEW_RUN_HINT = 'Start a new run'
+const OVERVIEW_HINTS = [
+  'Summarize my runs', NEW_RUN_HINT, 'Explain my best result', 'What should I try next?',
 ]
+const RUN_HINTS = [
+  'Summarize this run', 'Explain its best result',
+  'Review open work in this run', 'Choose the next experiment',
+]
+const STALLED_HINT = 'Why did this run stop?'
 
-const ASSISTANT_OVERLAY_MAX_PX = 1439
-const assistantMaxWidth = compact => Math.max(320, window.innerWidth - (compact ? 120 : 880))
+const ASSISTANT_OVERLAY_MAX_PX = 1199
+const assistantMaxWidth = compact => Math.max(320, window.innerWidth - (compact ? 120 : 620))
 const clampAssistantWidth = (value, compact = window.innerWidth <= ASSISTANT_OVERLAY_MAX_PX) => {
   const max = assistantMaxWidth(compact)
-  return Math.min(Math.max(Number(value) || 440, 320), max)
+  return Math.min(Math.max(Number(value) || Math.round(window.innerWidth * .52), 320), max)
 }
 const assistantRevertKey = (sessionId, change) => {
   const path = typeof change?.abs_path === 'string' ? change.abs_path : ''
@@ -272,7 +276,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const [preview, setPreview] = useState('')      // beginning of the latest reply (collapsed bar)
   const [hasNew, setHasNew] = useState(false)     // highlight the bar until a view is opened
   const [replyAnnouncement, setReplyAnnouncement] = useState('')
-  const [view, setView] = useState('bar')         // 'bar' | 'side' | 'full'
+  const [view, setView] = useState(() => !hidden && window.innerWidth > ASSISTANT_OVERLAY_MAX_PX
+    && storageGet('ll.asstCollapsed') !== 'true' ? 'side' : 'bar')
+  const [newRunDraft, setNewRunDraft] = useState(false)
   const viewRef = useRef(view)
   viewRef.current = view
   const setAssistantView = React.useCallback(update => {
@@ -368,7 +374,13 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const [shareCopyFallbacks, setShareCopyFallbacks] = useState({})
   const [shareBusySid, setShareBusySid] = useState(null)
   const [shareAckNotice, setShareAckNotice] = useState(null)
-  const [sideW, setSideW] = useState(() => clampAssistantWidth(storageGet('ll.asstW', 440)))
+  const preferredSideWRef = useRef(null)
+  const [sideW, setSideW] = useState(() => {
+    const saved = storageGet('ll.asstW')
+    // Numeric values came from automatic persistence. Only an explicit resize pins the width.
+    preferredSideWRef.current = saved?.startsWith('user:') ? Number(saved.slice(5)) : null
+    return clampAssistantWidth(preferredSideWRef.current)
+  })
   const autoRevealedPendingIdsRef = useRef(new Set())
 
   // A permission card cannot render in the collapsed composer bar. Reveal the side thread as soon as
@@ -636,16 +648,15 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       if (replyAnnouncementTimerRef.current) clearTimeout(replyAnnouncementTimerRef.current)
     }
   }, [])
-  useEffect(() => { storageSet('ll.asstW', sideW) }, [sideW])
   // VS Code-style docking: when the side panel is open, reserve its width on the right so the MAIN
   // view is pushed aside (shrinks) rather than overlaid. The panel is position:fixed; this frees the
   // exact space it occupies. The width lives in a CSS var so a drag-resize reflows the main view live.
   useEffect(() => {
     const b = document.body
-    if (view === 'side') { b.classList.add('asst-side-open'); b.style.setProperty('--asst-side-w', sideW + 'px') }
+    if (!hidden && view === 'side') { b.classList.add('asst-side-open'); b.style.setProperty('--asst-side-w', sideW + 'px') }
     else b.classList.remove('asst-side-open')
     return () => { b.classList.remove('asst-side-open') }
-  }, [view, sideW])
+  }, [hidden, view, sideW])
 
   useEffect(() => { assistantCommands().then(r => setCommands(r.commands || [])).catch(() => {}) }, [])
   const feedOpen = view === 'side' || view === 'full'
@@ -759,7 +770,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     setAssistantView(next); setHasNew(false)
     if (next === 'side') requestAnimationFrame(() => inputRef.current?.focus({ preventScroll: true }))
   }
-  const openSide = () => openCommandView('side')   // openable any time (even empty)
+  const openSide = () => { storageSet('ll.asstCollapsed', 'false'); openCommandView('side') }
   const openFull = () => openCommandView('full')
   useEffect(() => {
     if (view !== 'full' || !sid) return
@@ -810,6 +821,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     // Folding a reply the user was already reading may reveal its preview, but it is not a new reply.
     setHasNew(false)
     if (commandBusy || directFailure) commandFocusRequestedRef.current = true
+    storageSet('ll.asstCollapsed', 'true')
     setAssistantView('bar')
     requestAnimationFrame(() => document.querySelector(returnSelector)?.focus())
   }
@@ -877,11 +889,16 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // ── resizable side panel (drag its left edge) ──
   const resizeCleanupRef = useRef(null)
   const maxSideWidth = () => assistantMaxWidth(compactAssistant)
+  const setPreferredSideW = width => {
+    preferredSideWRef.current = width
+    storageSet('ll.asstW', `user:${width}`)
+    setSideW(width)
+  }
   const startResize = (e) => {
     if (e.button != null && e.button !== 0) return
     e.preventDefault()
     const x0 = e.clientX, w0 = sideW
-    const onMove = (ev) => setSideW(Math.min(Math.max(w0 - (ev.clientX - x0), 320), maxSideWidth()))
+    const onMove = (ev) => setPreferredSideW(Math.min(Math.max(w0 - (ev.clientX - x0), 320), maxSideWidth()))
     const cleanup = () => {
       window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', cleanup)
       window.removeEventListener('pointercancel', cleanup)
@@ -900,11 +917,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     else if (event.key === 'Home') next = 320
     else if (event.key === 'End') next = maxSideWidth()
     if (next == null) return
-    event.preventDefault(); setSideW(Math.min(Math.max(next, 320), maxSideWidth()))
+    event.preventDefault(); setPreferredSideW(Math.min(Math.max(next, 320), maxSideWidth()))
   }
   useEffect(() => () => resizeCleanupRef.current?.(), [])
   useEffect(() => {
-    const clamp = () => setSideW(width => clampAssistantWidth(width, compactAssistant))
+    const clamp = () => setSideW(clampAssistantWidth(preferredSideWRef.current, compactAssistant))
     clamp()
     window.addEventListener('resize', clamp)
     return () => window.removeEventListener('resize', clamp)
@@ -1002,6 +1019,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       if (abortRef.current) { try { abortRef.current.abort() } catch { /* gone */ } abortRef.current = null }
       if (runningRef.current) { runningRef.current = false; setBusy(false); setPending([]) }
       activateComposer(id, { seedMode: s.meta?.mode })
+      setNewRunDraft(false)
       sidRef.current = id; setSid(id); setMsgs([]); setPreview('')
       setHasNew(false)
       storageSet('ll.asstSid', id)
@@ -1430,6 +1448,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     // the departing turn's finally is sid-guarded — reset the shared flags here (see openSession)
     runningRef.current = false; setBusy(false); setPending([])
     sidRef.current = null; setSid(null); setMsgs([])
+    setNewRunDraft(false)
     setPreview(''); setHasNew(false)
     activateComposer(NEW_CHAT_COMPOSER_KEY, { clear: true })
     storageRemove('ll.asstSid')
@@ -2677,7 +2696,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   })
 
   const currentComposerRunKey = composerRunKey(runId)
-  const draftRunMismatch = draftRunScope != null
+  // A goal entered through New run is intentionally independent of whichever run the user opens
+  // while drafting it. Its send path creates a launch card rather than acting on that run.
+  const draftRunMismatch = !newRunDraft && draftRunScope != null
     && draftRunScope !== currentComposerRunKey && composerUsesRun(input, files, pendingFileReads)
   const draftRunSource = draftRunScope ? `run “${draftRunScope}”` : 'the Runs overview'
   const draftRunDestination = runId ? `run “${runId}”` : 'the Runs overview'
@@ -2752,33 +2773,51 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       modeLabel: MODES.find(candidate => candidate.id === effectiveMode)?.label || effectiveMode,
       ...assistantDirectPresentation(command.name, command.arg, directRunId),
     }
-    if (command.name === 'approve') {
-      const approvalRead = deadlineRequest(
+    const pausing = command.name === 'stop' || command.name === 'pause'
+    if (command.name === 'approve' || pausing || command.name === 'finalize' || command.name === 'abort') {
+      const stateRead = deadlineRequest(
         signal => get(runApiPath(directRunId, '/state'), { signal }), 8000)
       const checking = {
-        ...confirmationBase, phase: 'checking', requestController: approvalRead.controller,
+        ...confirmationBase, phase: 'checking', requestController: stateRead.controller,
       }
       revealDirectConfirmation(checking)
       try {
-        const payload = await approvalRead.promise
+        const payload = await stateRead.promise
         if (directConfirmRef.current !== checking) return
-        const fetchedGeneration = normalizeRunGeneration(payload?.generation)
-        const target = pendingApprovalTarget(payload?.state)
-        if (fetchedGeneration !== expectedGeneration || !target
-            || target.nodeId !== command.arg || !Number.isSafeInteger(target.nodeGeneration)) {
+        if (normalizeRunGeneration(payload?.generation) !== expectedGeneration
+            || !payload?.state || typeof payload.state !== 'object') {
+          throw new Error('run state changed')
+        }
+        const target = command.name === 'approve' ? pendingApprovalTarget(payload.state) : null
+        if (command.name === 'approve' && (!target || target.nodeId !== command.arg
+            || !Number.isSafeInteger(target.nodeGeneration))) {
           throw new Error('approval target changed')
         }
-        const pendingConfirmation = {
-          ...confirmationBase,
-          phase: 'ready',
-          nodeGeneration: target.nodeGeneration,
+        if (command.name !== 'approve' && payload.state.finished === true) {
+          clearDirectConfirmation({ focus: true })
+          flash('Run already finished · nothing to pause or finalize')
+          return
         }
-        directConfirmRef.current = pendingConfirmation
-        setDirectConfirm(pendingConfirmation)
+        if (pausing && payload.state.paused === true) {
+          clearDirectConfirmation({ focus: true })
+          flash('Run already paused · nothing to pause')
+          return
+        }
+        if (pausing && payload.state.engine_running === false) {
+          clearDirectConfirmation({ focus: true })
+          flash('Run engine stopped · inspect the run before pausing')
+          return
+        }
+        const ready = { ...confirmationBase, phase: 'ready',
+          ...(target ? { nodeGeneration: target.nodeGeneration } : {}) }
+        directConfirmRef.current = ready
+        setDirectConfirm(ready)
       } catch {
         if (directConfirmRef.current !== checking) return
         clearDirectConfirmation({ focus: true })
-        flash('Nothing sent · the exact approval target could not be verified; refresh and inspect Events')
+        flash(command.name === 'approve'
+          ? 'Nothing sent · the exact approval target could not be verified; refresh and inspect Events'
+          : 'Nothing sent · run state could not be verified; refresh and inspect Events')
       }
       return
     }
@@ -2854,7 +2893,14 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     const mNew = /^\/(new|genesis|run)\b\s*([\s\S]*)$/i.exec(t)
     if (mNew) {
       const goal = mNew[2].trim()
+      setNewRunDraft(false)
       requestNewRun(goal, { clearComposer: true })
+      return
+    }
+    if (newRunDraft && t && !t.startsWith('/')) {
+      requestNewRun(t, { clearComposer: true }).then(() => {
+        if (!composerDraftRef.current.input) setNewRunDraft(false)
+      })
       return
     }
     const direct = parseDirect(t)
@@ -2876,10 +2922,13 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       }
       if (busy || commandBusy || historical) { flash(historical ? readOnlyAction : commandBusy ? 'A run command is pending' : 'Assistant is busy'); return }
       const goal = String(event.detail?.goal || '').trim()
-      const command = goal ? `/new ${goal}` : '/new '
       const existing = input.trim()
-      if (!existing || existing === command.trim()) setInput(command)
-      else flash('Draft preserved — choose Chat or clear the composer before drafting a new run')
+      if (!existing) {
+        setNewRunDraft(true)
+        if (goal) setInput(goal)
+      } else if (!newRunDraft || (goal && existing !== goal)) {
+        flash('Draft preserved — choose Chat or clear the composer before drafting a new run')
+      }
       setAssistantView(current => current === 'bar' ? 'side' : current)
       setHasNew(false)
       requestAnimationFrame(() => inputRef.current?.focus())
@@ -2887,7 +2936,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     window.addEventListener('ll:new-run', onNewRun)
     onReady?.()
     return () => window.removeEventListener('ll:new-run', onNewRun)
-  }, [busy, commandBusy, historical, readOnlyAction, input, onReady])
+  }, [busy, commandBusy, historical, readOnlyAction, input, newRunDraft, onReady])
 
   useEffect(() => {
     if (!directConfirm) return undefined
@@ -3028,9 +3077,27 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         <OpIcon name="sliders" size={10} /> {ktok(ctxUsage.last)} ctx
         {ctxUsage.compacted && <span className="muted"> ↓{ktok(ctxUsage.peak)}</span>}</span>
     : null
+  const selectedRun = runId ? runsById[runId] : null
+  const selectedRunStatus = selectedRun ? effectiveRunStatus(selectedRun) : ''
+  const draftingNewRun = newRunDraft || /^\/(?:new|genesis|run)\b/i.test(input.trim())
+  const welcomeHints = newRunDraft ? [] : runId
+    ? selectedRunStatus === 'stalled'
+      ? [RUN_HINTS[0], STALLED_HINT, RUN_HINTS[1], RUN_HINTS[3]] : RUN_HINTS
+    : OVERVIEW_HINTS
+  const proposalContext = !historical && draftingNewRun
+  const runContextBanner = (runId || proposalContext) && <div className={`asst-run-context${!proposalContext && selectedRunStatus === 'stalled' ? ' stalled' : ''}`}>
+    <span className="asst-run-context-label">{proposalContext ? 'Drafting' : historical ? 'Viewing run' : 'Next message to run'}</span>
+    <strong title={proposalContext ? 'New run proposal' : selectedRun?.goal || runId}>
+      {proposalContext ? 'New run proposal' : selectedRun?.label || selectedRun?.run_id || runId}
+    </strong>
+    {!proposalContext && <span className="asst-run-context-state">{selectedRunStatus || 'Loading'}</span>}
+    {!proposalContext && selectedRunStatus === 'stalled' && <span className="asst-run-context-help">Engine stopped · use Resume run in Lineage.</span>}
+  </div>
 
   const slashMatch = /^\/(\w*)$/.exec(input)
-  const draftingNewRun = /^\/(?:new|genesis|run)\b/i.test(input.trim())
+  const nextMessageTarget = draftingNewRun ? 'New run proposal'
+    : runId ? (selectedRun?.label || selectedRun?.run_id || runId) : 'No run attached'
+  const nextMessageRefs = !draftingNewRun && runId ? refNodes(input) : []
   const directModeDecision = assistantDirectDecision(mode)
   const directModeHint = directModeDecision === 'deny'
     ? 'run control · unavailable in Plan'
@@ -3367,17 +3434,22 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     return <>
     {renderWatchStrip()}
     {msgs.length === 0 && <div className="asst-empty">
-      <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
-        Ask anything — inspect the code, read your runs, steer or create runs{runId ? ` · run “${runId}” is open` : ''}.
-      </div>
-      {!input.trim() && <div className="asst-hints">
-        {HINTS.map(h => <button key={h.label} className="asst-hint"
-          disabled={composerEditingPaused}
+      <div className="asst-empty-eyebrow">LOOPLAB ASSISTANT</div>
+      <h2>{newRunDraft ? 'What should we investigate?' : runId ? 'Work through this run together' : 'What would you like to explore?'}</h2>
+      <p>{newRunDraft
+        ? 'Describe the goal. Review the launch card before starting.'
+        : runId
+          ? 'Ask about results or the next experiment.'
+          : 'Describe a goal, ask about runs, or plan an experiment.'}</p>
+      {!input.trim() && welcomeHints.length > 0 && <div className="asst-hints">
+        {welcomeHints.map(h => <button key={h} className="asst-hint"
+          disabled={historical || composerEditingPaused}
           onClick={() => {
             if (openSessionPendingRef.current) return
-            setInput(current => current.trim() ? current : h.text)
+            setNewRunDraft(h === NEW_RUN_HINT)
+            if (h !== NEW_RUN_HINT) setInput(current => current.trim() ? current : h)
             inputRef.current?.focus()
-          }}>{h.label}</button>)}
+          }}>{h}</button>)}
       </div>}
     </div>}
     {msgs.map((m, i) => <React.Fragment key={i}>
@@ -3459,7 +3531,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
 
   // mode selector row — placed BELOW the input in the side + full composers.
   const modeRow = <div className="asst-moderow">
-    <div className="asst-modes">
+    <div className="asst-modes" role="group" aria-label="Mode">
       {MODES.map(x => <button key={x.id} aria-pressed={x.id === mode}
         className={'asst-mode' + (x.id === mode ? ' on' : '')}
         disabled={historical || composerEditingPaused} title={historical ? readOnlyShort
@@ -3492,6 +3564,17 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // A full composer (textarea + attach + send/stop + mode row below) — reused by side + full views.
   const composer = (placeholder) => <div
     className={'chat-in asst-in' + (directConfirm ? ' direct-confirming' : '')}>
+    <div className="asst-next-context" role="note" aria-label="Assistant conversation and message context">
+      <span className="asst-next-chat" title={currentSession?.title || 'New chat'}>
+        Chat <strong>{currentSession?.title || 'New chat'}</strong>
+      </span>
+      <span className="asst-next-target" title={nextMessageTarget}>
+        {historical ? 'Viewing' : 'Next message to'} <strong>{nextMessageTarget}</strong>
+      </span>
+      {nextMessageRefs.length > 0 && <span className="asst-next-refs">
+        {nextMessageRefs.map(id => <span key={id}>#{id}</span>)}
+      </span>}
+    </div>
     {historical && <div className="assistant-history-lock">{runLoadingLocked
       ? 'Verifying this run · Assistant actions are paused.'
       : runUnavailableLocked
@@ -3505,7 +3588,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     {directConfirm?.phase === 'checking' && <div className="assistant-command-pending">
       <span ref={directConfirmStatusRef} tabIndex={-1} role="status"
         aria-live="polite" aria-atomic="true">
-        Verifying the exact approval target · nothing sent…
+        {directConfirm.direct.name === 'approve'
+          ? 'Verifying the exact approval target · nothing sent…'
+          : 'Checking current run state · nothing sent…'}
       </span>
       <button ref={directConfirmCancelRef} type="button" className="btn sm ghost"
         onClick={cancelDirectConfirmation}>Cancel · keep draft</button>
@@ -3616,7 +3701,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         placeholder={historical ? readOnlyShort : shareUnknown
           ? 'Public-link status unknown · keep drafting; Send will verify it' : shareBusy
             ? 'Finishing public-link action…' : forkingCurrentSession
-              ? 'Forking this chat…' : placeholder} />
+              ? 'Forking this chat…' : newRunDraft ? 'Describe the goal for your new run…' : placeholder} />
       {busy
         ? <button className="btn sm" aria-label="Stop Assistant" title="stop" onClick={stop}>■</button>
         : <button className="btn sm primary"
@@ -3631,8 +3716,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
                 : pendingFileReads > 0 ? 'Reading…' : 'Send'}</button>}
     </div>
     {draftingNewRun && <div id="assistant-new-run-hint" className="asst-new-run-hint" role="note">
-      Describe the goal after /new, then Send. Send uses the configured model to draft a launch card.
-      Nothing starts until you review it and press Start run.
+      <span>{newRunDraft
+        ? 'New run · review its launch card to start.'
+        : 'Describe the goal after /new. Nothing starts until you review the launch card and press Start run.'}</span>
+      {newRunDraft && <button type="button" className="btn sm ghost" onClick={() => setNewRunDraft(false)}>Back to chat</button>}
     </div>}
     {modeRow}
   </div>
@@ -3695,8 +3782,13 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
 
   // ── bottom bar — ONLY in bar view (moves into the side panel otherwise) ──
   const barView = () => <div className={'cmdbar-wrap'}><div className={'cmdbar-dock' + (sessionOpening || retryChecking || turnStarting || busy || commandBusy || forkingCurrentSession ? ' thinking' : '') + (hasNew ? ' fresh' : '')}>
-      <button className="cmdbar-ic" aria-label="Open full Assistant" title="open the full assistant" onClick={openFull}>✦</button>
+      <button className="cmdbar-ic" aria-label="Open full Assistant" title="Open the full Assistant conversation" onClick={openFull}>
+        <OpIcon name="chat" size={14} /> Assistant
+      </button>
       {launchRecoveryButton}
+      <span className="cmdbar-target" title={`${draftingNewRun ? 'Drafting' : 'Next message to'} ${nextMessageTarget}`}>
+        {draftingNewRun ? 'New run' : runId ? `Run · ${nextMessageTarget}` : 'No run'}
+      </span>
       <button type="button" className={`cmdbar-mode mode-${mode}`}
         aria-label={`Assistant mode for the next message: ${activeMode.label}. ${activeMode.hint}. Open Assistant to inspect or change.`}
         title={`${activeMode.label} · ${activeMode.hint}`} onClick={openSide}>
@@ -3870,10 +3962,18 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         <button className="btn sm ghost" title="expand to the full view" onClick={openFull}>⤢ full</button>
         {foldToBarButton('btn sm ghost', 'collapse to the bar')}
       </div>
+      <div className="asst-side-conversation" role="group" aria-label="Current Assistant chat">
+        <span>Chat</span>
+        <strong title={currentSession?.title || (sid ? 'Loading chat…' : 'New chat')}>
+          {currentSession?.title || (sid ? 'Loading chat…' : 'New chat')}
+        </strong>
+        <button type="button" className="btn sm ghost" onClick={openFull}>All chats</button>
+      </div>
+      {runContextBanner}
       <div className="asst-drawer-feed" ref={feedRef} role="log" aria-label="Assistant transcript"
         aria-live="off" aria-busy={busy} tabIndex={0}
         onScroll={onFeedScroll}>{renderThread()}</div>
-      {composer('Message the assistant…  (/ for commands · Enter to send)')}
+      {composer('Ask Assistant… (Enter sends · Shift+Enter new line)')}
       {visibleToast && <div className="cmdbar-toast side" role="status" aria-live="polite" aria-atomic="true">{visibleToast}</div>}
     </aside>
   </>
@@ -4024,10 +4124,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
             Open snapshot
           </a>
         </div>}
+        {runContextBanner}
         <div className="asst-feed" ref={feedRef} role="log" aria-label="Assistant transcript"
           aria-live="off" aria-busy={busy} tabIndex={0}
           onScroll={onFeedScroll}>{renderThread()}</div>
-        {composer('Message the assistant…  (/ for commands · Enter to send)')}
+        {composer('Ask Assistant… (Enter sends · Shift+Enter new line)')}
         {visibleToast && <div className="cmdbar-toast side" role="status" aria-live="polite" aria-atomic="true">{visibleToast}</div>}
       </div>
     </div>

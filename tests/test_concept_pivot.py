@@ -48,6 +48,25 @@ def test_snapshot_is_none_for_task_without_skeleton(tmp_path):
     assert Engine._concept_coverage_snapshot(None, st) is None   # no curated skeleton -> no-op
 
 
+def test_external_authored_tags_keep_coverage_live_without_skeleton(tmp_path):
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append("run_started", {"run_id": "t", "task_id": "unlisted-repository",
+                                 "goal": "g", "direction": "max"})
+    store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft", "code": "print(1)",
+        "idea": {"operator": "draft", "concepts": ["architecture/adapter"]}})
+    store.append("node_evaluated", {"node_id": 0, "metric": 0.8})
+    engine = SimpleNamespace(external_harness=True, _reflect_client=lambda: None)
+    snapshot = Engine._concept_coverage_snapshot(engine, fold(store.read_all()))
+    assert snapshot is not None
+    assert snapshot["tag_mode"] == "external_authored"
+    assert snapshot["experiments"] == 1
+    host = _snap_engine(store)
+    host._concept_coverage_snapshot = lambda state: Engine._concept_coverage_snapshot(engine, state)
+    state = Engine._maybe_snapshot_concept_coverage(host, fold(store.read_all()))
+    assert state.concept_coverage_snapshots[0]["tag_mode"] == "external_authored"
+
+
 # The snapshot feeds a persisted event, so it must be byte-identical across PYTHONHASHSEED values — a
 # same-process f(x)==f(x) can't catch a set/dict iteration order leaking into a list/string. Run the pure
 # snapshot in two subprocesses with different hash seeds and compare the serialized result.

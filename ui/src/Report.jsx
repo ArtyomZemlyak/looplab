@@ -107,7 +107,7 @@ function AgentNarrative({ rep, coverage, generation, snapshotSeq }) {
   return <section className={`agent-report ${coverage.status}`} role="note"
     aria-labelledby="agent-report-heading">
     <div className="agent-report-head">
-      <h2 id="agent-report-heading">Agent narrative</h2>
+      <h2 id="agent-report-heading" tabIndex={-1}>Agent narrative</h2>
       <span className="pill">advisory · not deterministic</span>
     </div>
     <div className="report-provenance" aria-label="Agent narrative publication provenance">
@@ -139,6 +139,7 @@ function ChampionCard({ best, state }) {
   if (!best) return null
   const m = best.confirmed_mean ?? best.metric
   const direction = nodeTheme(best, state)
+  const params = Object.entries(best.idea?.params || {})
   // The champion card is the report's own statement of the result, and it printed the number bare —
   // the fifth surface of the salvage/subject vocabulary, and the one where the number IS the claim.
   // Same call, same label, same sentence as the Metrics tab, the Pareto front and the cross-run
@@ -163,8 +164,13 @@ function ChampionCard({ best, state }) {
           : <span className="muted"> (single-seed)</span>}
           {objectiveCaveated && <span className="warn" title={objectiveSourceHelp(objective)}>
             {' · '}{OBJECTIVE_SOURCE_LABEL[objective.channel]}</span>}</div>
-        <div className="k">params</div><div className="v">{Object.keys(best.idea?.params || {}).length
-          ? Object.entries(best.idea.params).map(([k, val]) => `${k}=${fmt(val)}`).join(', ') : '—'}</div>
+        <div className="k">params</div><div className="v">{params.length
+          ? <details className="champion-params">
+              <summary>{params.length} parameters · <span className="champion-params-show">show values</span><span className="champion-params-hide">hide values</span></summary>
+              <dl className="champion-params-list">{params.map(([key, value]) => <React.Fragment key={key}>
+                <dt>{key}</dt><dd>{fmt(value)}</dd>
+              </React.Fragment>)}</dl>
+            </details> : '—'}</div>
         {(best.parent_ids || []).length > 0 && <><div className="k">lineage</div><div className="v">{best.parent_ids.map(p => '#' + p).join(' → ')}</div></>}
         <div className="k">feasible</div><div className="v">{best.feasible === true ? 'yes' : best.feasible === false ? 'no — constraint violated' : 'unknown — not established'}</div>
       </div>
@@ -219,14 +225,7 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
   })
   const [bestCodeNonce, setBestCodeNonce] = useState(0)
   const bestCodeRequestRef = useRef(null)
-  const [openMemo, setOpenMemo] = useState(memos.length ? memos[0].sourceIndex : null)
-  const newestMemoIndex = memos[0]?.sourceIndex ?? null
-  const seenNewestMemo = useRef(newestMemoIndex)
-  useEffect(() => {
-    if (newestMemoIndex === seenNewestMemo.current) return
-    seenNewestMemo.current = newestMemoIndex
-    setOpenMemo(newestMemoIndex)
-  }, [newestMemoIndex])
+  const [openMemo, setOpenMemo] = useState(null)
   const [refreshing, setRefreshing] = useState(false)
   const [refreshError, setRefreshError] = useState('')
   const [refreshRetryAllowed, setRefreshRetryAllowed] = useState(true)
@@ -487,11 +486,25 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
   const impr = s => s.delta == null || (state.direction === 'min' ? s.delta < 0 : s.delta > 0)
   const exportContext = { generation: expectedGeneration, snapshotSeq: observedSeq }
   const modelCard = () => JSON.stringify(buildModelCard({ ...state, report: rep }, best, exportContext), null, 2)
+  const reportSections = [
+    ['report-section-summary', 'Summary'],
+    best && ['report-section-champion', 'Champion'],
+    a.steps.length > 0 && ['report-section-trajectory', 'Trajectory'],
+    (memos.length || imp.length) && ['report-section-learnings', 'Learnings'],
+    ['report-section-failures', 'Failures'],
+    best && ['report-section-solution', 'Solution'],
+    rep && ['agent-report-heading', 'Agent narrative'],
+  ].filter(Boolean)
+  const jumpToSection = id => {
+    const heading = document.getElementById(id)
+    heading?.scrollIntoView({ block: 'start' })
+    heading?.focus({ preventScroll: true })
+  }
 
   return (
     <div className="report-view" aria-busy={refreshing || undefined}>
-      <h2 className="report-title">{state.goal || state.task_id}</h2>
-      <div className="report-sub muted">{state.run_id} · {state.direction} · {state.phase || (state.finished ? 'finished' : 'running')}{state.stop_reason ? ` (${state.stop_reason})` : ''}
+      <h2 id="report-section-summary" tabIndex={-1} className="report-title">{state.label || state.run_id || state.task_id}</h2>
+      <div className="report-sub muted">{state.label && state.label !== state.run_id ? `${state.run_id} · ` : ''}{state.direction} · {state.phase || (state.finished ? 'finished' : 'running')}{state.stop_reason ? ` (${state.stop_reason})` : ''}
         {' · '}{nodeCount} nodes ({a.nEval} evaluated, {failed.length} failed)
         {state.llm_cost && ` · ${fmtInt(state.llm_cost.total_tokens)} tokens · ${fmtCost(state.llm_cost)}`}</div>
 
@@ -513,6 +526,11 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
         <button className="btn sm" onClick={() => dl(`${state.run_id}_report.md`, toMarkdown({ ...state, report: rep }, best, exportContext), 'text/markdown')}><OpIcon name="download" size={12} /> Markdown</button>
         {best && evidenceAvailable && <button className="btn sm" disabled={!bestCode?.code} onClick={() => dl(`solution_node${best.id}.py`, bestCode.code, 'text/x-python')}><OpIcon name="download" size={12} /> Solution</button>}
         <button className="btn sm" onClick={() => dl(`${state.run_id}_model_card.json`, modelCard(), 'application/json')}><OpIcon name="download" size={12} /> Model card</button>
+        <nav className="report-sections" aria-label="Report sections">
+          <span className="report-sections-label">Jump to</span>
+          {reportSections.map(([id, label]) => <button type="button" key={id}
+            onClick={() => jumpToSection(id)}>{label}</button>)}
+        </nav>
       </div>
       {!readOnly && <div id="paid-report-refresh-status" className="report-inline-state paid"
         role="status" aria-live="polite" aria-atomic="true">
@@ -533,15 +551,15 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
           : 'The report will add a champion, trajectory, and reproducible solution after the first successful evaluation.'}</p>
       </div>}
 
-      {best && <><h2 className="section-h">Champion — the answer</h2>
+      {best && <><h2 id="report-section-champion" tabIndex={-1} className="section-h">Champion — the answer</h2>
         <ChampionCard best={best} state={state} /></>}
 
       {a.steps.length > 0 && <>
-        <h2 className="section-h">{a.steps.length > 1 ? 'How the metric got better' : 'Metric baseline'}</h2>
+        <h2 id="report-section-trajectory" tabIndex={-1} className="section-h">{a.steps.length > 1 ? 'How the metric got better' : 'Metric baseline'}</h2>
         <Trajectory nodes={Object.values(state.nodes)} direction={state.direction} state={state}
           steps={a.steps} onPick={onPickNode} />
         <ImprovementWaterfall steps={a.steps} direction={state.direction} />
-        <DataTable caption="Metric trajectory steps" card={false}><table className="tbl"><thead><tr><th>#</th><th>node</th><th>operator</th><th>metric</th><th>Δ</th><th>what changed</th></tr></thead><tbody>
+        <DataTable caption="Metric trajectory steps" card={false}><table className="tbl report-steps-table"><thead><tr><th>#</th><th>node</th><th>operator</th><th>metric</th><th>Δ</th><th>what changed</th></tr></thead><tbody>
           {a.steps.map((s, i) => <tr key={s.id}>
             <td>{i + 1}</td><td>#{s.id}</td><td><span className="report-step-kind" aria-hidden="true">
               {s.operator || 'unknown operator'}
@@ -549,16 +567,19 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
             </span><span className="sr-only">{reportStepIdentity(s.operator, s.theme)}</span></td>
             <td>{fmt(s.to)}</td>
             <td className={`report-delta ${s.delta == null ? 'baseline' : (impr(s) ? 'improved' : 'regressed')}`}>{s.delta == null ? 'baseline' : fmt(s.delta)}</td>
-            <td className="muted">{paramDiffLabel(s.diff)}</td></tr>)}
+            <td className="muted">{s.diff.length > 2
+              ? <details className="report-step-changes"><summary>{s.diff.length} parameter changes</summary>
+                  <span>{paramDiffLabel(s.diff)}</span></details>
+              : paramDiffLabel(s.diff)}</td></tr>)}
         </tbody></table></DataTable>
         {a.steps.length > 1 && <div className="muted">Total improvement <b>{fmt(a.totalGain)}</b> over {a.steps.length} steps (baseline {fmt(a.firstBest)} → best {fmt(a.finalBest)}).</div>}
       </>}
 
       {(memos.length || imp.length) ? <>
-        <h2 className="section-h">What we learned</h2>
+        <h2 id="report-section-learnings" tabIndex={-1} className="section-h">What we learned</h2>
         {imp.length > 0 && <>
-          <div className="muted" style={{ marginTop: 6 }}>which knobs mattered (|correlation| with the metric)</div>
-          <DataTable caption="Report hyperparameter importance" card={false}><table className="tbl"><thead><tr><th>param</th><th>importance</th><th>r</th><th>n</th></tr></thead><tbody>
+          <div className="muted" style={{ marginTop: 6 }}>Exploratory correlation with the metric. Small n is fragile; correlation does not establish cause.</div>
+          <DataTable caption="Report hyperparameter correlations" card={false}><table className="tbl"><thead><tr><th>param</th><th>|r|</th><th>r</th><th>n</th></tr></thead><tbody>
             {/* `row.r >= 0` is TRUE for null, so an unmeasurable correlation used to sign its own
                 absence as "+—". A param no node varied has nothing to report here. */}
             {imp.map(row => <tr key={row.k}><td>{row.k}</td><td>{fmt(row.imp, 3)}</td>
@@ -575,7 +596,7 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
         </div>}
       </> : null}
 
-      <h2 className="section-h">What didn't work</h2>
+      <h2 id="report-section-failures" tabIndex={-1} className="section-h">What didn't work</h2>
       <div className="cardgrid" style={{ marginBottom: 10 }}>
         {Object.entries(a.failures).map(([r, ns]) => <div key={r} className="stat"><div className="n">{ns.length}</div><div className="l">failed · {r}</div></div>)}
         {a.regressions.length > 0 && <div className="stat"><div className="n">{a.regressions.length}</div><div className="l">regressions</div></div>}
@@ -583,7 +604,7 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
         {!Object.keys(a.failures).length && !a.regressions.length && !a.infeasible.length && <div className="stat"><div className="n">0</div><div className="l">nothing notably failed</div></div>}
       </div>
 
-      {best && <><h2 className="section-h">Reproduce — winning solution</h2>
+      {best && <><h2 id="report-section-solution" tabIndex={-1} className="section-h">Reproduce — winning solution</h2>
         {bestCodeStatus === 'restricted' && <div className="report-inline-state report-code-state" role="status">
           Solution source was not included in this summary-only review link.
         </div>}

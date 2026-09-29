@@ -414,6 +414,10 @@ def _reflection_can_write(engine: "Engine") -> bool:
     Minimal test/compatibility engines historically expose neither flag, so absence remains enabled;
     an actual Engine exposes both and ``write_reflection_note`` uses this same truthiness gate.
     """
+    # External coding agents author lessons through the run-scoped API. Finalization must not
+    # silently call LoopLab's Researcher/reflector after the agent has finished its work.
+    if getattr(engine, "external_harness", False):
+        return False
     # An instance-level writer is an explicit integration/test seam and may perform work regardless
     # of the stock LessonMemory flags.  Treat it as external rather than silently skipping it.
     if callable(getattr(engine, "__dict__", {}).get("_write_reflection_note")):
@@ -815,7 +819,7 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
 
         # reflection must precede claim curation so this run's durable lessons are visible;
         # every steward still precedes llm_cost so its provider usage enters the terminal roll-up.
-        if getattr(engine, "_cross_run_curation", False):
+        if getattr(engine, "_cross_run_curation", False) and not getattr(engine, "external_harness", False):
             # The INDEPENDENT stewards each get their own failure boundary. Concept and claim curation
             # are the baseline pair. Task faceting is a third, explicitly scheduled call because its
             # proposal currently has no live behavior consumer; old/custom Engine shims lack the new
@@ -893,7 +897,9 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
         # cannot perturb `QUIET_FINALIZATION_SUFFIX`, and needs no `BACKGROUND_APPENDABLE` entry.
         # Its audit lives in cross-run memory, where it survives this run's deletion. Main task,
         # after the steward, so a proposal bought seconds ago is ratifiable in the same finalize.
-        if getattr(engine, "_concept_tidy", False) and getattr(engine, "memory_dir", None):
+        if (not getattr(engine, "external_harness", False)
+                and getattr(engine, "_concept_tidy", False)
+                and getattr(engine, "memory_dir", None)):
             try:
                 import datetime as _dt
 

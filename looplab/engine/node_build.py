@@ -2087,6 +2087,13 @@ class NodeBuildMixin:
 
         if not isinstance(req, Mapping):
             raise ValueError("injected request must be an object")
+        if self.external_harness and inject_needs_developer(req):
+            raise ValueError("external harness requires ready-made code or files for inject_node")
+        if self.external_harness:
+            from looplab.harness.contract import candidate_surface_refusal
+            refusal = candidate_surface_refusal(self._repo_spec, req.get("files"), req.get("deleted"))
+            if refusal:
+                raise ValueError(refusal)
         idea_d = dict(req.get("idea") or {})
         idea_d.setdefault("operator", "manual")
         # Coerce params to floats defensively (a manual form may send strings); drop unparseable.

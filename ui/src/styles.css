@@ -543,7 +543,8 @@ button { font: inherit; }
 .cmdbar-dock.fresh { border-top-color: var(--accent); box-shadow: 0 -2px 14px rgba(74,163,255,.22); }
 .cmdbar-dock.open { border-top-color: var(--accent-dim); }
 .cmdbar-ic { background: transparent; border: 1px solid var(--line-2); color: var(--accent); cursor: pointer;
-  font-size: 15px; line-height: 1; padding: 5px 8px; border-radius: 6px; flex: none; }
+  display: inline-flex; align-items: center; gap: 7px; font-size: 13px; line-height: 1; padding: 7px 10px;
+  border-radius: 6px; flex: none; font-weight: 600; }
 .cmdbar-ic:hover { background: var(--bg-3); border-color: var(--accent-dim); }
 .cmdbar-mode { flex: none; min-height: 30px; display: inline-flex; align-items: center; justify-content: center;
   gap: 2px; padding: 5px 8px; border: 1px solid var(--line-2); border-radius: 7px;
@@ -592,9 +593,10 @@ button { font: inherit; }
 
 /* ── Right-hand chat drawer (Cursor-style): the conversation thread + extra actions. Overlays the
    right side; the bottom bar remains the single composer. ── */
-.asst-drawer-h { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+.asst-drawer-h { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-height: 54px;
+  padding: 10px 18px; border-bottom: 1px solid var(--line); }
 .asst-drawer-h .assistant-share-state.warn { order: 2; flex: 1 0 100%; justify-content: center; }
-.asst-drawer-ttl { font-size: 13px; }
+.asst-drawer-ttl { font-size: 16px; letter-spacing: -.01em; }
 .asst-modes.sm { display: inline-flex; gap: 2px; }
 .asst-drawer-feed { flex: 1; min-height: 0; overflow: auto; padding: 10px 12px; }
 
@@ -629,20 +631,21 @@ button { font: inherit; }
 .hyp-stmt { min-width: 0; font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; }
 .hyp-src { display: inline-flex; vertical-align: -1px; color: var(--fg-dim); }
 
-/* L6 Card lifecycle board. Six frozen lanes stay visible (`coded` is unreachable from the projection and
-   now renders only if occupied); future derived statuses are inserted before Dropped and the column rail
-   scrolls horizontally instead of compressing the safe DTO into unreadable cards. The board therefore has
-   an intrinsic MINIMUM width that grows with the lane count — 6 x 225px + 5 x 8px = 1390px — which is why
-   its panel takes the wider `size="board"` shell rather than the 1100px reading width (PanelShell.jsx). */
+/* Keep every status visible while giving the available width to work that actually exists. */
 .card-projection-note { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; padding: 6px 8px;
   border: 1px solid color-mix(in srgb, var(--working) 55%, var(--line)); border-radius: 7px;
   background: color-mix(in srgb, var(--working) 7%, var(--bg-2)); color: var(--working-text); font-size: 11px; }
 .card-projection-note svg { flex: none; }
-.card-board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(225px, 1fr); gap: 8px;
+.card-board { display: flex; gap: 10px;
   align-items: start; overflow-x: auto; overscroll-behavior-inline: contain; padding: 1px 1px 8px; }
-.card-col { background: var(--bg-2); border: 1px solid var(--border); border-radius: 8px; padding: 6px;
-  min-height: 80px; min-width: 0; }
-.card-col-h { font-weight: 600; font-size: 11px; margin: 0 0 6px;
+.card-col { background: var(--bg-2); border: 1px solid var(--border); border-radius: 8px; padding: 10px;
+  min-height: 80px; min-width: 280px; flex: 1 0 280px; max-width: 640px; }
+.card-empty-lanes { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 7px;
+  margin: 0 0 10px; color: var(--fg-dim); font-size: 11px; }
+.card-empty-lanes-label { margin-right: 2px; }
+.card-empty-lane { border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px;
+  background: var(--bg-2); white-space: nowrap; }
+.card-col-h { font-weight: 650; font-size: 12px; margin: 0 0 10px;
   text-transform: uppercase; letter-spacing: .03em; }
 .card-col.card-building .card-col-h, .card-col.card-running .card-col-h { color: var(--working-text); }
 /* Built, NOT started — deliberately not the working tone: `coded` exists precisely to stop the board
@@ -672,24 +675,60 @@ button { font: inherit; }
    one, so a direction with twenty children is scannable without a horizontal scroll of its own. */
 .card-direction-rows { display: grid; gap: 6px;
   grid-template-columns: repeat(auto-fill, minmax(225px, 1fr)); align-items: start; }
-.card-grouping { gap: 4px; margin: 0; }
+.card-grouping { gap: 6px; margin: 0; flex-wrap: wrap; }
+.card-filter { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.card-filter .text { width: min(260px, 100%); min-height: 32px; }
+.card-filter .text::-webkit-search-cancel-button { display: none; }
+.card-filter-count { color: var(--fg-dim); font-size: 12px; white-space: nowrap; }
+.card-filter-empty { padding: 28px 16px; border: 1px dashed var(--border); border-radius: 8px;
+  color: var(--fg-dim); text-align: center; font-size: 13px; }
 /* THE RESEARCH LADDER. Not a grid and not a kanban: the point of this view is that a chain of
    sharpening questions reads top-to-bottom as ONE chain, so the rows are a plain ordered list and
    the only structural signal is the indent, applied inline from the row's own depth. */
-.card-research { min-width: 0; }
-.research-filter { gap: 6px; margin: 0 0 8px; }
-.research-lattice { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.card-research { min-width: 0; max-width: 1200px; }
+.research-empty { max-width: 440px; margin: min(14vh, 140px) auto 0; padding: 28px 32px;
+  text-align: center; background: var(--bg-2); border: 1px solid var(--border); border-radius: 12px; }
+.research-empty-symbol { display: grid; place-items: center; width: 36px; height: 36px;
+  margin: 0 auto 14px; border: 1px solid var(--line-2); border-radius: 50%;
+  color: var(--accent-text); font-size: 21px; }
+.research-empty h2 { margin: 0 0 8px; font-size: 17px; line-height: 1.35; }
+.research-empty p { margin: 0; color: var(--fg-dim); font-size: 13px; line-height: 1.5; }
+.research-empty p + p { margin-top: 8px; }
+.research-overview { margin-bottom: 12px; }
+.research-overview h2 { margin: 0 0 3px; font-size: 17px; line-height: 1.3; }
+.research-overview h2 span { color: var(--fg-mut); font-size: 13px; font-weight: 500; }
+.research-overview p { margin: 0; color: var(--fg-dim); font-size: 12px; line-height: 1.45; }
+.research-filter { gap: 8px; margin: 0 0 12px; font-size: 12px; }
+.research-filter label { display: inline-flex; align-items: center; gap: 8px; }
+.research-filter select { min-height: 30px; padding: 4px 8px; border: 1px solid var(--line-2);
+  border-radius: 6px; background: var(--bg-3); color: var(--fg); font: inherit; }
+.research-filter select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.research-search { flex: 1 1 190px; min-width: 160px; max-width: 320px; }
+.research-filter-result { margin: -4px 0 10px; color: var(--accent-text); font-size: 12px; }
+.card-research .card-empty { font-size: 12px; line-height: 1.45; margin-top: 8px; }
+.research-lattice { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
 .research-row { min-width: 0; background: var(--bg-2); border: 1px solid var(--border);
-  border-radius: 8px; padding: 7px 8px; }
+  border-radius: 8px; padding: 12px 14px; }
+.research-row.research-root:not(.research-closed) { border-left: 3px solid var(--accent); }
+.research-row.research-nested:not(.research-closed) { border-left: 2px solid color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.research-row.research-match { box-shadow: inset 0 0 0 1px var(--accent); }
 /* The indent is a MARGIN on a bordered row rather than padding inside a shared box, so a deep rung
    is visibly a narrower card and not just text that starts further right. */
-.research-row-h { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; min-width: 0; }
-.research-statement { font-size: 12px; font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.research-row-h { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; min-width: 0; }
+.research-id { color: var(--fg-mut); font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 11px; }
+.research-statement { font-size: 15px; line-height: 1.45; font-weight: 650; min-width: 0;
+  max-width: 76ch; overflow-wrap: anywhere; }
 /* Fixed width whether it holds a twist or the empty placeholder, so every statement on the ladder
    starts at the same x within its own depth and the indent stays the only left-edge signal. */
 .research-twist { display: inline-block; width: 18px; min-width: 18px; text-align: center;
   padding: 0; line-height: 1.2; }
-.research-row-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 6px; }
+.research-row-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0 0 26px; }
+.research-evidence { margin: 8px 0 0 26px; }
+.research-evidence summary { width: fit-content; padding: 4px 8px; border: 1px solid var(--line-2);
+  border-radius: 6px; color: var(--accent-text); cursor: pointer; font-size: 12px; }
+.research-evidence summary:hover, .research-evidence summary:focus-visible { background: var(--bg-3); }
+.research-evidence .research-experiments { margin: 8px 0 0; }
 /* A concept id is a coordinate, not a status — toned like the direction chip it shares a taxonomy
    with, and never like a lifecycle lane. */
 .chip-concept { background: color-mix(in srgb, var(--accent) 10%, var(--bg-3));
@@ -697,22 +736,20 @@ button { font: inherit; }
   font-size: 11px; }
 /* The experiments under one question reflow exactly as they do under a direction — same floor, same
    auto-fill — so moving between the two views does not change how work items are shaped. */
-/* A closed question is DIMMED and never removed: it is part of the chain that explains its
-   neighbours, and the operator asked for the whole ladder to stay readable. Opacity alone would be
-   colour-only signalling, so the row also carries its own `dropped`/`abandoned` chip. */
+/* A closed question stays in the chain that explains its neighbours. Its status chip and border
+   identify it without lowering contrast or striking through the question text. */
 /* The cards no question claims. A SECTION beside the ladder rather than a row inside it: they have
    no position in a concept lattice, and seating them at depth 0 would put them among questions whose
    position is measured. Between this and the ladder every card on the wire is drawn, which is what
    makes retiring the Directions tab lossless. */
 .research-unfiled { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
 .research-unfiled-h { font-size: 12px; font-weight: 600; margin: 0 0 4px; }
-.research-closed { opacity: .62; }
-.research-closed .research-statement { text-decoration: line-through; }
-/* Closed on NOTHING narrower — the one closure the operator suspected the run of making. It keeps
-   the left border rather than a fill, so it reads at a glance in a column of dimmed rows. */
-.research-closed-unsupported { opacity: .85; border-left: 3px solid var(--working); }
-.research-experiments { display: grid; gap: 6px; margin-top: 7px;
-  grid-template-columns: repeat(auto-fill, minmax(225px, 1fr)); align-items: start; }
+.research-closed { border-left: 3px solid var(--fg-mut); }
+.research-closed .research-statement { color: var(--fg-dim); }
+/* Closed on NOTHING narrower keeps a distinct left border so it reads at a glance. */
+.research-closed-unsupported { border-left-color: var(--working); }
+.research-experiments { display: grid; gap: 8px; margin: 12px 0 0 26px;
+  grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); align-items: start; }
 @media (max-width: 700px) {
   /* On a narrow viewport a 22px-per-level indent runs the deepest rungs off the edge; the ladder is
      still readable from the twists and the order, so the indent collapses rather than the rows. */
@@ -723,8 +760,8 @@ button { font: inherit; }
    findable in a line of a dozen knobs. */
 .card-param-moved { color: var(--fg); font-weight: 600; }
 .card-drift .chip.warn { white-space: nowrap; }
-.card-kanban-card { min-width: 0; margin-bottom: 6px; padding: 7px; border: 1px solid var(--border);
-  border-radius: 7px; background: var(--bg-3); font-size: 11px; overflow-wrap: anywhere; }
+.card-kanban-card { min-width: 0; margin-bottom: 8px; padding: 10px; border: 1px solid var(--border);
+  border-radius: 7px; background: var(--bg-3); font-size: 12px; overflow-wrap: anywhere; }
 /* These two rules were DEAD: no module ever emitted `card-outcome-*`, so the per-card marker their
    comment described ("the Evaluated lane holds finished work, not successful work — a crashed node
    and a superseded speculative prefetch land there beside a real result") never rendered. That
@@ -733,14 +770,18 @@ button { font: inherit; }
    selectors so a future per-card outcome marker has its shape ready — never colour alone. */
 .card-kanban-card.card-outcome-failed { border-left: 3px solid var(--fail); }
 .card-kanban-card.card-outcome-discarded { border-left: 3px solid var(--fg-mut); }
-.card-kanban-stmt { display: flex; align-items: flex-start; gap: 4px; font-size: 12px; line-height: 1.35; }
+.card-kanban-stmt { display: flex; align-items: flex-start; gap: 7px; font-size: 14px; line-height: 1.45; }
 .card-kanban-stmt > span:last-child { min-width: 0; }
 .card-kanban-meta, .card-kanban-tags, .card-kanban-blockers, .card-kanban-evidence {
   display: flex; flex-wrap: wrap; align-items: center; gap: 3px; margin-top: 6px; }
-.card-kanban-fact { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 3px 5px; margin-top: 5px;
-  color: var(--fg-dim); line-height: 1.3; }
+.card-workspace .chip.xs { font-size: 11px; padding: 1px 6px; }
+.card-detail .card-kanban-meta .chip.xs:nth-child(2) { max-width: 22ch; overflow: hidden;
+  text-overflow: ellipsis; }
+.card-detail .card-kanban-meta .chip.xs:nth-child(2):hover { max-width: 100%; }
+.card-kanban-fact { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 5px 9px; margin-top: 9px;
+  color: var(--fg); line-height: 1.45; }
 .card-kanban-fact > :nth-child(n+3) { grid-column: 2; }
-.card-kanban-k { color: var(--fg-mut); }
+.card-kanban-k { color: var(--fg-dim); }
 .card-param { font-family: ui-monospace, Consolas, monospace; }
 .card-resource-pin { margin-inline: -3px; padding: 4px 3px; border-radius: 5px;
   background: color-mix(in srgb, var(--working) 8%, transparent); }
@@ -754,37 +795,52 @@ button { font: inherit; }
 /* ── Card board as a workspace VIEW ─────────────────────────────────────────
    Lanes left, one work item's full record right. The lanes keep `.card-board`'s own horizontal
    scroll, which is the point of the promotion: as a modal the board's intrinsic minimum
-   (6 x 225px + 5 x 8px = 1390px) had to fit inside the panel, so PanelShell grew a second
-   `board` width to hold it. Here the lanes own a flex column that may scroll on its own, so the
+   had to fit inside the panel, so PanelShell grew a second `board` width to hold it.
+   Here the lanes own a flex column that may scroll on its own, so the
    lane count stops driving the shell width at all — and the JupyterHub proxy's narrower window
    scrolls the lanes instead of clipping them. The detail pane deliberately re-uses `.side`
    (width, border, drawer behaviour) so it is the SAME pane as the graph inspector's. */
 .card-workspace { min-height: 0; }
 .card-lanes-wrap { flex: 1; min-width: 0; display: flex; flex-direction: column;
-  padding: 8px 10px; overflow: auto; }
-.card-lanes-head { display: flex; flex-direction: column; gap: 4px; font-size: 11px; flex: none; }
+  padding: 14px 16px; overflow: auto; }
+.card-lanes-head { display: flex; flex-direction: column; gap: 8px; font-size: 12px; flex: none; }
+.card-selection-missing { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.card-selection-missing code { overflow-wrap: anywhere; }
+.card-selection-missing button { margin-left: auto; }
 .card-lanes-head .card-projection-note { margin-bottom: 4px; }
 .card-workspace .card-board { flex: 1; min-height: 0; align-content: start; }
+/* A long list in one status can use the width beside Assistant. Keep short lists at reading width,
+   and return to one column when details take part of the workspace. */
+.card-workspace:not(.detail-open) .card-board.dense-lane .card-col { max-width: 1200px; }
+.card-workspace:not(.detail-open) .card-board.dense-lane .card-col-cards {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));
+  gap: 8px; align-items: start; }
+.card-workspace:not(.detail-open) .card-board.dense-lane .card-col-cards > .card-kanban-card {
+  margin-bottom: 0; }
 /* A lane card is a summary you pick, not a record you read: the facts moved to the pane. The whole
    face is one button so the hit target is the card, not a link inside it. */
 .card-lane-card { padding: 0; overflow: hidden; }
 .card-lane-card.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
-.card-lane-open { display: flex; flex-direction: column; gap: 4px; width: 100%; padding: 7px;
+.card-lane-open { display: flex; flex-direction: column; gap: 8px; width: 100%; padding: 12px;
   border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .card-lane-open:hover { background: var(--bg-2); }
 .card-lane-open:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .card-detail-side { overflow: hidden; }
-.card-detail { flex: 1; min-height: 0; overflow: auto; padding: 8px; font-size: 11px; }
+.card-detail { flex: 1; min-height: 0; overflow: auto; padding: 16px; font-size: 12px; }
+.card-detail-heading { margin: 0 0 14px; font-size: 17px; line-height: 1.4;
+  font-weight: 650; overflow-wrap: anywhere; }
+.card-detail > .card-kanban-card > .card-kanban-stmt { display: none; }
 .card-detail-empty { display: flex; align-items: center; padding: 16px; }
 .card-detail-node { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
 .card-detail-crumb { display: flex; align-items: center; gap: 6px; flex: none;
   padding: 4px 8px; border-bottom: 1px solid var(--line); font-size: 11px; }
+.card-detail-side .pane-grip { min-height: 40px; padding-inline: 16px; font-size: 13px; }
 /* The section that says a Card is not an experiment. It leads the pane on purpose: the count is the
    fact the board never showed, and it is the one an operator gets wrong. */
 .card-attempts { margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
 .card-attempts-h { display: flex; align-items: center; gap: 6px; margin: 0 0 4px;
-  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
-.card-attempts-note { margin: 0 0 6px; font-size: 10px; line-height: 1.4; }
+  font-size: 12px; font-weight: 650; text-transform: uppercase; letter-spacing: .03em; }
+.card-attempts-note { margin: 0 0 8px; font-size: 12px; line-height: 1.45; }
 .card-attempt-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
 .card-attempt { display: flex; align-items: center; gap: 6px; width: 100%; padding: 4px 6px;
   border: 1px solid var(--border); border-radius: 6px; background: var(--bg-3); color: inherit;
@@ -797,8 +853,20 @@ button { font: inherit; }
 .card-attempt-metric { margin-left: auto; font-variant-numeric: tabular-nums; }
 .card-workspace-legacy { overflow: auto; }
 
+/* With Assistant docked, the run workspace is a reading column. Keep the board at full width and
+   open the selected record over it, so six lifecycle lanes and the research ladder remain legible. */
+@media (min-width: 1200px) {
+  body.asst-side-open .card-workspace .splitter.v { display: none; }
+  body.asst-side-open .card-workspace .card-detail-side { position: absolute; inset: 0 0 0 auto;
+    z-index: 32; width: min(560px, 68%) !important; box-shadow: var(--shadow);
+    border-left-color: var(--line-2); }
+  /* The detail floats over the board here. Keep the first lane inside the exposed reading strip. */
+  body.asst-side-open .card-workspace.detail-open .card-col {
+    max-width: min(640px, calc(100% - min(560px, 68%))); }
+}
+
 .card-kanban-controls { margin-top: 7px; border-top: 1px solid var(--line); padding-top: 5px; }
-.card-kanban-controls > summary { color: var(--fg-mut); cursor: pointer; font-size: 10px; }
+.card-kanban-controls > summary { color: var(--fg-dim); cursor: pointer; font-size: 12px; }
 .card-control-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 5px;
   align-items: end; margin-top: 7px; }
 .card-control-form label, .card-control-resource label { display: grid; gap: 2px; min-width: 0;
@@ -865,6 +933,9 @@ textarea.text.card-control-statement { min-height: 48px; max-height: 120px; resi
 /* chart interactivity: a small toolbar (log-scale toggle) above a chart. */
 .chart { position: relative; }
 .chart-tools { display: flex; justify-content: flex-end; gap: 6px; margin-bottom: 2px; min-height: 18px; }
+.chart-scale-note { margin: 2px 0 5px; color: var(--fg-dim); font-size: 11px; line-height: 1.4; text-align: right; }
+.waterfall-context { margin: 3px 0 7px; padding: 7px 10px; border-left: 2px solid var(--accent);
+  background: var(--bg-2); color: var(--fg-dim); font-size: 12px; line-height: 1.45; }
 .hyp-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; margin-top: 5px; }
 .hyp-empty { font-size: 11px; text-align: center; padding: 4px 0; }
 @media (max-width: 900px) { .hyp-board { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
@@ -1023,15 +1094,9 @@ pre.code { background: var(--bg); border: 1px solid var(--line); border-radius: 
 
 .cardgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px,1fr)); gap: 10px; }
 
-/* Overview tab (round-8): run metrics lifted out of the header */
-.ov-goal { color: var(--fg-dim); margin-bottom: 12px; line-height: 1.5; }
 .stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 8px; }
 .ov-row { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
 .ov-row .k { color: var(--fg-dim); font-weight: 600; margin-right: 6px; }
-.ov-why { font-size: 12px; margin-top: 4px; line-height: 1.45; }
-.ov-hints { margin: 6px 0 0; padding-left: 18px; }
-.ov-hints li { margin: 2px 0; line-height: 1.4; }
-.ov-alerts { display: flex; gap: 8px; }
 
 .stat { background: var(--bg-2); border: 1px solid var(--line); border-radius: 9px; padding: 8px 11px; }
 .stat .n { font-size: 19px; font-weight: 700; font-variant-numeric: tabular-nums; }
@@ -1209,7 +1274,6 @@ button.ptree-row { width: 100%; border: 0; background: transparent; color: inher
 .compare-check:focus-visible { outline: 0; }
 .run-card-main { flex: 1; min-width: 0; color: inherit; cursor: pointer; border-radius: 6px; }
 .run-card-main:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-.run-card .goal { color: var(--fg-dim); }
 .muted { color: var(--fg-mut); }
 .right { margin-left: auto; }
 .notice { background: var(--bg-1); border: 1px dashed var(--line-2); border-radius: 10px; padding: 14px; color: var(--fg-dim); }
@@ -2510,7 +2574,7 @@ pre.code.event-json { max-height: 220px; }
 .asst-mention-item:hover { background: var(--bg-1); }
 /* propose_run launch card */
 .asst-launch { border: 1px solid var(--accent-dim); border-radius: 12px; background: var(--bg-1);
-  padding: 12px; align-self: flex-start; width: min(100%, 780px); max-width: 100%; margin-top: 8px;
+  padding: 16px; align-self: flex-start; width: min(100%, 780px); max-width: 100%; margin-top: 8px;
   display: flex; flex-direction: column; gap: 10px; }
 .asst-launch[aria-busy="true"] { border-color: var(--working); }
 .asst-launch-global { flex: none; white-space: nowrap; color: var(--working);
@@ -2519,17 +2583,17 @@ pre.code.event-json { max-height: 220px; }
 .asst-launch-global-count { display: inline-grid; min-width: 18px; height: 18px; padding: 0 4px;
   place-items: center; border-radius: 999px; background: var(--working); color: var(--bg);
   font-size: 10px; font-weight: 750; }
-.asst-launch-h { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 13px; }
-.asst-launch-state { margin-left: auto; color: var(--fg-mut); font-size: 10.5px; text-transform: uppercase;
+.asst-launch-h { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 14px; }
+.asst-launch-state { margin-left: auto; color: var(--fg-dim); font-size: 11.5px; text-transform: uppercase;
   letter-spacing: .35px; }
 .asst-launch-state.ready { color: var(--best); }
-.asst-launch-rationale { color: var(--fg-dim); font-size: 12px; line-height: 1.45; margin: -2px 0 0; }
+.asst-launch-rationale { color: var(--fg-dim); font-size: 13.5px; line-height: 1.5; margin: -2px 0 0; }
 .asst-launch-config { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .asst-launch-section { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--line);
   border-radius: 9px; padding: 10px; min-width: 0; }
-.asst-launch-section h4 { margin: 0 0 2px; font-size: 12px; letter-spacing: .2px; }
+.asst-launch-section h4 { margin: 0 0 2px; font-size: 14px; letter-spacing: .2px; }
 .asst-launch-section > label, .asst-launch-field > label, .asst-launch-advanced > label {
-  color: var(--fg-dim); font-size: 11px; font-weight: 650; }
+  color: var(--fg-dim); font-size: 12.5px; font-weight: 650; }
 .asst-launch-section input.text, .asst-launch-section select.text { min-width: 0; min-height: 34px;
   width: 100%; max-width: 100%; }
 .asst-launch-source { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 0;
@@ -2542,9 +2606,9 @@ pre.code.event-json { max-height: 220px; }
 .asst-launch-help { color: var(--fg-mut); font-size: 10.5px; line-height: 1.35; }
 .asst-launch-field-error { color: var(--fail); font-size: 10.5px; line-height: 1.35; }
 .asst-launch-field-error ul { margin: 0; padding-left: 18px; }
-.asst-launch-summary { display: grid; gap: 3px; margin: 3px 0 0; font-size: 11.5px; }
+.asst-launch-summary { display: grid; gap: 6px; margin: 4px 0 0; font-size: 13px; }
 .asst-launch-summary > div { display: grid; grid-template-columns: minmax(74px, .22fr) minmax(0, 1fr); gap: 8px; }
-.asst-launch-summary dt { color: var(--fg-mut); font-weight: 650; }
+.asst-launch-summary dt { color: var(--fg-dim); font-weight: 650; }
 .asst-launch-summary dd { margin: 0; overflow-wrap: anywhere; }
 .asst-launch-summary .invalid dd { color: var(--fail); }
 .asst-launch-runtime { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
@@ -2553,8 +2617,8 @@ pre.code.event-json { max-height: 220px; }
 .asst-launch-advanced summary, .asst-launch-preview summary { color: var(--fg-dim); cursor: pointer;
   font-size: 11.5px; font-weight: 650; }
 .asst-launch-advanced[open] summary, .asst-launch-preview[open] summary { margin-bottom: 7px; }
-.asst-launch-notes p { color: var(--fg-mut); font-size: 11px; margin: 0; }
-.asst-launch-notes ol { margin: 2px 0 0; padding-left: 22px; font-size: 11.5px; line-height: 1.45; }
+.asst-launch-notes p { color: var(--fg-dim); font-size: 12.5px; margin: 0; }
+.asst-launch-notes ol { margin: 2px 0 0; padding-left: 22px; font-size: 12.5px; line-height: 1.5; }
 .asst-launch-errors, .asst-launch-warnings { border: 1px solid color-mix(in srgb, var(--fail) 65%, var(--line));
   border-radius: 8px; padding: 8px 10px; color: var(--fail); font-size: 11.5px; }
 .asst-launch-warnings { border-color: color-mix(in srgb, var(--working) 60%, var(--line)); color: var(--fg); }
@@ -2570,18 +2634,19 @@ pre.code.event-json { max-height: 220px; }
 .asst-launch-recovery code { color: var(--fg); overflow-wrap: anywhere; }
 .asst-launch-recovery span { width: 100%; color: var(--fg-mut); }
 .asst-launch-progress { color: var(--fg-mut); min-height: 16px; font-size: 11px; }
-.asst-launch-cost { margin: -4px 0 0; color: var(--fg-mut); font-size: 10.5px; line-height: 1.4; }
+.asst-launch-cost { margin: -4px 0 0; color: var(--fg-dim); font-size: 12px; line-height: 1.45; }
 .asst-launch-cost strong { color: var(--fg-dim); }
-.asst-launch-configtoggle { align-self: flex-start; }
+.asst-launch-configtoggle { align-self: flex-start; min-height: 34px; font-size: 12px; }
 .asst-launch-openreason { margin: 0; color: var(--fg-mut); font-size: 11px; line-height: 1.4; }
 .asst-launch-actions { margin-top: 0; }
+.asst-launch-actions .btn { min-height: 36px; font-size: 12.5px; }
 .asst-launch input:focus-visible, .asst-launch textarea:focus-visible, .asst-launch select:focus-visible,
 .asst-launch summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* The Assistant drawer is independently resizable, so viewport media queries cannot describe the
    launch card's actual space there. Keep labels, inherited values, and budget help readable even
    when the desktop viewport is wide but the drawer itself is narrow. */
+.asst-side-panel .feed-msg.chat.assistant.has-launch { width: 100%; max-width: 100%; }
 .asst-side-panel .asst-launch-runtime { grid-template-columns: 1fr; }
-.asst-side-panel .asst-launch-summary > div { grid-template-columns: 1fr; gap: 1px; }
 @media (max-width: 720px) {
   .asst-launch { padding: 10px; }
   .asst-launch-runtime { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -2628,29 +2693,81 @@ pre.code.event-json { max-height: 220px; }
   touch-action: none; z-index: 3; }
 .asst-resize:hover { background: var(--accent-dim); }
 .asst-resize:focus-visible { background: var(--accent); outline: 2px solid var(--accent); outline-offset: 1px; }
-.asst-side-panel .asst-drawer-feed { flex: 1; min-height: 0; overflow: auto; padding: 10px 12px; }
+.asst-side-panel .asst-drawer-feed { flex: 1; min-height: 0; overflow: auto; padding: 18px 24px;
+  width: 100%; max-width: 1120px; margin-inline: auto; box-sizing: border-box; }
+:is(.asst-side-panel, .asst-full) .feed-msg.chat { max-width: min(86%, 820px); }
+:is(.asst-side-panel, .asst-full) .feed-msg.chat .chat-bubble { padding: 11px 14px; }
+:is(.asst-side-panel, .asst-full) .feed-msg.chat .chat-text { font-size: 15px; line-height: 1.55; }
+:is(.asst-side-panel, .asst-full) .feed-msg.chat .chat-who { font-size: 11.5px; margin-bottom: 5px; }
+.asst-run-context { display: flex; align-items: center; gap: 9px; min-height: 42px;
+  padding: 7px 24px; border-bottom: 1px solid var(--line); color: var(--fg-dim); font-size: 12px; }
+.asst-run-context strong { min-width: 0; color: var(--fg); font-weight: 600; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.asst-run-context-state { border: 1px solid var(--line-2); border-radius: 99px;
+  padding: 2px 8px; text-transform: capitalize; white-space: nowrap; }
+.asst-run-context.stalled { border-bottom-color: color-mix(in srgb, var(--working) 45%, var(--line)); }
+.asst-run-context.stalled .asst-run-context-state, .asst-run-context-help { color: var(--working-text); }
 
 /* Composer shared by side + full: attach + textarea + send/stop, mode selector BELOW it. */
-.asst-in { border-top: 1px solid var(--line); padding: 8px 10px; flex: none; position: relative; }
-.asst-inrow { display: flex; align-items: flex-end; gap: 6px; position: relative; }  /* relative: anchors the /command hint pop above the composer input */
-.asst-inrow .text { flex: 1; min-width: 0; min-height: 40px; max-height: 200px; resize: vertical; width: auto; }
-.asst-moderow { display: flex; align-items: center; gap: 8px; margin-top: 7px; }
-.asst-modehint { font-size: 11px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.asst-in { border-top: 1px solid var(--line-2); padding: 16px 24px 18px; flex: none;
+  position: relative; background: var(--bg-2); }
+.asst-inrow { display: flex; align-items: flex-end; gap: 8px; position: relative;
+  max-width: 980px; margin: 0 auto; }  /* relative: anchors the /command hint pop above the composer input */
+.asst-inrow .asst-attach { min-width: 44px; min-height: 44px; justify-content: center; }
+.asst-inrow > .btn { min-width: 88px; min-height: 44px; justify-content: center; font-size: 14px; }
+.asst-inrow .text { flex: 1; min-width: 0; min-height: 68px; max-height: 260px; resize: vertical;
+  width: auto; font-size: 14px; line-height: 1.5; padding: 12px 14px; }
+.asst-moderow { display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  max-width: 980px; margin: 10px auto 0; }
+.asst-moderow::before { content: 'Mode'; color: var(--fg-dim); font-size: 12px; font-weight: 650; }
+.asst-moderow .asst-mode { min-height: 32px; padding: 6px 12px; font-size: 13px; }
+.asst-moderow .asst-mode:not(.on):hover { color: var(--fg); background: var(--bg-3); }
+.asst-moderow .asst-mode:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.asst-modehint { font-size: 13px; line-height: 1.4; flex: 1 1 220px; min-width: 0; white-space: normal; }
 .asst-files { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
 
 /* Empty-state one-tap command hints. */
-.asst-empty { padding: 16px; }
-.asst-hints { display: flex; flex-wrap: wrap; gap: 6px; }
+.asst-empty { max-width: 860px; margin: clamp(24px, 7vh, 92px) auto 0; padding: 16px; }
+.asst-empty-eyebrow { color: var(--accent); font-size: 11px; font-weight: 700;
+  letter-spacing: .12em; margin-bottom: 14px; }
+.asst-empty h2 { margin: 0; color: var(--fg); font-size: clamp(25px, 2vw, 34px);
+  line-height: 1.16; letter-spacing: -.025em; }
+.asst-empty p { margin: 12px 0 28px; color: var(--fg-dim); font-size: 15px;
+  line-height: 1.55; max-width: 650px; }
+.asst-hints { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .asst-hint { background: var(--bg-2); border: 1px solid var(--line-2); color: var(--fg); cursor: pointer;
-  border-radius: 14px; padding: 5px 12px; font-size: 12px; }
+  border-radius: 10px; padding: 14px 16px; min-height: 54px; text-align: left; font-size: 13px; }
 .asst-hint:hover { border-color: var(--accent-dim); background: var(--bg-3); }
-.asst-new-run-hint { margin: 6px 2px 2px; color: var(--fg-dim); font-size: 11px; line-height: 1.4; }
+/* The welcome state lives in a resizable panel even on a wide desktop. Keep its
+   type and actions sized for the panel instead of the viewport-wide full view. */
+.asst-side-panel .asst-empty { width: 100%; max-width: 620px; box-sizing: border-box;
+  margin-top: clamp(28px, 5vh, 64px); padding: 8px 0; }
+.asst-side-panel .asst-empty h2 { font-size: clamp(24px, 1.6vw, 30px); }
+.asst-side-panel .asst-empty p { font-size: 15px; margin: 10px 0 24px; }
+.asst-side-panel .asst-hints { grid-template-columns: minmax(0, 1fr); }
+.asst-side-panel .asst-hint { min-height: 54px; font-size: 14px; }
+.asst-new-run-hint { display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; max-width: 980px; margin: 10px auto 2px; color: var(--fg-dim);
+  font-size: 12px; line-height: 1.45; }
+
+@media (min-width: 1600px) {
+  body { font-size: 14px; }
+  .asst-drawer-ttl { font-size: 18px; }
+  .asst-empty { max-width: 960px; }
+  .asst-empty h2 { font-size: 38px; }
+  .asst-empty p { font-size: 17px; max-width: 760px; }
+  .asst-hint { min-height: 64px; font-size: 15px; }
+  .asst-inrow .text { min-height: 80px; font-size: 16px; }
+  .asst-modehint, .asst-new-run-hint, .asst-run-context { font-size: 13px; }
+}
 
 /* Full = a dedicated OPAQUE page above everything. */
 .asst-view.asst-full { position: fixed; inset: 0; z-index: 200; background: var(--bg); }
 .asst-main-h { display: flex; align-items: center; gap: 8px; padding: 10px; border-bottom: 1px solid var(--line); }
 .asst-main-h .ttl { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.asst-full .asst-feed { flex: 1; min-height: 0; overflow: auto; padding: 12px 14px; }
+.asst-full .asst-feed { flex: 1; min-height: 0; overflow: auto; padding: 12px 14px;
+  width: 100%; max-width: 1120px; margin-inline: auto; box-sizing: border-box; }
+.asst-full .asst-empty { width: 100%; box-sizing: border-box; }
 .asst-shared { height: 100dvh; min-height: 100svh; }
 .asst-shared-terms { display: flex; align-items: center; justify-content: flex-end; gap: 8px;
   min-width: 0; flex-wrap: wrap; }
@@ -2801,7 +2918,7 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   max-width: calc(100% - 24px); box-shadow: var(--shadow); border-left-color: var(--line-2);
 }
 
-@media (max-width: 1439px) {
+@media (max-width: 1199px) {
   /* Below wide desktop, docking a 440px Assistant alongside a 420px Inspector starves the DAG. */
   body.asst-side-open .app-shell-main { margin-right: 0; }
   .asst-side-panel { width: min(var(--asst-side-w, 440px), 92vw) !important; }
@@ -2972,7 +3089,6 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
     overflow-wrap: anywhere; }
   .run-card-metrics { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 12px;
     min-width: 0; grid-column: 1 / 3; grid-row: 3; text-align: left !important; overflow-wrap: anywhere; }
-  .run-card .goal { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   .run-actions { grid-column: 3; grid-row: 3; align-self: start; justify-self: end; }
   .run-deletion-card { display: flex; flex-direction: column; align-items: stretch; gap: 9px; }
   .run-deletion-card > .btn { width: 100%; min-height: 44px; justify-content: center; }
@@ -3294,23 +3410,33 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 .cv-empty-flow span { padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-3); color: var(--fg-dim); font-size: 12px; }
 .cv-empty-flow i { color: var(--accent); font-style: normal; }
 .cv-state-warning { font-size: 12px; }
-.cv-bar { display: grid; grid-template-columns: minmax(220px, 1fr) auto auto; align-items: center; gap: 12px 18px; padding: 14px 18px 12px; flex: none; border-bottom: 1px solid var(--line); background: var(--bg-1); }
+.cv-bar { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: center; gap: 10px 14px; padding: 14px 18px 12px; flex: none; border-bottom: 1px solid var(--line); background: var(--bg-1); }
 .cv-heading { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
 .cv-heading strong { font-size: 15px; letter-spacing: -.01em; }
 .cv-heading span { color: var(--fg-mut); font-size: 11px; }
-.cv-lensctl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cv-search { min-width: 0; }
+.cv-search .cs-box { width: 100%; min-width: 0; }
+.cv-search .cs-input { width: 100%; min-width: 0; }
+.cv-lensctl { display: flex; grid-column: 1 / -1; align-items: center; gap: 8px; flex-wrap: wrap; }
 .cv-lenspick { display: inline-flex; align-items: center; gap: 8px; }
+.cv-lenspick > span { white-space: nowrap; }
 .cv-lensctl .text { min-width: 176px; }
-/* In-the-moment lens creation (View 1): a compact author-a-lens control + a delete affordance. */
+/* Keep the paid creation form available without crowding the concept search and projection picker. */
 .cv-lensdel { background: none; border: 0; color: var(--fg-mut); cursor: pointer; font-size: 15px;
   line-height: 1; padding: 0 3px; border-radius: 4px; }
 .cv-lensdel:hover { color: var(--fail-text); background: var(--bg-3); }
-.cv-lensnew { display: inline-flex; align-items: center; gap: 5px; flex-wrap: wrap; }
-.cv-lensnew .text { min-width: 0; width: 148px; font-size: 12px; }
+.cv-lens-add { width: 100%; color: var(--fg-dim); font-size: 12px; }
+.cv-lens-add > summary { width: fit-content; cursor: pointer; color: var(--accent-text); }
+.cv-lens-add > summary:hover, .cv-lens-add > summary:focus-visible { text-decoration: underline; }
+.cv-lens-add[open] { padding: 8px 10px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--bg-2); }
+.cv-lens-add[open] > summary { margin-bottom: 8px; }
+.cv-lensnew { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.cv-lensnew .text { min-width: 180px; flex: 1; font-size: 12px; }
+.cv-lensnew > .muted { flex-basis: 100%; font-size: 11px; line-height: 1.4; }
 .cv-lenserr { color: var(--fail-text); font-size: 11px; max-width: 260px; }
 .cv-tree-actions { display: flex; grid-column: 1 / -1; align-items: center; flex-wrap: wrap; gap: 6px; }
 .cv-tree-actions .btn { white-space: nowrap; }
-.cv-cols { display: flex; grid-column: 1 / -1; align-items: center; gap: 7px; padding-top: 10px; border-top: 1px solid var(--line); }
+.cv-cols { display: flex; grid-column: 1 / -1; align-items: center; flex-wrap: wrap; gap: 7px; padding-top: 10px; border-top: 1px solid var(--line); }
 .cv-col { min-height: 30px; padding: 4px 10px; cursor: pointer; border: 1px solid var(--line-2); border-radius: 999px; background: var(--bg-2); color: var(--fg-dim); font-size: 11px; }
 .cv-col.on { border-color: var(--accent); color: var(--fg); box-shadow: 0 0 0 1px var(--accent); }
 .cv-col:disabled { cursor: default; opacity: .72; }
@@ -3321,12 +3447,12 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 .cv-resource-note.epistemic { color: var(--fg-mut); font-style: italic; }
 .cv-inline-spinner { width: 14px; height: 14px; flex: none; }
 .cv-table-wrap { flex: 1; min-height: 0; overflow: auto; }
-.cv-table { width: 100%; min-width: 720px; border-collapse: collapse; font-size: 13px; }
+.cv-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 13px; }
 .cv-table thead th { position: sticky; top: 0; z-index: 1; padding: 9px 12px; border-bottom: 1px solid var(--line-2); background: var(--bg-1); color: var(--fg-mut); font-size: 10px; font-weight: 700; letter-spacing: .06em; text-align: right; text-transform: uppercase; }
-.cv-table thead th.cv-name { width: 44%; text-align: left; }
-.cv-name { text-align: left; white-space: nowrap; }
+.cv-table thead th.cv-name { text-align: left; }
+.cv-name { padding-block: 7px; text-align: left; overflow-wrap: anywhere; }
 .cv-num { padding: 8px 12px; color: var(--fg-dim); text-align: right; font-variant-numeric: tabular-nums; }
-.cv-crow { height: 42px; border-bottom: 1px solid var(--line); }
+.cv-crow { border-bottom: 1px solid var(--line); }
 .cv-crow.tagged .cv-cid { color: var(--fg); }
 .cv-crow.ghost .cv-cid { color: var(--fg-dim); font-weight: 500; }
 .cv-crow:hover, .cv-erow:hover { background: var(--bg-1); }
@@ -3335,7 +3461,7 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 .cv-chev:hover, .cv-chev:focus-visible { background: var(--bg-3); color: var(--fg); }
 .cv-chev-placeholder { color: var(--line-2); }
 .cv-cid { font-family: ui-monospace, Menlo, Consolas, monospace; font-weight: 650; }
-.cv-badge { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: var(--bg-3); color: var(--fg-mut); font-size: 10px; }
+.cv-badge { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: var(--bg-3); color: var(--fg-dim); font-size: 11px; }
 .cv-crosslinks { display: inline-block; max-width: min(520px, 52vw); margin-left: 8px; vertical-align: middle; }
 .cv-crosslinks > summary.cv-badge { display: inline-block; margin-left: 0; cursor: pointer; list-style: none; }
 .cv-crosslinks > summary.cv-badge::-webkit-details-marker { display: none; }

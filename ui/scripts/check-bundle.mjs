@@ -53,8 +53,24 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // substituted-build Card readers and the command-settlement copy —
     // all of it route-local lazy code; every forbidden reachability proof below still holds, and
     // master (ed47c64b) measured 566,615 B locally and in CI alike, byte for byte.
-    js: { gzip: 557 * KIB },
-    css: { gzip: 52 * KIB },
+    // 2026-09-28 Card workspace: 569,337 B before, 569,674 B after. The 337 B adds local
+    // search across ideas/ids/concepts and a readable detail heading; route closures remain lazy.
+    // 2026-09-28 Research map: 570,105 B before, 570,610 B after. The 505 B adds
+    // question search with visible ancestry and collapsible evidence; route closures remain lazy.
+    // 2026-09-29 Deep research workspace: 571,934 B JS / 53,522 B CSS measured after
+    // adding persistent memo navigation, chat handoff and a larger reading surface.
+    // Route closures remain lazy.
+    // 2026-09-29 Overview: 572,588 B JS / 54,447 B CSS. The summary adds budget truth,
+    // review signals and bounded hint history. Its 982 B CSS chunk loads with panels only;
+    // initial-shell CSS fell to 36,358 B. Keep <1 KiB headroom on each total.
+    // 2026-09-29 Report later gains: measured 573,716 B JS after the bounded two-scale
+    // waterfall view. The 561 KiB ceiling leaves 748 B; route/reachability gates still apply.
+    // 2026-09-29 workspace UI: measured 574,846 B JS / 56,080 B CSS after Card evidence,
+    // Assistant context, Concept empty-state navigation and Trust summary. Optional Card and
+    // Concept styles load with their lazy screens; the initial shell remains below its ceiling.
+    // 2026-09-29 merge of master into the branch: measured 578,765 B JS / 56,311 B CSS — both sides' features, every closure still lazy.
+    js: { gzip: 566 * KIB },
+    css: { gzip: 55 * KIB },
   },
   individual: {
     js: { raw: 450 * KIB, gzip: 110 * KIB },
@@ -82,7 +98,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // two model slices beside it measured +11 / -15 B).
       // 2026-09-27: measured 217,216 B JS (was 211 KiB, +1,152 B over; master alone was +84 B):
       // the same features as the total above, through the shared OwnerChrome/RunList closure.
-      limits: { js: { gzip: 213 * KIB }, css: { gzip: 40 * KIB } },
+      // 2026-09-28 Windows build: 216,251 B; forbidden reachability still passes.
+      // 2026-09-29 merge of master into the branch: measured 218,171 B JS.
+      limits: { js: { gzip: 214 * KIB }, css: { gzip: 40 * KIB } },
     },
     {
       name: 'Run compare increment',
@@ -114,7 +132,11 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-09-22: measured 388,537 B JS (was 348 KiB, +31.4 KiB) / 44,969 B CSS (was 43 KiB).
       // 2026-09-27: measured 393,548 B JS (was 381 KiB, +3,404 B over; master alone +993 B): the
       // Inspector's ruler and drain controls, the comparability refusal copy, the Card readers.
-      limits: { js: { gzip: 385 * KIB }, css: { gzip: 45 * KIB } },
+      // 2026-09-28 Windows build: 391,398 B; panel hub remains a separate lazy increment.
+      // 2026-09-29 Overview: 392,224 B; budget provenance in RunView adds a small shared path.
+      // 2026-09-29 workspace UI: measured 393,283 B JS with Assistant handoff and inspector CTA.
+      // 2026-09-29 merge of master into the branch: measured 396,112 B JS.
+      limits: { js: { gzip: 387 * KIB }, css: { gzip: 45 * KIB } },
     },
     {
       name: 'valid review DAG route',
@@ -123,7 +145,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-09-22: measured 259,910 B JS (was 239 KiB, +14.8 KiB) / 41,000 B CSS (was 39 KiB).
       // 2026-09-27: measured 263,037 B JS (was 255 KiB, +1,917 B over; master alone +627 B): the
       // shared RunView half of the same features.
-      limits: { js: { gzip: 258 * KIB }, css: { gzip: 41 * KIB } },
+      // 2026-09-28 Windows build: 261,870 B; review still excludes owner panel code.
+      // 2026-09-29 merge of master into the branch: measured 264,378 B JS.
+      limits: { js: { gzip: 259 * KIB }, css: { gzip: 41 * KIB } },
     },
     {
       name: 'owner Concepts route',
@@ -138,7 +162,11 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // as the owner List route above (UI-06's composer hook).
       // 2026-09-27: measured 259,110 B JS (was 252 KiB, +1,062 B over; master alone +42 B): the
       // Concepts detail's objective ruler plus the shared RunView/OwnerChrome growth above.
-      limits: { js: { gzip: 254 * KIB }, css: { gzip: 42 * KIB } },
+      // 2026-09-28 Windows build: 258,304 B; concept view stays outside the initial shell.
+      // 2026-09-29 Overview: 259,090 B on the shared RunView path; the panel remains lazy.
+      // 2026-09-29 workspace UI: measured 43,377 B CSS with the Concepts empty and evidence rows.
+      // 2026-09-29 merge of master into the branch: measured 261,117 B JS (both sides' Concepts work).
+      limits: { js: { gzip: 256 * KIB }, css: { gzip: 43 * KIB } },
     },
     {
       name: 'panel-hub increment',
@@ -194,6 +222,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-09-27: measured 89,469 B (was 87 KiB, +381 B over; master alone +171 B): `vendor-flow`
       // itself is byte-identical to master's; the +210 B is the shared `run-support` chunk it
       // statically imports (the run models the features above extended).
+      // 2026-09-28 Windows build: 89,261 B; vendor Flow remains lazy from the shell.
       limits: { js: { gzip: 88 * KIB } },
     },
   ],

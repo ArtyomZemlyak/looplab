@@ -152,6 +152,15 @@ export function cardSelectionBlock(card) {
 }
 
 export const cardText = value => typeof value === 'string' && value.trim() ? value.trim() : null
+
+export function cardMatchesQuery(card, query) {
+  const needle = cardText(query)?.toLowerCase()
+  if (!needle) return true
+  if (!isRecord(card)) return false
+  const fields = [card.id, card.statement, card.operator,
+    ...(Array.isArray(card.concept_tags) ? card.concept_tags : [])]
+  return fields.some(value => cardText(value)?.toLowerCase().includes(needle))
+}
 export const cardNumber = value => typeof value === 'number' && Number.isFinite(value) ? value : null
 export const cardInt = value => Number.isSafeInteger(value) && value >= 0 ? value : null
 export const cardNodes = value => Array.isArray(value)
@@ -473,7 +482,7 @@ export function cardLessons(state, card) {
 
 // Which card the route's `card=` target resolves to. Deliberately NEVER auto-picks a fallback: a
 // shared link that silently opened a DIFFERENT card than the one it names would be worse than an
-// empty pane, and the empty pane is recoverable by clicking a lane card.
+// explicit missing-selection notice. The board can still open another Card or clear the link.
 export function resolveSelectedCard(cards, cardId) {
   const wanted = cardText(cardId)
   if (!wanted) return null

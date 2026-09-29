@@ -43,7 +43,7 @@ tmp root is keyed by OS USER, so two concurrent runs delete each other's fixture
 `LOOPLAB_LIVE_SCENARIOS=1`). There is no formatter and ONE lint rule, and that rule is a CENSUS, not a
 style: `[tool.ruff]` selects `BLE` only (doc 52 row 14), so `python -m ruff check looplab` lists every
 blind `except Exception`/`BaseException`/bare `except` that carries no `# noqa: BLE001 — <why this is
-safe to contain>`. Containment is the house posture (750 such handlers), so the rule is not "do not
+safe to contain>`. Containment is the house posture (758 such handlers), so the rule is not "do not
 write one" but "say why"; `tests/test_containment_census.py` re-derives the same census by AST with no
 `ruff` installed, refuses a NEW blind handler that states no reason, and keeps the 86 pre-existing
 reason-less sites as a shrink-only backlog in `tests/data/containment_unreviewed.txt` (review one =
@@ -371,3 +371,14 @@ refused — is in `docs/64-agent-guide-narratives-2026-09-06.md` ("Engine invari
 - A run directory contains `events.jsonl`, `config.snapshot.json`, `task.snapshot.json`,
   `engine.lock`, and per-node workdirs (`docs/guide/concepts.md` is accurate;
   `docs/04-file-layout.md` is the original *design* and differs from what shipped).
+# External agent integration
+
+When using this project as a research harness, run `looplab harness` to discover the
+implemented contract and read `docs/guide/external-harness.md`. A node's stages and plan
+are optional reasoning choices; operator-declared stages take precedence. The candidate
+may edit only the task's allowed surface, and LoopLab owns evaluation and the event log.
+In `external_harness=true` mode with `backend=toy`, connect `looplab harness-mcp`
+to the live UI and submit ready-made candidates through durable commands. The
+external agent owns Researcher, Developer, repair and next-action decisions;
+the engine owns evaluation and budgets. `developer_backend=claude` on a normal
+run delegates candidate editing only. See `AGENTS.md` for the operational guide.

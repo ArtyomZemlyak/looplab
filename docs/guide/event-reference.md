@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-161 event types — 113 folded into `RunState`, 48 diagnostic; 1009 declared payload keys; 22 types whose whole payload is stored by the fold.
+162 event types — 113 folded into `RunState`, 49 diagnostic; 1024 declared payload keys; 22 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -37,7 +37,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `applied_params_backfilled` | folded | What the configuration that actually RAN assigned to the declared params, read back off the workdir. | `applied_params`, `generation`, `node_id`, `read_at`, `unrecoverable`, `workdir_digest` | `attempt` |
 | `approval_granted` | folded | The operator ratified the node the run paused on (HITL). | `generation`, `node_id` | `attempt` |
 | `approval_requested` | folded | The run paused for a human decision about one node, at a named log position. | `after_seq`, `generation`, `metric`, `node_id` | `attempt` |
-| `asha_rank` | diagnostic | One ASHA tick's ranking of a running node against its comparable population. | `comparable_population`, `direction`, `endpoint_underperforming`, `generation`, `intermediate`, `kill_comparable`, `node_id`, `population`, `quantile`, `resource_underperforming`, `underperforming` | `resource`, `resource_key` |
+| `asha_rank` | diagnostic | One ASHA tick's ranking of a running node against its comparable population. | `comparable_population`, `direction`, `endpoint_underperforming`, `generation`, `intermediate`, `kill_comparable`, `node_id`, `population`, `quantile`, `resource_underperforming`, `underperforming` | `checkpoint_id`, `resource`, `resource_key`, `source` |
 | `asha_verdict` | diagnostic | The ASHA judge's call on a persistently underperforming node: stop or spare, with confidence. | `comparable_population`, `confidence`, `direction`, `generation`, `intermediate`, `kill`, `node_id`, `quantile`, `reason`, `status`, `stop_decided`, `under_streak` | `confidence_valid`, `kill_superseded_by`, `resource`, `resource_key`, `train_monitor_status` |
 | `belief_admission` | diagnostic | How many researcher-proposed beliefs one proposal turn offered and how many the board admitted. | `admitted`, `blank`, `board_read`, `capped`, `proposed`, `repeated`, `restated`, `shape` | — |
 | `best_confirmed` | folded | The champion the run confirmed by re-evaluation, and whether that confirmation was significant. | `generations`, `node_id`, `search_epoch`, `significant` | `attempt`, `generation`, `objective_key` |
@@ -103,6 +103,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `host_grading` | folded · whole | The host-side scorer's grade over the candidate's predictions. | `predictions`, `scorer` | `competition`, `n_hidden`, `n_labels`, `protocol` |
 | `hypothesis_added` | folded | A research hypothesis on the board — operator-authored, or engine-written after a deep-research pass. | `source`, `statement` | `at_node`, `concept_tags`, `concepts`, `id`, `parent_belief_id` |
 | `hypothesis_concepts` | folded | The concept ids one hypothesis was tagged with, against a named vocabulary. | `at_vocab`, `concepts`, `hyp_id`, `mode` | — |
+| `hypothesis_merge_reviewed` | diagnostic | An external agent reviewed one exact open-belief board for duplicate hypotheses. | `action_id`, `aliases`, `board_sha256`, `canonical`, `decision`, `reason`, `statement` | — |
 | `hypothesis_merged` | folded | Alias hypotheses folded into a canonical one. | `aliases`, `at_node`, `canonical`, `statement` | — |
 | `hypothesis_ranked` | folded · whole | The board's priority order over the open hypotheses, with confidence. | — | `attempt`, `generation`, `node_id`, `order` |
 | `hypothesis_updated` | folded | One hypothesis's status moved. | `id` | `status` |
@@ -131,7 +132,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `node_repaired` | folded | One repair round on a failing node: what it changed, on what evidence, and the verdict on the change. | `attempt`, `changed`, `deleted`, `error_in`, `files`, `generation`, `node_id`, `rationale`, `stages_passed`, `triage_action` | `attribution`, `budget_exhausted`, `code`, `edit_calls`, `engine_reason`, `error_evidence`, `eval_seconds`, `failure_signature`, `footprint_finalized`, `idea_footprint`, `judge_deferred`, `param_overrides`, `reason`, `reason_evidence`, `reason_evidence_resolved`, `reason_findings`, `reason_hypotheses`, `reason_override_refused`, `reason_source`, `reason_summary`, `salvaged_metric`, `unmet`, `unparseable_repairs`, `verified` |
 | `node_reset` | folded | The operator re-ran an existing node in place from a named stage. | `node_id` | `attempt`, `from_stage`, `generation` |
 | `node_tombstoned` | folded | Nodes struck from selection without deleting their history. | `node_ids` | — |
-| `node_value_estimated` | folded | How much a model thinks expanding one node's branch still has left, in [0, 1]. | `generation`, `node_id`, `value` | `attempt`, `rationale` |
+| `node_value_estimated` | folded | How much a model thinks expanding one node's branch still has left, in [0, 1]. | `generation`, `node_id`, `value` | `action_id`, `attempt`, `rationale`, `request_sha256` |
 | `node_verified` | folded | The selection verifier's score for one node, over a named evidence digest. | — | `attempt`, `evidence_digest`, `generation`, `node_id`, `score` |
 | `novelty_graded` | folded · whole | The graded-novelty verdict on a proposal the flat gate would have rejected. | — | `grade`, `level`, `literature`, `rationale`, `recommendation`, `shared_concepts`, `stance` |
 | `novelty_rejected` | folded · whole | A near-duplicate proposal the novelty gate nudged off, with the distance that decided it. | — | `action`, `distance`, `generation`, `kind`, `literature`, `node_id`, `nudged`, `original`, `reason`, `stance` |
@@ -182,10 +183,10 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `strategy_decision` | folded | The Strategist's consult: the strategy it returned and the context it was given. | `at_node`, `ctx`, `strategy` | `developer_application`, `width_unfilled` |
 | `task_changed` | diagnostic | A re-entry read a task whose identity (defaults left out) differs from the last recorded: the start's, or a row's `now`. | `now`, `was` | — |
 | `trace_export_health` | diagnostic | The span exporter is unhealthy — one row per distinct state, never on a healthy run. | — | `accepted_spans`, `buffered_bytes`, `dropped_queue_bytes`, `dropped_queue_full`, `dropped_serialization_error`, `dropped_shutdown`, `dropped_shutdown_timeout`, `dropped_spans`, `dropped_worker_start`, `export_failures`, `exported_spans`, `last_export_error`, `loss_receipt_failures`, `loss_receipts`, `queued_spans`, `shutdown`, `stopped_abandoned`, `stopped_crashed`, `stopped_idle`, `stopped_receipt_failed`, `stopped_retired`, `stopped_shutdown`, `worker_alive`, `worker_stop_detail`, `worker_stop_reason` |
-| `train_monitor_alert` | diagnostic | The live training-log judge's verdict about one running stage, and the log role it judged. | `confidence`, `generation`, `log_role`, `node_id`, `reason`, `status` | `citation_resolved`, `confidence_valid`, `evidence_locator`, `evidence_source`, `fault`, `kill`, `kill_role_withheld`, `kill_superseded_by`, `overrun_alert_floor_s`, `overrun_beyond_noise_s`, `projected_overrun_s`, `repair_decided`, `stage`, `stage_grace_s`, `stage_wall_s`, `stop_decided`, `trajectory`, `trajectory_veto` |
+| `train_monitor_alert` | diagnostic | The live training-log judge's verdict about one running stage, and the log role it judged. | `confidence`, `generation`, `log_role`, `node_id`, `reason`, `status` | `checkpoint_id`, `citation_resolved`, `confidence_valid`, `evidence_locator`, `evidence_source`, `fault`, `kill`, `kill_role_withheld`, `kill_superseded_by`, `overrun_alert_floor_s`, `overrun_beyond_noise_s`, `projected_overrun_s`, `repair_decided`, `source`, `stage`, `stage_grace_s`, `stage_wall_s`, `stop_decided`, `trajectory`, `trajectory_veto` |
 | `trust_gate_changed` | folded | The run's trust gate was changed, by a named source (last write wins). | `source`, `trust_gate` | — |
 | `trust_scan` | diagnostic | Which trust detectors ran over one node's code, how many findings they made, over what digest. | — | `code_digest`, `detectors`, `evidence_version`, `findings`, `generation`, `node_id` |
-| `verifier_group_scored` | folded | One verifier round over a GROUP of nodes, keyed on the contract and evidence digests. | `contract`, `members`, `requested_samples`, `v` | — |
+| `verifier_group_scored` | folded | One verifier round over a GROUP of nodes, keyed on the contract and evidence digests. | `contract`, `members`, `requested_samples`, `v` | `action_id`, `request_sha256` |
 | `workspace_changed` | folded | A re-entry read a workspace source unlike the last recorded reading of its kind, or a way it was never read before. | `now`, `was` | — |
 | `workspace_seeded` | diagnostic | One node's workspace was seeded: what was materialized, and the bytes the seed copied from the editable tree(s). | `materialized`, `node_id` | `workspace_bytes` |
 
