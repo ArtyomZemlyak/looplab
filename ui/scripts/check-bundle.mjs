@@ -136,7 +136,8 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-09-29 Overview: 392,224 B; budget provenance in RunView adds a small shared path.
       // 2026-09-29 workspace UI: measured 393,283 B JS with Assistant handoff and inspector CTA.
       // 2026-09-29 merge of master into the branch: measured 396,112 B JS.
-      limits: { js: { gzip: 387 * KIB }, css: { gzip: 45 * KIB } },
+      // 2026-09-29 master's Card-board model (withheld-return copy): 396,291 B, 3 B over 387 KiB.
+      limits: { js: { gzip: 388 * KIB }, css: { gzip: 45 * KIB } },
     },
     {
       name: 'valid review DAG route',
