@@ -62,7 +62,7 @@ function frame(runId, generation, {
       complete: true, truncated: false, reasons: [], limits,
       source: { membership_nodes: 1, edges: edge ? 1 : 0 },
       included: { membership_nodes: 1, memberships: 1, concepts: 1,
-        tree_nodes: edge ? 1 : 2, edges: edge ? 1 : 0, experiment_refs: 1 },
+        tree_nodes: edge ? 1 : 2, edges: edge ? 1 : 0, derived_edges: 0, experiment_refs: 1 },
       source_integrity: { complete: true, generation_identified: true },
     },
   }
@@ -79,7 +79,7 @@ function emptyFrame(runId, generation) {
       ...value.completeness,
       source: { membership_nodes: 0, edges: 0 },
       included: { membership_nodes: 0, memberships: 0, concepts: 0,
-        tree_nodes: 0, edges: 0, experiment_refs: 0 },
+        tree_nodes: 0, edges: 0, derived_edges: 0, experiment_refs: 0 },
     },
   }
 }

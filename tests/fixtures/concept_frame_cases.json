@@ -1,0 +1,1614 @@
+[
+ {
+  "expected": {
+   "requestedLens": "co_occurs",
+   "requestedSeq": null,
+   "runId": "demo"
+  },
+  "frame": {
+   "authoritative": true,
+   "authority": {
+    "authoritative": true,
+    "complete": true,
+    "scope": "captured_recoverable_event_prefix",
+    "semantic_claims_verified": false,
+    "source_authoritative": true
+   },
+   "captured_seq": 4,
+   "complete": true,
+   "completeness": {
+    "complete": true,
+    "included": {
+     "concepts": 3,
+     "derived_edges": 1,
+     "edges": 1,
+     "experiment_refs": 5,
+     "membership_nodes": 2,
+     "memberships": 5,
+     "tree_nodes": 3
+    },
+    "limits": {
+     "concepts_per_node": 64,
+     "edge_endpoints": 4096,
+     "edges": 2048,
+     "membership_nodes": 2048,
+     "memberships": 8192,
+     "tree_nodes": 4096
+    },
+    "reasons": [],
+    "source": {
+     "edges": 0,
+     "membership_nodes": 2
+    },
+    "source_integrity": {
+     "complete": true,
+     "generation_identified": true
+    },
+    "truncated": false
+   },
+   "edges_present": true,
+   "effective_lens": "co_occurs",
+   "experiment_refs": {
+    "pair/x": [
+     {
+      "feasible": true,
+      "is_best": false,
+      "membership_provenance": "researcher-authored",
+      "metric": 1.0,
+      "metric_kind": "robust_metric",
+      "node_generation": 0,
+      "node_id": 0,
+      "status": "evaluated"
+     },
+     {
+      "feasible": true,
+      "is_best": true,
+      "membership_provenance": "researcher-authored",
+      "metric": 2.0,
+      "metric_kind": "robust_metric",
+      "node_generation": 0,
+      "node_id": 1,
+      "status": "evaluated"
+     }
+    ],
+    "pair/y": [
+     {
+      "feasible": true,
+      "is_best": false,
+      "membership_provenance": "researcher-authored",
+      "metric": 1.0,
+      "metric_kind": "robust_metric",
+      "node_generation": 0,
+      "node_id": 0,
+      "status": "evaluated"
+     },
+     {
+      "feasible": true,
+      "is_best": true,
+      "membership_provenance": "researcher-authored",
+      "metric": 2.0,
+      "metric_kind": "robust_metric",
+      "node_generation": 0,
+      "node_id": 1,
+      "status": "evaluated"
+     }
+    ],
+    "solo/z": [
+     {
+      "feasible": true,
+      "is_best": true,
+      "membership_provenance": "researcher-authored",
+      "metric": 2.0,
+      "metric_kind": "robust_metric",
+      "node_generation": 0,
+      "node_id": 1,
+      "status": "evaluated"
+     }
+    ]
+   },
+   "generation": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+   "historical": false,
+   "lens": "co_occurs",
+   "lens_contract": {
+    "effective": "co_occurs",
+    "fallback": null,
+    "registration": "shipped",
+    "requested": "co_occurs"
+   },
+   "lens_edges_present": true,
+   "lenses": [
+    {
+     "kind": "path",
+     "label": "Family \u00b7 is-a",
+     "name": "is_a",
+     "rels": [
+      "is_a"
+     ]
+    },
+    {
+     "kind": "edge",
+     "label": "Usage \u00b7 uses",
+     "name": "uses",
+     "rels": [
+      "uses"
+     ]
+    },
+    {
+     "kind": "edge",
+     "label": "Composition \u00b7 part-of",
+     "name": "part_of",
+     "rels": [
+      "part_of"
+     ]
+    },
+    {
+     "kind": "edge",
+     "label": "Empirical \u00b7 co-occurs",
+     "name": "co_occurs",
+     "rels": [
+      "co_occurs"
+     ]
+    }
+   ],
+   "max_seq": 4,
+   "metrics": {
+    "baseline": 1.5,
+    "direction": "max",
+    "rollup": {
+     "pair": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.0,
+      "evaluated": 2,
+      "first_touch": 0,
+      "mean": 1.5,
+      "touched": 2,
+      "worst": 1.0
+     },
+     "pair/x": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.0,
+      "evaluated": 2,
+      "first_touch": 0,
+      "mean": 1.5,
+      "touched": 2,
+      "worst": 1.0
+     },
+     "pair/y": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.0,
+      "evaluated": 2,
+      "first_touch": 0,
+      "mean": 1.5,
+      "touched": 2,
+      "worst": 1.0
+     },
+     "solo": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.5,
+      "evaluated": 1,
+      "first_touch": 1,
+      "mean": 2.0,
+      "touched": 1,
+      "worst": 2.0
+     },
+     "solo/z": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.5,
+      "evaluated": 1,
+      "first_touch": 1,
+      "mean": 2.0,
+      "touched": 1,
+      "worst": 2.0
+     }
+    },
+    "rows": {
+     "pair/x": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.0,
+      "evaluated": 2,
+      "first_touch": 0,
+      "mean": 1.5,
+      "touched": 2,
+      "worst": 1.0
+     },
+     "pair/y": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.0,
+      "evaluated": 2,
+      "first_touch": 0,
+      "mean": 1.5,
+      "touched": 2,
+      "worst": 1.0
+     },
+     "solo/z": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.5,
+      "evaluated": 1,
+      "first_touch": 1,
+      "mean": 2.0,
+      "touched": 1,
+      "worst": 2.0
+     }
+    }
+   },
+   "provenance": {
+    "membership_counts": {
+     "researcher-authored": 5
+    },
+    "membership_semantics": "recorded_claims",
+    "projection": "event_log_fold",
+    "source": "events.jsonl"
+   },
+   "requested_lens": "co_occurs",
+   "requested_lens_spec": {
+    "kind": "edge",
+    "name": "co_occurs",
+    "registration": "shipped",
+    "rels": [
+     "co_occurs"
+    ]
+   },
+   "requested_seq": null,
+   "run_id": "demo",
+   "run_scope": {
+    "coverage": "complete",
+    "distinguishing": {
+     "0": [],
+     "1": [
+      "solo/z"
+     ]
+    },
+    "no_distinguishing": [
+     0
+    ],
+    "population": 2,
+    "reasons": [],
+    "run_constant": [
+     "pair/x",
+     "pair/y"
+    ],
+    "unclassified": []
+   },
+   "schema": 1,
+   "status": "complete",
+   "touch": {
+    "pair/x": 2,
+    "pair/y": 2,
+    "solo/z": 1
+   },
+   "tree": {
+    "lens": "co_occurs",
+    "nodes": {
+     "pair/x": {
+      "children": [
+       "pair/y"
+      ],
+      "cross_parents": [],
+      "depth": 0,
+      "parent": null,
+      "tagged": true
+     },
+     "pair/y": {
+      "children": [],
+      "cross_parents": [],
+      "depth": 1,
+      "parent": "pair/x",
+      "tagged": true
+     },
+     "solo/z": {
+      "children": [],
+      "cross_parents": [],
+      "depth": 0,
+      "parent": null,
+      "tagged": true
+     }
+    },
+    "roots": [
+     "pair/x",
+     "solo/z"
+    ]
+   }
+  },
+  "name": "a derived co_occurs edge only, on its own lens"
+ },
+ {
+  "expected": {
+   "requestedLens": "is_a",
+   "requestedSeq": null,
+   "runId": "demo"
+  },
+  "frame": {
+   "authoritative": true,
+   "authority": {
+    "authoritative": true,
+    "complete": true,
+    "scope": "captured_recoverable_event_prefix",
+    "semantic_claims_verified": false,
+    "source_authoritative": true
+   },
+   "captured_seq": 4,
+   "complete": true,
+   "completeness": {
+    "complete": true,
+    "included": {
+     "concepts": 3,
+     "derived_edges": 1,
+     "edges": 1,
+     "experiment_refs": 5,
+     "membership_nodes": 2,
+     "memberships": 5,
+     "tree_nodes": 5
+    },
+    "limits": {
+     "concepts_per_node": 64,
+     "edge_endpoints": 4096,
+     "edges": 2048,
+     "membership_nodes": 2048,
+     "memberships": 8192,
+     "tree_nodes": 4096
+    },
+    "reasons": [],
+    "source": {
+     "edges": 0,
+     "membership_nodes": 2
+    },
+    "source_integrity": {
+     "complete": true,
+     "generation_identified": true
+    },
+    "truncated": false
+   },
+   "edges_present": true,
+   "effective_lens": "is_a",
+   "experiment_refs": {
+    "pair/x": [
+     {
+      "feasible": true,
+      "is_best": false,
+      "membership_provenance": "researcher-authored",
+      "metric": 1.0,
+      "metric_kind": "robust_metric",
+      "node_generation": 0,
+      "node_id": 0,
+      "status": "evaluated"
+     },
+     {
+      "feasible": true,
+      "is_best": true,
+      "membership_provenance": "researcher-authored",
+      "metric": 2.0,
+      "metric_kind": "robust_metric",
+      "node_generation": 0,
+      "node_id": 1,
+      "status": "evaluated"
+     }
+    ],
+    "pair/y": [
+     {
+      "feasible": true,
+      "is_best": false,
+      "membership_provenance": "researcher-authored",
+      "metric": 1.0,
+      "metric_kind": "robust_metric",
+      "node_generation": 0,
+      "node_id": 0,
+      "status": "evaluated"
+     },
+     {
+      "feasible": true,
+      "is_best": true,
+      "membership_provenance": "researcher-authored",
+      "metric": 2.0,
+      "metric_kind": "robust_metric",
+      "node_generation": 0,
+      "node_id": 1,
+      "status": "evaluated"
+     }
+    ],
+    "solo/z": [
+     {
+      "feasible": true,
+      "is_best": true,
+      "membership_provenance": "researcher-authored",
+      "metric": 2.0,
+      "metric_kind": "robust_metric",
+      "node_generation": 0,
+      "node_id": 1,
+      "status": "evaluated"
+     }
+    ]
+   },
+   "generation": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+   "historical": false,
+   "lens": "is_a",
+   "lens_contract": {
+    "effective": "is_a",
+    "fallback": null,
+    "registration": "shipped",
+    "requested": "is_a"
+   },
+   "lens_edges_present": false,
+   "lenses": [
+    {
+     "kind": "path",
+     "label": "Family \u00b7 is-a",
+     "name": "is_a",
+     "rels": [
+      "is_a"
+     ]
+    },
+    {
+     "kind": "edge",
+     "label": "Usage \u00b7 uses",
+     "name": "uses",
+     "rels": [
+      "uses"
+     ]
+    },
+    {
+     "kind": "edge",
+     "label": "Composition \u00b7 part-of",
+     "name": "part_of",
+     "rels": [
+      "part_of"
+     ]
+    },
+    {
+     "kind": "edge",
+     "label": "Empirical \u00b7 co-occurs",
+     "name": "co_occurs",
+     "rels": [
+      "co_occurs"
+     ]
+    }
+   ],
+   "max_seq": 4,
+   "metrics": {
+    "baseline": 1.5,
+    "direction": "max",
+    "rollup": {
+     "pair": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.0,
+      "evaluated": 2,
+      "first_touch": 0,
+      "mean": 1.5,
+      "touched": 2,
+      "worst": 1.0
+     },
+     "pair/x": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.0,
+      "evaluated": 2,
+      "first_touch": 0,
+      "mean": 1.5,
+      "touched": 2,
+      "worst": 1.0
+     },
+     "pair/y": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.0,
+      "evaluated": 2,
+      "first_touch": 0,
+      "mean": 1.5,
+      "touched": 2,
+      "worst": 1.0
+     },
+     "solo": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.5,
+      "evaluated": 1,
+      "first_touch": 1,
+      "mean": 2.0,
+      "touched": 1,
+      "worst": 2.0
+     },
+     "solo/z": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.5,
+      "evaluated": 1,
+      "first_touch": 1,
+      "mean": 2.0,
+      "touched": 1,
+      "worst": 2.0
+     }
+    },
+    "rows": {
+     "pair/x": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.0,
+      "evaluated": 2,
+      "first_touch": 0,
+      "mean": 1.5,
+      "touched": 2,
+      "worst": 1.0
+     },
+     "pair/y": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.0,
+      "evaluated": 2,
+      "first_touch": 0,
+      "mean": 1.5,
+      "touched": 2,
+      "worst": 1.0
+     },
+     "solo/z": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.5,
+      "evaluated": 1,
+      "first_touch": 1,
+      "mean": 2.0,
+      "touched": 1,
+      "worst": 2.0
+     }
+    }
+   },
+   "provenance": {
+    "membership_counts": {
+     "researcher-authored": 5
+    },
+    "membership_semantics": "recorded_claims",
+    "projection": "event_log_fold",
+    "source": "events.jsonl"
+   },
+   "requested_lens": "is_a",
+   "requested_lens_spec": {
+    "kind": "path",
+    "name": "is_a",
+    "registration": "shipped",
+    "rels": [
+     "is_a"
+    ]
+   },
+   "requested_seq": null,
+   "run_id": "demo",
+   "run_scope": {
+    "coverage": "complete",
+    "distinguishing": {
+     "0": [],
+     "1": [
+      "solo/z"
+     ]
+    },
+    "no_distinguishing": [
+     0
+    ],
+    "population": 2,
+    "reasons": [],
+    "run_constant": [
+     "pair/x",
+     "pair/y"
+    ],
+    "unclassified": []
+   },
+   "schema": 1,
+   "status": "complete",
+   "touch": {
+    "pair/x": 2,
+    "pair/y": 2,
+    "solo/z": 1
+   },
+   "tree": {
+    "lens": "is_a",
+    "nodes": {
+     "pair": {
+      "children": [
+       "pair/x",
+       "pair/y"
+      ],
+      "depth": 0,
+      "parent": null,
+      "tagged": false
+     },
+     "pair/x": {
+      "children": [],
+      "depth": 1,
+      "parent": "pair",
+      "tagged": true
+     },
+     "pair/y": {
+      "children": [],
+      "depth": 1,
+      "parent": "pair",
+      "tagged": true
+     },
+     "solo": {
+      "children": [
+       "solo/z"
+      ],
+      "depth": 0,
+      "parent": null,
+      "tagged": false
+     },
+     "solo/z": {
+      "children": [],
+      "depth": 1,
+      "parent": "solo",
+      "tagged": true
+     }
+    },
+    "roots": [
+     "pair",
+     "solo"
+    ]
+   }
+  },
+  "name": "a derived co_occurs edge only, on the default hierarchy"
+ },
+ {
+  "expected": {
+   "requestedLens": "uses",
+   "requestedSeq": null,
+   "runId": "demo"
+  },
+  "frame": {
+   "authoritative": true,
+   "authority": {
+    "authoritative": true,
+    "complete": true,
+    "scope": "captured_recoverable_event_prefix",
+    "semantic_claims_verified": false,
+    "source_authoritative": true
+   },
+   "captured_seq": 5,
+   "complete": true,
+   "completeness": {
+    "complete": true,
+    "included": {
+     "concepts": 3,
+     "derived_edges": 1,
+     "edges": 2,
+     "experiment_refs": 5,
+     "membership_nodes": 2,
+     "memberships": 5,
+     "tree_nodes": 3
+    },
+    "limits": {
+     "concepts_per_node": 64,
+     "edge_endpoints": 4096,
+     "edges": 2048,
+     "membership_nodes": 2048,
+     "memberships": 8192,
+     "tree_nodes": 4096
+    },
+    "reasons": [],
+    "source": {
+     "edges": 1,
+     "membership_nodes": 2
+    },
+    "source_integrity": {
+     "complete": true,
+     "generation_identified": true
+    },
+    "truncated": false
+   },
+   "edges_present": true,
+   "effective_lens": "uses",
+   "experiment_refs": {
+    "pair/x": [
+     {
+      "feasible": true,
+      "is_best": false,
+      "membership_provenance": "researcher-authored",
+      "metric": 1.0,
+      "metric_kind": "robust_metric",
+      "node_generation": 0,
+      "node_id": 0,
+      "status": "evaluated"
+     },
+     {
+      "feasible": true,
+      "is_best": true,
+      "membership_provenance": "researcher-authored",
+      "metric": 2.0,
+      "metric_kind": "robust_metric",
+      "node_generation": 0,
+      "node_id": 1,
+      "status": "evaluated"
+     }
+    ],
+    "pair/y": [
+     {
+      "feasible": true,
+      "is_best": false,
+      "membership_provenance": "researcher-authored",
+      "metric": 1.0,
+      "metric_kind": "robust_metric",
+      "node_generation": 0,
+      "node_id": 0,
+      "status": "evaluated"
+     },
+     {
+      "feasible": true,
+      "is_best": true,
+      "membership_provenance": "researcher-authored",
+      "metric": 2.0,
+      "metric_kind": "robust_metric",
+      "node_generation": 0,
+      "node_id": 1,
+      "status": "evaluated"
+     }
+    ],
+    "solo/z": [
+     {
+      "feasible": true,
+      "is_best": true,
+      "membership_provenance": "researcher-authored",
+      "metric": 2.0,
+      "metric_kind": "robust_metric",
+      "node_generation": 0,
+      "node_id": 1,
+      "status": "evaluated"
+     }
+    ]
+   },
+   "generation": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+   "historical": false,
+   "lens": "uses",
+   "lens_contract": {
+    "effective": "uses",
+    "fallback": null,
+    "registration": "shipped",
+    "requested": "uses"
+   },
+   "lens_edges_present": true,
+   "lenses": [
+    {
+     "kind": "path",
+     "label": "Family \u00b7 is-a",
+     "name": "is_a",
+     "rels": [
+      "is_a"
+     ]
+    },
+    {
+     "kind": "edge",
+     "label": "Usage \u00b7 uses",
+     "name": "uses",
+     "rels": [
+      "uses"
+     ]
+    },
+    {
+     "kind": "edge",
+     "label": "Composition \u00b7 part-of",
+     "name": "part_of",
+     "rels": [
+      "part_of"
+     ]
+    },
+    {
+     "kind": "edge",
+     "label": "Empirical \u00b7 co-occurs",
+     "name": "co_occurs",
+     "rels": [
+      "co_occurs"
+     ]
+    }
+   ],
+   "max_seq": 5,
+   "metrics": {
+    "baseline": 1.5,
+    "direction": "max",
+    "rollup": {
+     "pair": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.0,
+      "evaluated": 2,
+      "first_touch": 0,
+      "mean": 1.5,
+      "touched": 2,
+      "worst": 1.0
+     },
+     "pair/x": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.0,
+      "evaluated": 2,
+      "first_touch": 0,
+      "mean": 1.5,
+      "touched": 2,
+      "worst": 1.0
+     },
+     "pair/y": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.0,
+      "evaluated": 2,
+      "first_touch": 0,
+      "mean": 1.5,
+      "touched": 2,
+      "worst": 1.0
+     },
+     "solo": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.5,
+      "evaluated": 1,
+      "first_touch": 1,
+      "mean": 2.0,
+      "touched": 1,
+      "worst": 2.0
+     },
+     "solo/z": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.5,
+      "evaluated": 1,
+      "first_touch": 1,
+      "mean": 2.0,
+      "touched": 1,
+      "worst": 2.0
+     }
+    },
+    "rows": {
+     "pair/x": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.0,
+      "evaluated": 2,
+      "first_touch": 0,
+      "mean": 1.5,
+      "touched": 2,
+      "worst": 1.0
+     },
+     "pair/y": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.0,
+      "evaluated": 2,
+      "first_touch": 0,
+      "mean": 1.5,
+      "touched": 2,
+      "worst": 1.0
+     },
+     "solo/z": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.5,
+      "evaluated": 1,
+      "first_touch": 1,
+      "mean": 2.0,
+      "touched": 1,
+      "worst": 2.0
+     }
+    }
+   },
+   "provenance": {
+    "membership_counts": {
+     "researcher-authored": 5
+    },
+    "membership_semantics": "recorded_claims",
+    "projection": "event_log_fold",
+    "source": "events.jsonl"
+   },
+   "requested_lens": "uses",
+   "requested_lens_spec": {
+    "kind": "edge",
+    "name": "uses",
+    "registration": "shipped",
+    "rels": [
+     "uses"
+    ]
+   },
+   "requested_seq": null,
+   "run_id": "demo",
+   "run_scope": {
+    "coverage": "complete",
+    "distinguishing": {
+     "0": [],
+     "1": [
+      "solo/z"
+     ]
+    },
+    "no_distinguishing": [
+     0
+    ],
+    "population": 2,
+    "reasons": [],
+    "run_constant": [
+     "pair/x",
+     "pair/y"
+    ],
+    "unclassified": []
+   },
+   "schema": 1,
+   "status": "complete",
+   "touch": {
+    "pair/x": 2,
+    "pair/y": 2,
+    "solo/z": 1
+   },
+   "tree": {
+    "lens": "uses",
+    "nodes": {
+     "pair/x": {
+      "children": [],
+      "cross_parents": [],
+      "depth": 1,
+      "parent": "solo/z",
+      "tagged": true
+     },
+     "pair/y": {
+      "children": [],
+      "cross_parents": [],
+      "depth": 0,
+      "parent": null,
+      "tagged": true
+     },
+     "solo/z": {
+      "children": [
+       "pair/x"
+      ],
+      "cross_parents": [],
+      "depth": 0,
+      "parent": null,
+      "tagged": true
+     }
+    },
+    "roots": [
+     "pair/y",
+     "solo/z"
+    ]
+   }
+  },
+  "name": "a recorded uses edge beside a derived one, on the uses lens"
+ },
+ {
+  "expected": {
+   "requestedLens": "co_occurs",
+   "requestedSeq": null,
+   "runId": "demo"
+  },
+  "frame": {
+   "authoritative": true,
+   "authority": {
+    "authoritative": true,
+    "complete": true,
+    "scope": "captured_recoverable_event_prefix",
+    "semantic_claims_verified": false,
+    "source_authoritative": true
+   },
+   "captured_seq": 5,
+   "complete": true,
+   "completeness": {
+    "complete": true,
+    "included": {
+     "concepts": 3,
+     "derived_edges": 1,
+     "edges": 2,
+     "experiment_refs": 5,
+     "membership_nodes": 2,
+     "memberships": 5,
+     "tree_nodes": 3
+    },
+    "limits": {
+     "concepts_per_node": 64,
+     "edge_endpoints": 4096,
+     "edges": 2048,
+     "membership_nodes": 2048,
+     "memberships": 8192,
+     "tree_nodes": 4096
+    },
+    "reasons": [],
+    "source": {
+     "edges": 1,
+     "membership_nodes": 2
+    },
+    "source_integrity": {
+     "complete": true,
+     "generation_identified": true
+    },
+    "truncated": false
+   },
+   "edges_present": true,
+   "effective_lens": "co_occurs",
+   "experiment_refs": {
+    "pair/x": [
+     {
+      "feasible": true,
+      "is_best": false,
+      "membership_provenance": "researcher-authored",
+      "metric": 1.0,
+      "metric_kind": "robust_metric",
+      "node_generation": 0,
+      "node_id": 0,
+      "status": "evaluated"
+     },
+     {
+      "feasible": true,
+      "is_best": true,
+      "membership_provenance": "researcher-authored",
+      "metric": 2.0,
+      "metric_kind": "robust_metric",
+      "node_generation": 0,
+      "node_id": 1,
+      "status": "evaluated"
+     }
+    ],
+    "pair/y": [
+     {
+      "feasible": true,
+      "is_best": false,
+      "membership_provenance": "researcher-authored",
+      "metric": 1.0,
+      "metric_kind": "robust_metric",
+      "node_generation": 0,
+      "node_id": 0,
+      "status": "evaluated"
+     },
+     {
+      "feasible": true,
+      "is_best": true,
+      "membership_provenance": "researcher-authored",
+      "metric": 2.0,
+      "metric_kind": "robust_metric",
+      "node_generation": 0,
+      "node_id": 1,
+      "status": "evaluated"
+     }
+    ],
+    "solo/z": [
+     {
+      "feasible": true,
+      "is_best": true,
+      "membership_provenance": "researcher-authored",
+      "metric": 2.0,
+      "metric_kind": "robust_metric",
+      "node_generation": 0,
+      "node_id": 1,
+      "status": "evaluated"
+     }
+    ]
+   },
+   "generation": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+   "historical": false,
+   "lens": "co_occurs",
+   "lens_contract": {
+    "effective": "co_occurs",
+    "fallback": null,
+    "registration": "shipped",
+    "requested": "co_occurs"
+   },
+   "lens_edges_present": true,
+   "lenses": [
+    {
+     "kind": "path",
+     "label": "Family \u00b7 is-a",
+     "name": "is_a",
+     "rels": [
+      "is_a"
+     ]
+    },
+    {
+     "kind": "edge",
+     "label": "Usage \u00b7 uses",
+     "name": "uses",
+     "rels": [
+      "uses"
+     ]
+    },
+    {
+     "kind": "edge",
+     "label": "Composition \u00b7 part-of",
+     "name": "part_of",
+     "rels": [
+      "part_of"
+     ]
+    },
+    {
+     "kind": "edge",
+     "label": "Empirical \u00b7 co-occurs",
+     "name": "co_occurs",
+     "rels": [
+      "co_occurs"
+     ]
+    }
+   ],
+   "max_seq": 5,
+   "metrics": {
+    "baseline": 1.5,
+    "direction": "max",
+    "rollup": {
+     "pair": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.0,
+      "evaluated": 2,
+      "first_touch": 0,
+      "mean": 1.5,
+      "touched": 2,
+      "worst": 1.0
+     },
+     "pair/x": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.0,
+      "evaluated": 2,
+      "first_touch": 0,
+      "mean": 1.5,
+      "touched": 2,
+      "worst": 1.0
+     },
+     "pair/y": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.0,
+      "evaluated": 2,
+      "first_touch": 0,
+      "mean": 1.5,
+      "touched": 2,
+      "worst": 1.0
+     },
+     "solo": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.5,
+      "evaluated": 1,
+      "first_touch": 1,
+      "mean": 2.0,
+      "touched": 1,
+      "worst": 2.0
+     },
+     "solo/z": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.5,
+      "evaluated": 1,
+      "first_touch": 1,
+      "mean": 2.0,
+      "touched": 1,
+      "worst": 2.0
+     }
+    },
+    "rows": {
+     "pair/x": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.0,
+      "evaluated": 2,
+      "first_touch": 0,
+      "mean": 1.5,
+      "touched": 2,
+      "worst": 1.0
+     },
+     "pair/y": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.0,
+      "evaluated": 2,
+      "first_touch": 0,
+      "mean": 1.5,
+      "touched": 2,
+      "worst": 1.0
+     },
+     "solo/z": {
+      "best": 2.0,
+      "delta_best": 0.5,
+      "delta_mean": 0.5,
+      "evaluated": 1,
+      "first_touch": 1,
+      "mean": 2.0,
+      "touched": 1,
+      "worst": 2.0
+     }
+    }
+   },
+   "provenance": {
+    "membership_counts": {
+     "researcher-authored": 5
+    },
+    "membership_semantics": "recorded_claims",
+    "projection": "event_log_fold",
+    "source": "events.jsonl"
+   },
+   "requested_lens": "co_occurs",
+   "requested_lens_spec": {
+    "kind": "edge",
+    "name": "co_occurs",
+    "registration": "shipped",
+    "rels": [
+     "co_occurs"
+    ]
+   },
+   "requested_seq": null,
+   "run_id": "demo",
+   "run_scope": {
+    "coverage": "complete",
+    "distinguishing": {
+     "0": [],
+     "1": [
+      "solo/z"
+     ]
+    },
+    "no_distinguishing": [
+     0
+    ],
+    "population": 2,
+    "reasons": [],
+    "run_constant": [
+     "pair/x",
+     "pair/y"
+    ],
+    "unclassified": []
+   },
+   "schema": 1,
+   "status": "complete",
+   "touch": {
+    "pair/x": 2,
+    "pair/y": 2,
+    "solo/z": 1
+   },
+   "tree": {
+    "lens": "co_occurs",
+    "nodes": {
+     "pair/x": {
+      "children": [
+       "pair/y"
+      ],
+      "cross_parents": [],
+      "depth": 0,
+      "parent": null,
+      "tagged": true
+     },
+     "pair/y": {
+      "children": [],
+      "cross_parents": [],
+      "depth": 1,
+      "parent": "pair/x",
+      "tagged": true
+     },
+     "solo/z": {
+      "children": [],
+      "cross_parents": [],
+      "depth": 0,
+      "parent": null,
+      "tagged": true
+     }
+    },
+    "roots": [
+     "pair/x",
+     "solo/z"
+    ]
+   }
+  },
+  "name": "a recorded uses edge beside a derived one, on the co_occurs lens"
+ },
+ {
+  "expected": {
+   "requestedLens": "co_occurs",
+   "requestedSeq": 3,
+   "runId": "demo"
+  },
+  "frame": {
+   "authoritative": true,
+   "authority": {
+    "authoritative": true,
+    "complete": true,
+    "scope": "captured_recoverable_event_prefix",
+    "semantic_claims_verified": false,
+    "source_authoritative": true
+   },
+   "captured_seq": 3,
+   "complete": true,
+   "completeness": {
+    "complete": true,
+    "included": {
+     "concepts": 3,
+     "derived_edges": 1,
+     "edges": 1,
+     "experiment_refs": 5,
+     "membership_nodes": 2,
+     "memberships": 5,
+     "tree_nodes": 3
+    },
+    "limits": {
+     "concepts_per_node": 64,
+     "edge_endpoints": 4096,
+     "edges": 2048,
+     "membership_nodes": 2048,
+     "memberships": 8192,
+     "tree_nodes": 4096
+    },
+    "reasons": [],
+    "source": {
+     "edges": 0,
+     "membership_nodes": 2
+    },
+    "source_integrity": {
+     "complete": true,
+     "generation_identified": true
+    },
+    "truncated": false
+   },
+   "edges_present": true,
+   "effective_lens": "co_occurs",
+   "experiment_refs": {
+    "pair/x": [
+     {
+      "feasible": true,
+      "is_best": true,
+      "membership_provenance": "researcher-authored",
+      "metric": 1.0,
+      "metric_kind": "robust_metric",
+      "node_generation": 0,
+      "node_id": 0,
+      "status": "evaluated"
+     },
+     {
+      "feasible": true,
+      "is_best": false,
+      "membership_provenance": "researcher-authored",
+      "metric": null,
+      "metric_kind": "robust_metric",
+      "node_generation": 0,
+      "node_id": 1,
+      "status": "pending"
+     }
+    ],
+    "pair/y": [
+     {
+      "feasible": true,
+      "is_best": true,
+      "membership_provenance": "researcher-authored",
+      "metric": 1.0,
+      "metric_kind": "robust_metric",
+      "node_generation": 0,
+      "node_id": 0,
+      "status": "evaluated"
+     },
+     {
+      "feasible": true,
+      "is_best": false,
+      "membership_provenance": "researcher-authored",
+      "metric": null,
+      "metric_kind": "robust_metric",
+      "node_generation": 0,
+      "node_id": 1,
+      "status": "pending"
+     }
+    ],
+    "solo/z": [
+     {
+      "feasible": true,
+      "is_best": false,
+      "membership_provenance": "researcher-authored",
+      "metric": null,
+      "metric_kind": "robust_metric",
+      "node_generation": 0,
+      "node_id": 1,
+      "status": "pending"
+     }
+    ]
+   },
+   "generation": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+   "historical": true,
+   "lens": "co_occurs",
+   "lens_contract": {
+    "effective": "co_occurs",
+    "fallback": null,
+    "registration": "shipped",
+    "requested": "co_occurs"
+   },
+   "lens_edges_present": true,
+   "lenses": [
+    {
+     "kind": "path",
+     "label": "Family \u00b7 is-a",
+     "name": "is_a",
+     "rels": [
+      "is_a"
+     ]
+    },
+    {
+     "kind": "edge",
+     "label": "Usage \u00b7 uses",
+     "name": "uses",
+     "rels": [
+      "uses"
+     ]
+    },
+    {
+     "kind": "edge",
+     "label": "Composition \u00b7 part-of",
+     "name": "part_of",
+     "rels": [
+      "part_of"
+     ]
+    },
+    {
+     "kind": "edge",
+     "label": "Empirical \u00b7 co-occurs",
+     "name": "co_occurs",
+     "rels": [
+      "co_occurs"
+     ]
+    }
+   ],
+   "max_seq": 4,
+   "metrics": {
+    "baseline": 1.0,
+    "direction": "max",
+    "rollup": {
+     "pair": {
+      "best": 1.0,
+      "delta_best": 0.0,
+      "delta_mean": 0.0,
+      "evaluated": 1,
+      "first_touch": 0,
+      "mean": 1.0,
+      "touched": 2,
+      "worst": 1.0
+     },
+     "pair/x": {
+      "best": 1.0,
+      "delta_best": 0.0,
+      "delta_mean": 0.0,
+      "evaluated": 1,
+      "first_touch": 0,
+      "mean": 1.0,
+      "touched": 2,
+      "worst": 1.0
+     },
+     "pair/y": {
+      "best": 1.0,
+      "delta_best": 0.0,
+      "delta_mean": 0.0,
+      "evaluated": 1,
+      "first_touch": 0,
+      "mean": 1.0,
+      "touched": 2,
+      "worst": 1.0
+     },
+     "solo": {
+      "best": null,
+      "delta_best": null,
+      "delta_mean": null,
+      "evaluated": 0,
+      "first_touch": 1,
+      "mean": null,
+      "touched": 1,
+      "worst": null
+     },
+     "solo/z": {
+      "best": null,
+      "delta_best": null,
+      "delta_mean": null,
+      "evaluated": 0,
+      "first_touch": 1,
+      "mean": null,
+      "touched": 1,
+      "worst": null
+     }
+    },
+    "rows": {
+     "pair/x": {
+      "best": 1.0,
+      "delta_best": 0.0,
+      "delta_mean": 0.0,
+      "evaluated": 1,
+      "first_touch": 0,
+      "mean": 1.0,
+      "touched": 2,
+      "worst": 1.0
+     },
+     "pair/y": {
+      "best": 1.0,
+      "delta_best": 0.0,
+      "delta_mean": 0.0,
+      "evaluated": 1,
+      "first_touch": 0,
+      "mean": 1.0,
+      "touched": 2,
+      "worst": 1.0
+     },
+     "solo/z": {
+      "best": null,
+      "delta_best": null,
+      "delta_mean": null,
+      "evaluated": 0,
+      "first_touch": 1,
+      "mean": null,
+      "touched": 1,
+      "worst": null
+     }
+    }
+   },
+   "provenance": {
+    "membership_counts": {
+     "researcher-authored": 5
+    },
+    "membership_semantics": "recorded_claims",
+    "projection": "event_log_fold",
+    "source": "events.jsonl"
+   },
+   "requested_lens": "co_occurs",
+   "requested_lens_spec": {
+    "kind": "edge",
+    "name": "co_occurs",
+    "registration": "shipped",
+    "rels": [
+     "co_occurs"
+    ]
+   },
+   "requested_seq": 3,
+   "run_id": "demo",
+   "run_scope": {
+    "coverage": "complete",
+    "distinguishing": {
+     "0": [],
+     "1": [
+      "solo/z"
+     ]
+    },
+    "no_distinguishing": [
+     0
+    ],
+    "population": 2,
+    "reasons": [],
+    "run_constant": [
+     "pair/x",
+     "pair/y"
+    ],
+    "unclassified": []
+   },
+   "schema": 1,
+   "status": "complete",
+   "touch": {
+    "pair/x": 2,
+    "pair/y": 2,
+    "solo/z": 1
+   },
+   "tree": {
+    "lens": "co_occurs",
+    "nodes": {
+     "pair/x": {
+      "children": [
+       "pair/y"
+      ],
+      "cross_parents": [],
+      "depth": 0,
+      "parent": null,
+      "tagged": true
+     },
+     "pair/y": {
+      "children": [],
+      "cross_parents": [],
+      "depth": 1,
+      "parent": "pair/x",
+      "tagged": true
+     },
+     "solo/z": {
+      "children": [],
+      "cross_parents": [],
+      "depth": 0,
+      "parent": null,
+      "tagged": true
+     }
+    },
+    "roots": [
+     "pair/x",
+     "solo/z"
+    ]
+   }
+  },
+  "name": "a historical frame read before the last experiment was scored"
+ }
+]

@@ -61,7 +61,31 @@ const paidLensReadOnlyMessage = access => access?.mode === 'review'
   : access?.mode === 'stale-link'
     ? 'Earlier-generation link: open the current generation before a paid lens. No provider request was sent.'
     : 'Paid lens actions are disabled in a historical snapshot; return to live first. No provider request was sent.'
-const invalidPayload = () => { throw new TypeError('Invalid concept projection') }
+// A payload the server sent but this build refuses is a CONTRACT failure: a retry reads the same
+// bytes and refuses them again, so the error state must not read as a transient outage.
+export class ConceptContractError extends TypeError {}
+const invalidPayload = () => { throw new ConceptContractError('Invalid concept projection') }
+
+// What a failed concept read failed OF, so the error card names it instead of promising a retry.
+export const conceptFailure = error => error instanceof ConceptContractError
+  ? { kind: 'contract' }
+  : Number.isInteger(error?.status)
+    ? { kind: 'http', status: error.status, message: String(error.message || '').slice(0, 200) }
+    : { kind: 'transport' }
+
+export const conceptErrorBody = (timeout, failure) => {
+  if (timeout) return 'Concept projection timed out. Run unchanged; retry this read.'
+  if (failure?.kind === 'contract') {
+    return 'The server answered, but this UI refused the concept projection as inconsistent '
+      + '(a UI/server version mismatch or a projection bug). Run unchanged; a retry reads the '
+      + 'same frame — rebuild the UI or report it.'
+  }
+  if (failure?.kind === 'http') {
+    return `Concept projection refused (HTTP ${failure.status}${failure.message
+      ? `: ${failure.message}` : ''}). Run unchanged.`
+  }
+  return 'Concept projection unreachable. Run unchanged; retry when the server is reachable.'
+}
 const countRecord = value => record(value) && Object.values(value).every(item => count(item))
 const validList = (value, test) => Array.isArray(value) && value.every(test)
 const uniqueList = (value, test) => validList(value, test) && new Set(value).size === value.length
@@ -78,7 +102,8 @@ const KINDS = ['path', 'edge']
 const METRIC_FIELDS = 'best mean worst delta_best delta_mean'
 const LIMIT_FIELDS = 'concepts_per_node edge_endpoints edges membership_nodes memberships tree_nodes'
 const SOURCE_FIELDS = 'edges membership_nodes'
-const INCLUDED_FIELDS = 'concepts edges experiment_refs membership_nodes memberships tree_nodes'
+const INCLUDED_FIELDS =
+  'concepts derived_edges edges experiment_refs membership_nodes memberships tree_nodes'
 
 // HTTP 200 is transport success, not projection truth. Require the versioned frame,
 // lifecycle identity, authority receipt, bounds receipt, and self-contained experiment references
@@ -252,7 +277,12 @@ export function validateConceptPayload(value, expected = {}) {
       || edgesPresent !== (included.edges > 0)
       || fieldNames('membership_nodes memberships tree_nodes edges')
         .some(key => included[key] > limits[key])
-      || fieldNames(SOURCE_FIELDS).some(key => source[key] < included[key])
+      || source.membership_nodes < included.membership_nodes
+      // `included.edges` counts the co_occurs edges the projection DERIVES from the membership
+      // snapshot; `source.edges` counts only the recorded ones. Comparing the two whole refused
+      // every run where two concepts share two experiments (108 of 120 generated frames).
+      || included.derived_edges > included.edges
+      || source.edges < included.edges - included.derived_edges
       || [...lifecycleMemberships.values()].some(valueCount => valueCount > limits.concepts_per_node)
       || Object.keys(touch).length !== Object.keys(experimentRefs).length
       || Object.keys(metricRows).length !== Object.keys(experimentRefs).length) invalidPayload()
@@ -490,7 +520,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
           status: 'loading', data: null, timeout: false })
 
     let done = false
-    const finish = (ok, data = null) => {
+    const finish = (ok, data = null, error = null) => {
       if (done) return
       done = true
       if (request.current !== owner) return
@@ -506,7 +536,8 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         return previous.data
           ? { ...previous, status: 'stale', timeout: timed.timedOut() }
           : { scope: owner.scope, requestVersion: owner.requestVersion,
-              status: 'error', data: null, timeout: timed.timedOut() }
+              status: 'error', data: null, timeout: timed.timedOut(),
+              failure: conceptFailure(error) }
       })
       launchLatest.current?.()
     }
@@ -518,7 +549,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
       direction: target.direction,
       derived: target.derived,
       rels: target.rels,
-    })).then(data => finish(true, data), () => finish(false))
+    })).then(data => finish(true, data), error => finish(false, null, error))
   }
 
   useEffect(() => {
@@ -1257,9 +1288,8 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
     title: 'Building the concept view',
     body: `Loading the latest ${edgeProjection ? 'relationship projection' : 'hierarchy'} and outcome rollups for this run.` }
   else if (current.status === 'error') stateCard = { tone: 'error',
-    title: 'Concepts are unavailable', action: refresh, body: current.timeout
-      ? 'Concept projection timed out. Run unchanged; retry this read.'
-      : 'Concept projection unavailable. Run unchanged; retry when reachable.' }
+    title: 'Concepts are unavailable', action: refresh,
+    body: conceptErrorBody(current.timeout, current.failure) }
   else if (projectionStatus.state === 'unavailable') stateCard = { tone: 'error',
     title: 'Concepts are unavailable', action: refresh, pending: refreshing,
     body: 'No safe concept projection returned. Run unchanged; retry.' }

@@ -73,7 +73,7 @@ function framePayload({ id = null, runId = 'run#one', generation = GENERATION_A,
       source: { membership_nodes: hasConcept ? 1 : 0, edges: edgesPresent ? 1 : 0 },
       included: { membership_nodes: hasConcept ? 1 : 0, memberships: hasConcept ? 1 : 0,
         concepts: hasConcept ? 1 : 0, tree_nodes: treeIds.length,
-        edges: edgesPresent ? 1 : 0, experiment_refs: hasConcept ? 1 : 0 },
+        edges: edgesPresent ? 1 : 0, derived_edges: 0, experiment_refs: hasConcept ? 1 : 0 },
       source_integrity: sourceIntegrity
         ? { complete: true, generation_identified: generation !== null }
         : { complete: false, generation_identified: generation !== null,
