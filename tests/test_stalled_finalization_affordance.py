@@ -187,11 +187,16 @@ def test_a_pending_finalize_still_reattaches_and_that_path_launches_a_driver(ser
     # Admission happens on the POST; the DRIVER is launched by the command worker, so observe the
     # record the way the browser does instead of asserting on the first response.
     deadline = time.time() + 5.0
+    last = record
     while not driver.spawns and time.time() < deadline:
         observed = client.get(f"/api/runs/live-deps4/commands/{record['id']}",
                               headers={"X-LoopLab-Token": token})
         assert observed.status_code == 200, observed.text
-        assert (observed.json().get("error") or {}).get("code") != "command_intent_missing"
+        last = observed.json()
+        assert (last.get("error") or {}).get("code") != "command_intent_missing"
         time.sleep(0.02)
-    assert driver.spawns, "an accepted reattach drives the wrap-up by launching an engine"
+    # The record the command worker left says WHY no driver was launched (it failed on the Windows
+    # CI leg only, with nothing to read but "[]").
+    assert driver.spawns, ("an accepted reattach drives the wrap-up by launching an engine; last "
+                           f"record: status={last.get('status')!r} error={last.get('error')!r}")
     assert driver.spawns[0][0] == "resume"
