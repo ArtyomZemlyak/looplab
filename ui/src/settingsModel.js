@@ -78,8 +78,36 @@ const CREDENTIAL_STATUSES = new Set([
   'active', 'missing', 'incomplete', 'unbound', 'endpoint_mismatch', 'ambient_override',
 ])
 
+const credentialEndpoint = value => value === null
+  || (typeof value === 'string' && value.length > 0 && value.length <= 2048
+    && !/[\u0000-\u0020\u007f]/.test(value))
+const credentialEndpoints = value => value == null || (settingsRecord(value)
+  && Object.keys(value).length === 2
+  && credentialEndpoint(value.key_bound_to) && credentialEndpoint(value.base_url))
+const credentialVariables = value => value == null || (Array.isArray(value) && value.length <= 2
+  && value.every(name => typeof name === 'string' && /^[A-Z][A-Z0-9_]{0,127}$/.test(name)))
+
+// WHICH endpoints disagree and WHICH variables set the pair (doc 70, 70.3): the notice used to name
+// neither, so the operator guessed which side to change.
+export const mismatchDetail = credential => {
+  const endpoints = credential?.endpoints
+  if (!endpoints) return ''
+  const bound = endpoints.key_bound_to || 'an endpoint this server cannot parse'
+  const base = endpoints.base_url || 'an endpoint this server cannot parse'
+  return ` (key bound to ${bound}; base URL is ${base})`
+}
+export const ambientVariables = credential => {
+  const names = credential?.variables
+  return names?.length ? ` (${names.join(', ')})` : ''
+}
+
 export function validateCredentialState(value) {
   if (!settingsRecord(value) || Object.keys(value).length > 8
+      // the two endpoints only on a mismatch, the variable names only for an ambient source
+      || !credentialEndpoints(value.endpoints)
+      || (value.endpoints != null && value.status !== 'endpoint_mismatch')
+      || !credentialVariables(value.variables)
+      || (value.variables != null && !['environment', 'dotenv'].includes(value.source))
       || !CREDENTIAL_SOURCES.has(value.source)
       || !CREDENTIAL_STATUSES.has(value.status)
       || typeof value.stored !== 'boolean'

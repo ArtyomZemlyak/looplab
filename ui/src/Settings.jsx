@@ -4,8 +4,9 @@ import {
   toForm, fromForm, settingsSavePayload, settingsValidationErrors, loadSettingsSchema, sameAgentRoles,
 } from './settingsSchema.js'
 import {
-  filterSettingsGroups, reconcileAcceptedRecord, reconcileUnknownRecord, settingsViewStats,
-  validateSecretSaveAck, validateSettingsResource, validateSettingsSaveAck,
+  ambientVariables, filterSettingsGroups, mismatchDetail, reconcileAcceptedRecord,
+  reconcileUnknownRecord, settingsViewStats, validateSecretSaveAck, validateSettingsResource,
+  validateSettingsSaveAck,
 } from './settingsModel.js'
 import SettingsForm from './SettingsForm.jsx'
 import GlobalMenu from './GlobalMenu.jsx'
@@ -155,7 +156,7 @@ function CredentialState({
   const bindingNotice = credential.status === 'endpoint_mismatch'
     ? {
         title: 'Shared-key base URL mismatch',
-        text: 'The shared key is bound to a different normalized base endpoint. Shared-target actions will fail server preflight until the endpoint and key are saved as one verified pair. A profile with its own bound credential is validated separately.',
+        text: `The shared key is bound to a different normalized base endpoint${mismatchDetail(credential)}. Shared-target actions will fail server preflight until the endpoint and key are saved as one verified pair. A profile with its own bound credential is validated separately.`,
       }
       : credential.status === 'unbound'
         ? {
@@ -174,7 +175,7 @@ function CredentialState({
     ? ambientEffective
       ? {
           title: 'Ambient credential is read-only',
-          text: `The effective key comes from ${CREDENTIAL_SOURCE_LABELS[credential.source] || 'an ambient source'} and cannot be changed or cleared here. ${credential.stored
+          text: `The effective key comes from ${CREDENTIAL_SOURCE_LABELS[credential.source] || 'an ambient source'}${ambientVariables(credential)} and cannot be changed or cleared here. ${credential.stored
             ? 'Stored credential material remains only a fallback while this override exists.'
             : 'You can enter a key below to store a fallback without replacing this override.'}`,
         }

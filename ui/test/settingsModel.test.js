@@ -8,13 +8,16 @@ import {
 import { FIELD_BY_KEY, SETTINGS_GROUPS, SETTINGS_SCHEMA } from './settingsSchemaFixture.js'
 import {
   ESSENTIAL_SETTING_KEYS,
+  ambientVariables,
   filterSettingsGroups,
+  mismatchDetail,
   normalizeSettingsQuery,
   reconcileAcceptedRecord,
   reconcileUnknownRecord,
   runConfigWriteDisposition,
   splitRunConfigPayload,
   settingsViewStats,
+  validateCredentialState,
   validateRunConfigSaveAck,
   validateSecretSaveAck,
   validateSettingsResource,
@@ -246,6 +249,25 @@ const CREDENTIAL_STORED = Object.freeze({
   stored: true, effective: true, active: true, clearable: true,
 })
 
+const CREDENTIAL_MISMATCH = Object.freeze({
+  source: 'environment', status: 'endpoint_mismatch',
+  stored: false, effective: true, active: false, clearable: false,
+  endpoints: { key_bound_to: 'https://gateway.example.com/v1', base_url: 'http://localhost:8000/v1' },
+  variables: ['LOOPLAB_LLM_API_KEY', 'LOOPLAB_LLM_API_KEY_BASE_URL'],
+})
+
+test('an endpoint mismatch names both endpoints and the ambient variables (doc 70, 70.3)', () => {
+  assert.equal(validateCredentialState(CREDENTIAL_MISMATCH), CREDENTIAL_MISMATCH)
+  assert.equal(validateCredentialState({ ...CREDENTIAL_STORED, endpoints: null, variables: null })
+    .status, 'active')
+  assert.equal(mismatchDetail(CREDENTIAL_MISMATCH),
+    ' (key bound to https://gateway.example.com/v1; base URL is http://localhost:8000/v1)')
+  assert.equal(mismatchDetail(CREDENTIAL_STORED), '')
+  assert.equal(ambientVariables(CREDENTIAL_MISMATCH),
+    ' (LOOPLAB_LLM_API_KEY, LOOPLAB_LLM_API_KEY_BASE_URL)')
+  assert.equal(ambientVariables(CREDENTIAL_NONE), '')
+})
+
 test('settings and run-config resources reject malformed HTTP-200 envelopes', () => {
   const settings = completeSettingsRecord()
   const defaults = completeSettingsRecord({ includeSecret: false })
@@ -274,6 +296,19 @@ test('settings and run-config resources reject malformed HTTP-200 envelopes', ()
     { ...resource, credential: { ...CREDENTIAL_NONE, effective: true } },
     { ...resource, credential: { ...CREDENTIAL_STORED, clearable: false } },
     { ...resource, credential: { ...CREDENTIAL_STORED, active: true, effective: false } },
+    // doc 70, 70.3: endpoints only on a mismatch, variable names only for an ambient source, and
+    // neither may carry anything but a bounded endpoint or an env-var NAME
+    { ...resource, credential: { ...CREDENTIAL_STORED,
+      endpoints: { key_bound_to: 'https://a/v1', base_url: 'https://b/v1' } } },
+    { ...resource, credential: { ...CREDENTIAL_NONE, variables: ['LOOPLAB_LLM_API_KEY'] } },
+    { ...resource, credential: { ...CREDENTIAL_MISMATCH,
+      endpoints: { key_bound_to: 'https://a/v1' } } },
+    { ...resource, credential: { ...CREDENTIAL_MISMATCH,
+      endpoints: { key_bound_to: 'https://a/ v1', base_url: 'https://b/v1' } } },
+    { ...resource, credential: { ...CREDENTIAL_MISMATCH, endpoints: {
+      ...CREDENTIAL_MISMATCH.endpoints, api_key: 'sk-live-value' } } },
+    { ...resource, credential: { ...CREDENTIAL_MISMATCH, variables: ['sk-live-value'] } },
+    { ...resource, credential: { ...CREDENTIAL_MISMATCH, variables: 'LOOPLAB_LLM_API_KEY' } },
   ]) assert.throws(() => validateSettingsResource(malformed, SETTINGS_SCHEMA),
     /Invalid settings resource/)
   assert.throws(() => validateSettingsSaveAck({ ok: true, settings: {}, overrides: {} },

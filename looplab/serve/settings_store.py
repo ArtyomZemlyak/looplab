@@ -226,7 +226,26 @@ class SettingsStore:
                 "active": active,
                 "clearable": stored,
                 "status": status,
+                # WHICH two endpoints disagree, and WHICH variables put the pair there (doc 70,
+                # 70.3). "Shared-key base URL mismatch" named neither side, so the operator guessed
+                # which one to change. Both are the NORMALIZED spelling the comparison above used:
+                # userinfo, query and fragment are refused by it, so no credential material can
+                # ride along, and `llm_base_url` is already on this same settings page. Variable
+                # NAMES only, never values.
+                "endpoints": None,
+                "variables": None,
             }
+            if status == "endpoint_mismatch":
+                from looplab.core.llm import normalize_llm_base_url_or_none
+                credential["endpoints"] = {
+                    "key_bound_to": normalize_llm_base_url_or_none(binding),
+                    "base_url": normalize_llm_base_url_or_none(settings.llm_base_url),
+                }
+            if source in {"environment", "dotenv"}:
+                present = ({str(key).upper() for key in os.environ} if source == "environment"
+                           else set(self._dotenv_values()))
+                credential["variables"] = sorted(
+                    name for name in _SECRET_ENV.values() if name.upper() in present)
             return settings, credential
 
     def resolve_settings(self, overrides: Optional[dict] = None) -> Settings:

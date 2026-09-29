@@ -405,3 +405,49 @@ def test_launch_env_for_run_loads_task_plan_before_yield(tmp_path, monkeypatch):
     with store.launch_env_for_run(rd) as env:
         assert env[key] == "secret-for-test"
         assert env[f"{key}_BASE_URL"] == endpoint
+
+
+def test_an_endpoint_mismatch_names_both_endpoints_and_the_variables_never_the_key(
+        tmp_path, _restore_key, monkeypatch):
+    """Doc 70, 70.3: "Shared-key base URL mismatch" named neither side, so the operator guessed which
+    one to change. The credential state now carries both NORMALIZED endpoints (the spelling the
+    comparison used — no userinfo, query or fragment can pass it) and the ambient variable NAMES; the
+    key's value appears nowhere. MUTATION: drop either block -> red."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LOOPLAB_LLM_API_KEY", "sk-ambient-secret-value")
+    monkeypatch.setenv("LOOPLAB_LLM_API_KEY_BASE_URL", "https://Gateway.Example.com/v1/")
+    monkeypatch.setenv("LOOPLAB_LLM_BASE_URL", "http://localhost:8000/v1")
+    client = TestClient(make_app(tmp_path))
+    body = client.get("/api/settings").json()
+    credential = body["credential"]
+    assert credential["status"] == "endpoint_mismatch" and credential["source"] == "environment"
+    assert credential["endpoints"] == {"key_bound_to": "https://gateway.example.com/v1",
+                                       "base_url": "http://localhost:8000/v1"}
+    assert credential["variables"] == ["LOOPLAB_LLM_API_KEY", "LOOPLAB_LLM_API_KEY_BASE_URL"]
+    assert "sk-ambient-secret-value" not in json.dumps(body)
+
+    # a matching pair names no endpoints; the variables still say where the pair came from
+    monkeypatch.setenv("LOOPLAB_LLM_BASE_URL", "https://gateway.example.com/v1")
+    matched = client.get("/api/settings").json()["credential"]
+    assert matched["status"] == "active" and matched["endpoints"] is None
+    assert matched["variables"] == ["LOOPLAB_LLM_API_KEY", "LOOPLAB_LLM_API_KEY_BASE_URL"]
+
+
+def test_the_variables_are_the_ones_actually_set(tmp_path, _restore_key, monkeypatch):
+    """Half a pair in the environment names the half that is there — the operator's fix is the
+    other name. MUTATION: list every name the store knows -> red."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("LOOPLAB_LLM_API_KEY", raising=False)
+    monkeypatch.setenv("LOOPLAB_LLM_API_KEY_BASE_URL", "https://gateway.example.com/v1")
+    credential = SettingsStore(tmp_path).credential_status()
+    assert credential["status"] == "incomplete" and credential["source"] == "environment"
+    assert credential["variables"] == ["LOOPLAB_LLM_API_KEY_BASE_URL"]
+
+
+def test_a_stored_pair_names_no_ambient_variables(tmp_path, _restore_key, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    for name in ("LOOPLAB_LLM_API_KEY", "LOOPLAB_LLM_API_KEY_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    credential = SettingsStore(tmp_path).credential_status()
+    assert credential["source"] == "none"
+    assert credential["variables"] is None and credential["endpoints"] is None

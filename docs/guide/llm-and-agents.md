@@ -174,6 +174,14 @@ A run refused for either reason names the mistake, both endpoints, and the varia
 — **once**, with the roles it affects listed underneath. Seven roles share one shared credential, so
 one wrong variable is one problem, not seven.
 
+The Settings page says the same before anything is launched: on **Shared-key base URL mismatch** it
+names the endpoint the key is bound to and the base URL it is compared with (both in the normalized
+spelling the check uses — userinfo, query and fragment are refused by it, so nothing secret can ride
+along), and an ambient pair names the variables it came from — never their values
+(`serve/settings_store.py::_resolve_bundle`, doc 70 item 70.3). "Ambient credential is read-only" means
+exactly that: the page cannot change the server's own environment — fix the variables it names (or
+`.env`) and restart `looplab ui`, or set `llm_base_url` to the bound endpoint.
+
 ### Endpoint options
 
 | Endpoint | `LOOPLAB_LLM_BASE_URL` | Notes |

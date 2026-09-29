@@ -121,6 +121,13 @@ class SettingsUISchemaResponse(BaseModel):
     revision: str
 
 
+class CredentialEndpoints(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key_bound_to: Optional[str]
+    base_url: Optional[str]
+
+
 class CredentialStatusResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -132,6 +139,10 @@ class CredentialStatusResponse(BaseModel):
     status: Literal[
         "active", "missing", "unbound", "incomplete", "endpoint_mismatch", "ambient_override",
     ]
+    # the two normalized endpoints, only on `endpoint_mismatch`; the ambient variable NAMES, only
+    # when the pair came from the process environment or `.env` (doc 70, 70.3)
+    endpoints: Optional[CredentialEndpoints] = None
+    variables: Optional[list[str]] = None
 
 
 class SettingsSnapshotResponse(BaseModel):
