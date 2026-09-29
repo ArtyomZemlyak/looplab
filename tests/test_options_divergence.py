@@ -94,6 +94,10 @@ EXPECTED = {
     # row above's ground — it changes a PROMPT (and the failure text the triage judge and the
     # durable rows carry), so a direct `Engine(...)` keeps every one of those texts byte for byte.
     "repair_context_record": (True, False),
+    # A failed eval canary's own account (doc 69 69.7, 2026-09-29): the header and both stream tails
+    # in place of the 500-character stderr tail. ON in the product surface, OFF in the bare library
+    # on the row above's ground — it changes the failure TEXT the repair and the triage judge read.
+    "canary_failure_account": (True, False),
     # The proposal prompt's NODE-BUDGET line (Q-3, the Researcher's context audit, 2026-09-23): ON
     # in the product surface, OFF in the bare library on `evidence_envelope`'s ground — it changes a
     # PROMPT, and a prompt flag defaults off at every constructor, so a direct `Engine(...)` keeps

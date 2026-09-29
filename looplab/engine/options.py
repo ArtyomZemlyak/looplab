@@ -146,6 +146,11 @@ class EngineOptions:
     eval_env: dict = dataclasses.field(default_factory=dict)
     # THE EVAL CANARY (`engine/eval_canary.py`): off on BOTH sides, so no options-divergence row.
     eval_canary: bool = False
+    # A failed canary's own account (`Settings.canary_failure_account`, doc 69 69.7): OFF here and ON
+    # in the product surface — a divergence-table row — because it changes the failure TEXT (the
+    # repair prompt and the triage judge's `err`), and a prompt flag defaults off at every
+    # constructor: a bare `Engine(...)` keeps the historical tail byte for byte.
+    canary_failure_account: bool = False
     confirm_top_k: int = 0
     confirm_seeds: int = 0
     confirm_seed_base: int = 1           # D1: first confirm seed; 1 keeps confirm splits disjoint

@@ -134,7 +134,7 @@ instructions insist»). **Как чинить:** обусловить промп
 - **Текст сбоя канарейки не несёт её собственного лога (69.7).** Узел 0: triage видел только обёртку
   движка (`_stderr_tail = res.stderr[-500:]`), каталог канарейки вне корней агента — 44 мин и 7.0 M
   токенов на однострочный `EADDRINUSE`, который лежал в логе. Предложение: хвост stdout/stderr
-  канарейки и `read_log` по её `log_dir`.
+  канарейки и `read_log` по её `log_dir`. *Закрыто — см. §9, 69.7 (текст) и 69.9 (`read_log`).*
 - **Маркер активации проверяется литералом (69.8).** Узел 8 добавил безусловный `echo "SFT dataset:
   built"`, и маркер «доказал» сборку датасета, взятого из кэша. Предложение: формулировка отказа
   («не добавляй печать ради проверки») и приём маркера как префикса шаблонной печати.
@@ -349,7 +349,7 @@ UnseenRecall@20=0.03328)» уйдёт в межпрогонные claims как 
 - **69.4** OPEN[researcher-rationale-cut-to-400] rationale идеи обрезается до 400 символов до того, как её увидит Developer (§3.3). proof:`present:rationale = (idea.rationale or "")[:400]@looplab/engine/card_reservation.py`
 - **69.5** OPEN[stage-prompt-claims-scorer-protected] промпт STAGES называет скорер FIXED/PROTECTED без проверки, заморожен ли он (§3.4). proof:absent:scorer_frozen@looplab/adapters/repo_developer.py
 - **69.6** OPEN[salvage-refuses-scored-then-crashed] ненулевой exit исключает salvage даже при уже напечатанной полной строке метрик (§3.5). proof:`line:getattr(res, "exit_code", 0) != 0&&not getattr(res, "stalled", False)@looplab/engine/metric_salvage.py`
-- **69.7** OPEN[canary-failure-text-misses-canary-log] текст сбоя канарейки — хвост stderr обёртки, без лога самой канарейки (§3.5). proof:`present:_stderr_tail = self._redact(res.stderr[-500:])@looplab/engine/evaluate.py`
+- **69.7** *Закрыто 2026-09-29: здесь стоял `canary-failure-text-misses-canary-log`. Текст сбоя упавшей канарейки — промпт ремонта, `err` судьи triage, `node_repaired.error_in`, `error` терминала — теперь её собственный отчёт (`RunResult.canary_account`, собирает `engine/eval_canary.py::canary_failure_result`): заголовок канарейки целиком (как упала, где её логи), затем хвосты ОБОИХ её потоков, stdout и stderr, с подписью, сколько потока показано (`CANARY_ACCOUNT_TAIL_CHARS` на каждый; вместе с заголовком меньше 4 000 символов). Каждый поток редактируется ЦЕЛИКОМ до обрезки — порядок `evaluate._redacted_tail`, иначе секрет на границе среза оставляет хвост, который не ловит ни одно правило (прогнано). Раньше это были последние 500 символов stderr результата, где делили окно заголовок, stderr канарейки и подвал движка: трассировка в несколько строк отрезала заголовок, а stdout не читался вовсе. Переключатель `Settings.canary_failure_account` (по умолчанию включён, в конструкторах выключен, строка `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` — ран до поля продолжает со старым хвостом байт в байт). `read_log` по логам канарейки у судьи — 69.9. Тесты: `tests/test_canary_failure_account.py`.*
 - **69.8** OPEN[activation-marker-literal-only] маркер активации засчитывается по литералу в печати, безусловная печать его «доказывает» (§3.5). proof:`present:missing = [m for m in markers if not any(m in body for body in printable.values())]@looplab/engine/repair_verify.py`
 
 **Реакция на сбои (§4)**

@@ -347,7 +347,12 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               pre-change tree re-derives 888f3370…). NOT inert in principle: a replicate's agent
 #               loops run under the rule, so an earlier receipt SHOULD stop verifying — which is
 #               what this branch of the gate is for.
-_EXPECTED_DIGEST = "sha256:d65707b2007a8838e981e8180e97c8b51243ad7f3b7d36c134ffe2ebb1059b4a"
+#   2026-09-29  + canary_failure_account (a failed canary's own account, doc 69 69.7). The 'field
+#               set changed too' branch: exactly `['canary_failure_account']` added and `[]`
+#               removed; `_EXPECTED_FIELD_COUNT` goes 270 -> 271 and both pins are re-set (the
+#               pre-change tree re-derives d65707b2…). INERT for a calibration replicate unless it
+#               runs the eval canary: it changes only a failed canary's failure text.
+_EXPECTED_DIGEST = "sha256:1514ffe42c2cd19be84f5ccecd0daf981e26e8e7b1bd33017178e1d5cf7462be"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -849,7 +854,8 @@ _EXPECTED_DIGEST = "sha256:d65707b2007a8838e981e8180e97c8b51243ad7f3b7d36c134ffe
 #   2026-09-29  + endgame_stall_nodes (the stall endgame's length), with origin's unpinned
 #               `external_harness`: 267 -> 269; see the digest history.
 #   2026-09-29  + agent_stuck_stale_streak (doc 69 69.3): 269 -> 270; see the digest history.
-_EXPECTED_FIELD_COUNT = 270
+#   2026-09-29  + canary_failure_account (doc 69 69.7): 270 -> 271; see the digest history.
+_EXPECTED_FIELD_COUNT = 271
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

@@ -29,7 +29,7 @@ SETTINGS_UI_SCHEMA_VERSION = 2
 # here reading as if 207 were derived while it is typed, which is the drift it warns about. The
 # unforgeable gate is `SETTINGS_UI_SCHEMA_KEYSET_REVISION` further down; this integer is the
 # human-readable half the docs sentence quotes, and `_load_schema` refuses when the two disagree.
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 238
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 239
 # On the KEYSET REVISION below: DERIVED, and deliberately no longer a hand-pinned review gate: a
 # bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
@@ -359,7 +359,12 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # call+result. A row for the reason its two siblings are: it decides when an agent's loop is ended
 # for it, and 0 is the operator's off switch. Verified by INTERSECTION: the 237 previous keys plus
 # exactly that one, none removed.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "59949ba42294d5c7053e777dacf4b1b43fa276e2cb703c135f1f2e461732e82c"
+# 238 -> 239 on 2026-09-29: `canary_failure_account`, beside `eval_canary` — whether a failed
+# canary's text is its own account (the header and both stream tails) instead of the 500-character
+# stderr tail (doc 69 69.7). A row because it decides what the triage judge and the repair are told
+# about a failed canary, and it is ON in the product surface. Verified by INTERSECTION: the 238
+# previous keys plus exactly that one, none removed.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "7f6c93f000833f613c0f7eee8d26d6e16da6681fff39d3a9a035c4008bc31ed9"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

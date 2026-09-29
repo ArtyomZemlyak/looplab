@@ -1063,7 +1063,12 @@ eval seconds.
 - **Canary fails** (non-zero exit or no metric read): it is that attempt's crash. The node goes
   through the ordinary triage/repair path with the canary's output as the evidence, the full eval is
   **not** started, and no salvage rung may recover a number from it. The failed canary's logs stay
-  in its scratch directory for you to read.
+  in its scratch directory for you to read — and the triage judge reads them there too. What the
+  judge and the repair are TOLD (`canary_failure_account`, on by default) is the canary's own
+  account: its header whole — how it failed, where its logs are — then the tails of both its
+  stdout and its stderr, each labelled with how much of the stream it shows. Off, it is the older
+  500-character tail of stderr, which a traceback of a few lines cut the header out of and which
+  never showed stdout.
 - **Canary runs out of time** (its `timeout`, on a stage or over the chain): the engine runs it
   **once more**, from a fresh scratch tree, at **twice** the cap, and asks no model — a cold JIT,
   compile or download cache is the one cause a re-run heals. A pass there lets the full eval start.

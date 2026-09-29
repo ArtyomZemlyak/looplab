@@ -526,6 +526,13 @@ class RunResult:
     # by `triage._failure_reason`, which names it `canary_timeout`: the ENGINE's own clock, and no
     # code defect a repair could fix.
     canary_expired: bool = False
+    # A FAILED EVAL CANARY'S OWN ACCOUNT (doc 69 69.7), composed by `canary_failure_result`: the
+    # canary header — what a canary is, how this one failed, where its logs are — then the tails of
+    # the canary's OWN stdout and stderr, each labelled with how much of the stream it shows. Read
+    # by `evaluate._eval_failure_text` only under `Settings.canary_failure_account`, in place of
+    # the 500-character tail of `stderr` (which that header, the footer and the stream share). None
+    # on every other result.
+    canary_account: Optional[str] = None
     # Multi-objective (#5, RepoTask): extra reported metrics {name: value} (audit) and unmet
     # hard constraints [{name,value,max,min}]. A node with violations stays measured but is
     # excluded from best-selection. None on the normal path.

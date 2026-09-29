@@ -64,6 +64,13 @@ CANARY_ENV = "LOOPLAB_CANARY"
 # (`_eval_failure_text`, the durable evidence) cut again, so this only bounds memory.
 _CANARY_OUTPUT_CHARS = 200_000
 
+# How much of EACH of the canary's two streams its own account (`canary_failure_result`'s
+# `canary_account`, doc 69 69.7) shows. Two tails and the header stay under the 4,000 characters
+# `evaluate._SCORED_EVIDENCE_CHARS` was priced at — the first window of the 257 preserved stage logs
+# in which the redactor fired at all — because this text is the repair prompt, the triage judge's
+# `err`, `node_repaired.error_in` and the terminal's `error` alike.
+CANARY_ACCOUNT_TAIL_CHARS = 1_500
+
 
 def canary_spec(eval_spec) -> Optional[dict]:
     """The task's canary declaration as `{"env": {...}, "timeout": float}`, or None.
@@ -225,7 +232,7 @@ def canary_near_cap(seconds, cap) -> bool:
 
 
 def canary_failure_result(res, *, detail: str, log_dir: str, env_names: Iterable[str],
-                          expired: bool = False):
+                          expired: bool = False, redact=None):
     """The metric-less `RunResult` a FAILED canary hands SETTLE_OUTCOME as the attempt's result.
 
     Deliberately NARROW: exit code non-zero (a clean exit that printed no number is still a failure
@@ -237,7 +244,12 @@ def canary_failure_result(res, *, detail: str, log_dir: str, env_names: Iterable
     it is. `expired` — the clock killed it at its cap and at the retry's — marks it
     `canary_expired`, which `triage._failure_reason` names `canary_timeout`, and it gets its OWN
     header: "fix the defect below" is the wrong sentence for a run nothing was seen to be wrong with,
-    and a non-expired failure keeps the historical header byte for byte."""
+    and a non-expired failure keeps the historical header byte for byte.
+
+    `canary_account` is the same failure as the canary's OWN account (doc 69 69.7): the header, then
+    each stream's tail, labelled. `redact` — the engine's `_redact` funnel — is applied to each WHOLE
+    stream before its tail is cut, in `evaluate._redacted_tail`'s order: a secret straddling the cut
+    must reach the redactor whole, or its surviving fragment no longer matches any rule."""
     from looplab.runtime.command_eval import RunResult
     names = ", ".join(sorted(env_names))
     if expired:
@@ -259,7 +271,26 @@ def canary_failure_result(res, *, detail: str, log_dir: str, env_names: Iterable
         stdout=stdout[-_CANARY_OUTPUT_CHARS:],
         stderr=header + stderr[-_CANARY_OUTPUT_CHARS:]
         + f"\n[eval canary] ({detail}; the full evaluation was not started)",
-        metric=None, timed_out=False, canary_expired=bool(expired))
+        metric=None, timed_out=False, canary_expired=bool(expired),
+        canary_account=(header + _account_tail("stdout", stdout, redact)
+                        + _account_tail("stderr", stderr, redact)).rstrip("\n"))
+
+
+def _account_tail(stream: str, text, redact=None) -> str:
+    """One labelled stream of the canary's own account: the last `CANARY_ACCOUNT_TAIL_CHARS` of it,
+    saying how much of the stream that is, or that the stream was empty — which is itself evidence
+    (a crash that wrote only to stdout is exactly the case the stderr tail was blind to). Redacted
+    WHOLE first when `redact` is given (see `canary_failure_result`)."""
+    body = str(text or "")
+    if redact is not None:
+        body = str(redact(body) or "")
+    body = body.rstrip()
+    if not body.strip():
+        return f"[the canary's {stream} was empty]\n"
+    shown = body[-CANARY_ACCOUNT_TAIL_CHARS:]
+    label = (f"[the canary's {stream}, its last {len(shown):,} of {len(body):,} characters]"
+             if len(shown) < len(body) else f"[the canary's {stream}]")
+    return f"{label}\n{shown}\n"
 
 
 def canary_already_passed(events, node_id: int, generation: int, code_digest: str) -> bool:

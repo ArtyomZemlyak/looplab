@@ -403,6 +403,9 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         # …and the repair context as the engine's record (review 2026-09-22, ENG2-14), ON in
         # Settings and OFF in the bare library for the same frozen reason (a prompt flag).
         repair_context_record=settings.repair_context_record,
+        # …and a failed canary's own account (doc 69 69.7, 2026-09-29), a prompt flag on the same
+        # frozen ground.
+        canary_failure_account=settings.canary_failure_account,
         # …and the proposal prompt's node-budget line (Q-3, 2026-09-23), ON in Settings and OFF in
         # the bare library for the same reason (a prompt flag).
         node_budget_cue=settings.node_budget_cue,

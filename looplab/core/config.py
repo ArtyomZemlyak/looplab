@@ -839,6 +839,21 @@ class Settings(BaseSettings):
     # 15 min scoring) that died in their scoring tail on a trivial defect. Off by default, and inert
     # for a task that declares no `eval.canary` whatever this says (`engine/eval_canary.py`).
     eval_canary: bool = False
+    # A FAILED CANARY'S OWN ACCOUNT (doc 69 §3.5, 69.7). The failure text — the repair prompt, the
+    # triage judge's `err`, `node_repaired.error_in`, the terminal's `error` — was the last 500
+    # characters of the canary result's stderr, which is the canary's header (what a canary is, how
+    # it failed, where its logs are), its stderr and an engine footer run together: any traceback
+    # longer than a few lines cut the header off, the footer spent a fifth of the window, and stdout
+    # was never read at all. `minionerec-backbones-v10` node 0: a triage of 44 min and 7.0 M tokens
+    # over the engine's own wrapper text, for a one-line `EADDRINUSE` the canary's log held. ON, a
+    # failed canary's text is `RunResult.canary_account` (`eval_canary.py::canary_failure_result`):
+    # the header whole, then the tails of the canary's OWN stdout and stderr, each labelled with how
+    # much of it is shown (`CANARY_ACCOUNT_TAIL_CHARS` apiece). `false` is the historical tail BYTE
+    # FOR BYTE, so it takes a `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row on `host_scorer_account`'s
+    # different-prompt ground and is OFF at every constructor (`EngineOptions`); read through ONE
+    # reader, `engine/shared.py::canary_failure_account`. No call, no metric, no selection moves on
+    # it — only what the judge and the repair are TOLD. Inert while `eval_canary` is off.
+    canary_failure_account: bool = True
     # Sandbox tier (ADR-13): "trusted_local" (subprocess, no Docker) for the CLI;
     # "untrusted" (Docker --network none, shared-kernel runtime) for hosted/multi-tenant UI;
     # "hostile" (untrusted + a true-isolation OCI runtime, gVisor `runsc` by default / Kata) for
@@ -3826,6 +3841,12 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # judge's `err` and history, `error_in` / `error` — changes bytes, and the task field that names
     # the key is no switch a resumed snapshot can hold. (c) is `False`, the historical tail.
     "host_scorer_account": False,
+    # A FAILED CANARY'S OWN ACCOUNT, added 2026-09-29 defaulting ON (doc 69 69.7). (a) holds. (b) is
+    # `host_scorer_account`'s DIFFERENT-PROMPT ground: ON, a failed canary's failure text — the
+    # repair prompt, the triage judge's `err`, `error_in` / `error` — is its header and both stream
+    # tails instead of the 500-character stderr tail, so a resumed run would change what both roles
+    # are told mid-log. (c) is `False`, the historical tail, pointable at every commit before this one.
+    "canary_failure_account": False,
     # THE NODE BUDGET CUE, added 2026-09-23 defaulting ON (Q-3, the Researcher's context audit).
     # (a) holds. (b) is the rows above's DIFFERENT-PROMPT ground: ON, every proposal prompt gains a
     # line stating the run's remaining node budget and its plan phase, so a resumed run would change

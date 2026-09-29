@@ -320,6 +320,9 @@ class EngineKnobs:
     _eval_env = Knob("eval_env", lambda v: dict(v or {}))
     # The eval canary's switch (`engine/eval_canary.py`); inert without a task `eval.canary`.
     _eval_canary = Knob("eval_canary", bool)
+    # A failed canary's own account (doc 69 69.7). Read by `shared.py::canary_failure_account`, the
+    # one place the failure text learns it.
+    _canary_failure_account = Knob("canary_failure_account", bool)
     _train_monitor = Knob("train_monitor", bool)
     _train_monitor_interval_s = Knob("train_monitor_interval_s")
     _train_monitor_kill = Knob("train_monitor_kill", bool)

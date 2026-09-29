@@ -863,6 +863,13 @@
           "help": "Before each node's FULL evaluation, run the same stage chain once on a tiny slice in a scratch directory: the engine sets LOOPLAB_CANARY=1, and the task's `eval.canary` declares any extra env and the cap (e.g. {\"env\": {\"MAX_USERS\": \"2000\"}, \"timeout\": 900}). What the canary means is the eval script's decision. A failing canary is the attempt's crash — the normal repair path, with the canary's output as evidence — and the full eval never starts; a passing one lets it run, once per code version (a resume does not re-run a passed canary). The canary's number is never the node's metric. Its seconds count as eval seconds. Inert for a task that declares no `eval.canary`."
         },
         {
+          "key": "canary_failure_account",
+          "label": "↳ failed canary's own account",
+          "type": "bool",
+          "default": true,
+          "help": "When a canary FAILS, the text the triage judge and the repair read is the canary's own account: its header (how it failed, where its logs are) and the tails of BOTH its stdout and its stderr, each labelled with how much it shows. Off, it is the historical 500-character tail of stderr, which a long traceback cut the header out of and which never showed stdout. Inert while the eval canary is off."
+        },
+        {
           "key": "holdout_fraction",
           "label": "Holdout fraction",
           "type": "float",

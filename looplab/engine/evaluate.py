@@ -92,8 +92,9 @@ from looplab.engine.eval_attempt_rules import (  # noqa: F401 — the ladder's r
     triage_verdict_outcome)
 from looplab.engine.crash_repair import developer_repair_history
 from looplab.engine.eval_stages import STAGE_MANIFEST_NAME
-from looplab.engine.shared import (host_refusal_deferral, host_refusal_repair_lead,
-                                   host_scorer_account, repair_context_record)
+from looplab.engine.shared import (canary_failure_account, host_refusal_deferral,
+                                   host_refusal_repair_lead, host_scorer_account,
+                                   repair_context_record)
 from looplab.engine.metric_salvage import (DEFAULT_METRIC_SALVAGE, SALVAGE_CAUSE_TRIAGE_ACTION,
                                            cause_repair_context, salvage_gates,
                                            declaration_actually_corrected,
@@ -2228,6 +2229,17 @@ class EvaluateMixin:
                     + ". Do NOT edit the score stage: it is the operator's, "
                     "protected. Repair the candidate's own code. The scorer's own account:\n"
                     + fence_untrusted(self._redact(_host_diag.strip()), EVIDENCE_LABEL))
+        # A FAILED CANARY'S OWN ACCOUNT (doc 69 69.7), under `Settings.canary_failure_account`. The
+        # tail below is 500 characters of the canary header, the canary's stderr and an engine
+        # footer run together, so a traceback of a few lines cut the header off, the footer spent a
+        # fifth of the window, and the canary's stdout was never read at all: MiniOneRec v10 node 0
+        # was triaged for 44 min over the wrapper's own text while a one-line `EADDRINUSE` sat in
+        # the canary's log. The account is the header whole and both streams' tails, labelled
+        # (`eval_canary.py::canary_failure_result`, which redacts each WHOLE stream before it cuts);
+        # the funnel is applied once more here, which leaves an already-masked text as it is.
+        _canary = getattr(res, "canary_account", None)
+        if canary_failure_account(self) and isinstance(_canary, str) and _canary.strip():
+            return self._redact(_canary)
         _stderr_tail = self._redact(res.stderr[-500:])
         _inert = getattr(res, "inert_path", None)
         if _inert:
@@ -3165,7 +3177,7 @@ class EvaluateMixin:
                     pass
             return True
         a.res = canary_failure_result(res, detail=detail, log_dir=str(scratch),
-                                      env_names=spec["env"], expired=expired)
+                                      env_names=spec["env"], expired=expired, redact=self._redact)
         a.canary_failed = True
         return False
 
