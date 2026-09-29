@@ -259,6 +259,75 @@ def test_a_windows_separator_is_carried_in_its_portable_spelling(isolated):
     assert resolve_seed(str(src), runs / "x").payload["files"] == {"pkg/mod.py": "x = 1\n"}
 
 
+# ------------------------------------------------------------------ an external_harness run
+
+def _script_task():
+    from looplab.adapters.tasks import validate_task
+    return validate_task({"benchmark": "quadratic", "goal": "g", "direction": "min"})
+
+
+def test_an_external_run_holds_a_seed_to_its_own_edit_surface(isolated):
+    """MEDIUM (critic 2026-09-29, driven): `resolve_seed` asks the engine's inject validation as an
+    INTERNAL run would, so an external run admitted a file overlay its own engine then refused at
+    its first inject. `check_seed_surface` asks it again as the run's engine will hold it."""
+    from looplab.engine.seed_from_run import check_seed_surface
+
+    runs = isolated / "runs"
+    overlay = resolve_seed(str(_crafted(runs, "overlay", {"id": 0, "files": {"model.py": "x = 2\n"},
+                                                          "metric": 1.0})), runs / "x")
+    code_only = resolve_seed(str(_crafted(runs, "code", {"id": 0, "metric": 1.0})), runs / "x")
+    task = _script_task()
+    with pytest.raises(ConfigRefusal, match=(r"node #0 of run overlay cannot seed this "
+                                             r"external_harness run: file overlays require a "
+                                             r"repository task")):
+        check_seed_surface(overlay, task, external_harness=True)
+    check_seed_surface(code_only, task, external_harness=True)      # the pair itself is legal
+    check_seed_surface(overlay, task, external_harness=False)       # an internal run: resolve_seed
+    check_seed_surface(overlay, None, external_harness=True)        # no adapter held: engine judges
+
+
+def test_an_external_repo_run_admits_its_surface_and_refuses_a_protected_file(isolated):
+    from looplab.adapters.tasks import validate_task
+    from looplab.engine.seed_from_run import check_seed_surface
+
+    runs = isolated / "runs"
+    repo = isolated / "repo"
+    repo.mkdir()
+    (repo / "score.py").write_text("print('{\"loss\": 1}')\n")
+    (repo / "model.py").write_text("x = 1\n")
+    task = validate_task(_repo_task(repo))
+    editable = resolve_seed(str(_crafted(runs, "ok", {"id": 0, "files": {"model.py": "x = 2\n"},
+                                                     "metric": 1.0})), runs / "x")
+    check_seed_surface(editable, task, external_harness=True)
+    scorer = resolve_seed(str(_crafted(runs, "scorer", {"id": 0, "files": {"score.py": "print(0)\n"},
+                                                        "metric": 1.0})), runs / "x")
+    with pytest.raises(ConfigRefusal, match="candidate file 'score.py' is protected"):
+        check_seed_surface(scorer, task, external_harness=True)
+
+
+def test_the_cli_refuses_an_external_seed_before_anything_is_created(isolated):
+    runs = isolated / "runs"
+    src = _crafted(runs, "overlay", {"id": 0, "files": {"model.py": "x = 2\n"}, "metric": 1.0})
+    new = runs / "next"
+    out = _run(new, "-s", "external_harness=true", "-s", f"seed_from_run={src}")
+    assert out.exit_code == 2, out.output
+    assert "file overlays require a repository task" in out.output
+    assert not (new / "events.jsonl").exists()
+
+
+def test_a_snapshot_an_earlier_build_wrote_with_both_still_loads(isolated):
+    """HIGH (critic 2026-09-29, driven): a `Settings` refusal of the pair refused every snapshot a
+    previous build wrote with both — the run's own resume, finalize and config routes included."""
+    from looplab.core.config import Settings, read_config_snapshot
+
+    path = isolated / "config.snapshot.json"
+    path.write_text(json.dumps({"backend": "toy", "external_harness": True,
+                                "seed_from_run": "/runs/prior#3"}))
+    settings = read_config_snapshot(path)
+    assert settings.external_harness and settings.seed_from_run == "/runs/prior#3"
+    assert Settings(backend="toy", external_harness=True, seed_from_run="prior").seed_from_run
+
+
 def test_the_spec_grammar(isolated):
     """Surrounding whitespace is not part of the spec; a trailing `#<integer>` names a node when the
     text before it is a run, else the whole text is the path — so a run whose name holds a `#` stays
@@ -508,6 +577,25 @@ def test_the_web_route_refuses_a_seed_at_validation(web, spec):
     assert verdict["ready"] is False and verdict["code"] == "invalid_seed", verdict
     assert verdict["field_errors"] == {"settings.seed_from_run": verdict["message"]}
     assert "/etc" not in verdict["message"] or spec == "/etc", "no probed host path is echoed"
+    assert not (root / "web-seeded").exists()
+
+
+def test_the_web_route_holds_an_external_seed_to_the_runs_surface(web):
+    """The same launch rule on `/api/validate`, answered on the seed's own field — and a code-only
+    seed of the same external run is admitted."""
+    client, root, _src = web
+    overlay = _crafted(root, "overlay", {"id": 0, "files": {"model.py": "x = 2\n"}, "metric": 1.0})
+    code_only = _crafted(root, "code", {"id": 0, "metric": 1.0})
+    body = _launch(overlay.name)
+    body["settings"].update(external_harness=True, backend="toy")
+    verdict = client.post("/api/validate", json=body).json()
+    assert verdict["ready"] is False and verdict["code"] == "invalid_seed", verdict
+    assert "file overlays require a repository task" in verdict["field_errors"][
+        "settings.seed_from_run"]
+    body = _launch(code_only.name)
+    body["settings"].update(external_harness=True, backend="toy")
+    verdict = client.post("/api/validate", json=body).json()
+    assert verdict["ready"] is True, verdict
     assert not (root / "web-seeded").exists()
 
 

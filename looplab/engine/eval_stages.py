@@ -1602,9 +1602,10 @@ class EvalStagesMixin:
                                    expectation="one bounded extension or stop at the declared deadline",
                                    observation=str(observed)[-4000:])
                 except CheckpointSubjectGone:
-                    # No pending lifecycle to ask about (a confirm or noise-floor re-run of an
-                    # evaluated node, or an abandoned attempt): nobody can answer, and a missing
-                    # answer is never permission to extend. Retrying it spun forever.
+                    # No pending lifecycle to ask about (a confirm re-run of an evaluated node —
+                    # the operator's `force_confirm` in external mode — or an abandoned attempt):
+                    # nobody can answer, and a missing answer is never permission to extend.
+                    # Retrying it spun forever.
                     return 0.0
                 except Exception:  # noqa: BLE001 — a ledger failure cannot grant an extension
                     time.sleep(0.5)
@@ -1653,9 +1654,10 @@ class EvalStagesMixin:
                                    stage=stage_name, expectation=expect,
                                    observation=str(observed)[-4000:])
                 except CheckpointSubjectGone:
-                    # Nobody CAN answer (a confirm or noise-floor re-run of an evaluated node, or an
-                    # abandoned attempt), so the check is RECORDED inconclusive on the stage row —
-                    # not skipped silently, and not a spin: retrying it never ended.
+                    # Nobody CAN answer (a confirm re-run of an evaluated node — `force_confirm`
+                    # in external mode — or an abandoned attempt), so the check is RECORDED
+                    # inconclusive on the stage row — not skipped silently, and not a spin:
+                    # retrying it never ended.
                     return StageCheckVerdict(
                         STAGE_CHECK_INCONCLUSIVE,
                         "external checkpoint not asked: the node has no pending lifecycle")

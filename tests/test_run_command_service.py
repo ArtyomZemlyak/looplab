@@ -432,6 +432,25 @@ def test_run_generation_reads_only_the_first_durable_event(tmp_path, monkeypatch
     assert srv.commands.run_generation(rd) == ""
 
 
+def test_the_tools_adapter_fences_on_the_command_services_own_token(tmp_path):
+    """`tools/run_command_adapter.py::_local_run_generation` is a CALL of the token the command
+    service fences on — pinned over a multi-row log and against the service's own reader, not
+    only by its docstring (critic 2026-09-29): a re-derivation that read the whole log, or the
+    first row differently, would fence the assistant's commands on a token nobody else holds."""
+    from looplab.tools.run_command_adapter import _local_run_generation
+
+    rd = _seed(tmp_path)
+    store = EventStore(rd / "events.jsonl")
+    store.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                  "idea": {"operator": "draft"}, "code": "print(1)"})
+    store.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": 1.0})
+    events = store.read_all()
+    assert len(events) >= 3
+    _client_unused, srv = _client(tmp_path, _Driver())
+    token = _local_run_generation(rd)
+    assert token and token == run_generation_token(events) == srv.commands.run_generation(rd)
+
+
 def test_run_generation_first_record_matches_eventstore_durability_semantics(tmp_path):
     rd = _seed(tmp_path)
     _client_unused, srv = _client(tmp_path, _Driver())

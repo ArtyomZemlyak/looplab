@@ -6,7 +6,10 @@ def candidate_surface_refusal(repo_spec: dict | None, files, deleted) -> str | N
     paths = list(files or {}) + list(deleted or ())
     if not paths:
         return None
-    if repo_spec is None:
+    # The ENGINE holds `{}` for a task with no repository (`orchestrator.py`: `task.repo_spec()` or
+    # `{}`), the server's intake holds None; both mean "no editable tree", and `{}` used to fall
+    # through to a KeyError on `repo_spec["editables"]` inside the engine's inject validation.
+    if not repo_spec:
         return "file overlays require a repository task; submit script code instead"
     from looplab.tools.patch import SurfacePolicy
 

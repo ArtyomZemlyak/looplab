@@ -213,21 +213,28 @@ def test_a_damaged_snapshot_is_refused_without_its_text(tmp_path):
     assert _log_bytes(rd) == before and engine.spawns == []
 
 
+@pytest.mark.parametrize("event_type, data", [
+    ("run_abort", {"reason": "finalized"}),
+    ("inject_node", {"idea": {"operator": "draft"}, "code": "print(1)\n"}),
+])
 @pytest.mark.parametrize("alive", [False, True])
-def test_a_finish_over_a_damaged_snapshot_is_a_coded_refusal_not_a_500(tmp_path, alive):
+def test_a_finish_over_a_damaged_snapshot_is_a_coded_refusal_not_a_500(tmp_path, alive,
+                                                                       event_type, data):
     """`run_abort`'s intake reads the snapshot to learn whether the external finish obligations
     apply (`control_validation.py::_normalize_run_abort`), and a damaged one escaped as a 500 with
     the parse error — for a LIVE engine too, where no admission preflight reads the file (critic
     2026-09-29, driven). The run mode is unknowable, so the finish is refused with the one coded
     answer — a REJECTED record, the `/commands` protocol's refusal — nothing appended and nothing
-    spawned. MUTATION: drop the `except` around that read -> the parse error escapes the route."""
+    spawned. `inject_node`, the external agent's main command, reads the same file to learn its
+    surface rules and met the same unguarded read once the intent rule stopped pre-empting it
+    (critic 2026-09-29, driven). MUTATION: drop either `except` around that read -> the parse error
+    escapes the route."""
     rd = _seed(tmp_path, snapshot=_snapshot("not json"))
     engine = _Engine(alive=alive)
     client, _srv = _client(tmp_path, engine)
     before = _log_bytes(rd)
 
-    response = post_command(client, "run_abort", {"reason": "finalized"},
-                            f"finish-damaged-{alive}")
+    response = post_command(client, event_type, dict(data), f"{event_type}-damaged-{alive}")
 
     assert response.status_code == 200, response.text
     record = response.json()

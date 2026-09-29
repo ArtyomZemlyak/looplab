@@ -26,15 +26,19 @@ _PHASES = frozenset({"stage_check", "train_monitor", "asha_live", "deadline_grac
 
 
 class CheckpointSubjectGone(ValueError):
-    """`ask` refused because the node is not a PENDING lifecycle at the asked generation.
+    """`ask` refused because the fold PROVES the asked lifecycle moved: the node's generation is
+    past the asked one, or it is the asked one and no longer pending.
 
     No answer could ever be matched to such a question (`pending` lists only pending lifecycles),
     and the state does not heal: a lifecycle leaves `pending` only through a terminal or a reset,
-    and a reset bumps the generation. Two callers meet it on purpose — a confirm or noise-floor
-    RE-MEASUREMENT of an evaluated node runs the same stage chain — and one by accident, an attempt
-    a reset or abort abandoned mid-eval. A caller that retried it would spin until cancelled, and
-    those re-measurements pass no cancel (critic 2026-09-29, driven): so it is a TYPE, apart from
-    the transient ledger errors a caller does retry."""
+    and a reset bumps the generation. One caller meets it on purpose — a confirm RE-MEASUREMENT of
+    an evaluated node runs the same stage chain (in external mode the operator's `force_confirm`;
+    the noise floor has the same shape but never runs there) — and one by accident, an attempt a
+    reset or abort abandoned mid-eval. A caller that retried it would spin until cancelled, and a
+    re-measurement passes no cancel (critic 2026-09-29, driven): so it is a TYPE, apart from the
+    transient errors a caller does retry. A node the read does not show, or shows at an EARLIER
+    generation, proves nothing moved — the read may simply be behind — and stays a plain,
+    retryable `ValueError`."""
 
 
 def _claim_seq(events, node_id: int, node_generation: int) -> int:
@@ -73,7 +77,10 @@ def ask(rd: Path, node_id: int, node_generation: int, phase_id: str,
     events = EventStore(Path(rd) / "events.jsonl").read_all()
     state = fold(events)
     node = state.nodes.get(node_id)
-    if node is None or node.attempt != node_generation or node.status != "pending":
+    if node is None or node.attempt < node_generation:
+        # Not proof of a move: a read that does not yet show the lifecycle the evaluator runs.
+        raise ValueError("node lifecycle not visible to the checkpoint yet")
+    if node.attempt != node_generation or node.status != "pending":
         raise CheckpointSubjectGone("node lifecycle changed before checkpoint")
     row = {"type": "question", "checkpoint_id": uuid.uuid4().hex,
            "run_uid": state.run_uid, "run_generation": run_generation_token(events),

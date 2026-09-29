@@ -42,7 +42,8 @@ from looplab.engine.run_boundary import (  # noqa: F401 - re-exported under the 
     terminal_projection_incomplete,
 )
 from looplab.engine.finalize import finalize_run, incomplete_finalize_scope
-from looplab.engine.seed_from_run import (check_seed_direction, frozen_seed_payload,
+from looplab.engine.seed_from_run import (check_seed_direction, check_seed_surface,
+                                          frozen_seed_payload,
                                           recorded_seed_spec, resolve_seed, seed_ignored_note,
                                           seed_intent, seed_row_spec, seed_summary)
 from looplab.events.replay import fold
@@ -1158,6 +1159,7 @@ def run(
         # is what an operator reads (and clears, to Replay the run unseeded). A Replay does not
         # resolve it again: it re-seeds from the log's own first row (`_frozen_seed`).
         check_seed_direction(seed, getattr(task, "direction", None))
+        check_seed_surface(seed, task, external_harness=bool(settings.external_harness))
         settings.seed_from_run = seed.canonical_spec
     _report_submit_notes(task, task_dict, out, settings, planned=genesis and goal is not None)
     driven = _open_and_drive(task, task_dict, settings, out, crash_after=crash_after,

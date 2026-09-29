@@ -136,8 +136,8 @@ DEFERRED: dict[tuple[str, str], str] = {
     ("serve", "agents"): "the assistant and preflight routes build roles per request",
     ("serve", "harness"): "`control_validation` applies the external candidate-surface, "
                           "obligation and finish rules per command, and `routers/runs.py` serves "
-                          "the harness routes and the config GET's external policy fields, per "
-                          "request",
+                          "the harness routes and the config GET's and PUT's external policy "
+                          "fields, per request",
     ("serve", "runtime"): "the engine process and the runs router reach the sandbox and "
                           "`command_eval` per request",
     ("serve", "search"): "the concept routes reach the concept cluster per request",

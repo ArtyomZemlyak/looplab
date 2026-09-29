@@ -78,14 +78,25 @@ def test_external_mode_requires_offline_backend():
     assert Settings(backend="toy", external_harness=True).external_harness
 
 
-def test_external_mode_refuses_a_seed_run():
-    """The seed's launch preflight asks the engine's inject validation as an INTERNAL run would, so
-    an external run admitted a seed its own engine then refused at runtime (critic 2026-09-29,
-    driven). Refused where every surface reads Settings; a blank (or blank-after-strip) seed is off."""
-    with pytest.raises(ValueError, match="seed_from_run is not available with external_harness"):
-        Settings(backend="toy", external_harness=True, seed_from_run="prior-run")
+def test_external_mode_admits_a_seed_and_holds_it_to_the_surface_at_launch():
+    """The pair is legal — a code-only seed seeds an external run fine — so `Settings` refuses
+    neither half; what an external engine would refuse is refused at LAUNCH
+    (`engine/seed_from_run.py::check_seed_surface`, `tests/test_seed_from_run.py`). A `Settings`
+    rule refused every snapshot an earlier build wrote with both (critic 2026-09-29, driven)."""
+    assert Settings(backend="toy", external_harness=True,
+                    seed_from_run="prior-run").seed_from_run == "prior-run"
     assert Settings(backend="toy", external_harness=True, seed_from_run="   ").seed_from_run == ""
-    assert Settings(backend="toy", seed_from_run="prior-run").seed_from_run == "prior-run"
+
+
+def test_no_repository_refuses_a_file_overlay_in_both_spellings():
+    """The engine holds `{}` for a task with no repository, the server's intake None; both refuse a
+    file overlay with the repository message — the engine's `{}` fell through to a KeyError on
+    `repo_spec["editables"]` inside its own inject validation (critic 2026-09-29)."""
+    for spec in (None, {}):
+        assert candidate_surface_refusal(spec, {"a.py": "x"}, []) == (
+            "file overlays require a repository task; submit script code instead")
+        assert candidate_surface_refusal(spec, {}, ["a.py"]) is not None
+        assert candidate_surface_refusal(spec, {}, []) is None
 
 
 def test_external_concept_base_is_due_after_first_scored_authored_node():

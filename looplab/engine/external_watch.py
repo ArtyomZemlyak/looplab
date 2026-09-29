@@ -25,7 +25,7 @@ async def observe_external_eval(engine, a, cancel, phase: str, *, final_pass: bo
     """
     # the external agent's checkpoints: an engine reach into the harness taken only in an
     # external_harness run (`tests/test_package_layering.py` DEFERRED, engine -> harness)
-    from looplab.harness.checkpoints import answer_for, ask
+    from looplab.harness.checkpoints import CheckpointSubjectGone, answer_for, ask
     from looplab.engine.evaluate import _watch_limiter
 
     last_digest = None
@@ -166,6 +166,12 @@ async def observe_external_eval(engine, a, cancel, phase: str, *, final_pass: bo
                 await anyio.sleep(0.3)
             if final_pass:
                 return
+        except CheckpointSubjectGone:
+            # The fold PROVES the lifecycle this watcher observes is no longer pending (a reset or
+            # a terminal moved it): no question about it can be asked, now or on a later tick, and
+            # the event that moved it owns the node. Not a hiccup to retry, and not a failed final
+            # observation to raise into an attempt that no longer exists (critic 2026-09-29).
+            return
         except Exception:  # noqa: BLE001 — a tick hiccup cannot disable later observation
             # A transient storage/log read cannot turn an enabled review into an
             # implicit 'continue'. Keep observing; an opened question remains due.

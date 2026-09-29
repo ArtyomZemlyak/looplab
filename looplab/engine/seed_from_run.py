@@ -164,12 +164,20 @@ def _not_a_run(text: str, head: Optional[str], out: Path, locate: Optional[SeedL
                if looked else ""))
 
 
-def _engine_refusal(payload: dict) -> Optional[str]:
+def _engine_refusal(payload: dict, *, external_harness: bool = False,
+                    repo_spec: Optional[dict] = None) -> Optional[str]:
     """What the engine's own inject validation refuses this PARENTLESS request with, or None.
 
     `node_build.py::_prepare_injected_node` is pure — no provider, Developer, filesystem or log
-    effect — and for a request with no parents it reads nothing off its `self` but the two static
-    rules below. Asking IT, not a copy of its rules, is what keeps the seed's refusals the engine's."""
+    effect — and for a request with no parents it reads nothing off its `self` but the rules below.
+    Asking IT, not a copy of its rules, is what keeps the seed's refusals the engine's.
+
+    `external_harness` / `repo_spec` are the NEW run's, as its engine will hold them: the engine's
+    external branch reads both first — the "needs a Developer" rule (a seed carries its own
+    ready-made artefact, so it has nothing to refuse there) and the candidate-surface rule over the
+    run's own repository. `resolve_seed` asks with the defaults, which are the internal engine's;
+    `check_seed_surface` asks again with the run's real mode once the task is known (critic
+    2026-09-29: a stand-in pinned to internal admitted a seed an external engine then refused)."""
     from looplab.core.models import RunState
     from looplab.engine.card_reservation import CardReservationMixin
     from looplab.engine.node_build import NodeBuildMixin
@@ -177,18 +185,39 @@ def _engine_refusal(payload: dict) -> Optional[str]:
     class _ParentlessInject:
         _build_parent_snapshot = staticmethod(CardReservationMixin._build_parent_snapshot)
         _implementation_ref = staticmethod(CardReservationMixin._implementation_ref)
-        # The engine's external-harness branch (master 2026-09-29) reads these first. A seed carries
-        # its own ready-made files, so the harness's "needs a Developer" rule has nothing to refuse;
-        # the candidate-surface rule is the engine's at launch, over the run's own repo spec.
-        external_harness = False
-        _repo_spec = None
 
+    stand_in = _ParentlessInject()
+    stand_in.external_harness = bool(external_harness)
+    stand_in._repo_spec = repo_spec if repo_spec is not None else {}
     try:
         NodeBuildMixin._prepare_injected_node(
-            _ParentlessInject(), RunState(), {**payload, "parent_id": None})
+            stand_in, RunState(), {**payload, "parent_id": None})
     except ValueError as exc:
         return str(exc)
     return None
+
+
+def check_seed_surface(seed: "SeedSource", task, *, external_harness: bool) -> None:
+    """Refuse, at LAUNCH, a seed the new run's EXTERNAL engine would refuse at its first inject: a
+    file its repository's edit surface does not allow, or a file overlay on a task with no
+    repository. An internal run needs nothing here (`resolve_seed` already asked its rules).
+
+    At launch and never in `Settings`: the pair is legal — a code-only seed of a script task seeds
+    an external run fine (critic 2026-09-29, driven) — and a `Settings` rule would refuse every
+    snapshot a previous build wrote with both, the run's own resume and config routes included.
+
+    `task` is the validated task ADAPTER. `None` means the caller holds none to ask (an embedder's
+    injected validator that returns a plain dict, `serve/launch.py::preflight_start`): nothing is
+    known of its repository, so the engine's own inject validation stays the only judge."""
+    if not external_harness or task is None:
+        return
+    rs = getattr(task, "repo_spec", None)
+    refusal = _engine_refusal(seed.payload, external_harness=True,
+                              repo_spec=rs() if callable(rs) else {})
+    if refusal:
+        raise ConfigRefusal(
+            f"seed_from_run: node #{seed.node_id} of run {seed.run_dir.name} cannot seed this "
+            f"external_harness run: {refusal}")
 
 
 def check_seed_direction(seed: SeedSource, direction: Optional[str]) -> None:

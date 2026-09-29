@@ -40,6 +40,14 @@ def test_the_intents_an_external_run_refuses_are_the_published_five():
     assert refused == {EV_FORK, EV_FORCE_ABLATE, EV_DEEP_RESEARCH, EV_NODE_RESET, EV_INJECT_NODE}
 
 
+@pytest.mark.parametrize("event_type", [EV_FORK, EV_FORCE_ABLATE, EV_DEEP_RESEARCH])
+def test_an_intent_whose_fulfilment_needs_an_internal_role_is_a_conflict(event_type):
+    """Refused whatever it carries, and as the run's state (409), not a malformed body (400)."""
+    for data in PROBES:
+        got = external_intent_refusal(event_type, dict(data))
+        assert got is not None and got.status_code == 409, (event_type, data)
+
+
 @pytest.mark.parametrize("stage, refused", [
     ("propose", True), ("implement", True), (" implement ", True), ("eval", False),
     ("score", False), ("train", False), ("Implement", False), (None, False), (3, False),

@@ -428,8 +428,8 @@ def _normalize_run_abort(ctx: _ControlIntake) -> dict:
             settings = read_config_snapshot(snapshot)
         except (OSError, ValueError) as exc:
             # A damaged snapshot hides whether the finish obligations apply, so the finish is
-            # REFUSED with the coded answer, never a 500 carrying the parse error (critic
-            # 2026-09-29, driven). A live external engine reads the same file at its own terminal
+            # REFUSED with the coded answer — a durable rejected command naming the code, never a
+            # 500 and never the parse error (critic 2026-09-29, driven). A live external engine reads the same file at its own terminal
             # gate (`orchestrator.py`, `external_finish_due`); `pause` reads none and still stops it.
             raise refusal("config_snapshot_unreadable") from exc
         if not settings.external_harness:
@@ -1143,7 +1143,17 @@ def _normalize_inject_node(ctx: _ControlIntake) -> dict:
     data["deleted"] = [_relative_file_name(name, "deleted") for name in deleted]
     from looplab.core.config import read_config_snapshot
     snapshot = ctx.rd / "config.snapshot.json"
-    if snapshot.is_file() and read_config_snapshot(snapshot).external_harness:
+    run_settings = None
+    if snapshot.is_file():
+        try:
+            run_settings = read_config_snapshot(snapshot)
+        except (OSError, ValueError) as exc:
+            # The run mode is unknowable, and with it every external rule below: the one coded
+            # refusal every serve reader gives an unreadable snapshot, never a 500 — the external
+            # agent's main command landed on this unguarded read once the intent rule stopped
+            # pre-empting it (critic 2026-09-29, driven).
+            raise refusal("config_snapshot_unreadable") from exc
+    if run_settings is not None and run_settings.external_harness:
         from looplab.adapters.tasks import load_task
         from looplab.harness.contract import candidate_surface_refusal
         task_snapshot = ctx.rd / "task.snapshot.json"
@@ -1154,13 +1164,15 @@ def _normalize_inject_node(ctx: _ControlIntake) -> dict:
             repo_spec = task.repo_spec() if callable(getattr(task, "repo_spec", None)) else None
         except (OSError, ValueError) as exc:
             raise HTTPException(409, "cannot verify the external candidate's task surface") from exc
-        refusal = candidate_surface_refusal(repo_spec, normalized_files, data["deleted"])
-        if refusal:
-            raise HTTPException(400, refusal)
+        # Not `refusal`: that name is this module's coded-refusal helper, which the snapshot read
+        # above raises through — a local of the same name made that raise an UnboundLocalError.
+        surface_refused = candidate_surface_refusal(repo_spec, normalized_files, data["deleted"])
+        if surface_refused:
+            raise HTTPException(400, surface_refused)
         # A configured concept workflow is an obligation in external mode, not
         # an advisory prompt. Check effective membership after surface checks.
         from looplab.harness.obligations import candidate_concepts, concept_tags_required
-        settings = read_config_snapshot(snapshot)
+        settings = run_settings
         from looplab.harness.obligations import research_due
         from looplab.events.eventstore import EventStore
         events = EventStore(ctx.rd / "events.jsonl").read_all()
@@ -2197,8 +2209,9 @@ def external_intent_refusal(event_type: str, data: dict) -> Optional[HTTPExcepti
 
 def _external_mode_restriction(rd: Path, event_type: str, data: dict) -> None:
     """Refuse intents that would call an internal role in an externally driven run."""
-    # The command service and legacy /control route share this boundary. An external run must
-    # never queue an intent whose engine fulfillment invokes its old Researcher/Developer loop.
+    # Every control intent reaches this boundary through the command service (`normalize_control`).
+    # An external run must never queue an intent whose engine fulfillment invokes its internal
+    # Researcher/Developer loop.
     # Read the run's snapshot, not the server's ambient config: one UI serves many run modes.
     # The RULE first, and the snapshot only for an intent it would refuse: the snapshot's own
     # readers (a resume's admission, a budget extension's ceiling) each answer an UNREADABLE

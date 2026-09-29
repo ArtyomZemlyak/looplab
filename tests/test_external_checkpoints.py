@@ -109,9 +109,9 @@ def test_external_deadline_grace_waits_for_agent_and_never_uses_internal_judge(t
 
 
 def test_a_re_measurement_of_an_evaluated_node_asks_no_question_nobody_can_answer(tmp_path):
-    """A confirm or noise-floor re-run of an EVALUATED node runs the same stage chain, and `ask`
-    refuses its lifecycle. Both callbacks retried that refusal forever — the noise floor passes no
-    cancel, and confirm's cancel fires only when the lifecycle MOVES — so a checked stage or a
+    """A confirm re-run of an EVALUATED node (the operator's `force_confirm` in external mode) runs
+    the same stage chain, and `ask` refuses its lifecycle. Both callbacks retried that refusal
+    forever — confirm's cancel fires only when the lifecycle MOVES — so a checked stage or a
     deadline wedged the pass (critic 2026-09-29, driven). MUTATION: drop either
     `except CheckpointSubjectGone` -> its call never returns before the cancel below."""
     rd, store, _client = seeded(tmp_path)
@@ -136,6 +136,58 @@ def test_a_re_measurement_of_an_evaluated_node_asks_no_question_nobody_can_answe
     # and no extension: a missing answer is never permission to extend.
     assert verdict.kind == "inconclusive" and "no pending lifecycle" in verdict.concern
     assert extension == 0.0
+    assert not (rd / "harness_checkpoints.jsonl").exists(), "no question was published"
+
+
+def test_only_a_proven_move_is_the_typed_refusal(tmp_path, monkeypatch):
+    """The type means "no question about this lifecycle can EVER be answered", and a caller stops
+    asking on it. A read that does not show the node, or shows it at an EARLIER generation, proves
+    nothing moved — the read may be behind — so it stays a plain `ValueError` the callbacks retry
+    (critic 2026-09-29). MUTATION: fold `node is None` back into the typed branch -> the torn read
+    below is the type, and a live stage check would be recorded inconclusive over a hiccup."""
+    import looplab.harness.checkpoints as checkpoints
+
+    rd, store, _client = seeded(tmp_path)
+    with pytest.raises(ValueError) as behind:
+        ask(rd, 0, 1, "stage_check", stage="train")         # the log is still at generation 0
+    assert not isinstance(behind.value, CheckpointSubjectGone)
+    real = checkpoints.EventStore.read_all
+    monkeypatch.setattr(checkpoints.EventStore, "read_all", lambda self: [])
+    with pytest.raises(ValueError) as torn:
+        ask(rd, 0, 0, "stage_check", stage="train")         # a read that shows no node at all
+    assert not isinstance(torn.value, CheckpointSubjectGone)
+    monkeypatch.setattr(checkpoints.EventStore, "read_all", real)
+    assert ask(rd, 0, 0, "stage_check", stage="train")["node_generation"] == 0
+    store.append("node_reset", {"node_id": 0, "from_stage": "eval"})
+    with pytest.raises(CheckpointSubjectGone):
+        ask(rd, 0, 0, "stage_check", stage="train")         # generation 1 now: proven moved
+
+
+def test_a_final_observation_of_a_reset_lifecycle_ends_quietly(tmp_path):
+    """The watcher's final pass re-raises a failed observation, on purpose: the final gate must not
+    skip one. A lifecycle a reset MOVED is not a failed observation — nothing about it can be
+    asked — and raising it failed an attempt that no longer exists (critic 2026-09-29).
+    MUTATION: drop `except CheckpointSubjectGone` in `observe_external_eval` -> this raises."""
+    rd, store, _client = seeded(tmp_path)
+    workdir = rd / "nodes" / "node_0"
+    workdir.mkdir(parents=True)
+    snapshot = snapshot_training_logs(workdir)
+    (workdir / "eval.log").write_text("epoch 1 loss=1.5\n")
+    store.append("node_reset", {"node_id": 0, "from_stage": "eval"})
+    a = SimpleNamespace(workdir=workdir, node_id=0, generation=0,
+                        _log_plan=eval_log_plan([]), _log_snapshot=snapshot,
+                        _live_questions=[], kill_signal={})
+    engine = SimpleNamespace(run_dir=rd, _eval_spec={"metric": {"kind": "stdout_json"}},
+                             _monitor_cadence=lambda: 600.0, _redact=lambda value: value,
+                             _train_monitor_kill=False, store=store, _write_lock=anyio.Lock())
+
+    async def final_review():
+        with anyio.fail_after(10):
+            await observe_external_eval(engine, a, threading.Event(), "train_monitor",
+                                        final_pass=True)
+
+    anyio.run(final_review)
+    assert a._live_questions == [] and a.kill_signal == {}
     assert not (rd / "harness_checkpoints.jsonl").exists(), "no question was published"
 
 

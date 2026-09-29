@@ -654,7 +654,8 @@ def server_seed_locator(srv):
     return locate
 
 
-def _resolve_launch_seed(srv, run_dir: Path, task: dict, effective: dict) -> tuple[dict, tuple]:
+def _resolve_launch_seed(srv, run_dir: Path, task: dict, effective: dict,
+                         adapter=None) -> tuple[dict, tuple]:
     """`Settings.seed_from_run` (doc 67 67.2), answered in the funnel `/api/validate` and
     `/api/start` share (critic 2026-09-26, driven: the route accepted `nowhere`, `/etc` and
     `../runs/src1#999`, and the refusal surfaced only in the spawned engine's stderr — after the run
@@ -671,10 +672,12 @@ def _resolve_launch_seed(srv, run_dir: Path, task: dict, effective: dict) -> tup
     if not spec:
         return effective, ()
     from looplab.core.errors import ConfigRefusal
-    from looplab.engine.seed_from_run import resolve_seed, seed_summary, seed_verdict
+    from looplab.engine.seed_from_run import (check_seed_surface, resolve_seed, seed_summary,
+                                              seed_verdict)
     try:
         seed = resolve_seed(spec, run_dir, direction=task.get("direction"),
                             locate=server_seed_locator(srv))
+        check_seed_surface(seed, adapter, external_harness=bool(effective.get("external_harness")))
     except ConfigRefusal as exc:
         _reject(422, "invalid_seed", str(exc), "settings.seed_from_run")
     verdict, note = seed_verdict(seed, task, direction=task.get("direction"),
@@ -786,7 +789,8 @@ def preflight_start(srv, body: Any) -> LaunchPreflight:
     for key in LAUNCH_ONLY_FIELDS:
         if key not in launch_settings and key not in file_settings:
             effective[key] = Settings.model_fields[key].default
-    effective, seed_notes = _resolve_launch_seed(srv, run_dir, canonical_task, effective)
+    effective, seed_notes = _resolve_launch_seed(srv, run_dir, canonical_task, effective,
+                                                 adapter=None if isinstance(adapter, dict) else adapter)
     warnings += seed_notes
     explicit = tuple(sorted(str(k) for k in launch_settings))
     token = _launch_token(

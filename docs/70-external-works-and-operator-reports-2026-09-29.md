@@ -238,7 +238,12 @@ read-only*, источник *Process environment*. Это не ошибка д�
   `external_harness`. На ВНУТРЕННЕМ ране держатель агентского токена ставит `fork` через
   `/commands` — принято и записано в журнал (прогнано 2026-09-29, критик), и живой движок строит его
   платным Developer, хотя манифест обещает «scoped agent requests cannot … invoke LoopLab's owner
-  model workflows». Нужен собственный вид принципала или отказ этих интентов агентскому токену на
+  model workflows». Та же дыра у всех интентов, которые правило отказывает только внешнему рану:
+  `fork`, `force_ablate`, `deep_research`, `node_reset` со стадии `propose`/`implement` (узел
+  заново строит внутренний Developer), `inject_node` без готового кода или файлов (его строит
+  Developer), а также `resume` поставленного на паузу внутреннего рана — он запускает движок с его
+  собственным циклом Researcher/Developer (критик 2026-09-29). Закрывает пункт любое из двух:
+  собственный вид принципала для агентского токена или отказ этих интентов агентскому токену на
   любом ране — решение владельца: принципал решает и доступ к портфелю
   (`serve/principal.py::portfolio_access`). proof:`present:OWNER_PRINCIPAL if (_owner_authenticated(request) or harness_auth)@looplab/serve/server.py`
 
