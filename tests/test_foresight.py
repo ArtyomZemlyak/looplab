@@ -3,6 +3,8 @@ model predicts which candidate / hypothesis scores best BEFORE any eval — over
 over structural/text ideas (the hypothesis panel the numeric surrogate is blind to)."""
 from __future__ import annotations
 
+import pytest
+
 from looplab.agents.roles import (
     _state_brief, bind_idea_to_board_card, next_board_prompt_cards,
 )
@@ -735,3 +737,114 @@ def test_rank_agentic_falls_back_when_loop_yields_nothing(monkeypatch):
     monkeypatch.setattr(f, "rank", lambda *a, **k: ([0, 1], 0.3, "fallback"))
     out = f.rank_agentic(object(), object(), "report", ["a", "b"])
     assert out == ([0, 1], 0.3, "fallback")
+
+
+# --------------------------------------------------------------------------- #
+# the run's stop (WP-STOP): no further member, ranking or verifier once it has halted
+# --------------------------------------------------------------------------- #
+
+class _HaltsDuringMember(_SeqResearcher):
+    """The operator's stop lands while member `at`'s paid propose is in flight."""
+
+    def __init__(self, ideas, client, halted: dict, at: int):
+        super().__init__(ideas, client)
+        self.halted, self.at = halted, at
+
+    def propose(self, state, parent):
+        if self.i + 1 == self.at:
+            self.halted["now"] = True
+        return super().propose(state, parent)
+
+
+@pytest.mark.parametrize("at", [1, 3], ids=["first-member", "last-member"])
+def test_a_halted_run_starts_no_further_member_ranking_or_verifier(at):
+    """MiniOneRec inf13: the pause landed while member 2 of a K=2 panel was proposing, and the K->1
+    ranking still ran after it — a new paid call for a pick the engine then refused. Once the run's
+    stop is published (`core/phase_events.py::run_halt_scope`, installed by `Engine.run`), the panel
+    starts no further member and returns the first, abstaining like an unranked turn — also when the
+    stop lands in the LAST member, where only the ranking is left to refuse. The board ranking BEFORE
+    member 1 still ran: the run had not halted yet."""
+    from looplab.core.phase_events import run_halt_scope
+
+    st = _state_with_open_hyps(["h a", "h b"])
+    ideas = [Idea(operator="improve", params={"x": float(i)}, hypothesis=f"h{i}") for i in range(3)]
+    halted = {"now": False}
+    client = _RankClient([2, 1, 0])
+    base = _HaltsDuringMember(ideas, client, halted, at)
+    panel = ForesightPanelResearcher(base, k=3, verify_score=True)
+    with run_halt_scope(lambda: halted["now"]):
+        out = panel.propose(st, None)
+    assert base.i == at, f"{base.i} member proposals; the stop landed in member {at}"
+    assert client.calls == 1, "only the board ranking (before the stop) may have been paid for"
+    assert out is ideas[0] and "foresight" not in out.rationale
+    assert panel.last_foresight is None
+
+
+def test_a_run_already_halted_skips_the_board_ranking_and_returns_one_member():
+    """The one call `propose` cannot skip is the proposal it must return; every optional paid step
+    around it — here the board ranking — is not started once the run has halted."""
+    from looplab.core.phase_events import run_halt_scope
+
+    st = _state_with_open_hyps(["h a", "h b"])
+    a = Idea(operator="improve", params={"x": 1.0}, hypothesis="h a")
+    b = Idea(operator="improve", params={"x": 2.0}, hypothesis="h b")
+    client = _RankClient([1, 0])
+    base = _SeqResearcher([a, b], client)
+    panel = ForesightPanelResearcher(base, k=2)
+    with run_halt_scope(lambda: True):
+        out = panel.propose(st, None)
+    assert out.hypothesis == "h a" and "foresight" not in out.rationale
+    assert base.i == 1 and client.calls == 0
+    assert panel.last_hyp_priority is None and panel.last_foresight is None
+
+
+def test_outside_a_run_the_stop_probe_changes_nothing():
+    """No scope, or a probe that answers False or RAISES, is the historical panel byte for byte: K
+    members, both rankings. A broken observer must never end the paid work it observes."""
+    from looplab.core.phase_events import run_halt_scope, run_halted
+
+    def _broken():
+        raise RuntimeError("probe exploded")
+
+    assert run_halted() is False
+    for scope in (None, (lambda: False), _broken):
+        st = _state_with_open_hyps(["h a", "h b"])
+        a = Idea(operator="improve", params={"x": 1.0}, hypothesis="h a")
+        b = Idea(operator="improve", params={"x": 2.0}, hypothesis="h b")
+        client = _RankClient([1, 0])
+        base = _SeqResearcher([a, b], client)
+        panel = ForesightPanelResearcher(base, k=2)
+        with run_halt_scope(scope):
+            if scope is _broken:
+                assert run_halted() is False
+            out = panel.propose(st, None)
+        assert base.i == 2 and client.calls == 2 and out.hypothesis == "h b"
+        assert panel.last_foresight is not None
+    assert run_halted() is False, "the scope leaked past its block"
+
+
+def test_a_stop_during_the_ranking_starts_no_verifier():
+    """The ranking already in flight when the stop lands finishes and its pick stands (a stop never
+    cuts a call short); the verifier's repeated samples after it are new paid calls and do not start.
+    Control: the same panel with no stop consults the verifier once."""
+    from looplab.core.phase_events import run_halt_scope
+
+    for stop in (False, True):
+        halted = {"now": False}
+
+        class _RankingSeesTheStop(_RankClient):
+            def complete_tool(self, messages, json_schema):
+                halted["now"] = stop
+                return super().complete_tool(messages, json_schema)
+
+        a = Idea(operator="improve", params={"x": 1.0}, hypothesis="A")
+        b = Idea(operator="improve", params={"x": 2.0}, hypothesis="B")
+        panel = ForesightPanelResearcher(_SeqResearcher([a, b], _RankingSeesTheStop([1, 0])), k=2,
+                                         verify_score=True)
+        verified: list = []
+        panel._verifier_confidence = lambda *args: (verified.append(args), 0.9)[1]
+        with run_halt_scope(lambda: halted["now"]):
+            out = panel.propose(_state(), None)
+        assert out.hypothesis == "B"
+        assert len(verified) == (0 if stop else 1)
+        assert panel.last_foresight["confidence_source"] == ("self" if stop else "verifier")

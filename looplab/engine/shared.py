@@ -464,8 +464,9 @@ class SharedEngineMixin:
         result. The fold is the ONE spelling of the question (`RunState.halted`), never a second one,
         and it is fresh on purpose: the decision fold the turn carries is exactly what is stale.
 
-        Called from worker threads too (the funnel's post-propose check): the store's `read_all`
-        holds its own lock and the fold is pure."""
+        Called from worker threads too — the funnel's post-propose check, and the probe `Engine.run`
+        publishes for the role wrappers it cannot reach (`core/phase_events.py::run_halt_scope`); the
+        store's `read_all` holds its own lock and the fold is pure."""
         return engine_fold(self.store.read_all()).halted
 
     def _beacon_discarded_proposal(self, reason: str, **detail) -> None:

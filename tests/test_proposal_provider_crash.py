@@ -232,10 +232,16 @@ class _StoppedMidProposeResearcher:
     def __init__(self):
         self.calls = 0
         self.store = None
+        self.saw_the_stop: list[bool] = []
 
     def propose(self, _state, _parent) -> Idea:
+        from looplab.core.phase_events import run_halted
+
         self.calls += 1
         self.store.append(EV_PAUSE, {"reason": "operator stop (`looplab stop`)"})
+        # What a role wrapper inside this call (a foresight panel's next member) now sees: the run's
+        # stop, published by `Engine.run` for everything the run executes, worker threads included.
+        self.saw_the_stop.append(run_halted())
         return Idea(operator="draft", params={"x": 0.5, "y": 0.5},
                     rationale="a real proposal", hypothesis="x=0.5 improves the objective")
 
@@ -256,6 +262,7 @@ def test_a_stop_during_a_paid_proposal_buys_no_second_one(tmp_path):
     events = engine.store.read_all()
 
     assert researcher.calls == 1, f"{researcher.calls} paid proposals for one stopped turn"
+    assert researcher.saw_the_stop == [True], "the run's stop never reached the Researcher stack"
     beacons = [e.data for e in events if e.type == "phase_progress"]
     proposes = [b for b in beacons if b.get("phase") == "propose" and b.get("status") == "started"]
     assert len(proposes) == 1, proposes

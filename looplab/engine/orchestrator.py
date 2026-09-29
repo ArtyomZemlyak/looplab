@@ -124,7 +124,7 @@ from looplab.core.models import BENIGN_TERMINAL_REASONS, Event, NodeStatus, RunS
 from looplab.engine.run_boundary import DRAIN_LEFT_FOR_THE_SEARCH, DRAIN_SERVED_INTENTS, drain_owed
 from looplab.core.errors import ConfigRefusal, EnvironmentRefusal
 from looplab.core.llm_budget import RunBudget
-from looplab.core.phase_events import phase_sink_scope
+from looplab.core.phase_events import phase_sink_scope, run_halt_scope
 from looplab.core.llm_broker import (LLMConcurrencyBroker,
                                      default_llm_lane_limits, in_llm_lane, llm_broker_scope,
                                      llm_lane_scope)
@@ -1515,8 +1515,13 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             broker = self._llm_broker = LLMConcurrencyBroker(
                 budget=getattr(self, "_llm_budget", None))
         try:
+            # The run's STOP, published for the role wrappers the engine cannot reach
+            # (`core/phase_events.py::run_halt_scope`): a panel inside one `propose` starts no further
+            # member, ranking or verifier once the run has halted. Looked up defensively, like the
+            # control watch below: `Engine.run` is borrowed by host stubs that are not Engines.
             with llm_broker_scope(broker), llm_lane_scope("engine"), \
-                    phase_sink_scope(self._append_phase_event):
+                    phase_sink_scope(self._append_phase_event), \
+                    run_halt_scope(getattr(self, "_run_halted_now", None)):
                 # THE RUN-SCOPED EVAL TASK GROUP (backlog F1f, doc 33 option 1 — "adopting
                 # sessions").  Evaluation children used to belong to whichever `_run_card_session`
                 # admitted them, and that session could not return until the LAST of them drained.

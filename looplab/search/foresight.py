@@ -42,6 +42,7 @@ from looplab.core.llm import BudgetExceeded
 from looplab.core.config import MAX_FORESIGHT_VERIFY_SAMPLES
 from looplab.core.models import NodeStatus
 from looplab.core.parse import parse_structured
+from looplab.core.phase_events import run_halted
 from looplab.core.prompts import render
 
 _REPORT_CAP = 2000     # per-source char bound for the priming "Verified Data Analysis Report"
@@ -518,6 +519,12 @@ class ForesightPanelResearcher(WrapsResearcher):
         if len(window) < 2:
             setattr(self.base, "_hyp_order", [card.id for card in rotated])
             return
+        if run_halted():
+            # THE RUN'S STOP (WP-STOP): the board ranking is an OPTIONAL paid call, so a halted run
+            # abstains from it exactly as an `r is None` below does
+            # (`core/phase_events.py::run_halted`).
+            setattr(self.base, "_hyp_order", None)
+            return
         r = self._rank(
                  verified_report(data_profile=state.data_profile, memory=_memory_brief(state, parent)),
                  ["Hypothesis: " + h.seed_statement for h in window],
@@ -638,7 +645,19 @@ class ForesightPanelResearcher(WrapsResearcher):
         if (self.alternatives and callable(getattr(self.base, "propose_with_session", None))
                 and callable(getattr(self.base, "propose_alternative", None))):
             return self._propose_alternatives(state, parent)
-        ideas = [self._bind_base_proposal(state, parent) for _ in range(self.k)]
+        # THE RUN'S STOP (WP-STOP, MiniOneRec inf13): members 2..K, the K->1 ranking and its verifier
+        # are each a NEW paid call inside this one `propose`, where the engine's own gates cannot
+        # reach. The operator's pause landed while member 2 was proposing and the ranking still ran
+        # after it — for a pick the engine then refused. So each asks the run's stop first, and a
+        # halted run abstains exactly as `r is None` does below: the first member comes back, which
+        # is the one proposal this method must return, and nothing is recorded as a foresight pick.
+        # Outside a run `run_halted()` is always False, so every other call is byte-identical.
+        ideas = [self._bind_base_proposal(state, parent)]
+        while len(ideas) < self.k and not run_halted():
+            ideas.append(self._bind_base_proposal(state, parent))
+        if len(ideas) < self.k or run_halted():
+            self.last_foresight = None
+            return ideas[0]
         return self._pick(state, parent, ideas)
 
     def _propose_alternatives(self, state, parent):
@@ -659,6 +678,8 @@ class ForesightPanelResearcher(WrapsResearcher):
         publish = getattr(session, "publish_brief", None)
         briefs = [functools.partial(publish, 0) if callable(publish) else None]
         for _ in range(self.k - 1):
+            if run_halted():
+                break               # the run's stop: no further member (WP-STOP, see `propose`)
             if session is None:
                 # The base holds no session for this call (a one-shot Researcher behind the unified
                 # facade): independent sampling, exactly as without the switch.
@@ -677,6 +698,12 @@ class ForesightPanelResearcher(WrapsResearcher):
         # (`orchestrator.py::_refuse_degraded_proposal`). Only when nothing else is left is it
         # returned — so a dead provider still reaches that circuit breaker.
         kept = [index for index, idea in enumerate(ideas) if not is_researcher_fallback(idea)]
+        if run_halted():
+            # The run's stop landed while the members were proposing: no ranking, no verifier and
+            # no deferred brief (each a new paid call no build on this halted run will read); the
+            # first kept member comes back exactly as the independent path's abstain does.
+            self.last_foresight = None
+            return self._chosen(ideas, kept[0] if kept else 0, receipts, None)
         if len(kept) < 2:
             self.last_foresight = None
             return self._chosen(ideas, kept[0] if kept else 0, receipts, briefs)
@@ -721,7 +748,7 @@ class ForesightPanelResearcher(WrapsResearcher):
         # degrades to the self-reported `conf` when the verifier is unavailable. Recorded as
         # `confidence_source` so the track record shows which signal was in force.
         conf_source = "self"
-        if self.verify_score:
+        if self.verify_score and not run_halted():
             vconf = self._verifier_confidence(state, best, report)
             if vconf is not None:
                 conf, conf_source = vconf, "verifier"
