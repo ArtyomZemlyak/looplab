@@ -305,7 +305,16 @@ def test_an_external_repo_run_admits_its_surface_and_refuses_a_protected_file(is
         check_seed_surface(scorer, task, external_harness=True)
 
 
-def test_the_cli_refuses_an_external_seed_before_anything_is_created(isolated):
+def test_the_cli_refuses_an_external_seed_before_anything_is_created(isolated, monkeypatch):
+    """The CLI asks `check_seed_surface` before it drives anything. Driving is stubbed to FAIL, not
+    run: an external run the check let through would wait for its agent forever, so a regression
+    here must be a red test, never a hung suite (a mutant that dropped the call hung the runner)."""
+    import looplab.cli.run_cmds as run_cmds
+
+    def _driven(*_a, **_k):
+        raise AssertionError("the run was driven: the seed was not refused at launch")
+
+    monkeypatch.setattr(run_cmds, "_open_and_drive", _driven)
     runs = isolated / "runs"
     src = _crafted(runs, "overlay", {"id": 0, "files": {"model.py": "x = 2\n"}, "metric": 1.0})
     new = runs / "next"
