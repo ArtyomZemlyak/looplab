@@ -21,7 +21,7 @@ test('elapsed seconds rejects invalid or negative measurements', () => {
   }
 })
 
-test('run summary surfaces share the elapsed formatter and retain a zero budget', async () => {
+test('run summary surfaces share the elapsed formatter and do not invent a live budget', async () => {
   const [runView, panels] = await Promise.all([
     readFile(new URL('../src/RunView.jsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/panels.jsx', import.meta.url), 'utf8'),
@@ -29,10 +29,12 @@ test('run summary surfaces share the elapsed formatter and retain a zero budget'
 
   for (const source of [runView, panels]) {
     assert.match(source, /fmtElapsedSeconds\(evalSec\)/)
-    assert.match(source, /maxEval != null/)
-    assert.match(source, /fmtElapsedSeconds\(maxEval\)/)
     assert.doesNotMatch(source, /Math\.round\(evalSec\)/)
   }
+  assert.match(runView, /state\.budget_overrides\?\.max_eval_seconds/)
+  assert.match(runView, /live\.engine_running === false && !historyActive/)
+  assert.match(panels, /maxEval >= 0/)
+  assert.match(panels, /evalLimit > 0/)
 })
 
 // The absent-is-not-zero rule this function exists for, applied to its OWN inputs. Every case below

@@ -420,7 +420,8 @@ test('every converted site reads the shared machine, and none keeps a private co
   // which is what keeps the limit on screen through a failed refresh. RunView itself is not mounted
   // anywhere in this suite (it owns the SSE stream and the React Flow canvas), so the sequence this
   // maps is covered by the hook test above and the mapping is pinned here.
-  assert.match(runView, /const maxEval = configResource\.data\?\.max_eval_seconds/)
+  assert.match(runView, /const maxEval = state\.budget_overrides\?\.max_eval_seconds/)
+  assert.match(runView, /live\.engine_running === false && !historyActive \? configResource\.data\?\.max_eval_seconds : null/)
   assert.match(runView,
     /const configNoticeStatus = configResource\.pending === 'retry'\n\s*\? 'retrying'\n\s*: \['error', 'stale'\]\.includes\(configResource\.status\) \? configResource\.status : null/)
   assert.doesNotMatch(runView, /retrying: sameResource/,

@@ -2055,7 +2055,10 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   // The hook already fences the resource to the current key, so there is no second `activeResource`
   // read here. A retry keeps the verdict the operator can see (error stays 'error', stale stays
   // 'stale') and announces itself through `pending`, which is what this notice reports as "Retrying".
-  const maxEval = configResource.data?.max_eval_seconds
+  // A live engine retains its launch settings even if the saved snapshot is edited. Only a
+  // folded override is an authoritative live ceiling; the snapshot is usable after it stops.
+  const maxEval = state.budget_overrides?.max_eval_seconds
+    ?? (live.engine_running === false && !historyActive ? configResource.data?.max_eval_seconds : null)
   const configNoticeStatus = configResource.pending === 'retry'
     ? 'retrying'
     : ['error', 'stale'].includes(configResource.status) ? configResource.status : null
@@ -2260,7 +2263,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
             to Overview. Compact layouts trade those optional chips for canvas space, while urgent
             reward-hack alerts remain visible and every metric is one tap away through Overview. */}
         {evalSec > 0 && <button type="button" className="chip run-metric-chip" disabled={historyActive}
-          title={historyActive ? 'Historical mode — return live to open Overview' : 'eval time — open Overview for the budget bar'}
+          title={historyActive ? 'Historical mode — return live to open Overview'
+            : maxEval != null ? 'eval time — open Overview for the budget bar' : 'eval time — open Overview'}
           onClick={event => { panelReturnFocusRef.current = event.currentTarget; setPanel('overview') }}>
           <span className="k">eval</span> {fmtElapsedSeconds(evalSec)}{maxEval != null ? ` / ${fmtElapsedSeconds(maxEval)}` : ''}</button>}
         {cost && <button type="button" className="chip run-metric-chip" disabled={historyActive}
@@ -2785,7 +2789,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {panel && panelAllowed(panel) && <LazyBoundary label={`${HUB_OF[panel] || panel} panel`}
         mode="overlay" resetKey={`${panel}:${runId}@${generation || 'pending'}`} onClose={closePanel}>
       <>
-      {panel === 'overview' && panelAllowed('overview') && <OverviewPanel state={state} maxEval={maxEval} onClose={closePanel}
+      {panel === 'overview' && panelAllowed('overview') && <OverviewPanel state={state} maxEval={maxEval}
+        phase={displayedPhase} onClose={closePanel}
         onOpenPanel={p => { if (panelAllowed(p)) setPanel(p, { mode: 'replace' }) }} />}
       {panel === 'research' && panelAllowed('research') && <ResearchPanel state={state} runId={runId}
         onToast={showToast} onClose={closePanel} onSelect={selectNodeFromPanel}

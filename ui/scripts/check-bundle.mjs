@@ -54,8 +54,11 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // 2026-09-29 Deep research workspace: 571,934 B JS / 53,522 B CSS measured after
     // adding persistent memo navigation, chat handoff and a larger reading surface.
     // Route closures remain lazy.
-    js: { gzip: 559 * KIB },
-    css: { gzip: 53 * KIB },
+    // 2026-09-29 Overview: 572,588 B JS / 54,447 B CSS. The summary adds budget truth,
+    // review signals and bounded hint history. Its 982 B CSS chunk loads with panels only;
+    // initial-shell CSS fell to 36,358 B. Keep <1 KiB headroom on each total.
+    js: { gzip: 560 * KIB },
+    css: { gzip: 54 * KIB },
   },
   individual: {
     js: { raw: 450 * KIB, gzip: 110 * KIB },
@@ -113,7 +116,8 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // boundary, incremental-route limits, or forbidden owner/public reachability checks.
       // 2026-09-22: measured 388,537 B JS (was 348 KiB, +31.4 KiB) / 44,969 B CSS (was 43 KiB).
       // 2026-09-28 Windows build: 391,398 B; panel hub remains a separate lazy increment.
-      limits: { js: { gzip: 383 * KIB }, css: { gzip: 45 * KIB } },
+      // 2026-09-29 Overview: 392,224 B; budget provenance in RunView adds a small shared path.
+      limits: { js: { gzip: 384 * KIB }, css: { gzip: 45 * KIB } },
     },
     {
       name: 'valid review DAG route',
@@ -135,7 +139,8 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-09-23: measured 257,268 B JS (was 251 KiB, +244 B over): the same OwnerChrome growth
       // as the owner List route above (UI-06's composer hook).
       // 2026-09-28 Windows build: 258,304 B; concept view stays outside the initial shell.
-      limits: { js: { gzip: 253 * KIB }, css: { gzip: 42 * KIB } },
+      // 2026-09-29 Overview: 259,090 B on the shared RunView path; the panel remains lazy.
+      limits: { js: { gzip: 254 * KIB }, css: { gzip: 42 * KIB } },
     },
     {
       name: 'panel-hub increment',

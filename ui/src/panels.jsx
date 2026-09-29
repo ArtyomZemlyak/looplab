@@ -31,6 +31,7 @@ import VirtualTimeline from './VirtualTimeline.jsx'
 import { timelineEventKey } from './timelineModel.js'
 import { queuedGenerationControls } from './queue.js'
 import Panel from './PanelShell.jsx'
+import './overview.css'
 import { DataTable, downloadBlob } from './accessibility.jsx'
 import { memoLead, normalizeResearchMemos } from './researchMemoModel.js'
 import ResearchMemoCard, { researchMemoTrust } from './ResearchMemoCard.jsx'
@@ -432,41 +433,81 @@ function PanelResourceNotice({ resource, label, onRetry }) {
   </div>
 }
 
-// Overall-info tab (round-8): the run's at-a-glance metrics, lifted out of the cramped top bar so the
-// header stays a single line. Everything derives from the folded state (+ maxEval from config).
-export function OverviewPanel({ state, maxEval, onClose, onOpenPanel }) {
+// At-a-glance run facts derive from the folded state; RunView supplies the authoritative eval ceiling.
+export function OverviewPanel({ state, maxEval, phase, onClose, onOpenPanel }) {
   const nodes = Object.values(state.nodes || {})
   const evaluated = nodes.filter(n => n.metric != null).length
   const failed = nodes.filter(n => n.status === 'failed').length
   const best = state.best_node_id != null ? (state.nodes || {})[state.best_node_id] : null
-  const evalSec = state.total_eval_seconds || 0
+  const evalSec = Number.isFinite(state.total_eval_seconds) && state.total_eval_seconds >= 0
+    ? state.total_eval_seconds : null
+  const evalLimit = Number.isFinite(maxEval) && maxEval >= 0 ? maxEval : null
+  const evalPercent = evalLimit > 0 && evalSec != null ? Math.min(100, evalSec / evalLimit * 100) : null
   const cost = state.llm_cost
   const strat = state.active_strategy
-  const hints = state.pending_hints || []
+  const hints = Array.isArray(state.pending_hints) ? state.pending_hints : []
+  const hintText = hint => typeof hint?.text === 'string' ? hint.text : typeof hint === 'string' ? hint : ''
+  const latestHint = hintText(hints.at(-1))
+  const rewardFlags = state.reward_hacks?.length || 0
+  const duplicates = state.novelty_events?.length || 0
+  const discuss = () => {
+    onClose?.()
+    requestAnimationFrame(() => window.dispatchEvent(new CustomEvent('ll:focus-assistant')))
+  }
   return (
-    <Panel title="Overview" sub={state.task_id || ''} onClose={onClose}>
-      {state.goal && <div className="ov-goal">{state.goal}</div>}
-      <div className="stat-grid">
-        <Stat n={best ? fmt(best.confirmed_mean ?? best.metric) : '—'} l="best metric" />
-        <Stat n={state.direction || '—'} l="direction" />
-        <Stat n={nodes.length} l="nodes" />
-        <Stat n={evaluated} l="evaluated" />
-        <Stat n={failed} l="failed" />
-        <Stat n={fmtElapsedSeconds(evalSec) + (maxEval != null ? ' / ' + fmtElapsedSeconds(maxEval) : '')} l="eval time" />
-        {cost && <Stat n={fmtInt(cost.total_tokens)} l="tokens" />}
-        {state.paused ? <Stat n="paused" l="status" /> : null}
+    <Panel title="Overview" sub={state.task_id || ''} onClose={onClose} wide className="overview-panel">
+      {state.goal && <p className="ov-goal">{state.goal}</p>}
+      <div className="ov-summary">
+        <div className="ov-best">
+          <span className="ov-label">Best metric</span>
+          <strong>{best ? fmt(best.confirmed_mean ?? best.metric) : '—'}</strong>
+          <span className="ov-sub">{best ? `Node #${best.id ?? state.best_node_id} · ${best.confirmed_mean != null ? 'confirmed mean' : 'observed result'}` : 'No measured result yet'}
+            {state.direction && ` · ${state.direction === 'min' ? 'minimize' : state.direction === 'max' ? 'maximize' : state.direction}`}</span>
+        </div>
+        <div className="ov-run-facts">
+          <div><span className="ov-label">Status</span><strong>{phase || (state.paused ? 'paused' : state.phase || (state.finished ? 'finished' : '—'))}</strong></div>
+          <div><span className="ov-label">Experiments</span><strong>{evaluated} evaluated <span className="ov-fact-muted">/ {nodes.length} nodes</span></strong></div>
+          <div><span className="ov-label">Failures</span><strong>{failed}</strong></div>
+        </div>
       </div>
-      {strat && <div className="ov-row"><span className="k"><OpIcon name="compass" className="t-ic" /> strategy</span>{' '}
-        {(strat.policy || 'greedy') + (strat.fidelity ? '/' + strat.fidelity : '')}
-        {strat.rationale && <div className="muted ov-why">{strat.rationale}</div>}</div>}
-      {hints.length > 0 && <div className="ov-row"><span className="k"><OpIcon name="bulb" className="t-ic" /> hints ({hints.length})</span>
-        <ul className="ov-hints">{hints.map((h, i) => <li key={(h.text || '') + i}>{h.text || JSON.stringify(h)}</li>)}</ul></div>}
-      {(state.novelty_events?.length > 0 || state.reward_hacks?.length > 0) && <div className="ov-row ov-alerts">
-        {state.novelty_events?.length > 0 && <span className="chip" title="near-duplicate proposals nudged to diversify (E1)"><OpIcon name="replay" className="t-ic" /> dedup {state.novelty_events.length}</span>}
-        {state.reward_hacks?.length > 0 && <button type="button" className="chip alarm run-metric-chip"
-          title="suspicious wins flagged (B5)" onClick={() => onOpenPanel?.('trust')}>
-          <OpIcon name="alert" size={11} /> hack? {state.reward_hacks.length}</button>}
-      </div>}
+      <section className="ov-section ov-budget" aria-label="Evaluation time">
+        <div className="ov-section-head"><h3>Evaluation time</h3>
+          <strong>{evalSec == null ? '—' : fmtElapsedSeconds(evalSec)}{evalLimit != null && ` / ${fmtElapsedSeconds(evalLimit)}`}</strong></div>
+        {evalPercent != null && <div className="ov-budget-bar" role="progressbar" aria-label="Evaluation budget used"
+          aria-valuemin={0} aria-valuemax={evalLimit} aria-valuenow={Math.min(evalSec, evalLimit)}
+          aria-valuetext={`${fmtElapsedSeconds(evalSec)} of ${fmtElapsedSeconds(evalLimit)} used`}>
+          <span style={{ width: `${evalPercent}%` }} /></div>}
+        <div className="ov-budget-note">{evalLimit == null ? 'Evaluation-time limit unavailable' : evalSec == null
+          ? 'Remaining time unavailable' : evalSec > evalLimit
+          ? `Over limit by ${fmtElapsedSeconds(evalSec - evalLimit)}`
+          : `${fmtElapsedSeconds(Math.max(0, evalLimit - evalSec))} remaining`}
+          {cost?.total_tokens != null && <span> · {fmtInt(cost.total_tokens)} tokens</span>}</div>
+      </section>
+      {(rewardFlags > 0 || duplicates > 0) && <section className="ov-section ov-signals" aria-label="Review signals">
+        <h3>Review signals</h3>
+        <div className="ov-signal-list">
+          {rewardFlags > 0 && <button type="button" className="ov-signal ov-signal-alert" onClick={() => onOpenPanel?.('trust')}>
+            <OpIcon name="alert" size={15} /> {rewardFlags} suspicious {rewardFlags === 1 ? 'result' : 'results'} <span>Open Trust →</span></button>}
+          {duplicates > 0 && <div className="ov-signal"><OpIcon name="replay" size={15} /> {duplicates} near-duplicate {duplicates === 1 ? 'proposal' : 'proposals'}</div>}
+        </div>
+      </section>}
+      {hints.length > 0 && <section className="ov-section ov-directions" aria-label="Saved hints">
+        <div className="ov-section-head"><h3><OpIcon name="bulb" size={15} /> Saved hints</h3><span className="ov-count">{hints.length}</span></div>
+        <div className="ov-latest"><span className="ov-label">Latest hint</span>
+          <p>{stripMd(latestHint) || 'No text available'}</p></div>
+        {hints.length > 1 && <details className="ov-details"><summary>Show all {hints.length} hints</summary>
+          <ol className="ov-hints">{hints.map((hint, i) => <li key={i}>{stripMd(hintText(hint)) || 'No text available'}</li>)}</ol>
+        </details>}
+        {hints.length === 1 && latestHint.length > 320 && <details className="ov-details"><summary>Read full hint</summary>
+          <p className="ov-hint-full">{stripMd(latestHint)}</p></details>}
+      </section>}
+      {strat && <section className="ov-section ov-strategy" aria-label="Search strategy">
+        <div className="ov-section-head"><h3><OpIcon name="compass" size={15} /> Search strategy</h3>
+          <strong>{(strat.policy || 'greedy') + (strat.fidelity ? ' / ' + strat.fidelity : '')}</strong></div>
+        {strat.rationale && <details className="ov-details"><summary>Why this strategy?</summary>
+          <p className="ov-why">{strat.rationale}</p></details>}
+      </section>}
+      <div className="ov-footer"><button type="button" className="btn" onClick={discuss}>Discuss in Assistant</button></div>
     </Panel>
   )
 }

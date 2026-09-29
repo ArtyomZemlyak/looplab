@@ -50,7 +50,7 @@ const snapshot = (seq, state = {}) => ({
     run_id: RUN, label: RUN, goal: 'min (x-3)^2', task_id: 'quadratic', direction: 'min',
     phase: 'search', engine_running: true, finished: false,
     nodes: { 0: experiment(0, 1), 1: experiment(1, 0.5) }, best_node_id: 1,
-    total_eval_seconds: 30, reward_hacks: [],
+    total_eval_seconds: 30, budget_overrides: { max_eval_seconds: 600 }, reward_hacks: [],
     ...state,
   },
 })
