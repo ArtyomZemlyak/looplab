@@ -106,11 +106,20 @@ def test_a_cpu_or_unregistered_lifecycle_has_nothing_to_yield():
 # ------------------------------------------------------------ the driver
 
 def test_the_driver_yields_before_the_repair_and_reclaims_before_every_attempt():
+    """The driver yields around the repair; RUN_ATTEMPT reclaims before it launches, AFTER its one
+    pause decision (critic 2026-09-29, MEDIUM-1: a reclaim that asked the rule itself, one fold
+    before RUN_ATTEMPT asked again, launched a relaunch on the GPU its repair had given back)."""
     calls = [c for c in called_or_offloaded_names(EvaluateMixin._evaluate)
              if c.startswith("self._")]
-    assert calls.index("self._reclaim_devices_for_attempt") < calls.index("self._eval_run_attempt")
+    assert "self._reclaim_devices_for_attempt" not in calls, "the reclaim moved into RUN_ATTEMPT"
     assert (calls.index("self._eval_salvage") < calls.index("self._yield_devices_for_repair")
             < calls.index("self._eval_decide_repair"))
+    attempt = [c for c in called_or_offloaded_names(EvaluateMixin._eval_run_attempt)
+               if c.startswith("self._")]
+    assert (attempt.index("self._pause_withholds_attempt")
+            < attempt.index("self._reclaim_devices_for_attempt") < attempt.index("self._run_eval"))
+    assert "self._pause_withholds_attempt" not in called_or_offloaded_names(
+        EvaluateMixin._reclaim_devices_for_attempt), "the reclaim decides nothing itself"
 
 
 def test_the_reclaimed_devices_are_the_ones_the_next_attempt_is_pinned_to():

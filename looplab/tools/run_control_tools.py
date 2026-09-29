@@ -186,7 +186,9 @@ class RunControlTools:
                  # would make the model refuse legitimate stage resets (train, data_prep, …).
                  "stage": {"type": "string",
                            "description": "propose | implement | eval, or any eval-pipeline stage "
-                           "name (train, data_prep, …) to re-run the pipeline from that stage"}},
+                           "name (train, data_prep, …) to re-run the pipeline from that stage "
+                           "(recorded; for now the whole pipeline re-runs — reuse of earlier "
+                           "stages after a reset is off)"}},
                 ["run_id", "node_id"]),
             fn_spec("retag_node",
                 "Re-tag ONE experiment's CONCEPTS on a run — replace node #node_id's concept ids with the "

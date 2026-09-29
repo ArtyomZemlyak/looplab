@@ -2838,7 +2838,8 @@ class EvaluateMixin:
                     await anyio.to_thread.run_sync(self._eval_prepare_workdir, a)
                     self._eval_seed_ledgers(a)
                     while True:
-                        await self._reclaim_devices_for_attempt(a)
+                        # The devices a repair gave back are re-taken INSIDE RUN_ATTEMPT, after its
+                        # one pause decision (`_eval_run_attempt`, critic 2026-09-29, MEDIUM-1).
                         if await self._eval_run_attempt(a) is PHASE_RETURN:
                             return
                         sig = await self._eval_settle_outcome(a)
@@ -2936,22 +2937,24 @@ class EvaluateMixin:
         if a.generation >= 0 and self._yield_eval_devices(a.node_id, a.generation):
             a.sp.set("devices_yielded_for_repair", True)
 
-    async def _reclaim_devices_for_attempt(self, a: "EvalAttempt") -> None:
+    async def _reclaim_devices_for_attempt(self, a: "EvalAttempt") -> bool:
         """Before an attempt launches, take back whatever the repair gave up, and re-pin the env to
         the devices actually held now: they need not be the ones given up, and launching on the
-        old ids would put this candidate on a sibling's GPU."""
+        old ids would put this candidate on a sibling's GPU. True when devices were taken back —
+        the take may have WAITED on the pool, so its caller asks the pause rule again.
+
+        Asked only by RUN_ATTEMPT, AFTER its pause decision (critic 2026-09-29, MEDIUM-1). It used
+        to ask that rule itself, one fold before RUN_ATTEMPT asked again: a resume landing between
+        the two made this skip the reclaim and RUN_ATTEMPT launch, pinned to the GPU the repair had
+        given back — which a sibling held (driven on a 2-GPU pool: both launches `CVD=0`)."""
         if a.generation < 0:
-            return
-        # An attempt a pause is about to withhold takes nothing back: on a busy GPU pool the
-        # reclaim WAITS, and a paused engine then sat on the pool for devices it would never use
-        # (critic 2026-09-29). RUN_ATTEMPT asks the same rule and withholds.
-        if getattr(a, "launches", 0) and self._pause_withholds_attempt(a):
-            return
+            return False
         back = await self._reclaim_eval_devices(a.node_id, a.generation)
         if back is None:
-            return
+            return False
         a._resource_reservation = back
         a.eval_env = self._resource_eval_env(back, inherit_host=True)
+        return True
 
     def _canary_scratch(self, node_id: int):
         """Where a node's eval canary runs — and where a FAILED one's logs stay until that node's
@@ -3455,12 +3458,14 @@ class EvaluateMixin:
             enforce_drift=(getattr(self, "eval_trust_mode", "ratify_freeze") == "ratify_freeze_drift"))
 
     def _eval_prepare_workdir(self, a: "EvalAttempt") -> None:
-        """PREPARE_WORKDIR — the node directory: reuse it on a stage-scoped re-run whose manifest
-        stamp still matches the folded node, else materialize; then the build delta and the
-        metrics-sidecar binding. The stamp/superseded-marker helpers live on `EvalAttempt`."""
+        """PREPARE_WORKDIR — the node directory, materialized afresh for every lifecycle (reuse
+        across a stage-scoped reset is OFF, doc 68 68.3e — see `_reuse` below), stamped with its
+        manifest; then the build delta and the metrics-sidecar binding. The stamp/superseded-marker
+        helpers live on `EvalAttempt`."""
         a.workdir = self.run_dir / "nodes" / f"node_{a.node_id}"
-        # Phase 2 stage-scoped re-run: REUSE the existing workdir (earlier stages' artifacts — the
-        # checkpoint `train` wrote) instead of re-seeding it, which would wipe them.
+        # Phase 2 stage-scoped re-run was meant to REUSE the existing workdir (earlier stages'
+        # artifacts — the checkpoint `train` wrote) instead of re-seeding it, which wipes them; that
+        # reuse is off until its precondition can be proven (below).
         a._superseded_marker = a.workdir / ".looplab-superseded"
         # Stage reuse is the ONE path that evaluates a workdir it did not just build, so it must
         # prove the bytes on disk are the manifest the folded node claims. `node_repaired` is
@@ -3665,7 +3670,15 @@ class EvaluateMixin:
         # measured", wrote that stale result as this lifecycle's terminal.
         a.res = None
         a.canary_failed = False
-        if a.launches and self._pause_withholds_attempt(a):
+        # ONE pause decision, and the devices follow it (critic 2026-09-29, MEDIUM-1): a withheld
+        # attempt takes nothing back — on a busy pool the reclaim WAITS, and a paused engine sat on
+        # the pool for devices it would never use — and a launching one is re-pinned before it
+        # launches. The rule is asked again only when the reclaim took devices back, because that
+        # take may have waited: a pause landing during the wait withholds the attempt, and the
+        # devices it took go back when the lane settles (`_settle_eval_resource_reservation`).
+        if ((a.launches and self._pause_withholds_attempt(a))
+                or (await self._reclaim_devices_for_attempt(a)
+                    and self._pause_withholds_attempt(a))):
             a.sp.set("eval_withheld", "paused_before_launch")
             _LOG.info("node %s: attempt %s withheld — the run was paused before it launched",
                       a.node_id, a.attempt)
@@ -5124,9 +5137,9 @@ class EvaluateMixin:
             # materialized, so state briefly claims a repair the workdir does not hold. The
             # window is closed on the READ side rather than by reordering (either order skews
             # one way or the other): the workdir carries a manifest stamp written only after
-            # its files land, and stage reuse — the one path that evaluates a workdir it did
-            # not just build — refuses to proceed unless that stamp matches the folded node.
-            # See `a.stamp_workdir` / `a.workdir_matches` at the top of this method.
+            # its files land, and the readers of a workdir this process did not just build —
+            # settled recovery; stage reuse across a reset, which is off for now (doc 68 68.3e) —
+            # refuse to trust it unless that stamp matches the folded node (`a.stamp_workdir`).
             self.store.append(EV_NODE_REPAIRED, repair_payload)
         a.node = fold(self.store.read_all()).nodes[a.node_id]   # node.code now == repaired code
         if a.node.attempt != a.generation:

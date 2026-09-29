@@ -1192,7 +1192,8 @@ def resume(
 
     `--drain-only` (doc 68 68.3a) finishes the OWED evaluations (`engine/run_boundary.py::
     drain_owed`) and pauses, so a `node_reset {from_stage: "score"}` can be rescored without resuming
-    the search; a later plain `resume` continues it. `drain_only_refusal` decides, before anything
+    the search — re-running its whole pipeline while stage reuse after a reset is off (doc 68
+    68.3e); a later plain `resume` continues it. `drain_only_refusal` decides, before anything
     is appended, which runs it will not drive — and the server's command worker asks it too before
     it spawns a drain for a `node_reset` command (doc 68 68.3b)."""
     # Called as a plain function too (see the `max_nodes` note below): an omitted option is Typer's

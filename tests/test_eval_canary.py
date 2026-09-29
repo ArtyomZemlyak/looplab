@@ -697,6 +697,102 @@ def test_a_pause_during_a_repair_holds_the_repaired_attempt(tmp_path, canary):
     assert again.errors == [], "the re-dispatch ran the repaired code; no second repair"
 
 
+def _two_gpu_engine(tmp_path, dev):
+    """`_engine` on a two-GPU pool with no host lease, node 0 seeded and admitted on GPU 0 — the
+    shape the critic drove (2026-09-29, MEDIUM-1)."""
+    eng = _engine(tmp_path / "run", dev, eval_canary=False)
+    eng._gpu_ids = [0, 1]
+    eng._gpu_physical_ids = {0: "0", 1: "1"}
+    eng._gpu_mem = {}
+    eng._free_gpus = [0, 1]
+    eng._gpu_host_lease_path = None
+    _seed(eng, dev.first)
+    ids = eng._acquire_gpus(1)
+    assert ids == [0]
+    eng._register_eval_resource_reservation(0, 0, {"gpu_ids": ids, "gpu_mem_mib": None, "count": 1})
+    return eng
+
+
+def _pinned_script(ledger: Path, *, fail: bool) -> str:
+    return ("import os\n"
+            f"open({str(ledger)!r}, 'a').write("
+            "'CVD=' + os.environ.get('CUDA_VISIBLE_DEVICES', '<unset>') + '\\n')\n"
+            + ("raise KeyError('boom')\n" if fail else "print('METRIC: 0.5')\n"))
+
+
+@pytest.mark.parametrize("race", [True, False])
+def test_a_resume_landing_after_the_pause_decision_never_launches_on_a_given_back_gpu(
+        tmp_path, race):
+    """MEDIUM (critic 2026-09-29, driven on a two-GPU pool): the reclaim asked the pause rule
+    itself, one fold before RUN_ATTEMPT asked it again. The repair gave GPU 0 back, a sibling took
+    it, the operator paused; a resume landing BETWEEN the two asks made the reclaim skip and the
+    attempt launch — pinned to GPU 0, the sibling's (both launches `CVD=0`). One decision now: a
+    withheld attempt takes nothing back and launches nothing, and a launching one is re-pinned.
+    MUTATION: let the reclaim ask the rule again before RUN_ATTEMPT does -> `CVD=0` twice."""
+    ledger = tmp_path / "ledger.txt"
+    sibling_held: list = []
+
+    class _D(_Dev):
+        def repair(self, idea, code, error):
+            sibling_held.extend(eng._acquire_gpus(1) or [])     # GPU 0 is back in the pool
+            eng.store.append(*_PAUSE)
+            if not race:
+                eng.store.append("resume", {})                 # CONTROL: resumed before the launch
+            return super().repair(idea, code, error)
+
+    dev = _D(_pinned_script(ledger, fail=True), fixes=[_pinned_script(ledger, fail=False)])
+    eng = _two_gpu_engine(tmp_path, dev)
+    real_rule = Engine._pause_withholds_attempt
+    answers: list = []
+
+    def _rule(a):
+        out = real_rule(eng, a)
+        answers.append(out)
+        if race and out and len(answers) == 1:
+            eng.store.append("resume", {})        # the resume lands right after the decision
+        return out
+
+    eng._pause_withholds_attempt = _rule
+    evs = _evaluate(eng)
+    assert sibling_held == [0]
+    launches = ledger.read_text().split()
+    assert "CVD=0" not in launches[1:], f"a relaunch ran on the sibling's GPU: {launches}"
+    if race:
+        assert launches == ["CVD=0"] and answers[:1] == [True], (launches, answers)
+        assert _terminals(evs) == [] and len(_of(evs, "node_repaired")) == 1
+    else:
+        assert launches == ["CVD=0", "CVD=1"], launches
+        (term,) = _terminals(evs)
+        assert term.type == "node_evaluated"
+
+
+def test_a_pause_landing_while_the_reclaim_waits_withholds_the_attempt(tmp_path):
+    """The one rule asked again only when the reclaim took devices back — that take may WAIT on a
+    busy pool, and a pause landing during the wait must still withhold the attempt. The devices it
+    took go back when the lane settles. MUTATION: drop the second ask -> the attempt launches over
+    the pause."""
+    ledger = tmp_path / "ledger.txt"
+    dev = _Dev(_pinned_script(ledger, fail=True), fixes=[_pinned_script(ledger, fail=False)])
+    eng = _two_gpu_engine(tmp_path, dev)
+    real_reclaim = eng._reclaim_eval_devices
+
+    async def _reclaim(node_id, generation):
+        back = await real_reclaim(node_id, generation)
+        if back is not None:
+            eng.store.append(*_PAUSE)             # the operator paused while the pool was busy
+        return back
+
+    eng._reclaim_eval_devices = _reclaim
+    evs = _evaluate(eng)
+    assert ledger.read_text().split() == ["CVD=0"], "the repaired attempt launched over the pause"
+    assert _terminals(evs) == [] and len(_of(evs, "node_repaired")) == 1
+    # The device it took back is on the lifecycle's reservation, and the lane's settle — which
+    # `_dispatch_evals` runs in its `finally`, not `_evaluate` — hands it to the pool: nothing leaks.
+    assert eng._eval_resource_reservation(0, 0)["gpu_ids"] == [0]
+    eng._settle_eval_resource_reservation(0, 0, None)
+    assert sorted(eng._free_gpus) == [0, 1], eng._free_gpus
+
+
 def test_a_pause_during_a_repaired_attempt_s_canary_holds_its_full_eval(tmp_path):
     """The post-canary check is asked on EVERY attempt, not only the first (critic 2026-09-29:
     mutant `a.attempt == 0` survived): a repaired attempt's canary passing during a pause does not
@@ -723,6 +819,7 @@ def test_a_pause_during_a_repaired_attempt_s_canary_holds_its_full_eval(tmp_path
     (_UNSET, [], False),
     (_UNSET, ["pause", "node_abort"], False),    # an intervention owns the terminal
     (_UNSET, ["pause", "node_reset"], False),
+    (_UNSET, ["pause", "run_finished"], False),  # a finished run is never withheld (mutant M4)
 ])
 def test_a_pause_withholds_only_work_it_cannot_destroy(tmp_path, next_start, controls, withheld):
     """The rule's truth table (`_pause_withholds_attempt`). MEDIUM (critic 2026-09-29, driven): a
@@ -744,6 +841,25 @@ def test_a_pause_withholds_only_work_it_cannot_destroy(tmp_path, next_start, con
             data["from_stage"] = "eval"
         eng.store.append(control, data)
     assert eng._pause_withholds_attempt(a) is withheld
+
+
+def test_a_dependency_round_charges_only_its_own_lifecycle():
+    """`_durable_dep_round_seconds` sums this node's rows of THIS generation only (critic
+    2026-09-29, mutant M9: the generation filter survived every test). A reset starts a new
+    lifecycle whose charge must not carry the old one's installs, nor a sibling node's."""
+    from looplab.engine.evaluate import _durable_dep_round_seconds
+    from looplab.events.eventstore import Event
+
+    def _row(seq, node_id, generation, seconds):
+        return Event(seq=seq, ts=0.0, type="deps_installed",
+                     data={"node_id": node_id, "generation": generation, "packages": ["p"],
+                           "round": 1, "eval_seconds": seconds})
+
+    events = [_row(1, 0, 0, 100.0), _row(2, 0, 1, 2.5), _row(3, 1, 1, 40.0),
+              _row(4, 0, 1, 0.5)]
+    assert _durable_dep_round_seconds(events, 0, 1) == 3.0
+    assert _durable_dep_round_seconds(events, 0, 0) == 100.0
+    assert _durable_dep_round_seconds(events, 1, 1) == 40.0
 
 
 def test_a_dependency_round_s_attempt_is_charged_across_a_pause(tmp_path):

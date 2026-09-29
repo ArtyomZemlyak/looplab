@@ -411,6 +411,13 @@ def test_a_real_verdict_still_drives_the_install(tmp_path, monkeypatch):
     assert len(dep_events) == 1 and dep_events[0].data["source"] == "triage"
     assert dev.repair_calls == 0                     # an install is not a repair
     assert fold(evs).nodes[0].status.name == "evaluated"
+    # The attempt the triage-sourced round re-runs is CHARGED like the traceback round's: the row
+    # carries its seconds and the lifecycle's terminal counts them (critic 2026-09-29, mutant M8:
+    # the triage row without `eval_seconds` survived every test).
+    ran = dep_events[0].data["eval_seconds"]
+    assert isinstance(ran, float) and ran > 0, dep_events[0].data
+    (terminal,) = [e for e in evs if e.type == "node_evaluated"]
+    assert terminal.data["eval_seconds"] >= ran, terminal.data
 
 
 # --------------------------------- a missing SUBMODULE of an INSTALLED distribution is not a lib

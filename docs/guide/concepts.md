@@ -1276,9 +1276,14 @@ it). Each stage gets its own span + `<name>.log` and a pass/fail (`stage_finishe
 
 - **A crash is pinpointed** to its stage (`node.failed_stage`), not hidden behind one command — a run
   that never actually trains is obvious (no `train` stage / a red one).
-- **Fix only the broken stage** — re-run the node *from* a stage (the Overview's clickable "eval
-  pipeline" strip, `reset(stage)` in chat, or a `node_reset` with the stage name): earlier stages are
-  marked *reused* and skipped, so a failed `eval` is fixed in seconds without paying to re-`train`.
+- **Fix only the broken stage** — within one evaluation, an inline repair restarts the pipeline
+  from the stage that failed: earlier stages are marked *reused* and skipped, so a failed `eval` is
+  fixed without paying to re-`train`. An OPERATOR reset from a stage (the Overview's clickable "eval
+  pipeline" strip, `reset(stage)` in chat, or a `node_reset` with the stage name) records that stage
+  but re-runs the WHOLE pipeline for now: the reset starts a new lifecycle whose workdir is rebuilt,
+  and reusing earlier stages across that boundary is off until the engine can prove those stages
+  completed in the node's workdir (doc 68 68.3e). Until they re-run, the strip keeps showing the
+  earlier stages' rows from before the reset.
   A *reused* marker never erases the stage's real record: every repair attempt appends its own
   `stage_finished` rows and the fold keeps the informative one, so `train ok / 6900 s` still reads as
   a train that happened. (Before 2026-08-07 only the LAST attempt's rows were written, so a reused

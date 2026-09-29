@@ -560,9 +560,10 @@ export function GroupSummary({
 // half keeps only the choreography: the re-run submit and its pending lock.
 function StagePipeline({ node, runId, id, generation, onToast }) {
   const [pendingStage, setPendingStage] = useState(null)
-  // "then pause" serves the stage re-run as a DRAIN (doc 68 68.3b): re-score from `score`, reusing
-  // the trained artifacts, and pause — the rescore the reset menu's drain row cannot express, since
-  // that row re-runs the whole evaluation (critic 2026-09-26).
+  // "then pause" serves the stage re-run as a DRAIN (doc 68 68.3b): the node re-evaluates and the
+  // run pauses. While stage reuse after a reset is off (doc 68 68.3e) a stage click re-runs the whole
+  // pipeline, exactly as the reset menu's drain row does; the stage name is still recorded, for
+  // when reuse returns (critic 2026-09-29).
   const [drainOnly, setDrainOnly] = useState(false)
   const { rows, notice, failedStage } = stagePipelineView(node)
   if (!rows.length) return null

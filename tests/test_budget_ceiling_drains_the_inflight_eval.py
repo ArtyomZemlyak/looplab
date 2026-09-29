@@ -899,6 +899,9 @@ def test_a_run_attempt_that_never_returned_carries_no_result_from_the_attempt_be
         async def _claim_eval_invocation(self, _a):
             return None
 
+        async def _reclaim_devices_for_attempt(self, _a):   # this host reserves no devices
+            return False
+
         def _run_eval(self, *_a):
             raise BudgetExceeded(CEILING)        # a paid call inside the evaluator crosses it
 
