@@ -1065,6 +1065,19 @@ EV_OPERATOR_REQUEST_PARKED = "operator_request_parked"
 # it changes no state, and the read side deliberately does NOT advance `lessons_refreshed`, so the
 # next cadence retries the same still-unread store rather than treating it as read.
 EV_LESSONS_STORE_UNAVAILABLE = "lessons_store_unavailable"
+# THE RANKINGS A STAGED CARD'S PROPOSAL MADE, held for the node the Card is built into (2026-09-29).
+# The card-staging lane (`engine/card_reservation.py::_stage_card_creates`) proposes through the
+# primary Researcher — the foresight panel — and no node exists yet, so its `finally` discarded the
+# panel's telemetry and the node built later had nothing to publish. Measured on MiniOneRec inf13: 20
+# `foresight_rank` spans, 17 of them in that lane, 2 `foresight_selected` rows and 0
+# `hypothesis_ranked` / `card_ranked` rows. The staging loop now appends the snapshot (`foresight` =
+# the panel's idea pick, `hyp_priority` = its board order, each with its ranking's trace ids) keyed by
+# `card_id` on the MAIN task, and the node's creation publishes it as `foresight_selected` /
+# `hypothesis_ranked` / `card_ranked` with that node's id — the precoded commit and the serial Card
+# claim alike (`engine/audit.py::AuditMixin._emit_staged_card_ranking`), once, for the Card's first
+# node after the row. DIAGNOSTIC / fold-ignored: nothing the fold decides reads it and its position
+# keys nothing; the engine reads it back by `card_id`, the way `skills_promoted` is read as a gate.
+EV_CARD_RANKING_STAGED = "card_ranking_staged"
 
 ALL_EVENT_TYPES: frozenset[str] = frozenset(
     v for k, v in globals().items() if k.startswith("EV_") and isinstance(v, str)
@@ -1191,6 +1204,7 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_FORK_UNFULFILLED,
     EV_OPERATOR_REQUEST_PARKED,
     EV_LESSONS_STORE_UNAVAILABLE,
+    EV_CARD_RANKING_STAGED,
     # EV_ENV_CHANGED moved to the FOLDED set (F18): it now sets a dedup flag (RunState.env_changed) so
     # the drift note is emitted once, not re-appended on every resume of an upgraded run.
     EV_AGENT_PHASE_STARTED, EV_AGENT_CHECKPOINTED, EV_AGENT_PHASE_COMPLETED,
@@ -1473,6 +1487,11 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         required=(),
         optional=("at_node", "confidence", "order", "ranked", "reason"),
     ),
+    "card_ranking_staged": PayloadContract(
+        "The foresight rankings a staged Card's proposal made, held for the node the Card becomes.",
+        required=("at_node", "card_id"),
+        optional=("foresight", "hyp_priority"),
+    ),
     "card_reopened": PayloadContract(
         "The operator resumed a dropped Card (server-stamped).",
         required=("id",),
@@ -1723,7 +1742,15 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "foresight_selected": PayloadContract(
         "The pre-execution foresight pick among candidate actions, with its confidence.",
         required=(),
-        optional=("attempt", "confidence", "generation", "node_id"),
+        # The pick's own keys, declared 2026-09-29: the payload is the role's telemetry dict
+        # (`search/foresight.py::ForesightPanelResearcher.propose`, `search/best_of_n.py`) spread
+        # beside `node_id`, which the writer scan cannot resolve, so only the three the fold reads
+        # had rows. `alternatives` (per candidate: produced by CONTINUING candidate 1's research
+        # session, `Settings.foresight_alternatives`) and `card_id` (the pick was made in the
+        # card-staging lane and published when the Card's node was created) joined that day.
+        optional=("alternatives", "attempt", "candidates", "card_id", "chosen", "confidence",
+                  "confidence_source", "generation", "k", "kind", "method", "n", "node_id",
+                  "novelty_stance", "order", "reason"),
     ),
     "fork": PayloadContract(
         "The operator asked to branch a new node from an existing one.",

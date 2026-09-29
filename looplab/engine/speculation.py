@@ -1945,9 +1945,9 @@ class SpeculationMixin:
                 retry_tail_cas(self.store, _plan_terminal, on_exhaust=lambda: None)
         try:
             self._emit_agent_report(node_id, developer=developer)
-            # THE DEVELOPER HALF ONLY (review 2026-09-22, SCJ-02). This used to call
-            # `_emit_hypothesis_ranked` and both halves of `_emit_foresight_selected` on the pooled
-            # researcher, which cannot hold THIS node's ranking: the build producer implements a
+            # THE DEVELOPER HALF ONLY, off the pooled pair (review 2026-09-22, SCJ-02). This used to
+            # call `_emit_hypothesis_ranked` and both halves of `_emit_foresight_selected` on the
+            # pooled researcher, which cannot hold THIS node's ranking: the build producer implements a
             # Card an earlier proposal minted and never proposes (it clears the pair's telemetry
             # first), and the pooled researcher carries no panel that could rank (see
             # `_producer_role_pair`). The reads were dead on every real pair — and on the leased pair
@@ -1955,6 +1955,11 @@ class SpeculationMixin:
             # pick on the pooled Developer is this build's own, so it is still published.
             self._emit_role_telemetry(
                 developer, "last_foresight_pick", EV_FORESIGHT_SELECTED, node_id, 0)
+            # …and the rankings the proposal that STAGED this Card made (2026-09-29): the card
+            # lane snapshotted them against `result.card_id`, because the pooled pair above never
+            # held them. MAIN task, so the board rows are allowed here (`audit.py::
+            # AuditMixin._emit_staged_card_ranking`).
+            self._emit_staged_card_ranking(result.card_id, node_id, created.attempt)
         finally:
             # `_emit_agent_report` does not consume `last_report`; make pair reuse explicit.
             self._discard_node_build_telemetry(researcher=researcher, developer=developer)

@@ -3223,6 +3223,12 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                             reason="build_batch_cancelled",
                         )
                     raise
+                # The rankings the proposal that STAGED this Card made (2026-09-29), published
+                # against the node just built. HERE, on the main task, not in the build worker:
+                # the board rows are run-global registers a worker may not append
+                # (`audit.py::AuditMixin._emit_staged_card_ranking`). A build that minted no node
+                # publishes nothing.
+                self._emit_staged_card_ranking(reservation.card_id, reservation.node_id, 0)
             else:
                 # One node per iteration on this path, so the floor is asked per node — the
                 # decision `Settings.node_open_budget_floor_usd` is about, on the main task.

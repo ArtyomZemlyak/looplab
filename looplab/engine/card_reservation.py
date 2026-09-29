@@ -1705,7 +1705,11 @@ class CardReservationMixin:
         proposal_events = self.store.read_all()
         proposal_state = _fold(proposal_events)
         proposal_node_ceiling = self._node_id_ceiling(proposal_events, proposal_state)
-        prepared: list[tuple[dict, Idea, str, int, list, dict]] = []
+        # The seventh member is the proposal's own RANKINGS (`last_hyp_priority` / `last_foresight`),
+        # snapshotted where they are made — the `finally` below discards the primary researcher's
+        # copy, and a Card staged here is built into a node only later (`audit.py::
+        # AuditMixin._record_staged_card_ranking` holds them for it; MiniOneRec inf13 lost 17 of 20).
+        prepared: list[tuple[dict, Idea, str, int, list, dict, dict]] = []
         dropped_batch: list[dict] = []
         try:
             if len(raw) > 1 and all(action.get("kind") == "draft" for action in raw):
@@ -1742,9 +1746,13 @@ class CardReservationMixin:
                         (record or {}).get("_cross_run_advisory_receipt", {})
                         if isinstance(record, dict) else {}
                     )
+                    # `_propose_batch` snapshotted each roll's rankings before the next roll could
+                    # overwrite them (`novelty.py::_snapshot_role_telemetry`); carry THIS idea's.
+                    ranking = {attr: (record or {}).get(attr) if isinstance(record, dict) else None
+                               for attr in ("last_hyp_priority", "last_foresight")}
                     prepared.append((
                         action, idea, "researcher",
-                        proposal_node_ceiling + offset, steering, advisory_receipt,
+                        proposal_node_ceiling + offset, steering, advisory_receipt, ranking,
                     ))
             else:
                 for offset, action in enumerate(raw):
@@ -1818,6 +1826,17 @@ class CardReservationMixin:
                                 source=source,
                                 proposal_events=proposal_events,
                             ))
+                    # THIS action's rankings, copied off the primary researcher and then cleared
+                    # on it, so the next action's propose cannot inherit them (a k=1 or client-less
+                    # panel does not reset `last_foresight` itself) and the `finally` below has
+                    # nothing of this action's left to discard. Taken whether or not an idea formed.
+                    ranking = {attr: self._snapshot_role_telemetry(attr)
+                               for attr in ("last_hyp_priority", "last_foresight")}
+                    for _attr in ranking:
+                        try:
+                            setattr(self.researcher, _attr, None)
+                        except (AttributeError, TypeError):
+                            pass        # a read-only forwarding wrapper: the `finally` walks it
                     if idea is None:
                         continue
                     prepared.append((
@@ -1828,12 +1847,13 @@ class CardReservationMixin:
                         list(getattr(self.researcher, "_steering_context", []) or []),
                         bounded_cross_run_advisory_receipt(getattr(
                             self.researcher, "_cross_run_advisory_receipt", {}) or {}),
+                        ranking,
                     ))
 
             staged: list[str] = []
             refused: collections.Counter = collections.Counter()
             attached = 0
-            for action, idea, source, at_node, steering, advisory_receipt in prepared:
+            for action, idea, source, at_node, steering, advisory_receipt, ranking in prepared:
                 # The BATCH lane reaches here without passing `_prepare_node_idea`'s `_link` funnel
                 # (`_consume_batch_proposal` hands its Ideas straight to the stager), so the proposal
                 # circuit breaker is repeated for it. MAIN TASK: both callers of `_stage_card_creates`
@@ -1854,6 +1874,9 @@ class CardReservationMixin:
                 )
                 if card_id is not None:
                     staged.append(card_id)
+                    # MAIN TASK, right after the Card's receipt: the rankings this proposal made,
+                    # held (diagnostic, fence-neutral) for the node the Card is built into.
+                    self._record_staged_card_ranking(card_id, at_node, ranking)
                 elif getattr(self, "_card_stage_attached_to", None) is not None:
                     # An attach is a HANDOFF, not a loss: the proposal repairs a question a live
                     # Card already owns, staging can never publish it as inventory, and the serial
