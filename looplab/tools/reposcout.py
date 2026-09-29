@@ -21,7 +21,7 @@ to the model (possibly a REMOTE provider):
 from __future__ import annotations
 
 import io
-from fnmatch import fnmatch
+from fnmatch import fnmatch, fnmatchcase
 from pathlib import Path
 
 from looplab.core import _pathsafe
@@ -55,13 +55,15 @@ REFUSAL_PREFIXES = (
     "(unsupported/binary type", "(file too large to page:", "(could not read:")
 
 
-def _fit_rows(header: str, rows: list[str], receipt: str = "") -> str:
+def _fit_rows(header: str, rows: list[str], receipt: str = "", cap: int = RESULT_CAP) -> str:
     """`_base.fit_rows` with this module's header shape (doc 25 TO-08).
 
     `read_file` already sizes its page so the loop's head-cut cannot eat the trailing receipt;
-    list_dir, find_files and grep did not, so a long listing arrived looking complete.
+    list_dir, find_files and grep did not, so a long listing arrived looking complete. `cap` is
+    lowered only by a caller that puts a line of its own above the rows (`RepoTools`' view header),
+    so the rows and their receipt still fit under the loop's cut together with it.
     """
-    return fit_rows(header, rows, receipt=receipt)
+    return fit_rows(header, rows, receipt=receipt, cap=cap)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -187,9 +189,15 @@ class RepoScoutTools:
         return any(str(d).replace("\\", "/").lstrip("./") == rel for d in self._deleted)
 
     def _is_deleted_abs(self, p) -> bool:
-        """Is an ABSOLUTE path a staged deletion? Maps it back to a repo-relative path first."""
+        """Is an ABSOLUTE path a staged deletion? Maps it back to a repo-relative path first.
+
+        Through `_disp` too, because in a MULTI-editable tree a deletion is keyed `<name>/rel` (the
+        write tools' shape) and the plain `relative_to(first root)` below can never produce that —
+        so a file deleted under a named editable stayed listed by `find_files` and `list_dir`."""
         if not self._deleted:
             return False
+        if self._named_roots and self._is_deleted(self._disp(p)):
+            return True
         base = self._default_root or (self._roots[0] if self._roots else None)
         try:
             return base is not None and self._is_deleted(str(Path(p).relative_to(base)))
@@ -559,7 +567,14 @@ class RepoScoutTools:
             for name in list(dirs) + sorted(files):
                 yield Path(dp) / name, _fnmatchcase(name, tail)
 
-    def _find_files(self, root: str, pattern: str) -> str:
+    def _find_files(self, root: str, pattern: str, *, with_overlay: bool = False,
+                    reserve: int = 0) -> str:
+        """`with_overlay` lists the STAGED files under `root` beside the disk walk (a staged key the
+        disk also has is one row), matched against `pattern` the way pathlib matches it relative to
+        `root` (`*` inside a segment, `**` any depth, case-sensitive). Off for this tool's own
+        callers, whose listing has always been the disk's; `RepoTools` turns it on for a node's
+        view, where a file only that node recorded exists as surely as one on disk. `reserve` is
+        the room a caller's own header line takes above the rows (`_fit_rows`' `cap`)."""
         p = self._resolve(root)
         if not p:
             return f"(root not allowed or outside permitted roots: {root})"
@@ -591,6 +606,16 @@ class RepoScoutTools:
                 hits.append(self._disp(rm))   # repo-relative for the Developer so a hit round-trips
         except (OSError, ValueError) as e:
             return f"(bad pattern: {e})"
+        if with_overlay and self._overlay:
+            want = [seg for seg in str(pattern or "*").replace("\\", "/").split("/") if seg]
+            for key in self._overlay:
+                where = self._overlay_key_path(key)
+                if (where is None or not self._key_within(key, p) or where == p
+                        or _looks_secret(Path(str(key))) or self._is_deleted(key)):
+                    continue
+                if _parts_match(want, list(where.relative_to(p).parts), fnmatchcase):
+                    hits.append(str(key))
+            hits = list(dict.fromkeys(hits))
         if not hits:
             # "(no matches)" would be a LIE about a walk that never finished — the model would cross
             # the file off and stop looking for it. Say which of the two happened.
@@ -608,9 +633,10 @@ class RepoScoutTools:
             shown = shown[:_MAX_ENTRIES]
         if stopped:
             notes.append(f"stopped after scanning {_FIND_SCAN_BUDGET} paths")
+        budget = RESULT_CAP - max(0, int(reserve))
         return _fit_rows("", shown,
                          f"... ({'; '.join(notes)} — narrow `pattern`/`root` for the rest)"
-                         if notes else "")
+                         if notes else "", cap=budget)
 
     def _grep_target(self, root: str):
         """What a `grep` ROOT names, resolved EXACTLY as `_read_file` resolves a path (WP-TOOLS T2).
@@ -660,8 +686,8 @@ class RepoScoutTools:
                                "read it in windows with read_file instead)")
         return "file", p
 
-    def _grep_one(self, rx, cap: int, pattern: str, kind: str, target,
-                  glob: str, where: str) -> GrepResult:
+    def _grep_one(self, rx, cap: int, pattern: str, kind: str, target, glob: str, where: str,
+                  budget: int) -> GrepResult:
         """`_grep` over the ONE file `_grep_target` admitted: a staged key, or a regular file read
         through `core/node_evidence.py::read_bounded_regular_file` — the one reader of a file a
         candidate can write, which a triage scout rooted at a node's workdir is looking at. `glob`
@@ -687,13 +713,14 @@ class RepoScoutTools:
             if rx.search(line):
                 hits.append(f"{shown}:{i}: {line.strip()[:200]}")
                 if len(hits) >= cap:
-                    return GrepResult(_fit_rows("", hits, f"(capped at {cap} hits)"), "hits")
+                    return GrepResult(_fit_rows("", hits, f"(capped at {cap} hits)", budget), "hits")
         if hits:
-            return GrepResult(_fit_rows("", hits), "hits")
+            return GrepResult(_fit_rows("", hits, "", budget), "hits")
         return GrepResult(f"(grep: {pattern!r} not found in {shown})", "not_found")
 
     def _grep(self, pattern: str, root: str, glob: str, max_hits, *,
-              skip_hidden: bool = True, label: str | None = None) -> GrepResult:
+              skip_hidden: bool = True, label: str | None = None,
+              reserve: int = 0) -> GrepResult:
         """`skip_hidden=False` keeps DOTTED directories in the walk (doc 25 TO-06).
 
         This tool's own audience wants them pruned — `~/` is one of its roots, where `.cache`/`.venv`
@@ -711,7 +738,8 @@ class RepoScoutTools:
         naming nothing. And `root` may name ONE file (`_grep_target`, T2), while a named directory
         now scopes the STAGED files too, which used to be searched whatever `root` said. `label` is
         how a receipt names the searched place when the caller's `root` is a path the model never
-        saw (`RepoTools` hands over absolute mount roots).
+        saw (`RepoTools` hands over absolute mount roots); `reserve` is the room a caller's own
+        header line takes under the loop's cut.
         """
         import os as _os
         import re as _re
@@ -723,6 +751,7 @@ class RepoScoutTools:
         except _re.error:
             rx = _re.compile(_re.escape(pattern))   # not a valid regex -> treat as a literal substring
         cap = max(1, min(int(max_hits) if max_hits else 40, 200))   # clamp: a model-supplied max can't disable the cap
+        budget = RESULT_CAP - max(0, int(reserve))
         glob = glob or "*"
         where = label if label is not None else (root or "repo")
         within = None               # a NAMED directory: the staged files searched are the ones in it
@@ -731,7 +760,7 @@ class RepoScoutTools:
             if kind == "refused":
                 return GrepResult(target, "refused")
             if kind != "dir":
-                return self._grep_one(rx, cap, pattern, kind, target, glob, where)
+                return self._grep_one(rx, cap, pattern, kind, target, glob, where, budget)
             base = within = target
         else:
             base = self._default_root or (self._roots[0] if self._roots else None)
@@ -754,7 +783,8 @@ class RepoScoutTools:
                 if rx.search(line):
                     hits.append(f"{rel}:{i}: {line.strip()[:200]}")
                     if len(hits) >= cap:
-                        return GrepResult(_fit_rows("", hits, f"(capped at {cap} hits)"), "hits")
+                        return GrepResult(_fit_rows("", hits, f"(capped at {cap} hits)", budget),
+                                          "hits")
         scanned = 0
         for dp, dirs, files in _os.walk(base):
             dirs[:] = [d for d in dirs
@@ -762,7 +792,7 @@ class RepoScoutTools:
             for fn in sorted(files):
                 if scanned >= 4000:                 # file budget so a huge repo can't stall the grep
                     return GrepResult(_fit_rows("", hits, "(stopped after 4000 files; narrow "
-                                                "`root`/`glob`)"), "stopped")
+                                                "`root`/`glob`)", budget), "stopped")
                 if path_glob is None and not fnmatch(fn, bare):
                     continue
                 fp = Path(dp) / fn
@@ -798,12 +828,12 @@ class RepoScoutTools:
                                 # above + write_file's path shape, so a hit round-trips into an edit).
                                 hits.append(f"{self._disp(fp)}:{i}: {line.strip()[:200]}")
                                 if len(hits) >= cap:
-                                    return GrepResult(_fit_rows("", hits, f"(capped at {cap} hits)"),
-                                                      "hits")
+                                    return GrepResult(_fit_rows("", hits, f"(capped at {cap} hits)",
+                                                                budget), "hits")
                 except OSError:
                     continue
         if hits:
-            return GrepResult(_fit_rows("", hits), "hits")
+            return GrepResult(_fit_rows("", hits, "", budget), "hits")
         if not searched + scanned:
             return GrepResult(no_file_receipt(where, glob), "no_file")
         return GrepResult(f"(grep: {pattern!r} not found)", "not_found")

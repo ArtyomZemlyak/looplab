@@ -26,7 +26,8 @@ empty store, which is why a phase that read nothing renders nothing.
 One store per RUN, shared by every role the factory builds (the Developer's phases run on worker
 threads under `llm_parallel`, hence the lock); it records through the tool loop's per-call
 `on_tool_result` hook, keyed on `(tool, path)` the way `tool_loop._READ_TOOL_PATH_SLOTS` keys the
-read-loop nudge — the two are one reading of "which tools return a file".
+read-loop nudge — the two are one reading of "which tools return a file" — plus the tree a call
+NAMED (`repo_read(node_id=N)`, WP-TOOLS T3), because one path in two trees is two files.
 
 A CARRIED PAGE IS TEXT THE MODEL DID NOT WRITE (review 2026-09-22, doc 66 §6, item 4 — the remainder of
 TAT-02 and doc 50 TO-06's boundary). The block lands in a chain root's USER turn, the message the
@@ -53,12 +54,16 @@ from looplab.core.evidence import EVIDENCE_LABEL, envelope_enabled, fence_untrus
 # line-for-line copy of `_canonical_read_path`'s body, held in step by a test — so a fifth reader
 # added to the loop's table would have gone unrecorded here until a human read the failure.
 # `tool_loop` imports nothing from this module, so the direction is safe. The derived view is
-# `tool -> slot`, which is what the renderer needs to name the call that re-reads.
+# `tool -> slot`, which is what the renderer needs to name the call that re-reads. `_read_node_id`
+# is the TREE a call names (WP-TOOLS T3: `repo_read(node_id=N)`), the third part of an item's key.
 from looplab.agents.tool_loop import (_READ_TOOL_PATH_SLOTS, _canonical_read_path,  # noqa: E402
-                                      _note_heads)
+                                      _note_heads, _read_node_id)
 
 READ_TOOL_PATH_SLOTS: dict[str, str] = {tool: slot
                                         for tool, (slot, _paged) in _READ_TOOL_PATH_SLOTS.items()}
+# The workspace tokens of a Researcher reading a NODE-FOLLOWING repo view (WP-TOOLS T3): the prefix
+# of `agents/repo_reader.py::researcher_workspace_token`'s `researcher@<view>`, one per tree shown.
+VIEW_WORKSPACE_PREFIX = "researcher@"
 # …and the WRITERS, because a page carried forward under "do not re-fetch" must never be the
 # version before an edit. THIS IS THE DEFECT THE PREDECESSOR OF THIS BLOCK WAS REMOVED FOR (the
 # G2 read-dedup cache, P3): a file read in `plan`, rewritten in `plan_step`, and then seeded into
@@ -231,10 +236,12 @@ class EstablishedContext:
         # never fit one, so the feature degenerated to index rows with nothing saying why.
         self.item_bytes = max(0, min(int(item_bytes), self.budget_bytes))
         self._lock = threading.Lock()
-        # key -> {"tool", "path", "count", "phases": [..], "content": str | None, "sha": str | None,
-        #         "changed": bool, "workspace": <token>}
-        self._items: dict[tuple[str, str], dict] = {}
-        self._order: list[tuple[str, str]] = []
+        # (tool, path, node_id) -> {"tool", "path", "node_id", "count", "phases": [..],
+        #         "content": str | None, "sha": str | None, "changed": bool, "workspace": <token>}
+        # `node_id` is the tree a call NAMED (`tool_loop._read_node_id`), None for the reader's own
+        # view: `repo_read(node_id=7, path="x.py")` and `repo_read(path="x.py")` are two files.
+        self._items: dict[tuple, dict] = {}
+        self._order: list[tuple] = []
         # WHICH WORKING SET THE CARRIED PAGES CAME FROM. The store is per RUN and the Developer's
         # scouts read through `write.files`, the per-NODE staged overlay (`repo_developer.py::
         # _scout_tools`: "read/grep see the code the Developer is currently writing"), so without
@@ -335,12 +342,13 @@ class EstablishedContext:
         # it is the file. Decided by the READER's own vocabulary, imported rather than re-listed.
         if not text.strip() or text.lstrip().startswith(_refusal_prefixes()):
             return False
-        key = (str(tool), path)
+        node_id = _read_node_id(str(tool or ""), args or {})
+        key = (str(tool), path, node_id)
         with self._lock:
             item = self._items.get(key)
             if item is None:
-                item = {"tool": str(tool), "path": path, "count": 0, "phases": [],
-                        "content": None, "sha": None, "changed": False,
+                item = {"tool": str(tool), "path": path, "node_id": node_id, "count": 0,
+                        "phases": [], "content": None, "sha": None, "changed": False,
                         "workspace": self._workspace}
                 self._items[key] = item
                 self._order.append(key)
@@ -463,7 +471,13 @@ class EstablishedContext:
             phases = ", ".join(row["phases"]) or "an earlier phase"
             times = f"read {row['count']}x" + (f" across {phases}" if row["phases"] else "")
             slot = READ_TOOL_PATH_SLOTS[row["tool"]]
-            call = f"{row['tool']}({slot}=\"{row['path']}\")"
+            # A page read from a tree the call NAMED is re-read from that tree: the node_id rides
+            # ahead of the path, and the row says which tree. None is every historical byte.
+            origin, lead = row["tool"], slot
+            if row.get("node_id") is not None:
+                origin = f"{row['tool']} node_id={row['node_id']}"
+                lead = f"node_id={row['node_id']}, {slot}"
+            call = f"{row['tool']}({lead}=\"{row['path']}\")"
             # A PAGE BELONGS TO THE WORKING SET IT WAS READ IN. The Developer's scouts answer
             # through `write.files`, this node's staged overlay, so a page read while building node
             # 3 is not this node's `solver.py` — and there is no write to hang `invalidate` on,
@@ -478,17 +492,22 @@ class EstablishedContext:
                 # budget is charged (a fence is ~50 bytes the cap must still hold).
                 if self.evidence_envelope:
                     content = fence_untrusted(content, EVIDENCE_LABEL)
-                body = (f"\n--- `{row['path']}` ({row['tool']}; {times}; first page verbatim, "
+                body = (f"\n--- `{row['path']}` ({origin}; {times}; first page verbatim, "
                         f"sha {row['sha']}) ---\n{content}\n")
                 size = len(body.encode("utf-8"))
                 if used + size <= self.budget_bytes:
                     out.append(body)
                     used += size
                     continue
-            why = ("read while building a DIFFERENT experiment — re-read" if elsewhere
+            # A Researcher page is scoped by the TREE its reader showed (`VIEW_WORKSPACE_PREFIX`),
+            # not by a build, and says so; every other page keeps its historical reason.
+            other = ("read in a DIFFERENT repo tree — re-read"
+                     if str(row.get("workspace") or "").startswith(VIEW_WORKSPACE_PREFIX)
+                     else "read while building a DIFFERENT experiment — re-read")
+            why = (other if elsewhere
                    else "CHANGED since you read it — re-read" if row.get("changed")
                    else "not carried — re-read once")
-            line = f"\n- `{row['path']}` ({row['tool']}; {times}; {why} with `{call}`)\n"
+            line = f"\n- `{row['path']}` ({origin}; {times}; {why} with `{call}`)\n"
             size = len(line.encode("utf-8"))
             if indexed >= _MAX_INDEX_ROWS or used + size > self.budget_bytes:
                 omitted += 1

@@ -126,13 +126,79 @@ def _merged_grep(results, where: str, glob: str) -> str:
     return "(no matches)"
 
 
+# The spelling of a node's own workspace inside a path the model copied — `<run>/nodes/node_15/
+# service/x.py`, off a traceback or a log. The engine materializes node N at `<run>/nodes/node_N`
+# with the root editable at that directory's root and a NAMED one at `node_N/<name>`, so what
+# follows the prefix is exactly the key the node's `files` use. A leading `/` is required: a
+# relative `nodes/node_3/x.py` may be a directory the repo itself has.
+_NODE_DIR_PATH = re.compile(r"/nodes/node_(\d+)/(.+)$")
+
+
+def _viewable(key) -> bool:
+    """May a node's RECORDED file be served into the (possibly remote) model context?
+
+    The two gates `repo_read` applies to a disk file (`looks_secret` + `_readable_repo_path`),
+    applied to the overlay KEY. The scout serves staged content before any gate of its own and its
+    staged grep is unguarded — right for the Developer's own writes, wrong for another candidate's
+    files shown to the Researcher: a node that wrote `.env` or `.git/config` must not be read
+    through its tree, nor named in a miss receipt."""
+    p = Path(str(key or "").replace("\\", "/"))
+    return bool(str(key or "")) and not _pathsafe.looks_secret(p) and _readable_repo_path(p)
+
+
+class _TreeView:
+    """One tree `RepoTools` can show: the run's STARTING code (`node_id` None) or a node's — the
+    starting code with the node's recorded `files` over it and its `deleted` hidden, served by a
+    `RepoScoutTools` built over the same mounts with those two as its overlay."""
+
+    __slots__ = ("node_id", "role", "files", "scout")
+
+    def __init__(self, node_id, role: str, files: dict, scout) -> None:
+        self.node_id, self.role, self.files, self.scout = node_id, role, files, scout
+
+    @property
+    def phrase(self) -> str:
+        return "the run's starting code" if self.node_id is None else f"node #{self.node_id}'s tree"
+
+    @property
+    def key(self) -> str:
+        """The view's identity for the A5 workspace token (`agents/repo_reader.py`)."""
+        return "base" if self.node_id is None else f"node:{self.node_id}"
+
+    @property
+    def header(self) -> str:
+        """The line every reply opens with, on its OWN line (so the paginator's `(lines a-b of T)`
+        header below it still matches `tool_loop._LINES_OF_RE`), short enough for the 400-char
+        headroom `reposcout._MAX_READ` leaves under the loop's cap."""
+        why = {"parent": " — the code this proposal improves",
+               "best": " — the run's current best"}.get(self.role, "")
+        return f"[view: {self.phrase}{why}]\n"
+
+
 class RepoTools:
     """Read-only view of the editable repo(s) for the LLM Researcher (item #3): grep / list /
     read over the source tree, path-restricted to the mounted repos. The proposer can SEE the
     code it suggests changing instead of proposing blind. It never writes — editing the repo
-    stays the Developer's job (the trust/role boundary)."""
+    stays the Developer's job (the trust/role boundary).
 
-    def __init__(self, mounts: list[dict], max_bytes: int = 4000):
+    WHICH TREE (WP-TOOLS T3, `Settings.researcher_repo_view_follows_node`). OFF — the constructor
+    default and every run launched before the field — it shows the run's STARTING code, whatever
+    the proposal builds on. Measured on MiniOneRec inf13: the Researcher improving node 15 read the
+    1,410-line base `service/latency_engine.py` believing it was the champion's 1,563-line one, and
+    234 reads of files that exist only in node trees failed. ON, `bind_state(state, parent)` points
+    it at the parent's tree: the starting code with the files that node recorded (`node_created`
+    carries the full cumulative `files` — exactly the Developer's starting tree) over it and its
+    deletions hidden. From the EVENT LOG, never the node's directory on disk: that is re-seeded by
+    materialize and purged, holds eval outputs that eat the 4,000-file grep budget, and is
+    candidate-writable. With no parent the view is the one chosen at CONSTRUCTION
+    (`no_parent_view`), because `bind_state(state, None)` cannot tell a draft from deep research:
+    the starting code for a draft, the incumbent best for deep research. Every reply opens with
+    `[view: …]` naming the tree; a refusal still opens with its `reposcout.REFUSAL_PREFIXES` entry,
+    so A5 never stores one as content. `node_id` reads another node's tree, -1 the starting code.
+    """
+
+    def __init__(self, mounts: list[dict], max_bytes: int = 4000, *, follow_node: bool = False,
+                 no_parent_view: str = "base"):
         # mounts: [{"name": ".|subdir", "path": "<repo>"}]; "." is shown as the repo root.
         # expanduser/expandvars so a `~/repo` mount (e.g. from an older snapshot) still resolves.
         self.roots = {(m["name"] or "."): Path(os.path.expanduser(os.path.expandvars(m["path"]))).resolve()
@@ -149,26 +215,191 @@ class RepoTools:
         self._scout = RepoScoutTools(
             list(self.roots.values()), default_root=self.roots.get("."),
             named_roots=list(self.roots.items()))
+        # THE VIEW (see the class docstring). OFF at the constructor: a prompt flag (CLAUDE.md),
+        # turned on only through `agents/repo_reader.py::repo_reader_provider`, its one reader.
+        # `_base_scout` is the starting code and stays the reader of every DISK file, whichever
+        # tree is shown: routing a disk read through a view's scout would ask its overlay first with
+        # an absolute path, which `_overlay_get` maps by the unnamed `(root)` pairs and so drops a
+        # named mount's `<name>/` prefix — another file's staged bytes.
+        self.follow_node = bool(follow_node)
+        self.no_parent_view = "best" if no_parent_view == "best" else "base"
+        self._base_scout = self._scout
+        self._state = None
+        self._view = _TreeView(None, "base", {}, self._scout)
+        # Every absolute spelling of a mount root the model may copy (as configured and resolved),
+        # longest first, so `/abs/repo/service/x.py` maps to the key `service/x.py`.
+        spelled: dict[str, str] = {}
+        for m in mounts:
+            name = m["name"] or "."
+            for root in (os.path.expanduser(os.path.expandvars(m["path"])), str(self.roots[name])):
+                root = str(root).replace("\\", "/").rstrip("/")
+                if root.startswith("/") and len(root) > 1:
+                    spelled.setdefault(root, name)
+        self._spellings = sorted(spelled.items(), key=lambda row: -len(row[0]))
+
+    def bind_state(self, state, parent=None) -> None:
+        """Point the view at the tree this call works on (flag on); a no-op with the flag off.
+
+        REBINDS `_view` and `_scout`, never mutates the scout it had: `tool_loop.bound_toolset`
+        hands each call a SHALLOW copy of this provider, so a view built by mutating the shared
+        scout would move the original's tree too (`tools/_base.py`: the hook rebinds attributes)."""
+        if not self.follow_node:
+            return
+        node, role = parent, "parent"
+        if node is None and self.no_parent_view == "best":
+            best = getattr(state, "best", None)
+            node, role = (best() if callable(best) else None), "best"
+        self._state = state
+        self._view = self._tree(node, role)
+        self._scout = self._view.scout
+
+    def bound_view_key(self) -> str | None:
+        """The bound view's identity (`base` / `node:<id>`), or None while this reader shows the
+        starting code whatever it is bound to (the flag is off) — `agents/repo_reader.py` reads it."""
+        return self._view.key if self.follow_node else None
+
+    def _tree(self, node, role: str) -> _TreeView:
+        """The view of `node` (None = the run's starting code), with its files gated (`_viewable`)."""
+        if node is None:
+            return _TreeView(None, "base", {}, self._base_scout)
+        from looplab.tools.reposcout import RepoScoutTools
+        files = {str(k): v for k, v in (getattr(node, "files", None) or {}).items() if _viewable(k)}
+        deleted = [str(d) for d in (getattr(node, "deleted", None) or [])]
+        scout = RepoScoutTools(list(self.roots.values()), default_root=self.roots.get("."),
+                               named_roots=list(self.roots.items()), overlay=files, deleted=deleted)
+        return _TreeView(int(node.id), role, files, scout)
+
+    def _view_for(self, args: dict, raw_path: str = ""):
+        """`(view, None)` for the tree a call asks for, or `(None, refusal)`.
+
+        An explicit `node_id` wins; -1 is the starting code. Otherwise a path spelled through a
+        node's workspace (`<run>/nodes/node_N/<rel>`) reads node N's tree — the file it names —
+        and anything else reads the bound view. A refusal opens with a `REFUSAL_PREFIXES` entry."""
+        nid = (args or {}).get("node_id")
+        spelled = nid is None or nid == ""
+        if spelled:
+            m = _NODE_DIR_PATH.search(str(raw_path or "").replace("\\", "/"))
+            if m is None:
+                return self._view, None
+            nid = int(m.group(1))
+        else:
+            try:
+                if isinstance(nid, bool):
+                    raise TypeError(nid)
+                nid = int(nid)
+            except (TypeError, ValueError):
+                return None, ("(refused: node_id takes an experiment id (an integer), or -1 for "
+                              "the run's starting code)")
+        if nid == -1:
+            return self._tree(None, "base"), None
+        if nid == self._view.node_id:
+            return self._view, None
+        node = (getattr(self._state, "nodes", None) or {}).get(nid)
+        if node is None:
+            if spelled:
+                return None, (f"(no such file: {raw_path} — node #{nid} is not an experiment of "
+                              "this run)")
+            return None, (f"(refused: there is no node #{nid} in this run — node_id takes an "
+                          "experiment id (list_experiments names them), or -1 for the run's "
+                          "starting code)")
+        return self._tree(node, "other"), None
+
+    def _view_key(self, raw: str) -> str:
+        """The model's path as the key a node's `files` use — a node-workspace spelling and an
+        absolute path under a mount root both become `<path>` / `<mount>/<path>`. `_resolve` alone
+        strips a leading `/` and re-roots the rest, so an absolute spelling missed even a file that
+        exists (80 of the 159 inf13 propose misses were spelled absolute or through a node dir)."""
+        s = str(raw or "").replace("\\", "/").strip()
+        m = _NODE_DIR_PATH.search(s)
+        if m is not None:
+            s = m.group(2)
+        else:
+            for root, name in self._spellings:
+                if s.startswith(root + "/"):
+                    rel = s[len(root) + 1:]
+                    s = rel if name == "." else f"{name}/{rel}"
+                    break
+        while s.startswith("./"):
+            s = s[2:]
+        return s
+
+    def _disk_refusal(self, target: Path) -> str:
+        """The refusal for a DISK file this reader must not return, or "" to read it."""
+        # Refuse to read credential files back into the (possibly remote) model context.
+        for r in self.roots.values():
+            try:
+                if _pathsafe.looks_secret(target.relative_to(r)):
+                    return f"(refused: {target.name} looks like a secret/credential)"
+            except ValueError:
+                continue
+        if not _readable_repo_path(target):
+            # KEPT here, not delegated: `_pathsafe.looks_secret` (and therefore the scout's
+            # own gate) does not know `.git`, so a credentialed clone's `.git/config` would
+            # pass every check the scout makes. See the module-level helper.
+            return (f"(refused: {target.name} is not a readable source file — "
+                    "repository internals and binaries are not returned)")
+        return ""
+
+    def _recorders(self, key: str, exclude) -> list[int]:
+        """Ids of the OTHER nodes whose recorded files hold `key` — the bound view's node first,
+        then the champion, then newest first. 14 inf13 propose misses were other nodes' files."""
+        nodes = getattr(self._state, "nodes", None) or {}
+        ids = [nid for nid, n in nodes.items()
+               if nid != exclude and key in (getattr(n, "files", None) or {})]
+        lead = [i for i in (self._view.node_id, getattr(self._state, "best_node_id", None))
+                if i in ids]
+        return list(dict.fromkeys(lead + sorted(ids, reverse=True)))
+
+    def _miss(self, raw: str, key: str, view: _TreeView) -> str:
+        """`(no such file: …)` naming the tree searched and, when other nodes recorded the path,
+        which — with the call that reads it. Only a `_viewable` key is looked up, so a miss never
+        discloses that some node wrote a credential-shaped file."""
+        out = f"(no such file: {raw} in {view.phrase}"
+        others = self._recorders(key, view.node_id) if _viewable(key) else []
+        if others:
+            names = ", ".join(f"#{n}" for n in others[:5])
+            more = f" and {len(others) - 5} more" if len(others) > 5 else ""
+            out += (f"; node {names}{more} recorded it — read it with "
+                    f"repo_read(node_id={others[0]}, path=\"{key}\")")
+        return out + ")"
+
+    def _view_sentence(self) -> str:
+        """The spec sentence saying which tree a reply shows (flag on only)."""
+        default = ("the run's current best node's tree — the run's starting code with the files "
+                   "that node recorded over it (the starting code until something has scored)"
+                   if self.no_parent_view == "best" else
+                   "the code this proposal builds on: the parent node's tree — the run's starting "
+                   "code with the files that node recorded over it (a fresh draft sees the "
+                   "starting code)")
+        return (f" By default it shows {default}. The first line of every reply names the tree "
+                "shown; node_id picks another node's tree, -1 the run's starting code.")
 
     def specs(self) -> list[dict]:
         names = ", ".join(self.roots)
+        # Flag off: `about` is "" and `view` adds no property, so every spec is the historical one.
+        about = self._view_sentence() if self.follow_node else ""
+        view = ({"node_id": {"type": "integer", "description": (
+            "optional: another node's tree (an experiment id, as list_experiments shows it), or "
+            "-1 for the run's starting code")}} if self.follow_node else {})
         return [
             fn_spec("repo_grep", f"Regex search across the editable repo source ({names}). "
-                     "Returns matching <repo>/<path>:<line> hits.",
+                     "Returns matching <repo>/<path>:<line> hits." + about,
                      {"pattern": {"type": "string"},
-                      "glob": {"type": "string", "description": _GREP_GLOB_HELP}}, ["pattern"]),
-            fn_spec("repo_list", f"List source files in an editable repo ({names}).",
-                     {"repo": {"type": "string"}, "glob": {"type": "string"}}, []),
+                      "glob": {"type": "string", "description": _GREP_GLOB_HELP}, **view},
+                     ["pattern"]),
+            fn_spec("repo_list", f"List source files in an editable repo ({names})." + about,
+                     {"repo": {"type": "string"}, "glob": {"type": "string"}, **view}, []),
             fn_spec("repo_read", "Read a file from an editable repo, given a <repo>/<path> "
                      "(or just <path> for the root repo). Returns ONE page of at most ~3600 chars; "
                      "window with start_line (+ optional lines). A page with more file below it ENDS "
                      "with '… (more below — continue with start_line=N)' — continue from exactly that "
                      "N (a single line longer than one page is cut mid-line — the marker says so and "
                      "resumes at the NEXT line); a reply WITHOUT that marker IS the end of the file. "
-                     "Never re-read from the top.",
+                     "Never re-read from the top." + about,
                      {"path": {"type": "string"},
                       "start_line": {"type": "integer", "description": "1-based line to start from (default top)"},
-                      "lines": {"type": "integer", "description": "how many lines to return (optional window)"}},
+                      "lines": {"type": "integer", "description": "how many lines to return (optional window)"},
+                      **view},
                      ["path"]),
         ]
 
@@ -193,8 +424,53 @@ class RepoTools:
             return None
         return target
 
+    def _execute_in_view(self, name: str, args: dict) -> str:
+        """The three tools over the tree a call asks for (flag on; see the class docstring)."""
+        from looplab.tools.reposcout import REFUSAL_PREFIXES
+        view, refusal = self._view_for(args, str(args.get("path") or "")
+                                       if name == "repo_read" else "")
+        if refusal:
+            return refusal
+        head = view.header
+        if name == "repo_grep":
+            glob = args.get("glob") or "*"
+            # Per mount, through the VIEW's scout: its staged files are scoped to the mount root it
+            # is handed (`_grep`'s `within`), so a staged file is searched once, under its mount.
+            results = [view.scout._grep(args.get("pattern", ""), str(root), glob, 40,
+                                        skip_hidden=False, label=mount, reserve=len(head))
+                       for mount, root in self.roots.items()]
+            return head + _merged_grep(results, self._mounts_label(), glob)
+        if name == "repo_list":
+            repo = args.get("repo") or ("." if "." in self.roots else next(iter(self.roots)))
+            root = self.roots.get(repo)
+            if root is None:
+                return f"(no such repo: {repo}; have: {', '.join(self.roots)})"
+            return head + view.scout._find_files(
+                str(root), _recursive_glob(args.get("glob") or "*"), with_overlay=True,
+                reserve=len(head))
+        raw = str(args.get("path", "") or "")
+        key = self._view_key(raw)
+        start, lines = args.get("start_line", 0), args.get("lines", 0)
+        if key in view.files:
+            # OVERLAY FIRST, by the RELATIVE key: the node's recorded file IS the file in its tree,
+            # whether or not the starting code has one (the 234 inf13 misses were such files).
+            return head + view.scout._read_file(key, start, lines)
+        if view.node_id is not None and view.scout._is_deleted(key):
+            return f"(no such file: {raw} — node #{view.node_id} deleted it from its tree)"
+        target = self._resolve(key)
+        if target is None or not target.is_file():
+            return self._miss(raw, key, view)
+        refused = self._disk_refusal(target)
+        if refused:
+            return refused
+        page = self._base_scout._read_file(str(target), start, lines)
+        # A refusal the scout makes (too large, unreadable) stays FIRST, un-headed.
+        return page if page.startswith(REFUSAL_PREFIXES) else head + page
+
     def execute(self, name: str, args: dict) -> str:
         try:
+            if self.follow_node and name in ("repo_grep", "repo_list", "repo_read"):
+                return self._execute_in_view(name, args or {})
             if name == "repo_grep":
                 glob = args.get("glob") or "*"
                 # One block per mount, each carrying the scout's OWN receipt (`(capped at N hits)`,
@@ -218,19 +494,9 @@ class RepoTools:
                 target = self._resolve(args.get("path", ""))
                 if target is None or not target.is_file():
                     return f"(no such file: {args.get('path')})"
-                # Refuse to read credential files back into the (possibly remote) model context.
-                for r in self.roots.values():
-                    try:
-                        if _pathsafe.looks_secret(target.relative_to(r)):
-                            return f"(refused: {target.name} looks like a secret/credential)"
-                    except ValueError:
-                        continue
-                if not _readable_repo_path(target):
-                    # KEPT here, not delegated: `_pathsafe.looks_secret` (and therefore the scout's
-                    # own gate) does not know `.git`, so a credentialed clone's `.git/config` would
-                    # pass every check the scout makes. See the module-level helper.
-                    return (f"(refused: {target.name} is not a readable source file — "
-                            "repository internals and binaries are not returned)")
+                refused = self._disk_refusal(target)
+                if refused:
+                    return refused
                 # The scout owns the read: its size fence, its full-file-then-paginate contract (M9 —
                 # a blind [:max_bytes] head made the agent re-read the same file 8×, and a 200KB cut
                 # reported EOF for a larger file), and its `(more below — continue with start_line=N)`

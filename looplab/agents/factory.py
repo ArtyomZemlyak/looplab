@@ -323,7 +323,7 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
     # — deep research builds from this same list and never grew a copy; see there for what it cost.
     from looplab.agents.repo_reader import repo_reader_provider
     rs_fn = getattr(task, "repo_spec", None)      # still read below for the sweep offer
-    _reader = repo_reader_provider(task)
+    _reader = repo_reader_provider(task, settings, beside=providers)
     if _reader is not None:
         providers.append(_reader)
     # P6/P21 (docs/PROMPT_REVIEW.md): offer the intra-node sweep ONLY when the active Developer

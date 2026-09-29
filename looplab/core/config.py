@@ -2959,6 +2959,19 @@ class Settings(BaseSettings):
     # the task data (schema/profile/asset) mid-loop, instead of seeing only best+parent. Advisory —
     # never changes best-selection. Off = the legacy single-shot Researcher (richer digest still added).
     researcher_tools: bool = True
+    # THE RESEARCHER READS THE CODE IT IS IMPROVING (WP-TOOLS T3, 2026-09-29). The Researcher's
+    # `repo_read`/`repo_grep`/`repo_list` always showed the run's STARTING code: on MiniOneRec inf13
+    # the proposal improving node 15 read the 1,410-line base `service/latency_engine.py` believing
+    # it was the champion's 1,563-line one, and 234 reads of files that exist only in node trees
+    # failed, while `read_code` of a repo node names its files and nothing more. ON, the reader shows
+    # the PARENT's tree — the starting code with the files `node_created` recorded for it over it and
+    # its deletions hidden, from the event log — deep research the incumbent best's, a draft the
+    # starting code; every reply opens with `[view: …]`, `node_id` reads any node's tree (-1 the
+    # starting code), and `read_code` points at that call. It changes what a paid role is SHOWN and
+    # buys no call, so the constructors default OFF, `false` is the historical tools byte for byte,
+    # and a run launched before the field resumes OFF (its `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row).
+    # One reader: `agents/repo_reader.py::repo_view_follows_node`.
+    researcher_repo_view_follows_node: bool = True
     # Cross-run introspection: give the agentic Researcher / pilot read-only tools to look at
     # SIBLING runs (same task_id, same run-root) — list them, read an experiment / its code, and
     # find analogous configs across runs — so a run can build on what neighbouring runs already
@@ -3894,6 +3907,14 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # `tests/test_script_developer_parent_code.py` holds that `false` is `implement`'s request byte
     # for byte.
     "developer_parent_code": False,
+    # THE RESEARCHER'S NODE-FOLLOWING REPO VIEW, added 2026-09-29 defaulting ON (WP-TOOLS T3). (a)
+    # holds. (b) is the rows above's DIFFERENT-PROMPT ground: ON, the Researcher's and deep
+    # research's repo tools gain a `node_id` argument and a `[view: …]` line, read the parent's (or
+    # the incumbent best's) tree instead of the starting code, and `read_code` names the call — so a
+    # resumed run would change what its Researcher is shown mid-log. (c) is `False`, pointable at
+    # every commit before this one; `tests/test_researcher_reads_the_code_it_improves.py` holds that
+    # `false` is the historical specs and replies byte for byte.
+    "researcher_repo_view_follows_node": False,
     # THE PROBE'S KERNEL READ CONFINEMENT, added 2026-08-21 defaulting to True. (a) holds — a
     # pre-2026-08-21 snapshot names no such field. (b) is not paid work, but it is the strongest
     # column there is on a RESUME: the rung fails CLOSED. On a box whose kernel offers no Landlock,

@@ -466,6 +466,34 @@ def _canonical_read_path(name: str, args: dict) -> str | None:
     return path or None
 
 
+# The readers whose call can name WHICH TREE it reads (WP-TOOLS T3, 2026-09-29): with
+# `Settings.researcher_repo_view_follows_node` on, `repo_read(node_id=N, path=…)` reads node N's tree
+# (-1: the run's starting code) instead of the view the reader is bound to. Two reads of one path
+# under two node_ids are two FILES, so they are two ledger rows here and in `agents/established.py`,
+# and the call a note names must carry the same node_id — a remedy that re-reads the bound view's
+# copy is a different file, not the one being walked.
+_READ_TOOL_VIEW_SLOTS: dict[str, str] = {"repo_read": "node_id"}
+
+
+def _read_node_id(name: str, args: dict) -> int | None:
+    """The explicit tree a registered reader's call names (`node_id`), or None for its bound view."""
+    slot = _READ_TOOL_VIEW_SLOTS.get(name)
+    raw = (args or {}).get(slot) if slot else None
+    if raw is None or raw == "" or isinstance(raw, bool):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _read_ledger_key(name: str, args: dict):
+    """The read ledger's row for a call: its path, or `(path, node_id)` when it names a tree."""
+    path = _canonical_read_path(name, args)
+    node_id = _read_node_id(name, args)
+    return path if path is None or node_id is None else (path, node_id)
+
+
 def _read_loop_fit(entry: dict) -> str:
     """The `{fit}` sentence: the file's total length and about how many widest pages it is, derived
     ONLY from what the reader's own headers said (`(lines a-b of T)` gives T; the windows seen give
@@ -491,8 +519,9 @@ def _note_path_read(read_state: dict, name: str, args: dict, result: str,
     path = _canonical_read_path(name, args)
     if path is None:
         return 0, ""
-    entry = read_state.setdefault(path, {"reads": 0, "lines_total": None,
-                                         "lines_seen": 0, "chars_seen": 0})
+    entry = read_state.setdefault(_read_ledger_key(name, args),
+                                  {"reads": 0, "lines_total": None, "lines_seen": 0,
+                                   "chars_seen": 0})
     entry["reads"] += 1
     header = _LINES_OF_RE.search(result[:400])
     if header is not None:
@@ -505,6 +534,12 @@ def _note_path_read(read_state: dict, name: str, args: dict, result: str,
         return entry["reads"], ""
     slot, paged = _READ_TOOL_PATH_SLOTS[name]
     template = _READ_LOOP_NOTE if paged else _READ_LOOP_NOTE_UNPAGED
+    node_id = _read_node_id(name, args)
+    if node_id is not None:
+        # The named call must re-read the SAME tree (`_READ_TOOL_VIEW_SLOTS`): the node_id rides
+        # ahead of the path argument, `repo_read(node_id=7, path="x.py")`; without one the call is
+        # spelled exactly as it always was.
+        slot = f"node_id={node_id}, {slot}"
     return entry["reads"], template.format(path=path, n=entry["reads"], tool=name, slot=slot,
                                            fit=_read_loop_fit(entry), page=_READ_PAGE_CHARS)
 
@@ -527,7 +562,7 @@ def _read_loop_stuck(read_state: dict | None, name: str, args: dict, nudge_after
     if read_state is None or nudge_after <= 0:
         return None
     path = _canonical_read_path(name, args)
-    entry = read_state.get(path) if path is not None else None
+    entry = read_state.get(_read_ledger_key(name, args)) if path is not None else None
     if not entry or entry.get("reads", 0) < _READ_LOOP_FORCE_FACTOR * nudge_after:
         return None
     return (f"`{path}` read {entry['reads']}× this phase, still piecemeal after the re-read note — "

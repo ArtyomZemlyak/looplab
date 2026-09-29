@@ -22,6 +22,7 @@ from looplab.core.models import Idea, IdeaEmission, Node, RunState
 from looplab.core.parse import ParseError, parse_structured
 from looplab.core.prompts import PromptStore, render
 from looplab.agents.answered_by_context import answered_by_context, offers_tool
+from looplab.agents.repo_reader import researcher_workspace_token
 from looplab.agents.roles import (
     _CONCEPT_AUTHORING_GUIDANCE, _CONTEXT_BEFORE_TOOLS_RULE, _OPERATOR_NOTE,
     _UNTRUSTED_MEMORY_RULE,
@@ -80,7 +81,7 @@ _IDEA_SPACE_TOOL = ("Your idea space is the WHOLE experiment, not just hyperpara
 # internal `drive_tool_loop(...)` call resolving through THIS module's (patched) global at call
 # time. Defined in tool_loop, that call would resolve tool_loop's UNPATCHED binding and the seam
 # would silently break — behavior seams beat file size.
-def _researcher_workspace(store):
+def _researcher_workspace(store, tools=None):
     """Declare the Researcher's own working set before its block is rendered, and return the store.
 
     The Developer's scouts answer through `write.files`, its per-NODE staged overlay, and the store
@@ -89,9 +90,16 @@ def _researcher_workspace(store):
     N's staged `solver.py` as "carried verbatim … do not re-fetch". The Researcher reads the source,
     not any node's overlay, so it belongs to a workspace of its own: one stable token, which keeps
     its pages carried across its own phases and out of every node's.
+
+    PER VIEW once its repo reader follows the node (WP-TOOLS T3,
+    `Settings.researcher_repo_view_follows_node`): the Researcher then DOES read a node's tree — the
+    parent's — so "the source" is no longer one tree, and a page read over parent 29 must not be
+    carried into a propose over parent 7. The token names the view the reader in `tools` is bound
+    to (`agents/repo_reader.py::researcher_workspace_token`); with the flag off there is no such
+    view and the token is the one stable `"researcher"`, byte for byte.
     """
     if store is not None:
-        store.enter_workspace("researcher")
+        store.enter_workspace(researcher_workspace_token(tools) or "researcher")
     return store
 
 
@@ -426,7 +434,8 @@ class ToolUsingResearcher:
                                                      verdict_support=bool(getattr(
                                                          self, "_verdict_support", False)))
                 + answered_by_context(self.tools)
-                + _established_block(_researcher_workspace(getattr(self, "_established", None)))
+                + _established_block(_researcher_workspace(getattr(self, "_established", None),
+                                                           self.tools))
                 + hint_block + cue +
                 "\nDecide the next experiment — a parameter change OR a structural one (architecture, "
                 "loss, data, training) if that's the stronger move. Consult knowledge if useful, then emit."},

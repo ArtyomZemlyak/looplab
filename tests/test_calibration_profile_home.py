@@ -340,7 +340,15 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               `Engine._ensure_plan` writes no plan under the calibration gate, and without a plan
 #               the field is never read. The product lane's authority token does not bind the
 #               settings map, so a product-lane run already underway resumes unchanged.
-_EXPECTED_DIGEST = "sha256:888f3370da70e2469d2d4326280ac7fd100d49318914f4584b0ced3721d30b5e"
+#   2026-09-29  + researcher_repo_view_follows_node (WP-TOOLS T3: the Researcher's repo tools show the
+#               tree of the node a proposal improves). The 'field set changed too' branch: a diff of
+#               `Settings.model_fields` against the pre-change tree reports exactly
+#               `['researcher_repo_view_follows_node']` added and `[]` removed;
+#               `_EXPECTED_FIELD_COUNT` goes 269 -> 270 and both pins are re-set (the pre-change tree
+#               re-derives 888f3370…). INERT for a calibration replicate: the profile ships
+#               `researcher_tools: false` on the toy backend, which builds no Researcher and no repo
+#               reader; re-pinned on the COMPLETE-envelope rule.
+_EXPECTED_DIGEST = "sha256:ad9450fcb2e3275777144eac5ea61f6c796bfc6a5750e195919f5e18d1943b0a"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -841,7 +849,8 @@ _EXPECTED_DIGEST = "sha256:888f3370da70e2469d2d4326280ac7fd100d49318914f4584b0ce
 #   2026-09-27  + ablation_simplify (doc 67 67.5): 266 -> 267; see the digest history above.
 #   2026-09-29  + endgame_stall_nodes (the stall endgame's length), with origin's unpinned
 #               `external_harness`: 267 -> 269; see the digest history.
-_EXPECTED_FIELD_COUNT = 269
+#   2026-09-29  + researcher_repo_view_follows_node (WP-TOOLS T3): 269 -> 270; see the digest history.
+_EXPECTED_FIELD_COUNT = 270
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():
