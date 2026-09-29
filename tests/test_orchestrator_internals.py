@@ -315,6 +315,21 @@ def test_a_build_that_only_adds_a_defaulted_field_records_no_task_change(tmp_pat
     assert not [e for e in store.read_all() if e.type == "task_changed"]
 
 
+def test_a_duck_typed_task_has_no_identity_and_does_not_raise():
+    """A task that is no pydantic model has no identity, decided by TYPE: the host-graded and memory
+    tests' duck-typed tasks define `model_dump(mode=...)` without `exclude_defaults`, and asking
+    for it raised a TypeError out of `run_started` (full suite 2026-09-29, 7 failures). MUTATION:
+    decide by a callable `model_dump` -> TypeError."""
+    from looplab.core import setup_identity
+
+    class _Duck:
+        def model_dump(self, mode="python"):
+            return {"id": "duck"}
+
+    assert setup_identity.task_identity(_Duck()) == ""
+    assert setup_identity.task_identity(object()) == ""
+
+
 def test_a_run_started_before_the_identity_reads_its_own_snapshot(tmp_path):
     """A log whose `run_started` records no `task_identity` is compared against its own
     `task.snapshot.json`, read by THIS build; an edit to the task is still a row."""

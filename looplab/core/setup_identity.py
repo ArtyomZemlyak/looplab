@@ -35,11 +35,15 @@ def task_identity(task) -> str:
     """The task AS ITS AUTHOR WROTE IT: `setup_config_hash` over the dump with every field at its
     default left out, so a build that only ADDS a defaulted field reads the same document to the same
     identity (doc 69 69.19; critic 2026-09-27: nine such fields since 2026-08-17 made every resume
-    across an upgrade record a task change nobody made). `""` for anything that is no pydantic model."""
-    dump = getattr(task, "model_dump", None)
-    if not callable(dump):
+    across an upgrade record a task change nobody made). `""` for anything that is no pydantic model
+    — decided by TYPE, not by a `model_dump` attribute: a duck-typed task's `model_dump` need not
+    take `exclude_defaults`, and the run's own setup (`run_started`) must not raise over a digest
+    that only a resume compares."""
+    from pydantic import BaseModel
+
+    if not isinstance(task, BaseModel):
         return ""
-    return setup_config_hash(dump(mode="json", exclude_defaults=True))
+    return setup_config_hash(task.model_dump(mode="json", exclude_defaults=True))
 
 
 def setup_manifest_digest(
