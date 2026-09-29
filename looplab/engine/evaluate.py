@@ -3314,9 +3314,13 @@ class EvaluateMixin:
                     and getattr(a.node, "eval_activity_started", False) is True):
                 # A lifecycle whose eval-start receipt is already durable (a Card session writes it
                 # at admission, on the main task) reads as EVALUATING until something closes it;
-                # nothing of it ran here, so the row carries no seconds (doc 69 69.12a).
+                # nothing of it ran here, so the row carries no seconds (doc 69 69.12a). Its
+                # `attempt` is the index the lifecycle would have run next, asked of the ONE
+                # derivation (SEED_LEDGERS: pure over `events_at_start`, it only fills this record)
+                # — a second read of `_durable_repair_ledger` here would be a second spelling of the
+                # rule `tests/test_evaluate_named_rules.py` holds to one reach.
                 a.generation = a.node.attempt
-                a.attempt = _durable_repair_ledger(a.events_at_start, a.node_id, a.generation)[0]
+                self._eval_seed_ledgers(a)
                 await self._record_eval_withheld(
                     a, "admit", 0.0, reason=("paused" if a.state.paused and not a.state.finished
                                              and not a.state.stop_requested else "stopping"))

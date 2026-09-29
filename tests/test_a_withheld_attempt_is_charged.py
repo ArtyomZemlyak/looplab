@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from looplab.engine.evaluate import _durable_withheld_seconds
+from looplab.engine.evaluate import _durable_repair_ledger, _durable_withheld_seconds
 from looplab.events.eval_occupancy import eval_occupancy
 from looplab.events.replay import fold
 from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_EVAL_ATTEMPT_WITHHELD, EVAL_WITHHELD_POINTS,
@@ -162,6 +162,25 @@ def test_admit_closes_a_receipt_it_refuses_to_run(tmp_path, control, reason):
     (row,) = _withheld(evs)
     assert row.data["at"] == "admit" and row.data["reason"] == reason
     assert row.data["eval_seconds"] == 0.0 and row.data["generation"] == 0
+
+
+def test_admit_names_the_attempt_the_lifecycle_would_have_run(tmp_path):
+    """A lifecycle with two durable repairs is withheld at ADMIT: its row names attempt 2, the index
+    the ONE derivation (`_durable_repair_ledger`, reached through SEED_LEDGERS) gives the re-dispatch —
+    not the record's pre-seed 0. MUTATION: drop the seed from ADMIT's branch -> the row says 0."""
+    eng = _engine(tmp_path / "run", _Dev("print('METRIC: 0.5')\n"), eval_canary=False)
+    _receipted_seed(eng)
+    for n in (1, 2):
+        eng.store.append("node_repaired", {
+            "node_id": 0, "generation": 0, "attempt": n, "triage_action": "repair",
+            "error_in": "crash", "rationale": f"fix {n}", "changed": ["run.py"], "deleted": [],
+            "stages_passed": [], "files": {"run.py": "print('METRIC: 0.5')\n"}})
+    eng.store.append(*_PAUSE)
+    evs = _evaluate(eng)
+    assert _terminals(evs) == []
+    (row,) = _withheld(evs)
+    assert row.data["at"] == "admit" and row.data["attempt"] == 2
+    assert row.data["attempt"] == _durable_repair_ledger(evs, 0, 0)[0]
 
 
 def test_admit_writes_nothing_for_a_lifecycle_with_no_receipt(tmp_path):
