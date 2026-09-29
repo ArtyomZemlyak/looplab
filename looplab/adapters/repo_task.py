@@ -35,18 +35,26 @@ _PY_ARGV0 = re.compile(r"^(python|pypy)[\d.]*(\.exe)?$", re.I)
 
 
 def _which_on(name: str, path: str) -> str:
-    """`shutil.which(name, path=path)`, answered only by a directory `path` NAMES — "" when `path` is
-    empty or the hit lies elsewhere: on Windows `which` searches the current directory first, and
-    that is the ENGINE's, never the task's (`RepoTask.task_python`)."""
-    import shutil
-    if not path:
-        return ""
-    found = shutil.which(name, path=path)
-    if not found:
-        return ""
-    found = os.path.abspath(found)
-    named = {os.path.normcase(os.path.abspath(d)) for d in path.split(os.pathsep) if d}
-    return found if os.path.normcase(os.path.dirname(found)) in named else ""
+    """The executable `name` in the first directory the declared `path` NAMES ABSOLUTELY that holds
+    one — "" when there is none. Looked up by hand, never through `shutil.which`:
+
+      * a RELATIVE entry (`.venv/bin`, `.`, an empty one) names a directory under the EVAL's cwd,
+        which is the node's workdir and not known here; `which` resolved it against the ENGINE's
+        cwd and answered with whatever sat there (critic 2026-09-27, driven);
+      * on Windows `which` looks in the current directory first, which is the engine's too;
+      * a refused hit must not end the lookup: the next named directory may hold the answer.
+    `RepoTask.task_python`'s argv[0] rule is the one caller."""
+    exts = [""]
+    if os.name == "nt":
+        exts += [e for e in os.environ.get("PATHEXT", ".EXE").split(os.pathsep) if e]
+    for directory in (path or "").split(os.pathsep):
+        if not directory or not os.path.isabs(directory):
+            continue
+        for ext in exts:
+            candidate = os.path.join(directory, name + ext)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return os.path.abspath(candidate)
+    return ""
 
 
 # HOISTED ABOVE THE MODELS (2026-09-02), not because the placement reads better but because
@@ -2414,12 +2422,14 @@ class RepoTask(BaseModel):
         method exists to replace. A task that names no interpreter keeps "" and the probe stays on
         `sys.executable`, byte-identical to before.
 
-        A pipeline launched through a SHELL (`bash run.sh`) names no interpreter as argv[0]; the python
-        it runs is whichever one the PATH it declares finds first, so that PATH is asked for `python3`,
-        then `python` (doc 69 69.35: the probe and the environment block described the ENGINE's
-        `/opt/conda` for such a task, whose torch lived elsewhere). Only a directory the declared PATH
-        NAMES answers (`_which_on`) — on Windows `shutil.which` looks in the current directory first,
-        which is the engine's.
+        A pipeline launched through a SHELL (`bash run.sh`) names no interpreter, and none is guessed
+        for it: the PATH's `python3` was tried (doc 69 69.35) and withdrawn — a script that activates
+        another env, `uv`/`conda`/`poetry run`, `srun`/`nice` over an absolute interpreter, or a PATH
+        opening with the engine's own bin directory each got the wrong interpreter under a confident
+        label, and it ran ENGINE-side with the engine's environment (critic 2026-09-27, driven). Such a
+        task declares `eval.python`; without it the probe and the environment block say they measured
+        the ENGINE's interpreter. A bare argv[0] is looked up only in the directories the declared PATH
+        names absolutely (`_which_on`).
 
         Not checked for existence: a task may build its env in `setup`. The probe checks at use and
         says so when the path is missing (`tools/dev_probe.py::DevProbeTools._interpreter`)."""
@@ -2446,11 +2456,6 @@ class RepoTask(BaseModel):
             found = _which_on(argv0, str(env.get("PATH") or ""))
             if found:
                 return found
-        for _argv, env in declared:
-            for name in ("python3", "python"):
-                found = _which_on(name, str(env.get("PATH") or ""))
-                if found:
-                    return found
         return ""
 
     def _bounds(self) -> dict:

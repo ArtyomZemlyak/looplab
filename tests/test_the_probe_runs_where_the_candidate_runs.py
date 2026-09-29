@@ -106,46 +106,68 @@ def test_a_bare_python_is_resolved_on_the_task_s_path_and_never_on_the_engine_s(
                     eval={"command": ["python3", "run.py"]}).task_python() == ""
 
 
-def test_a_shell_launched_pipeline_is_resolved_on_the_path_it_declares(tmp_path, monkeypatch):
-    """Doc 69 69.35: a pipeline launched as `bash run.sh` names no interpreter as argv[0], so the
-    probe and the environment block answered from the ENGINE's `/opt/conda` for a task whose torch
-    lived elsewhere. The PATH the task DECLARES is asked for `python3`, then `python`; with none
-    declared nothing is derived. And a hit outside the directories that PATH names is no answer —
-    Windows' `which` looks in the engine's current directory first. MUTATION: drop the PATH
-    fallback -> ""; accept any `which` hit -> the engine's directory answers."""
-    import shutil
-
-    from looplab.adapters import repo_task as repo_task_mod
-
+def test_a_shell_launched_pipeline_gets_no_guessed_interpreter(tmp_path):
+    """Doc 69 69.35, withdrawn half: the declared PATH's `python3` was taken for a `bash run.sh`
+    pipeline, and a script that activates another env, `uv`/`conda run` or a launcher over an
+    absolute interpreter each got the wrong one under a confident label — run engine-side with the
+    engine's environment (critic 2026-09-27, driven). Nothing is guessed: such a task declares
+    `eval.python`. MUTATION: restore the PATH fallback -> the planted `python3` answers."""
     envbin = tmp_path / "env" / "bin"
     envbin.mkdir(parents=True)
-    suffix = ".exe" if os.name == "nt" else ""
+    exe = envbin / ("python3.exe" if os.name == "nt" else "python3")
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
     bash = RepoTask(goal="g", editable_path=str(tmp_path),
                     eval={"command": ["bash", "run.sh"], "env": {"PATH": str(envbin)}})
-    assert bash.task_python() == "", "nothing on the declared PATH: nothing derived"
-    for name in ("python", "python3"):
-        exe = envbin / f"{name}{suffix}"
-        exe.write_text("#!/bin/sh\n")
-        exe.chmod(0o755)
-        assert os.path.normcase(bash.task_python()) == os.path.normcase(str(exe)), name
-    assert RepoTask(goal="g", editable_path=str(tmp_path),
-                    eval={"command": ["bash", "run.sh"]}).task_python() == "", "no PATH declared"
-    elsewhere = str(tmp_path / "engine_cwd" / f"python3{suffix}")
-    monkeypatch.setattr(shutil, "which", lambda name, path=None, **kw: elsewhere)
-    assert repo_task_mod._which_on("python3", str(envbin)) == ""
     assert bash.task_python() == ""
+    declared = RepoTask(goal="g", editable_path=str(tmp_path),
+                        eval={"command": ["bash", "run.sh"], "python": str(exe),
+                              "env": {"PATH": str(envbin)}})
+    assert declared.task_python() == str(exe)
 
 
-def test_a_task_with_no_interpreter_is_told_the_probe_and_the_block_are_the_engine_s(
-        monkeypatch):
-    """The fallback is SAID (doc 69 69.35): the probe result names the engine's interpreter, and
-    the environment block no longer claims "its own interpreter" for it. MUTATION: fall back
-    silently -> no note."""
+def test_a_bare_argv0_is_looked_up_only_in_absolute_declared_directories(tmp_path, monkeypatch):
+    """`_which_on`: a RELATIVE PATH entry names a directory under the EVAL's cwd, which is not known
+    here — resolved against the engine's cwd it answered with whatever sat there; an empty entry is
+    the same; and a refused entry does not end the lookup (critic 2026-09-27, driven). MUTATIONS:
+    accept relative entries -> the engine-cwd interpreter; stop at the first entry -> ""."""
+    from looplab.adapters.repo_task import _which_on
+
+    name = "python3.exe" if os.name == "nt" else "python3"
+    cwd_bin = tmp_path / "cwd" / ".venv" / "bin"
+    cwd_bin.mkdir(parents=True)
+    (cwd_bin / name).write_text("#!/bin/sh\n")
+    (cwd_bin / name).chmod(0o755)
+    real = tmp_path / "env" / "bin"
+    real.mkdir(parents=True)
+    (real / name).write_text("#!/bin/sh\n")
+    (real / name).chmod(0o755)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.chdir(tmp_path / "cwd")
+    path = os.pathsep.join([".venv/bin", "", ".", str(empty), str(real)])
+    assert os.path.normcase(_which_on("python3", path)) == os.path.normcase(str(real / name))
+    assert _which_on("python3", os.pathsep.join([".venv/bin", "."])) == ""
+    assert _which_on("python3", "") == ""
+    task = RepoTask(goal="g", editable_path=str(tmp_path),
+                    eval={"command": ["python3", "run.py"], "env": {"PATH": path}})
+    assert os.path.normcase(task.task_python()) == os.path.normcase(str(real / name))
+
+
+@pytest.mark.parametrize("truths", [False, True])
+def test_the_engine_fallback_is_said_only_under_the_prompt_truth_switch(monkeypatch, truths):
+    """The fallback is SAID (doc 69 69.35) — the probe result names the engine's interpreter and the
+    environment block stops claiming "its own interpreter" — under `Settings.
+    prompt_truths_developer`, like every other truth this prompt tells: off, the historical bytes
+    (critic 2026-09-27: the change was ungated). MUTATION: drop the gate -> the note when off."""
     from looplab.adapters.repo_task import EvalSpec, LLMRepoDeveloper
     from looplab.tools import env_inspect
 
-    python, note = DevProbeTools({})._interpreter()
-    assert python == sys.executable and "declares no interpreter" in note and "ENGINE" in note
+    python, note = DevProbeTools({}, prompt_truths=truths)._interpreter()
+    assert python == sys.executable
+    assert ("declares no interpreter" in note and "ENGINE" in note) is truths
+    if not truths:
+        assert note == ""
     monkeypatch.setattr(env_inspect, "_FINGERPRINT_CACHE", {})
     fixture = Path(__file__).resolve().parent / "fixtures" / "repo_fixture"
     for command, own in ((["bash", "run.sh"], False), ([sys.executable, "ttrain.py"], True)):
@@ -154,10 +176,12 @@ def test_a_task_with_no_interpreter_is_told_the_probe_and_the_block_are_the_engi
                         eval=EvalSpec(command=command,
                                       metric={"kind": "stdout_json", "key": "metric"}))
         dev = LLMRepoDeveloper(object(), task)
+        dev._prompt_truths = truths
         monkeypatch.setattr(dev, "_repo_import_names", lambda: ["pytest"])
         block = dev._environment_block()
-        assert ("measured on its own interpreter" in block) is own, block
-        assert ("measured on the ENGINE's interpreter" in block) is not own, block
+        said = truths and not own
+        assert ("measured on the ENGINE's interpreter" in block) is said, block
+        assert ("measured on its own interpreter" in block) is (not said), block
 
 
 def test_a_relative_declared_interpreter_is_refused_at_admission(tmp_path):
@@ -198,6 +222,9 @@ def test_no_task_interpreter_keeps_the_probe_where_it_always_was():
     out = DevProbeTools({}, timeout_s=60).execute(
         "run_probe", {"code": "import sys; print(sys.executable)"})
     assert sys.executable in out and "task's interpreter" not in out
+    assert "the task declares no interpreter" not in out, "off by default: the historical result"
+    out = DevProbeTools({}, timeout_s=60, prompt_truths=True).execute(
+        "run_probe", {"code": "import sys; print(sys.executable)"})
     assert "the task declares no interpreter, so this ran on the ENGINE's" in out
 
 

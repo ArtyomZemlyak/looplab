@@ -850,7 +850,7 @@ class DevProbeTools:
 
     def __init__(self, repo_spec: Optional[dict] = None, *, timeout_s: float = _DEFAULT_TIMEOUT,
                  staged=None, confine_reads: bool = True, max_calls: int = 0, counter=None,
-                 protect_roots=()):
+                 protect_roots=(), prompt_truths: bool = False):
         # A COUNT CAP, OFF BY DEFAULT (`max_calls=0`). §189 measured the only process variable that
         # separates the best `edge_expansion` runs from the worst: the bottom decile makes 29
         # `run_probe` calls to the top decile's 20, while evaluating the SAME number of nodes,
@@ -872,6 +872,10 @@ class DevProbeTools:
         # every provider it builds counts into it.
         self._counter = counter if isinstance(counter, dict) else {"n": 0}
         self.repo_spec = repo_spec or {}
+        # `Settings.prompt_truths_developer`, handed down by the repo Developer: a result's text is
+        # what the model reads next, so the no-interpreter note below is that switch's, OFF at this
+        # constructor like every other (doc 69 69.35; critic 2026-09-27).
+        self.prompt_truths = bool(prompt_truths)
         self.timeout_s = max(1.0, min(float(timeout_s or _DEFAULT_TIMEOUT), _MAX_TIMEOUT))
         self.staged = staged
         # RULE 1, KERNEL HALF. The audit-hook fence covers `open` in ONE interpreter; this covers
@@ -978,8 +982,11 @@ class DevProbeTools:
         declared = str((self.repo_spec or {}).get("task_python") or "").strip()
         if not declared:
             # Said, not silent (doc 69 69.35): a task that names no interpreter — a shell-launched
-            # pipeline with no declared PATH — may run its code anywhere, and an answer about the
-            # engine's packages read as one about the task's is this method's whole defect.
+            # pipeline, which declares `eval.python` or gets none — may run its code anywhere, and an
+            # answer about the engine's packages read as one about the task's is this method's whole
+            # defect. The note is `prompt_truths`'s: off, the historical result byte for byte.
+            if not self.prompt_truths:
+                return sys.executable, ""
             return sys.executable, (f" [the task declares no interpreter, so this ran on the "
                                     f"ENGINE's {sys.executable} -- its packages may not be your "
                                     "task's]")

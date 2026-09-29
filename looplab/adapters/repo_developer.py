@@ -1758,8 +1758,11 @@ class LLMRepoDeveloper:
             if fp and fp.get("packages"):
                 # Measured on the ENGINE's interpreter when the task names none, and said so: the
                 # block claimed "its own interpreter" for a shell-launched task whose torch lived
-                # elsewhere (doc 69 69.35).
-                where = ("measured on its own interpreter, not assumed" if self._task_python() else
+                # elsewhere (doc 69 69.35). The prompt-truth switch's (`Settings.
+                # prompt_truths_developer`), like every other truth this prompt now tells: off, the
+                # historical sentence byte for byte (critic 2026-09-27).
+                where = ("measured on its own interpreter, not assumed"
+                         if self._task_python() or not self._prompt_truths else
                          "measured on the ENGINE's interpreter: the task declares none, so where "
                          "your code runs may differ")
                 text = (f"THE ENVIRONMENT YOUR CODE RUNS IN ({where}): "
@@ -1850,6 +1853,7 @@ class LLMRepoDeveloper:
                                        # toolset and readable in the next was the route that
                                        # opened under pressure (2026-08-30 review).
                                        protect_roots=self._grader_roots(),
+                                       prompt_truths=self._prompt_truths,
                                        staged=write))
         # PART V §22 — the Developer's read-only cross-run knowledge (dev-routed lessons: what code
         # change fixed a crash across runs). Advisory only; role-scoped so it doesn't see the R&D claims.

@@ -1024,6 +1024,15 @@ Corpus effect: **24 of the 58 folded nodes** now carry at least one row (12 of t
 `e5small-dr-unified-v2` node 1 joins `rubertlite-dr-unified-v8` node 3. `champion_metric_caveats`
 costs 26-35 ms per `/api/runs` poll on the two large repo runs, up from 15-17 ms.
 
+### Which interpreter the candidate runs on (`eval.python`)
+
+The Developer's probe and its environment block answer "what is installed" on the task's own
+interpreter: `eval.python` when declared, else one read off the commands — an absolute
+`python...` argv[0], or a bare one found in an ABSOLUTE directory of the `PATH` the task
+declares. A pipeline launched through a shell (`bash run.sh`, `uv run`, `conda run`) names none,
+and none is guessed for it: declare `eval.python` (an absolute path). Without it the probe runs on
+the ENGINE's interpreter, and with `prompt_truths_developer` on both say so.
+
 ### A canary before a long eval (`eval.canary`)
 
 A repo eval can run for hours, and a trivial defect in its tail — a `KeyError` in the scoring code,
