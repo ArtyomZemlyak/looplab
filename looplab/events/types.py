@@ -2035,8 +2035,11 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # `drain_builds`: the operator's `looplab stop --drain-builds` — builds already running
         # finish and commit before the engine exits. `drain_only`: the pause a drain-only resume
         # (`looplab resume --drain-only`) writes when its drain ends, done or stuck.
-        optional=("attempt", "detail", "drain_builds", "drain_only", "generation", "node_id",
-                  "reason"),
+        # `terminal_reason` + `due`: an external harness's finish held back by its unmet obligations
+        # (`orchestrator.py`, reason `external_finish_obligations_due`) — the finish that was asked
+        # for and what is still owed.
+        optional=("attempt", "detail", "drain_builds", "drain_only", "due", "generation", "node_id",
+                  "reason", "terminal_reason"),
     ),
     "phase_progress": PayloadContract(
         "One build/eval phase started or finished — the live activity feed's row.",
