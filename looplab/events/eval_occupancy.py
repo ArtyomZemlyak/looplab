@@ -40,6 +40,13 @@ invariants, which survive a cleared trace. It also means this answers on a run w
 the last event in the log — for a live run that is "still running", which is true, and for a killed
 one it is the last thing anyone can prove. Both are stated rather than guessed at.
 
+**A WITHHELD ATTEMPT CLOSES ITS INTERVAL** (doc 69 69.12a). A pause (or a stop) that withholds a
+lifecycle's evaluation work returns with no terminal, so the node stays pending — and this module
+counted the WHOLE pause as a running evaluation, up to the re-dispatch's terminal. The engine now
+writes an `eval_attempt_withheld` row at every withhold: the busy stretch ends there, and a later
+`node_eval_started` for the same lifecycle opens the next one. A lifecycle with no such row pairs
+exactly as it always did (its first start, its first terminal), so every older log reads the same.
+
 **AN INTERVAL IS ONE LIFECYCLE, NOT ONE NODE ID** (review 2026-09-22, EVT-06). A `node_reset`
 re-opens the same id and the engine evaluates it again under the next `generation`, so keying the
 start/terminal pairing by the bare id kept the FIRST lifecycle's start and terminal and dropped the
@@ -52,10 +59,12 @@ lifecycle, so the row is not attributed at all rather than guessed onto one.
 from __future__ import annotations
 
 from looplab.core.models import coerce_node_id
-from looplab.events.types import EV_NODE_EVAL_STARTED, EV_NODE_EVALUATED, EV_NODE_FAILED
+from looplab.events.types import (EV_EVAL_ATTEMPT_WITHHELD, EV_NODE_EVAL_STARTED, EV_NODE_EVALUATED,
+                                  EV_NODE_FAILED)
 
 _EVAL_STARTED = EV_NODE_EVAL_STARTED
 _TERMINALS = (EV_NODE_EVALUATED, EV_NODE_FAILED)
+_WITHHELD = EV_EVAL_ATTEMPT_WITHHELD
 
 
 def _field(row, name):
@@ -102,6 +111,34 @@ def _lifecycle(row) -> tuple[int, int] | None:
     return (node, generation) if generation is not None and generation >= 0 else None
 
 
+def _withheld_segments(sequence, last: float) -> tuple[list, int]:
+    """The busy stretches of ONE lifecycle with at least one `eval_attempt_withheld` row, in log
+    order.
+
+    A start opens a stretch unless one is open (a re-append is not a re-run, as above); a withhold
+    closes the open one; the FIRST terminal closes it and ends the lifecycle — later rows are
+    ignored, as the fold ignores a second terminal. A stretch still open at the end runs to `last`
+    and is counted open. A close stamped before its open (clock skew between writers) drops that
+    stretch, as the one-interval pairing drops a terminal stamped before its start."""
+    segments: list = []
+    opened = None
+    for kind, stamp in sequence:
+        if kind == _EVAL_STARTED:
+            if opened is None:
+                opened = stamp
+            continue
+        if opened is not None and stamp >= opened:
+            segments.append((opened, stamp))
+        opened = None
+        if kind in _TERMINALS:
+            return segments, 0
+    if opened is not None:
+        if last >= opened:
+            segments.append((opened, last))
+        return segments, 1
+    return segments, 0
+
+
 def eval_occupancy(events, width: int | None = None) -> dict:
     """Fold durable rows into an occupancy report. `events` is any iterable of event dicts.
 
@@ -130,23 +167,33 @@ def eval_occupancy(events, width: int | None = None) -> dict:
     t0, last = min(stamps), max(stamps)
     starts: dict = {}
     ends: dict = {}
+    # Per lifecycle, in log order: every start, withhold and terminal, so the pairing below can
+    # close the busy stretch at each withhold where an `eval_attempt_withheld` row exists.
+    sequences: dict = {}
     for e in rows:
         stamp = _ts(e)
         if stamp is None:
             continue
         kind = _field(e, "type")
-        if kind != _EVAL_STARTED and kind not in _TERMINALS:
+        if kind != _EVAL_STARTED and kind not in _TERMINALS and kind != _WITHHELD:
             continue
         lifecycle = _lifecycle(e)
         if lifecycle is None:
             continue
+        sequences.setdefault(lifecycle, []).append((kind, stamp))
         if kind == _EVAL_STARTED:
             starts.setdefault(lifecycle, stamp)     # FIRST start wins: a re-append is not a re-run
-        else:
+        elif kind in _TERMINALS:
             ends.setdefault(lifecycle, stamp)       # FIRST terminal wins, as the fold does
     intervals = []
     open_intervals = 0
     for lifecycle in sorted(starts, key=lambda key: (starts[key], key)):
+        sequence = sequences.get(lifecycle, ())
+        if any(kind == _WITHHELD for kind, _stamp in sequence):
+            segments, still_open = _withheld_segments(sequence, last)
+            intervals.extend((begin, finish, lifecycle[0]) for begin, finish in segments)
+            open_intervals += still_open
+            continue
         begin = starts[lifecycle]
         finish = ends.get(lifecycle)
         if finish is None:

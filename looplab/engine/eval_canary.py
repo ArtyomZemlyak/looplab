@@ -21,9 +21,10 @@ _eval_run_attempt`) runs the SAME resolved stage chain once, before the full eva
   * with every stage (and the single command) capped at `canary.timeout`, plus the same bound over
     the whole chain (`CanaryClock`), because a canary that runs long has already failed its purpose;
   * under the attempt's own GPU lease and env pin, inside the attempt's own clock (`_t0`), so its
-    seconds are charged to the node's eval seconds exactly as the full eval's are — except when a
+    seconds are charged to the node's eval seconds exactly as the full eval's are — also when a
     PAUSE withholds the full eval after it (`evaluate.py::_pause_withholds_attempt`): no terminal
-    is written then and the re-dispatch skips the passed canary, so its seconds go uncharged;
+    is written then and the re-dispatch skips the passed canary, so its seconds ride on the
+    `eval_attempt_withheld` row to the lifecycle's next terminal (doc 69 69.12a);
   * under the attempt's intervention watcher, so an operator abort / reset kills it like the eval.
 
 A FAILED canary is the attempt's crash: RUN_ATTEMPT hands SETTLE_OUTCOME a metric-less `RunResult`

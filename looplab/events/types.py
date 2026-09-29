@@ -934,6 +934,22 @@ EV_EVAL_INVOCATION_RECOVERED = "eval_invocation_recovered"
 # through the attempt's ordinary repair rows and the node's one terminal.
 EV_EVAL_CANARY_STARTED = "eval_canary_started"
 EV_EVAL_CANARY_FINISHED = "eval_canary_finished"
+# A PAUSE (or a stop) WITHHELD THIS LIFECYCLE'S EVALUATION WORK, and what it had already spent
+# (doc 69 69.12a). A withheld attempt returns with NO terminal — the node stays pending, and the
+# re-dispatch after the pause lifts continues the chain — so the seconds it had consumed (a passed
+# canary whose full eval a pause refused to start, or the failed attempt DECIDE_REPAIR stopped
+# repairing) had no durable home: the next terminal charged nothing for them, and
+# `events/eval_occupancy.py` counted the whole pause as a running evaluation. `eval_seconds` is what
+# no other row carries; the next terminal of the same lifecycle sums it
+# (`engine/evaluate.py::_durable_withheld_seconds`), and the occupancy closes the busy interval at
+# it. `at` names the withhold point (`EVAL_WITHHELD_POINTS`), `reason` whether the run was paused or
+# stopping.
+#
+# DIAGNOSTIC for `eval_canary_*`'s reason: appended from the eval child, per attempt. The fold never
+# reads it; the charge reaches the run through the lifecycle's one terminal.
+EV_EVAL_ATTEMPT_WITHHELD = "eval_attempt_withheld"
+EVAL_WITHHELD_POINTS = ("admit", "before_launch", "after_canary", "decide_repair")
+EVAL_WITHHELD_REASONS = ("paused", "stopping")
 EV_WORKSPACE_SEEDED = "workspace_seeded"
 # FOLDED (moved out of DIAGNOSTIC_EVENTS): the start of an arbitrary operator `run_setup` command is
 # the only evidence that its side effects may have been applied. Without folding it, a kill between
@@ -1196,7 +1212,7 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_AGENT_PHASE_STARTED, EV_AGENT_CHECKPOINTED, EV_AGENT_PHASE_COMPLETED,
     EV_PRIOR_INJECTED, EV_MEMORY_READ,
     EV_EVAL_INVOCATION_CLAIMED, EV_EVAL_INVOCATION_SETTLED, EV_EVAL_INVOCATION_RECOVERED,
-    EV_EVAL_CANARY_STARTED, EV_EVAL_CANARY_FINISHED,
+    EV_EVAL_CANARY_STARTED, EV_EVAL_CANARY_FINISHED, EV_EVAL_ATTEMPT_WITHHELD,
     EV_TASK_CHANGED,
 })
 
@@ -1655,6 +1671,11 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "env_changed": PayloadContract(
         "A resume observed that the Python/library environment differs from the one the run started in.",
         required=("now", "was"),
+        optional=(),
+    ),
+    "eval_attempt_withheld": PayloadContract(
+        "A pause (or a stop) withheld a lifecycle's evaluation work; the seconds it had already spent, for its next terminal.",
+        required=("at", "attempt", "eval_seconds", "generation", "node_id", "reason"),
         optional=(),
     ),
     "eval_canary_finished": PayloadContract(

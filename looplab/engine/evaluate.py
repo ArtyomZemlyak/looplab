@@ -51,6 +51,7 @@ import contextlib
 import contextvars
 import hashlib
 import logging
+import math
 import threading
 import time
 from collections.abc import Mapping
@@ -533,6 +534,36 @@ def _durable_dep_round_seconds(events, node_id: int, generation: int) -> float:
     return spent
 
 
+def _durable_withheld_seconds(events, node_id: int, generation: int) -> float:
+    """The eval seconds this lifecycle spent in attempts a PAUSE (or a stop) withheld, off their
+    durable `eval_attempt_withheld` rows (doc 69 69.12a) — the third part of what the chain's
+    terminal charges beside `_durable_repair_seconds` and `_durable_dep_round_seconds`.
+
+    A withheld attempt returns with no terminal and no repair row: a passed canary whose full eval
+    a pause refused to start, or the failed attempt DECIDE_REPAIR stopped repairing when it saw the
+    pause. Its seconds had no durable home, so the re-dispatch's terminal charged nothing for them
+    (a 2-second canary, then a pause: the terminal read the full eval's seconds alone, driven). Each
+    row carries only what no other row does, so summing cannot count a second twice. A row written
+    before the event existed does not exist, which is the same safe direction as the other two."""
+    spent = 0.0
+    for e in events or []:
+        if e.type != EV_EVAL_ATTEMPT_WITHHELD:
+            continue
+        d = e.data or {}
+        if not _durable_row_belongs(d, node_id, generation):
+            continue
+        raw = d.get("eval_seconds")
+        if isinstance(raw, bool):
+            continue                    # the writer never writes one; `True` is not one second
+        try:
+            seconds = float(raw or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(seconds) and seconds > 0:
+            spent += seconds
+    return spent
+
+
 def _durable_monitor_verdicts(events, node_id: int, generation: int) -> list[dict]:
     """This node's TRAINING-WATCHDOG verdicts as the event log records them, oldest first.
 
@@ -1003,7 +1034,8 @@ from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_CARD_DROPPED, EV_DEPS_IN
                                   EV_EVAL_INVOCATION_CLAIMED, EV_EVAL_INVOCATION_RECOVERED,
                                   EV_EVAL_INVOCATION_SETTLED, EV_WORKSPACE_SEEDED,
                                   EV_EVAL_CANARY_FINISHED, EV_EVAL_CANARY_STARTED,
-                                  EV_NODE_BUILD_DELTA,
+                                  EV_EVAL_ATTEMPT_WITHHELD, EVAL_WITHHELD_POINTS,
+                                  EVAL_WITHHELD_REASONS, EV_NODE_BUILD_DELTA,
                                   EV_FULL_RETRAIN_CHARGED, EV_NODE_ABORT,
                                   EV_NODE_EVAL_STARTED,
                                   EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED,
@@ -2996,9 +3028,9 @@ class EvaluateMixin:
         A withheld attempt returns with NO terminal, as ADMIT and DECIDE_REPAIR's pause do: the node
         stays pending and every ledger the chain reads is durable. A passed canary is remembered by
         code digest (`canary_already_passed`), so the re-dispatch after the pause lifts goes straight
-        to the full eval — and its seconds go uncharged, as a pause costs DECIDE_REPAIR the attempt it
-        interrupts (no durable row carries them yet: doc 69 69.12a). A pause still never kills a
-        RUNNING eval; it only refuses to START one."""
+        to the full eval — and its seconds ride on the `eval_attempt_withheld` row every withhold
+        writes (`_record_eval_withheld`), which the lifecycle's next terminal charges (doc 69
+        69.12a). A pause still never kills a RUNNING eval; it only refuses to START one."""
         if a.next_start is not _UNSET and a.next_start is not None:
             # TOTAL (`[]` on a resolution hiccup): an unreadable manifest names no first stage, so the
             # reuse point stands and the attempt runs on.
@@ -3011,6 +3043,26 @@ class EvaluateMixin:
             return False
         card_id = getattr(getattr(a.node, "idea", None), "card_id", None)
         return self._eval_intervention_seen(a.node_id, a.generation, a.start_seq, card_id) is None
+
+    async def _record_eval_withheld(self, a: "EvalAttempt", at: str, seconds: float, *,
+                                    reason: str = "paused") -> None:
+        """The durable record of a withheld attempt (doc 69 69.12a): WHERE the pause (or a stop)
+        held it (`EVAL_WITHHELD_POINTS`) and the eval seconds it had spent that NO other row carries
+        — the lifecycle's next terminal charges them (`_durable_withheld_seconds`), and
+        `events/eval_occupancy.py` closes the busy interval at the row, so a paused run no longer
+        reads as one evaluating straight through its pause. Diagnostic, from the eval child under
+        `_write_lock` like `deps_installed`; the seconds are clamped to a finite non-negative
+        number, because a clock that stepped back must not refund the chain."""
+        assert at in EVAL_WITHHELD_POINTS and reason in EVAL_WITHHELD_REASONS, (at, reason)
+        try:
+            spent = float(seconds)
+        except (TypeError, ValueError):
+            spent = 0.0
+        spent = round(spent, 3) if math.isfinite(spent) and spent > 0 else 0.0
+        async with self._write_lock:
+            self.store.append(EV_EVAL_ATTEMPT_WITHHELD, {
+                "node_id": a.node_id, "generation": a.generation, "attempt": a.attempt,
+                "at": at, "reason": reason, "eval_seconds": spent})
 
     def _eval_canary_due(self, a: "EvalAttempt") -> bool:
         """Does THIS attempt owe an eval canary before its full eval (`engine/eval_canary.py`)?
@@ -3256,6 +3308,18 @@ class EvaluateMixin:
         if (a.node is None or a.node.status is not NodeStatus.pending or a.node.tombstoned
                 or a.node.id in a.state.aborted_nodes or a.node.rerun_from is not None
                 or a.state.halted):
+            if (a.state.halted and a.node is not None and a.node.status is NodeStatus.pending
+                    and not a.node.tombstoned and a.node.id not in a.state.aborted_nodes
+                    and a.node.rerun_from is None
+                    and getattr(a.node, "eval_activity_started", False) is True):
+                # A lifecycle whose eval-start receipt is already durable (a Card session writes it
+                # at admission, on the main task) reads as EVALUATING until something closes it;
+                # nothing of it ran here, so the row carries no seconds (doc 69 69.12a).
+                a.generation = a.node.attempt
+                a.attempt = _durable_repair_ledger(a.events_at_start, a.node_id, a.generation)[0]
+                await self._record_eval_withheld(
+                    a, "admit", 0.0, reason=("paused" if a.state.paused and not a.state.finished
+                                             and not a.state.stop_requested else "stopping"))
             return PHASE_RETURN
         # The one gate that keeps a speculative miss provably free: no unconfirmed prediction may
         # cross into the sandbox. See `_assert_speculative_selection_confirmed`.
@@ -3553,7 +3617,8 @@ class EvaluateMixin:
         # charge — the ones that re-run a stage without discarding a completed one.
         a.prior_repair_seconds = (
             _durable_repair_seconds(a.events_at_start, a.node_id, a.generation)
-            + _durable_dep_round_seconds(a.events_at_start, a.node_id, a.generation))
+            + _durable_dep_round_seconds(a.events_at_start, a.node_id, a.generation)
+            + _durable_withheld_seconds(a.events_at_start, a.node_id, a.generation))
         # THE INVOCATIONS AN EARLIER PROCESS LEFT OPEN, from the same log and for the same reason as
         # the ledgers above: a bound (or here, a FACT) that a resume forgets is not one. An evaluator
         # may finish paid or external side effects — a training run, a submission, a remote job — and
@@ -3682,6 +3747,9 @@ class EvaluateMixin:
             a.sp.set("eval_withheld", "paused_before_launch")
             _LOG.info("node %s: attempt %s withheld — the run was paused before it launched",
                       a.node_id, a.attempt)
+            # Nothing of THIS attempt ran: the one before it is on its `node_repaired` /
+            # `deps_installed` row. The row closes the busy interval (doc 69 69.12a).
+            await self._record_eval_withheld(a, "before_launch", 0.0)
             return PHASE_RETURN
         a.launches += 1
         a._t0 = time.time()
@@ -3739,6 +3807,10 @@ class EvaluateMixin:
                     a.sp.set("eval_withheld", "paused_after_canary")
                     _LOG.info("node %s: full eval withheld — the run was paused while its canary "
                               "ran; the passed canary is kept by code digest", a.node_id)
+                    # The canary's seconds are this attempt's (`_t0`), and the re-dispatch skips the
+                    # passed canary: recorded HERE or charged nowhere (doc 69 69.12a). Before the
+                    # scope is cancelled, which would cancel this await with it.
+                    await self._record_eval_withheld(a, "after_canary", time.time() - a._t0)
                     cancel.set()
                     _tg.cancel_scope.cancel()
                     return PHASE_RETURN
@@ -4178,6 +4250,9 @@ class EvaluateMixin:
                                 "repair of this node")
             return PHASE_SETTLED
         if halted.paused:
+            # The attempt that just failed has no `node_repaired` row (no repair was bought), so its
+            # seconds ride on the withheld row to the chain's next terminal (doc 69 69.12a).
+            await self._record_eval_withheld(a, "decide_repair", a.attempt_eval_seconds)
             return PHASE_RETURN
         if self.external_harness:
             # The external session reads the terminal failure and decides whether to submit a

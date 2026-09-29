@@ -62,11 +62,12 @@ GOLDEN = Path(__file__).resolve().parent / "data" / "golden_repair_loop.json"
 # (the setup phase's `deps_declared`, the stage runner's `phase_progress` beacons) belongs to other
 # modules and would make this pin fail on changes that have nothing to do with the loop.
 _LOOP_EVENT_TYPES = frozenset({
-    "deps_installed", "effective_train_batch", "eval_canary_finished", "eval_canary_started",
-    "eval_invocation_claimed", "eval_invocation_recovered", "eval_invocation_settled",
-    "full_retrain_charged", "node_build_delta", "node_eval_started", "node_evaluated", "node_failed",
-    "node_repaired", "pause", "proxy_scored", "repair_critic_verdict", "reward_hack_suspected",
-    "spec_drift", "stage_finished", "stage_rollback", "trust_scan"})
+    "deps_installed", "effective_train_batch", "eval_attempt_withheld", "eval_canary_finished",
+    "eval_canary_started", "eval_invocation_claimed", "eval_invocation_recovered",
+    "eval_invocation_settled", "full_retrain_charged", "node_build_delta", "node_eval_started",
+    "node_evaluated", "node_failed", "node_repaired", "pause", "proxy_scored",
+    "repair_critic_verdict", "reward_hack_suspected", "spec_drift", "stage_finished",
+    "stage_rollback", "trust_scan"})
 
 # Values a machine decides — wall clock and the timestamps derived from it. MASKED, never dropped:
 # the key's presence and its position in the payload are part of what is pinned.
