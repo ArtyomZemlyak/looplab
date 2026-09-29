@@ -148,3 +148,22 @@ def test_a_glob_that_excludes_the_named_file_gives_the_no_file_receipt(tmp_path)
     kept = scout.execute("grep", {"pattern": "def infer", "root": "service/latency_engine.py",
                                   "glob": "service/*.py"})
     assert kept == "service/latency_engine.py:1: def infer(batch):", "a glob that admits it is moot"
+
+
+def test_a_directory_that_exists_only_staged_is_searched_not_refused(tmp_path):
+    """D2: `optimizations/` holding only files this session wrote answered "(grep: no such file or
+    directory: optimizations)" while `read_file` of a file under it returned content. MUTATION:
+    drop the staged-directory clause in `_grep_target` -> that refusal again."""
+    root = _repo(tmp_path)
+    staged = {"optimizations/exp34_mixed_length_batch.py": "def mixed_length_batch():\n    pass\n",
+              "optimizations/deeper/exp36.py": "def mixed_exp36():\n    pass\n"}
+    scout = _scout(root, overlay=staged)
+    assert "def mixed_length_batch" in scout.execute(
+        "read_file", {"path": "optimizations/exp34_mixed_length_batch.py"})
+    out = scout.execute("grep", {"pattern": "def mixed", "root": "optimizations"})
+    assert out.splitlines() == [
+        "optimizations/deeper/exp36.py:1: def mixed_exp36():",
+        "optimizations/exp34_mixed_length_batch.py:1: def mixed_length_batch():"], out
+    assert "not found" in scout.execute("grep", {"pattern": "absent_zzz", "root": "optimizations"})
+    assert scout.execute("grep", {"pattern": "x", "root": "nowhere"}) == (
+        "(grep: no such file or directory: nowhere)"), "a directory NOTHING has is still refused"

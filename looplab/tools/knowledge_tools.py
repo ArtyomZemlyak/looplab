@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import posixpath
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -129,9 +130,17 @@ def _merged_grep(results, where: str, glob: str) -> str:
 # The spelling of a node's own workspace inside a path the model copied — `<run>/nodes/node_15/
 # service/x.py`, off a traceback or a log. The engine materializes node N at `<run>/nodes/node_N`
 # with the root editable at that directory's root and a NAMED one at `node_N/<name>`, so what
-# follows the prefix is exactly the key the node's `files` use. A leading `/` is required: a
-# relative `nodes/node_3/x.py` may be a directory the repo itself has.
+# follows the prefix is exactly the key the node's `files` use. Read ONLY off an ABSOLUTE path that
+# lies under no mount root (`RepoTools._spelling`): a mount may itself sit below a `nodes/node_N`
+# directory, and a relative `results/nodes/node_3/x.py` may be a directory the repo itself has.
 _NODE_DIR_PATH = re.compile(r"/nodes/node_(\d+)/(.+)$")
+
+
+def _unreadable(name: str) -> str:
+    """The refusal for a file this reader never returns for its TYPE — binaries, and repository
+    internals — whether it lies on disk or only among a node's recorded files."""
+    return (f"(refused: {name} is not a readable source file — "
+            "repository internals and binaries are not returned)")
 
 
 def _viewable(key) -> bool:
@@ -149,12 +158,16 @@ def _viewable(key) -> bool:
 class _TreeView:
     """One tree `RepoTools` can show: the run's STARTING code (`node_id` None) or a node's — the
     starting code with the node's recorded `files` over it and its `deleted` hidden, served by a
-    `RepoScoutTools` built over the same mounts with those two as its overlay."""
+    `RepoScoutTools` built over the same mounts with those two as its overlay. `withheld` names the
+    node's files `_viewable` kept out for their TYPE (a `.cu`, an `.ipynb`, `.git` internals): they
+    exist in its tree, so a read of one is refused as unreadable, never answered "no such file".
+    A credential-shaped name is in neither set — its existence is not disclosed."""
 
-    __slots__ = ("node_id", "role", "files", "scout")
+    __slots__ = ("node_id", "role", "files", "scout", "withheld")
 
-    def __init__(self, node_id, role: str, files: dict, scout) -> None:
+    def __init__(self, node_id, role: str, files: dict, scout, withheld=frozenset()) -> None:
         self.node_id, self.role, self.files, self.scout = node_id, role, files, scout
+        self.withheld = frozenset(withheld)
 
     @property
     def phrase(self) -> str:
@@ -263,25 +276,28 @@ class RepoTools:
         if node is None:
             return _TreeView(None, "base", {}, self._base_scout)
         from looplab.tools.reposcout import RepoScoutTools
-        files = {str(k): v for k, v in (getattr(node, "files", None) or {}).items() if _viewable(k)}
+        recorded = {str(k): v for k, v in (getattr(node, "files", None) or {}).items()}
+        files = {k: v for k, v in recorded.items() if _viewable(k)}
+        withheld = {k for k in recorded if k not in files
+                    and not _pathsafe.looks_secret(Path(k.replace("\\", "/")))}
         deleted = [str(d) for d in (getattr(node, "deleted", None) or [])]
         scout = RepoScoutTools(list(self.roots.values()), default_root=self.roots.get("."),
                                named_roots=list(self.roots.items()), overlay=files, deleted=deleted)
-        return _TreeView(int(node.id), role, files, scout)
+        return _TreeView(int(node.id), role, files, scout, withheld)
 
     def _view_for(self, args: dict, raw_path: str = ""):
         """`(view, None)` for the tree a call asks for, or `(None, refusal)`.
 
         An explicit `node_id` wins; -1 is the starting code. Otherwise a path spelled through a
-        node's workspace (`<run>/nodes/node_N/<rel>`) reads node N's tree — the file it names —
-        and anything else reads the bound view. A refusal opens with a `REFUSAL_PREFIXES` entry."""
+        node's workspace (`<run>/nodes/node_N/<rel>`, `_spelling`) reads node N's tree — the file it
+        names — and anything else reads the bound view. A refusal opens with a `REFUSAL_PREFIXES`
+        entry."""
         nid = (args or {}).get("node_id")
         spelled = nid is None or nid == ""
         if spelled:
-            m = _NODE_DIR_PATH.search(str(raw_path or "").replace("\\", "/"))
-            if m is None:
+            nid = self._spelling(raw_path)[1]
+            if nid is None:
                 return self._view, None
-            nid = int(m.group(1))
         else:
             try:
                 if isinstance(nid, bool):
@@ -304,24 +320,51 @@ class RepoTools:
                           "starting code)")
         return self._tree(node, "other"), None
 
-    def _view_key(self, raw: str) -> str:
-        """The model's path as the key a node's `files` use — a node-workspace spelling and an
-        absolute path under a mount root both become `<path>` / `<mount>/<path>`. `_resolve` alone
-        strips a leading `/` and re-roots the rest, so an absolute spelling missed even a file that
-        exists (80 of the 159 inf13 propose misses were spelled absolute or through a node dir)."""
+    def _spelling(self, raw: str) -> tuple[str, int | None]:
+        """`(key, node_id)`: the model's path as the key a node's `files` use, and the node whose
+        WORKSPACE it was spelled through (None = the call's own view).
+
+        NORMALISED first (`posixpath.normpath`: `a//b`, `a/./b`, `a/../b`), because the disk half
+        resolves its path and a key that did not would miss the overlay — and serve the base file
+        under a node's `[view: …]`, or a file the node DELETED (`service/../legacy.py`). A leading
+        `..` survives and misses. Then, in this order: a path under a mount root is that mount's key
+        (`_resolve` alone strips a leading `/` and re-roots the rest, so an absolute spelling missed
+        even a file that exists — 80 of the 159 inf13 propose misses were spelled absolute or through
+        a node dir), even when it contains `/nodes/node_N/`; only an absolute path under NO mount is
+        read as `<run>/nodes/node_N/<rel>` (`_NODE_DIR_PATH`); anything else is repo-relative."""
         s = str(raw or "").replace("\\", "/").strip()
-        m = _NODE_DIR_PATH.search(s)
+        if not s:
+            return "", None
+        s = posixpath.normpath(s)
+        if s.startswith("//"):                    # POSIX leaves an implementation-defined `//` head
+            s = "/" + s.lstrip("/")
+        for root, name in self._spellings:
+            if s == root or s.startswith(root + "/"):
+                rel = s[len(root) + 1:]
+                if name == ".":
+                    return rel or ".", None
+                return (f"{name}/{rel}" if rel else name), None
+        m = _NODE_DIR_PATH.search(s) if s.startswith("/") else None
         if m is not None:
-            s = m.group(2)
-        else:
-            for root, name in self._spellings:
-                if s.startswith(root + "/"):
-                    rel = s[len(root) + 1:]
-                    s = rel if name == "." else f"{name}/{rel}"
-                    break
-        while s.startswith("./"):
-            s = s[2:]
-        return s
+            return m.group(2), int(m.group(1))
+        return s, None
+
+    def _placed(self, key: str):
+        """`(canonical key, absolute path)` for a key, or None when it maps into no mount.
+
+        `_resolve`'s mapping, with the key REBUILT from the path it resolved to — the key the file
+        on disk has in every node's `files`. A symlinked directory inside a mount (and any spelling
+        normalisation missed) then still finds the node's copy and its deletions, instead of the
+        base bytes under the node's header."""
+        target = self._resolve(key)
+        if target is None:
+            return None
+        head = (key or "").replace("\\", "/").lstrip("/").partition("/")[0]
+        name = head if head in self.roots and head != "." else "."
+        inner = target.relative_to(self.roots[name]).as_posix()
+        if name == ".":
+            return inner, target
+        return (name if inner == "." else f"{name}/{inner}"), target
 
     def _disk_refusal(self, target: Path) -> str:
         """The refusal for a DISK file this reader must not return, or "" to read it."""
@@ -336,8 +379,7 @@ class RepoTools:
             # KEPT here, not delegated: `_pathsafe.looks_secret` (and therefore the scout's
             # own gate) does not know `.git`, so a credentialed clone's `.git/config` would
             # pass every check the scout makes. See the module-level helper.
-            return (f"(refused: {target.name} is not a readable source file — "
-                    "repository internals and binaries are not returned)")
+            return _unreadable(target.name)
         return ""
 
     def _recorders(self, key: str, exclude) -> list[int]:
@@ -355,7 +397,8 @@ class RepoTools:
         which — with the call that reads it. Only a `_viewable` key is looked up, so a miss never
         discloses that some node wrote a credential-shaped file."""
         out = f"(no such file: {raw} in {view.phrase}"
-        others = self._recorders(key, view.node_id) if _viewable(key) else []
+        escapes = key == ".." or key.startswith("../")
+        others = self._recorders(key, view.node_id) if _viewable(key) and not escapes else []
         if others:
             names = ", ".join(f"#{n}" for n in others[:5])
             more = f" and {len(others) - 5} more" if len(others) > 5 else ""
@@ -449,15 +492,24 @@ class RepoTools:
                 str(root), _recursive_glob(args.get("glob") or "*"), with_overlay=True,
                 reserve=len(head))
         raw = str(args.get("path", "") or "")
-        key = self._view_key(raw)
+        key = self._spelling(raw)[0]
         start, lines = args.get("start_line", 0), args.get("lines", 0)
-        if key in view.files:
-            # OVERLAY FIRST, by the RELATIVE key: the node's recorded file IS the file in its tree,
-            # whether or not the starting code has one (the 234 inf13 misses were such files).
-            return head + view.scout._read_file(key, start, lines)
-        if view.node_id is not None and view.scout._is_deleted(key):
+        placed = self._placed(key)
+        # The spelled key, and the key rebuilt from where the disk half would read: every question
+        # below is asked of both, so the overlay, the deletions and the withheld files cannot be
+        # stepped around by spelling the same file another way.
+        keys = list(dict.fromkeys([key] + ([placed[0]] if placed else [])))
+        for k in keys:
+            if k in view.files:
+                # OVERLAY FIRST, by the RELATIVE key: the node's recorded file IS the file in its
+                # tree, whether or not the starting code has one (the 234 inf13 misses were such).
+                return head + view.scout._read_file(k, start, lines)
+        withheld = next((k for k in keys if k in view.withheld), None)
+        if withheld is not None:
+            return _unreadable(Path(withheld).name)
+        if view.node_id is not None and any(view.scout._is_deleted(k) for k in keys):
             return f"(no such file: {raw} — node #{view.node_id} deleted it from its tree)"
-        target = self._resolve(key)
+        target = placed[1] if placed else None
         if target is None or not target.is_file():
             return self._miss(raw, key, view)
         refused = self._disk_refusal(target)

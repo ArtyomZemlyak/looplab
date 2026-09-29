@@ -56,8 +56,9 @@ from looplab.core.evidence import EVIDENCE_LABEL, envelope_enabled, fence_untrus
 # `tool_loop` imports nothing from this module, so the direction is safe. The derived view is
 # `tool -> slot`, which is what the renderer needs to name the call that re-reads. `_read_node_id`
 # is the TREE a call names (WP-TOOLS T3: `repo_read(node_id=N)`), the third part of an item's key.
-from looplab.agents.tool_loop import (_READ_TOOL_PATH_SLOTS, _canonical_read_path,  # noqa: E402
-                                      _note_heads, _read_node_id)
+from looplab.agents.tool_loop import (_READ_TOOL_PATH_SLOTS,  # noqa: E402
+                                      _READ_TOOL_VIEW_SLOTS, _canonical_read_path, _note_heads,
+                                      _read_node_id)
 
 READ_TOOL_PATH_SLOTS: dict[str, str] = {tool: slot
                                         for tool, (slot, _paged) in _READ_TOOL_PATH_SLOTS.items()}
@@ -342,7 +343,13 @@ class EstablishedContext:
         # it is the file. Decided by the READER's own vocabulary, imported rather than re-listed.
         if not text.strip() or text.lstrip().startswith(_refusal_prefixes()):
             return False
-        node_id = _read_node_id(str(tool or ""), args or {})
+        # A `node_id` counts only inside a NODE-FOLLOWING view's workspace — the one place a reader
+        # offers it (`tool_loop._view_readers` is the loop's twin of this gate). Anywhere else a
+        # model-invented `node_id` is an argument the reader ignored: counting it would split one
+        # file's rows and name a re-read call that reads something else than it says.
+        views = (frozenset(_READ_TOOL_VIEW_SLOTS)
+                 if str(self._workspace or "").startswith(VIEW_WORKSPACE_PREFIX) else frozenset())
+        node_id = _read_node_id(str(tool or ""), args or {}, views)
         key = (str(tool), path, node_id)
         with self._lock:
             item = self._items.get(key)

@@ -188,3 +188,23 @@ def test_the_receipt_is_emitted_once_and_only_when_no_mount_matched_a_file(tmp_p
     assert "b/notes.md:1:" in hit and "no searchable file" not in hit
     none = tools.execute("repo_grep", {"pattern": "def infer", "glob": "*.rst"})
     assert none.count("no searchable file") == 1 and "under a, b matches" in none, none
+
+
+def test_a_grep_result_survives_copy_deepcopy_and_pickle():
+    """D4: `GrepResult.__new__` needs the kind as well as the text, so `copy.copy`, `deepcopy` and
+    `pickle` — which rebuild a str subclass through `__new__` — raised TypeError on every result.
+    MUTATION: drop `__getnewargs__` -> TypeError."""
+    import copy
+    import pickle
+
+    from looplab.tools.reposcout import GrepResult
+    original = GrepResult("a.py:1: x", "hits")
+    for twin in (copy.copy(original), copy.deepcopy(original),
+                 pickle.loads(pickle.dumps(original))):
+        assert type(twin) is GrepResult and twin == "a.py:1: x" and twin.kind == "hits"
+
+
+def test_a_dot_segment_in_a_path_glob_is_noise(tmp_path):
+    root = _tree(tmp_path / "repo")
+    out = _scout(root).execute("grep", {"pattern": "def infer", "glob": "service/./*.py"})
+    assert "service/latency_engine.py:1:" in out, out

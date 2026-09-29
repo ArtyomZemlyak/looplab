@@ -259,31 +259,52 @@ def test_a5_does_not_carry_a_page_read_in_one_tree_into_another(tmp_path):
 
 def test_a5_keys_an_explicit_tree_apart_and_names_it_in_the_re_read_call():
     store = EstablishedContext()
+    store.enter_workspace("researcher@node:15")       # a node-following view: node_id is offered
     store.record("repo_read", {"path": "a.py", "node_id": 7}, "[view: node #7's tree]\nA = 7\n")
     store.record("repo_read", {"path": "a.py"}, "[view: node #15's tree]\nA = 15\n")
     assert {(r["path"], r["node_id"]) for r in store.items()} == {("a.py", 7), ("a.py", None)}, (
         "one path in two trees is two files, two rows")
     block = EstablishedContext(item_bytes=0)        # nothing fits: the row names the re-read call
+    block.enter_workspace("researcher@node:15")
     block.record("repo_read", {"path": "a.py", "node_id": 7}, "A = 7\n")
     rendered = block.render()
     assert '`repo_read(node_id=7, path="a.py")`' in rendered, rendered
     assert "(repo_read node_id=7;" in rendered
 
 
+def test_a5_ignores_a_node_id_the_reader_does_not_offer():
+    """D6: with the flag off the Researcher's workspace is the plain "researcher" and `repo_read`
+    ignores a `node_id` a model invents — so A5 must too, or one file splits into two rows and the
+    row names a re-read call that reads something else than it says. MUTATION: drop the gate ->
+    two rows, and `repo_read(node_id=7, …)` in the block."""
+    for token in ("researcher", None, ("node", 3)):
+        store = EstablishedContext(item_bytes=0)
+        if token is not None:
+            store.enter_workspace(token)
+        store.record("repo_read", {"path": "a.py", "node_id": 7}, "A = 1\n")
+        store.record("repo_read", {"path": "a.py"}, "A = 1\n")
+        assert [(r["path"], r["node_id"], r["count"]) for r in store.items()] == [("a.py", None, 2)]
+        assert "node_id" not in store.render(), token
+
+
 def test_the_read_loop_nudge_keeps_the_node_id_and_counts_each_tree_apart():
     """The note named `repo_read(path=…)` — which re-reads the BOUND view, a different file than
     the one being walked. MUTATION: drop the node_id from the note -> the remedy reads node 15's
     engine for a model walking node 7's."""
+    views = frozenset({"repo_read"})                   # the reader OFFERS node_id (flag on)
     ledger: dict = {}
     notes = [tool_loop._note_path_read(ledger, "repo_read",
                                        {"path": "service/x.py", "node_id": 7, "start_line": i},
-                                       "(lines 1-1 of 9)\nx\n", 3)[1] for i in range(4)]
+                                       "(lines 1-1 of 9)\nx\n", 3, views=views)[1]
+             for i in range(4)]
     assert notes[1] == "" and '`repo_read(node_id=7, path="service/x.py")`' in notes[2], notes[2]
-    reads, note = tool_loop._note_path_read(ledger, "repo_read", {"path": "service/x.py"}, "x\n", 3)
+    reads, note = tool_loop._note_path_read(ledger, "repo_read", {"path": "service/x.py"}, "x\n", 3,
+                                            views=views)
     assert reads == 1 and note == "", "the bound view's copy is another file: its own counter"
     assert tool_loop._read_loop_stuck(ledger, "repo_read", {"path": "service/x.py", "node_id": 7},
-                                      1) is not None, "4 reads of node 7's copy pass 4 x 1"
-    assert tool_loop._read_loop_stuck(ledger, "repo_read", {"path": "service/x.py"}, 1) is None
+                                      1, views=views) is not None, "4 reads of node 7's copy pass 4 x 1"
+    assert tool_loop._read_loop_stuck(ledger, "repo_read", {"path": "service/x.py"}, 1,
+                                      views=views) is None
     plain = tool_loop._note_path_read({}, "repo_read", {"path": "service/x.py"}, "x\n", 1)[1]
     assert '`repo_read(path="service/x.py")`' in plain, "no node_id: the call as it always was"
 
@@ -463,3 +484,171 @@ def test_make_roles_wires_the_researchers_reader_by_the_flag(tmp_path, flag):
     assert readers[0].no_parent_view == "base"
     run_tools = [p for p in providers if isinstance(p, RunTools)]
     assert run_tools and all(p.repo_read_node_view is flag for p in run_tools)
+
+
+# ------------------------------------------------------------------------------ post-review fixes
+
+def test_a_path_spelled_another_way_still_reads_the_node_tree_and_its_deletions(tmp_path):
+    """D1: the disk half RESOLVES its path while the key did not, so `service//x.py`,
+    `service/./x.py` and `<root>//service/x.py` served the BASE bytes under node 15's header, and
+    `service/../legacy.py` served a file node 15 deleted. MUTATION: drop the key normalisation and
+    the rebuilt key -> base bytes under `[view: node #15's tree …]`."""
+    tools = _reader(tmp_path)
+    root = tmp_path / "deploy"
+    state = _state()
+    tools.bind_state(state, state.nodes[15])
+    head = "[view: node #15's tree — the code this proposal improves]\n"
+    for spelled in ("service//latency_engine.py", "service/./latency_engine.py",
+                    "./service/latency_engine.py", f"{root}//service/latency_engine.py",
+                    f"{root}/service/../service/latency_engine.py",
+                    "optimizations/../service/latency_engine.py"):
+        assert _read(tools, spelled) == head + _ENGINE_15, spelled
+    assert _read(tools, "optimizations//exp34_mixed_length_batch.py") == head + _EXP34
+    for spelled in ("service/../legacy.py", f"{root}/./legacy.py", "service/..//legacy.py"):
+        assert _read(tools, spelled) == (
+            f"(no such file: {spelled} — node #15 deleted it from its tree)"), spelled
+    for escape in ("../outside.txt", "service/../../outside.txt"):
+        out = _read(tools, escape)
+        assert out.startswith("(no such file: ") and "recorded it" not in out, out
+
+
+def test_a_symlinked_directory_in_the_repo_reads_the_node_copy_it_points_at(tmp_path):
+    """The key rebuilt from where the disk read would land (`RepoTools._placed`) catches what no
+    lexical normalisation can: an alias directory inside the mount."""
+    import os
+    tools = _reader(tmp_path)
+    try:
+        os.symlink(tmp_path / "deploy" / "service", tmp_path / "deploy" / "alias")
+    except (OSError, NotImplementedError):
+        pytest.skip("filesystem does not support symlinks")
+    state = _state()
+    tools.bind_state(state, state.nodes[15])
+    assert _read(tools, "alias/latency_engine.py").endswith(_ENGINE_15)
+    assert _read(tools, "alias/latency_engine.py", node_id=-1).endswith(_BASE_ENGINE)
+
+
+def test_a_node_file_withheld_for_its_type_is_refused_not_denied(tmp_path):
+    """D3: a `.cu` / `.ipynb` / `.pyx` node file EXISTS in the node's tree; "(no such file …)" was
+    false. A credential-shaped name still reads as absent — its existence is not disclosed.
+    MUTATION: drop `withheld` -> "(no such file: kernels/attn.cu in node #15's tree)"."""
+    tools = _reader(tmp_path)
+    state = _state()
+    state.nodes[15].files.update({"kernels/attn.cu": "__global__ void k() {}\n",
+                                  "nb/explore.ipynb": "{}", "fast/ops.pyx": "cdef int x\n",
+                                  "cfg/secrets.yaml": "t: 1\n"})
+    tools.bind_state(state, state.nodes[15])
+    for path, name in (("kernels/attn.cu", "attn.cu"), ("nb/explore.ipynb", "explore.ipynb"),
+                       ("fast/ops.pyx", "ops.pyx"), ("kernels//attn.cu", "attn.cu")):
+        assert _read(tools, path) == (f"(refused: {name} is not a readable source file — "
+                                      "repository internals and binaries are not returned)"), path
+    assert _read(tools, "cfg/secrets.yaml") == (
+        "(no such file: cfg/secrets.yaml in node #15's tree)"), "no existence disclosure"
+
+
+def test_a_mount_under_a_nodes_directory_is_not_read_as_a_node_workspace(tmp_path):
+    """D5: the node-directory spelling was tried BEFORE mount-root membership, so a repo living
+    under `…/nodes/node_3/…` — or a repo path containing `/nodes/node_1/` — was redirected to a
+    node's tree or refused. MUTATION: test the node-dir pattern first -> node 3's file, or
+    "(no such file: … node #1 is not an experiment of this run)"."""
+    root = tmp_path / "exp" / "nodes" / "node_3" / "deploy"
+    (root / "service").mkdir(parents=True)
+    (root / "service" / "latency_engine.py").write_text(_BASE_ENGINE, encoding="utf-8")
+    (root / "results" / "nodes" / "node_1").mkdir(parents=True)
+    (root / "results" / "nodes" / "node_1" / "log.txt").write_text("LOG ONE\n", encoding="utf-8")
+    tools = RepoTools([{"name": ".", "path": str(root)}], follow_node=True)
+    state = _state()
+    state.nodes[3] = _node(3, {"service/latency_engine.py": "NODE THREE\n"})
+    tools.bind_state(state, state.nodes[15])
+    head = "[view: node #15's tree — the code this proposal improves]\n"
+    assert _read(tools, f"{root}/service/latency_engine.py") == head + _ENGINE_15
+    assert _read(tools, "results/nodes/node_1/log.txt") == head + "LOG ONE\n"
+    assert _read(tools, f"{root}/results/nodes/node_1/log.txt") == head + "LOG ONE\n"
+    # …while an absolute path under NO mount is still read through the node it names.
+    assert _read(tools, "/elsewhere/runs/r/nodes/node_7/service/latency_engine.py").endswith(
+        _ENGINE_7)
+
+
+def test_a_deleted_file_stays_hidden_under_a_named_mount(tmp_path):
+    """`_is_deleted_abs` compared a named mount's `<name>/rel` deletion keys against a path relative
+    to the FIRST root, so no named mount's deletion was ever hidden from `find_files` / `list_dir`
+    / `repo_list`. MUTATION: drop its `_disp` branch -> every assertion below goes red."""
+    from looplab.tools.reposcout import RepoScoutTools
+    a, b = tmp_path / "a", tmp_path / "b"
+    for root, names in ((a, ("keep.py", "old.py")), (b, ("util.py", "gone.py"))):
+        root.mkdir()
+        for name in names:
+            (root / name).write_text("x = 1\n", encoding="utf-8")
+    scout = RepoScoutTools(roots=[str(a), str(b)], default_root=str(a),
+                           named_roots=[("a", str(a)), ("b", str(b))],
+                           deleted=["a/old.py", "b/gone.py"])
+    found_a = scout.execute("find_files", {"root": str(a), "pattern": "**/*.py"}).splitlines()
+    found_b = scout.execute("find_files", {"root": str(b), "pattern": "**/*.py"}).splitlines()
+    assert found_a == ["a/keep.py"] and found_b == ["b/util.py"], (found_a, found_b)
+    assert "old.py" not in scout.execute("list_dir", {"path": str(a)})
+    assert "gone.py" not in scout.execute("list_dir", {"path": str(b)})
+
+    tools = RepoTools([{"name": "a", "path": str(a)}, {"name": "b", "path": str(b)}],
+                      follow_node=True)
+    state = RunState(direction="max", nodes={5: _node(5, {"b/new.py": "y = 2\n"},
+                                                      deleted=["a/old.py", "b/gone.py"])})
+    tools.bind_state(state, state.nodes[5])
+    listed_a = tools.execute("repo_list", {"repo": "a"}).splitlines()[1:]
+    listed_b = tools.execute("repo_list", {"repo": "b"}).splitlines()[1:]
+    assert listed_a == ["a/keep.py"] and listed_b == ["b/new.py", "b/util.py"], (listed_a, listed_b)
+
+
+def test_the_loop_counts_a_node_id_only_where_the_reader_offers_it(tmp_path):
+    """D6, driven through the real `drive_tool_loop`: with the flag OFF `repo_read` offers no
+    `node_id` and ignores an invented one, so the nudge must name the call as it always was and
+    count one file once; ON, it keeps the node_id. MUTATION: ungate `_read_node_id` -> the OFF note
+    names `repo_read(node_id=7, …)`, a call that reads the starting code, not node 7's file."""
+    from looplab.agents.agent import drive_tool_loop
+    emit = {"type": "function", "function": {"name": "emit", "description": "final",
+                                             "parameters": {"type": "object", "properties": {}}}}
+
+    def _drive(tools):
+        calls = [{"content": "", "tool_calls": [{"id": f"c{i}", "function": {
+            "name": "repo_read", "arguments": json.dumps({
+                "path": "service/latency_engine.py", "node_id": 7, "start_line": i + 1,
+                "lines": 1})}}]} for i in range(3)]
+        calls.append({"content": "", "tool_calls": [{"id": "e", "function": {
+            "name": "emit", "arguments": "{}"}}]})
+        seen: list = []
+
+        class _Client:
+            def chat(self, messages, tools, tool_choice="auto"):
+                seen.append([m["content"] for m in messages if m.get("role") == "tool"])
+                return calls.pop(0)
+
+        drive_tool_loop(_Client(), tools, [{"role": "user", "content": "go"}], emit,
+                        finalize=lambda args: args, fallback=lambda msgs: None,
+                        read_loop_nudge_after=3, stuck_detection=False)
+        return seen[-1][-1]
+
+    off = RepoTools([{"name": ".", "path": str(_repo(tmp_path / "off"))}])
+    note = _drive(off)
+    assert '`repo_read(path="service/latency_engine.py")`' in note, note
+    assert "node_id=7" not in note and "has now been read 3×" in note
+    on = RepoTools([{"name": ".", "path": str(_repo(tmp_path / "on"))}], follow_node=True)
+    on.bind_state(_state(), None)
+    assert '`repo_read(node_id=7, path="service/latency_engine.py")`' in _drive(on)
+    assert tool_loop._view_readers(off.specs()) == frozenset()
+    assert tool_loop._view_readers(on.specs()) == frozenset({"repo_read"})
+
+
+def test_a_workspace_file_is_found_however_spelled_when_every_mount_is_named(tmp_path):
+    """D1's lexical half: with every mount NAMED, a node's workspace-root file (`looplab_stages.json`)
+    maps into no mount, so the key rebuilt from the disk path cannot find it — only the normalised
+    spelling can. MUTATION: drop the `posixpath.normpath` -> "(no such file: …)"."""
+    a = tmp_path / "a"
+    a.mkdir()
+    (a / "x.py").write_text("BASE = 1\n", encoding="utf-8")
+    tools = RepoTools([{"name": "a", "path": str(a)}], follow_node=True)
+    state = RunState(direction="max", nodes={9: _node(9, {"looplab_stages.json": "{}\n",
+                                                           "a/x.py": "NODE = 9\n"})})
+    tools.bind_state(state, state.nodes[9])
+    head = "[view: node #9's tree — the code this proposal improves]\n"
+    for spelled in ("looplab_stages.json", "./looplab_stages.json", "a/../looplab_stages.json"):
+        assert _read(tools, spelled) == head + "{}\n", spelled
+    for spelled in ("a/x.py", "a//x.py", "./a/./x.py", f"{a}/x.py"):
+        assert _read(tools, spelled) == head + "NODE = 9\n", spelled

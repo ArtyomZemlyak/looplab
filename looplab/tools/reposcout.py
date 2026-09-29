@@ -92,7 +92,7 @@ def _path_glob(glob: str) -> tuple[str, list[str] | None, bool]:
     anchored = g.startswith("/")
     if g.endswith("/"):
         g += "**"
-    return g, [seg for seg in g.split("/") if seg], anchored
+    return g, [seg for seg in g.split("/") if seg and seg != "."], anchored
 
 
 def _parts_match(pattern: list[str], parts: list[str], match) -> bool:
@@ -145,6 +145,11 @@ class GrepResult(str):
         out = super().__new__(cls, text)
         out.kind = kind
         return out
+
+    def __getnewargs__(self) -> tuple[str, str]:
+        # `copy`, `deepcopy` and `pickle` rebuild a str subclass through `__new__`, which needs the
+        # kind as well as the text — without this every one of them raised TypeError.
+        return (str(self), self.kind)
 
 
 # Directories that are never worth walking for a content grep — model weights / checkpoints / caches
@@ -669,6 +674,12 @@ class RepoScoutTools:
         if p.is_dir():
             return "dir", p
         if not p.exists():
+            # A directory that exists only in the STAGED tree (a package this session created, e.g.
+            # `optimizations/`) is a directory to search: `read_file` serves the files under it, so
+            # "no such directory" would be false. Its staged files are searched (`within`) and the
+            # disk walk finds nothing, because there is no disk copy to walk.
+            if any(self._key_within(k, p) for k in self._overlay):
+                return "dir", p
             return "refused", f"(grep: no such file or directory: {root})"
         if not p.is_file():
             return "refused", f"(grep: {root} is not a regular file or a directory — not searched)"
