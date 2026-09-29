@@ -1971,7 +1971,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "attempt", "card_id", "engine_reason", "error", "error_evidence", "eval_seconds",
             "failed_stage", "failure_signature", "finish_data", "finish_report_planned",
             "generation", "never_evaluated", "node_id", "reason", "reason_evidence",
-            "reason_evidence_resolved", "reason_findings", "reason_hypotheses",
+            "reason_evidence_resolved", "reason_evidence_root", "reason_findings",
+            "reason_hypotheses",
             "reason_override_refused", "reason_source", "reason_summary", "repair_stop", "scope",
             "step", "triage_action", "triage_rationale"
         ),
@@ -1987,7 +1988,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "error_evidence", "eval_seconds", "failure_signature", "footprint_finalized",
             "idea_footprint", "judge_deferred",
             "param_overrides", "reason", "reason_evidence", "reason_evidence_resolved",
-            "reason_findings", "reason_hypotheses", "reason_override_refused", "reason_source",
+            "reason_evidence_root", "reason_findings", "reason_hypotheses",
+            "reason_override_refused", "reason_source",
             "reason_summary", "salvaged_metric", "unmet", "unparseable_repairs", "verified"
         ),
     ),

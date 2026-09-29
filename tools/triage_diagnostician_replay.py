@@ -176,7 +176,10 @@ class RunContext:
 # --------------------------------------------------------------------------------------------
 
 def workdir_for(row: dict, runs_root: Path) -> Path:
-    """The node workdir the engine would have re-resolved the citation against."""
+    """The node workdir the engine would have re-resolved the citation against — except for a failure
+    that was an eval CANARY's (`reason_evidence_root: "canary"` on the row), which the engine resolved
+    in the canary's scratch tree; that tree is rebuilt by the node's next canary and deleted by a
+    passing one, so this replay cannot re-resolve those and does not try."""
     prov = row.get("provenance") or {}
     return runs_root / str(prov.get("run")) / "nodes" / ("node_%s" % prov.get("node_id"))
 

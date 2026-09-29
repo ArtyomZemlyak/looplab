@@ -1123,8 +1123,10 @@ def judge_prompt_truths_enabled(settings) -> bool:
 
 
 def evidence_citation_resolves(evidence, workdir) -> bool | None:
-    """Does the cited file actually exist inside the node's workdir? `None` when there is nothing
-    checkable to resolve (no citation, or a citation into the error text it was handed anyway).
+    """Does the cited file actually exist inside the tree the diagnostician read — the node's
+    workdir, or a failed canary's scratch tree, which the row then names (`reason_evidence_root`)?
+    `None` when there is nothing checkable to resolve (no citation, or a citation into the error
+    text it was handed anyway).
 
     THE DIAGNOSTICIAN'S `is_present`, AND ONLY AS FAR AS THAT ANALOGY REALLY GOES. It does not
     check that the verdict is RIGHT — the module docstring explains why no such probe exists for a
@@ -1445,7 +1447,9 @@ def diagnosis_code_tools(engine, workdir):
     a frozen loss looks identical either way from the outside; the diagnostician is asked a harder
     version — `oom` vs `crash` vs `not_learning` — from a dead process instead of a live one.
 
-    ROOTED AT THE WORKDIR, which is the whole safety argument as well as the accuracy one:
+    ROOTED AT THE WORKDIR — or, for a failed eval canary, at its scratch tree: the same materialized
+    code, where the canary ran and wrote its logs (doc 69 69.9) — which is the whole safety argument
+    as well as the accuracy one:
 
     - it is the code that ACTUALLY RAN. The pilot's own `read_code` is rooted at the editable
       SOURCE, a different filesystem from the one the eval saw — a distinction that already cost a

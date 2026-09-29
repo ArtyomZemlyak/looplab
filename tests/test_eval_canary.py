@@ -305,6 +305,44 @@ def test_a_failed_canary_is_diagnosed_from_its_own_logs(tmp_path):
     (term,) = _terminals(evs)
     assert term.type == "node_failed" and "full" not in ledger.read_text().split()
     assert term.data.get("reason_evidence_resolved") is True, term.data
+    # The trail is resolved in the same tree (a surviving mutant resolved the FINDINGS in the
+    # workdir), and the row names that tree — the next canary rebuilds it, so a reader re-resolving
+    # the citation later must know it was not the workdir (critic 2026-09-29).
+    assert term.data["reason_findings"][0]["resolved"] is True, term.data["reason_findings"]
+    assert term.data.get("reason_evidence_root") == "canary"
+
+
+def test_a_full_eval_failure_after_a_repaired_canary_is_diagnosed_from_the_workdir(tmp_path):
+    """The canary flag is per ATTEMPT (a surviving mutant dropped its reset at RUN_ATTEMPT's top): a
+    canary that failed on attempt 0 and passed after the repair says nothing about attempt 1's full
+    eval, whose logs are in the node's WORKDIR. With the flag carried over, the judge's tools were
+    rooted at the passed canary's deleted scratch tree. MUTATION: drop `a.canary_failed = False`."""
+    ledger = tmp_path / "ledger.txt"
+    broken = _script(ledger, canary="raise", full="raise")
+    canary_fixed = _script(ledger, canary="0.1", full="raise")      # the full eval still raises
+    looked = []
+
+    class _Judge(_Researcher):
+        def triage_crash(self, node, error, attempt, tools=None, **kw):
+            names = {s.get("function", s).get("name") for s in tools.specs()} if tools else set()
+            read = str(tools.execute("read_log", {"log": "eval.log"})) if "read_log" in names else ""
+            looked.append(("[eval canary]" in error, read))
+            if attempt == 1:
+                return {"action": "repair", "rationale": "fix the defect the canary found"}
+            return {"action": "abandon", "rationale": "the full eval raised",
+                    "evidence_source": "log", "evidence_locator": "eval.log",
+                    "evidence_quote": "KeyError: 'history_item_sid'"}
+
+    eng = _engine(tmp_path / "run", _Dev(broken, fixes=[canary_fixed]), researcher=_Judge())
+    _seed(eng, broken)
+    evs = _evaluate(eng)
+    assert ledger.read_text().split() == ["canary", "canary", "full"]
+    (canary_turn, full_turn) = looked
+    assert canary_turn[0] is True and full_turn[0] is False
+    assert "history_item_sid" in full_turn[1], "the judge read the FULL eval's own log"
+    (term,) = _terminals(evs)
+    assert term.type == "node_failed" and term.data.get("reason_evidence_resolved") is True
+    assert "reason_evidence_root" not in term.data, "resolved in the workdir, as every older row"
 
 
 def test_a_canary_that_keeps_failing_ends_the_node_without_one_full_eval(tmp_path):

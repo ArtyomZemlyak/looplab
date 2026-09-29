@@ -87,7 +87,8 @@ existing crash-triage call rather than a second agent: that call already spends 
 per failure (335 calls / 38 decisions over v8+v9+v3), so a separate one would double the
 failure-path cost and could contradict the directive it is building. Its verdict carries
 `{source, locator, quote}`, and the engine re-resolves the locator inside the workdir fence and
-stamps `reason_evidence_resolved`.
+stamps `reason_evidence_resolved` (for a failed eval canary, inside the canary's scratch tree, named
+on the row as `reason_evidence_root: canary`).
 
 ### What that verdict RECORDS (2026-08-21)
 

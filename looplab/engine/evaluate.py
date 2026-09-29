@@ -1256,6 +1256,10 @@ class EvalAttempt:
     _engine_reason: Any = None
     _evidence: Any = None
     _evidence_resolved: Any = None
+    # WHERE `_evidence_resolved` / `_findings` were re-resolved, bound with them: None = the node's
+    # workdir, "canary" = a failed canary's scratch tree (doc 69 69.9) — which the node's next canary
+    # rebuilds and a passing one deletes, so a `resolved` there stops being re-checkable one attempt on.
+    _evidence_root_kind: Any = None
     _summary: Any = None
     _findings: Any = None
     _hypotheses: Any = None
@@ -1376,7 +1380,10 @@ DIAGNOSIS_SLOTS = ("_evidence", "_evidence_resolved", "_summary", "_findings", "
                    # and is the SAME shape as `_hypotheses` was: bound beside the diagnosis,
                    # written through `if a._x` on both failure rows. Registered here at the
                    # merge rather than after the next stale row.
-                   "_override_refused")
+                   "_override_refused",
+                   # WHERE `_evidence_resolved`/`_findings` were resolved (doc 69 69.9): bound with
+                   # them, so a stale one would name the canary tree on a workdir-resolved row.
+                   "_evidence_root_kind")
 # The slots a failure row also carries but which are REBOUND rather than cleared: a failure always
 # has an author, so the reset for `_reason_source` is a non-diagnostician source and not None — the
 # loop-local default is `REASON_SOURCE_ENGINE` and the per-attempt re-stamp asks `reason_source_for`,
@@ -4425,8 +4432,11 @@ class EvaluateMixin:
         # runs BEFORE the 300-char cap, like both siblings, so masking cannot be truncated
         # away; `coerce_evidence`/`coerce_findings` own that ordering.
         a._evidence = coerce_evidence(a.triage, self._redact)
-        # Resolved where the judge LOOKED: a failed canary's citations name its scratch tree.
+        # Resolved where the judge LOOKED: a failed canary's citations name its scratch tree — and
+        # the row SAYS so (`reason_evidence_root`), or a reader re-resolving it later would look in
+        # the workdir the canary never wrote (critic 2026-09-29).
         a._evidence_resolved = evidence_citation_resolves(a._evidence, _evidence_root)
+        a._evidence_root_kind = "canary" if a.canary_failed else None
         # WHAT ACTUALLY HAPPENED, IN PROSE A READER CAN USE WITH NOTHING ELSE IN FRONT OF
         # THEM. This is the deliverable and the rest of this block is its trail: the
         # diagnostician has just read the stage logs, the config and the program the eval
@@ -4437,8 +4447,8 @@ class EvaluateMixin:
         # bar, which is about CONTENT: a summary that points at a log instead of naming the
         # allocation size, the parameter, the stage and the exception has failed it.
         a._summary = coerce_diagnosis_summary(a.triage, self._redact)
-        # …and the trail behind it, each citation re-resolved inside the workdir fence by
-        # the same rule the singular one above uses. FREE — the resolution was already being
+        # …and the trail behind it, each citation re-resolved inside the same fence — the workdir,
+        # or a failed canary's scratch tree — by the same rule the singular one above uses. FREE — the resolution was already being
         # done for `reason_evidence` — and deliberately nothing more than that: a citation
         # that does not resolve is MARKED and kept, never retried and never dropped, because
         # the finding stands on its own text and the summary stands without any of it.
@@ -5022,6 +5032,10 @@ class EvaluateMixin:
                    if a._override_refused else {}),
                 **({"reason_evidence_resolved": a._evidence_resolved}
                    if a._evidence_resolved is not None else {}),
+                # WHERE those were resolved, when it was not the workdir: absent = the workdir,
+                # which is what every row before this key meant.
+                **({"reason_evidence_root": a._evidence_root_kind}
+                   if a._evidence_root_kind else {}),
                 # WHAT HAPPENED, IN PROSE — same additive, fold-ignored, omitted-when-absent
                 # rule as the pair above, and the absence means the same thing: nobody was
                 # asked. This is the column that makes the row readable a week later
@@ -5515,6 +5529,8 @@ class EvaluateMixin:
                     data["reason_evidence"] = a._evidence
                 if a._evidence_resolved is not None:
                     data["reason_evidence_resolved"] = a._evidence_resolved
+                if a._evidence_root_kind:
+                    data["reason_evidence_root"] = a._evidence_root_kind
                 if a._override_refused:
                     data["reason_override_refused"] = a._override_refused
                 # THE ACCOUNT AND ITS TRAIL, on the same rule as on `node_repaired` above. This
