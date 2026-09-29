@@ -28,6 +28,7 @@ falls back to its prior behavior.
 """
 from __future__ import annotations
 
+import functools
 import json
 from typing import Optional
 
@@ -652,16 +653,23 @@ class ForesightPanelResearcher(WrapsResearcher):
         window = list(cards) if isinstance(cards, list) else self._base_board_window(state)
         ideas = [bind_idea_to_board_card(first, window)]
         alternative, receipts = [False], [researcher_budget_exhausted(self.base)]
+        # The session's handoff brief, DEFERRED by `propose` to the candidate chosen here: candidate
+        # `i` of the session is summarized from the transcript up to its own end, once, after the
+        # pick (`agents/agent.py::ProposalSession.publish_brief`). None where there is no session.
+        publish = getattr(session, "publish_brief", None)
+        briefs = [functools.partial(publish, 0) if callable(publish) else None]
         for _ in range(self.k - 1):
             if session is None:
                 # The base holds no session for this call (a one-shot Researcher behind the unified
                 # facade): independent sampling, exactly as without the switch.
                 ideas.append(self._bind_base_proposal(state, parent))
                 alternative.append(False)
+                briefs.append(None)
             else:
                 alt = self.base.propose_alternative(state, parent, session, list(ideas))
                 if alt is None:
                     break           # a failed continuation ends it; nothing is paid to replace it
+                briefs.append(functools.partial(publish, len(ideas)) if callable(publish) else None)
                 ideas.append(bind_idea_to_board_card(alt, window))
                 alternative.append(True)
             receipts.append(researcher_budget_exhausted(self.base))
@@ -671,22 +679,27 @@ class ForesightPanelResearcher(WrapsResearcher):
         kept = [index for index, idea in enumerate(ideas) if not is_researcher_fallback(idea)]
         if len(kept) < 2:
             self.last_foresight = None
-            return self._chosen(ideas, kept[0] if kept else 0, receipts)
+            return self._chosen(ideas, kept[0] if kept else 0, receipts, briefs)
         return self._pick(state, parent, [ideas[i] for i in kept],
                           alternative=[alternative[i] for i in kept],
-                          receipts=[receipts[i] for i in kept])
+                          receipts=[receipts[i] for i in kept],
+                          briefs=[briefs[i] for i in kept])
 
-    def _chosen(self, ideas, index: int, receipts):
-        """Return `ideas[index]`, publishing its own budget receipt when the call gathered them."""
+    def _chosen(self, ideas, index: int, receipts, briefs=None):
+        """Return `ideas[index]`, publishing its own budget receipt — and contributing its deferred
+        handoff brief — when the call gathered them."""
         if receipts is not None:
             self.last_propose_budget_exhausted = receipts[index]
+        if briefs is not None and callable(briefs[index]):
+            briefs[index]()
         return ideas[index]
 
-    def _pick(self, state, parent, ideas, *, alternative=None, receipts=None):
+    def _pick(self, state, parent, ideas, *, alternative=None, receipts=None, briefs=None):
         """Rank `ideas` with the world model, record the pick, return it (the first on abstain).
 
-        `alternative` / `receipts` come from `_propose_alternatives` and are None on the historical
-        path, whose telemetry and returned Idea are byte-identical to before they existed."""
+        `alternative` / `receipts` / `briefs` come from `_propose_alternatives` and are None on the
+        historical path, whose telemetry and returned Idea are byte-identical to before they
+        existed."""
         # Slice 3: the Strategist's novelty stance biases the K->1 pick. "balanced" (default) leaves
         # the ranking a pure predicted-metric choice — byte-identical to today; "explore" appends a
         # directive so that when candidates are close the ranker PREFERS the more novel/divergent one
@@ -699,7 +712,7 @@ class ForesightPanelResearcher(WrapsResearcher):
                        goal=state.goal, direction=state.direction)
         if r is None:
             self.last_foresight = None
-            return self._chosen(ideas, 0, receipts)
+            return self._chosen(ideas, 0, receipts, briefs)
         order, conf, reason = r
         best = ideas[order[0]]
         # PART IV 2c: replace the self-reported confidence (Pearson≈0 with outcome, §21.12) with a
@@ -718,7 +731,7 @@ class ForesightPanelResearcher(WrapsResearcher):
         # 0.0 (default) = off: conf >= 0 is always true, so the behavior is byte-identical to before.
         if conf is not None and conf < self.min_confidence:
             self.last_foresight = None
-            return self._chosen(ideas, 0, receipts)
+            return self._chosen(ideas, 0, receipts, briefs)
         # Telemetry the engine reads after propose() to emit `foresight_selected` (engine = sole event
         # writer): WHICH of the K generated ideas won + the discarded alternatives + confidence + the
         # model's analysis trace + the novelty stance in force. Without it only the winner survives.
@@ -735,4 +748,4 @@ class ForesightPanelResearcher(WrapsResearcher):
         # "of N" is the number RANKED — `self.k` on the historical path, where every call yields one.
         best.rationale = (best.rationale
                           + f" [foresight: predicted best of {len(ideas)} pre-execution]").strip()
-        return self._chosen(ideas, order[0], receipts)
+        return self._chosen(ideas, order[0], receipts, briefs)

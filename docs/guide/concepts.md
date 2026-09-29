@@ -934,18 +934,22 @@ MiniOneRec inf13 one proposal cost 86 + 100 minutes for two candidates the ranke
 "effectively the same bet". Now candidate 1 is one session
 (`agents/agent.py::ToolUsingResearcher.propose_with_session`, reached through the unified facade)
 and each further candidate CONTINUES it (`propose_alternative`): one more turn on the transcript that
-already holds every read, asking for a different mechanism, capped at 8 tool turns, with a copy of an
-earlier candidate bounced. The transcript is repaired first (the accepted emit's `tool_call_id` is
-answered, so a strict endpoint does not refuse it), no earlier-phase note is spliced in and no second
-handoff summary is bought. A failed alternative is simply absent — never replaced by a full proposal,
-never a degraded `fallback (…)` candidate for the ranker to pick — and a one-shot Researcher or a
-surrogate still samples independently. Two effects are by design: under the Strategist's `explore`
-stance the ranker prefers the more divergent — now the less-researched — candidate, and the board's
-rotating tail slot advances once per proposal instead of K times. `foresight_selected.alternatives`
+already holds every read, asking for a different mechanism, capped at 8 tool turns (never above the
+operator's own `agent_max_turns`), with a copy of an earlier candidate bounced. The transcript is
+repaired first (the accepted emit's `tool_call_id` is answered, so a strict endpoint does not refuse
+it), no earlier-phase note is spliced in, and the proposal's one handoff summary is the CHOSEN
+candidate's, made after the pick — the Developer builds that one. A failed alternative is simply
+absent — never replaced by a full proposal, never a degraded `fallback (…)` candidate for the
+ranker to pick — and a one-shot Researcher or a surrogate still samples independently. Two effects
+are by design: under the Strategist's `explore` stance the ranker prefers the more divergent — now
+the less-researched — candidate, and the board's rotating tail slot advances once per proposal
+instead of K times. `foresight_selected.alternatives`
 marks each ranked candidate, and the budget receipt the proposal funnel reads is the chosen
 candidate's. A ranking the card-staging lane made is no longer thrown away either: it is recorded as
-a diagnostic `card_ranking_staged` row and published (`foresight_selected` with its `card_id`,
-`hypothesis_ranked`, `card_ranked`) when the Card's node is created.
+a diagnostic `card_ranking_staged` row and published when the Card's node is created —
+`foresight_selected` with its `card_id` always, and the board pair (`hypothesis_ranked`,
+`card_ranked`) only while no newer board decision follows the row: Cards are built in selection
+order, and an older board order written last would steer which Card is built next.
 
 **The three empirical predictors spend the same uncertainty (2026-09-06).** `core/numeric.py::knn_idw`
 returns `(prediction, nearest_distance)`, and the distance to the nearest evaluated point is the

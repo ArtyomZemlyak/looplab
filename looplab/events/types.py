@@ -1072,11 +1072,14 @@ EV_LESSONS_STORE_UNAVAILABLE = "lessons_store_unavailable"
 # `foresight_rank` spans, 17 of them in that lane, 2 `foresight_selected` rows and 0
 # `hypothesis_ranked` / `card_ranked` rows. The staging loop now appends the snapshot (`foresight` =
 # the panel's idea pick, `hyp_priority` = its board order, each with its ranking's trace ids) keyed by
-# `card_id` on the MAIN task, and the node's creation publishes it as `foresight_selected` /
-# `hypothesis_ranked` / `card_ranked` with that node's id — the precoded commit and the serial Card
-# claim alike (`engine/audit.py::AuditMixin._emit_staged_card_ranking`), once, for the Card's first
-# node after the row. DIAGNOSTIC / fold-ignored: nothing the fold decides reads it and its position
-# keys nothing; the engine reads it back by `card_id`, the way `skills_promoted` is read as a gate.
+# `card_id` on the MAIN task, and the node's creation publishes it as `foresight_selected` (and as
+# `hypothesis_ranked` / `card_ranked`, but only while no NEWER board decision follows the row) with
+# that node's id — the precoded commit and the serial Card claim alike
+# (`engine/audit.py::AuditMixin._emit_staged_card_ranking`), once, for the Card's first node after
+# the row. DIAGNOSTIC / fold-ignored: nothing the fold decides reads it, and it moves no fence. The
+# engine reads it back by `card_id`, the way `skills_promoted` is read as a gate, and reads its ORDER
+# against the other board decisions (a later staged board order or `hypothesis_ranked` supersedes
+# it) — an order the main task alone writes, in staging order.
 EV_CARD_RANKING_STAGED = "card_ranking_staged"
 
 ALL_EVENT_TYPES: frozenset[str] = frozenset(

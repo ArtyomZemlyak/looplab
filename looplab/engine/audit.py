@@ -331,21 +331,31 @@ class AuditMixin:
         self.store.append(EV_CARD_RANKING_STAGED, data)
 
     def _staged_card_ranking(self, card_id, node_id: int, events=None):
-        """The `card_ranking_staged` row node `node_id` publishes, or None.
+        """`(row, board_is_latest)` for the `card_ranking_staged` row node `node_id` publishes, or
+        None.
 
         The rankings belong to the Card's FIRST node created after its latest staging row — the
         build of that proposal. A later node of the same Card (a rebuild, a re-election after a
         failed producer) made no ranking, and a node created BEFORE the row was built from an older
         proposal. A pure reading of the log, so a resumed process decides exactly as the original
-        would have; nothing is cached on the engine."""
+        would have; nothing is cached on the engine.
+
+        `board_is_latest` is False once a NEWER board decision follows the row — another staged
+        row carrying a board order, or a `hypothesis_ranked` already published — because the board
+        pair folds into last-write-wins registers (`Card.priority`, the Card selector's priority
+        signal): published in BUILD order, an older ranking would overwrite a newer one."""
         if not (isinstance(card_id, str) and card_id):
             return None
-        row, created, taken = None, False, False
+        row, created, taken, superseded = None, False, False, False
         for event in (events if events is not None else self.store.read_all()):
             data = event.data if isinstance(event.data, dict) else {}
             if event.type == EV_CARD_RANKING_STAGED:
                 if data.get("card_id") == card_id:
-                    row, created, taken = data, False, False
+                    row, created, taken, superseded = data, False, False, False
+                elif row is not None and isinstance(data.get("hyp_priority"), dict):
+                    superseded = True      # a newer board order was staged after this one
+            elif event.type == EV_HYPOTHESIS_RANKED and row is not None:
+                superseded = True          # a newer board order was already published
             elif event.type == EV_NODE_CREATED and row is not None:
                 idea = data.get("idea")
                 if isinstance(idea, dict) and idea.get("card_id") == card_id:
@@ -353,7 +363,9 @@ class AuditMixin:
                         created = True
                     elif not created:
                         taken = True       # another node of this Card came first: the row was its
-        return row if (row is not None and created and not taken) else None
+        if row is None or not created or taken:
+            return None
+        return row, not superseded
 
     def _emit_staged_card_ranking(self, card_id, node_id: int, generation: int | None = 0) -> None:
         """Publish the Card's staged rankings against the node it was just built into.
@@ -363,17 +375,21 @@ class AuditMixin:
         board rows are run-global registers `_emit_hypothesis_ranked` refuses to append from a build
         worker. The idea pick becomes `foresight_selected` carrying `card_id` (so a reader can tell a
         staged pick from one made during the build); the board order becomes `hypothesis_ranked`
-        + `card_ranked`, the same pair a serial build writes. No role is read or consumed: the
-        snapshot is the only copy this node owns."""
+        + `card_ranked`, the same pair a serial build writes — but ONLY while it is still the
+        latest board decision in the log (`_staged_card_ranking`). Cards are built in selection
+        order, not staging order, and the pair is a last-write-wins register the Card selector
+        reads, so an older order published after a newer one would change which Card is built
+        next. No role is read or consumed: the snapshot is the only copy this node owns."""
         staged = self._staged_card_ranking(card_id, node_id)
         if staged is None:
             return
-        foresight = staged.get("foresight")
+        row, board_is_latest = staged
+        foresight = row.get("foresight")
         if isinstance(foresight, dict):
             self._emit_role_telemetry(None, "last_foresight", EV_FORESIGHT_SELECTED, node_id,
                                       generation, value={**foresight, "card_id": card_id})
-        board = staged.get("hyp_priority")
-        if isinstance(board, dict):
+        board = row.get("hyp_priority")
+        if isinstance(board, dict) and board_is_latest:
             self._emit_hypothesis_ranked(node_id, generation, pick=board)
 
     def _discard_node_build_telemetry(self, researcher=None, developer=None) -> None:

@@ -106,12 +106,15 @@ class _Model:
         self.forced_requests: list[list] = []
         self.rank_requests: list[list] = []
         self.summaries = 0
+        self.summarized: list[str] = []         # the transcript text each handoff summary was given
+        self.log: list[str] = []                # "chat" / "rank" / "forced" / "summary", in call order
         self.strict = strict
 
     def chat(self, messages, tools=None, tool_choice="auto", **_kw):
         if self.strict:
             _refuse_like_a_strict_endpoint(messages)
         self.chats.append(copy.deepcopy(messages))
+        self.log.append("chat")
         reply = self.script(messages) if callable(self.script) else self.script.pop(0)
         if isinstance(reply, BaseException):
             raise reply
@@ -124,13 +127,17 @@ class _Model:
             if "untested HYPOTHESES" in str(messages[0].get("content")):
                 return {"order": [], "confidence": 0.5, "reason": "board: abstain"}
             self.rank_requests.append(copy.deepcopy(messages))
+            self.log.append("rank")
             return {"order": list(self.order), "confidence": 0.8, "reason": "ranked"}
         self.forced_requests.append(copy.deepcopy(messages))
+        self.log.append("forced")
         return self.forced.pop(0) if self.forced else None
 
     def complete_text(self, messages):
         if str(messages[0].get("content", "")).startswith("You are handing off from"):
             self.summaries += 1
+            self.summarized.append(str(messages[1].get("content", "")))
+            self.log.append("summary")
             return "- the per-depth scorer lives in service/latency_engine.py"
         return "no json here"
 
@@ -157,13 +164,13 @@ class _Developer:
 
 
 def _chain(script, *, order=(1, 0), forced=(), strict=False, unified=True, tools=None,
-           envelope=False, loop_opts=None):
+           envelope=False, loop_opts=None, k=2):
     """The shipped shape by default: panel -> UnifiedAgent -> ToolUsingResearcher."""
     model = _Model(script, order=order, forced=forced, strict=strict)
     researcher = ToolUsingResearcher(model, tools if tools is not None else _Tools(),
                                      evidence_envelope=envelope, loop_opts=loop_opts)
     base = UnifiedAgent(researcher=researcher, developer=_Developer(model)) if unified else researcher
-    panel = ForesightPanelResearcher(base, k=2, client=model, alternatives=True)
+    panel = ForesightPanelResearcher(base, k=k, client=model, alternatives=True)
     return model, researcher, base, panel
 
 
@@ -211,6 +218,28 @@ def test_1_the_unified_chain_continues_candidate_1s_session_in_ONE_request():
     assert chosen.params == {"x": 2.0} and "[foresight: predicted best of 2" in chosen.rationale
     assert panel.last_foresight["alternatives"] == [False, True]
     assert panel.last_foresight["n"] == 2
+
+
+def test_1_a_third_candidate_continues_the_ALREADY_continued_session():
+    """K = 3: the second alternative continues the transcript the first one left — its request
+    starts with the first continuation's final request byte for byte, the first alternative's emit
+    is answered (never a dangling id), and the turn lists BOTH candidates so far."""
+    model, _researcher, _base, panel = _chain([
+        _turn(_read("r1")), _turn(_emit("e1", "cache the per-depth scorer")),
+        _turn(_emit("e2", "batch the shared prompt pages", x=2.0)),
+        _turn(_emit("e3", "prune the beam early", x=3.0))], order=(2, 1, 0), k=3, strict=True)
+    chosen = panel.propose(_state(), None)
+
+    assert len(model.chats) == 4
+    first_alt, second_alt = model.chats[2], model.chats[3]
+    assert json.dumps(second_alt[:len(first_alt)]) == json.dumps(first_alt)
+    tail = second_alt[len(first_alt):]
+    assert [m["role"] for m in tail] == ["assistant", "tool", "user"]
+    assert tail[1]["tool_call_id"] == "e2" and tail[1]["content"].startswith("(recorded:")
+    assert "1. [improve]" in tail[2]["content"] and "2. [improve]" in tail[2]["content"]
+    assert "batch the shared prompt pages" in tail[2]["content"]
+    assert chosen.params == {"x": 3.0}
+    assert panel.last_foresight["alternatives"] == [False, True, True]
 
 
 # ------------------------------------------------------------------ (2) a strict endpoint
@@ -263,6 +292,23 @@ def test_2_a_strict_endpoint_accepts_every_continuation(first_exit):
         assert not any(call["function"]["name"] == "emit" for m in request
                        for call in m.get("tool_calls") or []), (
             "a salvaged emission is not in the transcript — it is restated, never invented")
+
+
+def test_2_only_the_FIRST_emit_of_a_turn_is_recorded_as_a_candidate():
+    """A turn carrying TWO emits: the loop walked the calls in order and returned at the first one it
+    accepted, so the second was never looked at. Recording both would tell the model a proposal
+    nobody accepted is a candidate. MUTATION: answer every open emit with the record -> e1b reads
+    `(recorded: …)`."""
+    model, _researcher, _base, panel = _chain([
+        _turn(_read("r1")),
+        _turn(_emit("e1", "cache the per-depth scorer"), _emit("e1b", "something else", x=9.0)),
+        _turn(_emit("e2", "batch the shared prompt pages", x=2.0))], order=(0, 1), strict=True)
+    chosen = panel.propose(_state(), None)
+
+    answers = {m["tool_call_id"]: m["content"] for m in _alt_request(model) if m.get("role") == "tool"}
+    assert answers["e1"].startswith("(recorded:")
+    assert answers["e1b"].startswith("(not executed"), answers["e1b"]
+    assert chosen.params == {"x": 1.0}, "candidate 1 is the FIRST emit, the one the loop accepted"
 
 
 # ------------------------------------------------------------------ (3) a failure is None
@@ -467,6 +513,41 @@ def test_6_inside_a_handoff_scope_no_note_is_spliced_and_one_summary_is_bought()
     assert json.dumps(request[:len(model.chats[1])]) == json.dumps(model.chats[1])
 
 
+@pytest.mark.parametrize("order, alternative_won", [((1, 0), True), ((0, 1), False)])
+def test_6_the_one_handoff_brief_is_the_CHOSEN_candidates_made_after_the_pick(order, alternative_won):
+    """Summarized as soon as candidate 1 finished (`run_phase(handoff=True)`), the node's only brief
+    described candidate 1 even when the ranker then picked the alternative — and the Developer, which
+    reads the brief, builds the alternative. The summary is DEFERRED to after the pick and distilled
+    from the session up to the CHOSEN candidate's end: the alternative's reads are in it exactly
+    when the alternative won. Still one summary call. MUTATION: keep `handoff=True` for a session ->
+    the summary runs before the ranking and never sees the alternative."""
+    model, _researcher, _base, panel = _chain([
+        _turn(_read("r1")), _turn(_emit("e1", "cache the per-depth scorer")),
+        _turn(_read("a1", "service/prompt_pages.py")),
+        _turn(_emit("e2", "batch the shared prompt pages", x=2.0))], order=order)
+    with handoff_scope():
+        chosen = panel.propose(_state(), None)
+        ledger = list(_handoff_ctx.get())
+
+    assert model.summaries == 1 and len(ledger) == 1
+    assert model.log.index("summary") > model.log.index("rank"), "summarized AFTER the pick"
+    assert ("service/prompt_pages.py" in model.summarized[0]) is alternative_won
+    assert "service/latency_engine.py" in model.summarized[0], "candidate 1's reads, either way"
+    assert chosen.params == ({"x": 2.0} if alternative_won else {"x": 1.0})
+
+
+def test_6_a_session_whose_candidate_1_stands_alone_still_contributes_its_brief():
+    """When nothing is ranked (the continuation failed), the brief is candidate 1's, as it always
+    was — the deferral never loses the node's brief."""
+    model, _researcher, _base, panel = _chain([
+        _turn(_read("r1")), _turn(_emit("e1", "cache the per-depth scorer")),
+        LLMError("HTTP 503: upstream unavailable after retries")])
+    with handoff_scope():
+        panel.propose(_state(), None)
+        ledger = list(_handoff_ctx.get())
+    assert model.summaries == 1 and len(ledger) == 1 and model.rank_requests == []
+
+
 # ------------------------------------------------------------------ (7) the cap and the receipt
 
 def _capped_script():
@@ -516,6 +597,18 @@ def test_7_a_new_call_never_reads_the_previous_calls_published_receipt():
     assert researcher_budget_exhausted(panel) == researcher_budget_exhausted(agent) == ""
 
 
+def test_7_the_cap_never_RAISES_an_operators_smaller_turn_limit():
+    """`agent_max_turns` 3 means an alternative gets 3 turns, never the 8 of
+    `ALTERNATIVE_MAX_TURNS`: the cap is `min(configured, 8)` when one is configured. MUTATION:
+    `replace(max_turns=ALTERNATIVE_MAX_TURNS)` unconditionally -> 8 continuation requests."""
+    model, _researcher, _agent, panel = _chain(
+        _capped_script(), order=(0, 1), forced=[_emission("salvaged alternative", x=3.0)],
+        loop_opts=LoopOptions(max_turns=3))
+    panel.propose(_state(), None)
+    alt_start = model.chats.index(_alt_request(model))
+    assert len(model.chats) - alt_start == 3
+
+
 # ------------------------------------------------------------------ (8) board binding + rotation
 
 def _board(n: int = 6, size: int = 3_900) -> RunState:
@@ -560,6 +653,27 @@ def test_8_an_alternative_binds_to_candidate_1s_window_and_the_board_rotates_onc
     independent = ForesightPanelResearcher(panel.base, k=2, client=model, alternatives=False)
     independent.propose(st, None)
     assert researcher._board_prompt_attempt == 4
+
+
+def test_8_the_session_keeps_THIS_calls_window_when_the_shared_instance_moves_on():
+    """The Researcher is the shared primary: another call can publish its own
+    `_visible_board_cards` while this call's loop runs. The session — and candidate 1's own claim —
+    use the window computed at the top of THIS call. MUTATION: hold `self._visible_board_cards` ->
+    the session carries the other call's (empty) window and every alternative's claim is nulled."""
+    st = _board()
+    shown = next_board_prompt_cards(st, attempt=0)
+    claim = shown[0].id
+    model = _Model([])
+    researcher = ToolUsingResearcher(model, _Tools())
+
+    def reply(_messages):
+        researcher._visible_board_cards = []        # another call published its window meanwhile
+        return _turn(_emit("e1", "cache the per-depth scorer", card_id=claim))
+
+    model.script = reply
+    idea, session = researcher.propose_with_session(st, None)
+    assert idea.card_id == claim
+    assert [card.id for card in session.visible_board_cards] == [card.id for card in shown]
 
 
 # ------------------------------------------------------------------ (9) a copy is bounced

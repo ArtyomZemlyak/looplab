@@ -218,14 +218,21 @@ def run_phase(client, tools, messages, emit_spec, *, label: str, next_label: str
         raise PhaseCancelled(
             f"{label} ended at a turn boundary: the work it belongs to was cancelled")
     if handoff and ledger is not None:      # non-terminal phase in an active scope → contribute a brief
-        # Wrap the summary call in its OWN operation span so it's a distinct, clearly-labeled band in
-        # the UI trace ("handoff-summary") instead of an anonymous complete_text generation buried in
-        # the phase — the summarization is visible/auditable, not a silent extra call.
-        with tracing.operation("handoff-summary", handoff_from=label, handoff_to=next_label):
-            s = summarize_phase(client, messages, phase=label, next_phase=next_label)
-        if s:
-            ledger.append(f"[{label}]\n{s}")
+        _contribute_brief(client, messages, label=label, next_label=next_label, ledger=ledger)
     return result
+
+
+def _contribute_brief(client, messages, *, label: str, next_label: str, ledger: list) -> None:
+    """Distill a finished phase's transcript into the node's handoff ledger — ONE call.
+
+    Shared by `run_phase` and a proposal session's DEFERRED brief (`ProposalSession.publish_brief`)."""
+    # Wrap the summary call in its OWN operation span so it's a distinct, clearly-labeled band in
+    # the UI trace ("handoff-summary") instead of an anonymous complete_text generation buried in
+    # the phase — the summarization is visible/auditable, not a silent extra call.
+    with tracing.operation("handoff-summary", handoff_from=label, handoff_to=next_label):
+        s = summarize_phase(client, messages, phase=label, next_phase=next_label)
+    if s:
+        ledger.append(f"[{label}]\n{s}")
 
 
 # ------------------------------------------------ the foresight panel's ALTERNATIVES (2026-09-29)
@@ -249,15 +256,21 @@ def run_phase(client, tools, messages, emit_spec, *, label: str, next_label: str
 #   siblings — never `tool_loop.py::answered_transcript`, which DELETES the model's own emission. A
 #   SALVAGED emission was forced on a copy (`tool_loop.py::_force_emit`) and is not in the
 #   transcript at all, so the new turn restates every candidate so far.
-# * NO NOTES, NO SECOND SUMMARY: `run_phase(handoff=False, inject_notes=False)`.
-# * A BOUNDED TURN: `ALTERNATIVE_MAX_TURNS` through `LoopOptions.replace`, and an emit whose idea
-#   digest equals an earlier candidate's is bounced — a copy is not an alternative.
+# * NO NOTES, AND ONE SUMMARY OF THE CHOSEN CANDIDATE: `run_phase(handoff=False,
+#   inject_notes=False)` for a continuation, and candidate 1's own handoff summary is DEFERRED
+#   (`ProposalSession.publish_brief`) until the panel has picked — summarized right after candidate
+#   1, the node's only brief described candidate 1's decisions even when the alternative won and the
+#   Developer then built it.
+# * A BOUNDED TURN: `ALTERNATIVE_MAX_TURNS` through `LoopOptions.replace` — never ABOVE an
+#   operator's own smaller `agent_max_turns` — and an emit whose idea digest equals an earlier
+#   candidate's is bounced — a copy is not an alternative.
 
 ALTERNATIVE_MAX_TURNS = 8
-"""Tool turns an alternative may spend. It starts from a transcript that already holds the
-investigation, so it should read little — "read more only if the alternative needs a file you have
-not read" — and a cap is what keeps a model that re-researches from buying a second full session.
-The turn it ends on is announced like every cutoff (`last_budget_exhausted`)."""
+"""Tool turns an alternative may spend — or the operator's own `agent_max_turns` when that is
+smaller, never more. It starts from a transcript that already holds the investigation, so it should
+read little — "read more only if the alternative needs a file you have not read" — and a cap is what
+keeps a model that re-researches from buying a second full session. The turn it ends on is
+announced like every cutoff (`last_budget_exhausted`)."""
 
 # The continuation turn — a PROMPT, so a contract, overridable as `tool_researcher_alternative.md`.
 # `$candidates` is every candidate proposed so far, one numbered line each; it doubles as the
@@ -282,11 +295,15 @@ class ProposalSession:
     included), `visible_board_cards` the board window the model was shown — the one a continuation's
     Card claim must bind against — and `exit` how the loop ended: `emitted` (the accepted emit call
     is the transcript's last turn), `salvaged` (a forced emit, made on a copy), `fallback` (no emit),
-    `error` (the call raised), or "" (never ran)."""
+    `error` (the call raised), or "" (never ran). `ends[i]` is the transcript's length when
+    candidate `i` of the session (0 = the proposal itself) was finished, and `pending_brief` the
+    handoff summary `propose` DEFERRED to the candidate the caller chooses (`publish_brief`)."""
 
     messages: list = field(default_factory=list)
     visible_board_cards: list = field(default_factory=list)
     exit: str = ""
+    ends: list = field(default_factory=list)
+    pending_brief: Optional[tuple] = field(default=None, repr=False)
 
     @property
     def continuable(self) -> bool:
@@ -304,6 +321,20 @@ class ProposalSession:
                 and call.get("id", "") in open_ids for call in turn["tool_calls"])
                 else "salvaged")
         self.exit = exit_kind
+        self.ends.append(len(messages))
+
+    def publish_brief(self, candidate: int) -> None:
+        """Contribute the handoff brief `propose` deferred, distilled from the session UP TO the end
+        of the CHOSEN candidate — once, whatever is asked after. The Developer builds the chosen
+        candidate, so the brief it reads must be about that one's investigation: summarized when
+        candidate 1 finished (as `run_phase` would have), the brief described the loser whenever an
+        alternative won. Choosing candidate 1 gives exactly the brief it always had."""
+        pending, self.pending_brief = self.pending_brief, None
+        if pending is None or not 0 <= candidate < len(self.ends):
+            return
+        client, label, next_label, ledger = pending
+        _contribute_brief(client, self.messages[:self.ends[candidate]], label=label,
+                          next_label=next_label, ledger=ledger)
 
 
 def _open_calls(messages: list) -> tuple[Optional[dict], set]:
@@ -319,23 +350,30 @@ def _open_calls(messages: list) -> tuple[Optional[dict], set]:
 
 def _answer_open_calls(messages: list, emit_name: str) -> None:
     """Answer, in place and in call order, every call of the last tool-calling turn that has no
-    `role: "tool"` answer: the emit with `_EMIT_RECORDED`, a sibling with `_NOT_EXECUTED`.
+    `role: "tool"` answer: the FIRST open emit — the one the loop accepted — with `_EMIT_RECORDED`,
+    every other open call with `_NOT_EXECUTED`.
 
-    The answers go directly after that turn's existing answers, which on every exit the loop has
-    is the END of the transcript — so the prefix a provider cached is left byte for byte."""
+    ONLY THE FIRST open emit was accepted. The loop walks a turn's calls in order and returns at
+    the first emit it accepts (`tool_loop.py::drive_tool_loop`), so a second emit in the same turn
+    was never looked at; recording it too would tell the model a proposal it never had accepted is
+    a candidate. (An emit the validator BOUNCED is already answered with the refusal, so it is not
+    open.) The answers go directly after that turn's existing answers, which on every exit the loop
+    has is the END of the transcript — so the prefix a provider cached is left byte for byte."""
     turn, open_ids = _open_calls(messages)
     if turn is None or not open_ids:
         return
     at = next(i for i in range(len(messages) - 1, -1, -1) if messages[i] is turn) + 1
     while at < len(messages) and isinstance(messages[at], dict) and messages[at].get("role") == "tool":
         at += 1
-    answers = []
+    answers, recorded = [], False
     for call in turn["tool_calls"]:
         if call.get("id", "") not in open_ids:
             continue
         name = (call.get("function") or {}).get("name", "")
+        accepted = name == emit_name and not recorded
+        recorded = recorded or accepted
         answers.append({"role": "tool", "tool_call_id": call.get("id", ""), "name": name,
-                        "content": _EMIT_RECORDED if name == emit_name else _NOT_EXECUTED})
+                        "content": _EMIT_RECORDED if accepted else _NOT_EXECUTED})
     messages[at:at] = answers
 
 
@@ -541,7 +579,10 @@ class ToolUsingResearcher:
         hyp = _hypothesis_system_suffix(getattr(self, "track_hypotheses", True))
         prompt_attempt = int(getattr(self, "_board_prompt_attempt", 0))
         self._board_prompt_attempt = prompt_attempt + 1
-        self._visible_board_cards = next_board_prompt_cards(
+        # THIS call's window, kept in a local as well as published: the instance is the shared
+        # primary, so the attribute may already name another call's window by the time this one's
+        # emit is bound or its session recorded.
+        visible = self._visible_board_cards = next_board_prompt_cards(
             state, getattr(self, "_hyp_order", None), attempt=prompt_attempt)
         # Whether this request offers `list_experiments`: the fitted digest's cut receipt names that
         # call only when it does (`events/digest.py::_fit_receipt`).
@@ -600,12 +641,14 @@ class ToolUsingResearcher:
 
         def _finalize_seen(args):
             exit_kind[0] = "finalized"
-            return self._finalize(args)
+            return self._finalize(args, visible)
 
         def _fallback_seen(msgs):
             exit_kind[0] = "fallback"
             return self._fallback(msgs)
 
+        next_label = ("the Developer (stages → plan → implement)" if getattr(self, "handoff", True)
+                      else "the Developer (single-shot implement)")
         try:
             # Every loop OPTION (the turn/time/context budgets included) is folded into
             # self.loop_opts once in __init__ (see there) — pass the merged bundle straight through,
@@ -615,13 +658,14 @@ class ToolUsingResearcher:
             # P25: `handoff` is True only when a run_phase-based (repo) Developer follows — its
             # stages/plan/implement phases read the brief; the single-shot developers never do,
             # so no summary call is spent there and the label names the developer that ACTUALLY runs.
+            # A SESSION'S SUMMARY IS DEFERRED: the caller holding it may continue it into
+            # alternatives, and the brief must describe the candidate it CHOOSES
+            # (`ProposalSession.publish_brief`) — still one summary call.
             result = run_phase(
                 self.client, self.tools, messages, self._emit_spec(),
                 label="Researcher·propose",
-                next_label=("the Developer (stages → plan → implement)"
-                            if getattr(self, "handoff", True)
-                            else "the Developer (single-shot implement)"),
-                handoff=getattr(self, "handoff", True),
+                next_label=next_label,
+                handoff=getattr(self, "handoff", True) and session is None,
                 finalize=_finalize_seen, fallback=_fallback_seen,
                 validate=self._validate_emit, on_budget=_note_cutoff,
                 on_tool_result=_established_hook(getattr(self, "_established", None), "propose"),
@@ -630,8 +674,11 @@ class ToolUsingResearcher:
                 **fence_kwargs(self.evidence_envelope),
                 **self.loop_opts)
             if session is not None:
-                session.hold(messages, self._visible_board_cards, exit_kind[0])
-            return bind_idea_to_board_card(result, self._visible_board_cards)
+                session.hold(messages, visible, exit_kind[0])
+                ledger = _handoff_ctx.get()
+                if getattr(self, "handoff", True) and ledger is not None:
+                    session.pending_brief = (self.client, "Researcher·propose", next_label, ledger)
+            return bind_idea_to_board_card(result, visible)
         except BudgetExceeded:      # hard budget stop -> propagate and end the run
             raise
         except Exception as e:  # noqa: BLE001 - a transport/endpoint failure (LLMError after retries)
@@ -641,7 +688,7 @@ class ToolUsingResearcher:
             # Hand it the CAUSE, though: the degraded node is the only record that this happened, and a
             # rationale that just says "parse failed" is indistinguishable from a weak model's bad JSON.
             if session is not None:     # a session that raised is never continued
-                session.hold(messages, getattr(self, "_visible_board_cards", []), "error")
+                session.hold(messages, visible, "error")
             return self._fallback(messages, e)
 
     def propose_with_session(self, state: RunState,
@@ -659,8 +706,10 @@ class ToolUsingResearcher:
 
         One more user turn on the transcript that already holds the investigation, run through the
         SAME emit spec, validator (plus a bounce of a copy of an earlier candidate), finalize,
-        evidence fence and loop options as `propose`, with the turn cap `ALTERNATIVE_MAX_TURNS`. The
-        session is continued IN PLACE, so a third candidate sees the second.
+        evidence fence and loop options as `propose`, with the turn cap `ALTERNATIVE_MAX_TURNS`
+        (lowered, never raised, to an operator's smaller one). The session is continued IN PLACE,
+        so a third candidate sees the second, and it runs no handoff summary of its own: the one
+        summary is the chosen candidate's (`ProposalSession.publish_brief`).
 
         None is every failure and never a degraded Idea: a session that is not continuable, a
         transport error, a loop that ended without an emit (its fallback makes NO forced call), or
@@ -715,6 +764,11 @@ class ToolUsingResearcher:
                         "alternative must test a DIFFERENT mechanism, not repeat one")
             return None
 
+        # The cap may only LOWER the operator's own turn limit: `agent_max_turns` 3 means an
+        # alternative gets 3, never 8. 0 / unset is "unlimited", which the cap then bounds.
+        configured = getattr(getattr(self, "loop_opts", None), "max_turns", None)
+        cap = (min(int(configured), ALTERNATIVE_MAX_TURNS) if configured and int(configured) > 0
+               else ALTERNATIVE_MAX_TURNS)
         try:
             result = run_phase(
                 self.client, self.tools, messages, emit_spec,
@@ -723,7 +777,7 @@ class ToolUsingResearcher:
                 validate=_validate_alternative, on_budget=_note_cutoff,
                 on_tool_result=_established_hook(getattr(self, "_established", None), "propose"),
                 **fence_kwargs(self.evidence_envelope),
-                **self.loop_opts.replace(max_turns=ALTERNATIVE_MAX_TURNS))
+                **self.loop_opts.replace(max_turns=cap))
         except (BudgetExceeded, PhaseCancelled):
             session.exit = "error"
             raise
