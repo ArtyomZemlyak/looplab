@@ -180,14 +180,16 @@ node workspaces.
   chat) re-runs an EXISTING node from a chosen stage instead of spawning a new one: `eval` re-scores it
   (keep the idea + code — for an infra/API-key blip), `implement` re-runs only the Developer (keep the
   Researcher's idea — for crashed code), `propose` is a full redo. Any eval-**pipeline** stage name
-  (`train`, `data_prep`, …) is also accepted — it restarts the node's pipeline from that stage,
-  reusing earlier stages' artifacts. Same node id, no proliferation. The command service wakes or
+  (`train`, `data_prep`, …) is also accepted and recorded, but the whole pipeline re-runs: reusing
+  earlier stages' artifacts after a reset is off until it can prove those stages completed in the
+  node's workdir (doc 68, 68.3e). Same node id, no proliferation. The command service wakes or
   attaches the driver automatically. Its exact `command_ack` means the engine accepted that reset
   intent; re-development/re-evaluation may still be running and remains visible as normal run work.
   **re-score, then pause** is the same `eval` reset served as a DRAIN (doc 68 68.3b): the engine the
   command starts evaluates what is owed and pauses (`looplab resume --drain-only`) rather than
   resuming the search; the eval pipeline's **then pause** box serves a stage click the same way, so
-  a rescore from `score` reuses the trained artifacts and stops. It is refused on a run an engine is
+  a rescore from `score` re-evaluates the node and stops (re-running its earlier stages too, while
+  stage reuse is off). It is refused on a run an engine is
   already driving, and wherever the drain itself would refuse (a finalize pending, a resume pending,
   a holdout disclosed, a host-graded split re-carved since the incumbents were measured) — before
   the reset is recorded, or, when the run changed in between, before the drain starts, with the

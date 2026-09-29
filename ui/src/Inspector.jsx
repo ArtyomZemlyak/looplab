@@ -603,7 +603,7 @@ function StagePipeline({ node, runId, id, generation, onToast }) {
       {rows.map((v, i) => <React.Fragment key={i}>
         {runId ? <button type="button" disabled={pendingStage != null} onClick={() => rerun(v.name)}
           className={'eval-pipeline-step' + (v.superseded ? ' superseded' : '')} style={{ '--stage-tone': v.tone }}
-          title={`${v.title} — click to re-run the pipeline FROM here (reuse earlier stages)`}>
+          title={`${v.title} — click to re-run the node from here (earlier stages re-run too: stage reuse is off)`}>
           {v.icon}{v.iconLabel && <span className="sr-only"> {v.iconLabel}</span>} {v.name}</button> : <span
           className={'eval-pipeline-step' + (v.superseded ? ' superseded' : '')} style={{ '--stage-tone': v.tone }}
           title={`${v.title} · historical result`}>
