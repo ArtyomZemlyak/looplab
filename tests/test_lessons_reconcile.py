@@ -753,16 +753,38 @@ def test_the_reconcile_rewrite_bounds_what_it_writes_as_the_append_funnel_does(t
     assert len(load_claim_source_path(mem / "lessons.jsonl", research=False)) == len(rows)
 
 
+def _orjson_only_nesting():
+    """A nesting depth `orjson` reads and THIS interpreter's `json` refuses, or None. Which depths
+    those are is the interpreter's: `json`'s C scanner stops at the recursion limit on 3.11 (~1000)
+    but reads past `orjson`'s 1024 on 3.12 (Windows CI), so a fixed 1010 tested the property on one
+    and inverted it on the other."""
+    import json
+
+    for depth in (1000, 1010, 1020, 1024):
+        text = b"[" * depth + b"]" * depth
+        try:
+            orjson.loads(text)
+        except orjson.JSONDecodeError:
+            continue
+        try:
+            json.loads(text)
+        except (ValueError, RecursionError):
+            return depth
+    return None
+
+
 def test_the_scan_decodes_with_the_locked_reads_decoder(tmp_path, monkeypatch):
     """A row only `orjson` reads — nesting past `json`'s depth, under `orjson`'s — was judged stale by
     the pre-lock scan (an `orjson` read) and paid for, while the locked read (`json`) could not see
     it to retire (critic 2026-09-27, driven). One decoder for both reads. MUTATION: scan with
-    `orjson` -> the row is paid for."""
-    import orjson
-
+    `orjson` -> the row is paid for. The reverse divergence is the portable half: `json` reads NaN,
+    `orjson` refuses it (see the next test)."""
+    depth = _orjson_only_nesting()
+    if depth is None:
+        pytest.skip("this interpreter's json reads every depth orjson does; the NaN case covers it")
     mem = tmp_path / "mem"
     eng = _engine(tmp_path, reflection_priors=True, memory_dir=str(mem), comparative_lessons=True)
-    line = orjson.dumps(_STALE_PAIR_ROW)[:-1] + b',"note":' + b"[" * 1010 + b"]" * 1010 + b"}"
+    line = orjson.dumps(_STALE_PAIR_ROW)[:-1] + b',"note":' + b"[" * depth + b"]" * depth + b"}"
     assert orjson.loads(line)["statement"] == _STALE_PAIR_ROW["statement"], "orjson reads it"
     (mem / "lessons.jsonl").parent.mkdir(parents=True, exist_ok=True)
     (mem / "lessons.jsonl").write_bytes(line + b"\n")
@@ -770,6 +792,26 @@ def test_the_scan_decodes_with_the_locked_reads_decoder(tmp_path, monkeypatch):
     monkeypatch.setattr(eng, "_reflect_client", lambda: client)
     eng.lessons.reconcile_lessons(_flipped_state())
     assert client.prompts == [], "a row the retirement cannot read was paid for"
+
+
+def test_a_row_only_json_reads_is_judged_by_the_scan_too(tmp_path, monkeypatch):
+    """The other direction, on every interpreter: `json` reads a NaN, `orjson` refuses it. The locked
+    retirement (`json`) sees this stale row, so the scan must see it too and judge it — an `orjson`
+    scan skipped it and the row the retirement could have retired stayed unjudged. MUTATION: scan
+    with `orjson` -> nothing is judged."""
+    import json
+
+    mem = tmp_path / "mem"
+    eng = _engine(tmp_path, reflection_priors=True, memory_dir=str(mem), comparative_lessons=True)
+    line = json.dumps({**_STALE_PAIR_ROW, "note": float("nan")}).encode("utf-8")
+    with pytest.raises(orjson.JSONDecodeError):
+        orjson.loads(line)
+    (mem / "lessons.jsonl").parent.mkdir(parents=True, exist_ok=True)
+    (mem / "lessons.jsonl").write_bytes(line + b"\n")
+    client = FakeClient("P1 [BAD] this change regressed the metric\n")
+    monkeypatch.setattr(eng, "_reflect_client", lambda: client)
+    eng.lessons.reconcile_lessons(_flipped_state())
+    assert len(client.prompts) == 1, "the stale row the retirement reads was never judged"
 
 
 def test_a_stale_row_the_lesson_fence_refuses_for_another_reason_is_not_judged(tmp_path,

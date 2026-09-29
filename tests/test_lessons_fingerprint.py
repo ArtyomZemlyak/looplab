@@ -1194,6 +1194,9 @@ def test_the_migration_reads_under_the_lock_and_leaves_what_it_cannot_round_trip
     store.write_bytes(("\r\n".join([past, at_bound, *left, ints, deep, "\u3000"]) + "\r\n")
                       .encode("utf-8"))
     os.chmod(store, 0o644)
+    # the mode this platform recorded for it: 0o644 on POSIX, 0o666 on Windows (only the read-only
+    # bit is real there) -- the property is "kept", not a POSIX literal
+    own_mode = stat.S_IMODE(store.stat().st_mode)
     assert rebound_lesson_fingerprints(store, apply=False) == {
         "rows": 7, "past_fence": 4, "rebound": 1, "left_quarantined": 3, "applied": False}
 
@@ -1216,7 +1219,7 @@ def test_the_migration_reads_under_the_lock_and_leaves_what_it_cannot_round_trip
     assert lines[-1] == b"" and all(line.endswith(b"\r") for line in lines[:-1]), "CRLF kept"
     assert [line[:-1].decode("utf-8") for line in lines[2:5]] == left, "left byte for byte"
     assert json.loads(lines[0])["fingerprint_omitted"] == len(long_fp) - 256
-    assert stat.S_IMODE(store.stat().st_mode) == 0o644, "the store's own mode"
+    assert stat.S_IMODE(store.stat().st_mode) == own_mode, "the store's own mode"
     (tmp_path / "read").mkdir()
     (tmp_path / "read" / "lessons.jsonl").write_bytes(b"\n".join(
         line for line in lines if not line.startswith(b"[[")))

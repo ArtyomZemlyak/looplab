@@ -15,6 +15,7 @@ import pytest
 from typer.testing import CliRunner
 
 from looplab.cli import app
+from looplab.core.atomicio import rmtree_readonly_aware
 from looplab.core.errors import ConfigRefusal
 from looplab.core.models import Idea, durable_idea_payload
 from looplab.engine.seed_from_run import resolve_seed, seed_intent, seed_verdict
@@ -153,12 +154,10 @@ def test_an_existing_run_is_continued_even_once_its_seed_source_is_gone(isolated
     """MEDIUM (critic 2026-09-26, driven): the seed was resolved before `run` knew the directory
     already held a run, so re-running a seeded run whose source had since been removed was REFUSED
     ("no run directory"), the log unchanged. Nothing is resolved for an existing run."""
-    import shutil
-
     src, _prior = _source(isolated)
     new = isolated / "runs" / "cont"
     assert _run(new, "--max-nodes", "2", "-s", f"seed_from_run={src}").exit_code == 0
-    shutil.rmtree(src)
+    rmtree_readonly_aware(src)  # holds the read fence's read-only sitecustomize.py
     again = _run(new, "--max-nodes", "3", "-s", f"seed_from_run={src}")
     assert again.exit_code == 0, again.output
     assert "ignored: this run directory already has events" in again.output

@@ -22,6 +22,8 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 from typer.testing import CliRunner  # noqa: E402
 
+from looplab.core.atomicio import rmtree_readonly_aware  # noqa: E402
+
 from factories import http_run_generation  # noqa: E402
 from looplab.cli import app  # noqa: E402
 from looplab.events.eventstore import EventStore  # noqa: E402
@@ -107,7 +109,7 @@ def test_a_replay_re_seeds_from_the_birth_row_even_after_the_source_is_gone(root
 
     src, seeded = _source_and_seeded(root)
     born = _birth_row(seeded)
-    shutil.rmtree(src)
+    rmtree_readonly_aware(src)  # holds the read fence's read-only sitecustomize.py
     spawns: list = []
     monkeypatch.setattr(control_router, "_spawn_engine", _replacement_spawn(seeded, spawns))
     with TestClient(make_app(root)) as client:
@@ -124,7 +126,7 @@ def test_a_replay_re_seeds_the_experiment_even_after_the_source_was_replayed(roo
 
     src, seeded = _source_and_seeded(root)
     born = _birth_row(seeded)
-    shutil.rmtree(src)                               # the source regenerated: same ids, new code
+    rmtree_readonly_aware(src)                       # the source regenerated: same ids, new code
     regenerated = EventStore(src / "events.jsonl")
     (src / "events.jsonl").parent.mkdir(parents=True, exist_ok=True)
     regenerated.append("run_started", {"run_id": "src", "task_id": "toy", "goal": "g",
@@ -215,7 +217,7 @@ def test_a_replay_child_appends_the_frozen_row_and_resolves_nothing(root, monkey
 
     src, seeded = _source_and_seeded(root)
     born = _birth_row(seeded)
-    shutil.rmtree(src)
+    rmtree_readonly_aware(src)  # holds the read fence's read-only sitecustomize.py
     frozen = root / ".frozen-seed.json"
     frozen.write_text(json.dumps(born))
     monkeypatch.setenv(RUN_RESET_OPERATION_ENV, "0" * 8 + "-0000-4000-8000-" + "0" * 12)
