@@ -10,7 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-149 routes on 132 paths; 10 deprecated; 27 with a declared response model.
+150 routes on 133 paths; 10 deprecated; 27 with a declared response model.
 
 ### `/api`
 
@@ -57,6 +57,12 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 |---|---|---|---|---|
 | `GET` | `/api/auth/status` | *Auth Status* (no docstring) | — |  |
 | `POST` | `/api/auth/verify` | *Auth Verify* (no docstring) | — |  |
+
+### `/api/campaign-runs`
+
+| method | path | summary | response model | deprecated |
+|---|---|---|---|---|
+| `GET` | `/api/campaign-runs` | The runs inside the root's CAMPAIGN folders (`<root>/<folder>/<run>`, doc 70 70.1), grouped | — |  |
 
 ### `/api/cross-run`
 

@@ -993,6 +993,20 @@ def build_router(srv) -> APIRouter:
                  "engine_running": _alive(
                      root / s["run_id"], bool(s.get("resume_pending")))} for s in out]
 
+    @router.get("/api/campaign-runs")
+    def list_campaign_runs():
+        """The runs inside the root's CAMPAIGN folders (`<root>/<folder>/<run>`, doc 70 70.1), grouped
+        by folder, as the run list's own rows. READ-ONLY: a nested run is not addressable by the
+        per-run routes yet (one path segment, `AppState.run_dir`'s direct-child rule), so each folder
+        carries `run_root`, the path `looplab ui --run-root` serves as a root where its runs are.
+        Liveness is the same lock probe `/api/runs` overlays; unlike there, nothing is reconciled or
+        spawned — a list GET that could start an engine inside a campaign would be a new write."""
+        view = srv.campaign_runs()
+        return {**view, "folders": [
+            {**folder, "runs": [{**row, "engine_running": _engine_liveness(
+                Path(folder["run_root"]) / row["run_id"])} for row in folder["runs"]]}
+            for folder in view["folders"]]}
+
     # Late-bind the runs list WITH its live-fact overlay. The cross-run scope reports it was bound
     # for read `srv.run_membership()` now — a report GET must not probe every run's lock (doc 25
     # SR-12) — so this has no production consumer left; `serve/router_wiring.py` records that as an

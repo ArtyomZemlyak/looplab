@@ -331,6 +331,12 @@ class AppState:
         from looplab.serve.run_projections import run_summaries
         return run_summaries(self, only=only)
 
+    def campaign_runs(self) -> dict:
+        """The runs inside the root's campaign folders (doc 70 70.1); see
+        `run_projections.campaign_runs`. Side-effect free, like `run_membership`."""
+        from looplab.serve.run_projections import campaign_runs
+        return campaign_runs(self)
+
     def run_membership(self) -> list:
         """Only the columns `reports._scope_run_ids` joins on. Side-effect free by construction."""
         from looplab.serve.run_projections import run_membership

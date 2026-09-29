@@ -74,6 +74,14 @@ looplab ui --run-root runs --host 127.0.0.1 --port 8765
 
 Then open the printed URL. The server serves the **built** React bundle from `ui/dist/`.
 
+**Campaign folders.** A run written as `runs/<campaign>/<seed>` (`looplab run --out` takes any path)
+is not a run of the root, so it is not a row of the run list. Such runs are listed below the list, under
+**Campaign folders**, grouped by folder and read-only: a run is addressed by one path segment, so they
+cannot be opened from this root yet. Each folder shows the command that serves it as the root —
+`looplab ui --run-root runs/<campaign>` — where its runs open, live, like any other. A folder that is
+itself a run (or a run still in setup) is never read as a campaign: its children are that run's own
+node workspaces.
+
 ## What it does
 
 - **Live runs** — watch a run unfold in real time over SSE: the lineage graph, per-node metrics,

@@ -69,7 +69,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // Assistant context, Concept empty-state navigation and Trust summary. Optional Card and
     // Concept styles load with their lazy screens; the initial shell remains below its ceiling.
     // 2026-09-29 merge of master into the branch: measured 578,765 B JS / 56,311 B CSS — both sides' features, every closure still lazy.
-    js: { gzip: 566 * KIB },
+    // 2026-09-29 campaign folders (doc 70 70.1): measured 580,162 B JS — a lazy CampaignRuns chunk
+    // below the run list; the owner List closure grew 46 B (its lazy import), every gate still passes.
+    js: { gzip: 567 * KIB },
     css: { gzip: 55 * KIB },
   },
   individual: {

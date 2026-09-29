@@ -42,6 +42,9 @@ const MapView = lazy(() => import('./MapView.jsx'))
 const ScopeReport = lazy(() => import('./ScopeReport.jsx'))
 const RunCompare = lazy(() => import('./RunCompare.jsx'))
 const PortfolioConcepts = lazy(() => import('./PortfolioConcepts.jsx'))
+// The runs inside the root's campaign folders (doc 70 70.1): read-only, so a lazy finder below
+// the list rather than rows of it — every caller of `/api/runs` opens what it lists.
+const CampaignRuns = lazy(() => import('./CampaignRuns.jsx'))
 // App writes `looplab` when the operator leaves through the LoopLab menu; `settings` is the value
 // already persisted in older history entries and returns focus to the same control.
 const returnsToGlobalMenu = control => control === 'looplab' || control === 'settings'
@@ -2941,6 +2944,8 @@ export default function RunList({ onOpen, onGlobalNavigate,
               onClick={() => setListLimit(listLimit + LIST_PAGE_SIZE)}>Show more</button>
             <span className="muted">{displayedRuns.length}/{visible.length}</span>
           </div>}
+          {view === 'list' && sel === ALL && runs && <LazyBoundary label="campaign folders"
+            resetKey="campaigns"><CampaignRuns /></LazyBoundary>}
         </div>
       </div>
 
