@@ -287,8 +287,11 @@ def bound_toolset(tools, state, parent=None):
     stay one object. The hook's contract (`tools/_base.py`) is what makes that sound — `bind_state`
     REBINDS attributes on the provider it is called on, it does not mutate shared containers. The
     price is that an attribute a provider memoizes across calls (`CrossRunTools`' capsule read) is
-    now memoized per call — recomputed at most once, and only by a call that uses the tool. A provider
-    with no `bind_state` has nothing to bind and is shared as it is. A `CompositeTools` is viewed all
+    now memoized per call — recomputed at most once, and only by a call that uses the tool. A memo
+    a bind recomputes EAGERLY is the exception and is shared by reference instead: the knowledge
+    index, whose rebuild re-embeds (paid with `embed_model`) — `tools/knowledge_tools.py::
+    _SharedIndex` (crit_v53 N2). A provider with no `bind_state` has nothing to bind and is
+    shared as it is. A `CompositeTools` is viewed all
     the way down, keeping its route, its capabilities and its spec ORDER, which is what the model is
     offered.
     """

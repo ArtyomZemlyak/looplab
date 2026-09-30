@@ -136,3 +136,100 @@ def test_the_harmonic_build_is_memoized_too(tmp_path):
     tools._build_index()                                # nothing moved
     assert embed.calls == cold, (
         f"the harmonic rebuild re-embedded {embed.calls - cold} unchanged record(s)")
+
+
+# ------------------------------------------------ per-call views share one index (crit_v53 N2)
+def _counting_builds(monkeypatch):
+    builds = []
+    real = KnowledgeTools._build_index
+
+    def counting(self):
+        builds.append(self._scope_key(self._scope))
+        return real(self)
+
+    monkeypatch.setattr(KnowledgeTools, "_build_index", counting)
+    return builds
+
+
+def test_every_per_call_view_adopts_the_index_its_scope_already_owes(tmp_path, monkeypatch):
+    """crit_v53 N2: a view is a shallow copy of a provider that is itself never bound, so every view
+    saw "unbound -> bound" and rebuilt, re-embedding what the construction-time memo lacked — driven,
+    5 proposals made 6 builds and 7 embeddings where the shared binding had made 2 and 3. MUTATION:
+    `_adopt_or_build` always builds -> one build (and one paid embedding) per view."""
+    from looplab.agents.tool_loop import bound_toolset
+    from looplab.core.models import RunState
+
+    builds = _counting_builds(monkeypatch)
+    notes, embed = _notes(tmp_path, 2), _CountingEmbedder()
+    tools = KnowledgeTools(str(notes), embed=embed)
+    (notes / "late.md").write_text("# late\nwritten after the provider was built\n", encoding="utf-8")
+    state = RunState(goal="g", direction="min", run_id="r1")
+    views = [bound_toolset(tools, state) for _ in range(5)]
+    assert len(builds) == 2 and embed.calls == 3, (builds, embed.texts)
+    assert len({id(v._index) for v in views}) == 1 and views[0]._index is not tools._index
+
+    # A search after the sources moved rebuilds ONCE; the next view's search adopts it.
+    (notes / "later.md").write_text("# later\nanother note\n", encoding="utf-8")
+    first = views[0].execute("kb_search", {"query": "note"})
+    adopted = views[1].execute("kb_search", {"query": "note"})
+    assert len(builds) == 3 and embed.calls == 3 + 1 + 2, embed.texts   # 1 record + 2 queries
+    # …and the adopting view reports the revision it now searches, not the one it was bound at.
+    assert first.splitlines()[0] == adopted.splitlines()[0]
+    assert views[2]._index is not views[0]._index            # bound before: keeps its own until asked
+    assert bound_toolset(tools, state)._index is views[0]._index
+    # A view still holding the OLD memo that owes a build starts from the freshest one: only the
+    # newest note is embedded, not `later.md` again. MUTATION: build from the view's own memo.
+    (notes / "latest.md").write_text("# latest\none more\n", encoding="utf-8")
+    views[2].execute("kb_search", {"query": "note"})
+    assert len(builds) == 4 and embed.calls == 6 + 1 + 1, embed.texts
+
+
+def test_a_view_of_another_run_builds_its_own_scope_and_leaves_the_others_alone(tmp_path,
+                                                                                monkeypatch):
+    """Adoption is keyed by the SCOPE (`LessonScope`): a view of another run never reads this run's
+    cases, and binding it does not move a view already bound."""
+    from looplab.agents.tool_loop import bound_toolset
+    from looplab.core.models import RunState
+
+    builds = _counting_builds(monkeypatch)
+    tools = KnowledgeTools(str(_notes(tmp_path, 1)), embed=_CountingEmbedder())
+    one = bound_toolset(tools, RunState(goal="g", direction="min", run_id="r1"))
+    two = bound_toolset(tools, RunState(goal="other goal", direction="max", run_id="r2"))
+    assert len(builds) == 3 and one._index is not two._index
+    assert one._scope.run_id == "r1" and two._scope.run_id == "r2"
+    again = bound_toolset(tools, RunState(goal="g", direction="min", run_id="r1"))
+    assert len(builds) == 4 and again._index is not one._index   # the slot holds the LAST scope
+
+
+def test_proposals_through_the_researcher_build_the_index_once(tmp_path, monkeypatch):
+    """The critic's scenario through `ToolUsingResearcher.propose`, which binds a view per call."""
+    from test_foresight_alternatives import _Model, _emit, _turn
+
+    from looplab.agents.agent import ToolUsingResearcher
+    from looplab.core.models import RunState
+
+    builds = _counting_builds(monkeypatch)
+    notes, embed = _notes(tmp_path, 2), _CountingEmbedder()
+    tools = KnowledgeTools(str(notes), embed=embed)
+    (notes / "late.md").write_text("# late\nwritten mid-run\n", encoding="utf-8")
+    researcher = ToolUsingResearcher(_Model(lambda msgs: _turn(_emit("e", "idea"))), tools)
+    state = RunState(goal="g", direction="min", run_id="r1")
+    for _ in range(4):
+        researcher.propose(state, None)
+    assert (len(builds), embed.calls) == (2, 3), (builds, embed.texts)
+
+
+def test_a_view_never_adopts_an_index_another_embedder_built(tmp_path):
+    """The shared index is keyed by the EMBEDDER as well as the scope: a re-wired provider's views
+    must not search one model's vectors with another model's query. MUTATION: drop the embedder
+    clause from the adoption -> the second model embeds nothing and the index mixes two spaces."""
+    from looplab.agents.tool_loop import bound_toolset
+    from looplab.core.models import RunState
+
+    tools = KnowledgeTools(str(_notes(tmp_path, 3)), embed=_CountingEmbedder())
+    state = RunState(goal="g", direction="min", run_id="r1")
+    bound_toolset(tools, state)
+    second = _CountingEmbedder()
+    tools.embed = second
+    view = bound_toolset(tools, state)
+    assert second.calls == 3 and view._vector_memo_embedder is second

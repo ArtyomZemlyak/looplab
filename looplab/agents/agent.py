@@ -596,7 +596,9 @@ class ToolUsingResearcher:
         # A PER-CALL VIEW bound to this proposal's state (critic 2026-09-30, crit_v51 F4, driven):
         # `bind_state` MUTATES a provider, and this instance is the shared primary — two proposals
         # on two threads rebound ONE toolset, and one call's `run_goal` answered the other run's
-        # goal. `bound_toolset` is the view triage already uses; on one thread nothing changes.
+        # goal. `bound_toolset` is the view triage already uses. A view is new per call, so a
+        # provider's memo is per call too, unless it is shared on purpose: the knowledge index is
+        # (`tools/knowledge_tools.py::_SharedIndex`, crit_v53 N2, a rebuild per proposal otherwise).
         tools = bound_toolset(self.tools, state, parent)
         from looplab.agents.hints import render_hint_directives
         hint_block = render_hint_directives(state.pending_hints)

@@ -10,6 +10,7 @@ import json
 import os
 import posixpath
 import re
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -679,6 +680,29 @@ _NO_NOTES = ("(there are NO knowledge notes at all — the note set is operator-
              "about past CASES, which only `kb_search` reads.)")
 
 
+class _SharedIndex:
+    """The ONE index every per-call view of a `KnowledgeTools` adopts (critic 2026-09-30, crit_v53 N2).
+
+    `agents/tool_loop.py::bound_toolset` hands each call a SHALLOW copy of the provider and binds the
+    copy, so the provider itself is never bound and keeps its construction-time scope. Each view then
+    saw "unbound -> bound" and rebuilt the index eagerly, whether or not the model searched, and
+    re-embedded every record the construction-time memo lacked. Driven: five proposals, one note
+    written after construction, made 6 builds and 7 embeddings where the shared binding had made
+    2 and 3, and with `embed_model` set each embedding is a paid call. This container is shared by
+    reference, so a view ADOPTS what an earlier view built for the same scope and sources. The lock
+    serializes the one build a scope or source change owes, so two views never pay for it twice. What
+    it publishes is never mutated again, because a build starts a new index and a new memo."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.key: tuple | None = None
+        self.revision = ""
+        self.index = None
+        self.memo: dict = {}
+        self.memo_embedder = None
+        self.case_window_health = None
+
+
 class KnowledgeTools:
     def __init__(self, knowledge_dir: str | None = None,
                  cases_path: str | None = None, k: int = 3, embed=None,
@@ -707,7 +731,42 @@ class KnowledgeTools:
         # it, and a memo that outlived that would mix two embedding spaces in one index.
         self._vector_memo: dict[str, list] = {}
         self._vector_memo_embedder = self.embed
+        self._shared = _SharedIndex()
         self._build_index()
+        self._publish_index()
+
+    @staticmethod
+    def _scope_key(scope) -> tuple:
+        return (scope.bound, scope.run_uid, scope.run_id, scope.task_id, scope.direction,
+                scope.goal_terms)
+
+    def _publish_index(self) -> None:
+        shared = self._shared
+        shared.key, shared.revision, shared.index = (self._scope_key(self._scope),
+                                                     self._index_revision, self._index)
+        shared.memo, shared.memo_embedder = self._vector_memo, self._vector_memo_embedder
+        shared.case_window_health = self._case_window_health
+
+    def _adopt_or_build(self, revision: str | None = None) -> None:
+        """This view's index: the shared one when it was built for this scope (and, given a
+        `revision`, over these sources) by this embedder; else one build, from the freshest memo,
+        that every later view adopts (`_SharedIndex`)."""
+        shared = getattr(self, "_shared", None)
+        if shared is None:
+            self._build_index()
+            return
+        with shared.lock:
+            if (shared.index is not None and shared.key == self._scope_key(self._scope)
+                    and shared.memo_embedder is self.embed
+                    and (revision is None or shared.revision == revision)):
+                self._index, self._index_revision = shared.index, shared.revision
+                self._vector_memo, self._vector_memo_embedder = shared.memo, shared.memo_embedder
+                self._case_window_health = shared.case_window_health
+                return
+            if shared.memo_embedder is self.embed:
+                self._vector_memo, self._vector_memo_embedder = shared.memo, shared.memo_embedder
+            self._build_index()
+            self._publish_index()
 
     def bind_state(self, state, parent=None) -> None:
         """Bind case retrieval to the same live scope as lessons and cross-run tools.
@@ -717,13 +776,10 @@ class KnowledgeTools:
         filtering after a lossy merge cannot recover a compatible member that was discarded.
         """
         next_scope = LessonScope.of(state)
-        current = (self._scope.bound, self._scope.run_uid, self._scope.run_id,
-                   self._scope.task_id, self._scope.direction, self._scope.goal_terms)
-        updated = (next_scope.bound, next_scope.run_uid, next_scope.run_id,
-                   next_scope.task_id, next_scope.direction, next_scope.goal_terms)
+        current, updated = self._scope_key(self._scope), self._scope_key(next_scope)
         self._scope = next_scope
         if current != updated:
-            self._build_index()
+            self._adopt_or_build()
 
     def _source_revision(self) -> str:
         """Stable identity of the files feeding the in-memory index; unavailable files stay explicit."""
@@ -958,7 +1014,7 @@ class KnowledgeTools:
             if name == "kb_search":
                 revision = self._source_revision()
                 if revision != self._index_revision:
-                    self._build_index()
+                    self._adopt_or_build(revision)
                 q = args.get("query", "")
                 # Embed the query in the SAME space as the index. When a HARMONIC (abstraction-keyed)
                 # index is in use (self.abstract set — _build_index keys each entry by
