@@ -322,13 +322,29 @@ def _neutralize_fences(text: str, label: str) -> str:
     return _sub_through_format_chars(_fence_pattern(label), text, _mark)
 
 
+# Default_Ignorable_Code_Point OUTSIDE category Cf (Unicode's DerivedCoreProperties): they render as
+# nothing too — the combining grapheme joiner, the Khmer inherent vowels, the Mongolian free variation
+# selectors, the variation selectors — plus the unassigned code points the standard reserves as
+# default-ignorable (critic 2026-09-30, crit_v46 L4, driven: U+034F, U+FE0F, U+E0100 and U+180B
+# each kept a forged marker live). The Hangul fillers are left out: they render as a blank, and the
+# matcher already reads one as the gap between two words of a marker.
+_DEFAULT_IGNORABLE_NOT_CF = ((0x034F, 0x034F), (0x17B4, 0x17B5), (0x180B, 0x180D),
+                             (0x180F, 0x180F), (0x2065, 0x2065), (0xFE00, 0xFE0F),
+                             (0xFFF0, 0xFFF8), (0xE0000, 0xE0000), (0xE0002, 0xE001F),
+                             (0xE0080, 0xE0FFF))
+
+
 @functools.lru_cache(maxsize=1)
 def _format_chars() -> dict:
-    """Every Unicode FORMAT character (category Cf) this Python knows, as a `str.translate` table
-    that deletes them. Built on first use, because the scan costs ~0.2 s — and only a NON-ASCII text
-    ever asks for it (every Cf character is outside ASCII), so an ASCII log never pays it."""
-    return {cp: None for cp in range(sys.maxunicode + 1)
-            if unicodedata.category(chr(cp)) == "Cf"}
+    """Every Unicode FORMAT character (category Cf) this Python knows, and every other
+    default-ignorable one (`_DEFAULT_IGNORABLE_NOT_CF`), as a `str.translate` table that deletes
+    them. Built on first use, because the scan costs ~0.2 s — and only a NON-ASCII text ever asks for
+    it (every such character is outside ASCII), so an ASCII log never pays it."""
+    table = {cp: None for cp in range(sys.maxunicode + 1)
+             if unicodedata.category(chr(cp)) == "Cf"}
+    for low, high in _DEFAULT_IGNORABLE_NOT_CF:
+        table.update((cp, None) for cp in range(low, high + 1))
+    return table
 
 
 def _sub_through_format_chars(pattern: "re.Pattern", text: str, mark) -> str:
@@ -347,15 +363,29 @@ def _sub_through_format_chars(pattern: "re.Pattern", text: str, mark) -> str:
     if text.isascii():
         return pattern.sub(mark, text)
     table = _format_chars()
-    if len(text.translate(table)) == len(text):
+    if len(text.translate(table)) == len(text) and unicodedata.is_normalized("NFKC", text):
         return pattern.sub(mark, text)
-    keep = [i for i, ch in enumerate(text) if ord(ch) not in table]
-    view = "".join(text[i] for i in keep)
+    # The VIEW: every ignorable character dropped and every other one folded to its compatibility
+    # form (NFKC, character by character), each view character remembering the original one it
+    # came from. A fullwidth `ＥＮＤ ＵＮＴＲＵＳＴＥＤ＿ＲＵＮ＿ＥＶＩＤＥＮＣＥ` reads as the close to a model
+    # and folded to nothing here (crit_v46 L4); it folds to the ASCII marker in the view.
+    view_chars: list = []
+    owner: list = []
+    folds: dict = {}
+    for index, ch in enumerate(text):
+        if ord(ch) in table:
+            continue
+        folded = ch if ch.isascii() else folds.setdefault(ch, unicodedata.normalize("NFKC", ch))
+        view_chars.extend(folded)
+        owner.extend([index] * len(folded))
+    view = "".join(view_chars)
     out, cursor = [], 0
     for match in pattern.finditer(view):
         if match.end() == match.start():
             continue                      # a label is never empty; a zero-width match folds nothing
-        start, end = keep[match.start()], keep[match.end() - 1] + 1
+        start, end = owner[match.start()], owner[match.end() - 1] + 1
+        if start < cursor:
+            continue                      # two matches inside one folded character: fold it once
         out.append(text[cursor:start])
         out.append(mark(match))
         cursor = end
