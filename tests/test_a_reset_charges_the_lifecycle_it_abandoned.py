@@ -315,3 +315,67 @@ def test_the_finish_gate_charges_a_reset_that_landed_after_entry(tmp_path):
     assert begun == []
     assert [e.data["eval_seconds"] for e in reporting.store.read_all()
             if e.type == "node_failed"] == [1.5]
+
+
+# --------------------------------------------- the canary's seconds and the salvage row (crit_v46 L1)
+def _canary(seconds, passed, *, retry=0, attempt=0):
+    extra = {"retry": retry} if retry else {}
+    return [("eval_canary_started", {"node_id": 0, "generation": 0, "attempt": attempt,
+                                     "code_digest": "d", "timeout": 900, **extra}),
+            ("eval_canary_finished", {"node_id": 0, "generation": 0, "attempt": attempt,
+                                      "code_digest": "d", "passed": passed, "eval_seconds": seconds,
+                                      "log_dir": "/x", **extra})]
+
+
+def _claim(attempt=0, **extra):
+    return ("eval_invocation_claimed", {"node_id": 0, "generation": 0, "attempt": attempt,
+                                        "invocation_id": f"inv-{attempt}", **extra})
+
+
+def test_a_new_attempt_s_canary_ends_an_older_orphan_settle_s_window():
+    """crit_v46 L1 A, driven: a dead process's 100 s settle, then the resumed attempt's canary fails
+    (2 s, no invocation claimed) and a pause withholds it at DECIDE_REPAIR carrying those 2 s — the
+    withhold closed the OLDER window, and the reset charged 2 s. MUTATION: drop the canary-start
+    clause -> 2.0 again."""
+    assert _charges(_claim(), _settle(100.0), *_canary(2.0, False), _withhold(seconds=2.0),
+                    _RESET) == [(0, 0, 102.0)]
+    assert _charges(_claim(), _settle(100.0), *_canary(2.0, False), _repaired(2.0),
+                    _RESET) == [(0, 0, 102.0)]
+
+
+def test_a_passed_canary_nothing_carried_is_charged():
+    """crit_v46 L1 B, driven: a passed 900 s canary, a death mid full-eval, a reset — nothing, because
+    the resume skips a passed canary by code digest. MUTATIONS: drop the canary rows from the sum or
+    from `abandoned_lifecycle_charges`' spend rows -> []."""
+    assert _charges(*_canary(900.0, True), _claim(), _RESET) == [(0, 0, 900.0)]
+    # A resumed process repeating that invocation: its settle is its own clock, not the canary's.
+    # MUTATION: let the resumed settle carry the dead process's canary -> 50.0.
+    assert _charges(*_canary(900.0, True), _claim(), _claim(after_interrupted_attempt=True),
+                    _settle(50.0), _RESET) == [(0, 0, 950.0)]
+
+
+def test_a_canary_is_charged_exactly_once_when_its_attempt_carries_it():
+    """The settle, an `after_canary` withhold, a repair row and a terminal each carry the canary that
+    ran inside their attempt's clock — never a second time here. A canary RETRY is the same attempt:
+    both canaries ride on its settle. MUTATIONS: charge the canary at its own settle; let a retry's
+    start end the window; replace instead of accumulate across a retry."""
+    assert _charges(*_canary(9.0, True), _claim(), _settle(20.0), _RESET) == [(0, 0, 20.0)]
+    after = _withhold(seconds=9.0, at="after_canary")
+    assert _charges(*_canary(9.0, True), after, _RESET) == [(0, 0, 9.0)]
+    assert _charges(*_canary(2.0, False), _repaired(2.0), _RESET) == [(0, 0, 2.0)]
+    done = ("node_evaluated", {"node_id": 0, "generation": 0, "metric": 0.5, "eval_seconds": 20.0})
+    assert _charges(*_canary(9.0, True), _claim(), _settle(20.0, outcome="ok"), done, _RESET) == []
+    retried = [*_canary(3.0, False), *_canary(5.0, True, retry=1)]
+    assert _charges(*retried, _claim(), _settle(12.0), _RESET) == [(0, 0, 12.0)]
+    assert _charges(*retried, _claim(), _RESET) == [(0, 0, 8.0)]
+
+
+def test_a_salvage_cause_row_does_not_close_the_window_it_carries_nothing_for():
+    """crit_v46 L1 C, driven: a 4,560 s settle, the salvage-cause fix's row (no seconds), a death and
+    a reset charged nothing — and a resumed chain's seed was 0. MUTATION: let the salvage row carry."""
+    from looplab.engine.evaluate import _durable_prior_seconds
+    salvage = ("node_repaired", {"node_id": 0, "generation": 0, "attempt": 0, "files": {},
+                                 "deleted": [], "triage_action": "salvage_cause_fix", "changed": [],
+                                 "salvaged_metric": 0.7})
+    assert _charges(_claim(), _settle(4560.0), salvage, _RESET) == [(0, 0, 4560.0)]
+    assert _durable_prior_seconds(_log(_claim(), _settle(4560.0), salvage), 0, 0) == 4560.0

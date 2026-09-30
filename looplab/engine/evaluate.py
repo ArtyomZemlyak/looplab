@@ -582,8 +582,23 @@ def _carries_settle(e, node_id: int, generation: int) -> bool:
                 and event_generation_binds(d, generation, legacy_attempt=True))
     if e.type == EV_EVAL_ATTEMPT_WITHHELD and d.get("at") != "decide_repair":
         return False
+    # A salvage-cause fix's row carries NO seconds — the salvaged attempt's are its terminal's — so
+    # it cannot close the window it would otherwise end (critic 2026-09-30, crit_v46 L1 C, driven:
+    # a 4,560 s settle, that row, a death and a reset charged nothing).
+    if (e.type == EV_NODE_REPAIRED
+            and str(d.get("triage_action") or "") == SALVAGE_CAUSE_TRIAGE_ACTION):
+        return False
     return (e.type in (EV_NODE_REPAIRED, EV_DEPS_INSTALLED, EV_EVAL_ATTEMPT_WITHHELD)
             and _durable_row_belongs(d, node_id, generation))
+
+
+def _positive_seconds(raw) -> float:
+    """A row's `eval_seconds` as a finite non-negative float — 0.0 for junk, a bool, NaN or inf."""
+    try:
+        seconds = 0.0 if isinstance(raw, bool) else float(raw or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return seconds if math.isfinite(seconds) and seconds > 0 else 0.0
 
 
 def _durable_orphan_settle_seconds(events, node_id: int, generation: int) -> float:
@@ -602,22 +617,48 @@ def _durable_orphan_settle_seconds(events, node_id: int, generation: int) -> flo
     finalizes from is always an orphan here, so that phase prices its terminal off this sum and adds
     nothing for the settle itself."""
     spent = 0.0
-    open_seconds = None
+    # The seconds of this lifecycle's latest step that no row has carried yet, and whether that step
+    # was a SETTLE or a CANARY (crit_v46 L1): a canary runs inside the attempt's clock (`_t0`), so the
+    # settle that follows it carries it, and a canary nothing followed is an orphan like a settle.
+    open_seconds, open_kind = None, None
     for e in events or []:
         d = e.data if isinstance(e.data, Mapping) else {}
-        if e.type == EV_EVAL_INVOCATION_SETTLED:
+        if e.type in (EV_EVAL_INVOCATION_SETTLED, EV_EVAL_CANARY_STARTED, EV_EVAL_CANARY_FINISHED,
+                      EV_EVAL_INVOCATION_CLAIMED):
             if not _durable_row_belongs(d, node_id, generation):
                 continue
-            if open_seconds is not None:
-                spent += open_seconds
-            raw = d.get("eval_seconds")
-            try:
-                seconds = 0.0 if isinstance(raw, bool) else float(raw or 0.0)
-            except (TypeError, ValueError):
-                seconds = 0.0
-            open_seconds = seconds if math.isfinite(seconds) and seconds > 0 else 0.0
-        elif open_seconds is not None and _carries_settle(e, node_id, generation):
-            open_seconds = None
+            if e.type == EV_EVAL_INVOCATION_CLAIMED:
+                # A RESUMED process repeating an invocation a dead one left open: a canary that dead
+                # process ran is inside no clock of this one, so the settle that follows cannot carry
+                # it (the resume skips a passed canary by code digest).
+                if open_kind == "canary" and d.get("after_interrupted_attempt") is True:
+                    spent += open_seconds
+                    open_seconds, open_kind = None, None
+            elif e.type == EV_EVAL_INVOCATION_SETTLED:
+                if open_kind == "settle":
+                    spent += open_seconds
+                open_seconds, open_kind = _positive_seconds(d.get("eval_seconds")), "settle"
+            elif e.type == EV_EVAL_CANARY_STARTED:
+                # A NEW ATTEMPT begins (a retry of the same canary does not): whatever the last one
+                # left uncarried never will be. A failed canary claims no invocation, so without this
+                # its carrying row closed an OLDER orphan settle's window (crit_v46 L1 A, driven: a
+                # 100 s orphan, a failed 2 s canary withheld, a reset — 2 s charged).
+                if not d.get("retry") and open_seconds is not None:
+                    spent += open_seconds
+                    open_seconds, open_kind = None, None
+            else:
+                # Held OPEN until a row carries it — its attempt's settle, an `after_canary` or
+                # `decide_repair` withhold, a repair row, the terminal. A passed canary whose full
+                # eval a dead process never settled was charged nowhere: the resume skips it by code
+                # digest (crit_v46 L1 B, driven: 900 s, a death mid-eval, a reset — nothing).
+                seconds = _positive_seconds(d.get("eval_seconds"))
+                open_seconds = (open_seconds or 0.0) + seconds if open_kind == "canary" else seconds
+                open_kind = "canary"
+        elif open_seconds is not None and (
+                _carries_settle(e, node_id, generation)
+                or (open_kind == "canary" and e.type == EV_EVAL_ATTEMPT_WITHHELD
+                    and d.get("at") == "after_canary" and _durable_row_belongs(d, node_id, generation))):
+            open_seconds, open_kind = None, None
     return spent + (open_seconds or 0.0)
 
 
@@ -673,7 +714,7 @@ def abandoned_lifecycle_charges(events, state) -> list:
         if e.type in (EV_NODE_EVALUATED, EV_NODE_FAILED):
             terminals.setdefault(node_id, []).append(d)
         elif e.type in (EV_NODE_REPAIRED, EV_DEPS_INSTALLED, EV_EVAL_ATTEMPT_WITHHELD,
-                        EV_EVAL_INVOCATION_SETTLED):
+                        EV_EVAL_INVOCATION_SETTLED, EV_EVAL_CANARY_FINISHED):
             generation = coerce_node_id({"node_id": d.get("generation")})
             if generation is not None and generation >= 0:
                 spent.add((node_id, generation))
