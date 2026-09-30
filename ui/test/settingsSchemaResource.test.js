@@ -273,7 +273,9 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   the engine searches itself, the operator's injects left out. The Python half moved too.
   //   247 -> 248 (2026-09-30): `lesson_prior_claim_decisions` — the cross-run prior withholds a
   //   lesson whose claim the operator rejected. The Python half moved too.
-  assert.equal(Object.keys(schema.fieldByKey).length, 248)
+  //   248 -> 249 (2026-09-30): `plateau_stop_nodes` — K settled endgame nodes without a new leader
+  //   finish the run. The Python half moved too.
+  assert.equal(Object.keys(schema.fieldByKey).length, 249)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

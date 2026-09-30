@@ -63,6 +63,7 @@ from looplab.engine.setup_phase import SetupPhaseMixin
 from looplab.engine.forced_requests import ForcedRequestsMixin
 from looplab.engine.audit import AuditMixin
 from looplab.engine.cadence import occupancy_due
+from looplab.engine.plan import PLATEAU_STOP_REASON, plateau_rearm_floor, plateau_stop_due
 from looplab.engine.card_reservation import (CardReservationMixin, _BuildReservation,
                                              scored_anchor)
 from looplab.engine.speculation_gate import CalibrationRuntime, admit_speculation_lane
@@ -1995,6 +1996,21 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                                        max_es=max_es, drain_forced_request=True) == "break":
                     break
                 continue
+            # THE PLATEAU STOP (doc 70 70.4, `Settings.plateau_stop_nodes`; 0 = off, the default):
+            # K settled endgame nodes after the search leader end the SEARCH (`engine/plan.py::
+            # plateau_stop_due`), here — above every lane that builds, like the ceilings — and the run
+            # then ends the way a spent node budget ends it (`_plateau_stop_turn`). NOT over an
+            # operator's queued node-creating request: that is new breadth the operator asked for,
+            # served below before the stop is asked again. An operator's node extension or the reopen
+            # of a finished run re-arms it (`plateau_rearm_floor`).
+            _plateau = (plateau_stop_due(state, self._plateau_stop_nodes,
+                                         floor=plateau_rearm_floor(decision_events))
+                        if self._plateau_stop_nodes else None)
+            if _plateau is not None and self._node_creating_forced_head(state) is None:
+                if await self._plateau_stop_turn(state, _plateau, decision_seq=decision_seq,
+                                                 max_es=max_es) == "break":
+                    break
+                continue
 
             # docs/29 F1 — the run's WIDTH re-pins HERE, from what the research proposed, for the same
             # reason the AUTO depth re-resolves below: a stable decision prefix, no PRODUCER in flight
@@ -2488,9 +2504,51 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             self._ack_commands(self.store.read_all(), final_drain=True)
         return "break"
 
-    async def _handle_no_actions(self, state, *, decision_seq) -> str:
+    async def _plateau_stop_turn(self, state, why: str, *, decision_seq: int,
+                                 max_es: Optional[float]) -> str:
+        """One turn of the plateau stop (doc 70 70.4): the search is over, and the run ends the way a
+        spent node budget ends it. Returns the outer loop's signal, like `_settle_terminal_gate`.
+
+        Nothing is created — the turn never reaches a lane that builds — and in this order: an open
+        Card build head settles first (the terminal ladder's order, `_settle_terminal_gate`); an
+        evaluation in flight is drained; a node already BUILT is evaluated, because its build is paid
+        and its measurement may be the new leader that cancels the stop on the next turn; then the
+        empty-action ladder — noise floor, confirm, holdout, approval — finishes with `reason:
+        plateau`. NOT `_settle_terminal_gate` itself: that is the CEILINGS' ending, which skips the
+        ladder, and a run that stopped because it stopped improving still owes its champion the
+        confirmation, the holdout and the approval its operator configured."""
+        if self._close_card_build_before_terminal_gate(state, max_es):
+            return "continue"
+        if self._evals_inflight():
+            await self._drain_adopted_evals()
+            await self._raise_deferred_eval_budget_stop()
+            return "continue"
+        aborted = set(state.aborted_nodes)
+        owed = {node.id: node.attempt for node in state.pending_nodes() if node.id not in aborted}
+        if owed:
+            await self._dispatch_evals([{"kind": "evaluate", "node_id": node_id}
+                                        for node_id in owed], state, max_es, research=False)
+            events = self.store.read_all()
+            after = fold(events)
+            if any((node := after.nodes.get(node_id)) is None or node.attempt != generation
+                   or node.status is not NodeStatus.pending or node_id in after.aborted_nodes
+                   for node_id, generation in owed.items()):
+                return "continue"
+            # Nothing the dispatch was handed moved — an admission refused every one. The ladder
+            # runs over them on this fresh fold rather than handing the same nodes back on every
+            # turn, as a spent ceiling finishes over a node it never started.
+            _LOG.warning("plateau stop: node(s) %s stayed pending through their dispatch",
+                         ", ".join(map(str, sorted(owed))))
+            state, decision_seq = after, (events[-1].seq if events else -1)
+        _LOG.info("%s — ending the search", why)
+        return await self._handle_no_actions(state, decision_seq=decision_seq,
+                                             finish_reason=PLATEAU_STOP_REASON)
+
+    async def _handle_no_actions(self, state, *, decision_seq,
+                                 finish_reason: Optional[str] = None) -> str:
         """The empty-action ladder: noise floor -> confirm -> holdout -> HITL approval -> finish
-        (doc 25 XP-06).
+        (doc 25 XP-06). `finish_reason` names an ending the ladder was handed (the plateau stop,
+        `_plateau_stop_turn`); None is the spent node budget's, which states none.
 
         Lifted verbatim out of the run loop's `if not actions:` branch, which — like the ES-05
         `creates` branch before it — always continued or broke and never fell through. Its six
@@ -2541,8 +2599,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                     return "continue"
             if best is not None:
                 return "break"  # awaiting approval -> stop without finishing
-        finish_data = ({"reason": "no_eligible_candidate"}
-                       if state.best() is None else {})
+        finish_data = ({"reason": "no_eligible_candidate"} if state.best() is None
+                       else {"reason": finish_reason} if finish_reason else {})
         if self._finish_with_report_if_quiescent(
                 state, finish_data, after_seq=decision_seq):
             return "break"

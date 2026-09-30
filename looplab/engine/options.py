@@ -246,6 +246,10 @@ class EngineOptions:
     # divergence-table row on `endgame_stall_nodes`' ground: a bare `Engine(...)` gains no new
     # dispatch it did not ask for.
     endgame_inject_recut: bool = False
+    # doc 70 70.4 (2026-09-30): K settled endgame nodes after the search leader end the search
+    # (`Settings.plateau_stop_nodes`). 0 = never — the default here AND in `Settings`, so not a
+    # divergence-table row: a stop only an operator's number turns on.
+    plateau_stop_nodes: int = 0
     model_arms: dict = field(default_factory=dict)   # doc 52 row 19: {arm: "model[@cost]"} the bandit may route a build to
     complexity_cue: bool = False         # A0d: breadth-keyed prompt hint
     budget_aware: bool = False           # A5: surface remaining eval budget into the prompt

@@ -254,6 +254,13 @@
           "help": "The endgame reserve is a fraction of the budget the engine searches itself: nodes you inject are left out of it, and a batch of injects that moves the reserve's start re-plans it. Without it a batch that pushed the run past the reserve's start left the engine only the ensemble and champion sweeps. The endgame never starts earlier than it would without your injects. Off = the reserve is a fraction of the whole budget (the historical rule). Needs an endgame reserve above 0."
         },
         {
+          "key": "plateau_stop_nodes",
+          "label": "Stop on a plateau after",
+          "type": "int",
+          "default": 0,
+          "help": "End the search once its endgame has spent this many nodes after the leader without a new one; the run then finishes as it would at the end of its node budget — nodes already built are measured first, then confirmation, holdout and approval run as configured. Without it a run whose search had stalled spent the rest of its node budget on merges and sweeps that never beat the leader. A node that lands as a new leader cancels the stop; injects you queued are served first, and adding nodes or reopening a finished run re-arms it. 0 = never stop on a plateau (the default). Needs an endgame reserve above 0."
+        },
+        {
           "key": "complexity_cue",
           "label": "Complexity cue",
           "type": "bool",

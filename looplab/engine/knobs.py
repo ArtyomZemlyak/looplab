@@ -153,6 +153,9 @@ class EngineKnobs:
     # doc 69 69.25: the reserve is cut from the engine's share of the budget — the operator's
     # injected nodes left out (`engine/plan.py::operator_injected`, read by `_ensure_plan`).
     _endgame_inject_recut = Knob("endgame_inject_recut", bool)
+    # doc 70 70.4: K settled endgame nodes without a new search leader end the search
+    # (`engine/plan.py::plateau_stop_due`); 0 = never, the default everywhere.
+    _plateau_stop_nodes = Knob("plateau_stop_nodes", lambda v: max(0, int(v or 0)))
     # doc 52 row 19: the model ARMS the bandit may route a build to — `{arm: (model, cost)}`;
     # the configured Developer model is the implicit `default` arm. Inert without
     # `operator_bandit`, which is the policy's knob, and without a declared arm.

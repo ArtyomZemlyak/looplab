@@ -1006,6 +1006,17 @@ class Settings(BaseSettings):
     # byte (`EngineOptions` and a pre-field snapshot: `LEGACY_CONFIG_SNAPSHOT_DEFAULTS`). Inert
     # without a plan (`endgame_reserve_frac` 0) and in a run with no injected node.
     endgame_inject_recut: bool = True
+    # THE PLATEAU STOP (doc 70 70.4): a hard stall moves the endgame earlier and never ENDS the run —
+    # the budget ran on to `max_nodes` without a new leader. With K > 0, K settled nodes inside the
+    # plan's endgame window after the SEARCH leader (`engine/plan.py::plateau_leader` — the best raw
+    # metric, not the champion the confirm pass re-ranks), none of which took its place, end the search
+    # (`engine/plan.py::plateau_stop_due`), and the run ends the way a spent node budget ends it: what
+    # is built is evaluated, then the empty-action ladder (noise floor, confirm, holdout, approval)
+    # finishes with `reason: plateau` (`orchestrator.py::_plateau_stop_turn`). An operator's queued
+    # node-creating request is served first; a node extension or a finished run's reopen re-arms it
+    # (`plateau_rearm_floor`). 0 = never, the default everywhere (it only removes spend, so no LEGACY
+    # row). Inert without a plan (`endgame_reserve_frac` 0).
+    plateau_stop_nodes: int = Field(default=0, ge=0, le=1_000_000)
     # A0d (AIRA): inject a dynamic complexity hint into the draft/improve prompt keyed on the
     # node's child count (few children -> keep minimal; many -> escalate to ensembling/HPO).
     complexity_cue: bool = False

@@ -45,6 +45,9 @@ _IGNORED_FAILURE_REASONS = set(BENIGN_TERMINAL_REASONS)
 _BUDGET_REASONS = {
     "time_budget": "The run reached its wall-clock budget.",
     "eval_budget": "The run reached its evaluation-compute budget.",
+    # doc 70 70.4: the operator's `plateau_stop_nodes` (`engine/plan.py::PLATEAU_STOP_REASON`).
+    "plateau": ("The run stopped on a plateau: its endgame spent the configured number of nodes "
+                "(plateau_stop_nodes) without a new leader."),
 }
 _FAILED_FINISH_REASONS = {"error", "leakage", "no_eligible_candidate"}
 _STOPPED_FINISH_REASONS = {"aborted", "finalized"}

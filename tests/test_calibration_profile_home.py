@@ -410,7 +410,12 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               goes 279 -> 280 and both pins are re-set (the pre-change tree re-derives
 #               e2d334bf…). INERT for a calibration replicate: it runs under `EngineOptions`, whose
 #               `lesson_prior_claim_decisions` is False.
-_EXPECTED_DIGEST = "sha256:75718f291ddda123d29737d06c453b3976a2395a6f63904add49af893a15ac20"
+#   2026-09-30  + plateau_stop_nodes (K settled endgame nodes without a new leader finish the run,
+#               doc 70 70.4). The 'field set changed too' branch: exactly `['plateau_stop_nodes']`
+#               added and `[]` removed; `_EXPECTED_FIELD_COUNT` goes 280 -> 281 and both pins are
+#               re-set (the pre-change tree re-derives 75718f29…). INERT for a calibration replicate:
+#               its default is 0 (never stop) in `Settings` and `EngineOptions` alike.
+_EXPECTED_DIGEST = "sha256:364851ee2bd0975e59a87c01274d12f21b7ed4f0861c3a239ea1a2e131ac8874"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -925,7 +930,8 @@ _EXPECTED_DIGEST = "sha256:75718f291ddda123d29737d06c453b3976a2395a6f63904add49a
 #   2026-09-30  + strategist_budget_brief (doc 69 69.25): 277 -> 278; see the digest history.
 #   2026-09-30  + endgame_inject_recut (doc 69 69.25): 278 -> 279; see the digest history.
 #   2026-09-30  + lesson_prior_claim_decisions (doc 69 69.21): 279 -> 280; see the digest history.
-_EXPECTED_FIELD_COUNT = 280
+#   2026-09-30  + plateau_stop_nodes (doc 70 70.4): 280 -> 281; see the digest history.
+_EXPECTED_FIELD_COUNT = 281
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

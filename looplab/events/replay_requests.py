@@ -93,17 +93,26 @@ def _on_budget_extend(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
                 # sequences behave identically before and after process restart without retroactively
                 # throttling legacy-only logs.
                 st.budget_overrides["llm_broker_total"] = _value
-    _raw_add = d.get("add_nodes")
-    if _raw_add is not None and not isinstance(_raw_add, bool):
-        if not (isinstance(_raw_add, float) and (
-                not math.isfinite(_raw_add) or not _raw_add.is_integer())):
-            try:
-                _add = int(_raw_add)
-                if 0 < _add <= 1_000_000:
-                    st.budget_overrides["add_nodes"] = (
-                        int(st.budget_overrides.get("add_nodes", 0)) + _add)
-            except (TypeError, ValueError, OverflowError):
-                pass
+    _add = accepted_add_nodes(d.get("add_nodes"))
+    if _add:
+        st.budget_overrides["add_nodes"] = int(st.budget_overrides.get("add_nodes", 0)) + _add
+
+
+def accepted_add_nodes(raw) -> int:
+    """The node delta one `budget_extend` row's `add_nodes` GRANTS, 0 when the fold refuses it: a
+    bool, a non-finite or fractional float, an unparseable value, or one outside `(0, 1_000_000]`.
+    The ONE reading, shared with `engine/plan.py::plateau_rearm_floor` (doc 70 70.4), which asks
+    "did the operator give this run more nodes here?" of the same rows the fold sums."""
+    if raw is None or isinstance(raw, bool):
+        return 0
+    if isinstance(raw, float) and (not math.isfinite(raw) or not raw.is_integer()):
+        return 0
+    try:
+        add = int(raw)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return add if 0 < add <= 1_000_000 else 0
+
 
 def _on_hint(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Append-only by default; a `replace` hint supersedes all prior standing directives

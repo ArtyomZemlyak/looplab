@@ -29,7 +29,7 @@ SETTINGS_UI_SCHEMA_VERSION = 2
 # here reading as if 207 were derived while it is typed, which is the drift it warns about. The
 # unforgeable gate is `SETTINGS_UI_SCHEMA_KEYSET_REVISION` further down; this integer is the
 # human-readable half the docs sentence quotes, and `_load_schema` refuses when the two disagree.
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 248
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 249
 # On the KEYSET REVISION below: DERIVED, and deliberately no longer a hand-pinned review gate: a
 # bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
@@ -406,7 +406,11 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # the passive cross-run prior withholds a lesson whose claim the operator rejected (doc 69 69.21). A
 # row because it decides what every role is told from other runs, and it is ON in the product
 # surface. Verified by INTERSECTION: the 247 previous keys plus exactly that one, none removed.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "2a12b67988c56e4f44e06779e2740696dfe7bdfc4c097cbcbe2080d74b79c098"
+# 248 -> 249 on 2026-09-30: `plateau_stop_nodes`, beside `endgame_inject_recut` — how many settled
+# endgame nodes after the search leader end the search on a plateau (doc 70 70.4; 0 = never). A row
+# because it is an operator's stopping rule beside the node budget. Verified by INTERSECTION: the 248
+# previous keys plus exactly that one, none removed.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "cddee7735674b37ccb9a4efd6eecaf8db785cc02cb5c6acbb22003182446f2d0"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

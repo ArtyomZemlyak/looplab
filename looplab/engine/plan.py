@@ -165,6 +165,119 @@ def operator_injected(events, nodes) -> int:
     return sum(1 for node_id in ids if node_id in nodes)
 
 
+# The `run_finished.reason` of the plateau stop (doc 70 70.4), a slug like `time_budget`, so the
+# attention feed can name it (`serve/attention.py::_BUDGET_REASONS`).
+PLATEAU_STOP_REASON = "plateau"
+
+
+def plateau_leader(state) -> Optional[int]:
+    """The node the SEARCH's own objective last improved on, or None: the first node, in id order,
+    holding the best raw search metric among the settled nodes that may count toward the best
+    (`core/fitness.py::counts_toward_best`). A later node that only TIES it did not improve on it.
+
+    Not `RunState.best_node_id`. The champion is re-ranked by the confirm pass, the holdout, a
+    simplification tie and an approval — and the first two are the end-of-search ladder the plateau
+    stop hands the run to (`orchestrator.py::_plateau_stop_turn`), so a stop measured on the champion
+    would reopen the very search it ended the moment confirmation crowned another node."""
+    from looplab.core.fitness import counts_toward_best, is_usable_metric
+    flagged = set(getattr(state, "breed_excluded", None) or ())
+    aborted = set(getattr(state, "aborted_nodes", None) or ())
+    leader = None
+    for node in sorted(state.evaluated_nodes(), key=lambda n: n.id):
+        if not (counts_toward_best(node, flagged, aborted) and is_usable_metric(node.metric)):
+            continue
+        if leader is None or state.is_better(node.metric, leader.metric):
+            leader = node
+    return None if leader is None else leader.id
+
+
+def plateau_rearm_floor(events) -> int:
+    """The first node id the plateau may count (doc 70 70.4): the next id after the last point the
+    operator gave the run MORE SEARCH — a `budget_extend` whose `add_nodes` the fold grants
+    (`events/replay_requests.py::accepted_add_nodes`), or a `resume`/`run_reopened` of a FINISHED
+    run. 0 when neither happened. A pure function of the log, like the fold.
+
+    Without it a run the stop finished could never be continued: reopened with twelve more nodes,
+    it re-read the same K nodes after the same leader and finished again before building one."""
+    from looplab.core.models import coerce_node_id
+    from looplab.events.replay_requests import accepted_add_nodes
+    from looplab.events.types import (EV_BUDGET_EXTEND, EV_NODE_CREATED, EV_RESUME,
+                                      EV_RUN_FINISHED, EV_RUN_REOPENED)
+    next_id, floor, finished = 0, 0, False
+    for event in events:
+        data = event.data if isinstance(event.data, dict) else {}
+        if event.type == EV_NODE_CREATED:
+            node_id = coerce_node_id(data)
+            if node_id is not None:
+                next_id = max(next_id, node_id + 1)
+        elif event.type == EV_RUN_FINISHED:
+            finished = True
+        elif event.type in (EV_RESUME, EV_RUN_REOPENED):
+            if finished:
+                floor = next_id
+            finished = False
+        elif event.type == EV_BUDGET_EXTEND and accepted_add_nodes(data.get("add_nodes")):
+            floor = next_id
+    return floor
+
+
+def plateau_nodes(state, *, floor: int = 0) -> tuple[Optional[int], int]:
+    """`(leader_id, n)`: how many SETTLED nodes inside the plan's endgame window came after the search
+    leader (`plateau_leader`) without taking its place — the nodes an operator's
+    `Settings.plateau_stop_nodes` is counted in (doc 70 70.4). `(None, 0)` with no plan or no leader.
+
+    The window is the CURRENT plan row's: `[endgame_start, endgame_end)` for a bounded stall episode,
+    from `endgame_start` to the end of the budget otherwise — so a bounded episode the plan already
+    `reopened` counts nothing (breadth resumed), while the ordinary reserve and the permanent stall
+    endgame of `endgame_stall_nodes` 0 do. Only ids AFTER the leader and at or past `floor`
+    (`plateau_rearm_floor`) count, so a new leader and an operator's extension each restart the
+    count. A node still pending has not answered yet, and one that ended for a reason that says
+    nothing about the experiment (`core/models.py::BENIGN_TERMINAL_REASONS`: superseded, a dropped
+    Card, an operator abort) was not an attempt."""
+    from looplab.core.models import BENIGN_TERMINAL_REASONS, NodeStatus
+    plan = getattr(state, "plan", None)
+    if not isinstance(plan, dict):
+        return None, 0
+    try:
+        start = int(plan["endgame_start"])
+        end = plan.get("endgame_end")
+        end = None if end is None else int(end)
+    except (KeyError, TypeError, ValueError):
+        return None, 0
+    leader = plateau_leader(state)
+    if leader is None:
+        return None, 0
+    low = max(start, leader + 1, int(floor or 0))
+    aborted = set(getattr(state, "aborted_nodes", None) or [])
+    count = 0
+    for node in (getattr(state, "nodes", None) or {}).values():
+        if node.id < low or (end is not None and node.id >= end):
+            continue
+        if node.status is NodeStatus.pending or node.tombstoned or node.id in aborted:
+            continue
+        if str(getattr(node, "error_reason", "") or "") in BENIGN_TERMINAL_REASONS:
+            continue
+        count += 1
+    return leader, count
+
+
+def plateau_stop_due(state, stop_nodes: int, *, floor: int = 0) -> Optional[str]:
+    """Why the SEARCH should end on a plateau, or None (doc 70 70.4, `Settings.plateau_stop_nodes`).
+
+    A hard stall moves the endgame earlier (`replan`) and never ends the run: the budget ran on to
+    `max_nodes` without a new leader. With `stop_nodes` K > 0, K settled endgame nodes after the
+    search leader (`plateau_nodes`, from `floor` on) end the search, and the run then ends the way a
+    spent node budget ends it (`orchestrator.py::_plateau_stop_turn`). `stop_nodes <= 0` — the
+    default everywhere — never stops."""
+    if not isinstance(stop_nodes, int) or isinstance(stop_nodes, bool) or stop_nodes <= 0:
+        return None
+    leader, count = plateau_nodes(state, floor=floor)
+    if leader is None or count < stop_nodes:
+        return None
+    return (f"plateau: {count} endgame node(s) after node {leader} produced no new leader "
+            f"(plateau_stop_nodes={stop_nodes})")
+
+
 def in_endgame(plan: Optional[dict], total_nodes: int) -> bool:
     """Inside the reserve: `endgame_start <= n`, and `n < endgame_end` when the row bounds its
     episode. A row without `endgame_end` — every row before bounded episodes, and every non-stall

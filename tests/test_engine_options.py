@@ -403,6 +403,8 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         # …and the operator's claim decisions in the passive prior (doc 69 69.21), a prompt flag on
         # the same frozen ground.
         lesson_prior_claim_decisions=settings.lesson_prior_claim_decisions,
+        # …and the plateau stop (doc 70 70.4), 0 in both.
+        plateau_stop_nodes=settings.plateau_stop_nodes,
         # …and the judges' evidence fence (review 2026-09-22, TAT-02), ON in Settings and OFF in
         # the bare library for the reason frozen in tests/test_options_divergence.py (a prompt flag).
         evidence_envelope=settings.evidence_envelope,
