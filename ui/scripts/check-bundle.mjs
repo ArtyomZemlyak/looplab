@@ -81,7 +81,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // 2026-09-30 result clarity: measured 587,246 B JS / 57,353 B CSS. Assistant's lazy
     // summary reads the cached run list; Inspector explains scores and repeats separately.
     // Initial shell remains 80.9 KiB JS / 35.8 KiB CSS, with no new provider/detail request.
-    js: { gzip: 574 * KIB },
+    // 2026-09-30 inline model check: measured 589,781 B JS. Settings and Assistant
+    // reuse one health/recovery component; the inline panel loads only when opened.
+    js: { gzip: 576 * KIB },
     css: { gzip: 57 * KIB },
   },
   individual: {
@@ -159,7 +161,8 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // concise descriptions share the existing Config renderer. Lazy boundaries remain unchanged.
       // 2026-09-30 result clarity: measured 400,869 B JS / 46,371 B CSS; Inspector's
       // recorded result, repeat checks and comparison qualifications share this route.
-      limits: { js: { gzip: 392 * KIB }, css: { gzip: 46 * KIB } },
+      // Shared health extraction changes compression streams: 401,716 B JS.
+      limits: { js: { gzip: 393 * KIB }, css: { gzip: 46 * KIB } },
     },
     {
       name: 'valid review DAG route',
@@ -171,7 +174,8 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-09-28 Windows build: 261,870 B; review still excludes owner panel code.
       // 2026-09-29 merge of master into the branch: measured 264,378 B JS.
       // 2026-09-30 first-run model status: measured 265,441 B JS in this closure.
-      limits: { js: { gzip: 260 * KIB }, css: { gzip: 41 * KIB } },
+      // Same shared-component extraction: measured 266,639 B JS; route boundaries hold.
+      limits: { js: { gzip: 261 * KIB }, css: { gzip: 41 * KIB } },
     },
     {
       name: 'owner Concepts route',

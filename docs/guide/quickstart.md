@@ -14,7 +14,10 @@ and LoopLab's internal research roles. For setup from a fresh checkout, use
    makes one provider request and may be billed. The local defaults (`qwen3:8b` at
    `http://localhost:11434/v1`) require a running Ollama server with that model pulled;
    saved values alone do not prove the model is reachable. The first-run Assistant shows
-   the saved model and the last explicit test result on this page. Return to
+   the saved model and the last explicit test result on this page. **Check connection…**
+   opens the same explicit **Test active LLM** control beside your draft; opening it only
+   reads settings. If a prior request has no verified outcome, **Check previous result**
+   recovers its receipt without starting another provider call. Return to
    Runs after saving. **Experiments & resources** and **Time & model budgets** set defaults
    for new runs. Blank time limits and zero model budgets mean no cap. Cost budgets
    use estimates and require provider prices; Assistant chat is outside those run budgets.

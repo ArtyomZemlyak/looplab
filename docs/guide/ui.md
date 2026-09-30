@@ -16,6 +16,15 @@ keep the complete settings catalogue available; **Technical details** explains e
 An offline engine demonstration is available through the
 [CLI walkthrough](cli-walkthrough.md).
 
+Before the first run, **Check connection…** in Assistant opens a model check beside the
+composer. Your draft stays in place. Opening the block only reads saved settings;
+**Test active LLM** starts the provider request and may be billed. It uses the same
+server-resolved active configuration and recovery mechanism as Settings. If you leave
+mid-request, reopening offers **Check previous result**, which looks up the same operation
+without starting a new provider call. A terminal unknown outcome keeps a visible warning;
+a new check requires the existing explicit acknowledgment of possible repeated billing.
+Connection errors appear in the block; **Edit model settings** opens setup.
+
 For a run controlled by Codex or Claude Code, the first experiment can wait for that
 agent's decision. The empty Lineage view links to **Agent cycle**, which lists current
 admission and finish requirements. A live UI or engine alone does not show whether an

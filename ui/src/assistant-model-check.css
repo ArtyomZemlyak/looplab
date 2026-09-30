@@ -1,0 +1,5 @@
+.asst-model-status { flex-wrap: wrap; text-align: left; }
+.asst-model-check { flex-basis: 100%; border-top: 1px solid var(--line-2); margin-top: 8px; padding-top: 10px; }
+.asst-model-check p { margin: 6px 0 10px; font-size: 13px; line-height: 1.5; }
+.asst-model-check .llm-health-detail, .asst-model-check .llm-health-note { font-size: 12px; line-height: 1.5; white-space: normal; }
+.asst-model-check .llm-health-result { flex-basis: 100%; }

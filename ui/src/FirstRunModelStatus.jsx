@@ -2,11 +2,15 @@ import React, { useEffect, useState } from 'react'
 import { usePoll } from './hooks.js'
 import { deadlineGet } from './util.js'
 import { MODEL_CHECK_EVENT, modelConnectionView, readModelCheck } from './modelConnection.js'
+import './assistant-model-check.css'
+
+const AssistantModelCheck = React.lazy(() => import('./AssistantModelCheck.jsx'))
 
 export default function FirstRunModelStatus({ onSettings }) {
   const [snapshot, setSnapshot] = useState(null)
   const [check, setCheck] = useState(readModelCheck)
   const [routeEpoch, setRouteEpoch] = useState(0)
+  const [showCheck, setShowCheck] = useState(false)
   useEffect(() => {
     const onCheck = event => setCheck(event.detail)
     const onRoute = () => { setSnapshot(null); setRouteEpoch(value => value + 1) }
@@ -26,8 +30,13 @@ export default function FirstRunModelStatus({ onSettings }) {
     return request
   }, 30_000, [routeEpoch], { pauseHidden: true })
   const status = modelConnectionView(snapshot, check)
-  return <div className="asst-new-run-hint">
+  return <div className="asst-new-run-hint asst-model-status">
     <span role="status" className={status.tone ? `model-connection-${status.tone}` : ''}>{status.text}</span>
-    <button type="button" className="btn sm" onClick={onSettings}>Model settings</button>
+    {!showCheck && <button type="button" className="btn sm" onClick={onSettings}>Model settings</button>}
+    {!showCheck && <button type="button" className="btn sm ghost" onClick={() => setShowCheck(true)}>
+      Check connection…</button>}
+    {showCheck && <React.Suspense fallback={<span role="status">Opening connection check…</span>}>
+      <AssistantModelCheck onSettings={onSettings} />
+    </React.Suspense>}
   </div>
 }
