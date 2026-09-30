@@ -511,11 +511,6 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
       <VerdictBanner v={v} onOpenPanel={onOpenPanel} canOpenPanel={canOpenPanel} />
 
       <div className="toolbar report-toolbar" role="group" aria-label="Report actions">
-        {!readOnly && <button className="btn sm primary"
-          disabled={refreshing || !refreshRetryAllowed || !refreshGenerationReady || !refreshStorageReady}
-          onClick={refresh}
-          aria-describedby="paid-report-refresh-status"
-          title={refreshDisabledReason || refreshStatus}><OpIcon name="replay" size={12} /> {refreshButtonLabel}</button>}
         {readOnly && <span className="history-inline">{readOnlyReason === 'review'
           ? 'Read-only review · report refresh disabled'
           : readOnlyReason === 'start-over'
@@ -531,6 +526,11 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
           {reportSections.map(([id, label]) => <button type="button" key={id}
             onClick={() => jumpToSection(id)}>{label}</button>)}
         </nav>
+        {!readOnly && <button className="btn sm"
+          disabled={refreshing || !refreshRetryAllowed || !refreshGenerationReady || !refreshStorageReady}
+          onClick={refresh}
+          aria-describedby="paid-report-refresh-status"
+          title={refreshDisabledReason || refreshStatus}><OpIcon name="replay" size={12} /> {refreshButtonLabel}</button>}
       </div>
       {!readOnly && <div id="paid-report-refresh-status" className="report-inline-state paid"
         role="status" aria-live="polite" aria-atomic="true">
