@@ -438,10 +438,10 @@ def _own_fraction(plan: dict, cut: dict) -> dict:
     the row was cut with, so the start `final_reserve_reached` reads off an episode row is the one
     its reopen cuts (critic crit_v62 F3, driven: a carry and an extension took a fraction lowered on
     resume and unread nodes the rule had read as final). One corner stays (critic crit_v63 N1): a
-    stall while `stall_nodes` was 0 records the fraction live THEN, so a fraction lowered on resume
-    before it reopens later than the same history with the setting on at the stall. A stored
-    fraction is rounded to 4 places; a fraction the row rounded to 0 is no usable one, and the live
-    cut stands."""
+    stall while `stall_nodes` was 0 records the fraction live THEN, so a fraction moved on resume
+    before it moves the reopen too — later when lowered, earlier when raised (critic crit_v64) —
+    against the same history with the setting on at the stall. A stored fraction is rounded to 4
+    places; a fraction the row rounded to 0 is no usable one, and the live cut stands."""
     frac = plan.get("reserve_frac")
     if isinstance(frac, (int, float)) and not isinstance(frac, bool) and frac > 0:
         return {**cut, "reserve_frac": frac}

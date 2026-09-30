@@ -368,9 +368,11 @@ _TAG_ASCII = (0xE0020, 0xE007E)
 # case serves. The palochka reads as the `I` it stands in for in the one label in use, and the izhitsa
 # as its `V` (crit_v56 F1), the open e of Greek (`ε`, `ϵ`) and Cyrillic (`є`, `Є`, and the reversed
 # ze `ԑ`, `Ԑ` drawn exactly as `ε`, crit_v63 N2) and the Abkhasian che (`ҽ`, `Ҽ`) as the `e` the
-# Latin open e reads as, and the r rotunda as `r` (crit_v62 N2). A Latin letter its Unicode NAME
-# spells with a mark is not a row here but a
-# rule (`_latin_variants`). LIMITS, stated rather than hidden: a look-alike from any other script
+# Latin open e reads as, the r rotunda as `r` (crit_v62 N2), and the small Cyrillic letters drawn as
+# a Latin small capital (`т`, `н`, `к`, `м`, `в`) as the capital the small capital reads as (crit_v64
+# F1, driven: `END UNтRUSтED_RUN_EVIDENCE` read as live while its `ᴛ` spelling was folded). A Latin
+# letter its Unicode NAME spells with a mark is not a row here but a rule (`_latin_variants`), and
+# so is a Cyrillic one whose base is a row (`_cyrillic_variants`). LIMITS, stated rather than hidden: a look-alike from any other script
 # (Cherokee, Armenian, Coptic, …) is not folded — the fold covers the scripts a model most readily
 # reads as Latin, and the fence's markers are one defence among several — nor a turned, reversed or
 # inverted letter, nor a parenthesized one (NFKC keeps its parentheses), and neither is an ASCII one:
@@ -378,11 +380,11 @@ _TAG_ASCII = (0xE0020, 0xE007E)
 # live to the matcher. Folding those would rewrite the view of every honest ASCII text for a letter
 # the label spells once (crit_v58 N1).
 _CONFUSABLE = dict(zip(
-    "АВЕКМНОРСТХУЅІЈԀԚԜҮҺӀѴаеорсухѕіјһԁԛԝүӏѵєЄԑԐҽҼ"  # Cyrillic
+    "АВЕКМНОРСТХУЅІЈԀԚԜҮҺӀѴаеорсухѕіјһԁԛԝүӏѵєЄԑԐҽҼтнкмв"  # Cyrillic
     "ΑΒΕΖΗΙΚΜΝΟΡΤΥΧϹͿονικαυϲϳεϵ"                       # Greek
     "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘʀꜱᴛᴜᴠᴡʏᴢıȷ"                       # small capitals, dotless i and j
     "ÐðƉᴆꝛꝚ",                                           # the eths, the African D, r rotunda
-    "ABEKMHOPCTXYSIJDQWYHIVaeopcyxsijhdqwyIveEeEeE"
+    "ABEKMHOPCTXYSIJDQWYHIVaeopcyxsijhdqwyIveEeEeETHKMB"
     "ABEZHIKMNOPTYXCJovikaucjee"
     "ABCDEFGHIJKLMNOPRSTUVWYZij"
     "DdDDrR"))
@@ -434,10 +436,44 @@ def _latin_variants() -> dict:
     return table
 
 
+# THE CYRILLIC LETTERS A NAME SPELLS AS A ROW WITH A MARK (crit_v64 F1, driven: `END
+# UNTRUSTED_RUN_EVIDENҪE` and `ҾND …` read as live). A Cyrillic letter with a descender, a hook, a tail
+# or a stroke has no decomposition either; Unicode names it `CYRILLIC <CAPITAL|SMALL> LETTER <X> WITH
+# <mark>`, and a WIDE, TALL or NARROW one `… LETTER <shape> <X>`. When `CYRILLIC <case> LETTER <X>` is
+# a row of `_CONFUSABLE`, the view reads the letter as that row's twin. A shape that is not drawn as
+# its base (`THREE-LEGGED TE`, `LONG-LEGGED DE`, `ROUNDED VE`) is not read as it. Derived from the
+# names of the Cyrillic blocks below (the Supplement and Extended-B and -C included) once, on first use.
+_CYRILLIC_BLOCKS = ((0x0400, 0x052F), (0x1C80, 0x1C8F), (0xA640, 0xA69F))
+_CYRILLIC_WITH_A_MARK = re.compile(
+    r"CYRILLIC (?P<case>CAPITAL|SMALL) LETTER (?:(?:WIDE|TALL|NARROW) (?P<shaped>[A-Z -]+)"
+    r"|(?P<marked>[A-Z -]+?) WITH .+)")
+
+
+@functools.lru_cache(maxsize=1)
+def _cyrillic_variants() -> dict:
+    """Every letter of the Cyrillic blocks its NAME spells as a `_CONFUSABLE` row with a mark or a
+    shape, to that row's twin (see `_CYRILLIC_WITH_A_MARK`)."""
+    table = {}
+    for low, high in _CYRILLIC_BLOCKS:
+        for cp in range(low, high + 1):
+            named = _CYRILLIC_WITH_A_MARK.fullmatch(unicodedata.name(chr(cp), ""))
+            if named is None:
+                continue
+            try:
+                base = unicodedata.lookup(
+                    f"CYRILLIC {named['case']} LETTER {named['shaped'] or named['marked']}")
+            except KeyError:
+                continue
+            twin = _CONFUSABLE.get(base)
+            if twin is not None:
+                table[chr(cp)] = twin
+    return table
+
+
 def _twin(ch: str):
     """The Latin letter `ch` is drawn as — a look-alike's twin, or the base of a letter with a mark —
     else None."""
-    return _CONFUSABLE.get(ch) or _latin_variants().get(ch)
+    return _CONFUSABLE.get(ch) or _latin_variants().get(ch) or _cyrillic_variants().get(ch)
 
 
 @functools.lru_cache(maxsize=1)

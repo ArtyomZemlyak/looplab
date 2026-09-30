@@ -156,7 +156,8 @@ def test_the_agent_token_keeps_only_the_no_spawn_intents_on_an_internal_run(tmp_
                               {"text": "only mine now", "replace": True})):
         hint = post_command(client, "hint", data, key=f"agent-hint-{i}", headers=AGENT)
         assert _refused(hint), hint.json()
-        assert "hint" in hint.json()["error"]["message"], hint.json()
+        # Its own sentence, not the generic one (critic crit_v64 F4: that also says "hint").
+        assert "the operator's directives" in hint.json()["error"]["message"], hint.json()
     assert _no_spawn_after(client) == []
     # The OWNER keeps every one of them.
     owner = post_command(client, "fork", {"from_node_id": 0}, key="owner-fork", headers=OWNER)
@@ -462,9 +463,19 @@ def test_the_allow_list_starts_nothing_and_is_all_the_token_keeps():
 _KEPT_WORDS = {"pause": "pause", "annotation": "annotate", "comment_created": "add a comment"}
 
 
+def _kept_clause(text: str) -> list:
+    """The items of the "may only …" clause of `text`, its parentheticals dropped."""
+    import re
+    clause = re.sub(r"\([^)]*\)", "", text.split("may only ", 1)[1])
+    clause = re.split(r";|, and is refused", clause, maxsplit=1)[0]
+    return [" ".join(item.split()) for item in re.split(r", | or ", clause) if item.strip()]
+
+
 def test_the_manifest_and_the_guide_name_what_the_token_keeps():
     """The harness manifest's credential promise and the harness guide name the allow-list — the
-    same set, both ways. MUTATION: widen the allow-list without the docs -> red."""
+    same set, both ways: the "may only …" clause names every kept intent and nothing else (critic
+    crit_v64 F5: a word-in-text check stayed green on the docs that still kept "add a hint").
+    MUTATIONS, each red here: widen the allow-list without the docs; a doc that names one more."""
     from pathlib import Path
 
     from looplab.harness.manifest import harness_manifest
@@ -473,7 +484,10 @@ def test_the_manifest_and_the_guide_name_what_the_token_keeps():
     guide = (Path(__file__).resolve().parents[1] / "docs" / "guide"
              / "external-harness.md").read_text(encoding="utf-8")
     scope = " ".join(guide.split("## Scope and provenance", 1)[1].split("\n## ", 1)[0].split())
-    for word in set(_KEPT_WORDS.values()):
-        assert word in credential, (word, credential)
-        assert word in scope, (word, scope)
+    kept = sorted(_KEPT_WORDS.values())
+    for text in (credential, scope):
+        items = _kept_clause(text)
+        named = sorted(next((word for word in kept if item == word or item.startswith(word + " ")),
+                            item) for item in items)
+        assert named == kept, (items, text)
     assert "agent_token_refused" in credential and "agent_token_refused" in scope
