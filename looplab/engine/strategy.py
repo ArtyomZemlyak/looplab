@@ -41,10 +41,10 @@ from looplab.core.models import RunState
 from looplab.engine.cadence import (at_creation_boundary, cadence_due, cadence_marks,
                                      plateau_due, seed_boundary_due)
 from looplab.engine.widths import (EVAL_WIDTH_MAX, LLM_WIDTH_MAX, operator_width_axes,
-                                   settle_width)
+                                   per_experiment_gpu_budget, settle_width)
 from looplab.engine.costs import bind_cost_accountants
 from looplab.engine.governance_health import GovernanceLedgerUnavailable
-from looplab.engine.shared import effective_max_eval_timeout
+from looplab.engine.shared import effective_max_eval_timeout, strategist_gpu_brief
 # Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
 from looplab.engine.shared import engine_fold as fold
 from looplab.events.types import EV_COVERAGE_SNAPSHOT, EV_STRATEGY_DECISION
@@ -159,7 +159,45 @@ class StrategyCadenceMixin:
             operator_yields=operator_yields(state),
             cross_run_note=cross_run_note,
             cross_run_receipt=getattr(self, "_cross_run_note_receipt", {}),
+            **self._gpu_pool_ctx(state),
         )
+
+    def _gpu_pool_ctx(self, state: RunState) -> dict:
+        """The GPU facts the Strategist's brief states under `Settings.strategist_gpu_brief` (doc 69
+        69.23), or `{}` — OFF, the context and the brief it renders keep their historical shape.
+
+        Every number is one the engine ALREADY schedules by, read where the engine keeps it: the pool
+        is `_gpu_ids` (what admission hands out, not a fresh probe that could disagree with it), the
+        per-width ceiling is `widths.py::per_experiment_gpu_budget` (the number the Researcher's
+        footprint guidance quotes), the open work is `_proposal_footprints` (the population the
+        width settler derives from) and the pin is `_operator_width_axes` (what `_strategy_may`
+        refuses the Strategist). `minionerec-backbones-v10`'s Strategist chose `eval_parallel=2` on
+        four H200s with none of these in front of it, and asked to widen four more times after the
+        operator pinned the width. The widths shown are 1, 2, the current one and one per device —
+        the choices that change the answer — capped at 1,024, the width's own ceiling."""
+        if not strategist_gpu_brief(self):
+            return {}
+        pool = len(self._gpu_ids or [])
+        width = self._eval_parallel
+        top = min(EVAL_WIDTH_MAX, max(pool, width if type(width) is int else 1, 1))
+        budgets = {}
+        for candidate in sorted({1, 2, width, pool}):
+            if type(candidate) is not int or not 1 <= candidate <= top:
+                continue
+            budget = per_experiment_gpu_budget(pool, candidate)
+            if budget is not None:
+                budgets[candidate] = budget
+        footprints = self._proposal_footprints(state)
+        declared = [f for f in footprints if type(f) is int and f >= 0]
+        return {
+            "gpu_pool": pool,
+            "gpu_budget_by_width": budgets,
+            "open_proposals": len(footprints),
+            "widest_declared_gpus": max(declared, default=None),
+            "undeclared_proposals": sum(1 for f in footprints if type(f) is not int),
+            "eval_parallel_operator_owned": (parallelism_aliases("eval_parallel")[0]
+                                             in getattr(self, "_operator_width_axes", frozenset())),
+        }
 
     def _cross_run_note_for_ctx(
             self, state: Optional[RunState] = None, *,

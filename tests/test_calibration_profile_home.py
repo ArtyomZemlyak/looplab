@@ -362,7 +362,12 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               `_EXPECTED_FIELD_COUNT` goes 272 -> 273 and both pins are re-set (the pre-change
 #               tree re-derives 6b06df4d…). INERT for a replicate at its default 0, which is the
 #               loop's historical "no ceiling"; a positive value ends its loops sooner.
-_EXPECTED_DIGEST = "sha256:fc43af6d5549b0be4c93e43c00fde47403751445813eb23a28140b6b102373ba"
+#   2026-09-30  + strategist_gpu_brief (the Strategist's brief names the GPU pool, doc 69 69.23).
+#               The 'field set changed too' branch: exactly `['strategist_gpu_brief']` added and
+#               `[]` removed; `_EXPECTED_FIELD_COUNT` goes 273 -> 274 and both pins are re-set (the
+#               pre-change tree re-derives fc43af6d…). NOT inert in principle: a replicate whose
+#               Strategist is an LLM reads its brief.
+_EXPECTED_DIGEST = "sha256:2a8d014ea3c04c94c6ed547bd7405feabdb8a19d487603e362e92b331f48fa03"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -867,7 +872,8 @@ _EXPECTED_DIGEST = "sha256:fc43af6d5549b0be4c93e43c00fde47403751445813eb23a28140
 #   2026-09-29  + canary_failure_account (doc 69 69.7): 270 -> 271; see the digest history.
 #   2026-09-29  + card_full_rationale (doc 69 69.4): 271 -> 272; see the digest history.
 #   2026-09-30  + agent_token_budget (doc 69 69.2): 272 -> 273; see the digest history.
-_EXPECTED_FIELD_COUNT = 273
+#   2026-09-30  + strategist_gpu_brief (doc 69 69.23): 273 -> 274; see the digest history.
+_EXPECTED_FIELD_COUNT = 274
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

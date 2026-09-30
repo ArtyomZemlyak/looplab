@@ -169,6 +169,15 @@ class StrategyContext(BaseModel):
     # Immutable evidence receipt for the scoped snapshot rendered into ``cross_run_note``. It is persisted
     # with strategy_decision but omitted from the prose brief; no raw memory text is duplicated here.
     cross_run_receipt: dict = Field(default_factory=dict)
+    # The GPU facts the brief's pool line states (doc 69 69.23, `Settings.strategist_gpu_brief`),
+    # filled by the engine only when that switch is on: `gpu_pool` None means "say nothing", and the
+    # brief is then byte for byte what it was. Not in the recorded `ctx` subset.
+    gpu_pool: Optional[int] = None
+    gpu_budget_by_width: dict[int, int] = Field(default_factory=dict)
+    open_proposals: int = 0
+    widest_declared_gpus: Optional[int] = None
+    undeclared_proposals: int = 0
+    eval_parallel_operator_owned: bool = False
 
 
 class Strategist(Protocol):
@@ -922,6 +931,42 @@ def _policy_width_note(ctx) -> str:
             "purpose rather than by accident.\n")
 
 
+def _gpu_pool_note(ctx) -> str:
+    """One line: the GPU pool, what ONE experiment may claim at each width, what the open proposals
+    declare, and whether the width is the operator's — or "" when the engine sent no pool.
+
+    THE WIDTH WAS CHOSEN BLIND (doc 69 §6.1, 69.23). `minionerec-backbones-v10`'s Strategist set
+    `eval_parallel=2` "without oversubscribing 192 CPU-only cores" on four H200s: the 4-GPU
+    experiments then ran on one card each, bound the same torchrun port and ran ~2.4 h with no
+    metric, and after the operator pinned the width it asked to widen four more times. Nothing in
+    its brief said what a width COSTS each experiment, what the queued work had declared it needs,
+    or that the width was no longer its to choose. It states facts the engine schedules by and
+    forbids nothing: a wider width is still the Strategist's call where the operator left it open.
+    """
+    pool = getattr(ctx, "gpu_pool", None)
+    if isinstance(pool, bool) or not isinstance(pool, int) or pool < 0:
+        return ""
+    budgets = getattr(ctx, "gpu_budget_by_width", None) or {}
+    if pool == 0:
+        parts = ["GPU POOL: 0 devices detected — every experiment runs on CPU at any width"]
+    elif budgets:
+        table = ", ".join(f"{w} -> {b}" for w, b in sorted(budgets.items()))
+        parts = [f"GPU POOL: {pool} device(s); the most GPUs ONE experiment may claim at "
+                 f"eval_parallel = {table} (now {ctx.eval_parallel})"]
+    else:
+        parts = [f"GPU POOL: {pool} device(s)"]
+    if ctx.open_proposals:
+        widest = ctx.widest_declared_gpus
+        claim = (f"the widest declares {widest} GPU(s)" if widest is not None
+                 else "none declares a GPU count")
+        if widest is not None and ctx.undeclared_proposals:
+            claim += f", {ctx.undeclared_proposals} declare none"
+        parts.append(f"{ctx.open_proposals} open proposal(s): {claim}")
+    if ctx.eval_parallel_operator_owned:
+        parts.append("eval_parallel was set by the operator, so a width you choose is not applied")
+    return "; ".join(parts) + ".\n"
+
+
 def _strategist_brief(state: RunState, ctx: StrategyContext) -> str:
     """The compact decision brief shared by the structured-output and tool-using Strategists."""
     brief = (
@@ -934,7 +979,8 @@ def _strategist_brief(state: RunState, ctx: StrategyContext) -> str:
         f"LLM broker total={ctx.llm_total if ctx.llm_total is not None else 'unbounded'} "
         f"(the value to change with canonical llm_parallel); "
         f"current build fan-out={ctx.llm_parallel}; LLM lanes={ctx.llm_lane_limits}\n"
-        f"coverage (narrowing signal): {_fmt_coverage(ctx.coverage)}\n"
+        + _gpu_pool_note(ctx)
+        + f"coverage (narrowing signal): {_fmt_coverage(ctx.coverage)}\n"
         + (f"bounded cross-run observations (not coverage): {ctx.cross_run_note}\n"
            if ctx.cross_run_note else "")
         + f"operator yields (evidence for the operator mix — mean metric gain per eval-second, n tried): "

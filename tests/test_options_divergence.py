@@ -102,6 +102,10 @@ EXPECTED = {
     # characters: ON in the product surface, OFF in the bare library — a PROMPT flag that also adds a
     # key to the `card_added` row, so a direct `Engine(...)` keeps both byte for byte.
     "card_full_rationale": (True, False),
+    # The Strategist's brief names the GPU pool (doc 69 69.23, 2026-09-30): ON in the product
+    # surface, OFF in the bare library — a PROMPT flag, so a direct `Engine(...)` keeps the
+    # historical brief byte for byte.
+    "strategist_gpu_brief": (True, False),
     # The proposal prompt's NODE-BUDGET line (Q-3, the Researcher's context audit, 2026-09-23): ON
     # in the product surface, OFF in the bare library on `evidence_envelope`'s ground — it changes a
     # PROMPT, and a prompt flag defaults off at every constructor, so a direct `Engine(...)` keeps

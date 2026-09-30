@@ -256,7 +256,9 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   rationale instead of the board's 400 characters. The Python half moved too.
   //   240 -> 241 (2026-09-30): `agent_token_budget` — the session's token ceiling, the one that
   //   holds on a provider that prices nothing. The Python half moved too.
-  assert.equal(Object.keys(schema.fieldByKey).length, 241)
+  //   241 -> 242 (2026-09-30): `strategist_gpu_brief` — the Strategist's brief names the GPU pool
+  //   and what one experiment may claim at each width. The Python half moved too.
+  assert.equal(Object.keys(schema.fieldByKey).length, 242)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

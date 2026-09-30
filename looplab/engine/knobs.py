@@ -168,6 +168,9 @@ class EngineKnobs:
     # doc 69 69.4: the whole rationale beside a Card's receipt, read by
     # `shared.py::card_full_rationale`, the one place the Card writer learns it.
     _card_full_rationale = Knob("card_full_rationale", bool)
+    # doc 69 69.23: the pool line of the Strategist's brief, read by
+    # `shared.py::strategist_gpu_brief`, the one place the consult learns it.
+    _strategist_gpu_brief = Knob("strategist_gpu_brief", bool)
     # doc 67 67.4: the ablation refiner's probes, stamped onto the Researcher as
     # `_ablation_probe_hint` for the ONE refine proposal (`engine/ablation.py::_ablate`).
     _ablation_probe_hint = Knob("ablation_probe_hint", bool)

@@ -297,6 +297,15 @@ def card_full_rationale(engine) -> bool:
     return bool(getattr(engine, "_card_full_rationale", False))
 
 
+def strategist_gpu_brief(engine) -> bool:
+    """`Settings.strategist_gpu_brief` as the Strategist consult reads it — the ONE reading.
+
+    Asked by `strategy.py::StrategyCadenceMixin._gpu_pool_ctx`: whether the context carries the pool facts
+    the brief's pool line is rendered from (doc 69 69.23). On `repair_context_record`'s ground (OFF
+    when absent): stubs that never ran `Engine.__init__` hand the historical context."""
+    return bool(getattr(engine, "_strategist_gpu_brief", False))
+
+
 class SharedEngineMixin:
     """Cross-cluster members, mixed into `Engine` like every other mixin. In here `self` IS the
     Engine, exactly as in the concern mixins."""

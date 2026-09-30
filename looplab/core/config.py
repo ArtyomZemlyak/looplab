@@ -1752,6 +1752,18 @@ class Settings(BaseSettings):
     #   Strategist READS the run/data/sibling-runs/KB/memory with tools before deciding, not a single-shot
     #   call over aggregate stats. "llm" = the old non-agentic single-shot; "rule"/"off" = no LLM.
     strategist_every: int = Field(default=3, ge=1)   # consult cadence (created nodes)
+    # THE STRATEGIST SEES THE GPU POOL (doc 69 §6.1, 69.23). `minionerec-backbones-v10`'s Strategist
+    # set `eval_parallel=2` "without oversubscribing 192 CPU-only cores" on four H200s: its brief
+    # named no pool, no per-experiment GPU budget, nothing the queued work declared and nothing about
+    # an operator's width — the 4-GPU nodes then ran on one card each (a port conflict, ~2.4 h with
+    # no metric), and after the operator pinned the width it asked to widen four more times. ON, every
+    # consult's brief gains one line: the pool the engine schedules on, what ONE experiment may claim
+    # at each width (`engine/widths.py::per_experiment_gpu_budget`), what the open proposals declare
+    # and whether the width is the operator's. It changes the Strategist's PROMPT and buys no call,
+    # so `false` reproduces the historical brief, every constructor defaults it OFF, and a pre-field
+    # snapshot resumes OFF (its `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row). Read through ONE reader,
+    # `engine/shared.py::strategist_gpu_brief`.
+    strategist_gpu_brief: bool = True
     # Stop the whole RUN when NOTHING has ever worked: this many DISTINCT nodes ended failed and not
     # one has ever produced a metric. It is the run-level companion to `inline_repair_attempts`,
     # which bounds one node's repairs but says nothing about a run whose every node fails for the
@@ -3909,6 +3921,11 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # either way, so no crash-prefix mint is orphaned by the change). (c) is `False`, pointable at
     # every commit before this.
     "card_full_rationale": False,
+    # THE STRATEGIST SEES THE GPU POOL, added 2026-09-30 defaulting ON (doc 69 69.23). (a) holds.
+    # (b) is the DIFFERENT-PROMPT ground: ON, every Strategist consult's brief gains the pool line,
+    # so a resumed run would change what its Strategist is told mid-log. (c) is `False`, pointable at
+    # every commit before this one.
+    "strategist_gpu_brief": False,
     # THE NODE BUDGET CUE, added 2026-09-23 defaulting ON (Q-3, the Researcher's context audit).
     # (a) holds. (b) is the rows above's DIFFERENT-PROMPT ground: ON, every proposal prompt gains a
     # line stating the run's remaining node budget and its plan phase, so a resumed run would change
