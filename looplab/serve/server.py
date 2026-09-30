@@ -628,16 +628,25 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
                          or p in ("/api/research", "/api/llm/health",
                                   "/api/cross-run/concept-steward",
                                   "/api/cross-run/claim-steward")
-                         # The concept lens is a paid `derive_lens` call (critic crit_v60 F2).
-                         or re.fullmatch(r"/api/runs/[^/]+/(chat|suggest|command|report_refresh"
-                                         r"|concepts/lens)", p)
+                         # The concept lens is a paid `derive_lens` call (critic crit_v60 F2). The
+                         # chat log holds the pending actions the owner's TUI replays with the
+                         # owner's token (critic crit_v62 F1, driven: a forged row became a fork,
+                         # a resume and a paid report refresh).
+                         or re.fullmatch(r"/api/runs/[^/]+/(chat|chat-log|suggest|command"
+                                         r"|report_refresh|concepts/lens)", p)
+                         # Destructive recovery and cleanup of the owner's work (crit_v62 F5,
+                         # driven: `memory-purge` emptied the lesson store of a live run).
+                         or re.fullmatch(r"/api/runs/[^/]+/(memory-purge|resolve-activity-claims"
+                                         r"|concepts/lens/abandon|concepts/lens/recovery/abandon"
+                                         r"|nodes/[^/]+/clear_trace)", p)
+                         or re.fullmatch(r"/api/scope-report-actions/[^/]+/abandon", p)
                          or (p.startswith("/api/scope-report/") and p.endswith("/generate"))
                          or re.fullmatch(r"/api/runs/[^/]+/(reset|deletions)", p)
                          # The owner's prompts, skills and knowledge: every live internal run
                          # re-reads them (critic crit_v61 M2, driven: a PUT answered 200).
                          or re.fullmatch(r"/api/(prompts|skills|knowledge)/.+", p)
                          or (request.method == "DELETE" and re.fullmatch(r"/api/runs/[^/]+", p)))):
-                return JSONResponse({"detail": "harness token cannot change operator defaults (settings, prompts, skills, knowledge), launch or reset/delete a run, or invoke an internal model workflow"},
+                return JSONResponse({"detail": "harness token cannot change operator defaults (settings, prompts, skills, knowledge), launch, reset, purge or delete a run, or invoke an internal model workflow"},
                                     status_code=403)
             # WHO THIS IS (`serve/principal.py`): the token holder is the `owner` principal; a request
             # on the small open surface that presented nothing is `anonymous` — never promoted.

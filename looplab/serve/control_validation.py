@@ -2221,13 +2221,14 @@ def external_intent_refusal(event_type: str, data: dict) -> Optional[HTTPExcepti
 # `metric_retarget` replaced the run's goal and discarded paid confirmation evals, a `promote` moved
 # the exported champion, a dropped Card cancelled an in-flight evaluation, a memo, a report and a
 # hypothesis spoke as the owner's (critic crit_v61 M1, driven). So on an internal run (or one with
-# no snapshot) the token keeps an explicit ALLOW-LIST — a pause, a node abort, a hint, an annotation,
-# a comment — asserted below to be `NO_SPAWN` intents; anything added later is refused to it until it
-# is added here. On an external run it meets the external rule only.
+# no snapshot) the token keeps an explicit ALLOW-LIST — a pause, a hint that ADDS (a `replace` erased
+# the owner's standing directives), an annotation and a new comment, each of which only adds or stops
+# — asserted below to be `NO_SPAWN` intents; anything added later is refused to it until it is added
+# here. A node abort (it moved the champion and cancels an in-flight eval, as a dropped Card does) and
+# an edit or resolution of a comment (the owner's included, attributed to the owner) are not additive
+# and were taken off it (critic crit_v62 F4, driven). On an external run it meets the external rule.
 AGENT_TOKEN_REFUSED_STARTS = frozenset({EV_RESUME, EV_RESTART, EV_RUN_REOPENED})
-AGENT_TOKEN_INTERNAL_INTENTS = frozenset({
-    EV_PAUSE, EV_NODE_ABORT, EV_HINT, EV_ANNOTATION,
-    EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED})
+AGENT_TOKEN_INTERNAL_INTENTS = frozenset({EV_PAUSE, EV_HINT, EV_ANNOTATION, EV_COMMENT_CREATED})
 assert all(CONTROL_SPECS[kind].engine_policy is EnginePolicy.NO_SPAWN
            for kind in AGENT_TOKEN_INTERNAL_INTENTS), "an agent intent must never start the engine"
 
@@ -2239,6 +2240,9 @@ def agent_token_refusal(event_type: str, data: dict) -> Optional[HTTPException]:
     question (`_external_mode_restriction`). Admitted: exactly `AGENT_TOKEN_INTERNAL_INTENTS`; an
     unknown type is refused (fail closed). A 403 with its own code — this credential may not,
     whoever else may — which the command service records on the REJECTED command as it is."""
+    if event_type == EV_HINT and data.get("replace") not in (None, False):
+        return agent_token_refused("the agent token may add a hint to an internal run, not replace "
+                                   "the owner's standing hints")
     if event_type in AGENT_TOKEN_INTERNAL_INTENTS:
         return None
     external = external_intent_refusal(event_type, data)
@@ -2258,9 +2262,9 @@ def agent_token_refused(message: str) -> HTTPException:
     """The agent token's one refusal shape (`agent_token_refused`, 403, not retryable)."""
     return HTTPException(403, {
         "code": "agent_token_refused", "message": message, "retryable": False,
-        "remediation": ("on an internal run the agent token may only pause, abort a node, hint, "
-                        "annotate or comment; ask the operator to act with the owner's token, or "
-                        "drive a run launched with external_harness")})
+        "remediation": ("on an internal run the agent token may only pause it, add a hint, "
+                        "annotate or add a comment; ask the operator to act with the owner's "
+                        "token, or drive a run launched with external_harness")})
 
 
 def run_is_external(rd: Path) -> bool:

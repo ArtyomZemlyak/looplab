@@ -152,6 +152,10 @@ def test_the_agent_token_keeps_only_the_no_spawn_intents_on_an_internal_run(tmp_
     note = post_command(client, "annotation", {"node_id": 0, "text": "looks promising"},
                         key="agent-note", headers=AGENT)
     assert not _refused(note), note.json()
+    # …but a hint that REPLACES the owner's standing ones is not additive (critic crit_v62 F4).
+    replacing = post_command(client, "hint", {"text": "only mine now", "replace": True},
+                             key="agent-hint-replace", headers=AGENT)
+    assert _refused(replacing), replacing.json()
     assert _no_spawn_after(client) == []
     # The OWNER keeps every one of them.
     owner = post_command(client, "fork", {"from_node_id": 0}, key="owner-fork", headers=OWNER)
@@ -161,6 +165,7 @@ def test_the_agent_token_keeps_only_the_no_spawn_intents_on_an_internal_run(tmp_
 
 
 _DRIVING = (
+    ("node_abort", {"node_id": 0}),
     ("metric_retarget", {"key": "acc"}),
     ("promote", {"node_id": 0}),
     ("research_completed", {"memo": {"summary": "the agent's memo"}}),
@@ -328,6 +333,56 @@ def test_the_agent_token_may_not_start_the_paid_concept_lens(tmp_path, monkeypat
     assert response.status_code == 403, response.text
 
 
+_MIDDLEWARE_DENIAL = "harness token cannot change operator defaults"
+
+
+@pytest.mark.parametrize("path", [
+    "/api/runs/demo/chat-log", "/api/runs/demo/memory-purge",
+    "/api/runs/demo/resolve-activity-claims", "/api/runs/demo/nodes/0/clear_trace",
+    "/api/runs/demo/concepts/lens/abandon", "/api/runs/demo/concepts/lens/recovery/abandon",
+    "/api/scope-report-actions/act-1/abandon"])
+def test_the_agent_token_may_not_write_the_chat_log_or_clean_up_the_owner_s_work(
+        tmp_path, monkeypatch, path):
+    """Critic crit_v62 F1 (driven): the chat log holds the pending actions the owner's TUI replays
+    with the OWNER's token — a forged row became a fork, a resume and a paid report refresh. F5
+    (driven): `memory-purge` emptied the lesson store of a live internal run, and the other routes
+    abandon or clear the owner's work. Each is refused at the middleware; the owner's is not.
+    MUTATION: drop either clause from the harness deny list."""
+    client = _client(tmp_path, monkeypatch, external=False)
+    refused = client.post(path, json={}, headers=AGENT)
+    assert refused.status_code == 403 and _MIDDLEWARE_DENIAL in refused.text, (path, refused.text)
+    owner = client.post(path, json={}, headers=OWNER)
+    assert _MIDDLEWARE_DENIAL not in owner.text, (path, owner.text)
+
+
+_SAMPLE = {"{run_id}": "demo", "{kind}": "skills", "{name}": "agent.md",
+           "{operation_id}": "op-1"}
+
+
+def test_the_phase_index_s_write_access_is_what_the_middleware_enforces(tmp_path, monkeypatch):
+    """Critic crit_v62 F2 (driven): the harness phase index advertised the authoring write as the
+    agent's after the middleware had closed it. Every HTTP write of the index, sent with the agent
+    token: an `operator` one meets the middleware's denial, an `external_agent` one does not (the
+    route may still refuse its body — that is the route's own answer, not the credential's)."""
+    from looplab.harness.phases import PHASES, OPERATOR_WRITES
+    client = _client(tmp_path, monkeypatch, external=True)
+    seen = set()
+    for phase in PHASES:
+        access = phase.public()["write_access"]
+        for ref, who in access.items():
+            if ref.startswith("command:") or ref in seen:
+                continue
+            seen.add(ref)
+            method, template = ref.split(" ", 1)
+            path = template
+            for placeholder, value in _SAMPLE.items():
+                path = path.replace(placeholder, value)
+            response = client.request(method, path, json={}, headers=AGENT)
+            denied = response.status_code == 403 and _MIDDLEWARE_DENIAL in response.text
+            assert denied is (who == "operator") is (ref in OPERATOR_WRITES), (ref, response.text)
+    assert "PUT /api/{kind}/{name}/operations/{operation_id}" in seen
+
+
 @pytest.mark.parametrize("kind", ["prompts", "skills", "knowledge"])
 def test_the_agent_token_may_not_rewrite_the_owner_s_prompts_skills_or_knowledge(
         tmp_path, monkeypatch, kind):
@@ -356,9 +411,11 @@ def test_the_agent_token_may_not_rewrite_the_owner_s_prompts_skills_or_knowledge
     ("metric_retarget", {}, True), ("promote", {}, True), ("research_completed", {}, True),
     ("report_generated", {}, True), ("hypothesis_added", {}, True), ("card_dropped", {}, True),
     ("card_reopened", {}, True), ("run_concepts", {}, True),
-    ("pause", {}, False), ("hint", {"text": "t"}, False), ("node_abort", {}, False),
-    ("annotation", {}, False), ("comment_created", {}, False), ("comment_edited", {}, False),
-    ("comment_resolution_changed", {}, False),
+    ("node_abort", {}, True), ("comment_edited", {}, True), ("comment_resolution_changed", {}, True),
+    ("hint", {"text": "t", "replace": True}, True), ("hint", {"text": "t", "replace": "yes"}, True),
+    ("pause", {}, False), ("hint", {"text": "t"}, False),
+    ("hint", {"text": "t", "replace": False}, False),
+    ("annotation", {}, False), ("comment_created", {}, False),
 ])
 def test_the_agent_token_rule_s_truth_table(kind, data, refused):
     got = agent_token_refusal(kind, data)
@@ -383,9 +440,8 @@ def test_the_allow_list_starts_nothing_and_is_all_the_token_keeps():
 
 # The words the manifest and the guide use for each intent the agent token keeps (crit_v61 M1: the
 # docs named five while the rule kept twenty).
-_KEPT_WORDS = {"pause": "pause", "node_abort": "abort a node", "hint": "hint",
-               "annotation": "annotat", "comment_created": "comment", "comment_edited": "comment",
-               "comment_resolution_changed": "comment"}
+_KEPT_WORDS = {"pause": "pause", "hint": "add a hint", "annotation": "annotate",
+               "comment_created": "add a comment"}
 
 
 def test_the_manifest_and_the_guide_name_what_the_token_keeps():

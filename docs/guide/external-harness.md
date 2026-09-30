@@ -60,7 +60,8 @@ available through MCP `api_request` with the scoped harness token.
 `phases` is the workflow index for both modes. Each entry names the entity, the
 built-in owner, the evidence to read, the external actions that write the same
 domain state, and any PromptStore keys. `write_access` distinguishes operator
-setup actions (global settings and launch) from scoped agent actions.
+setup actions (global settings, launch, and the prompts, skills and knowledge stores)
+from scoped agent actions.
 The scoped token also refuses old owner routes that invoke LoopLab's model
 (legacy chat/suggestion/report refresh, taxonomy stewards, provider probe and
 scope-report generation). The agent writes run reports with `report_generated`
@@ -380,16 +381,18 @@ a request body to 1 MiB. Query narrow routes for larger outputs; binary uploads
 need their dedicated API or CLI flow. A dedicated harness token can read and
 control launched runs but cannot change operator defaults (settings, prompts, skills,
 knowledge), launch new runs, drive the owner assistant or the paid concept lens, or
-reset/delete runs. Commands that start internal agent work (fork, forced ablation,
+reset, purge or delete runs, or touch the chat log the owner's TUI replays. Commands
+that start internal agent work (fork, forced ablation,
 deep research, a node reset from `propose` or `implement`, a code-less inject — judged
 on what an import resolves to) are refused on a run launched with `external_harness`
 for every credential. On an INTERNAL run served by the same UI the harness token may
-only pause the run, abort a node, hint, annotate or comment, and is refused
-(`agent_token_refused`, doc 70 item 70.8) everything else: a resume, restart or
-reopen, any inject or node reset, a budget extension, a strategy, an approval, an
-abort, a metric retarget, a promotion, a research memo or report, a hypothesis or
-Card change, a retry of any of those and an edit of the run's configuration. What it
-may submit is marked `submitted_by: agent_token` on the command record. The operator,
+only pause the run, add a hint (not replace the standing ones), annotate a node or add
+a comment, and is refused (`agent_token_refused`, doc 70 item 70.8) everything else: a
+resume, restart or reopen, any inject or node reset, a node abort, a budget extension,
+a strategy, an approval, an abort, a metric retarget, a promotion, a research memo or
+report, a hypothesis or Card change, an edit or resolution of a comment, a retry of
+any of those and an edit of the run's configuration. What it may submit is marked
+`submitted_by: agent_token` on the command record. The operator,
 with the owner's token, keeps everything. A run whose snapshot cannot be read refuses
 the harness token those
 commands. Legacy configurations passing `LOOPLAB_UI_TOKEN` still give
