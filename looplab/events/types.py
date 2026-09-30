@@ -1318,9 +1318,10 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         stored_whole=True,
     ),
     "agent_phase_completed": PayloadContract(
-        "One agentic phase ended: how it exited, after how many turns and seconds.",
+        "One agentic phase ended: how it exited, after how many turns and seconds, and which "
+        "no-progress rule stopped it when one did.",
         required=("exit", "label", "plan_updates", "seconds", "turns"),
-        optional=(),
+        optional=("stuck_detail", "stuck_rule"),
     ),
     "agent_phase_started": PayloadContract(
         "One agentic phase began: its label, tool surface and the turn/time budget it was given.",

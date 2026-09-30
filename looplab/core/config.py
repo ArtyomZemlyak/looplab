@@ -2780,7 +2780,9 @@ class Settings(BaseSettings):
     # turn/time ceilings above are only BACKSTOPS; this is what actually stops a runaway loop, on the
     # cheapest signal: when the model repeats the SAME tool call (or ping-pongs between two, or keeps
     # hitting the SAME error) with no progress, the loop forces the final emit and finishes. ON by
-    # default; reading DIFFERENT files or running ONE long command never trips it. (OpenHands-style.)
+    # default; a single read of each of many files never trips it, and nor does ONE long command
+    # whose output moves; reading the same files round and round is the long-cycle rule's case
+    # (`agent_stuck_stale_streak`, below). (OpenHands-style.)
     agent_stuck_detection: bool = True
     agent_stuck_repeat: int = 4        # identical calls in a row that count as "stuck" (>=2)
     agent_stuck_alternate: int = 4     # ping-pong cycles between two calls that count as "stuck" (>=2)
@@ -2791,13 +2793,23 @@ class Settings(BaseSettings):
     # card-4 plan phase read seven `config/rl_*.yaml` files round and round for its last 104
     # calls; the short rules saw no cycle, the repeat and read-loop notes went out 156 times
     # unheeded, and `agent_emit_after` stopped it at turn 300. "12 in a row", replayed over that
-    # run's spans, fired in two phases, saved 32.4 M tokens (16 %) and nothing healthy; the two
-    # floors only make it fire later. No `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row, on
-    # `triage_time_budget_s`'s ground: it only ever ENDS a loop through the existing stuck exit
-    # (the same nudge and forced emit `agent_emit_after`/`agent_emit_force` would reach later), so
-    # a resumed run gains no call and no treatment it never consented to. A threshold measured on
-    # ONE run, and it says so; every firing reaches the caller's `on_budget` observer as a `stuck`
-    # cutoff whose detail opens "re-ran N calls in a row", so its rate can be read off later runs.
+    # run's spans (the ENGINE's phases of that run — the assistant, the judges and the one-shot
+    # loops were not in it), fired in two phases, saved 32.4 M tokens (16 %) and nothing healthy.
+    # Values 1-5 act as 6: the floors are three distinct pairs and two re-runs each. The pair keys
+    # the CAPPED result the model reads, so two results past the cap that differ only after it are
+    # one observation here. A caller declares its own checklist and waiting tools neutral (the
+    # assistant: `write_todos`, `read_output`, `list_background`), and a refused emit ends a streak.
+    # `0` reaches the loops that take the settings bundle (the Researcher, the Developer, triage,
+    # the Strategist, the assistant); the judges and one-shot loops run their constructor's 12, as
+    # they do for the two knobs above. No `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row, and deliberately,
+    # on the precedent of `tool_loop._READ_LOOP_FORCE_FACTOR` (the same stuck exit, no field, no
+    # row) and `triage_time_budget_s`: it only ever ENDS a loop through the existing stuck exit —
+    # its nudge and forced emit REPLACE the next turn's call, the same two `agent_emit_after` /
+    # `agent_emit_force` would reach later — so it removes calls and adds none. What a resumed
+    # pre-field run DOES see is that exit sooner: its phase produces the forced emit's answer where
+    # it would have kept circling. A threshold measured on ONE run, and it says so; every firing is
+    # stamped on its loop's `agent_phase_completed` row (`stuck_rule: stale_cycle`, `stuck_detail`)
+    # inside a run, observer or not, so its rate can be read off later runs.
     agent_stuck_stale_streak: int = Field(default=12, ge=0)
     # C1 · Self-plan (TodoWrite-style): expose an `update_plan` tool so a long-running agent keeps its
     # OWN working TODO and re-surfaces it every `agent_plan_reinject_every` turns — keeps the goal in

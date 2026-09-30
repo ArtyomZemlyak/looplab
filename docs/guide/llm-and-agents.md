@@ -508,9 +508,11 @@ There is deliberately **no read cache**: every read tool call executes and retur
 the `StuckDetector` remains the safety net against true repeat loops — a repeated call, a
 ping-pong, and (`agent_stuck_stale_streak`, 12) a longer cycle: that many calls in a row, each
 re-running a call+result already seen in the loop, over three or more distinct ones and twice each
-on average. A single new call+result ends such a streak, so re-reads scattered through real work never
-add up; a plan phase that read seven config files round and round for 104 calls is what it ends
-(doc 69 §3.2). A parallel node build gets its own
+on average. A single new call+result ends such a streak — so does a refused emit — so re-reads
+scattered through real work never add up; a plan phase that read seven config files round and round
+for 104 calls is what it ends (doc 69 §3.2). A caller's checklist and waiting tools are neutral to it
+(the assistant declares `write_todos`, `read_output` and `list_background`), and the rule that stopped
+a loop is stamped on its `agent_phase_completed` row (`stuck_rule`, `stuck_detail`). A parallel node build gets its own
 scope; every phase runs through the shared `run_phase` wrapper, so with the setting off it's
 byte-identical to a plain `drive_tool_loop`.
 

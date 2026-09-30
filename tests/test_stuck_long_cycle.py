@@ -35,7 +35,8 @@ def test_a_seven_file_cycle_ends_on_its_third_lap():
     out = _lap(d, _SEVEN) + _lap(d, _SEVEN) + _lap(d, _SEVEN)
     assert out[:20] == [None] * 20
     assert out[20] is not None
-    assert out[20].startswith("re-ran 14 calls in a row whose call AND result were each already seen")
+    assert out[20].startswith("re-ran 14 calls in a row (neutral calls aside) whose call AND result "
+                              "were each already seen in this loop")
     assert "a cycle over 7 distinct calls" in out[20]
     assert 'read_file({"path": "config/rl_6.yaml"})' in out[20]      # names the call it ended on
 
@@ -277,9 +278,228 @@ def test_plan_updates_between_laps_do_not_hide_the_cycle(self_plan, reads):
     # the same seven files: the loop's `update_plan` is neutral, so it ends on lap three exactly as
     # without the plan. Without self-plan there IS no plan tool — the call is an unknown tool whose
     # varying arguments are new calls each time, and the rule stays out of it (the turn ceiling ends
-    # the loop), which is the caller-declared scope of "neutral".
+    # the loop) — unless the CALLER declares it neutral (`stuck_neutral_tools`, below).
     tools = _FileTools()
     out, cutoffs, _ = _drive(_CyclingClient(_SEVEN, plan_every_read=True), tools,
                              self_plan=self_plan)
     assert len(tools.reads) == reads
     assert [c["kind"] for c in cutoffs] == (["stuck"] if self_plan else ["turns"])
+
+
+# ------------------------------------------------------------ critic 2026-09-29 (a383), driven
+def test_a_new_pair_resets_the_streak_s_breadth_too():
+    """30 files each re-read once (a streak of breadth 30), a NEW grep ends it, then a 3-file cycle:
+    the second streak's breadth is 3, so it fires at its 12th stale call — not at the 60th a breadth
+    kept from the first streak would demand. MUTATION: keep the breadth across a new pair."""
+    d = StuckDetector()
+    files = [f"src/m{i}.py" for i in range(30)]
+    assert _lap(d, files) == [None] * 30
+    assert _lap(d, files) == [None] * 30
+    assert d.push("grep", {"pattern": "fresh"}, "one hit") is None
+    out = _lap(d, files[:3] * 4)
+    assert out[:11] == [None] * 11
+    assert out[11] is not None and out[11].startswith("re-ran 12 calls in a row")
+
+
+def test_digests_do_not_collide_over_a_long_session():
+    """MUTATION: a one-byte digest -> distinct pairs collide and count as re-runs."""
+    d = StuckDetector()
+    assert all(d.push("grep", {"pattern": f"p{i}"}, f"hit {i}") is None for i in range(3000))
+
+
+def test_neutral_calls_stay_visible_to_the_short_rules():
+    """Neutral means only "not in the long rule's streak": the two short rules still see the call.
+    A read / plan-update alternation whose plan changes is no 1- or 2-cycle. MUTATION: drop neutral
+    calls from the short rules' window -> four identical reads in a row read as a 1-cycle."""
+    d = StuckDetector(neutral_tools=("update_plan",))
+    out = []
+    for i in range(4):
+        out.append(d.push("read_file", {"path": "a.py"}, "contents of a.py"))
+        out.append(d.push("update_plan", {"plan": f"v{i}"}, "plan updated"))
+    assert out == [None] * 8
+
+
+def test_a_bare_string_is_one_neutral_tool_name():
+    """`frozenset("update_plan")` is a set of characters. MUTATION: take the string as an iterable."""
+    d = StuckDetector(neutral_tools="update_plan")
+    out = []
+    for i in range(30):
+        out.append(d.push("read_file", {"path": ("a.py", "b.py", "c.py")[i % 3]},
+                          "contents"))
+        out.append(d.push("update_plan", {"plan": f"v{i}"}, "plan updated"))
+    assert any(out), "the plan updates are neutral, so the three-file cycle is still seen"
+
+
+def test_each_rule_names_itself():
+    """What the loop stamps on `agent_phase_completed` (`stuck_rule`)."""
+    repeat = StuckDetector()
+    assert [repeat.push("x", {}, "same") for _ in range(4)][-1] and repeat.last_rule == "repeat"
+    ping = StuckDetector()
+    out = [ping.push("a" if i % 2 else "b", {}, "same") for i in range(8)]
+    assert out[-1] and ping.last_rule == "alternate"
+    cycle = StuckDetector()
+    out = []
+    for _ in range(5):
+        out += _lap(cycle, ["a.py", "b.py", "c.py"])
+    assert out[14] and cycle.last_rule == "stale_cycle"
+
+
+class _TodoCyclingClient(_CyclingClient):
+    """The assistant's shape: a visible checklist (`write_todos`) rewritten after every read."""
+
+    def chat(self, messages, tools, tool_choice="auto"):
+        path = self.paths[self.turn % len(self.paths)]
+        calls = [{"id": f"r{self.turn}", "function": {
+            "name": "read_file", "arguments": json.dumps({"path": path})}},
+            {"id": f"t{self.turn}", "function": {
+                "name": "write_todos",
+                "arguments": json.dumps({"todos": [{"content": f"pass {self.turn}"}]})}}]
+        self.turn += 1
+        return {"content": "", "tool_calls": calls}
+
+
+@pytest.mark.parametrize("neutral, reads", [(("write_todos",), 21), ((), 60)])
+def test_a_caller_declares_its_own_checklist_neutral(neutral, reads):
+    """The assistant runs with the loop's `update_plan` off and its own `write_todos` on; a
+    checklist rewritten between laps broke every streak and the rule never fired (critic
+    2026-09-29, driven: 160 calls, `turns`). MUTATION: ignore `stuck_neutral_tools`."""
+    tools = _FileTools()
+    _out, cutoffs, _ = _drive(_TodoCyclingClient(_SEVEN), tools, self_plan=False,
+                              stuck_neutral_tools=neutral)
+    assert len(tools.reads) == reads
+    assert [c["kind"] for c in cutoffs] == (["stuck"] if neutral else ["turns"])
+
+
+class _PollTools(_FileTools):
+    def execute(self, name, args):
+        self.reads.append(name)
+        return {"read_output": "[t1] running (no new output)",
+                "list_background": "t1 running", "run_command": ""}.get(name, "(unknown)")
+
+
+class _PollingClient:
+    """The assistant waiting on a quiet background job: three constant calls, round and round."""
+
+    def __init__(self):
+        self.turn = 0
+
+    def chat(self, messages, tools, tool_choice="auto"):
+        name, args = [("read_output", {"id": "t1"}), ("list_background", {}),
+                      ("run_command", {"cmd": "sleep 30"})][self.turn % 3]
+        self.turn += 1
+        return {"content": "", "tool_calls": [{"id": f"c{self.turn}", "function": {
+            "name": name, "arguments": json.dumps(args)}}]}
+
+
+def test_the_assistant_s_waiting_tools_are_neutral():
+    """Three constant polls of a quiet job were stopped at call 15 (critic 2026-09-29, driven); with
+    the assistant's own declaration the long rule stays out of a wait. MUTATION: drop the
+    declaration from `serve/assistant.py` -> the source pin below; drop the wiring -> the loop."""
+    from looplab.serve.assistant import ASSISTANT_STUCK_NEUTRAL_TOOLS
+
+    tools = _PollTools()
+    _out, cutoffs, _ = _drive(_PollingClient(), tools, self_plan=False,
+                              stuck_neutral_tools=ASSISTANT_STUCK_NEUTRAL_TOOLS)
+    assert len(tools.reads) == 60 and [c["kind"] for c in cutoffs] == ["turns"]
+    tools = _PollTools()
+    _out, cutoffs, _ = _drive(_PollingClient(), tools, self_plan=False)
+    assert len(tools.reads) == 15 and [c["kind"] for c in cutoffs] == ["stuck"]
+
+
+def test_the_assistant_passes_its_declaration_and_every_name_is_a_tool_it_offers(tmp_path):
+    """A declared name that is no tool the assistant offers neutralizes nothing, silently.
+    MUTATIONS: stop passing the declaration; rename one of its tools."""
+    import ast
+    from pathlib import Path
+
+    from looplab.serve.assistant import ASSISTANT_STUCK_NEUTRAL_TOOLS, TodoTools
+    from looplab.tools.shell_tools import ShellTools
+
+    tree = ast.parse((Path(__file__).resolve().parents[1] / "looplab" / "serve"
+                      / "assistant.py").read_text(encoding="utf-8"))
+    passed = [ast.unparse(k.value) for node in ast.walk(tree) if isinstance(node, ast.Call)
+              and ast.unparse(node.func) == "drive_tool_loop"
+              for k in node.keywords if k.arg == "stuck_neutral_tools"]
+    assert passed == ["ASSISTANT_STUCK_NEUTRAL_TOOLS"]
+    offered = {spec["function"]["name"]
+               for provider in (TodoTools(), ShellTools([tmp_path]))
+               for spec in provider.specs()}
+    assert set(ASSISTANT_STUCK_NEUTRAL_TOOLS) <= offered, offered
+
+
+class _BouncingClient:
+    """Laps 1-3 of three files, an emit the validator refuses, two re-read laps to fix it, then the
+    corrected emit."""
+
+    plan = ([("read_file", {"path": p}) for p in ("manifest.yaml", "train.py", "data.py")] * 3
+            + [("emit", {"path": "wrong"})]
+            + [("read_file", {"path": p}) for p in ("manifest.yaml", "train.py", "data.py")] * 2
+            + [("emit", {"path": "data.py"})])
+
+    def __init__(self):
+        self.turn = 0
+
+    def chat(self, messages, tools, tool_choice="auto"):
+        name, args = self.plan[min(self.turn, len(self.plan) - 1)]
+        self.turn += 1
+        return {"content": "", "tool_calls": [{"id": f"c{self.turn}", "function": {
+            "name": name, "arguments": json.dumps(args)}}]}
+
+
+def test_a_refused_emit_ends_the_stale_streak():
+    """The validator's refusal is new information; re-reading what it named is the repair (critic
+    2026-09-29, driven: at 12 the loop fell to the fallback before the corrected emit). MUTATION:
+    do not reset the streak on a bounced emit."""
+    emit = {"type": "function", "function": {"name": "emit", "description": "final", "parameters": {
+        "type": "object", "properties": {"path": {"type": "string"}}}}}
+    tools = _FileTools()
+    cutoffs: list = []
+    out = drive_tool_loop(_BouncingClient(), tools, [{"role": "user", "content": "go"}], emit,
+                          max_turns=40, finalize=lambda a: ("emit", a),
+                          fallback=lambda _m: ("fallback", None),
+                          validate=lambda a: None if a.get("path") == "data.py"
+                          else "needs input `data.py` is not declared",
+                          on_budget=cutoffs.append, self_plan=False)
+    assert out == ("emit", {"path": "data.py"}) and cutoffs == []
+
+
+def test_the_rule_that_stopped_the_loop_is_stamped_on_its_phase_row():
+    """Inside a run every loop reports its completion through the phase sink; the stuck exit now
+    names its rule there, observer or not (critic 2026-09-29: only four callers pass `on_budget`).
+    MUTATION: drop the stamp -> the row says `fallback` and nothing else."""
+    from looplab.core.phase_events import PHASE_COMPLETED, phase_sink_scope
+
+    rows: list = []
+    with phase_sink_scope(lambda etype, data: rows.append((etype, data))):
+        drive_tool_loop(_CyclingClient(_SEVEN), _FileTools(), [{"role": "user", "content": "go"}],
+                        _EMIT, max_turns=60, finalize=lambda a: ("emit", a),
+                        fallback=lambda _m: ("fallback", None))
+    (completed,) = [data for etype, data in rows if etype == PHASE_COMPLETED]
+    assert completed["stuck_rule"] == "stale_cycle"
+    assert completed["stuck_detail"].startswith("re-ran 14 calls in a row")
+    rows.clear()
+    with phase_sink_scope(lambda etype, data: rows.append((etype, data))):
+        drive_tool_loop(_CyclingClient(_SEVEN), _FileTools(), [{"role": "user", "content": "go"}],
+                        _EMIT, max_turns=60, finalize=lambda a: ("emit", a),
+                        fallback=lambda _m: ("fallback", None), stuck_stale_streak=0)
+    (completed,) = [data for etype, data in rows if etype == PHASE_COMPLETED]
+    assert "stuck_rule" not in completed and "stuck_detail" not in completed
+
+
+def test_judgebench_forwards_the_detector_s_other_two_thresholds(monkeypatch, tmp_path):
+    """A case's `loop` block could name `stuck_stale_streak` and nothing forwarded it (critic
+    2026-09-29). MUTATION: drop either keyword from `run_case`."""
+    from looplab.agents import tool_loop
+    from looplab.judgebench import trajectory as T
+
+    seen: dict = {}
+
+    def _capture(*_args, **kwargs):
+        seen.update(kwargs)
+        return None
+
+    monkeypatch.setattr(tool_loop, "drive_tool_loop", _capture)
+    case = dict(T.read_corpus()["cases"][0])
+    case["loop"] = dict(case.get("loop") or {}, stuck_stale_streak=0, stuck_alternate=7)
+    T.run_case(case, tmp_path / "case")
+    assert seen["stuck_stale_streak"] == 0 and seen["stuck_alternate"] == 7

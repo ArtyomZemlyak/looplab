@@ -355,9 +355,11 @@ _TRUNC_NOTE = ("\n…[truncated by the tool-result cap — {n} chars omitted; "
 # Appended to the 3rd+ consecutive IDENTICAL-RESULT repeat of an exact (tool, canonical-args) call
 # within ONE loop invocation. The G2 read-dedup removal (P3 — see the always-execute comment in
 # drive_tool_loop) left a B1 gap: a 3+-call read ROUND-ROBIN (A B C A B C …) never tripped the
-# StuckDetector, which caught only 1- and 2-cycles (its long-cycle rule, `stuck_stale_streak`, has
-# ENDED such a loop since 2026-09-29, but only two laps in — this note speaks from the third
-# identical result on, long before). No caching, no suppression — the repeated call
+# StuckDetector, which then caught only 1- and 2-cycles. Its long-cycle rule (`stuck_stale_streak`)
+# has ENDED such a loop since 2026-09-29, and this note still speaks first, from the third identical
+# result of a call — but for a wide cycle the two land in ONE lap: over d >= 6 distinct calls the
+# note first fires at call 2d+1 and the rule stops the loop at call 3d (seven files: call 15, then
+# call 21), and a 3-call cycle needs four stale laps. No caching, no suppression — the repeated call
 # still fully executes and returns fresh, complete content (the operator's always-re-read decision
 # stands); we only TELL the model it is repeating itself so it can stop on its own. Keyed on the
 # RESULT too, not just the call: a cursor tool (read_output) legitimately repeats the same args and
@@ -773,7 +775,7 @@ def _run_tool_call(tools, name: str, args: dict, *, repeat_state: dict,
     cached copy silently went stale — always read what is asked. The StuckDetector in the
     caller is the loop-safety net now: a model that thrashes on the SAME call with the
     SAME result trips B1 and the loop force-emits instead of spinning; the repeat
-    note below covers the 3+-call round-robins B1's 1-/2-cycle window can't see.
+    note below speaks to a 3+-call round-robin before B1's long-cycle rule ends it.
 
     `repeat_state` is the caller's per-invocation ledger (see `_REPEAT_NOTE`), mutated here.
     `read_state` is its PATH-keyed sibling (see `_READ_TOOL_PATH_SLOTS`), also mutated here; `None`
@@ -829,10 +831,10 @@ def _run_tool_call(tools, name: str, args: dict, *, repeat_state: dict,
         # will carry (a single expression, not two kept-in-sync copies).
         result = _cap_tool_result(str(result))
         # Tag the 3rd+ IDENTICAL-RESULT repeat of this (tool, canonical-args) call (see
-        # _REPEAT_NOTE: the round-robin gap the StuckDetector's 1-/2-cycle window can't
-        # cover; a changed result — a cursor poll's new chunk, a post-write re-read —
-        # resets the streak and never gets the note). The note rides OUTSIDE the cap so it
-        # can never be truncated away.
+        # _REPEAT_NOTE: a round-robin the StuckDetector's 1-/2-cycle window cannot see and its
+        # long-cycle rule ends only later; a changed result — a cursor poll's new chunk, a
+        # post-write re-read — resets the streak and never gets the note). The note rides
+        # OUTSIDE the cap so it can never be truncated away.
         repeat_note = ""
         sig = f"{name}({_canonical(args)})"
         prev, streak = repeat_state.get(sig, (None, 0))
@@ -979,6 +981,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     on_plan=None, phase_label: str = "",
                     stuck_detection: bool = True,
                     stuck_repeat: int = 4, stuck_alternate: int = 4, stuck_stale_streak: int = 12,
+                    stuck_neutral_tools: tuple = (),
                     self_plan: bool = False, plan_reinject_every: int = 5,
                     auto_summary: bool = False, summary_client=None, on_step=None, on_text=None,
                     cancel_check=None, on_tool_result=None,
@@ -1020,7 +1023,12 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     row, each re-running a call+result already seen in THIS loop, over at least three distinct
     ones and twice each on average, end the loop through the same exit — a plan phase that read
     seven config files round and round for 104 calls saw neither short rule fire. An `update_plan`
-    call neither extends nor breaks that streak (see `agents/stuck.py`).
+    call neither extends nor breaks that streak (see `agents/stuck.py`), and nor does a call of a
+    tool in `stuck_neutral_tools` — the caller's declaration of its OWN checklist and waiting
+    tools (the assistant's `write_todos`, `read_output`, `list_background`), explicit-only because
+    a tool name is a fact about the call site's toolset, not a setting. A refused emit ends the
+    streak; the rule that stopped the loop is stamped on its `agent_phase_completed` row
+    (`stuck_rule`, `stuck_detail`), whether or not the caller passed an `on_budget` observer.
 
       - `read_loop_nudge_after` (25; 0 = off): reads of ONE file inside this loop after which every
         further read of it carries `_READ_LOOP_NOTE` — the path-keyed net for a model walking a file
@@ -1113,7 +1121,10 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         from looplab.agents.stuck import StuckDetector
         stuck = StuckDetector(repeat_threshold=stuck_repeat, alternate_threshold=stuck_alternate,
                               stale_threshold=stuck_stale_streak,
-                              neutral_tools=(_PLAN_TOOL_NAME,) if self_plan else ())
+                              neutral_tools=(((_PLAN_TOOL_NAME,) if self_plan else ())
+                                             + ((stuck_neutral_tools,)
+                                                if isinstance(stuck_neutral_tools, str)
+                                                else tuple(stuck_neutral_tools or ()))))
     # STATELESS per-loop repeat ledger (see _REPEAT_NOTE): for each exact (tool, canonical-args)
     # call, the previous CAPPED result and the length of the current identical-result streak — for
     # THIS invocation only, a fresh dict per call, like the StuckDetector, so nothing leaks across
@@ -1154,10 +1165,19 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         "tools": len(tool_specs), "max_turns": int(max_turns or 0),
         "time_budget_s": float(time_budget_s or 0.0)})
 
+    # Which no-progress rule stopped this loop, when one did: stamped on the phase's completion row
+    # so a firing is countable on every loop inside a run, observer or not (critic 2026-09-29: the
+    # long-cycle rule's rate could be read off only the four callers that pass `on_budget`, and
+    # `agents/agent.py::_note_cutoff` kept its kind alone, `stuck`, as for a 1- or 2-cycle).
+    _stuck_stamp: dict = {}
+
     def _done(exit_kind: str) -> None:
-        emit_phase_event(PHASE_COMPLETED, {
-            "label": _label, "exit": exit_kind, "turns": clock.turn + 1,
-            "seconds": round(time.monotonic() - started, 3), "plan_updates": _plan_updates})
+        payload = {"label": _label, "exit": exit_kind, "turns": clock.turn + 1,
+                   "seconds": round(time.monotonic() - started, 3), "plan_updates": _plan_updates}
+        if _stuck_stamp:
+            payload["stuck_rule"] = _stuck_stamp["stuck_rule"]
+            payload["stuck_detail"] = _stuck_stamp["stuck_detail"]
+        emit_phase_event(PHASE_COMPLETED, payload)
     # D11: history compression runs on the dedicated cheap compressor when configured, else the
     # loop's own client. A configured compressor that failed validation/construction is different:
     # use the deterministic local truncation fallback instead of spending against the main client.
@@ -1388,6 +1408,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         messages.append({"role": "assistant", "content": msg.get("content") or "",
                          "tool_calls": calls})
         stuck_reason = None
+        stuck_rule = None               # which rule `stuck_reason` came from (see `_stuck_stamp`)
         investigated = False            # did any call this turn actually RUN a tool (see call_turns)
         for tc in calls:
             repeat_note = ""            # per-call: the repeat note and/or the read-loop nudge, else ""
@@ -1409,6 +1430,10 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                         # the emit call with the error and `continue` so any sibling calls this turn still
                         # get their tool results (no dangling tool_call_id) and the NEXT turn re-prompts.
                         emit_rejects += 1
+                        # The refusal is NEW information: re-reading what it named is the repair,
+                        # so it ends a stale streak that began before it (see `reset_stale`).
+                        if stuck is not None:
+                            stuck.reset_stale()
                         messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                                          "content": (_reject_text(reject_prompt, emit_name, err)
                                                      if reject_prompt else
@@ -1482,11 +1507,14 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             if stuck is not None:       # B1: flag no-progress on the cheapest signal (a repeat).
                 # Push the UN-noted result: the note's incrementing count would otherwise make every
                 # repeat look like a NEW observation and blind the identical-pair check.
-                stuck_reason = stuck.push(name, args, result) or stuck_reason
+                pushed = stuck.push(name, args, result)
+                if pushed:
+                    stuck_reason, stuck_rule = pushed, stuck.last_rule
                 # The read-loop nudge's ESCALATION (see `_READ_LOOP_FORCE_FACTOR`): a model that
                 # keeps walking one file long after the note told it how to stop is stuck too.
-                stuck_reason = (_read_loop_stuck(read_state, name, args, read_loop_nudge_after)
-                                or stuck_reason)
+                walked = _read_loop_stuck(read_state, name, args, read_loop_nudge_after)
+                if walked:
+                    stuck_reason, stuck_rule = walked, "read_loop"
         # G: soft convergence. A model that keeps issuing DIFFERENT tool calls never trips the
         # StuckDetector (it keys on repeats) and, with max_turns unlimited, investigates until the budget
         # runs out (live GLM node 63: one idea's worth of intent, then ~200 more reads). Nudge it to
@@ -1550,6 +1578,8 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             # indistinguishable from a finished turn.
             _note_budget(on_budget, "stuck", turns=turn_idx,
                          seconds=time.monotonic() - started, detail=str(stuck_reason))
+            _stuck_stamp.update({"stuck_rule": str(stuck_rule or "unknown"),
+                                 "stuck_detail": str(stuck_reason)[:200]})
             messages.append({"role": "user",
                              "content": (stuck_prompt.replace("{reason}", str(stuck_reason)) if stuck_prompt
                                          else f"Stop: you appear to be stuck ({stuck_reason}). "

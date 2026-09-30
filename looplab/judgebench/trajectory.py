@@ -526,6 +526,11 @@ def run_case(case: dict, root, *, arm: str = _ARM_SUBJECT, client=None,
         max_turns=int(loop.get("max_turns", 40)),
         stuck_detection=bool(loop.get("stuck_detection", True)),
         stuck_repeat=int(loop.get("stuck_repeat", 4)),
+        # …and the detector's other two thresholds, which a case's `loop` block could name and
+        # nothing forwarded: a case that turned the long-cycle rule off ran it at 12 anyway
+        # (critic 2026-09-29).
+        stuck_alternate=int(loop.get("stuck_alternate", 4)),
+        stuck_stale_streak=int(loop.get("stuck_stale_streak", 12)),
         tool_result_label=str(loop.get("tool_result_label", "")),
         phase_label=str(loop.get("phase_label", "trajectory_bench")))
     elapsed = time.monotonic() - started

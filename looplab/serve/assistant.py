@@ -70,6 +70,14 @@ _FORK_STAGING_MAX_AGE_SECONDS = 24 * 60 * 60
 _FORK_STAGING_SWEEP_INTERVAL_SECONDS = 5 * 60
 _FORK_ACTIONS_DIR = ".fork-actions"
 _INCOMPLETE_SESSION_TITLE = "Incomplete chat (cleanup required)"
+# THE ASSISTANT'S CHECKLIST AND WAITING TOOLS, neutral to the stuck detector's long-cycle rule
+# (`agents/stuck.py`, doc 69 69.3; critic 2026-09-29, driven). `write_todos` is this role's plan —
+# it runs with the loop's own `update_plan` off, so a checklist rewritten between laps of the same
+# files broke every streak and the rule never fired — and `read_output` / `list_background` are how
+# it waits on a background job: three constant polls of a quiet job were stopped at call 15, a
+# pattern the replay the rule was measured on never saw. A poll of ONE constant call still meets the
+# short repeat rule, as it always did.
+ASSISTANT_STUCK_NEUTRAL_TOOLS = ("write_todos", "read_output", "list_background")
 # The per-SESSION cross-process fences (review 2026-09-22, SRV1-03), one per in-process lock they
 # extend: appends and the fork snapshot's read share the transcript's, meta read-modify-writes share
 # the meta's. Two files rather than one because `append` updates the meta AFTER releasing the
@@ -2414,7 +2422,8 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
                                 # results into a long turn had nothing in the text to re-anchor on.
                                 # The same constant on both sides, so the guard and the fence cannot
                                 # come to name different things.
-                                tool_result_label=BOSS_EVIDENCE_LABEL, **opts)
+                                tool_result_label=BOSS_EVIDENCE_LABEL,
+                                stuck_neutral_tools=ASSISTANT_STUCK_NEUTRAL_TOOLS, **opts)
     except Exception as e:  # noqa: BLE001 - surface a usable error, never crash the request
         return {"ok": False, **safe_assistant_failure(e), "steps": steps,
                 "applied": _collect("applied"), "proposals": _collect("proposals"),

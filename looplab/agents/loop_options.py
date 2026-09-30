@@ -183,6 +183,10 @@ EXPLICIT_ONLY_LOOP_ARGS: tuple[str, ...] = (
     # (review 2026-09-22, Q-1; `adapters/repo_developer.py::LLMRepoDeveloper._reject_kwargs`).
     "reject_prompt",
     "emit_retries",                             # per-call; nothing derives it from Settings
+    # The tools the stuck detector's long-cycle rule treats as NEUTRAL (`agents/stuck.py`): a name
+    # is a fact about the call site's own toolset — the assistant's checklist and background-job
+    # polls — so it is declared beside that toolset, never carried by a settings bundle.
+    "stuck_neutral_tools",
     # Whether a forced emit on an exit with NO retry turn may skip `validate`. A per-call
     # POLICY that belongs beside the callback it modifies: only the repair session wants it,
     # and a settings bundle that could turn it on for the stages caller would silently

@@ -1147,7 +1147,7 @@
           "label": "Stuck detection",
           "type": "bool",
           "default": true,
-          "help": "B1: the safety net that makes unlimited turns safe. Stops an agent that repeats the same call (or ping-pongs between two, or keeps hitting the same error) with no progress — forces its final emit instead of looping forever. On by default; reading different files / one long command never trips it."
+          "help": "B1: the safety net that makes unlimited turns safe. Stops an agent that repeats the same call (or ping-pongs between two, keeps hitting the same error, or reads the same files round and round) with no progress — forces its final emit instead of looping forever. On by default; reading many different files once each never trips it."
         },
         {
           "key": "agent_stuck_repeat",
@@ -1171,7 +1171,7 @@
           "type": "int",
           "default": 12,
           "placeholder": "12",
-          "help": "How many calls in a row, each re-running a call+result already seen in this loop, count as “stuck” — a cycle of three or more calls (e.g. the same seven config files read round and round), once each has been re-run twice on average. 0 = off."
+          "help": "How many calls in a row, each re-running a call+result already seen in this loop, count as “stuck” — a cycle of three or more calls (e.g. the same seven config files read round and round), once each has been re-run twice on average. 0 = off for the research, build, triage, strategy and assistant loops; the judges keep 12."
         },
         {
           "key": "agent_self_plan",
