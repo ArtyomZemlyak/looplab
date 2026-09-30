@@ -6,7 +6,8 @@
         "node_id": 0,
         "generation": 0,
         "attempt": 0,
-        "invocation_id": "legacy:r:n0:g0:a0"
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "canary_ran": false
       }
     ],
     [
@@ -71,7 +72,8 @@
         "node_id": 0,
         "generation": 0,
         "attempt": 1,
-        "invocation_id": "legacy:r:n0:g0:a1"
+        "invocation_id": "legacy:r:n0:g0:a1",
+        "canary_ran": false
       }
     ],
     [
@@ -147,7 +149,8 @@
         "node_id": 0,
         "generation": 0,
         "attempt": 0,
-        "invocation_id": "legacy:r:n0:g0:a0"
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "canary_ran": false
       }
     ],
     [
@@ -189,7 +192,8 @@
         "node_id": 0,
         "generation": 0,
         "attempt": 0,
-        "invocation_id": "legacy:r:n0:g0:a0"
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "canary_ran": false
       }
     ],
     [
@@ -231,7 +235,8 @@
         "node_id": 0,
         "generation": 0,
         "attempt": 0,
-        "invocation_id": "legacy:r:n0:g0:a0"
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "canary_ran": false
       }
     ],
     [
@@ -279,7 +284,8 @@
         "node_id": 0,
         "generation": 0,
         "attempt": 0,
-        "invocation_id": "legacy:r:n0:g0:a0"
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "canary_ran": false
       }
     ],
     [
@@ -321,7 +327,8 @@
         "node_id": 0,
         "generation": 0,
         "attempt": 0,
-        "invocation_id": "legacy:r:n0:g0:a0"
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "canary_ran": false
       }
     ],
     [
@@ -363,7 +370,8 @@
         "node_id": 0,
         "generation": 0,
         "attempt": 0,
-        "invocation_id": "legacy:r:n0:g0:a0"
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "canary_ran": false
       }
     ],
     [
@@ -411,7 +419,8 @@
         "node_id": 0,
         "generation": 0,
         "attempt": 0,
-        "invocation_id": "legacy:r:n0:g0:a0"
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "canary_ran": false
       }
     ],
     [
@@ -459,7 +468,8 @@
         "node_id": 0,
         "generation": 0,
         "attempt": 0,
-        "invocation_id": "legacy:r:n0:g0:a0"
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "canary_ran": false
       }
     ],
     [
@@ -517,7 +527,8 @@
         "node_id": 0,
         "generation": 0,
         "attempt": 1,
-        "invocation_id": "legacy:r:n0:g0:a1"
+        "invocation_id": "legacy:r:n0:g0:a1",
+        "canary_ran": false
       }
     ],
     [
@@ -597,7 +608,8 @@
         "node_id": 0,
         "generation": 0,
         "attempt": 0,
-        "invocation_id": "legacy:r:n0:g0:a0"
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "canary_ran": false
       }
     ],
     [
@@ -662,7 +674,8 @@
         "node_id": 0,
         "generation": 0,
         "attempt": 1,
-        "invocation_id": "legacy:r:n0:g0:a1"
+        "invocation_id": "legacy:r:n0:g0:a1",
+        "canary_ran": false
       }
     ],
     [
@@ -727,7 +740,8 @@
         "node_id": 0,
         "generation": 0,
         "attempt": 2,
-        "invocation_id": "legacy:r:n0:g0:a2"
+        "invocation_id": "legacy:r:n0:g0:a2",
+        "canary_ran": false
       }
     ],
     [
@@ -796,7 +810,8 @@
         "node_id": 0,
         "generation": 0,
         "attempt": 0,
-        "invocation_id": "legacy:r:n0:g0:a0"
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "canary_ran": false
       }
     ],
     [
@@ -861,7 +876,8 @@
         "node_id": 0,
         "generation": 0,
         "attempt": 1,
-        "invocation_id": "legacy:r:n0:g0:a1"
+        "invocation_id": "legacy:r:n0:g0:a1",
+        "canary_ran": false
       }
     ],
     [
@@ -926,7 +942,8 @@
         "node_id": 0,
         "generation": 0,
         "attempt": 2,
-        "invocation_id": "legacy:r:n0:g0:a2"
+        "invocation_id": "legacy:r:n0:g0:a2",
+        "canary_ran": false
       }
     ],
     [
@@ -963,7 +980,8 @@
         "node_id": 0,
         "generation": 0,
         "attempt": 0,
-        "invocation_id": "legacy:r:n0:g0:a0"
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "canary_ran": false
       }
     ],
     [
@@ -998,7 +1016,8 @@
         "node_id": 0,
         "generation": 0,
         "attempt": 0,
-        "invocation_id": "legacy:r:n0:g0:a0"
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "canary_ran": false
       }
     ],
     [
@@ -1033,7 +1052,8 @@
         "node_id": 0,
         "generation": 0,
         "attempt": 0,
-        "invocation_id": "legacy:r:n0:g0:a0"
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "canary_ran": false
       }
     ],
     [
@@ -1068,7 +1088,8 @@
         "node_id": 0,
         "generation": 0,
         "attempt": 0,
-        "invocation_id": "legacy:r:n0:g0:a0"
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "canary_ran": false
       }
     ],
     [
@@ -1183,7 +1204,8 @@
         "node_id": 0,
         "generation": 0,
         "attempt": 0,
-        "invocation_id": "legacy:r:n0:g0:a0"
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "canary_ran": false
       }
     ],
     [
@@ -1318,7 +1340,8 @@
         "node_id": 0,
         "generation": 0,
         "attempt": 0,
-        "invocation_id": "legacy:r:n0:g0:a0"
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "canary_ran": false
       }
     ],
     [
@@ -1453,7 +1476,8 @@
         "node_id": 0,
         "generation": 0,
         "attempt": 0,
-        "invocation_id": "legacy:r:n0:g0:a0"
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "canary_ran": false
       }
     ],
     [
@@ -1574,7 +1598,8 @@
         "node_id": 0,
         "generation": 0,
         "attempt": 0,
-        "invocation_id": "legacy:r:n0:g0:a0"
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "canary_ran": false
       }
     ],
     [
@@ -1735,7 +1760,8 @@
         "node_id": 0,
         "generation": 0,
         "attempt": 0,
-        "invocation_id": "legacy:r:n0:g0:a0"
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "canary_ran": false
       }
     ],
     [
@@ -1834,7 +1860,8 @@
         "node_id": 0,
         "generation": 0,
         "attempt": 0,
-        "invocation_id": "legacy:r:n0:g0:a0"
+        "invocation_id": "legacy:r:n0:g0:a0",
+        "canary_ran": false
       }
     ],
     [
@@ -1891,7 +1918,8 @@
         "node_id": 0,
         "generation": 0,
         "attempt": 1,
-        "invocation_id": "legacy:r:n0:g0:a1"
+        "invocation_id": "legacy:r:n0:g0:a1",
+        "canary_ran": false
       }
     ],
     [

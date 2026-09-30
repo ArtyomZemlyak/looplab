@@ -247,6 +247,9 @@ def test_a_passing_canary_lets_the_full_eval_run_and_its_number_is_dropped(tmp_p
         "the canary's env never reaches the full eval"
     assert not (eng.run_dir / "canary" / "node_0").exists()
     assert dev.errors == []
+    # The claim says the canary was this attempt's own, so its settle carries it (crit_v57 M1).
+    (claim,) = _of(evs, "eval_invocation_claimed")
+    assert claim.data["canary_ran"] is True
 
 
 def test_a_failing_canary_is_the_attempt_s_crash_and_the_full_eval_never_starts(tmp_path):
@@ -897,6 +900,31 @@ def test_a_dependency_round_s_attempt_is_charged_across_a_pause(tmp_path):
     assert fold(evs).total_eval_seconds >= first
 
 
+def test_a_dependency_round_s_claim_says_it_ran_no_canary(tmp_path):
+    """A dependency round re-runs its attempt through RUN_ATTEMPT, and the passed canary is not
+    re-run (same code digest) — so that round's claim says it ran none, never the first run's
+    answer (crit_v57 M1/L1: whose canary a window holds is read off the claim). MUTATION: drop the
+    per-attempt reset of `canary_ran` -> the round's claim repeats "True"."""
+    marker = tmp_path / "installed"
+    code = ("import os\n"
+            "if os.environ.get('LOOPLAB_CANARY') == '1':\n"
+            "    print('METRIC: 0.1')\n"
+            f"elif not os.path.exists({str(marker)!r}):\n"
+            f"    open({str(marker)!r}, 'w').write('1')\n"
+            "    raise ModuleNotFoundError(\"No module named 'somepkg'\")\n"
+            "else:\n"
+            "    print('METRIC: 0.5')\n")
+    eng = _engine(tmp_path / "run", _Dev(code))
+    eng._auto_install_deps = True
+    eng._prepare_env = lambda stderr: ["somepkg"]
+    _seed(eng, code)
+    evs = _evaluate(eng)
+    assert [c.data["canary_ran"] for c in _of(evs, "eval_invocation_claimed")] == [True, False]
+    assert len(_of(evs, EV_EVAL_CANARY_FINISHED)) == 1 and len(_of(evs, "deps_installed")) == 1
+    (term,) = _terminals(evs)
+    assert term.type == "node_evaluated" and term.data["metric"] == 0.5
+
+
 def _expired(*, timed_out: bool):
     return RunResult(exit_code=-9, stdout="", stderr="killed\n", metric=None, timed_out=timed_out)
 
@@ -1047,6 +1075,11 @@ def test_a_resume_does_not_rerun_a_canary_that_already_passed_for_the_same_code(
     assert [f.data["passed"] for f in _of(evs, EV_EVAL_CANARY_FINISHED)] == [True]
     (term,) = _terminals(evs)
     assert term.type == "node_evaluated" and term.data["metric"] == 0.9
+    # Each claim says whose canary the log holds (crit_v57 M1/L1): the dead process ran one, the
+    # resumed attempt none — so no settle of this process is read as carrying the dead one's.
+    claims = [e.data for e in _of(evs, "eval_invocation_claimed")]
+    assert [(c.get("after_interrupted_attempt", False), c["canary_ran"]) for c in claims] == [
+        (False, True), (True, False)]
 
 
 def _leaves(exc):

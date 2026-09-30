@@ -1727,7 +1727,9 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         required=("attempt", "generation", "invocation_id", "node_id"),
         # Written only when TRUE (an absent key is not the same fact as a false one): this attempt
         # re-invokes an evaluator whose previous invocation of the SAME id never settled.
-        optional=("after_interrupted_attempt",),
+        # `canary_ran` is written on every claim since crit_v57 (true or false; absent = an older
+        # claim): whether THIS attempt ran an eval canary of its own, which its settle carries.
+        optional=("after_interrupted_attempt", "canary_ran"),
     ),
     "eval_invocation_recovered": PayloadContract(
         "An ok-settled invocation with no terminal, on resume: finalized from its evidence, or re-run "

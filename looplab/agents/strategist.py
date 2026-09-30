@@ -1010,7 +1010,11 @@ def _gpu_pool_note(ctx) -> str:
             claim += f", {undeclared} declare none"
         parts.append(f"{count} {what}: {claim}")
     if ctx.eval_parallel_operator_owned:
-        parts.append("eval_parallel was set by the operator, so a width you choose is not applied")
+        # Owned by a pin, a launch setting OR a revoked `agent_control` grant
+        # (`engine/strategy.py::_eval_width_operator_owned`): "was set by the operator" was false of
+        # the last, which sets nothing (crit_v57 L3, driven).
+        parts.append("eval_parallel is not yours to set (the operator set it or withheld it), so a "
+                     "width you choose is not applied")
     return "; ".join(parts) + ".\n"
 
 

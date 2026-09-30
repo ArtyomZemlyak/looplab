@@ -59,14 +59,22 @@ test('a run that STOPPED with the evaluation withheld is not promised a resume',
 })
 
 test('a lifecycle number is an integer, not whatever `Number` coerces', () => {
-  // `Number(null)`, `Number('')`, `Number(true)`, `Number(' ')`, `Number([])` and `Number('0x0')`
-  // are integers; none is a generation, and neither is -1.
-  // MUTATION: the old `Number.isInteger(Number(x))` guard -> each of these moves the card.
+  // `Number(' ')`, `Number([])`, `Number([0])`, `Number('0x0')` and `Number('0')` are 0; none is a
+  // generation. MUTATION: the old guard (`Number.isInteger(Number(x))` after refusing a boolean,
+  // null and '' by name) -> each of those five moves the card. null, '', true and false it refused
+  // too; they stay as rows of the same rule.
   for (const bad of [null, '', true, false, ' ', [], [0], '0x0', -1, '0']) {
     const node = { id: 0, attempt: 0, status: 'pending', activity: withheld(bad) }
     const zero = { id: 0, attempt: bad, status: 'pending', activity: withheld(0) }
     assert.equal(cardRows(state({ 0: node }))[0].status, 'running', String(bad))
     assert.equal(cardRows(state({ 0: zero }))[0].status, 'running', `attempt ${bad}`)
+  }
+  // A NUMBER that is no lifecycle, the same on both sides — paired with 0 above, -1 was refused by
+  // the equality alone and pinned nothing (crit_v57 L4). MUTATIONS: drop `value >= 0`; test
+  // `typeof value === 'number'` for the safe integer.
+  for (const bad of [-1, 1.5, Infinity, 2 ** 53]) {
+    const both = { id: 0, attempt: bad, status: 'pending', activity: withheld(bad) }
+    assert.equal(cardRows(state({ 0: both }))[0].status, 'running', `both ${bad}`)
   }
 })
 

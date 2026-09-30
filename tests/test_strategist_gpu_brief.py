@@ -42,8 +42,8 @@ def test_the_line_states_the_grant_the_concurrent_declaration_the_queue_and_the_
                     "every experiment to run at once each may declare at most: eval_parallel "
                     "1 -> 4, 2 -> 2, 4 -> 1 (now 2); 3 open proposal(s): the widest declares 4 "
                     "GPU(s), 1 declare none; 2 built node(s) waiting to run: the widest declares 4 "
-                    "GPU(s), 1 declare none; eval_parallel was set by the operator, so a width "
-                    "you choose is not applied.\n")
+                    "GPU(s), 1 declare none; eval_parallel is not yours to set (the operator set "
+                    "it or withheld it), so a width you choose is not applied.\n")
     assert "the most GPUs ONE experiment may claim" not in line
 
 
@@ -213,8 +213,13 @@ def test_the_operator_owns_the_width_through_a_set_strategy_pin_too(tmp_path):
     assert engine._strategy_ctx(state).eval_parallel_operator_owned is False
     state.pending_strategy = {"eval_parallel": 3}
     assert engine._strategy_ctx(state).eval_parallel_operator_owned is True
+    # `validate_strategy`'s whole range, both ends: 0 is a width (live 0 settles to serial), 1024
+    # the ceiling (crit_v57 L4 s06, MUTATION: `0 < pin`).
+    for width in (0, 1024):
+        state.pending_strategy = {"eval_parallel": width}
+        assert engine._strategy_ctx(state).eval_parallel_operator_owned is True, width
     for not_a_width in ({"max_parallel": 3}, {"eval_parallel": "four"}, {"eval_parallel": 2000},
-                        {"eval_parallel": True}):
+                        {"eval_parallel": True}, {"eval_parallel": -1}, {"eval_parallel": 1025}):
         state.pending_strategy = not_a_width
         assert engine._strategy_ctx(state).eval_parallel_operator_owned is False, not_a_width
     state.pending_strategy = {"developer": "default"}
@@ -307,5 +312,8 @@ def test_built_nodes_waiting_to_run_are_the_queue_a_width_admits_next(tmp_path):
     node(5, {"gpus": 8}, rerun_from="propose")
     node(6, {"gpus": 8})
     state.buildings = {6: {"node_id": 6, "operator": "draft", "generation": 1}}
+    # …and one reset to be re-IMPLEMENTED is waiting for its build too (crit_v57 L4 w03, MUTATION:
+    # read only a re-proposal as a rebuild).
+    node(7, {"gpus": 8}, rerun_from="implement")
     ctx = engine._strategy_ctx(state)
     assert (ctx.waiting_nodes, ctx.widest_waiting_gpus, ctx.undeclared_waiting) == (2, 4, 1)

@@ -379,3 +379,63 @@ def test_a_salvage_cause_row_does_not_close_the_window_it_carries_nothing_for():
                                  "salvaged_metric": 0.7})
     assert _charges(_claim(), _settle(4560.0), salvage, _RESET) == [(0, 0, 4560.0)]
     assert _durable_prior_seconds(_log(_claim(), _settle(4560.0), salvage), 0, 0) == 4560.0
+
+
+# ------------------------------------------ whose canary is open at a claim (crit_v57 M1/L1)
+def test_a_resumed_process_s_own_canary_is_charged_once():
+    """crit_v57 M1, driven through the real engine: the dead process's canary faulted (0 s, the full
+    eval ran and died), the resumed process re-ran the canary (1.141 s) and its claim was stamped
+    `after_interrupted_attempt` — which the ledger read as "the open canary is the dead process's",
+    so the 1.141 s were charged at the claim AND inside the 1.597 s settle: 2.738 where 1.597 ran.
+    The claim now says whose canary it is. MUTATION: charge an open canary at every flagged claim."""
+    dead = [*_canary(0.0, True), _claim(canary_ran=True)]
+    resumed = [*_canary(1.141, True), _claim(after_interrupted_attempt=True, canary_ran=True),
+               _settle(1.597), _withhold(seconds=1.597)]
+    assert _charges(*dead, *resumed, _RESET) == [(0, 0, 1.597)]
+    # The moved digest (b57de542): the dead process's passed 10 s canary is ITS, the resumed
+    # process's 5 s canary is inside its own 105 s settle — 115 ran.
+    moved = [*_canary(10.0, True), _claim(canary_ran=True), *_canary(5.0, True),
+             _claim(after_interrupted_attempt=True, canary_ran=True), _settle(105.0)]
+    assert _charges(*moved, _RESET) == [(0, 0, 115.0)]
+
+
+def test_a_passed_canary_whose_process_died_before_claiming_is_not_refunded():
+    """crit_v57 L1, driven: the process died between its passed canary and the claim (the pause
+    fold and the write lock sit there), the resume skipped the canary by digest and claimed with no
+    open invocation to flag, and its settle — which holds none of that canary — replaced the window:
+    0.382 s charged where 1.462 ran. MUTATION: keep the window open at a claim that ran no canary."""
+    from looplab.engine.evaluate import _durable_prior_seconds
+    rows = [*_canary(1000.0, True), _claim(canary_ran=False), _settle(100.0)]
+    assert _charges(*rows, _RESET) == [(0, 0, 1100.0)]
+    assert _durable_prior_seconds(_log(*rows), 0, 0) == 1100.0, "RECOVER prices off the same sum"
+
+
+def test_a_claim_written_before_the_stamp_keeps_the_interrupted_repeat_rule():
+    """A log older than `canary_ran`: a flagged claim charges the open canary, an unflagged one leaves
+    it to its settle — and a junk stamp is no stamp. MUTATION: read an absent stamp as False -> a
+    legacy attempt's own canary is charged beside the settle that holds it."""
+    assert _charges(*_canary(9.0, True), _claim(), _settle(20.0), _RESET) == [(0, 0, 20.0)]
+    assert _charges(*_canary(9.0, True), _claim(canary_ran="no"), _settle(20.0),
+                    _RESET) == [(0, 0, 20.0)]
+    assert _charges(*_canary(900.0, True), _claim(), _claim(after_interrupted_attempt=True),
+                    _settle(50.0), _RESET) == [(0, 0, 950.0)]
+
+
+def test_a_charged_window_is_closed_where_it_is_charged():
+    """crit_v57 L4 e06/e09: a window charged at a claim or at a new attempt's canary start is CLOSED
+    there — left open, the end of the log charged it a second time (900 -> 1,800; 5 -> 10).
+    MUTATIONS: drop either reset."""
+    assert _charges(*_canary(900.0, True), _claim(canary_ran=True),
+                    _claim(after_interrupted_attempt=True, canary_ran=False), _RESET) == [(0, 0, 900.0)]
+    started = ("eval_canary_started", {"node_id": 0, "generation": 0, "attempt": 1,
+                                       "code_digest": "d", "timeout": 900})
+    assert _charges(*_canary(5.0, False), started, _RESET) == [(0, 0, 5.0)]
+
+
+def test_another_node_s_after_canary_withhold_does_not_carry_this_node_s_canary():
+    """crit_v57 L4 e11: the `after_canary` withhold closes a canary window only for its own
+    lifecycle. MUTATION: drop the lifecycle test from that clause -> node 1's row refunds node 0's
+    9 s canary."""
+    other = ("eval_attempt_withheld", {"node_id": 1, "generation": 0, "attempt": 0,
+                                       "at": "after_canary", "reason": "paused", "eval_seconds": 9.0})
+    assert _charges(*_canary(9.0, True), other, _RESET) == [(0, 0, 9.0)]

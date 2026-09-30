@@ -795,7 +795,14 @@ class ToolUsingResearcher:
         if money > 0:
             if session.thread != threading.get_ident() or session.usd_at_start is None:
                 return None
-            left_usd = money - float(thread_committed_usd_exact() - session.usd_at_start)
+            try:
+                spent_usd = float(thread_committed_usd_exact() - session.usd_at_start)
+            except OverflowError:
+                # Past the float range the session has spent more than any ceiling can name: no
+                # continuation, never an OverflowError that loses the paid candidate 1 with it
+                # (crit_v57 L2, driven through the panel; `tool_loop.py::_session_spend` reads `inf`).
+                return None
+            left_usd = money - spent_usd
             if left_usd <= 0:
                 return None
             opts = opts.replace(cost_budget_usd=left_usd)

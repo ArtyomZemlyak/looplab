@@ -611,11 +611,13 @@ def _durable_orphan_settle_seconds(events, node_id: int, generation: int) -> flo
     read: a reset then refunded them (driven: a 26,830 s `ok` settle, a reset, and
     `abandoned_lifecycle_charges` answered []), and a resumed chain re-ran the attempt and charged
     only its own run. A settle is an ORPHAN when no carrying row follows it before the lifecycle's
-    next settle, or at all — read in log order, because the carrying rows name no invocation. A
-    carrying row that ends a window without the settle's seconds (a salvage-cause repair row carries
-    none) under-charges, which is the safe direction. The `ok` settle `_eval_recover_settled`
-    finalizes from is always an orphan here, so that phase prices its terminal off this sum and adds
-    nothing for the settle itself."""
+    next settle, or at all — read in log order, because the carrying rows name no invocation. A row
+    that carries none of the settle's seconds ends no window (`_carries_settle`: a salvage-cause
+    repair row). An eval CANARY is a window too: the settle of the attempt that ran it carries it,
+    and one nothing carries — its process died before claiming, or mid-eval with the resume skipping
+    the passed canary by code digest — is an orphan; whose canary is open at a claim is on the claim
+    (`canary_ran`). The `ok` settle `_eval_recover_settled` finalizes from is always an orphan here,
+    so that phase prices its terminal off this sum and adds nothing for the settle itself."""
     spent = 0.0
     # The seconds of this lifecycle's latest step that no row has carried yet, and whether that step
     # was a SETTLE or a CANARY (crit_v46 L1): a canary runs inside the attempt's clock (`_t0`), so the
@@ -628,10 +630,17 @@ def _durable_orphan_settle_seconds(events, node_id: int, generation: int) -> flo
             if not _durable_row_belongs(d, node_id, generation):
                 continue
             if e.type == EV_EVAL_INVOCATION_CLAIMED:
-                # A RESUMED process repeating an invocation a dead one left open: a canary that dead
-                # process ran is inside no clock of this one, so the settle that follows cannot carry
-                # it (the resume skips a passed canary by code digest).
-                if open_kind == "canary" and d.get("after_interrupted_attempt") is True:
+                # WHOSE canary is open at a claim is on the claim (`canary_ran`, crit_v57 M1/L1).
+                # THIS attempt's own: its settle is measured from `_t0` and carries it, so the window
+                # stays open. None of its own: the open canary is an earlier process's, inside no
+                # clock of this one (the resume skips a passed canary by code digest), and nothing
+                # else will carry it. A claim written before the key falls back to its
+                # interrupted-repeat flag, which misreads both ways — a resumed process's own
+                # re-run canary charged twice, a canary whose process died before claiming refunded
+                # — and is why the key exists.
+                own = d.get("canary_ran")
+                if open_kind == "canary" and (own is False or (
+                        not isinstance(own, bool) and d.get("after_interrupted_attempt") is True)):
                     spent += open_seconds
                     open_seconds, open_kind = None, None
             elif e.type == EV_EVAL_INVOCATION_SETTLED:
@@ -664,8 +673,8 @@ def _durable_orphan_settle_seconds(events, node_id: int, generation: int) -> flo
 
 def _durable_prior_seconds(events, node_id: int, generation: int) -> float:
     """The eval seconds this lifecycle already spent that NO terminal carries yet: its repair
-    attempts, its dependency rounds, its withheld attempts and the settled invocations whose next
-    row a dead process never wrote, each off its own durable rows — the ONE sum every terminal of
+    attempts, its dependency rounds, its withheld attempts and the settled invocations and eval
+    canaries whose next row a dead process never wrote, each off its own durable rows — the ONE sum every terminal of
     the lifecycle charges (SEED_LEDGERS seeds `prior_repair_seconds` with it for the terminal the
     attempt loop writes).
 
@@ -703,7 +712,8 @@ def abandoned_lifecycle_charges(events, state) -> list:
     (`attempt` is the terminals' legacy generation alias), and an UNSTAMPED legacy terminal binds
     every generation, so it can only suppress a charge, never add a second one. A spend row names
     its lifecycle by an explicit stamp or not at all; a settle row is one, for the invocation a dead
-    process settled and never carried (`_durable_orphan_settle_seconds`)."""
+    process settled and never carried, and so is a canary's finished row, for a canary nothing
+    carried (`_durable_orphan_settle_seconds`)."""
     terminals: dict = {}
     spent: set = set()
     for e in events or []:
@@ -1586,6 +1596,11 @@ class EvalAttempt:
     # recover a number from a canary — and by APPLY_REPAIR, which must not reuse a stage the node's
     # workdir never ran.
     canary_failed: bool = False
+    # True when THIS attempt ran an eval canary in THIS process and went on to claim its full eval:
+    # bound by RUN_ATTEMPT (reset at its top) and stamped on the invocation's claim (`canary_ran`),
+    # the one row that can say whose canary an open window holds (`_durable_orphan_settle_seconds`,
+    # crit_v57 M1/L1).
+    canary_ran: bool = False
 
     def charged_eval_seconds(self, extra: float = 0.0) -> float:
         """What this lifecycle's TERMINAL charges the run's eval budget: the attempts a DEAD process
@@ -1854,9 +1869,17 @@ class EvaluateMixin:
 
         The id itself is bound by the PHASE (`_eval_run_attempt`), beside every other per-attempt
         value it binds, so the record's own slots keep their one declaring site.
+
+        `canary_ran` is written on EVERY claim, true or false, because both answers are facts the
+        seconds ledger needs and its absence is a third one — a claim written before the key: did
+        THIS attempt run an eval canary of its own (inside `_t0`, so its settle carries it), or is
+        any canary still uncarried in the log an earlier process's (`_durable_orphan_settle_seconds`,
+        crit_v57 M1/L1)? `after_interrupted_attempt` could not answer that: a resumed process
+        re-runs a canary whose digest moved or that faulted, and a process can die between its
+        passed canary and its claim.
         """
         row = {"node_id": a.node_id, "generation": a.generation, "attempt": a.attempt,
-               "invocation_id": a.invocation_id}
+               "invocation_id": a.invocation_id, "canary_ran": bool(a.canary_ran)}
         if a.invocation_id in a.unsettled_at_start:
             row["after_interrupted_attempt"] = True
         async with self._write_lock:
@@ -4019,6 +4042,7 @@ class EvaluateMixin:
         # measured", wrote that stale result as this lifecycle's terminal.
         a.res = None
         a.canary_failed = False
+        a.canary_ran = False
         # ONE pause decision, and the devices follow it (critic 2026-09-29, MEDIUM-1): a withheld
         # attempt takes nothing back — on a busy pool the reclaim WAITS, and a paused engine sat on
         # the pool for devices it would never use — and a launching one is re-pinned before it
@@ -4105,6 +4129,7 @@ class EvaluateMixin:
                     cancel.set()
                     _tg.cancel_scope.cancel()
                     return PHASE_NEXT
+                a.canary_ran = True
                 if self._pause_withholds_attempt(a):
                     a.sp.set("eval_withheld", "paused_after_canary")
                     _LOG.info("node %s: full eval withheld — the run was paused while its canary "

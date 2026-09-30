@@ -336,6 +336,34 @@ def test_derive_lens_endpoint_mints_and_projects(tmp_path, monkeypatch):
     assert data["metrics"]["rows"]["llm/gpt"]["best"] == 0.9
 
 
+def test_the_queued_lens_receipt_carries_the_frame_the_ui_restores(tmp_path, monkeypatch):
+    """What the UI consumes on the QUEUED path is the job receipt, not `_post_lens`' replay (crit_v57
+    NIT): its generic `status: done` shadows the frame's own status, which
+    `ui/src/conceptLensRecovery.js::normalizeJobResult` restores from the frame's `complete` bit. So
+    the receipt must carry that bit, agreeing with the frame's status, and the rest of the frame."""
+    import time as _time
+    monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0")
+    _edge_run(tmp_path)
+    import looplab.serve.server as server_mod
+    monkeypatch.setattr(server_mod, "make_llm_client",
+                        lambda *a, **k: _LensClient({"name": "Usage", "label": "By usage", "rels": ["uses"]}))
+    client = TestClient(make_app(tmp_path))
+    body = _lens_body(client, "group by what uses what")
+    first = client.post("/api/runs/demo/concepts/lens", json=body, headers=_lens_headers()).json()
+    assert first["status"] == "running" and first["job_id"], first
+    deadline = _time.monotonic() + 60.0
+    while (receipt := client.get(f"/api/jobs/{first['job_id']}").json()).get("status") == "running":
+        assert _time.monotonic() < deadline, "the lens job never settled"
+        _time.sleep(0.02)
+    frame = client.post("/api/runs/demo/concepts/lens", json=body, headers=_lens_headers()).json()
+    assert receipt["status"] == "done" and receipt["complete"] is (frame["status"] == "complete")
+    assert receipt["ok"] is True and receipt["spec"] == frame["spec"] and receipt["lens"] == "usage"
+    # The replay re-reads the log the lens rows extended; every other key is the frame's own.
+    moved = {"status", "captured_seq", "max_seq"}
+    assert {k: v for k, v in receipt.items() if k not in moved} == {
+        k: v for k, v in frame.items() if k not in moved}
+
+
 def test_derive_lens_endpoint_soft_fails_when_model_declines(tmp_path, monkeypatch):
     _edge_run(tmp_path)
     import looplab.serve.server as server_mod

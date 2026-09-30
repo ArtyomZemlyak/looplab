@@ -1129,10 +1129,15 @@ class _FakeClock:
         return self.now
 
 
-def _continued_with(monkeypatch, *, wall, money):
+def _continued_with(monkeypatch, *, wall, money, spent_before=0.0):
     """Candidate 1 (a read, an emit: 60 s and $0.50 of the fake clock and accountant), then one
-    continuation. Returns what the alternative's loop was handed and the model's requests."""
+    continuation. Returns what the alternative's loop was handed and the model's requests.
+    `spent_before` is what this THREAD committed before the session began (an earlier session)."""
     import looplab.agents.agent as agent_mod
+    from looplab.core.llm_budget import note_committed_cost
+
+    if spent_before:
+        note_committed_cost(spent_before)
 
     clock = _FakeClock()
     monkeypatch.setattr(agent_mod, "time", clock)   # agent.py's session clock only
@@ -1160,6 +1165,11 @@ def test_12_a_continued_session_runs_on_what_is_left_of_its_wall_clock_and_money
     candidate 1 began. MUTATION: hand it `self.loop_opts`' own wall clock or money ceiling."""
     seen, _model, _before, _after = _continued_with(monkeypatch, wall=100.0, money=1.0)
     assert seen["Researcher·propose"] == (100.0, 1.0)
+    assert seen["Researcher·alternative"] == (40.0, 0.5)
+    # What the thread spent BEFORE the session is not the session's (crit_v57 L4 a08, MUTATION: take
+    # the session's money baseline from 0 -> 0.2).
+    seen, _model, _before, _after = _continued_with(monkeypatch, wall=100.0, money=1.0,
+                                                    spent_before=0.3)
     assert seen["Researcher·alternative"] == (40.0, 0.5)
 
 
@@ -1193,3 +1203,28 @@ def test_the_panel_notes_the_chosen_candidate_s_receipt_last_into_the_caller_s_s
         chosen = panel._chosen(["a", "b", "c"], 1, ["turns", "", "time"])
     assert chosen == "b" and panel.last_propose_budget_exhausted == ""
     assert scoped_budget_exhausted(box, panel) == ""
+
+
+def test_12_a_session_past_the_float_range_is_not_continued_and_does_not_raise(monkeypatch):
+    """crit_v57 L2, driven through the panel: two float-max cost reports on candidate 1's emit turn,
+    a money ceiling on, and the continuation's reading of what was left raised OverflowError — the
+    already-paid candidate 1 lost with it. `tool_loop.py::_session_spend` reads that spend as `inf`
+    since crit_v54 F2; this reading refuses the continuation instead. MUTATION: drop the catch."""
+    import sys
+    import threading
+    from fractions import Fraction
+
+    import looplab.agents.agent as agent_mod
+    from looplab.agents.agent import ProposalSession
+
+    researcher = ToolUsingResearcher(_Model([]), _Tools(), loop_opts=LoopOptions(cost_budget_usd=1.0))
+    session = ProposalSession(thread=threading.get_ident(), usd_at_start=Fraction(0))
+    monkeypatch.setattr(agent_mod, "thread_committed_usd_exact",
+                        lambda: Fraction(sys.float_info.max) * 2)
+    assert researcher._continuation_opts(session) is None
+    monkeypatch.setattr(agent_mod, "thread_committed_usd_exact", lambda: Fraction(1, 4))
+    assert researcher._continuation_opts(session).cost_budget_usd == 0.75
+    # On another thread the session's spend cannot be measured: no continuation (crit_v57 L4 a04,
+    # MUTATION: drop the thread test -> this thread's ledger is read as the session's).
+    elsewhere = ProposalSession(thread=threading.get_ident() + 1, usd_at_start=Fraction(0))
+    assert researcher._continuation_opts(elsewhere) is None
