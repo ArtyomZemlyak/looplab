@@ -60,6 +60,19 @@ from looplab.trust.cross_run import (cross_run_text, keep_retarget_clause, same_
 _NO_PREPARED_DEVELOPER = object()
 
 
+def _plateau_leader(state: RunState):
+    """WHOSE plateau the memo files a consulted rung under: the leader's `(node id, lifecycle)`.
+    The stall is counted on the leader's CURRENT lifecycle (`agents/strategist.py::stall_rung` reads
+    each attempt's `parent_generations` against `champion.attempt`), so an operator reset of the
+    leader, or the holdout epoch's requeue of it, starts a new count — a new plateau the memo must
+    not read as the old one's rungs (crit_v56 F2, driven: after a reset, a new stall and hard stall
+    bought no consult, where a resumed engine's durable gate said both were due). `None` for the
+    lifecycle when the leader is not in the state."""
+    leader = state.best_node_id
+    node = state.nodes.get(leader) if leader is not None else None
+    return leader, getattr(node, "attempt", None)
+
+
 class StrategyCadenceMixin:
     """The engine's strategist-cadence cluster. See the module docstring for the mixin convention
     (`self` is the Engine; `_op_span` stays on the Engine)."""
@@ -485,13 +498,13 @@ class StrategyCadenceMixin:
         return coverage_signal(state, resolution=self.archive_resolution)
 
     def _plateau_key(self, state: RunState) -> tuple:
-        """The `(leader, rung)` identity of the plateau the run is on — `(best_node_id, 0)` when it is
-        not on one. The in-process memo `_maybe_consult_strategist` keeps for `plateau_due`'s `seen`
-        is built from these (`cadence.plateau_consulted`: the highest rung consulted per leader), so
-        the identity is computed in exactly one place for the gate and for the memo."""
+        """The `(leader, rung)` identity of the plateau the run is on — rung 0 when it is not on one.
+        The in-process memo `_maybe_consult_strategist` keeps for `plateau_due`'s `seen` is built from
+        these (`cadence.plateau_consulted`: the highest rung consulted per leader), so the identity is
+        computed in exactly one place for the gate and for the memo."""
         rung, _started_at = stall_rung(
             state, strategist_stall_window(getattr(self, "strategist", None)))
-        return state.best_node_id, rung
+        return _plateau_leader(state), rung
 
     def _should_consult(self, state: RunState, *, marks=None, plateau_seen=None) -> bool:
         """Bounded, deterministic cadence: only at a creation decision point (no pending evals),
@@ -505,8 +518,8 @@ class StrategyCadenceMixin:
         `strategist_every - 1` nodes of paid, leader-less pushing (FML-bench: the stagnation-adaptive
         agent beat all six fixed baselines, and the adaptation is only worth what its latency leaves).
         `cadence.plateau_due` states the trigger and its bound; `plateau_seen` is the CONSUMER's
-        in-process memo of the last plateau it consulted on (the Strategist passes its own, the
-        coverage snapshot passes none because a snapshot always records a mark). A plateau firing
+        in-process memo of the highest rung it consulted on per leader LIFECYCLE (the Strategist
+        passes its own, the coverage snapshot passes none because a snapshot always records a mark). A plateau firing
         does not move the cadence window unless it records — the same rule as every other firing.
 
         Since-last, not `n % every == 0`. Under `llm_parallel > 1` the node count advances in
@@ -548,7 +561,8 @@ class StrategyCadenceMixin:
         # would act — at the stall, and once more at the hard stall that requests deep research.
         rung, started_at = stall_rung(
             state, strategist_stall_window(getattr(self, "strategist", None)))
-        if plateau_due(rung, started_at, last, seen=plateau_seen, key=(state.best_node_id, rung)):
+        if plateau_due(rung, started_at, last, seen=plateau_seen,
+                       key=(_plateau_leader(state), rung)):
             return True
         # `strategist_every` is `ge=1` via Settings, but the Engine kwarg / EngineOptions accept 0, and
         # this cadence is reused for coverage snapshots even with NO strategist wired

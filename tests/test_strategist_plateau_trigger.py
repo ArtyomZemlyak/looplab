@@ -140,17 +140,17 @@ def test_the_gate_fires_at_the_stall_and_at_the_hard_stall_and_not_before_either
     assert gate._should_consult(stalled, marks=marks) is True
     # A decision recorded inside the rung closes it durably; the consumer's memo closes it too.
     assert gate._should_consult(stalled, marks=[{"at_node": 4}]) is False
-    assert gate._should_consult(stalled, marks=marks, plateau_seen={0: 1}) is False
+    assert gate._should_consult(stalled, marks=marks, plateau_seen={(0, 0): 1}) is False
     # Two more failed attempts are the SAME plateau, not a new one.
     _push(store)
     _push(store)
-    assert gate._should_consult(fold(store.read_all()), marks=marks, plateau_seen={0: 1}) is False
+    assert gate._should_consult(fold(store.read_all()), marks=marks, plateau_seen={(0, 0): 1}) is False
     # The sixth is the hard stall the rule requests deep research at: a new rung, fires once more.
     _push(store)
     hard = fold(store.read_all())
     assert stall_rung(hard, DEFAULT_STALL_WINDOW) == (2, 7)
-    assert gate._should_consult(hard, marks=[{"at_node": 4}], plateau_seen={0: 1}) is True
-    assert gate._should_consult(hard, marks=[{"at_node": 7}], plateau_seen={0: 1}) is False
+    assert gate._should_consult(hard, marks=[{"at_node": 4}], plateau_seen={(0, 0): 1}) is True
+    assert gate._should_consult(hard, marks=[{"at_node": 7}], plateau_seen={(0, 0): 1}) is False
     # A new leader ends the plateau: the count restarts from zero improves.
     _push(store, metric=0.95)
     crowned = fold(store.read_all())
@@ -166,10 +166,10 @@ def test_the_plateau_does_not_move_the_cadence_window_unless_it_records(tmp_path
     marks = [{"at_node": 1}]
     st = fold(store.read_all())                    # n == 4: plateau yes, cadence 4 - 1 < 5
     assert gate._should_consult(st, marks=marks) is True
-    assert gate._should_consult(st, marks=marks, plateau_seen={0: 1}) is False
+    assert gate._should_consult(st, marks=marks, plateau_seen={(0, 0): 1}) is False
     _push(store)
     _push(store)                                   # n == 6: cadence 6 - 1 >= 5 fires as before
-    assert gate._should_consult(fold(store.read_all()), marks=marks, plateau_seen={0: 1}) is True
+    assert gate._should_consult(fold(store.read_all()), marks=marks, plateau_seen={(0, 0): 1}) is True
 
 
 # ---------------------------------------------------------------------------------- 3. THE MONEY
@@ -271,6 +271,39 @@ def test_a_lead_handed_back_re_opens_no_rung_already_consulted(tmp_path):
     assert stub.calls == 3, "rung 2 of node 0 was consulted on before the lead moved"
 
 
+def test_a_reset_leader_s_new_plateau_is_a_new_one(tmp_path):
+    """crit_v56 F2, driven: the stall is counted on the leader's CURRENT lifecycle, so an operator
+    reset (or the holdout epoch's requeue) starts the count again — and the memo, keyed on the node
+    id alone, read the new lifecycle's stall and hard stall as rungs already paid for: 2 consults
+    where 4 were due, and a resumed engine's durable gate disagreed with the live one. MUTATION: key
+    the memo on the node id alone -> 2."""
+    store = _stalled_store(tmp_path, improves=0)
+    stub = _Stub({})
+    eng = make_engine(tmp_path, strategist=stub, strategist_every=100,
+                      cadence_while_evaluating=True)
+
+    def push(lifecycle):
+        nid = sum(1 for e in store.read_all() if e.type == "node_created")
+        store.append("node_created", {"node_id": nid, "parent_ids": [0], "operator": "improve",
+                                      "parent_generations": {"0": lifecycle},
+                                      "idea": {"operator": "improve", "params": {"x": float(nid)}}})
+        store.append("node_evaluated", {"node_id": nid, "metric": 0.5, "generation": 0})
+
+    for _ in range(6):
+        push(0)
+        _turn(eng)
+    assert stub.calls == 2
+    store.append("node_reset", {"node_id": 0, "from_stage": "eval", "generation": 0})
+    store.append("node_evaluated", {"node_id": 0, "metric": 0.9, "generation": 1})
+    _turn(eng)
+    assert stall_rung(fold(store.read_all()), DEFAULT_STALL_WINDOW)[0] == 0, "a new count"
+    for _ in range(6):
+        push(1)
+        _turn(eng)
+    assert stall_rung(fold(store.read_all()), DEFAULT_STALL_WINDOW)[0] == 2
+    assert stub.calls == 4, f"paid {stub.calls}: the new lifecycle's two rungs are new facts"
+
+
 # ------------------------------------------------------------------------------- 4. DURABILITY
 def test_a_recorded_plateau_decision_closes_the_rung_for_a_fresh_engine(tmp_path):
     store = _stalled_store(tmp_path, improves=3)
@@ -326,7 +359,7 @@ def test_the_window_is_read_off_the_strategist_that_acts_on_it(tmp_path):
     _push(store)
     _push(store)
     assert wide._should_consult(fold(store.read_all()), marks=marks) is True
-    assert wide._plateau_key(fold(store.read_all())) == (0, 1)
+    assert wide._plateau_key(fold(store.read_all())) == ((0, 0), 1)   # (leader, lifecycle)
 
 
 # ------------------------------------------------------------------- 6. the other consumer

@@ -105,7 +105,12 @@ def _fresh_logs(workdir, since: Optional[float], snapshot=None, engine_logs=None
     `engine_logs` names the logs the ENGINE appends to — the case-folded basenames of this attempt's
     `EvalLogPlan.roles`: `setup.log`, one `<stage>.log` per resolved stage, or `eval.log` — and only
     those are read past the cursor. The engine never truncates one, so a boundary that still matches
-    IS an append. A log the CANDIDATE writes is read whole from the `since` floor: rewritten in place
+    is taken as an append — which a CANDIDATE writing a file of the same name defeats: a
+    `logging.basicConfig(filename="train.log", filemode="w")` under a stage named `train` shares the
+    engine's log, its byte-identical rewrite matches the old boundary, and the marker it printed
+    before the old end is not credited (crit_v56 F3, driven end to end: `inert_path` where the
+    candidate's own `own.log` scores). No size, identity or probe tells that rewrite from an append;
+    it stays open in doc 69 69.10b. A log the CANDIDATE writes is read whole from the `since` floor: rewritten in place
     ('w' mode, same inode) with deterministic output, its bytes at the old boundary match, the probe
     reads the rewrite as an append, and the marker this attempt really printed was dropped — a real
     metric withheld as `inert_path` (crit_v55 A1, driven). The cost is the old one for that file: a

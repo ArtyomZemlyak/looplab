@@ -452,8 +452,8 @@ def _sota_eligible(n: Node, excluded: Collection[int] = frozenset(),
     champion's card `tested` (it beat only that ineligible record). `n.metric` stays required and
     usable on top, because it — not `robust_metric` — is the scalar this ledger orders by.
 
-    IT CHANGES VERDICTS ON A PRESERVED LOG, stated here like `replay.py`'s
-    `_FAILURE_SPIKE_IGNORED_REASONS` note: any log with a node aborted AFTER its evaluation, or a
+    IT CHANGES VERDICTS ON A PRESERVED LOG, stated here like `replay.py`'s note on the benign
+    terminals above `_counts_as_current_failure`: any log with a node aborted AFTER its evaluation, or a
     hard-flagged node under `gate`/`block`, re-folds with that node's card reading `open` (no usable
     evidence — the class a failed or infeasible node was already in) instead of `supported`/
     `tested`, and the champion's card may move from `tested` to `supported`. Under `trust_gate=

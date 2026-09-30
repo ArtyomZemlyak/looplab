@@ -19,7 +19,7 @@ it needs a test of its own rather than a line in a docstring.
 from __future__ import annotations
 
 from looplab.core.models import BENIGN_TERMINAL_REASONS, NodeStatus
-from looplab.events.replay import _FAILURE_SPIKE_IGNORED_REASONS, fold
+from looplab.events.replay import fold
 from looplab.events.eventstore import EventStore
 
 
@@ -44,10 +44,15 @@ def test_a_frozen_speculative_build_does_not_count_toward_the_spike(tmp_path):
 def test_the_two_readers_of_this_judgement_agree_exactly(tmp_path):
     """They were written twice and drifted; the point of deriving both from one set is that they
     cannot again. A reader that needs a DIFFERENT set says so at its own site and explains why —
-    neither of these does."""
+    neither of these does. The fold's half is DRIVEN — a failed terminal per reason, counted or not
+    — because its set is read through `search_outcome` now, and the alias this compared used to be
+    the set itself (crit_v56 F6: a comparison of one object with itself). MUTATION: a reason added
+    to or dropped from either reader -> they disagree on it."""
     from looplab.serve import attention
 
-    assert _FAILURE_SPIKE_IGNORED_REASONS == set(BENIGN_TERMINAL_REASONS)
+    for reason in sorted(set(BENIGN_TERMINAL_REASONS) | {"crash", "timeout", "no_metric", "oom"}):
+        counted = _log(tmp_path / reason, [reason]).current_failure_count == 1
+        assert counted is (reason not in attention._IGNORED_FAILURE_REASONS), reason
     assert "frozen" in BENIGN_TERMINAL_REASONS, (
         "the reason the unification actually moved — see the note at the fold's set")
     assert "cancelled" not in BENIGN_TERMINAL_REASONS, (

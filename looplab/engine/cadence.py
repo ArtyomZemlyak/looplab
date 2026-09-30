@@ -315,7 +315,9 @@ def plateau_due(rung: int, started_at: int, last: int, *, seen, key) -> bool:
       * DURABLY, a mark `last >= started_at` — the consumer already spoke since this rung began,
         on cadence or on plateau — closes the rung on every resume and re-entry;
       * IN-PROCESS, `seen` — the consumer's own memo of the HIGHEST rung it consulted on, per
-        leader (`plateau_consulted`) — covers the outcome that leaves no mark. A resumed engine
+        leader (`plateau_consulted`; the consumer names a leader by its node id AND lifecycle,
+        since a reset restarts the count, `strategy.py::_plateau_leader`) — covers the outcome
+        that leaves no mark. A resumed engine
         re-asks once per rung, which is the same contract the `(n, projection token)` memo states
         about its own window.
 
