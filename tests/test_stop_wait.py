@@ -292,6 +292,11 @@ _DEAD_ENGINE_STEP = {"node_id": 6, "prospective": True, "operator": "improve", "
                      "phase": "novelty", "status": "started"}
 
 
+# Node 0's lifecycle, returned by a pause with no terminal (doc 69 69.12b): admitted, not running.
+_WITHHELD = {"node_id": 0, "generation": 0, "attempt": 0, "at": "after_canary", "reason": "paused",
+             "eval_seconds": 1.5}
+
+
 @FLOCK
 @pytest.mark.parametrize("in_flight,rows,says", [
     (True, (), "exits once its running evaluation(s) finish (node 0)"),
@@ -307,7 +312,13 @@ _DEAD_ENGINE_STEP = {"node_id": 6, "prospective": True, "operator": "improve", "
     (False, (("phase_progress", _DEAD_ENGINE_STEP), ("run_loop_exited", {"reason": "paused"}),
              ("phase_progress", _OPEN_PROPOSE)),
      "the newest step the log shows open is node 33 improve build propose"),
-], ids=["evaluating", "proposing", "nothing-open", "dead-engine-step", "live-after-a-dead-one"])
+    # A lifecycle a pause WITHHELD still carries its start receipt, so the fold alone calls it
+    # running; the line names it only when it is not withheld, like every other list on the stop
+    # path (the merge of WP-STOP's line with 69.12b's withheld set).
+    (True, (("eval_attempt_withheld", _WITHHELD),),
+     "no evaluation is running and the log shows no build or proposal step open"),
+], ids=["evaluating", "proposing", "nothing-open", "dead-engine-step", "live-after-a-dead-one",
+        "withheld"])
 def test_a_timeout_names_what_the_engine_is_really_finishing(tmp_path, in_flight, rows, says):
     """WP-STOP (MiniOneRec inf13): the line said "exits once its running evaluation(s) finish" while
     no evaluation was running — the engine was inside a paid proposal a stop lets finish. It now

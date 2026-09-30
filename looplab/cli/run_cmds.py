@@ -1409,10 +1409,14 @@ def _what_the_engine_is_finishing(state, events) -> str:
     proposal, which a stop lets finish (and then refuses the result of) rather than interrupts. The
     sentence now names the running nodes when there are any, else the newest OPEN phase beacon of the
     current engine (a proposal, a novelty check, a build — `events/stop_account.py::open_phase_line`,
-    which ignores the steps a dead or exited engine left open), else says that the log shows none."""
+    which ignores the steps a dead or exited engine left open), else says that the log shows none.
+
+    The running nodes are counted less the lifecycles a pause WITHHELD, off the same `events`
+    (`events/eval_occupancy.py::withheld_lifecycles`, doc 69 69.12b), as on every other line of the
+    stop path: their start receipt outlives the withhold, so the fold alone calls them running."""
     from looplab.events.stop_account import open_phase_line
 
-    running = _in_flight_node_ids(state)
+    running = _in_flight_node_ids(state, withheld_lifecycles(events))
     if running:
         return (f"the engine exits once its running evaluation(s) finish "
                 f"(node {', '.join(map(str, running))})")
