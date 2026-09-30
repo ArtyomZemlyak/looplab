@@ -738,8 +738,9 @@ class ToolUsingResearcher:
             # (parse_structured swallows LLMError -> draft Idea), so it can't re-raise the transport error.
             # Hand it the CAUSE, though: the degraded node is the only record that this happened, and a
             # rationale that just says "parse failed" is indistinguishable from a weak model's bad JSON.
-            if session is not None:     # a session that raised is never continued
-                session.hold(messages, visible, "error")
+            if session is not None:     # a session that raised is never continued — and a cutoff
+                # the loop announced before it raised is still this call's receipt (crit_v53 N5)
+                session.hold(messages, visible, "error", cutoff=cutoff[0])
             return self._fallback(messages, e)
 
     def propose_with_session(self, state: RunState,

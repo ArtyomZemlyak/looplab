@@ -663,10 +663,12 @@ class ForesightPanelResearcher(WrapsResearcher):
     def _propose_alternatives(self, state, parent):
         """Candidate 1 as a session, candidates 2..K as alternatives continuing it (class docstring).
 
-        The per-candidate budget receipt is read right after each call, because the base's copy is
-        overwritten by the next one — and the ENGINE must read the chosen candidate's: with the
-        alternatives' turn cap a converged candidate 1 would otherwise be logged TRUNCATED whenever
-        an alternative after it was cut (`engine/node_build.py::_prepare_node_idea`'s `_link`)."""
+        The per-candidate budget receipt is read right after each call — the session's own cutoff
+        when the base held one (`_receipt`), else the base's attribute, which the next call
+        overwrites — and the ENGINE must read the chosen candidate's: with the alternatives' turn
+        cap a converged candidate 1 would otherwise be logged TRUNCATED whenever an alternative after
+        it was cut (`engine/node_build.py::_prepare_node_idea`'s `_link`). The panel still publishes
+        it on a shared attribute (doc 69, 69.37)."""
         first, session = self.base.propose_with_session(state, parent)
         cards = getattr(session, "visible_board_cards", None)
         window = list(cards) if isinstance(cards, list) else self._base_board_window(state)

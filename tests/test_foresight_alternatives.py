@@ -1053,3 +1053,55 @@ def test_the_panel_publishes_the_chosen_candidate_s_own_receipt(monkeypatch, ord
     panel.propose(_state(), None)
     assert panel.last_foresight is not None, "premise: two candidates were ranked"
     assert panel.last_propose_budget_exhausted == ""
+
+
+def test_every_reader_of_one_proposal_reads_the_same_bound_view(monkeypatch):
+    """crit_v53 N3: the run-tools offer, the inventory block, the workspace token and the loop each
+    read the toolset, and a reader left on the SHARED provider reads an unbound one — driven, the
+    inventory block of an unbound `RunTools` rendered '' where the view's named the run's rows. The
+    continuation runs on candidate 1's very view. MUTATIONS: any of the four reads `self.tools`; the
+    continuation binds a fresh view (or the session does not keep the one it ran on)."""
+    import looplab.agents.agent as agent_mod
+
+    seen: dict = {"offers": [], "inventory": [], "workspace": [], "loop": []}
+    real = {name: getattr(agent_mod, name) for name in
+            ("offers_tool", "answered_by_context", "_researcher_workspace", "run_phase")}
+    monkeypatch.setattr(agent_mod, "offers_tool", lambda tools, name: (
+        seen["offers"].append(tools), real["offers_tool"](tools, name))[1])
+    monkeypatch.setattr(agent_mod, "answered_by_context", lambda tools: (
+        seen["inventory"].append(tools), real["answered_by_context"](tools))[1])
+    monkeypatch.setattr(agent_mod, "_researcher_workspace", lambda store, tools=None: (
+        seen["workspace"].append(tools), real["_researcher_workspace"](store, tools))[1])
+    monkeypatch.setattr(agent_mod, "run_phase", lambda client, tools, *a, **kw: (
+        seen["loop"].append(tools), real["run_phase"](client, tools, *a, **kw))[1])
+    shared = _GoalTools()
+    model = _Model([_turn(_emit("e1", "cache the per-depth scorer")),
+                    _turn(_emit("e2", "batch the shared prompt pages", x=2.0))])
+    researcher = ToolUsingResearcher(model, shared)
+    state = RunState(goal="A: minimise latency", direction="min")
+    idea, session = researcher.propose_with_session(state, None)
+    assert researcher.propose_alternative(state, None, session, [idea]) is not None
+    view = session.tools
+    assert view is not shared and view.state is state and shared.state is None
+    assert [len(seen[k]) for k in ("offers", "inventory", "workspace", "loop")] == [1, 1, 1, 2]
+    assert all(tools is view for calls in seen.values() for tools in calls), seen
+
+
+def test_a_proposal_cut_by_its_budget_that_then_raised_keeps_its_receipt(monkeypatch):
+    """crit_v53 N5: the loop announced its wall-clock cutoff and the phase then raised; the error
+    exit held the session with no cutoff, so the panel published '' ("converged") where the bound had
+    fired. MUTATION: hold the error exit without `cutoff=`."""
+    import looplab.agents.agent as agent_mod
+
+    real = agent_mod.run_phase
+
+    def cut_then_raise(*args, **kwargs):
+        if kwargs.get("label") == "Researcher·propose":
+            kwargs["on_budget"]({"kind": "time", "turns": 3, "seconds": 99.0})
+            raise LLMError("HTTP 502 from the salvage call")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(agent_mod, "run_phase", cut_then_raise)
+    _model, researcher, _agent, panel = _chain([_turn(_emit("e1", "x"))], forced=[_emission("f")])
+    panel.propose(_state(), None)
+    assert researcher_budget_exhausted(panel) == "time"
