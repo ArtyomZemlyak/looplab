@@ -900,11 +900,13 @@ def test_spawn_exception_and_no_progress_startup_are_structured_failures(tmp_pat
     app = make_app(tmp_path)
     srv = app.state.looplab
     silent = _Driver()
+    # The deadline falls after the worker has spawned, on a loaded runner too (the same shape failed
+    # the Windows leg in test_node_reset_drain_command.py, master CI run 144).
     srv.commands = RunCommandService(
         srv, engine_alive=silent.is_alive, spawn_engine=silent.spawn,
         process_alive=silent.is_process_alive,
-        startup_timeout=0.05, command_timeout=0.15, poll_interval=0.01,
-        max_observation_timeout=0.25)
+        startup_timeout=0.05, command_timeout=_ADMISSION_MARGIN_S, poll_interval=0.01,
+        max_observation_timeout=_ADMISSION_MARGIN_S + 0.5)
     client2 = TestClient(app)
     response = client2.post("/api/runs/other/commands", headers={"Idempotency-Key": "silent"},
                             json={"type": "budget_extend", "data": {"add_nodes": 1},

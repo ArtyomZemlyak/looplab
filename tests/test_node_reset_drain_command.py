@@ -456,7 +456,8 @@ def test_an_uncertain_drain_becomes_retryable_once_its_child_is_gone(tmp_path):
     lock stayed `retryable: false` forever — a plain reset in the same place did not."""
     import time as _time
 
-    from test_run_command_service import RunCommandService, TestClient, make_app
+    from test_run_command_service import (_ADMISSION_MARGIN_S, RunCommandService, TestClient,
+                                          make_app)
 
     for drain in (False, True):
         root = tmp_path / f"drain-{drain}"
@@ -464,10 +465,15 @@ def test_an_uncertain_drain_becomes_retryable_once_its_child_is_gone(tmp_path):
         silent = _Driver()                          # a pid, and never the lock
         app = make_app(root)
         srv = app.state.looplab
+        # The command's deadline must fall AFTER its worker has spawned: at 0.15 s the Windows leg's
+        # worker had appended the intent but not yet spawned, and the record settled
+        # `postcondition_timeout` (master CI run 144; reproduced on Linux with a 0.1 s liveness
+        # probe). The startup window that makes the child uncertain stays short.
         srv.commands = RunCommandService(
             srv, engine_alive=silent.is_alive, spawn_engine=silent.spawn,
-            process_alive=silent.is_process_alive, startup_timeout=0.05, command_timeout=0.15,
-            poll_interval=0.01, max_observation_timeout=0.25)
+            process_alive=silent.is_process_alive, startup_timeout=0.05,
+            command_timeout=_ADMISSION_MARGIN_S, poll_interval=0.01,
+            max_observation_timeout=_ADMISSION_MARGIN_S + 0.5)
         client = TestClient(app)
         body = {"type": "node_reset", "data": _reset(),
                 "expected_generation": http_run_generation(client, "demo"),
