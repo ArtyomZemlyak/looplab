@@ -5143,10 +5143,14 @@ class EvaluateMixin:
         # it said. So a deferred row is graded on its bytes alone ("" rationale — the byte-anchored
         # inert check still runs), and `repair_attribution` below reads it the same way.
         _prescription = "" if a.judge_deferred is not None else a.triage.get("rationale", "")
+        # The ENGINE's reason for this failure, never a diagnosed kind: it says whether the
+        # activation manifest is what failed, and so whether rewriting only it moved anything
+        # (`repair_verify.inert_exempt_paths`, doc 69 69.10a).
         _verification = verify_repair(
             _prescription, changed=changed, deleted=new_deleted,
             code_changed=_code_changed,
-            region=changed_region(prev_files, repaired_files, a.node.code, new_code))
+            region=changed_region(prev_files, repaired_files, a.node.code, new_code),
+            engine_reason=a._engine_reason)
         # AND DID IT MOVE A DECLARED COORDINATE? A different question from the one above,
         # asked of different inputs: the Researcher's `idea.params` (in `node_created`, never
         # written by a repair) against the `.py` bytes this repair just committed. The
@@ -5359,6 +5363,18 @@ class EvaluateMixin:
         # rides into the judge's history as evidence; see `engine/repair_verify.py`.
         _inert = inert_streak(a.repair_log)
         if _inert >= INERT_REPAIR_LIMIT:
+            # The historical sentence is kept byte for byte for a streak of true no-ops; a streak
+            # in which a row moved only the activation manifest (69.10a) says so, because
+            # "byte-identical" would be false of it.
+            if any(r.get("changed") for r in a.repair_log[-_inert:]):
+                a.triage_outcome = ("abandon", (
+                    f"the last {_inert} repair attempts changed nothing the evaluation runs — "
+                    "the engine compared the repaired files against the ones already on disk, "
+                    "and the only file that moved is the activation manifest, which nothing the "
+                    "evaluation executes reads, so re-evaluating would re-run code this node has "
+                    "already run; abandoning in-node repair — the node ends here, and the loop's "
+                    "next proposal is fresh work rather than another attempt at this one"))
+                return PHASE_SETTLED
             a.triage_outcome = ("abandon", (
                 f"the last {_inert} repair attempts changed nothing at all — the engine "
                 "compared the repaired files against the ones already on disk and they are "

@@ -178,7 +178,16 @@ def _format_repair_log(repair_log) -> str:
         # prompt has always been. Prompt text is a contract (CLAUDE.md) — a new fact earns a new
         # sentence, it does not get to reword the existing ones.
         note = ""
-        if r.get("verified") == REPAIR_INERT:
+        if r.get("verified") == REPAIR_INERT and r.get("changed"):
+            # A row no log carried before doc 69 69.10a: inert, yet a file moved — the activation
+            # manifest, which nothing the evaluation runs reads (`repair_verify.
+            # inert_exempt_paths`). Its own sentence, so the one below stays byte for byte and
+            # never says "no file at all" of a row that names one.
+            note = ("\n    THE ENGINE COMPARED THE BYTES: this attempt changed only the activation "
+                    "manifest, which nothing the evaluation runs reads, and the failure was not "
+                    "a missing activation marker — so the evaluation after it re-ran the same "
+                    "code.")
+        elif r.get("verified") == REPAIR_INERT:
             note = ("\n    THE ENGINE COMPARED THE BYTES: this attempt changed no file at all, so "
                     "the evaluation after it re-ran inputs identical to the one before it.")
         elif r.get("verified") == REPAIR_UNMET and r.get("unmet"):

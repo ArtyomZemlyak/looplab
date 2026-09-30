@@ -7,7 +7,7 @@ concept 1 1011
 deepres 3 2567
 e_dep 1 640
 e_fence 2 990
-e_ir 10 4277
+e_ir 10 4225
 e_mon 2 844
 e_sal 5 5593
 e_stg 6 2109

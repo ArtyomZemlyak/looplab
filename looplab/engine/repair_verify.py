@@ -449,6 +449,7 @@ import re
 from dataclasses import dataclass
 
 from looplab.core import param_carriers
+from looplab.engine.activation import ACTIVATION_MANIFEST_NAME
 
 # --- The verdict vocabulary (a REGISTRY: CLAUDE.md) ---------------------------------------------
 # The single spelling of what a repair did to the tree. Duck-typed across three sites — the
@@ -460,7 +461,10 @@ from looplab.core import param_carriers
 #   "verified"  — the rationale named something concrete and the change set contains it.
 #   "inert"     — THE CHANGE SET IS EMPTY. No file content moved, nothing was deleted, the
 #                 whole-file artifact is byte-identical to the one it replaced. A fact about bytes;
-#                 the rationale is not read. This is the only verdict the loop acts on.
+#                 the rationale is not read. This is the only verdict the loop acts on. Since
+#                 doc 69 69.10a a change set holding ONLY the activation manifest is inert too, on
+#                 every failure but `inert_path` — see `inert_exempt_paths`; the `changed` column
+#                 still names it, and the judge is told why it does not count.
 #   "unmet"     — the change set is NOT empty, the rationale named concrete things, none of them
 #                 occur in what changed, and at least one of those was a PROMISE rather than a
 #                 citation of another experiment. Evidence for the judge, never a stop on its own.
@@ -839,19 +843,45 @@ def _is_citation_only(token: str, rationale: str, clauses=None) -> bool:
     return bool(hits) and all(any(a <= h < b for a, b in clauses) for h in hits)
 
 
+# WHAT A REPAIR MAY REWRITE WITHOUT MOVING ANYTHING THE NEXT EVALUATION EXECUTES (doc 69 69.10a).
+# The activation manifest declares what a node's new path prints; the engine reads it AFTER an
+# evaluation that otherwise succeeded (`engine/activation.py`), and nothing the pipeline runs reads
+# it. So for every failure but `inert_path` — the one verdict that file decides — a repair whose
+# only change is that file re-runs exactly the code that just failed. Measured on
+# `minionerec-backbones-v10` node 12, seq 4363: `changed: ["looplab_activation.json"]`,
+# `edit_calls: 0`, and a full canary bought for it. For `inert_path` the same edit is the
+# directive's own ask (declare no marker for a path meant to be conditional), so there it stays a
+# change. Named by PATH: a same-named file below the workdir root is a candidate's own file, which a
+# stage may read. The one reading it costs: a candidate whose OWN code reads the manifest has a
+# manifest-only fix counted inert — the first inert repair is still evaluated, so only a second
+# such fix in a row is refused.
+#
+# An UNKNOWN reason (None) exempts nothing: `inert` is the verdict the loop acts on — two in a row
+# end the node — so a caller that cannot say what failed gets the historical reading.
+def inert_exempt_paths(engine_reason) -> frozenset:
+    """The changed paths that do not count against `inert`, for a failure the ENGINE named."""
+    if engine_reason is None or engine_reason == "inert_path":
+        return frozenset()
+    return frozenset({ACTIVATION_MANIFEST_NAME})
+
+
 def verify_repair(rationale, *, changed, deleted=(), code_changed: bool = False,
-                  region: str = "") -> RepairVerification:
+                  region: str = "", engine_reason=None) -> RepairVerification:
     """Compare what a repair SAID against what it DID. See the module docstring for the tiering.
 
     `changed`/`deleted` are `_repair_change_set`'s own deltas and `code_changed` is the whole-file
     artifact's — i.e. the three halves of "did anything move", all of them the engine's own byte
-    comparisons. `region` is `changed_region(...)`. Nothing here calls a model, does I/O, or reads
-    anything the agent could rewrite after the fact.
+    comparisons. `region` is `changed_region(...)`. `engine_reason` is the failure the repair was
+    asked to fix, as the ENGINE classified it (never a diagnosed kind): it decides which paths
+    `inert_exempt_paths` sets aside. Nothing here calls a model, does I/O, or reads anything the
+    agent could rewrite after the fact.
     """
     changed_paths = sorted({str(c) for c in (changed or ())} | {str(d) for d in (deleted or ())})
-    if not changed_paths and not code_changed:
-        # THE BYTES SAID NOTHING MOVED. Decided before the rationale is even looked at, so no
-        # wording — vague, confident, or quoting the diff back at itself — can reach this verdict.
+    exempt = inert_exempt_paths(engine_reason)
+    if not code_changed and not [p for p in changed_paths if p not in exempt]:
+        # THE BYTES SAID NOTHING MOVED — or nothing the next evaluation runs (69.10a). Decided
+        # before the rationale is even looked at, so no wording — vague, confident, or quoting
+        # the diff back at itself — can reach this verdict.
         return RepairVerification(REPAIR_INERT)
     claims = claimed_tokens(rationale)
     if not claims:
