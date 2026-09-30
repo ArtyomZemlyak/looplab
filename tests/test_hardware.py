@@ -338,3 +338,65 @@ def test_on_this_box_the_budget_is_within_its_own_cgroup_quota():
     if quota == "max":
         pytest.skip("this box's cgroup carries no CPU quota")
     assert hw.usable_cpu_count() <= -(-int(quota) // int(period))
+
+
+# ------------------------------------------------ doc 69 69.23a: a failed probe is not an answer
+class _Probe:
+    """`query_nvidia_smi` as a scripted sequence: each call pops the next answer (an exception is
+    raised), and the calls are counted."""
+
+    def __init__(self, *answers):
+        self.answers, self.calls = list(answers), 0
+
+    def __call__(self, *_args, **_kwargs):
+        self.calls += 1
+        answer = self.answers.pop(0) if self.answers else None
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+
+_H200 = [["0", "NVIDIA H200", "143771", "143000"], ["1", "NVIDIA H200", "143771", "143000"]]
+
+
+def _fresh(monkeypatch, hw, probe, *, binary=True, retry_s=60.0):
+    monkeypatch.setattr(hw, "_GPUS_CACHE", None)
+    monkeypatch.setattr(hw, "_GPUS_FAILED_AT", None)
+    monkeypatch.setattr(hw, "_GPU_PROBE_RETRY_S", retry_s)
+    monkeypatch.setattr(hw, "query_nvidia_smi", probe)
+    monkeypatch.setattr(hw.shutil, "which",
+                        lambda name: "/usr/bin/nvidia-smi" if binary else None)
+
+
+def test_a_failed_inventory_probe_is_retried_not_cached_for_the_process(monkeypatch):
+    """v10: an empty `detect_gpus()` after a failed probe was cached for the whole process, and
+    the Strategist's prompt said "0 GPUs (CPU only)" on four H200s. MUTATION: cache the failure."""
+    import subprocess
+
+    import looplab.core.hardware as hw
+
+    probe = _Probe(subprocess.TimeoutExpired("nvidia-smi", 5.0), _H200)
+    _fresh(monkeypatch, hw, probe, retry_s=0.0)
+    assert hw.detect_gpus() == []
+    assert [g["name"] for g in hw.detect_gpus()] == ["NVIDIA H200", "NVIDIA H200"]
+    assert hw.detect_gpus() and probe.calls == 2, "an inventory IS the answer, and is cached"
+    assert hw.gpu_summary().startswith("2 GPU(s): NVIDIA H200")
+
+
+def test_a_failed_probe_is_not_repeated_inside_its_retry_window(monkeypatch):
+    """MUTATION: drop the window -> every prompt build re-runs a failing `nvidia-smi` (5 s each)."""
+    import looplab.core.hardware as hw
+
+    probe = _Probe(None, _H200)
+    _fresh(monkeypatch, hw, probe, retry_s=3600.0)
+    assert hw.detect_gpus() == [] and hw.detect_gpus() == [] and probe.calls == 1
+
+
+def test_a_box_without_nvidia_smi_is_an_answer_and_is_cached(monkeypatch):
+    """No driver tooling at all is definitive, not a failure: probed once. MUTATION: treat it as a
+    failure -> probed again on every call past the window."""
+    import looplab.core.hardware as hw
+
+    probe = _Probe(None, _H200)
+    _fresh(monkeypatch, hw, probe, binary=False, retry_s=0.0)
+    assert hw.detect_gpus() == [] and hw.detect_gpus() == [] and probe.calls == 1

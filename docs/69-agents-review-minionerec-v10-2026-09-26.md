@@ -378,6 +378,7 @@ UnseenRecall@20=0.03328)» уйдёт в межпрогонные claims как 
 
 **Направление поиска (§6)**
 - **69.23** OPEN[strategist-blind-to-gpu-pool] бриф стратега не несёт бюджета GPU на эксперимент (§6.1). proof:absent:per_experiment_gpu_budget@looplab/agents/strategist.py
+- **69.23a** *Закрыто 2026-09-30: половина 69.23 про `detect_gpus`. Неудачная проба инвентаря (`nvidia-smi` есть, но упал, завис по таймауту или ничего не напечатал) больше не кэшируется на весь процесс как `[]`: кэшируется только ОТВЕТ — инвентарь или отсутствие `nvidia-smi` на машине, а неудача повторяется не раньше чем через `core/hardware.py::_GPU_PROBE_RETRY_S` (60 с) и до того читается как «нет GPU». Строка «0 GPUs (CPU only)» в промптах на четырёх H200 была именно этим кэшем (`tests/test_hardware.py`). Бриф стратега (пул, бюджет GPU на эксперимент, footprint'ы, пин) — по-прежнему 69.23.*
 - **69.24** OPEN[board-rotation-by-attempt-only] без предсказанного порядка доска вращается только по `attempt` (§6.2). proof:`present:offset = attempt % len(cards)@looplab/agents/state_brief.py`
 - **69.25** OPEN[plan-not-replanned-on-inject] план endgame перестраивается только на смену бюджета и стагнацию, не на пакет inject (§6.2). proof:`present:PLAN_REASONS = ("initial", "budget_changed", "stagnation", "reopened")@looplab/engine/plan.py`
 - **69.26** OPEN[memo-claims-ignore-outcome-change] доказательство claims мемо не несёт подписи исхода узла и ключа цели (§6.3). proof:absent:_node_outcome_sig@looplab/trust/memo_verify.py

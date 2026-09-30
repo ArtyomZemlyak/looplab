@@ -14,19 +14,34 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 
 _GPU_CACHE: "tuple[bool, str | None] | None" = None
 _GPUS_CACHE: "list[dict] | None" = None
+# A FAILED inventory probe is not an answer (doc 69 69.23a). `nvidia-smi` present but erroring,
+# timing out or printing nothing left `detect_gpus` caching `[]` for the whole process, and every
+# prompt built from it said "0 GPUs (CPU only)" on a GPU box — `minionerec-backbones-v10`'s
+# Strategist set `eval_parallel=2` "without oversubscribing 192 CPU-only cores" on four H200s, and
+# the 4-GPU nodes then ran on one card each. So only a real inventory, or a box with no
+# `nvidia-smi` at all, is cached; a failed probe is retried once this long has passed (monotonic),
+# and reads as no GPUs until then.
+_GPUS_FAILED_AT: "float | None" = None
+_GPU_PROBE_RETRY_S = 60.0
 
 
 def detect_gpus() -> list[dict]:
     """All visible GPUs as [{index, name, mem_total_mib, mem_free_mib}], best-effort via nvidia-smi
     (no torch dependency — torch may be auto-installed later). Empty list when none/undetectable.
-    Cached for the process. This is the richer counterpart of `detect_gpu()` (which returns only the
-    first GPU's name, kept for back-compat)."""
-    global _GPUS_CACHE
+    Cached for the process once it is an ANSWER — an inventory, or no `nvidia-smi` on the box; a
+    probe that failed is retried after `_GPU_PROBE_RETRY_S` (see `_GPUS_FAILED_AT`). This is the
+    richer counterpart of `detect_gpu()` (which returns only the first GPU's name, kept for
+    back-compat)."""
+    global _GPUS_CACHE, _GPUS_FAILED_AT
     if _GPUS_CACHE is not None:
         return _GPUS_CACHE
+    if (_GPUS_FAILED_AT is not None
+            and time.monotonic() - _GPUS_FAILED_AT < _GPU_PROBE_RETRY_S):
+        return []
     gpus: list[dict] = []
     try:
         from looplab.core.parse import to_int
@@ -40,7 +55,11 @@ def detect_gpus() -> list[dict]:
                              "mem_total_mib": to_int(parts[-2]), "mem_free_mib": to_int(parts[-1])})
     except (OSError, ValueError, subprocess.SubprocessError):
         gpus = []
-    _GPUS_CACHE = gpus
+    if gpus or not shutil.which("nvidia-smi"):
+        _GPUS_CACHE = gpus
+        _GPUS_FAILED_AT = None
+    else:
+        _GPUS_FAILED_AT = time.monotonic()
     return gpus
 
 
