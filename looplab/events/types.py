@@ -2151,9 +2151,13 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # render (`Settings.lesson_operator_scope`, off by default): which action the retrieval was
         # scoped to. Both, not one — the outer key is what the row was scoped to and the receipt's own
         # copy is what the RANKING actually used, so a render that fell back is visibly different.
+        # `chars`, `regime`, `operator_rejected` and `claim_decisions_unavailable` ride the same
+        # spread (the last two under `Settings.lesson_prior_claim_decisions`, doc 69 69.21) and were
+        # missing here until critic 2026-09-30 (F6) read the builder against this row.
         optional=(
-            "at_node", "case", "notes", "operator", "operator_scoped", "phase",
-            "quarantined_useless", "role", "rows", "source"
+            "at_node", "case", "chars", "claim_decisions_unavailable", "notes", "operator",
+            "operator_rejected", "operator_scoped", "phase", "quarantined_useless", "regime",
+            "role", "rows", "source"
         ),
     ),
     "promote": PayloadContract(

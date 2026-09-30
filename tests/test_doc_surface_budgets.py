@@ -215,3 +215,27 @@ def test_a_settings_row_is_read_the_way_the_ghost_row_guard_reads_it():
     rows = settings_rows(text)
     assert [key for key, _ in rows] == ["alpha_knob"], rows
     assert over_budget(rows, 1_500) == {"alpha_knob": (1, rows[0][1])}
+
+
+def adjacent_literals(data: str) -> list[str]:
+    """Where two JS string literals touch with nothing between them — a syntax error."""
+    bad: list[str] = []
+    prev_end = None
+    for m in _JS_TOKEN.finditer(data):
+        if m.group(0).startswith(("//", "/*")):
+            prev_end = None
+            continue
+        if prev_end is not None and m.start() == prev_end:
+            bad.append(data[max(0, m.start() - 40):m.start() + 40])
+        prev_end = m.end()
+    return bad
+
+
+def test_no_two_diagram_literals_touch():
+    """Two string literals with nothing between them are a syntax error that blanks the whole
+    diagram. Three edits spliced one in on 2026-09-30 (`…stays)"","THE OPERATOR…`: a doubled quote
+    closing one literal, opening an empty one and leaving the new text bare), and only the Node-gated
+    geometry test could see it. Read from the source, so this needs no Node."""
+    assert adjacent_literals('sub:["a","b"],t:""') == []
+    assert adjacent_literals('sub:["a stays)"","THE NEXT"]')
+    assert adjacent_literals(_diagram_data(DIAGRAM.read_text(encoding="utf-8"))) == []

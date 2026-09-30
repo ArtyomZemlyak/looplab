@@ -2536,7 +2536,8 @@ A rejected claim remains human-visible in the unfiltered claims CLI/API and can 
 top-level `n_claims`/`n_claims_total`; it is excluded from the **active** context pack, Atlas contradictions,
 agent-tool projection and hybrid retrieval — and, since 2026-09-30 (`lesson_prior_claim_decisions`, doc 69
 69.21), from the passive cross-run prior every role's prompt carries: a lesson that states it is withheld,
-and the prompt says how many. Pins have first retention priority, followed by ratified claims. This closes
+and the prompt says how many. NOT yet from the pull tools that read `lessons.jsonl` rows directly —
+`search_lessons` and `cross_run_concept_card`'s notes still return it (doc 69 69.21b). Pins have first retention priority, followed by ratified claims. This closes
 the earlier steering leak without pretending rejection deletes evidence or history; scope, D8-verification and
 stable-identity gates in [doc 17 §22.8](../17-project-review-and-directions-2026-07-11.md) still block production
 advisory.

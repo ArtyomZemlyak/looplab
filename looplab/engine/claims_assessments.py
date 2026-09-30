@@ -149,6 +149,72 @@ def lesson_claim_uid(row) -> Optional[str]:
     return got[1]["uid"] if got is not None else None
 
 
+def decision_for_claim(overlay, *, uid, rep, scope, metric) -> tuple:
+    """`(decision, resolved_via)` — the operator decision governing one claim, found by the
+    claims surface's candidate chain: the structured uid, then the uid recomputed from `rep` under
+    the claim's scope/metric and each wider scope/metric, then the pre-structured legacy statement
+    keys an UNSCOPED decision was once filed under. `(None, "")` when none governs it.
+
+    Lifted out of `claim_assessments`' group lookup (`_decision_for`, which calls it with the
+    group's representative spelling) so a prompt reader can resolve ONE lesson row the same way
+    (`lesson_rejected`, doc 69 69.21) — a uid-only lookup lost the wider-scope and legacy fallbacks
+    (critic 2026-09-30)."""
+    from looplab.engine.claim_key import claim_uid
+    # DEFERRED: `claims.py` imports THIS module to re-export it, so importing the ledger
+    # half back at module scope would cycle. This spells the legacy overlay key the
+    # governance loader writes (doc 25 EM-01).
+    from looplab.engine.claims import _global_key
+    overlay = overlay if isinstance(overlay, dict) else {}
+    candidates = [uid, claim_uid(rep, scope=scope, metric=metric)]
+    if metric:
+        candidates.append(claim_uid(rep, scope=scope, metric=""))
+    if metric:
+        candidates.append(claim_uid(rep, scope="", metric=metric))
+    candidates.append(claim_uid(rep, scope="", metric=""))
+    seen = set()
+    for candidate in candidates:
+        if candidate and candidate not in seen and isinstance(overlay.get(candidate), dict):
+            return overlay[candidate], "claim_uid"
+        seen.add(candidate)
+    legacy_key = normalize_statement(rep)
+    legacy = overlay.get(legacy_key)
+    if (isinstance(legacy, dict) and not str(legacy.get("scope") or "")
+            and not str(legacy.get("metric") or "")):
+        return legacy, "legacy_statement_key"
+    global_legacy = overlay.get(_global_key(legacy_key))
+    if (isinstance(global_legacy, dict) and not str(global_legacy.get("scope") or "")
+            and not str(global_legacy.get("metric") or "")):
+        return global_legacy, "unscoped_global_key"
+    return None, ""
+
+
+def lesson_rejected(row, decisions) -> bool:
+    """Does the operator's decision ledger REJECT the claim this lesson row states — its own claim
+    identity (`_claim_row_signature`, the grouping's spelling) resolved through the claims surface's
+    candidate chain (`decision_for_claim`) with the row's own text as the representative? A row the
+    claims surface REFUSES to project (an over-fence fingerprint, doc 69 §5.2: 29 of 77 rows of the
+    real store) still states a claim the operator may have rejected, and a row outside the scan's
+    window still answers for itself (critic 2026-09-30, F2)."""
+    if not isinstance(row, dict):
+        return False
+    got = _claim_row_signature(row.get("statement"), row.get("task_id"), _metric_identity(row))
+    if got is None:
+        return False
+    text, sig = got
+    decision, _via = decision_for_claim(decisions, uid=sig["uid"], rep=text, scope=sig["scope"],
+                                        metric=sig["metric"])
+    return isinstance(decision, dict) and decision.get("decision") == "rejected"
+
+
+def rejects_anything(decisions) -> bool:
+    """Is any decision in the overlay a rejection? The prior's short-circuit: with none, no claim
+    projection is built at all (critic 2026-09-30, F4: +194 ms per prior build for 150 lessons and
+    no ledger, 58 % of it a digest the lookup never reads)."""
+    return isinstance(decisions, dict) and any(
+        isinstance(value, dict) and value.get("decision") == "rejected"
+        for value in decisions.values())
+
+
 def operator_rejected_claim_uids(lessons, decisions) -> frozenset:
     """The `claim_uid`s of the claims `lessons` state that `decisions` (`load_claim_decisions`)
     REJECTS: `claim_assessments`' own groups and decision lookup over the same rows (the structured
@@ -166,7 +232,6 @@ def _structured_assessments(lessons, research_claims, decisions, *,
     `claim_signature` merge_key: (subject stems, scope=task, metric, polarity). Opposite-polarity claims
     sharing a `contra_key` are surfaced as a CONTRADICTION (they never merge, and each is marked contested).
     Governance overlays by the structured `claim_uid` (scope-precise)."""
-    from looplab.engine.claim_key import claim_uid
     lessons = _valid_claim_source_rows(lessons, research=False)
     research_claims = _valid_claim_source_rows(research_claims, research=True)
     research_source = (safe_research_source_summary(research_source)
@@ -226,32 +291,8 @@ def _structured_assessments(lessons, research_claims, decisions, *,
         which is precisely the ambiguity the deleted lean projection institutionalized. REPORTED,
         never acted on — the fallback chain itself is unchanged.
         """
-        # DEFERRED: `claims.py` imports THIS module to re-export it, so importing the ledger
-        # half back at module scope would cycle. This spells the legacy overlay key the
-        # governance loader writes (doc 25 EM-01).
-        from looplab.engine.claims import _global_key
-        overlay = decisions
-        candidates = [g["uid"], claim_uid(rep, scope=g["scope"], metric=g["metric"])]
-        if g["metric"]:
-            candidates.append(claim_uid(rep, scope=g["scope"], metric=""))
-        if g["metric"]:
-            candidates.append(claim_uid(rep, scope="", metric=g["metric"]))
-        candidates.append(claim_uid(rep, scope="", metric=""))
-        seen = set()
-        for uid in candidates:
-            if uid and uid not in seen and isinstance(overlay.get(uid), dict):
-                return overlay[uid], "claim_uid"
-            seen.add(uid)
-        legacy_key = normalize_statement(rep)
-        legacy = overlay.get(legacy_key)
-        if (isinstance(legacy, dict) and not str(legacy.get("scope") or "")
-                and not str(legacy.get("metric") or "")):
-            return legacy, "legacy_statement_key"
-        global_legacy = overlay.get(_global_key(legacy_key))
-        if (isinstance(global_legacy, dict) and not str(global_legacy.get("scope") or "")
-                and not str(global_legacy.get("metric") or "")):
-            return global_legacy, "unscoped_global_key"
-        return None, ""
+        return decision_for_claim(decisions, uid=g["uid"], rep=rep, scope=g["scope"],
+                                  metric=g["metric"])
 
     prepared = []
     for g in groups.values():

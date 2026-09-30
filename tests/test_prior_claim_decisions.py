@@ -178,3 +178,152 @@ def test_on_for_new_runs_off_for_a_pre_field_snapshot_and_in_the_bare_library(tm
     assert EngineOptions().lesson_prior_claim_decisions is False
     assert EngineOptions.from_settings(Settings()).lesson_prior_claim_decisions is True
     assert make_engine(tmp_path / "run")._lesson_prior_claim_decisions is False
+
+
+# ------------------------------------------------------------------------------------ critic crit_v49
+_OVER_FENCE = ["kind:quadratic", "dir:min"] + [f"tok{i}" for i in range(300)]
+
+
+def test_a_row_the_claims_surface_refuses_still_answers_for_its_own_claim(tmp_path):
+    """F2: the surface refuses a row whose fingerprint is over the fence (doc 69 §5.2: 29 of 77 rows
+    of the real store) while the prior still renders it — so with no valid sibling in the window the
+    rejection never reached it (driven by the critic as the purge variant). Its OWN claim identity is
+    resolved through the surface's candidate chain now (MUTATION: withhold by the window's groups
+    only)."""
+    from looplab.engine.claims import claims_for_memory
+    mem = _memory(tmp_path, _lesson(REJECTED, fingerprint=_OVER_FENCE), _lesson(KEPT))
+    record_claim_decision(str(mem), statement=REJECTED, decision="rejected", scope=TASK)
+    assert [c["statement"] for c in claims_for_memory(str(mem))] == [KEPT], "the surface refuses it"
+    _eng, (text, receipt) = _prior(tmp_path, mem)
+    assert REJECTED not in text and KEPT in text and receipt["operator_rejected"] == 1
+
+
+def test_the_row_s_own_lookup_walks_the_surface_s_whole_candidate_chain():
+    """The per-row lookup is the surface's chain, not the uid alone (the critic's M24 was wrong for
+    exactly this): an UNSCOPED rejection reaches a task-scoped row through the wider candidates."""
+    from looplab.engine.claims import (decision_for_claim, lesson_rejected, load_claim_decisions,
+                                       record_claim_decision as record)
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        record(d, statement=REJECTED, decision="rejected")           # no scope: portfolio-wide
+        decisions = load_claim_decisions(d)
+    row = _lesson(REJECTED)
+    assert lesson_rejected(row, decisions)
+    assert not lesson_rejected(_lesson(KEPT), decisions)
+    assert not lesson_rejected({"statement": ""}, decisions) and not lesson_rejected("x", decisions)
+    assert decision_for_claim({}, uid="u", rep=REJECTED, scope=TASK, metric="") == (None, "")
+    # A task-scoped decision with no metric reaches the same task's METRIC-qualified row only
+    # through the chain's wider candidate — no legacy key holds a scoped decision (MUTATION: the
+    # row's own uid alone).
+    metric_row = _lesson(REJECTED, fingerprint=["kind:quadratic", "dir:min", "metric:recall"])
+    with tempfile.TemporaryDirectory() as d:
+        record(d, statement=REJECTED, decision="rejected", scope=TASK)
+        scoped = load_claim_decisions(d)
+        record(d, statement=KEPT, decision="ratified", scope=TASK)
+        ratified = load_claim_decisions(d)
+    assert lesson_rejected(metric_row, scoped)
+    # Only a REJECTION withholds (MUTATION: any decision found).
+    assert not lesson_rejected(_lesson(KEPT), ratified) and lesson_rejected(row, ratified)
+
+
+def test_with_no_rejection_in_the_ledger_no_claim_projection_is_built(tmp_path, monkeypatch):
+    """F4: the projection cost +194 ms per prior build with no ledger at all. With no REJECTION in
+    the ledger nothing is projected (MUTATION: drop `rejects_anything`)."""
+    import looplab.engine.claims as claims
+
+    def boom(*_a, **_k):
+        raise AssertionError("projected with nothing to withhold")
+
+    monkeypatch.setattr(claims, "operator_rejected_claim_uids", boom)
+    monkeypatch.setattr(claims, "lesson_rejected", boom)
+    mem = _memory(tmp_path)
+    record_claim_decision(str(mem), statement=KEPT, decision="ratified", scope=TASK)
+    _eng, (text, receipt) = _prior(tmp_path, mem)
+    assert REJECTED in text and "claim_decisions_unavailable" not in receipt
+    assert claims.rejects_anything({"k": {"decision": "rejected"}})
+    assert not claims.rejects_anything({"k": {"decision": "ratified"}, "j": "rejected"})
+    assert not claims.rejects_anything(None)
+
+
+def test_an_empty_window_discloses_nothing_even_with_an_unreadable_ledger(tmp_path):
+    """MUTATION (M02): ask the ledger with nothing parsed -> a prior with no lessons would say a
+    rejected lesson "may still appear below"."""
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    (mem / "lessons.jsonl").write_text("", encoding="utf-8")
+    (mem / "claim_decisions.jsonl").write_text('{"decision": "rejected"}\n', encoding="utf-8")
+    eng = make_engine(tmp_path / "run", n_seeds=1, max_nodes=1, reflection_priors=True,
+                      memory_dir=str(mem), lesson_prior_claim_decisions=True)
+    *_rest, health, _case = eng.lessons._scan_prior_context(None, None)
+    assert health["claim_decisions_unavailable"] is False and not health["claim_rejected"]
+
+
+def test_an_unreadable_ledger_is_counted_as_a_containment(tmp_path):
+    """MUTATION (M06): swallow the ledger failure without `contain` -> the containment census and
+    `looplab timings` never see it."""
+    from looplab.core.containment import containment_counts
+    mem = _memory(tmp_path)
+    (mem / "claim_decisions.jsonl").write_text('{"decision": "rejected"}\n', encoding="utf-8")
+    before = containment_counts().get("prior claim decisions", 0)
+    _eng, (_text, receipt) = _prior(tmp_path, mem)
+    assert receipt["claim_decisions_unavailable"] is True
+    assert containment_counts().get("prior claim decisions", 0) > before
+
+
+def test_a_rejection_of_the_other_role_s_lesson_says_nothing_here(tmp_path):
+    """MUTATION (M10): disclose whenever any scanned row is rejected -> "0 lesson(s) … not shown"
+    and an `operator_rejected: 0` receipt on a prompt that withheld nothing."""
+    other = "Pinning the CUDA allocator config fixes the fragmentation crash"
+    mem = _memory(tmp_path, _lesson(other, role="developer"), _lesson(KEPT))
+    record_claim_decision(str(mem), statement=other, decision="rejected", scope=TASK)
+    _eng, (text, receipt) = _prior(tmp_path, mem)
+    assert "MEMORY_OPERATOR_REJECTED" not in text and "operator_rejected" not in receipt
+    _eng, (dev, dev_receipt) = _prior(tmp_path, mem, role="developer")
+    assert dev_receipt["operator_rejected"] == 1 and other not in dev
+
+
+def test_a_rejected_lesson_is_counted_as_rejected_before_it_is_counted_useless(tmp_path):
+    """The operator's decision comes before the read-side hygiene: a lesson both rejected and
+    useless (shown 9 times, never cited) is counted once, as the operator's (MUTATION M15: move the
+    rejection after `filter_useless` -> it is counted as useless and the operator count drops)."""
+    mem = _memory(tmp_path)
+    (mem / "lesson_utility.jsonl").write_text(json.dumps(
+        {"lesson_id": lesson_id(REJECTED), "shown": 9, "cited": 0, "run_id": "r0"}) + "\n",
+        encoding="utf-8")
+    record_claim_decision(str(mem), statement=REJECTED, decision="rejected", scope=TASK)
+    _eng, (text, receipt) = _prior(tmp_path, mem)
+    assert receipt["operator_rejected"] == 1 and receipt.get("quarantined_useless", 0) == 0
+    _eng, (_off, off_receipt) = _prior(tmp_path, mem, on=False)
+    assert off_receipt["quarantined_useless"] == 1, "off: the useless filter took it, as before"
+
+
+def test_with_the_setting_on_and_no_ledger_a_new_lesson_still_moves_the_stamp(tmp_path):
+    """MUTATION (M17): an absent ledger returns no stamp at all -> with the product default ON and
+    no decision ever made (the common case) every refresh compares None == None and never fires."""
+    mem = _memory(tmp_path)
+    eng = make_engine(tmp_path / "on", reflection_priors=True, memory_dir=str(mem),
+                      lesson_prior_claim_decisions=True)
+    before = eng.lessons.lessons_store_stamp()
+    assert before is not None
+    with (mem / "lessons.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(_lesson("Label smoothing at 0.1 improves recall")) + "\n")
+    assert eng.lessons.lessons_store_stamp() != before
+
+
+def test_a_same_size_rewrite_of_the_ledger_moves_the_stamp(tmp_path):
+    """MUTATION (M19): stamp the ledger by its size -> a `rejected` rewritten to `ratified` (same
+    byte length) is no change and the refresh keeps the old verdict."""
+    import os
+    mem = _memory(tmp_path)
+    record_claim_decision(str(mem), statement=REJECTED, decision="rejected", scope=TASK)
+    eng = make_engine(tmp_path / "on", reflection_priors=True, memory_dir=str(mem),
+                      lesson_prior_claim_decisions=True)
+    before = eng.lessons.lessons_store_stamp()
+    ledger = mem / "claim_decisions.jsonl"
+    body = ledger.read_text(encoding="utf-8")
+    assert len("rejected") == len("ratified")
+    fresh = mem / "claim_decisions.jsonl.new"
+    fresh.write_text(body.replace('"rejected"', '"ratified"'), encoding="utf-8")
+    os.replace(fresh, ledger)
+    assert ledger.stat().st_size == len(body.encode("utf-8"))
+    assert eng.lessons.lessons_store_stamp() != before

@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-164 event types — 113 folded into `RunState`, 51 diagnostic; 1065 declared payload keys; 22 types whose whole payload is stored by the fold.
+164 event types — 113 folded into `RunState`, 51 diagnostic; 1069 declared payload keys; 22 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -143,7 +143,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `phase_progress` | diagnostic | One build/eval phase started or finished — the live activity feed's row. | `phase`, `stage`, `status` | — |
 | `plan` | folded · whole | The run's PLAN artifact: how `max_nodes` was cut into seed, search and endgame reserve. | — | `at_node`, `champion`, `endgame_end`, `endgame_start`, `injected`, `max_nodes`, `phases`, `reason`, `reopen_cause`, `reserve`, `reserve_frac`, `source`, `stall_champions` |
 | `policy_decision` | folded | The search policy's pick among the legal actions, with the scores behind it. | `chosen`, `reason`, `scores` | — |
-| `prior_injected` | diagnostic | A cross-run prior was put in front of a role at a node — the receipt the citation instrument reads. | — | `at_node`, `case`, `notes`, `operator`, `operator_scoped`, `phase`, `quarantined_useless`, `role`, `rows`, `source` |
+| `prior_injected` | diagnostic | A cross-run prior was put in front of a role at a node — the receipt the citation instrument reads. | — | `at_node`, `case`, `chars`, `claim_decisions_unavailable`, `notes`, `operator`, `operator_rejected`, `operator_scoped`, `phase`, `quarantined_useless`, `regime`, `role`, `rows`, `source` |
 | `promote` | folded · whole | The operator promoted one node to an alias (`champion` by default). | `node_id` | `alias`, `attempt`, `generation` |
 | `proxy_scored` | folded | The pre-eval proxy's score for a candidate, or its abstention when the nearest neighbour is too far. | `abstained`, `generation`, `nearest`, `node_id`, `score`, `skipped` | `attempt` |
 | `readmodel_skipped` | diagnostic | The SQLite read-model sidecar could not be updated. | `error` | — |

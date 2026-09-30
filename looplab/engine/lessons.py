@@ -371,6 +371,10 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
         `consolidate_lessons_file` rewrite it through an atomic replace, and a compaction that lands
         on the same size and nanosecond is invisible to the weaker pair. The cost is identical (one
         `stat`), the comparison is in-memory only, and a false CHANGE merely re-reads the store.
+
+        Under `Settings.lesson_prior_claim_decisions` (doc 69 69.21) it is the PAIR `(lessons,
+        claim_decisions)`, the second None while no ledger exists: the prior reads both, so a
+        decision made mid-run is a change too.
         """
         if not self._e.memory_dir:
             return None

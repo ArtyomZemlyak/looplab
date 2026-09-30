@@ -864,8 +864,11 @@ from looplab.engine.claims_assessments import (  # noqa: F401,E402
     _register_incarnation,
     _structured_assessments,
     claim_assessments,
+    decision_for_claim,
     lesson_claim_uid,
+    lesson_rejected,
     operator_rejected_claim_uids,
+    rejects_anything,
 )
 
 # The context pack / retrieval planner / atlas, re-exported so `engine.claims` keeps its

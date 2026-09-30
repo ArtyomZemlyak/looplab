@@ -313,21 +313,28 @@ class LessonPriorsMixin:
                     o["utility"] = dict(hit)
         # THE OPERATOR'S CLAIM DECISIONS (doc 69 69.21, `Settings.lesson_prior_claim_decisions`). An
         # operator's `claim-decide --reject` was read by the claims surface and by nothing that writes
-        # a prompt, so the rejected lesson kept arriving in every proposal. Resolved through
-        # `claim_assessments`' own groups and decision lookup over the rows this scan kept
-        # (`operator_rejected_claim_uids`), so what is withheld here is exactly what the claims surface
-        # shows as `operator-rejected`. An unreadable ledger withholds nothing and SAYS so, in the
-        # prompt and the receipt: a guessed subset of an operator's decisions is not a decision.
+        # a prompt, so the rejected lesson kept arriving in every proposal. A row is withheld when
+        # `claim_assessments`' own groups over the rows this scan kept mark its claim
+        # `operator-rejected` (`operator_rejected_claim_uids`, the surface's representative-spelling
+        # lookup included) OR its own claim resolves to a rejection through the surface's candidate
+        # chain (`lesson_rejected`) — the second because the surface REFUSES rows the prior still
+        # renders (an over-fence fingerprint) and this window may not hold the row that makes the group
+        # visible (critic 2026-09-30, F2). With no rejection in the ledger nothing is projected at all
+        # (`rejects_anything`, F4). An unreadable ledger withholds nothing and SAYS so, in the prompt
+        # and the receipt: a guessed subset of an operator's decisions is not a decision.
         claim_rejected: frozenset = frozenset()
         decisions_unavailable = False
         if getattr(self._e, "_lesson_prior_claim_decisions", False) and parsed:
             try:
                 from looplab.engine.claims import (
-                    lesson_claim_uid, load_claim_decisions, operator_rejected_claim_uids)
-                rejected = operator_rejected_claim_uids(
-                    [o for _idx, o in parsed], load_claim_decisions(base))
-                claim_rejected = frozenset(
-                    idx for idx, o in parsed if rejected and lesson_claim_uid(o) in rejected)
+                    lesson_claim_uid, lesson_rejected, load_claim_decisions,
+                    operator_rejected_claim_uids, rejects_anything)
+                decisions = load_claim_decisions(base)
+                if rejects_anything(decisions):
+                    rejected = operator_rejected_claim_uids([o for _idx, o in parsed], decisions)
+                    claim_rejected = frozenset(
+                        idx for idx, o in parsed
+                        if lesson_claim_uid(o) in rejected or lesson_rejected(o, decisions))
             except Exception as exc:  # noqa: BLE001 — an advisory filter: disclosed, never a failed prior
                 from looplab.core.containment import contain
                 contain("prior claim decisions", exc)
