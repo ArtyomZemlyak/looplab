@@ -79,8 +79,15 @@ CANARY_ACCOUNT_CHARS = 2_000
 # evidence fence's 50 characters, the newlines), reserved before the tails share the rest.
 _ACCOUNT_TAIL_OVERHEAD = 130
 # The floor under each stream's share when a long log path or detail eats the budget: a tail too
-# short to hold one traceback line is no account at all.
+# short to hold one traceback line is no account at all. It is the ONE thing that may take the
+# account past `CANARY_ACCOUNT_CHARS`, and only when the header and footer alone leave less than the
+# two floors — with the env names bounded below, a log path of ~800 characters (critic 2026-09-30).
 _ACCOUNT_MIN_TAIL = 200
+# At most this many characters of the canary's env NAMES in the ACCOUNT's header (the historical
+# header keeps them all, byte for byte): the task's own declaration plus `CANARY_ENV`, and forty of
+# them at thirty characters each made a 1,859-character header that left the tails only their
+# floors — a 2,564-character account (critic 2026-09-30, `probe_account_budget`).
+_ACCOUNT_ENV_NAMES_CHARS = 200
 
 
 def canary_spec(eval_spec) -> Optional[dict]:
@@ -262,18 +269,22 @@ def canary_failure_result(res, *, detail: str, log_dir: str, env_names: Iterable
     under `Settings.canary_failure_account` — is given: no funnel, no account, so an account can
     never be cut before it is redacted, and a run with the switch off pays no whole-stream pass."""
     from looplab.runtime.command_eval import RunResult
-    names = ", ".join(sorted(env_names))
-    if expired:
-        header = (f"[eval canary] The canary preflight TIMED OUT — {detail}. The canary is this "
-                  f"node's own eval pipeline run on the task's tiny slice (env: {names}) in a scratch "
-                  "directory; the FULL evaluation was NOT started. The clock stopped it, so this is "
-                  "the candidate's COST on that slice, not a defect the engine observed: its pipeline "
-                  f"must finish the slice within the cap. Canary logs: {log_dir}\n")
-    else:
-        header = (f"[eval canary] The canary preflight FAILED — {detail}. The canary is this node's "
-                  f"own eval pipeline run on the task's tiny slice (env: {names}) in a scratch "
-                  "directory; the FULL evaluation was NOT started. Fix the defect below so the "
-                  f"canary passes. Canary logs: {log_dir}\n")
+    ordered = sorted(env_names)
+
+    def _header(names: str) -> str:
+        if expired:
+            return (f"[eval canary] The canary preflight TIMED OUT — {detail}. The canary is this "
+                    f"node's own eval pipeline run on the task's tiny slice (env: {names}) in a "
+                    "scratch directory; the FULL evaluation was NOT started. The clock stopped it, "
+                    "so this is the candidate's COST on that slice, not a defect the engine "
+                    "observed: its pipeline must finish the slice within the cap. Canary logs: "
+                    f"{log_dir}\n")
+        return (f"[eval canary] The canary preflight FAILED — {detail}. The canary is this node's "
+                f"own eval pipeline run on the task's tiny slice (env: {names}) in a scratch "
+                "directory; the FULL evaluation was NOT started. Fix the defect below so the "
+                f"canary passes. Canary logs: {log_dir}\n")
+
+    header = _header(", ".join(ordered))
     footer = f"[eval canary] ({detail}; the full evaluation was not started)"
     code = getattr(res, "exit_code", None) if res is not None else None
     stdout = (getattr(res, "stdout", "") or "") if res is not None else ""
@@ -284,7 +295,24 @@ def canary_failure_result(res, *, detail: str, log_dir: str, env_names: Iterable
         stderr=header + stderr[-_CANARY_OUTPUT_CHARS:] + "\n" + footer,
         metric=None, timed_out=False, canary_expired=bool(expired),
         canary_account=(None if account_redact is None
-                        else canary_account(header, footer, stdout, stderr, account_redact)))
+                        else canary_account(_header(bounded_env_names(ordered)), footer, stdout,
+                                            stderr, account_redact)))
+
+
+def bounded_env_names(names, cap: int = _ACCOUNT_ENV_NAMES_CHARS) -> str:
+    """`names` joined as the header joins them, cut after the last whole name that fits in `cap`
+    characters and followed by how many there are in all — never a name cut in half, and never a
+    list that silently looks complete."""
+    names = list(names)
+    joined = ", ".join(names)
+    if len(joined) <= cap:
+        return joined
+    shown: list = []
+    for name in names:
+        if len(", ".join(shown + [name])) > cap:
+            break
+        shown.append(name)
+    return (", ".join(shown) + ", " if shown else "") + f"… ({len(names)} in all)"
 
 
 def canary_account_shares(stdout_chars: int, stderr_chars: int, *, room: int) -> tuple[int, int]:
@@ -304,7 +332,9 @@ def canary_account(header: str, footer: str, stdout, stderr, redact) -> str:
     of the same string (the judge's history rows, `fenced_tail(err, 200)`, the Researcher's
     `error_last_line`) still say the failure was a canary's, as the historical tail always did.
 
-    Within `CANARY_ACCOUNT_CHARS`, shared by `canary_account_shares`. Each stream is redacted WHOLE
+    Within `CANARY_ACCOUNT_CHARS`, shared by `canary_account_shares` — each FENCED block held to its
+    share, and the header's env names bounded (`bounded_env_names`) — unless the header and footer
+    alone leave less than the two `_ACCOUNT_MIN_TAIL` floors. Each stream is redacted WHOLE
     before its tail is cut, through `evaluate._redacted_tail`, the ONE spelling of that order: a
     secret straddling the cut must reach the redactor whole, or its surviving fragment no longer
     matches any rule. A label's second count is the RAW stream's length — what the canary's log file
@@ -313,8 +343,8 @@ def canary_account(header: str, footer: str, stdout, stderr, redact) -> str:
     err_raw = str(stderr or "").rstrip()
     room = max(2 * _ACCOUNT_MIN_TAIL,
                CANARY_ACCOUNT_CHARS - len(header) - len(footer) - 2 * _ACCOUNT_TAIL_OVERHEAD)
-    out_share, err_share = canary_account_shares(len(out_raw) if out_raw.strip() else 0,
-                                                 len(err_raw) if err_raw.strip() else 0, room=room)
+    # `rstrip` above already made a whitespace-only stream empty, so its length is its share's ask.
+    out_share, err_share = canary_account_shares(len(out_raw), len(err_raw), room=room)
     return (header + _account_tail("stdout", out_raw, out_share, redact)
             + _account_tail("stderr", err_raw, err_share, redact) + footer)
 
@@ -327,9 +357,20 @@ def _account_tail(stream: str, raw: str, share: int, redact) -> str:
     shown = _redacted_tail(redact, raw, share)
     if not shown.strip():
         return f"[the canary's {stream} was empty]\n"
-    label = (f"[the canary's {stream}, its last {len(shown):,} of {len(raw):,} characters]"
-             if len(raw) > share else f"[the canary's {stream}]")
-    return f"{label}\n{fence_untrusted(shown, EVIDENCE_LABEL)}\n"
+    # THE FENCED BLOCK is held to the share, not only the tail inside it: the fence marks every
+    # spelling of its own markers in what it quotes, and each mark GROWS the text, so a stream dense
+    # with `END UNTRUSTED_RUN_EVIDENCE` took a 2,000-character account to 2,157 and the Developer's
+    # head window lost the end of the stuck contract (critic 2026-09-30, driven). The kept tail
+    # shrinks until the block fits, as `core/evidence.py::_fenced_cut` shrinks a cut block.
+    budget = share + 2 * len(EVIDENCE_LABEL) + 6
+    kept = shown
+    block = fence_untrusted(kept, EVIDENCE_LABEL)
+    while len(block) > budget and kept:
+        kept = kept[min(len(kept), len(block) - budget):]
+        block = fence_untrusted(kept, EVIDENCE_LABEL)
+    label = (f"[the canary's {stream}, its last {len(kept):,} of {len(raw):,} characters]"
+             if len(raw) > share or len(kept) < len(shown) else f"[the canary's {stream}]")
+    return f"{label}\n{block}\n"
 
 
 def canary_already_passed(events, node_id: int, generation: int, code_digest: str) -> bool:

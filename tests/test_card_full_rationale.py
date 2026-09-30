@@ -363,6 +363,33 @@ def test_a_calibration_replicate_may_carry_the_whole_rationale(tmp_path):
         quality.analyze_speculation_run(forged)
 
 
+def test_the_calibration_validator_refuses_each_way_a_whole_rationale_can_be_wrong(tmp_path):
+    """Each clause of the admission, driven by the row it exists to refuse (critic 2026-09-30:
+    four of them survived their mutants). MUTATIONS: drop the bound; drop the non-empty own
+    rationale; `<` -> `<=`; skip the string check (a list then raises AttributeError, not the
+    validator's refusal)."""
+    import pytest
+    from looplab.search import speculation_quality as quality
+    from test_speculation_quality_gate import _make_run, _rewrite_first_event_data
+
+    def _forged(name, mutate):
+        run = _make_run(tmp_path / name, treatment=False, seed=0)
+        _rewrite_first_event_data(run, "card_added", mutate,
+                                  where=lambda data: data.get("id") == "card-1")
+        return run
+
+    cases = {
+        "past_the_bound": lambda d: d.__setitem__(
+            "rationale_full", d["rationale"] + "x" * quality._CALIBRATION_RATIONALE_FULL_MAX),
+        "no_own_rationale": lambda d: d.update(rationale="", rationale_full="the whole idea"),
+        "not_longer": lambda d: d.__setitem__("rationale_full", d["rationale"]),
+        "not_a_string": lambda d: d.__setitem__("rationale_full", ["x"] * 1_000),
+    }
+    for name, mutate in cases.items():
+        with pytest.raises(ValueError, match="ownership/proposal receipt is invalid"):
+            quality.analyze_speculation_run(_forged(name, mutate))
+
+
 # ----------------------------------------------------------------------------- a real run
 class _LongRationaleResearcher(ToyResearcher):
     """The toy proposals with a recipe-length rationale and a hypothesis of their own — a Card's

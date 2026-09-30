@@ -561,3 +561,39 @@ def test_a_withheld_row_that_cannot_be_written_leaves_the_lifecycle_pending(tmp_
     evs = _evaluate(eng)
     assert _terminals(evs) == [] and _withheld(evs) == []
     assert fold(evs).nodes[0].status.value == "pending"
+
+
+def test_a_late_intervention_writes_its_own_kind_of_terminal_charging_the_whole_lifecycle(tmp_path):
+    """`_eval_record_late_intervention`'s three answers, each charging `charged_eval_seconds()` —
+    the durable prior a dead process paid PLUS this process's — never this process's alone (critic
+    2026-09-30: every driven late-intervention test started from a prior of 0). MUTATIONS: charge
+    `total_eval`; treat a Card drop as no intervention; call a Card drop an abort."""
+    import anyio
+
+    class _Attempt:
+        node_id, generation, total_eval = 0, 0, 1.0
+        marked = False
+
+        def charged_eval_seconds(self):
+            return 7.5                                  # a 6.5 s durable prior + 1.0 s of this one
+
+        def mark_superseded_workdir(self):
+            self.marked = True
+
+    for kind, reason, error in (
+            ("abort", "aborted", "aborted by operator (on a paused run)"),
+            ("card_drop", "card_dropped", "Card dropped by operator (on a paused run)"),
+            ("reset", "superseded", "superseded by node reset")):
+        eng = _engine(tmp_path / kind, _Dev("print('METRIC: 0.5')\n"), eval_canary=False)
+        _seed(eng, "print('METRIC: 0.5')\n")
+        attempt = _Attempt()
+        wrote = anyio.run(eng._eval_record_late_intervention, attempt, kind, "on a paused run")
+        (term,) = _terminals(list(eng.store.read_all()))
+        assert wrote is True and term.type == "node_failed", kind
+        assert (term.data["reason"], term.data["error"]) == (reason, error), kind
+        assert term.data["eval_seconds"] == 7.5, kind
+        assert attempt.marked is (kind == "reset"), kind
+    eng = _engine(tmp_path / "none", _Dev("print('METRIC: 0.5')\n"), eval_canary=False)
+    _seed(eng, "print('METRIC: 0.5')\n")
+    assert anyio.run(eng._eval_record_late_intervention, _Attempt(), None, "x") is False
+    assert _terminals(list(eng.store.read_all())) == []

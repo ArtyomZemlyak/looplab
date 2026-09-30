@@ -376,3 +376,19 @@ def test_the_escalation_is_off_with_the_nudge_and_below_its_ceiling():
     assert tool_loop._read_loop_stuck(state, "repo_read", {"path": _REF}, 25)
     assert tool_loop._read_loop_stuck(state, "repo_grep", {"path": _REF}, 25) is None, (
         "a grep is not a read; only a registered reader can end the loop")
+
+
+def test_the_read_loop_escalation_is_stamped_on_its_phase_row():
+    """The read-loop exit names ITS rule on `agent_phase_completed`, and the reason whole up to the
+    stamp's 200 characters (critic 2026-09-30: both survived their mutants). MUTATIONS: stamp the
+    detector's last rule instead; cut the detail at 40."""
+    from looplab.core.phase_events import PHASE_COMPLETED, phase_sink_scope
+
+    limit = tool_loop._READ_LOOP_FORCE_FACTOR * 25
+    rows: list = []
+    with phase_sink_scope(lambda etype, data: rows.append((etype, data))):
+        _drive_raw(_walk(_REF, limit + 50), _Tools())
+    (completed,) = [data for etype, data in rows if etype == PHASE_COMPLETED]
+    reason = tool_loop._read_loop_stuck({_REF: {"reads": limit}}, "repo_read", {"path": _REF}, 25)
+    assert completed["stuck_rule"] == "read_loop"
+    assert completed["stuck_detail"] == reason[:200] and len(reason) > 40

@@ -36,6 +36,7 @@ from looplab.events.types import (BACKGROUND_APPENDABLE, DIAGNOSTIC_EVENTS,
     EV_DRIFT_UNAVAILABLE,
     EV_FINALIZE_STEP,
     EV_NODE_CREATED,
+    EV_NODE_FAILED,
     EV_PAUSE,
     EV_POLICY_DECISION,
     EV_REPORT_GENERATED,
@@ -1774,6 +1775,10 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # payload from the begun marker and resumes only the same wrap-up scope.
         if (incomplete_finalize_scope(events) is None
                 and not state.finalization_pending()):
+            # Before any new work, and never on a finished run: a finalized total stays the one its
+            # report was written from.
+            if not state.finished:
+                self._charge_abandoned_lifecycles(state)
             self._setup_phase(state)
 
         return self._reentry_repin()
@@ -3736,6 +3741,29 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             )
             recovered = True
         return recovered
+
+    def _charge_abandoned_lifecycles(self, state: RunState) -> bool:
+        """Charge every lifecycle a reset abandoned with durable spend no terminal carries
+        (`evaluate.py::abandoned_lifecycle_charges`, doc 69 69.12a; critic 2026-09-30), through the
+        SAME fold-budget-only row the attempt that sees a reset writes
+        (`evaluate.py::_eval_record_superseded`): the fold refuses its state fields and charges its
+        `eval_seconds` once. Asked at entry for the reason `_recover_interrupted_builds` is: entering
+        `run` under the run lock proves no attempt of an earlier process can still write that
+        lifecycle's terminal, and no attempt of this one has started. Idempotent through its own
+        rows — a charged lifecycle has a terminal, so the next entry finds nothing. A reset that
+        lands on a withheld lifecycle AFTER this entry and before its re-dispatch is charged at the
+        next one. True when it wrote anything."""
+        from looplab.engine.evaluate import abandoned_lifecycle_charges
+
+        charges = abandoned_lifecycle_charges(self.store.read_all(), state)
+        for node_id, generation, seconds in charges:
+            # The row `evaluate.py::_eval_record_superseded` writes, spelled out as a literal so the
+            # payload-contract scan reads its keys (`tests/test_event_payload_contract.py`).
+            self.store.append(EV_NODE_FAILED, {
+                "node_id": node_id, "generation": generation,
+                "error": "superseded by node reset", "reason": "superseded",
+                "eval_seconds": seconds})
+        return bool(charges)
 
     # *Closed 2026-09-08 (`paid-cadences-hold-the-engine-loop`): the whole block runs off the loop
     # thread through `_offload_cadence` — one worker hop under `_BufferedCadenceStore`, which buffers

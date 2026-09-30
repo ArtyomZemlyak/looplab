@@ -12,6 +12,7 @@ from looplab.core.config import Settings
 # `BOSS_EVIDENCE_LABEL` / `untrusted_evidence_guard` are `core/evidence.py`'s objects under their
 # historical names (doc 52 row 13) — see the note above `BOSS_EVIDENCE_GUARD`.
 from looplab.core.evidence import EVIDENCE_LABEL as BOSS_EVIDENCE_LABEL
+from looplab.core.evidence import fenced_head
 from looplab.core.evidence import untrusted_evidence_guard  # noqa: F401 — re-exported
 from looplab.serve.engine_proc import _engine_alive, _engine_liveness
 from looplab.serve.settings_store import SettingsStore
@@ -98,7 +99,12 @@ def _node_context(st, nid: Optional[int]) -> str:
                   f"feasible={n.feasible}",
                   f"params={n.idea.params}", f"rationale: {n.idea.rationale}"]
         if n.error:
-            lines.append(f"error ({n.error_reason}): {n.error[:400]}")
+            # `fenced_head`, not a slice: a canary's or a host scorer's failure account carries its
+            # streams FENCED, and 400 characters end inside the first block, so a bare cut left an
+            # opening marker with no close and the engine's own `solution.py` lines after it read
+            # as evidence (critic 2026-09-30).
+            lines.append(f"error ({n.error_reason}): "
+                         f"{fenced_head(n.error, 400, BOSS_EVIDENCE_LABEL)}")
         if n.code:
             lines.append("solution.py:\n```python\n" + n.code[:2400] + "\n```")
     return "\n".join(lines)

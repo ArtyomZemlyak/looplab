@@ -406,6 +406,75 @@ def test_the_assistant_s_waiting_tools_are_neutral():
     assert len(tools.reads) == 15 and [c["kind"] for c in cutoffs] == ["stuck"]
 
 
+class _EveryWaitClient:
+    """All three declared waiting tools plus two constant commands, round and round — so each
+    declared name decides whether the long rule sees three distinct pairs or two."""
+
+    plan = [("read_output", {"id": "t1"}), ("list_background", {}), ("write_todos", {"t": 1}),
+            ("run_command", {"cmd": "sleep 30"}), ("run_command", {"cmd": "true"})]
+
+    def __init__(self):
+        self.turn = 0
+
+    def chat(self, messages, tools, tool_choice="auto"):
+        name, args = self.plan[self.turn % len(self.plan)]
+        self.turn += 1
+        return {"content": "", "tool_calls": [{"id": f"c{self.turn}", "function": {
+            "name": name, "arguments": json.dumps(args)}}]}
+
+
+def test_every_declared_waiting_tool_is_what_keeps_the_rule_out():
+    """MUTATIONS: drop any ONE name from `ASSISTANT_STUCK_NEUTRAL_TOOLS` -> a third distinct pair
+    and the wait is cut (critic 2026-09-30: the three-call poll above could not tell)."""
+    from looplab.serve.assistant import ASSISTANT_STUCK_NEUTRAL_TOOLS
+
+    tools = _PollTools()
+    _out, cutoffs, _ = _drive(_EveryWaitClient(), tools, self_plan=False,
+                              stuck_neutral_tools=ASSISTANT_STUCK_NEUTRAL_TOOLS)
+    assert len(tools.reads) == 60 and [c["kind"] for c in cutoffs] == ["turns"]
+    for dropped in ASSISTANT_STUCK_NEUTRAL_TOOLS:
+        tools = _PollTools()
+        _out, cutoffs, _ = _drive(
+            _EveryWaitClient(), tools, self_plan=False,
+            stuck_neutral_tools=tuple(t for t in ASSISTANT_STUCK_NEUTRAL_TOOLS if t != dropped))
+        assert [c["kind"] for c in cutoffs] == ["stuck"], dropped
+
+
+class _RunPollTools(_FileTools):
+    def execute(self, name, args):
+        self.reads.append(name)
+        return {"list_runs": "r1 running", "read_run": "r1: node 3 evaluating",
+                "read_logs": "(no new lines)"}.get(name, "(unknown)")
+
+
+class _RunPollingClient:
+    """The assistant polling a QUIET run by reading it round and round."""
+
+    plan = [("list_runs", {}), ("read_run", {"run": "r1"}), ("read_logs", {"run": "r1", "node": 0})]
+
+    def __init__(self):
+        self.turn = 0
+
+    def chat(self, messages, tools, tool_choice="auto"):
+        name, args = self.plan[self.turn % len(self.plan)]
+        self.turn += 1
+        return {"content": "", "tool_calls": [{"id": f"c{self.turn}", "function": {
+            "name": name, "arguments": json.dumps(args)}}]}
+
+
+def test_polling_a_quiet_run_is_cut_on_purpose():
+    """The run readers are deliberately NOT neutral (critic 2026-09-30, driven: a poll of
+    `list_runs` / `read_run` / `read_logs` ends at call 15). Waiting on a run is `watch_run`'s job —
+    its own description says to use it instead of polling — and each poll re-sends the whole
+    transcript to learn that nothing moved. MUTATION: declare a run reader neutral -> 60 polls."""
+    from looplab.serve.assistant import ASSISTANT_STUCK_NEUTRAL_TOOLS
+
+    tools = _RunPollTools()
+    _out, cutoffs, _ = _drive(_RunPollingClient(), tools, self_plan=False,
+                              stuck_neutral_tools=ASSISTANT_STUCK_NEUTRAL_TOOLS)
+    assert len(tools.reads) == 15 and [c["kind"] for c in cutoffs] == ["stuck"]
+
+
 def test_the_assistant_passes_its_declaration_and_every_name_is_a_tool_it_offers(tmp_path):
     """A declared name that is no tool the assistant offers neutralizes nothing, silently.
     MUTATIONS: stop passing the declaration; rename one of its tools."""
@@ -503,3 +572,26 @@ def test_judgebench_forwards_the_detector_s_other_two_thresholds(monkeypatch, tm
     case["loop"] = dict(case.get("loop") or {}, stuck_stale_streak=0, stuck_alternate=7)
     T.run_case(case, tmp_path / "case")
     assert seen["stuck_stale_streak"] == 0 and seen["stuck_alternate"] == 7
+
+
+def test_a_refused_emit_forgets_the_streak_s_breadth_too():
+    """`reset_stale` ends the streak whole: its LENGTH and the distinct pairs it had re-run. Kept,
+    the breadth from before the bounce let two calls re-read afterwards count as a three-pair cycle
+    (critic 2026-09-30). MUTATION: keep `_streak` -> the two-call re-read below is cut at 12."""
+    lap = [("read_file", {"path": p}, f"<{p}>") for p in ("a", "b", "c")]
+    det = StuckDetector(repeat_threshold=4, alternate_threshold=4, stale_threshold=12)
+    for name, args, obs in lap * 3:                      # 6 re-seen calls over 3 distinct pairs
+        assert det.push(name, args, obs) is None
+    det.reset_stale()
+    # A A B B … — neither a 4-repeat nor a strict ping-pong, and only TWO distinct pairs.
+    pattern = [lap[0], lap[0], lap[1], lap[1]] * 6
+    assert all(det.push(name, args, obs) is None for name, args, obs in pattern)
+
+
+def test_a_bare_string_names_one_neutral_tool_through_the_loop():
+    """`drive_tool_loop(stuck_neutral_tools="read_output")` is ONE name, not eleven characters.
+    MUTATION: pass `tuple(stuck_neutral_tools)` -> no tool is neutral and the wait is cut."""
+    tools = _PollTools()
+    _out, cutoffs, _ = _drive(_PollingClient(), tools, self_plan=False,
+                              stuck_neutral_tools="read_output")
+    assert len(tools.reads) == 60 and [c["kind"] for c in cutoffs] == ["turns"]

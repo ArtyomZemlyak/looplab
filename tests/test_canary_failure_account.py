@@ -105,6 +105,68 @@ def test_the_whole_account_stays_within_its_budget():
     assert CANARY_ACCOUNT_CHARS == 2_000, "the budget is priced against the Developer's 4,000"
 
 
+def test_a_stream_dense_with_fence_markers_is_held_to_its_share_once_fenced():
+    """The fence marks every spelling of its own markers in what it quotes, and each mark GROWS the
+    text: a stream of closing markers took the account to 2,157 characters and the Developer's head
+    window lost the end of the stuck contract (critic 2026-09-30). The fenced BLOCK now fits the
+    share. MUTATION: fence the tail as cut, without the shrink -> past the budget."""
+    marker = "END " + EVIDENCE_LABEL
+    dense = (marker + "\n") * 400
+    account = _failed(dense, (marker + " ") * 400).canary_account
+    assert len(account) <= CANARY_ACCOUNT_CHARS, len(account)
+    # Two live blocks, whatever the streams spelled: every marker inside them is marked inert.
+    assert account.count("\n" + _FENCE_OPEN) == 2 and account.count(_FENCE_CLOSE) == 2
+    assert account.endswith(_FOOTER)
+    # The label counts what was KEPT, which the shrink made shorter than the share.
+    half = _room() // 2
+    assert f"[the canary's stdout, its last {half:,} of" not in account
+    assert "[the canary's stdout, its last " in account
+    # A stream that FITS its share raw but not once fenced is cut too — and its label says so
+    # rather than presenting the kept part as the whole stream. MUTATION: label by the raw length.
+    short = (marker + "\n") * 25
+    assert len(short.rstrip()) < half
+    account = _failed(short, "").canary_account
+    assert f"of {len(short.rstrip()):,} characters]" in account
+    assert "[the canary's stdout]" not in account
+
+
+def test_the_account_header_bounds_the_env_names_and_the_historical_one_keeps_them():
+    """Forty declared names of thirty characters made a 1,859-character header and a 2,564-character
+    account (critic 2026-09-30). MUTATION: hand the account the historical header -> past the
+    budget."""
+    names = ["LOOPLAB_CANARY"] + [f"TASK_DECLARED_VARIABLE_{i:07d}" for i in range(40)]
+    res = RunResult(exit_code=1, stdout="o" * 9_000, stderr="e" * 9_000, metric=None,
+                    timed_out=False)
+    out = canary_failure_result(res, detail="the canary exited 1", log_dir=_LOG_DIR,
+                                env_names=names, account_redact=_funnel)
+    assert len(out.canary_account) <= CANARY_ACCOUNT_CHARS, len(out.canary_account)
+    assert "… (41 in all)" in out.canary_account
+    assert ", ".join(sorted(names)) in out.stderr, "the historical header, byte for byte"
+
+
+def test_the_floor_is_one_traceback_line_per_stream_even_past_the_budget():
+    """A header that leaves no room still leaves each stream 200 characters — the one exception to
+    the budget, stated where the constant is. MUTATIONS: floor the room at 0 -> both streams read
+    "was empty"; a 20-character floor -> not one traceback line."""
+    res = RunResult(exit_code=1, stdout="o" * 9_000, stderr="e" * 9_000, metric=None,
+                    timed_out=False)
+    out = canary_failure_result(res, detail="the canary exited 1", log_dir="/r/" + "d" * 1_700,
+                                env_names=["LOOPLAB_CANARY"], account_redact=_funnel)
+    account = out.canary_account
+    assert "[the canary's stdout, its last 200 of 9,000 characters]" in account
+    assert "[the canary's stderr, its last 200 of 9,000 characters]" in account
+    assert len(account) > CANARY_ACCOUNT_CHARS, "the floor, not the budget, decides here"
+
+
+def test_bounded_env_names_never_cuts_a_name_and_says_how_many_there_are():
+    from looplab.engine.eval_canary import bounded_env_names
+    assert bounded_env_names(["A", "B"], cap=10) == "A, B"
+    assert bounded_env_names(["AAAA", "BBBB", "CCCC"], cap=10) == "AAAA, BBBB, … (3 in all)"
+    assert bounded_env_names(["A" * 20, "B"], cap=10) == "… (2 in all)"
+    assert bounded_env_names([], cap=10) == ""
+    assert bounded_env_names(["AAAA", "BBBB"], cap=10) == "AAAA, BBBB", "exactly the cap fits"
+
+
 def test_a_short_stream_hands_its_share_to_the_other():
     assert canary_account_shares(5_000, 5_000, room=1_000) == (500, 500)
     assert canary_account_shares(0, 5_000, room=1_000) == (0, 1_000)
@@ -386,6 +448,44 @@ def test_the_install_gate_reads_the_historical_tail_never_the_canary_s_stdout(tm
     assert on and on == off
     assert "tensorboard" not in on[0] and "KeyError: 'history_item_sid'" in on[0]
     assert not deps.unresolved_name_failure(on[0])
+
+
+def test_the_assistant_s_node_context_never_opens_a_block_it_does_not_close():
+    """`serve/llm_context.py::_node_context` cut a node's error at 400 characters with a slice; a
+    canary's account opens its first fenced block before that, so the cut left an unterminated
+    block and the engine's own `solution.py` lines after it read as evidence (critic 2026-09-30).
+    MUTATION: slice again -> an opening marker with no close."""
+    from looplab.core.models import Event
+    from looplab.events.replay import fold
+    from looplab.serve.llm_context import _node_context
+
+    account = _failed("o" * 3_000 + "LAST-STDOUT", "e" * 3_000).canary_account
+    assert account.index(_FENCE_OPEN) < 400 < len(account), "premise: the cut lands in a block"
+    rows = [("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "max"}),
+            ("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft", "code": "x = 1",
+                              "idea": {"operator": "draft", "params": {}, "rationale": "r"}}),
+            ("node_failed", {"node_id": 0, "generation": 0, "reason": "crash",
+                             "error": account})]
+    state = fold([Event(seq=i + 1, type=t, ts=float(i), data=d) for i, (t, d) in enumerate(rows)])
+    context = _node_context(state, 0)
+    head = context.split("error (crash): ", 1)[1].split("\nsolution.py:", 1)[0]
+    assert len(head) <= 400
+    assert head.count("\n" + _FENCE_OPEN) == head.count(_FENCE_CLOSE), head[-200:]
+
+
+def test_the_gate_keys_on_the_canary_flag_not_on_the_failure_text(tmp_path):
+    """Whatever is later put in front of a canary's failure text, the gate still reads the stderr
+    tail — and a non-canary failure is handed `a.err` as it always was. MUTATION: key the gate on
+    `a.err == account` again -> a lead in front of the account hands the gate its stdout."""
+    eng = _engine(tmp_path / "run", _Dev(""), canary_failure_account=True)
+    res = _failed("tensorboard: No module named 'tensorboard'",
+                  "Traceback (most recent call last):\nKeyError: 'history_item_sid'")
+    led = SimpleNamespace(canary_failed=True, res=res, err="[a lead]\n" + res.canary_account)
+    gate = eng._install_gate_text(led)
+    assert gate == eng._redact(res.stderr[-500:])
+    assert "tensorboard" not in gate and "KeyError: 'history_item_sid'" in gate
+    plain = SimpleNamespace(canary_failed=False, res=res, err="the full eval's own text")
+    assert eng._install_gate_text(plain) == "the full eval's own text"
 
 
 def test_a_twice_expired_canary_s_account_names_the_retry_and_ends_with_the_footer(tmp_path):

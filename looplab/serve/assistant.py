@@ -76,7 +76,11 @@ _INCOMPLETE_SESSION_TITLE = "Incomplete chat (cleanup required)"
 # files broke every streak and the rule never fired — and `read_output` / `list_background` are how
 # it waits on a background job: three constant polls of a quiet job were stopped at call 15, a
 # pattern the replay the rule was measured on never saw. A poll of ONE constant call still meets the
-# short repeat rule, as it always did.
+# short repeat rule, as it always did. The RUN readers (`list_runs`, `read_run`, `read_logs`) are
+# deliberately NOT here: a quiet run polled round and round is a wait `watch_run` exists for — its
+# description says to use it instead of polling — and every poll re-sends the whole transcript to
+# learn that nothing moved, so the long rule ends such a turn at call 15 (critic 2026-09-30,
+# driven; `tests/test_stuck_long_cycle.py::test_polling_a_quiet_run_is_cut_on_purpose`).
 ASSISTANT_STUCK_NEUTRAL_TOOLS = ("write_todos", "read_output", "list_background")
 # The per-SESSION cross-process fences (review 2026-09-22, SRV1-03), one per in-process lock they
 # extend: appends and the fork snapshot's read share the transcript's, meta read-modify-writes share

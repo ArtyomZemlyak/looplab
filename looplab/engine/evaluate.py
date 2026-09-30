@@ -587,6 +587,51 @@ def _durable_prior_seconds(events, node_id: int, generation: int) -> float:
                  + _durable_withheld_seconds(events, node_id, generation), 3)
 
 
+def abandoned_lifecycle_charges(events, state) -> list:
+    """`(node_id, generation, seconds)` for every lifecycle a RESET abandoned with durable spend that
+    no terminal carries — what the engine charges at entry (`Engine._charge_abandoned_lifecycles`).
+
+    The attempt that sees a reset writes its lifecycle's stale-generation terminal itself
+    (`_eval_record_superseded`), charging what it ran. A lifecycle NO attempt was running when the
+    reset landed got none: one a pause withheld (a passed canary whose full eval it refused to
+    start, or the failed attempt DECIDE_REPAIR stopped repairing), or one a dead process left
+    mid-chain. Its seconds sat on durable rows (`_durable_prior_seconds`) that only a terminal of
+    that lifecycle charges, so the reset refunded them to `max_eval_seconds` — driven: a 1.3 s
+    failed attempt withheld at DECIDE_REPAIR, a reset while paused, and the run's
+    `total_eval_seconds` then read the new lifecycle's seconds alone (critic 2026-09-30).
+
+    Only an OLDER generation than the node's current one — the current one is re-dispatched and its
+    own terminal charges it — and only one that no terminal names. A terminal is keyed as the fold
+    keys it (`attempt` is the terminals' legacy generation alias), and an UNSTAMPED legacy terminal
+    binds every generation, so it can only suppress a charge, never add a second one. A spend row
+    names its lifecycle by an explicit stamp or not at all."""
+    terminals: dict = {}
+    spent: set = set()
+    for e in events or []:
+        d = e.data if isinstance(e.data, Mapping) else {}
+        node_id = coerce_node_id(d)
+        if node_id is None:
+            continue
+        if e.type in (EV_NODE_EVALUATED, EV_NODE_FAILED):
+            terminals.setdefault(node_id, []).append(d)
+        elif e.type in (EV_NODE_REPAIRED, EV_DEPS_INSTALLED, EV_EVAL_ATTEMPT_WITHHELD):
+            generation = coerce_node_id({"node_id": d.get("generation")})
+            if generation is not None and generation >= 0:
+                spent.add((node_id, generation))
+    charges = []
+    for node_id, generation in sorted(spent):
+        node = state.nodes.get(node_id)
+        if node is None or generation >= node.attempt:
+            continue
+        if any(event_generation_binds(d, generation, legacy_attempt=True)
+               for d in terminals.get(node_id, ())):
+            continue
+        seconds = _durable_prior_seconds(events, node_id, generation)
+        if seconds > 0:
+            charges.append((node_id, generation, seconds))
+    return charges
+
+
 def _durable_monitor_verdicts(events, node_id: int, generation: int) -> list[dict]:
     """This node's TRAINING-WATCHDOG verdicts as the event log records them, oldest first.
 
@@ -2335,10 +2380,14 @@ class EvaluateMixin:
         stdout tail and wider stderr window are text `deps.unresolved_name_failure` was never
         measured on: a tensorboard warning on the canary's stdout nominated a pip install into the
         SHARED eval interpreter (critic 2026-09-29, driven). A rule of its own, not a second call of
-        `_eval_failure_text`, which the attempt loop reaches exactly once."""
-        account = getattr(a.res, "canary_account", None)
-        if (a.canary_failed and canary_failure_account(self) and isinstance(account, str)
-                and account.strip() and a.err == account):
+        `_eval_failure_text`, which the attempt loop reaches exactly once.
+
+        Keyed on the attempt's own canary flag and the switch, never on the TEXT of `a.err`: it
+        used to also demand `a.err == account`, so anything that later prepends to a canary's
+        failure text would have handed the gate the account again, stdout included, with no test
+        turning red (critic 2026-09-30). `a.canary_failed` is cleared at the head of every attempt,
+        so it always describes `a.res`."""
+        if a.canary_failed and canary_failure_account(self):
             return self._redact(str(getattr(a.res, "stderr", "") or "")[-500:])
         return a.err
 
@@ -3083,7 +3132,9 @@ class EvaluateMixin:
         code digest (`canary_already_passed`), so the re-dispatch after the pause lifts goes straight
         to the full eval — and its seconds ride on the `eval_attempt_withheld` row every withhold
         writes (`_record_eval_withheld`), which the lifecycle's next terminal charges (doc 69
-        69.12a). A pause still never kills a RUNNING eval; it only refuses to START one."""
+        69.12a) — or, when a reset abandons it first, the engine's next entry
+        (`abandoned_lifecycle_charges`). A pause still never kills a RUNNING eval; it only refuses
+        to START one."""
         if a.next_start is not _UNSET and a.next_start is not None:
             # TOTAL (`[]` on a resolution hiccup): an unreadable manifest names no first stage, so the
             # reuse point stands and the attempt runs on.
@@ -3101,7 +3152,8 @@ class EvaluateMixin:
                                     reason: str = "paused") -> None:
         """The durable record of a withheld attempt (doc 69 69.12a): WHERE the pause (or a stop)
         held it (`EVAL_WITHHELD_POINTS`) and the eval seconds it had spent that NO other row carries
-        — the lifecycle's next terminal charges them (`_durable_withheld_seconds`), and
+        — the lifecycle's next terminal charges them (`_durable_withheld_seconds`), or the
+        engine's next entry when a reset abandoned it (`abandoned_lifecycle_charges`), and
         `events/eval_occupancy.py` closes the busy interval at the row, so a paused run no longer
         reads as one evaluating straight through its pause. Diagnostic, from the eval child under
         `_write_lock` like `deps_installed`; the seconds are clamped to a finite non-negative
