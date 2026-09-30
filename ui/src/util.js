@@ -26,10 +26,10 @@ export function storageRemove(key) {
 // Assistant permission modes — shared by the docked assistant (AssistantBar) and the full-page view
 // (AssistantChat) so the list stays defined once.
 export const ASSISTANT_MODES = [
-  { id: 'plan', label: 'Plan', hint: 'read-only — inspect & propose (safe)' },
-  { id: 'default', label: 'Ask', hint: 'confirm every change' },
-  { id: 'acceptEdits', label: 'Auto-edit', hint: 'edits apply; commands and risky actions ask' },
-  { id: 'auto', label: 'Auto', hint: 'routine changes run; high-risk actions ask' },
+  { id: 'plan', label: 'Plan', hint: 'Discuss, inspect, and prepare proposals. Changes and commands are disabled.' },
+  { id: 'default', label: 'Ask', hint: 'Ask before changes. You can approve a repeated action for this turn.' },
+  { id: 'acceptEdits', label: 'Auto-edit', hint: 'Routine file edits apply. Commands, run controls, and high-risk actions ask first.' },
+  { id: 'auto', label: 'Auto', hint: 'Routine changes apply automatically. Shell commands and high-risk actions ask for approval.' },
 ]
 // One streamed token's text: the SSE stream sends {text} objects, but some paths hand back a bare
 // string — one reader so both assistant surfaces decode identically.

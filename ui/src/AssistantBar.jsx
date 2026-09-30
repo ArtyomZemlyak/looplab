@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Turn, PermCard } from './AssistantChat.jsx'
+import AssistantModePicker from './AssistantModePicker.jsx'
 import { OpIcon } from './icons.jsx'
 import { useCommandStatusPoll, useMediaQuery, usePoll } from './hooks.js'
 import {
@@ -3548,18 +3549,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   }
 
   // mode selector row — placed BELOW the input in the side + full composers.
-  const modeRow = <div className="asst-moderow">
-    <div className="asst-modes" role="group" aria-label="Mode">
-      {MODES.map(x => <button key={x.id} aria-pressed={x.id === mode}
-        className={'asst-mode' + (x.id === mode ? ' on' : '')}
-        disabled={historical || composerEditingPaused} title={historical ? readOnlyShort
-          : sessionOpening ? 'Wait for the selected Assistant chat to finish opening'
-            : shareUnknown ? 'Choose a draft mode; sending is paused until public-link status is verified'
-            : forkingCurrentSession ? 'Wait for this chat to finish forking' : x.hint}
-        onClick={() => { if (!openSessionPendingRef.current) setComposerMode(x.id) }}>{x.label}</button>)}
-    </div>
-    <span className="asst-modehint muted">{activeMode.hint}</span>
-  </div>
+  const modeRow = <AssistantModePicker mode={mode} disabled={historical || composerEditingPaused}
+    disabledReason={historical ? readOnlyShort
+      : sessionOpening ? 'Wait for the selected Assistant chat to finish opening'
+        : forkingCurrentSession ? 'Wait for this chat to finish forking' : 'Wait for the current action'}
+    onChange={value => { if (!openSessionPendingRef.current) setComposerMode(value) }} />
 
   // The /command hint listbox — one definition reused by the docked bar AND the side/full composers, so
   // command discovery is identical everywhere. Only one view renders at a time, so the shared id is unique.
@@ -3735,7 +3729,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     </div>
     {draftingNewRun && <div id="assistant-new-run-hint" className="asst-new-run-hint" role="note">
       <span>{newRunDraft
-        ? 'New run · review its launch card to start.'
+        ? 'Discuss the goal, validate the launch card, then choose Start run.'
         : 'Describe the goal after /new. Nothing starts until you review the launch card and press Start run.'}</span>
       {newRunDraft && <button type="button" className="btn sm ghost" onClick={() => setNewRunDraft(false)}>Back to chat</button>}
     </div>}

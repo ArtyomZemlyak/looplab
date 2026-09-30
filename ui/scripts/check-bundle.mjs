@@ -111,7 +111,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-09-28 Windows build: 216,251 B; forbidden reachability still passes.
       // 2026-09-29 merge of master into the branch: measured 218,171 B JS.
       // 2026-09-30 model-status entry: measured 219,213 B JS; the status itself stays lazy.
-      limits: { js: { gzip: 215 * KIB }, css: { gzip: 40 * KIB } },
+      // 2026-09-30 permission disclosure: measured 220,270 B JS (+314 B); collapsed choices
+      // preserve the current draft mode and return focus after an explicit selection.
+      limits: { js: { gzip: 216 * KIB }, css: { gzip: 40 * KIB } },
     },
     {
       name: 'Run compare increment',

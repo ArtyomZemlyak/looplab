@@ -25,6 +25,9 @@ and LoopLab's internal research roles. For setup from a fresh checkout, use
    Give the goal, accessible paths, and constraints. The Assistant can inspect a repo
    and ask for missing information. The paths must exist on the **LoopLab server**,
    which may be a different machine from your browser.
+   Keep **Permissions · Plan** to discuss and prepare the proposal. Expand that control
+   when you want to change how file edits and run controls are approved; each option
+   explains what happens automatically. You can review and start the launch card in Plan.
 4. Review **What this run will do** on the launch card: goal, score direction, paths,
    edit rules where applicable, and limits. Missing facts are marked explicitly.
    Choose **Validate**, inspect the effective preview and technical settings, then
