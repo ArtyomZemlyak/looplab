@@ -36,7 +36,9 @@ export const CARD_COLUMNS = [
   ['coded', 'Coded', 'an experiment is built and waiting to run — it has NOT started'],
   // Occupied only by the withheld overlay (`withheldRunning` below), never by the folded status: the
   // fold keeps a withheld lifecycle admitted, and the evaluation may already have run part of itself.
-  ['held', 'Held', 'its evaluation was admitted, then held by a pause — it continues on resume'],
+  // Neutral on WHY (critic 2026-09-30, crit_v46 L3): a run that STOPPED with the evaluation withheld
+  // folds exactly the same, and "it continues on resume" was false there.
+  ['held', 'Held', 'its evaluation was admitted, then withheld (a pause or the run stopping) before it finished'],
   ['running', 'Running', 'evaluation is in flight'],
   ['evaluated', 'Evaluated', 'evidence has reached a verdict'],
   // NOT "the hypothesis was refuted" — that is the verdict column's job (`tested`). This lane says
@@ -116,7 +118,7 @@ const BELIEF_ONLY_BLOCKERS = new Set(
 // through to the plain wording, so a lane this build does not know cannot mint a sentence.
 const BLOCKER_LIFECYCLE_BY_STATUS = {
   work_in_flight: { coded: 'its experiment is built and has not started',
-    held: 'its evaluation is held by a pause' },
+    held: 'its evaluation was withheld before it finished' },
 }
 
 // …AND ONE BLOCKER, TWO RETIREMENTS (2026-09-27). `work_terminal` on a Failed card with its verdict
@@ -275,8 +277,9 @@ export function cardAuthoring(state) {
 // evidence moves it, and only to `held`: not `coded`, whose "it has NOT started" is false for an
 // evaluation a pause held after its canary or its failed attempt ran (critic 2026-09-30). A card with
 // any node the server does not say this of stays `running`.
-const lifecycleInt = value => typeof value !== 'boolean' && value !== null && value !== ''
-  && Number.isInteger(Number(value))
+// A JSON number the server wrote, never whatever `Number` coerces: ' ', [], [0] and '0x0' all
+// coerce to 0 and -1 is no lifecycle (critic 2026-09-30, crit_v46 NIT).
+const lifecycleInt = value => Number.isSafeInteger(value) && value >= 0
 
 function withheldRunning(card, state) {
   if (cardStatus(card) !== 'running') return false
