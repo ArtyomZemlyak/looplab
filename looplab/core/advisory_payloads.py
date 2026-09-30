@@ -523,10 +523,15 @@ def _tree(value, budget: list[int], items: list[int], depth: int = 0, *, env):
 def _outcome_binding(raw_evidence: dict, node_refs: int) -> Optional[dict]:
     """The optional `objective` / `outcomes` of a verdict's evidence (doc 69 69.26), validated.
 
-    `{}` when the receipt carries neither (a legacy row); the keys that are present and well formed
-    otherwise; None when one is present and malformed. `outcomes` must be one outcome digest per
-    retained node ref, in order; `objective` a bounded key or None (the task's own metric)."""
+    `{}` when the receipt carries neither (a legacy row); both, when both are present and well
+    formed; None otherwise — one key without the other is a shape the writer never mints (it writes
+    the pair or, before 69.26, neither), and a half binding read as complete let finalize check the
+    objective and skip the numbers (critic 2026-09-30, driven: the number moved, `supported`).
+    `outcomes` must be one outcome digest per retained node ref, in order; `objective` a bounded key
+    or None (the task's own metric)."""
     out: dict = {}
+    if ("objective" in raw_evidence) != ("outcomes" in raw_evidence):
+        return None
     if "objective" in raw_evidence:
         objective = raw_evidence.get("objective")
         if not (objective is None or (isinstance(objective, str) and objective.strip()
@@ -605,8 +610,10 @@ def _verification(value, budget: list[int], items: list[int], *, env):
                     if valid_source_identity(identity)
                 ]
                 # The two outcome bindings (69.26), carried only in the shape their writer mints;
-                # one present but malformed makes the receipt INCOMPLETE rather than silently
-                # legacy, so a forged or damaged binding can never ratify by being dropped.
+                # one present but malformed, or one without the other, makes the receipt
+                # INCOMPLETE rather than silently legacy, so a damaged binding cannot ratify by being
+                # half dropped. A row with NEITHER key reads as legacy, as every pre-69.26 receipt
+                # must: this bounds damage, not a hand-edited log, which can drop both.
                 bound = _outcome_binding(raw_evidence, len(evidence["node_refs"]))
                 evidence.update(bound or {})
                 evidence["complete"] = bool(

@@ -34,6 +34,9 @@ export const CARD_COLUMNS = [
   ['building', 'Building', 'code is being produced'],
   ['built-awaiting-commit', 'Awaiting commit', 'build finished; durable node commit is pending'],
   ['coded', 'Coded', 'an experiment is built and waiting to run — it has NOT started'],
+  // Occupied only by the withheld overlay (`withheldRunning` below), never by the folded status: the
+  // fold keeps a withheld lifecycle admitted, and the evaluation may already have run part of itself.
+  ['held', 'Held', 'its evaluation was admitted, then held by a pause — it continues on resume'],
   ['running', 'Running', 'evaluation is in flight'],
   ['evaluated', 'Evaluated', 'evidence has reached a verdict'],
   // NOT "the hypothesis was refuted" — that is the verdict column's job (`tested`). This lane says
@@ -44,12 +47,12 @@ export const CARD_COLUMNS = [
   ['dropped', 'Dropped', 'operator or engine removed the work item'],
 ]
 export const CARD_FROZEN_STATUSES = new Set(
-  ['proposed', 'building', 'coded', 'running', 'evaluated', 'failed', 'gated', 'dropped'])
+  ['proposed', 'building', 'coded', 'held', 'running', 'evaluated', 'failed', 'gated', 'dropped'])
 // Rendered only when a card is actually in them. `coded` and `failed` stay here after becoming
 // derivable: a serial run reaches neither, and an empty column is a question the operator has to
 // answer before they can ignore it.
 export const CARD_OPTIONAL_STATUSES = new Set(
-  ['speculating', 'built-awaiting-commit', 'coded', 'failed'])
+  ['speculating', 'built-awaiting-commit', 'coded', 'held', 'failed'])
 export const CARD_RENDER_LIMIT = 256 // mirrors PUBLIC_CARD_MAX_COUNT at the wire boundary
 
 // WHY a card is not selectable — and whether that is news.
@@ -112,7 +115,8 @@ const BELIEF_ONLY_BLOCKERS = new Set(
 // the lane hint the chip must agree with is keyed on exactly that. A status with no row here falls
 // through to the plain wording, so a lane this build does not know cannot mint a sentence.
 const BLOCKER_LIFECYCLE_BY_STATUS = {
-  work_in_flight: { coded: 'its experiment is built and has not started' },
+  work_in_flight: { coded: 'its experiment is built and has not started',
+    held: 'its evaluation is held by a pause' },
 }
 
 // …AND ONE BLOCKER, TWO RETIREMENTS (2026-09-27). `work_terminal` on a Failed card with its verdict
@@ -160,7 +164,11 @@ export function cardSelectionBlock(card) {
           + 'it, so the engine will not rebuild it; the idea is left to the Researcher' }
     }
     const label = BLOCKER_LIFECYCLE_BY_STATUS[name]?.[cardStatus(card)] || BLOCKER_LIFECYCLE[name]
-    return { tone: 'lifecycle', label, title: detail }
+    // The withheld overlay moved the lane; the ledger's own word stays beside it.
+    const folded = isRecord(card.withheld) ? cardText(card.withheld.folded_status) : null
+    return { tone: 'lifecycle', label,
+      title: folded ? `${detail} — the ledger still folds it ${folded}: the server says a pause `
+        + 'holds its evaluation' : detail }
   }
   // No reason, or only reasons this build does not know: say the honest minimum rather than
   // inventing one. An unknown blocker is a FAULT — a card the queue refuses for a reason nothing can
@@ -264,8 +272,12 @@ export function cardAuthoring(state) {
 // (doc 69 69.12b): the fold keeps the lifecycle admitted — the withhold row is diagnostic and never
 // folded — so the card read "Running · evaluation is in flight" beside nodes that said "Waiting for
 // evaluation slot" in the same frame (critic 2026-09-30). Only the server's own generation-matched
-// evidence moves it, and only to `coded` ("built and waiting to run"), the lane `running` splits
-// into; a card with any node the server does not say this of stays `running`.
+// evidence moves it, and only to `held`: not `coded`, whose "it has NOT started" is false for an
+// evaluation a pause held after its canary or its failed attempt ran (critic 2026-09-30). A card with
+// any node the server does not say this of stays `running`.
+const lifecycleInt = value => typeof value !== 'boolean' && value !== null && value !== ''
+  && Number.isInteger(Number(value))
+
 function withheldRunning(card, state) {
   if (cardStatus(card) !== 'running') return false
   const ids = Array.isArray(card.status_nodes) ? card.status_nodes : []
@@ -274,7 +286,7 @@ function withheldRunning(card, state) {
     const activity = node?.activity
     return isRecord(activity) && activity.status === 'queued'
       && activity.evidence === 'eval_attempt_withheld'
-      && Number.isInteger(Number(activity.generation)) && Number.isInteger(Number(node.attempt))
+      && lifecycleInt(activity.generation) && lifecycleInt(node.attempt)
       && Number(activity.generation) === Number(node.attempt)
   })
 }
@@ -294,7 +306,7 @@ export function cardRows(state) {
       // replay facts and this one is a statement about a process that is running right now. The ONE
       // exception is the server's own statement that nothing runs: see `withheldRunning`.
       if (withheldRunning(card, state)) {
-        return { ...card, id, status: 'coded', withheld: { folded_status: cardStatus(card) } }
+        return { ...card, id, status: 'held', withheld: { folded_status: cardStatus(card) } }
       }
       if (!live || cardStatus(card) !== 'proposed') return { ...card, id }
       // `status` is overlaid, `selection_ready` is NOT: it stays true on purpose while the head is

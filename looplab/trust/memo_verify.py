@@ -166,6 +166,15 @@ def _node_outcome_sig(node) -> Optional[str]:
     return canonical_json_digest(body, prefix=RESEARCH_OUTCOME_PREFIX)
 
 
+def _carries_number(node) -> bool:
+    """Does this cited node's outcome carry a metric — the one part of a verdict's evidence the run's
+    objective decides? The same reading `_node_outcome_sig` digests: an evaluated node's usable
+    metric; a failed node's status and reason, and an evaluated node without a usable metric, name
+    no ruler (doc 69 69.26, critic 2026-09-30)."""
+    return (node is not None and getattr(node, "status", None) is NodeStatus.evaluated
+            and is_usable_metric(node.metric))
+
+
 def _evidence_snapshot(claim: dict, state: RunState,
                        sources: Optional[dict[str, dict[str, str]]] = None) -> tuple[dict, dict]:
     """Freeze exactly the evidence shown to the verifier and its lifecycle-aware identities."""
@@ -386,8 +395,15 @@ def finalize_verified_evidence(claim: dict, verdict_row: dict,
     # refused when the run's objective or a cited node's outcome moved after the verdict — a
     # `metric_retarget` does both, and neither is a new lifecycle. Two sentences, because the
     # remedies differ: the objective changed under the whole memo, or one cited number did.
+    # The objective is asked only of a verdict a NUMBER could have been read into: one whose cited
+    # node carries a metric now (a node that carried one when judged and not now has a moved outcome
+    # digest, refused below). A URL-only claim or one citing failed nodes alone — status and reason,
+    # no ruler — keeps its verdict across a retarget (critic 2026-09-30, driven: both were refused,
+    # and each refusal flipped the run's D8 `producer_complete`; the lessons twin is
+    # `engine/lessons_reconcile.py::_metric_on_ruler`).
     objective_now = getattr(state, "objective_key", None)
-    if "objective" in evidence and evidence.get("objective") != objective_now:
+    if ("objective" in evidence and evidence.get("objective") != objective_now
+            and any(_carries_number(final_nodes.get(ref["node_id"])) for ref in node_refs)):
         return None, "verification evidence was judged under another objective"
     if "outcomes" in evidence:
         raw_outcomes = evidence.get("outcomes")

@@ -138,3 +138,136 @@ def test_a_withheld_attempt_reset_while_paused_is_charged_when_the_run_resumes(t
     total = fold(evs).total_eval_seconds
     assert abs(total - (withheld + by_generation[1].data["eval_seconds"])) < 1e-6, total
 
+
+
+# -------------------------------------------------------------------------------- critic 2026-09-30
+# The first cut charged a RESET's older generation off repair, dependency and withheld rows alone.
+# Three lifecycles it left refunded, each driven by the critic: a node DELETED while paused (its
+# current generation, which nothing re-dispatches), an invocation a dead process SETTLED and never
+# carried (its seconds on the settle row only), and a reset landing after this process's entry on a
+# run that then FINISHED in it (never charged: a finished run is skipped at every later entry).
+
+def _settle(seconds, *, attempt=0, outcome="failed", generation=0):
+    return ("eval_invocation_settled", {"node_id": 0, "generation": generation, "attempt": attempt,
+                                        "invocation_id": f"inv-{attempt}", "outcome": outcome,
+                                        "eval_seconds": seconds})
+
+
+def _repaired(seconds, attempt=1):
+    return ("node_repaired", {"node_id": 0, "generation": 0, "attempt": attempt, "files": {},
+                              "eval_seconds": seconds})
+
+
+def test_a_settle_no_row_carried_is_charged_and_a_carried_one_is_not():
+    """The critic's `d3`: a 26,830 s `ok` settle, the process dies, a reset — [] before. MUTATION:
+    drop the orphan term from `_durable_prior_seconds` -> []."""
+    assert _charges(_settle(26830.0, outcome="ok"), _RESET) == [(0, 0, 26830.0)]
+    # A repair row carries the attempt it answers: the settle before it is not charged twice.
+    assert _charges(_settle(5.0), _repaired(5.0), _RESET) == [(0, 0, 5.0)]
+    # …and a DECIDE_REPAIR withhold carries it too; a withhold at any earlier point carries nothing
+    # of a settle (MUTATION: drop the `at` test -> the admit row swallows the 26,830 s).
+    assert _charges(_settle(5.0), _withhold(seconds=5.0), _RESET) == [(0, 0, 5.0)]
+    admit = _withhold(seconds=0.0, at="admit")
+    assert _charges(_settle(26830.0, outcome="ok"), admit, _RESET) == [(0, 0, 26830.0)]
+    # A dead process's settle, then a resumed re-run of the same attempt that a repair carried: the
+    # first settle's window closed with no carrying row (MUTATION: charge the last settle only).
+    assert _charges(_settle(4.0), _settle(6.0), _repaired(6.0), _RESET) == [(0, 0, 10.0)]
+    # …and a dependency round carries the attempt it re-runs.
+    deps = ("deps_installed", {"node_id": 0, "generation": 0, "packages": ["x"], "round": 1,
+                               "eval_seconds": 3.0})
+    assert _charges(_settle(3.0), deps, _settle(2.0, outcome="ok"), _RESET) == [(0, 0, 5.0)]
+    # Another lifecycle's rows never close this one's window; a malformed number is no seconds.
+    other = ("node_repaired", {"node_id": 0, "generation": 1, "attempt": 1, "files": {},
+                               "eval_seconds": 1.0})
+    assert _charges(_settle(7.0), other, _RESET) == [(0, 0, 7.0)]
+    assert _charges(_settle(True), _RESET) == [] and _charges(_settle("nan"), _RESET) == []
+
+
+def test_the_recovered_terminal_is_priced_off_the_sum_once():
+    """`_eval_recover_settled` finalizes from the orphan `ok` settle, which the sum already holds:
+    the terminal is `prior + 0`, never the settle twice (the driven twin is
+    `tests/test_settled_eval_recovery.py`)."""
+    from looplab.engine.evaluate import _durable_prior_seconds
+    events = _log(_settle(2.0), _repaired(2.0), _settle(9.5, attempt=1, outcome="ok"))
+    assert _durable_prior_seconds(events, 0, 0) == 11.5
+
+
+def test_a_deleted_node_s_current_lifecycle_is_charged_and_named_a_delete(tmp_path):
+    """The critic's `d2`: a withheld attempt, a delete while paused, a resume — the tombstone is out
+    of `pending_nodes`, so nothing re-dispatched it and the total read 0.0. MUTATION: drop the
+    tombstone clause -> []."""
+    from tests.factories import make_engine
+
+    tomb = ("node_tombstoned", {"node_ids": [0]})
+    assert _charges(_withhold(), tomb) == [(0, 0, 1.5)]
+    # An evaluated node that is deleted afterwards is not charged again.
+    done = ("node_evaluated", {"node_id": 0, "generation": 0, "metric": 0.5, "eval_seconds": 1.5})
+    assert _charges(_withhold(), done, tomb) == []
+    # A reset THEN a delete: both lifecycles, each named for what abandoned it.
+    gen1 = _withhold(generation=1, seconds=2.0)
+    engine = make_engine(tmp_path / "run")
+    for row in _log(_withhold(), _RESET, gen1, tomb):
+        engine.store.append(row.type, row.data)
+    assert engine._charge_abandoned_lifecycles(fold(engine.store.read_all())) is True
+    rows = [e.data for e in engine.store.read_all() if e.type == "node_failed"]
+    assert [(r["generation"], r["reason"], r["error"], r["eval_seconds"]) for r in rows] == [
+        (0, "superseded", "superseded by node reset", 1.5),
+        (1, "superseded", "abandoned by node delete", 2.0)]
+    state = fold(engine.store.read_all())
+    assert state.total_eval_seconds == 3.5 and state.nodes[0].tombstoned
+    assert engine._charge_abandoned_lifecycles(state) is False
+
+
+def test_two_abandoned_lifecycles_are_both_charged_each_under_its_own_generation(tmp_path):
+    """MUTATIONS: charge only the first sorted lifecycle; stamp the row with the node id instead of
+    the generation (the fold then charges nothing, and every entry would append it again)."""
+    from tests.factories import make_engine
+
+    node_2 = ("node_created", {"node_id": 2, "parent_ids": [], "operator": "draft",
+                               "idea": {"operator": "draft", "params": {}, "rationale": "seed"},
+                               "code": "y"})
+    withheld_2 = ("eval_attempt_withheld", {"node_id": 2, "generation": 0, "attempt": 0,
+                                            "at": "decide_repair", "reason": "paused",
+                                            "eval_seconds": 4.0})
+    reset_2 = ("node_reset", {"node_id": 2, "generation": 0})
+    engine = make_engine(tmp_path / "run")
+    for row in _log(_withhold(), _RESET, node_2, withheld_2, reset_2):
+        engine.store.append(row.type, row.data)
+    assert engine._charge_abandoned_lifecycles(fold(engine.store.read_all())) is True
+    rows = [e.data for e in engine.store.read_all() if e.type == "node_failed"]
+    assert sorted((r["node_id"], r["generation"], r["eval_seconds"]) for r in rows) == [
+        (0, 0, 1.5), (2, 0, 4.0)]
+    assert fold(engine.store.read_all()).total_eval_seconds == 5.5
+    assert engine._charge_abandoned_lifecycles(fold(engine.store.read_all())) is False
+
+
+def test_the_finish_gate_charges_a_reset_that_landed_after_entry(tmp_path):
+    """The critic's `d5`: entry charged nothing, the reset came after it, and the run finished in the
+    same process — its total never held the withheld seconds. Both finish gates refuse ONCE over the
+    charge and then finish over the charged log. MUTATIONS: drop the refusal from either gate."""
+    from tests.factories import make_engine
+
+    engine = make_engine(tmp_path / "run")
+    for row in _log(_withhold(), _RESET):
+        engine.store.append(row.type, row.data)
+    tail = engine.store.read_all()[-1].seq
+    assert engine._finish_if_quiescent({"reason": "done"}, after_seq=tail) is False
+    events = engine.store.read_all()
+    assert [e.type for e in events if e.type in ("node_failed", "run_finished")] == ["node_failed"]
+    assert engine._finish_if_quiescent({"reason": "done"}, after_seq=events[-1].seq) is True
+    state = fold(engine.store.read_all())
+    assert state.finished and state.total_eval_seconds == 1.5
+
+    # The report gate asks BEFORE it claims a finalize scope (and before it buys the report).
+    reporting = make_engine(tmp_path / "report")
+    for row in _log(_withhold(), _RESET):
+        reporting.store.append(row.type, row.data)
+    reporting.report_writer, reporting.report_every, reporting.external_harness = object(), 1, False
+    begun: list = []
+    reporting._begin_finalize = lambda *a, **k: begun.append(a) or "scope"
+    tail = reporting.store.read_all()[-1].seq
+    assert reporting._finish_with_report_if_quiescent(
+        fold(reporting.store.read_all()), {"reason": "done"}, after_seq=tail) is False
+    assert begun == []
+    assert [e.data["eval_seconds"] for e in reporting.store.read_all()
+            if e.type == "node_failed"] == [1.5]

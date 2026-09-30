@@ -2,7 +2,7 @@ import React, { useEffect, useId, useMemo, useState, useRef } from 'react'
 import { conditionalGet, costPricing, deadlineGet, get, fmt, fmtInt, isSweep, CONTROL,
   commandFeedback, commandCanRetry, createIdempotencyKey, getRunCommand,
   retryRunCommand, runApiPath, runNodeApiPath, submitCommand, traceDeadlineGet, traceGenerationMatches,
-  traceReadQuery, nodeActivityStatus, nodeActivityView, NODE_ACTIVITY } from './util.js'
+  traceReadQuery, activityKey, nodeActivityStatus, nodeActivityView, NODE_ACTIVITY } from './util.js'
 import { useNodeSpanWindow, usePoll, useScopedResource, useTraceRetry, useTraceScroll } from './hooks.js'
 import { Trajectory, ParallelCoords, Scatter, MetricLines } from './charts.jsx'
 import { themeFilteredGroupAggregate } from './grouping.js'
@@ -198,9 +198,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
     && String(value.id) === String(nodeId) && typeof value.status === 'string'
   const [traceClearedScopes, setTraceClearedScopes] = useState(() => new Set())
   // The summary's generation-scoped ACTIVITY, as one comparable key for the detail's `deps` below.
-  const summaryActivity = state?.nodes?.[nodeId]?.activity
-  const summaryActivityKey = summaryActivity && typeof summaryActivity === 'object'
-    ? `${summaryActivity.status}:${summaryActivity.generation}:${summaryActivity.evidence}` : ''
+  const summaryActivityKey = activityKey(state?.nodes?.[nodeId]?.activity)
   const detailQuery = []
   if (readOnly && historySeq != null) detailQuery.push(`seq=${historySeq}`)
   if (expectedGeneration) detailQuery.push(`expected_generation=${encodeURIComponent(expectedGeneration)}`)

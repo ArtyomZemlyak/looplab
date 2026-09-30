@@ -571,11 +571,62 @@ def _durable_withheld_seconds(events, node_id: int, generation: int) -> float:
     return spent
 
 
+def _carries_settle(e, node_id: int, generation: int) -> bool:
+    """Is `e` a row of this lifecycle that carries the seconds of the invocation settled before it?
+    A repair's `node_repaired`, a dependency round's `deps_installed`, a DECIDE_REPAIR withhold —
+    the one withhold point AFTER an evaluator ran; `admit`, `before_launch` and `after_canary` come
+    before theirs — or the lifecycle's terminal, keyed as the fold keys it."""
+    d = e.data if isinstance(e.data, Mapping) else {}
+    if e.type in (EV_NODE_EVALUATED, EV_NODE_FAILED):
+        return (coerce_node_id(d) == node_id
+                and event_generation_binds(d, generation, legacy_attempt=True))
+    if e.type == EV_EVAL_ATTEMPT_WITHHELD and d.get("at") != "decide_repair":
+        return False
+    return (e.type in (EV_NODE_REPAIRED, EV_DEPS_INSTALLED, EV_EVAL_ATTEMPT_WITHHELD)
+            and _durable_row_belongs(d, node_id, generation))
+
+
+def _durable_orphan_settle_seconds(events, node_id: int, generation: int) -> float:
+    """The eval seconds of this lifecycle's invocations that SETTLED and whose next row never came —
+    the fourth part of `_durable_prior_seconds`, and the one only a dead process leaves (critic
+    2026-09-30).
+
+    An attempt's seconds ride on the row its NEXT step writes (`_carries_settle`). A process killed
+    after `eval_invocation_settled` and before that row left them on the settle alone, which no sum
+    read: a reset then refunded them (driven: a 26,830 s `ok` settle, a reset, and
+    `abandoned_lifecycle_charges` answered []), and a resumed chain re-ran the attempt and charged
+    only its own run. A settle is an ORPHAN when no carrying row follows it before the lifecycle's
+    next settle, or at all — read in log order, because the carrying rows name no invocation. A
+    carrying row that ends a window without the settle's seconds (a salvage-cause repair row carries
+    none) under-charges, which is the safe direction. The `ok` settle `_eval_recover_settled`
+    finalizes from is always an orphan here, so that phase prices its terminal off this sum and adds
+    nothing for the settle itself."""
+    spent = 0.0
+    open_seconds = None
+    for e in events or []:
+        d = e.data if isinstance(e.data, Mapping) else {}
+        if e.type == EV_EVAL_INVOCATION_SETTLED:
+            if not _durable_row_belongs(d, node_id, generation):
+                continue
+            if open_seconds is not None:
+                spent += open_seconds
+            raw = d.get("eval_seconds")
+            try:
+                seconds = 0.0 if isinstance(raw, bool) else float(raw or 0.0)
+            except (TypeError, ValueError):
+                seconds = 0.0
+            open_seconds = seconds if math.isfinite(seconds) and seconds > 0 else 0.0
+        elif open_seconds is not None and _carries_settle(e, node_id, generation):
+            open_seconds = None
+    return spent + (open_seconds or 0.0)
+
+
 def _durable_prior_seconds(events, node_id: int, generation: int) -> float:
     """The eval seconds this lifecycle already spent that NO terminal carries yet: its repair
-    attempts, its dependency rounds and its withheld attempts, each off its own durable rows — the
-    ONE sum every terminal of the lifecycle charges (SEED_LEDGERS seeds `prior_repair_seconds` with
-    it for the terminal the attempt loop writes).
+    attempts, its dependency rounds, its withheld attempts and the settled invocations whose next
+    row a dead process never wrote, each off its own durable rows — the ONE sum every terminal of
+    the lifecycle charges (SEED_LEDGERS seeds `prior_repair_seconds` with it for the terminal the
+    attempt loop writes).
 
     The zero-compute terminals ask it too — an operator abort or Card drop closing a lifecycle before
     it starts again (`eval_dispatch.py::_skip_if_aborted`), ADMIT's `gpu_unavailable` and
@@ -585,12 +636,14 @@ def _durable_prior_seconds(events, node_id: int, generation: int) -> float:
     and the run's `total_eval_seconds` read 0)."""
     return round(_durable_repair_seconds(events, node_id, generation)
                  + _durable_dep_round_seconds(events, node_id, generation)
-                 + _durable_withheld_seconds(events, node_id, generation), 3)
+                 + _durable_withheld_seconds(events, node_id, generation)
+                 + _durable_orphan_settle_seconds(events, node_id, generation), 3)
 
 
 def abandoned_lifecycle_charges(events, state) -> list:
-    """`(node_id, generation, seconds)` for every lifecycle a RESET abandoned with durable spend that
-    no terminal carries — what the engine charges at entry (`Engine._charge_abandoned_lifecycles`).
+    """`(node_id, generation, seconds)` for every lifecycle a RESET or a DELETE abandoned with
+    durable spend that no terminal carries — what the engine charges at entry and at the finish gate
+    (`Engine._charge_abandoned_lifecycles`).
 
     The attempt that sees a reset writes its lifecycle's stale-generation terminal itself
     (`_eval_record_superseded`), charging what it ran. A lifecycle NO attempt was running when the
@@ -601,11 +654,15 @@ def abandoned_lifecycle_charges(events, state) -> list:
     failed attempt withheld at DECIDE_REPAIR, a reset while paused, and the run's
     `total_eval_seconds` then read the new lifecycle's seconds alone (critic 2026-09-30).
 
-    Only an OLDER generation than the node's current one — the current one is re-dispatched and its
-    own terminal charges it — and only one that no terminal names. A terminal is keyed as the fold
-    keys it (`attempt` is the terminals' legacy generation alias), and an UNSTAMPED legacy terminal
-    binds every generation, so it can only suppress a charge, never add a second one. A spend row
-    names its lifecycle by an explicit stamp or not at all."""
+    An OLDER generation than the node's current one — the current one is re-dispatched and its own
+    terminal charges it — and a DELETED node's current one, which nothing re-dispatches
+    (`RunState.pending_nodes` skips a tombstone; the delete is allowed on a paused run, whose engine
+    has exited — driven: a withheld 0.873 s, a delete, a resume, and the run's total read 0.0,
+    critic 2026-09-30); only one that no terminal names. A terminal is keyed as the fold keys it
+    (`attempt` is the terminals' legacy generation alias), and an UNSTAMPED legacy terminal binds
+    every generation, so it can only suppress a charge, never add a second one. A spend row names
+    its lifecycle by an explicit stamp or not at all; a settle row is one, for the invocation a dead
+    process settled and never carried (`_durable_orphan_settle_seconds`)."""
     terminals: dict = {}
     spent: set = set()
     for e in events or []:
@@ -615,14 +672,16 @@ def abandoned_lifecycle_charges(events, state) -> list:
             continue
         if e.type in (EV_NODE_EVALUATED, EV_NODE_FAILED):
             terminals.setdefault(node_id, []).append(d)
-        elif e.type in (EV_NODE_REPAIRED, EV_DEPS_INSTALLED, EV_EVAL_ATTEMPT_WITHHELD):
+        elif e.type in (EV_NODE_REPAIRED, EV_DEPS_INSTALLED, EV_EVAL_ATTEMPT_WITHHELD,
+                        EV_EVAL_INVOCATION_SETTLED):
             generation = coerce_node_id({"node_id": d.get("generation")})
             if generation is not None and generation >= 0:
                 spent.add((node_id, generation))
     charges = []
     for node_id, generation in sorted(spent):
         node = state.nodes.get(node_id)
-        if node is None or generation >= node.attempt:
+        if (node is None or generation > node.attempt
+                or (generation == node.attempt and not node.tombstoned)):
             continue
         if any(event_generation_binds(d, generation, legacy_attempt=True)
                for d in terminals.get(node_id, ())):
@@ -3641,9 +3700,11 @@ class EvaluateMixin:
         assert source in _settled.RECOVERY_SOURCES, f"unregistered recovery source: {source!r}"
         a.res = res
         a.ok = True
-        # THIS invocation's charge, as its settle recorded it; the attempts before it are already in
-        # `prior_repair_seconds` off their `node_repaired` rows (`charged_eval_seconds`).
-        a.total_eval = round(float(settled.get("eval_seconds") or 0.0), 3)
+        # THIS invocation's charge is in `prior_repair_seconds` already: the settle no row carried is
+        # an ORPHAN settle, which `_durable_prior_seconds` sums beside the attempts before it
+        # (`_durable_orphan_settle_seconds`). Adding its `eval_seconds` here too would charge the
+        # dead process's evaluation twice (`charged_eval_seconds`).
+        a.total_eval = 0.0
         a.sp.set_many(settled_recovery=_settled.RECOVERY_FINALIZED, settled_recovery_source=source)
         async with self._write_lock:
             self.store.append(EV_EVAL_INVOCATION_RECOVERED, {

@@ -18,6 +18,7 @@ def _fresh_gpu_probe_state(monkeypatch):
     2026-09-30: `test_detect_gpus_handles_comma_in_gpu_name` raised IndexError after one)."""
     monkeypatch.setattr(hw, "_GPUS_CACHE", None)
     monkeypatch.setattr(hw, "_GPUS_FAILED_AT", None)
+    monkeypatch.setattr(hw, "_GPUS_NO_DEVICES_AT", None)
 
 
 def test_caps_off_is_conservative():
@@ -370,10 +371,12 @@ class _Probe:
 _H200 = [["0", "NVIDIA H200", "143771", "143000"], ["1", "NVIDIA H200", "143771", "143000"]]
 
 
-def _fresh(monkeypatch, hw, probe, *, binary=True, retry_s=60.0):
+def _fresh(monkeypatch, hw, probe, *, binary=True, retry_s=60.0, no_devices_ttl_s=600.0):
     monkeypatch.setattr(hw, "_GPUS_CACHE", None)
     monkeypatch.setattr(hw, "_GPUS_FAILED_AT", None)
+    monkeypatch.setattr(hw, "_GPUS_NO_DEVICES_AT", None)
     monkeypatch.setattr(hw, "_GPU_PROBE_RETRY_S", retry_s)
+    monkeypatch.setattr(hw, "_GPU_NO_DEVICES_TTL_S", no_devices_ttl_s)
     monkeypatch.setattr(hw, "query_nvidia_smi", probe)
     monkeypatch.setattr(hw.shutil, "which",
                         lambda name: "/usr/bin/nvidia-smi" if binary else None)
@@ -441,6 +444,7 @@ def test_the_inventory_reads_a_real_exit_6_as_that_answer(monkeypatch):
 
     monkeypatch.setattr(hw, "_GPUS_CACHE", None)
     monkeypatch.setattr(hw, "_GPUS_FAILED_AT", None)
+    monkeypatch.setattr(hw, "_GPUS_NO_DEVICES_AT", None)
     monkeypatch.setattr(hw, "_GPU_PROBE_RETRY_S", 0.0)
     monkeypatch.setattr(hw.shutil, "which", lambda name: "/usr/bin/nvidia-smi")
     monkeypatch.setattr(hw.subprocess, "run", _run)
@@ -518,3 +522,45 @@ def test_the_name_probe_shares_the_inventorys_answer_and_its_retry(monkeypatch):
     assert hw.detect_gpu() is None
     assert hw.detect_gpu() == "NVIDIA H200"
     assert hw.gpu_summary().startswith("2 GPU(s): NVIDIA H200")
+
+
+def test_the_no_devices_answer_stands_for_its_ttl_not_for_the_process(monkeypatch):
+    """The long-lived `looplab ui` server: a device the driver had not enumerated yet at the first
+    probe read as absent until a restart (critic 2026-09-30). MUTATION: cache it forever -> the
+    later H200 inventory is never asked for."""
+    import looplab.core.hardware as hw
+
+    now = [1_000.0]
+    monkeypatch.setattr(hw.time, "monotonic", lambda: now[0])
+    probe = _Probe([], _H200)
+    _fresh(monkeypatch, hw, probe, retry_s=0.0, no_devices_ttl_s=600.0)
+    assert hw.detect_gpus() == []
+    now[0] += 599.0
+    assert hw.detect_gpus() == [] and probe.calls == 1, "inside the TTL: the answer stands"
+    now[0] += 1.0
+    assert [g["name"] for g in hw.detect_gpus()] == ["NVIDIA H200", "NVIDIA H200"]
+    assert probe.calls == 2
+    now[0] += 10_000.0
+    assert hw.detect_gpus() and probe.calls == 2, "an inventory is cached for the process"
+
+
+def test_exit_six_is_the_drivers_documented_no_devices_status(monkeypatch):
+    """Pinned to the literal, not to the constant every other test reads: `nvidia-smi` exits 6 for
+    "No devices were found". MUTATION: change the constant -> the real exit reads as a failure."""
+    import subprocess
+
+    import looplab.core.hardware as hw
+
+    monkeypatch.setattr(hw.shutil, "which", lambda name: "/usr/bin/nvidia-smi")
+    monkeypatch.setattr(hw.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
+        a[0], 6, stdout="No devices were found\n", stderr=""))
+    assert hw.query_nvidia_smi("name", no_devices_empty=True) == []
+
+
+def test_detect_gpu_answers_none_for_a_blank_name(monkeypatch):
+    """The first row's name, stripped, or None — never an empty string a prompt would print.
+    MUTATION: return the raw `name` -> ''."""
+    import looplab.core.hardware as hw
+
+    _fresh(monkeypatch, hw, _Probe([["0", "  ", "100", "50"]]))
+    assert hw.detect_gpu() is None

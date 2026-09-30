@@ -41,6 +41,15 @@ export function recordedNodeActivity(node) {
   return recorded && sameGeneration ? recorded : null
 }
 
+// The server's activity row as ONE comparable key — what the Inspector re-reads a node's detail on
+// (its `deps`), because `pending` covers the whole lifecycle and a withhold moves the activity
+// alone (doc 69 69.12b). Every field is in the key: a change of ANY of them is a new server
+// statement (critic 2026-09-30 — a key of one field missed a move of the others).
+export function activityKey(activity) {
+  return activity && typeof activity === 'object'
+    ? `${activity.status}:${activity.generation}:${activity.evidence}` : ''
+}
+
 export function nodeActivityStatus(node, state = null) {
   if (!node) return NODE_ACTIVITY.PENDING
   if (markerFor(state, node)) return NODE_ACTIVITY.BUILDING

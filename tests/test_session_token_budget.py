@@ -475,3 +475,16 @@ def test_the_salvage_after_a_token_cut_says_tokens():
     _row(_Watch(), token_budget=250)
     _row(_Watch(), max_turns=2)
     assert sent[0].startswith("Out of token budget.") and sent[1].startswith("Out of turn/time")
+
+
+def test_a_negative_cost_never_refunds_the_thread_s_committed_money():
+    """`CostAccountant.add` commits a safe, non-negative cost; the per-thread ledger the session's
+    money ceiling reads holds that line on its own (critic 2026-09-30). MUTATION: drop `c > 0` -> a
+    negative report lowers the thread's committed spend."""
+    from looplab.core.llm_budget import note_committed_cost, thread_committed_usd
+    before = thread_committed_usd()
+    note_committed_cost(-5.0)
+    note_committed_cost(float("nan"))
+    assert thread_committed_usd() == before
+    note_committed_cost(0.25)
+    assert thread_committed_usd() == before + 0.25

@@ -207,6 +207,20 @@ def is_fenced(text: str, label: str) -> bool:
     return f"{label}\n{_neutralize_fences(interior, label)}\nEND {label}" == text
 
 
+def neutralize_markers(text: str, label: str) -> str:
+    """`text` with every spelling of `label`'s two fence markers folded inert — and nothing else, so
+    a text holding no marker comes back byte for byte.
+
+    For a message that is evidence FROM ITS LABEL TO ITS END, where no marker inside it can be true:
+    the Boss's (`serve/llm_context.py::boss_prompt_parts`). Its label is a bare prefix, so a block
+    fenced INSIDE it — a host scorer's or a canary's failure account carries its streams fenced —
+    ended with a live `END` marker, and whatever followed read as outside the evidence: the
+    candidate's own `solution.py` next (critic 2026-09-30, driven). Neutralizing the markers, not
+    fencing the whole message, keeps every marker-free message the bytes it always was; the close a
+    whole-message fence would add is a prompt change, and a prompt is a contract (CLAUDE.md)."""
+    return _neutralize_fences(text, label) if label else text
+
+
 def fenced_tail(text, chars: int, label: str) -> str:
     """The LAST `chars` characters of `text`, with every fenced block in that window WELL FORMED.
 

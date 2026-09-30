@@ -12,7 +12,7 @@ from looplab.core.config import Settings
 # `BOSS_EVIDENCE_LABEL` / `untrusted_evidence_guard` are `core/evidence.py`'s objects under their
 # historical names (doc 52 row 13) — see the note above `BOSS_EVIDENCE_GUARD`.
 from looplab.core.evidence import EVIDENCE_LABEL as BOSS_EVIDENCE_LABEL
-from looplab.core.evidence import fenced_head
+from looplab.core.evidence import fenced_head, neutralize_markers
 from looplab.core.evidence import untrusted_evidence_guard  # noqa: F401 — re-exported
 from looplab.serve.engine_proc import _engine_alive, _engine_liveness
 from looplab.serve.settings_store import SettingsStore
@@ -99,10 +99,12 @@ def _node_context(st, nid: Optional[int]) -> str:
                   f"feasible={n.feasible}",
                   f"params={n.idea.params}", f"rationale: {n.idea.rationale}"]
         if n.error:
-            # `fenced_head`, not a slice: a canary's or a host scorer's failure account carries its
-            # streams FENCED, and 400 characters end inside the first block, so a bare cut left an
-            # opening marker with no close and the engine's own `solution.py` lines after it read
-            # as evidence (critic 2026-09-30).
+            # `fenced_head`, not a slice — the ONE cut of text that may hold a fenced block: a
+            # canary's or a host scorer's failure account carries its streams FENCED, and a bare cut
+            # at 400 can end inside a marker. Every marker this line keeps is neutralized where the
+            # message is built (`boss_prompt_parts`): the whole message is evidence, so a close
+            # inside it would make the candidate's `solution.py` below read as outside (critic
+            # 2026-09-30).
             lines.append(f"error ({n.error_reason}): "
                          f"{fenced_head(n.error, 400, BOSS_EVIDENCE_LABEL)}")
         if n.code:
@@ -325,7 +327,12 @@ def boss_prompt_parts(st, nid: Optional[int], full: "Path", *, advisory: bool = 
     trusted, untrusted = _boss_context_parts(st, nid, full, advisory=advisory)
     if not untrusted:
         return "\n".join(trusted), []
+    # EVIDENCE FROM THE LABEL TO THE END, so no marker inside can be true: a block a failure account
+    # fenced, a forged `END` in a rationale or a report, each read as the evidence closing early and
+    # the rest — candidate code, agent-authored text — as the operator's (critic 2026-09-30,
+    # driven). Inert, not fenced again: a marker-free message keeps its bytes.
     return "\n".join(trusted), [{
         "role": "user",
-        "content": BOSS_EVIDENCE_LABEL + "\n" + "\n".join(untrusted),
+        "content": BOSS_EVIDENCE_LABEL + "\n" + neutralize_markers("\n".join(untrusted),
+                                                                   BOSS_EVIDENCE_LABEL),
     }]

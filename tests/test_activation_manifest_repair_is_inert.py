@@ -229,11 +229,14 @@ class _LedgerDev(_ManifestOnlyDev):
         return code
 
 
-def _drive_canary(run_dir: Path, *, manifest: bool) -> list:
+def _drive_canary(run_dir: Path, *, manifest: bool, manifest_at_start: bool = False) -> list:
     import sys
     run_dir.mkdir(parents=True)
     ledger = run_dir.parent / f"{run_dir.name}.ledger"
     body = _ledger_script(ledger)
+    files = {"run.py": body}
+    if manifest_at_start:
+        files[ACTIVATION_MANIFEST_NAME] = manifest_text(["on 0"])
     eng = Engine(run_dir / "run", task=ToyTask.load(TASK), researcher=_Judge(),
                  developer=_LedgerDev(body, manifest=manifest), sandbox=SubprocessSandbox(),
                  policy=GreedyTree(n_seeds=1, max_nodes=1), auto_install_deps=False,
@@ -246,7 +249,7 @@ def _drive_canary(run_dir: Path, *, manifest: bool) -> list:
     eng.store.append("node_created", {
         "node_id": 0, "parent_ids": [], "operator": "draft",
         "idea": {"operator": "draft", "params": {"x": 1.0, "y": 1.0}, "rationale": "seed"},
-        "code": "print('unused')\n", "files": {"run.py": body}})
+        "code": "print('unused')\n", "files": files})
 
     async def _bounded() -> bool:
         with anyio.move_on_after(180) as scope:
@@ -263,6 +266,15 @@ def test_a_manifest_only_repair_does_not_buy_a_passed_canary_again(tmp_path):
     manifest-only chain reads canary, full, canary, full."""
     runs = _drive_canary(tmp_path / "manifest", manifest=True)
     assert runs == _drive_canary(tmp_path / "noop", manifest=False) == ["canary", "full", "full"]
+
+
+def test_the_canary_records_the_digest_its_due_check_reads(tmp_path):
+    """A node that carries a manifest FROM ITS FIRST ATTEMPT: the passed canary's row must be keyed
+    on the digest the due check asks for, or the first manifest-only repair buys it again (the test
+    above starts manifest-less, where the two digests agree). MUTATION: record
+    `_workdir_manifest_digest` at the canary run -> canary, full, canary, full."""
+    runs = _drive_canary(tmp_path / "manifest", manifest=True, manifest_at_start=True)
+    assert runs == ["canary", "full", "full"], runs
 
 
 def test_the_canary_digest_is_unchanged_for_a_node_with_no_manifest():
@@ -303,7 +315,8 @@ class _StageDev:
         return ""
 
 
-def _drive_stages(tmp_path: Path, monkeypatch, *, first: str, retrain_cap: int):
+def _drive_stages(tmp_path: Path, monkeypatch, *, first: str, retrain_cap: int, dev_cls=None,
+                  seed_manifest: bool = False):
     import json
     import sys
 
@@ -317,6 +330,8 @@ def _drive_stages(tmp_path: Path, monkeypatch, *, first: str, retrain_cap: int):
     (src / "train.py").write_text("import loss\nprint('train')\n")
     (src / "loss.py").write_text("x = 1\n")
     (src / "looplab_eval.py").write_text("print('score v0')\n")
+    if seed_manifest:
+        (src / ACTIVATION_MANIFEST_NAME).write_text(manifest_text(["on 0"]))
     (src / "looplab_stages.json").write_text(json.dumps({"stages": [
         {"name": "mine", "command": ["python", "mine.py"], "timeout": 900},
         {"name": "train", "command": ["python", "train.py"], "timeout": 900}]}))
@@ -336,7 +351,8 @@ def _drive_stages(tmp_path: Path, monkeypatch, *, first: str, retrain_cap: int):
                     eval=EvalSpec(command=[sys.executable, "looplab_eval.py"],
                                   metric={"kind": "stdout_json", "key": "metric"}, cwd="."))
     researcher, _ = task.build_roles()
-    eng = Engine(tmp_path / "run", task=task, researcher=researcher, developer=_StageDev(first),
+    eng = Engine(tmp_path / "run", task=task, researcher=researcher,
+                 developer=(dev_cls or _StageDev)(first),
                  sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
                  auto_install_deps=False, inline_repair=True, inline_repair_attempts=6,
                  inline_repair_retrain_cap=retrain_cap)
@@ -350,6 +366,26 @@ def test_a_manifest_only_repair_reuses_what_a_no_op_reuses_and_is_charged_nothin
     the manifest. MUTATION: ask the reuse question about the whole change set -> the third attempt
     starts at stage 0 and a full re-train is charged for it."""
     starts, evs = _drive_stages(tmp_path, monkeypatch, first="train.py", retrain_cap=0)
+    assert starts[:3] == [None, "train", "train"], starts
+    assert not [e for e in evs if e.type == "full_retrain_charged"]
+
+
+class _DeletingStageDev(_StageDev):
+    """Repair 1 edits `train.py`; every later repair only DELETES the repo's own manifest."""
+
+    def repair(self, idea, code, error):
+        self.repair_calls += 1
+        self.last_files = {"train.py": "import loss\nprint('train v1')\n"}
+        self.last_deleted = [] if self.repair_calls == 1 else [ACTIVATION_MANIFEST_NAME]
+        return ""
+
+
+def test_a_manifest_deletion_reuses_what_a_no_op_reuses(tmp_path, monkeypatch):
+    """The deletion half of the reuse question: a repair that only DELETES the manifest ran nothing
+    new. MUTATION: ask the reuse question about every deletion -> the third attempt starts at stage 0
+    and a full re-train is charged for it."""
+    starts, evs = _drive_stages(tmp_path, monkeypatch, first="train.py", retrain_cap=0,
+                                dev_cls=_DeletingStageDev, seed_manifest=True)
     assert starts[:3] == [None, "train", "train"], starts
     assert not [e for e in evs if e.type == "full_retrain_charged"]
 

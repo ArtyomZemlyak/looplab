@@ -1357,7 +1357,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         The begin marker is the first adjacency claim. ``run_finished`` then names that marker as its
         immediate predecessor and opts into the exact-finish crash handshake.
         """
-        if self._refuse_finish_over_adopted_evals():
+        if self._refuse_finish_over_adopted_evals() or self._refuse_finish_over_abandoned_spend():
             return False
         scope = f"finalize:{secrets.token_hex(16)}"
         try:
@@ -1399,7 +1399,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         if not report_planned:
             return self._finish_if_quiescent(data, after_seq=after_seq)
 
-        if self._refuse_finish_over_adopted_evals():
+        if self._refuse_finish_over_adopted_evals() or self._refuse_finish_over_abandoned_spend():
             return False
         scope = f"finalize:{secrets.token_hex(16)}"
         try:
@@ -3840,27 +3840,43 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         return recovered
 
     def _charge_abandoned_lifecycles(self, state: RunState) -> bool:
-        """Charge every lifecycle a reset abandoned with durable spend no terminal carries
-        (`evaluate.py::abandoned_lifecycle_charges`, doc 69 69.12a; critic 2026-09-30), through the
-        SAME fold-budget-only row the attempt that sees a reset writes
-        (`evaluate.py::_eval_record_superseded`): the fold refuses its state fields and charges its
-        `eval_seconds` once. Asked at entry for the reason `_recover_interrupted_builds` is: entering
-        `run` under the run lock proves no attempt of an earlier process can still write that
-        lifecycle's terminal, and no attempt of this one has started. Idempotent through its own
-        rows — a charged lifecycle has a terminal, so the next entry finds nothing. A reset that
-        lands on a withheld lifecycle AFTER this entry and before its re-dispatch is charged at the
-        next one. True when it wrote anything."""
+        """Charge every lifecycle a reset or a delete abandoned with durable spend no terminal
+        carries (`evaluate.py::abandoned_lifecycle_charges`, doc 69 69.12a; critic 2026-09-30),
+        through the SAME `superseded` row the attempt that sees a reset writes
+        (`evaluate.py::_eval_record_superseded`): on a reset's older generation the fold refuses its
+        state fields and charges its `eval_seconds` once; on a deleted node's current one it closes
+        a lifecycle the tombstone already took out of every selection. Asked where no attempt of it
+        can still be running: at entry — under the run lock, for the reason
+        `_recover_interrupted_builds` is — and at the finish gate, behind the refusal to finish over
+        an adopted evaluation (`_refuse_finish_over_abandoned_spend`), so a reset that lands after
+        this process's entry is charged before a run that ends in this process can finish. Idempotent
+        through its own rows — a charged lifecycle has a terminal, so the next ask finds nothing.
+        True when it wrote anything."""
         from looplab.engine.evaluate import abandoned_lifecycle_charges
 
         charges = abandoned_lifecycle_charges(self.store.read_all(), state)
         for node_id, generation, seconds in charges:
+            node = state.nodes.get(node_id)
+            deleted = node is not None and node.tombstoned and generation == node.attempt
             # The row `evaluate.py::_eval_record_superseded` writes, spelled out as a literal so the
             # payload-contract scan reads its keys (`tests/test_event_payload_contract.py`).
             self.store.append(EV_NODE_FAILED, {
                 "node_id": node_id, "generation": generation,
-                "error": "superseded by node reset", "reason": "superseded",
-                "eval_seconds": seconds})
+                "error": ("abandoned by node delete" if deleted else "superseded by node reset"),
+                "reason": "superseded", "eval_seconds": seconds})
         return bool(charges)
+
+    def _refuse_finish_over_abandoned_spend(self) -> bool:
+        """Charge a lifecycle abandoned SINCE this process's entry before the run may finish, and
+        refuse this finish when that wrote anything (critic 2026-09-30). A reset that lands on a
+        withheld lifecycle after the entry charge and before the run ends left its seconds to the
+        NEXT entry, and a finished run is never charged there — a finalized total stays the one its
+        report was written from — so the refund was permanent (driven: 0.873 s withheld, a reset
+        after entry, a finish in the same process, and the total read the new lifecycle alone).
+        Asked after `_refuse_finish_over_adopted_evals`, so no evaluation of this process is in
+        flight. A REFUSAL, like the drain: the charge moves the log under the finish CAS, so the
+        loop takes one more turn and finishes over the charged log, where this finds nothing."""
+        return self._charge_abandoned_lifecycles(fold(self.store.read_all()))
 
     # *Closed 2026-09-08 (`paid-cadences-hold-the-engine-loop`): the whole block runs off the loop
     # thread through `_offload_cadence` — one worker hop under `_BufferedCadenceStore`, which buffers

@@ -2,8 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  NODE_ACTIVITY, nodeActivityStatus, nodeActivityView, partitionNodeWork, primaryWorkingNode,
-  rankWork, workingNodeIds,
+  NODE_ACTIVITY, activityKey, nodeActivityStatus, nodeActivityView, partitionNodeWork,
+  primaryWorkingNode, rankWork, workingNodeIds,
 } from '../src/nodeActivity.js'
 import { workingId } from '../src/util.js'
 
@@ -113,4 +113,18 @@ test('the ordering is statable on its own and sorts a live set the same way', ()
   ]
   assert.deepEqual([...rows].sort(rankWork).map(row => row.id), [2, 5, 4, 1, 9])
   assert.equal(rankWork({ id: 3, lane: 2, started: 7 }, { id: 3, lane: 2, started: 7 }), 0)
+})
+
+test('activityKey: every field of the server row moves the key, and a non-row is empty', () => {
+  // The Inspector re-reads a node's detail on this key (doc 69 69.12b). A key of one field missed a
+  // move of the others (critic 2026-09-30). MUTATIONS: drop any field -> one row below stops moving.
+  const base = { status: 'queued', generation: 0, evidence: 'eval_attempt_withheld' }
+  const key = activityKey(base)
+  assert.notEqual(activityKey({ ...base, status: 'evaluating' }), key)
+  assert.notEqual(activityKey({ ...base, generation: 1 }), key)
+  assert.notEqual(activityKey({ ...base, evidence: 'node_eval_started' }), key)
+  assert.equal(activityKey({ ...base }), key, 'the same statement is the same key')
+  assert.equal(activityKey(null), '')
+  assert.equal(activityKey(undefined), '')
+  assert.equal(activityKey('queued'), '')
 })

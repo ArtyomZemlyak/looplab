@@ -26,10 +26,16 @@ _GPUS_CACHE: "list[dict] | None" = None
 # `nvidia-smi` at all, is cached; a failed probe is retried once this long has passed (monotonic),
 # and reads as no GPUs until then. The driver's own "No devices were found" (exit 6) is an ANSWER
 # too — a GPU-less box with the tooling installed — so it is cached, not re-probed every window
-# (critic 2026-09-30). One probe at a time (`_GPU_PROBE_LOCK`): concurrent callers after a window
-# expires wait for the one `nvidia-smi` instead of each paying up to its 5 s timeout.
+# (critic 2026-09-30), but for `_GPU_NO_DEVICES_TTL_S` rather than for the process: in the long-lived
+# `looplab ui` server a device the driver had not enumerated yet at the first probe would otherwise
+# read as absent until a restart (critic 2026-09-30). One probe at a time (`_GPU_PROBE_LOCK`):
+# concurrent callers after a window expires wait for the one `nvidia-smi` instead of each paying up
+# to its 5 s timeout.
 _GPUS_FAILED_AT: "float | None" = None
 _GPU_PROBE_RETRY_S = 60.0
+# When the cached answer is the driver's "no devices" (monotonic), else None; and how long it stands.
+_GPUS_NO_DEVICES_AT: "float | None" = None
+_GPU_NO_DEVICES_TTL_S = 600.0
 _GPU_PROBE_LOCK = threading.Lock()
 # `nvidia-smi`'s exit status for "No devices were found": the driver answered, and there are none.
 NVIDIA_SMI_NO_DEVICES = 6
@@ -38,16 +44,16 @@ NVIDIA_SMI_NO_DEVICES = 6
 def detect_gpus() -> list[dict]:
     """All visible GPUs as [{index, name, mem_total_mib, mem_free_mib}], best-effort via nvidia-smi
     (no torch dependency — torch may be auto-installed later). Empty list when none/undetectable.
-    Cached for the process once it is an ANSWER — an inventory, or no `nvidia-smi` on the box; a
-    probe that failed is retried after `_GPU_PROBE_RETRY_S` (see `_GPUS_FAILED_AT`). This is the
-    richer counterpart of `detect_gpu()` (which returns only the first GPU's name, kept for
-    back-compat)."""
-    global _GPUS_CACHE, _GPUS_FAILED_AT
-    if _GPUS_CACHE is not None:
+    Cached for the process once it is an ANSWER — an inventory, or no `nvidia-smi` on the box; the
+    driver's "no devices" for `_GPU_NO_DEVICES_TTL_S`; a probe that failed is retried after
+    `_GPU_PROBE_RETRY_S` (see `_GPUS_FAILED_AT`). This is the richer counterpart of `detect_gpu()`
+    (which returns only the first GPU's name, kept for back-compat)."""
+    global _GPUS_CACHE, _GPUS_FAILED_AT, _GPUS_NO_DEVICES_AT
+    if _gpus_answer_stands():
         return _GPUS_CACHE
     with _GPU_PROBE_LOCK:
         # Re-checked under the lock: the caller that waited here behind a probe reads its answer.
-        if _GPUS_CACHE is not None:
+        if _gpus_answer_stands():
             return _GPUS_CACHE
         if (_GPUS_FAILED_AT is not None
                 and time.monotonic() - _GPUS_FAILED_AT < _GPU_PROBE_RETRY_S):
@@ -74,9 +80,19 @@ def detect_gpus() -> list[dict]:
         if gpus or rows == [] or not shutil.which("nvidia-smi"):
             _GPUS_CACHE = gpus
             _GPUS_FAILED_AT = None
+            _GPUS_NO_DEVICES_AT = time.monotonic() if (not gpus and rows == []) else None
         else:
             _GPUS_FAILED_AT = time.monotonic()
         return gpus
+
+
+def _gpus_answer_stands() -> bool:
+    """Does the cached inventory still answer? Always, once it is one, except the driver's
+    "no devices", which stands for `_GPU_NO_DEVICES_TTL_S` (see `_GPUS_NO_DEVICES_AT`)."""
+    if _GPUS_CACHE is None:
+        return False
+    return (_GPUS_NO_DEVICES_AT is None
+            or time.monotonic() - _GPUS_NO_DEVICES_AT < _GPU_NO_DEVICES_TTL_S)
 
 
 def gpu_free_mib_uncached() -> "dict[int, int]":
