@@ -648,9 +648,11 @@ def build_router(srv) -> APIRouter:
             rd, lambda state: _node_context(state, nid))
         # The node context is a candidate's code and its failure accounts, some carrying a block
         # fenced by the engine: its live `END` marker let whatever followed — the candidate's own
-        # text — read as outside the evidence (critic 2026-09-30, crit_v46 L5, driven). Folded inert
-        # exactly as the other Boss prompts do (`llm_context.py::boss_prompt_parts`); a context
-        # holding no marker keeps its bytes.
+        # text — read as outside the evidence (critic 2026-09-30, crit_v46 L5, driven). Its markers
+        # are folded inert as `llm_context.py::boss_prompt_parts` folds them; a context holding no
+        # marker keeps its bytes. It is NOT fenced as those prompts are — no `BOSS_EVIDENCE_LABEL`
+        # opening, no `BOSS_EVIDENCE_GUARD` (crit_v52 F4): adding them changes this prompt, which is
+        # a flag decision, on a deprecated route whose Idea a human confirms before anything runs.
         node_context = neutralize_markers(node_context, BOSS_EVIDENCE_LABEL)
         convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in history)
         prompt = ("Propose ONE next experiment as a structured Idea (operator one of "
