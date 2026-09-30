@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 from looplab.core import tracing
 from looplab.core.cards import idea_proposal_digest
@@ -53,7 +53,7 @@ from looplab.agents.roles import (
 # forwarding one by default hands a caller that ambiguity for nothing.
 from looplab.agents.tool_loop import (  # noqa: F401
     CompositeTools, LoopOptions, _cap_tool_result, _flatten_transcript, _force_emit, _handoff_ctx,
-    agentic_struct, agentic_text, drive_tool_loop, emit_loop, handoff_scope,
+    agentic_struct, agentic_text, bound_toolset, drive_tool_loop, emit_loop, handoff_scope,
     loop_opts_from_settings, phase_cancel_check, phase_cancel_scope, phase_cancelled,
     summarize_phase)
 from looplab.core.errors import LLMCancelled, PhaseCancelled
@@ -325,6 +325,9 @@ class ProposalSession:
     # live `messages` list is compacted IN PLACE by later turns (`_compact_in_place`), so an index into
     # it can name a prefix that already holds an alternative's reads (the critic, 2026-09-30).
     snapshots: list = field(default_factory=list, repr=False)
+    # The toolset VIEW candidate 1 ran with (`tool_loop.py::bound_toolset`, bound to its state), which
+    # a continuation keeps: the instance's own toolset is shared by every call (crit_v51 F4).
+    tools: Any = field(default=None, repr=False, compare=False)
 
     @property
     def continuable(self) -> bool:
@@ -590,8 +593,11 @@ class ToolUsingResearcher:
         # `session`: a per-CALL handle `propose_with_session` passes to get this call's transcript
         # back (the foresight panel's alternatives continue it). None — every other caller — changes
         # nothing about the call.
-        if hasattr(self.tools, "bind_state"):    # let run-aware tools see the current search
-            self.tools.bind_state(state, parent)
+        # A PER-CALL VIEW bound to this proposal's state (critic 2026-09-30, crit_v51 F4, driven):
+        # `bind_state` MUTATES a provider, and this instance is the shared primary — two proposals
+        # on two threads rebound ONE toolset, and one call's `run_goal` answered the other run's
+        # goal. `bound_toolset` is the view triage already uses; on one thread nothing changes.
+        tools = bound_toolset(self.tools, state, parent)
         from looplab.agents.hints import render_hint_directives
         hint_block = render_hint_directives(state.pending_hints)
         # A0d breadth-keyed complexity cue + Strategist `prefer_sweep` bias + T5 novelty-gate
@@ -611,7 +617,7 @@ class ToolUsingResearcher:
             state, getattr(self, "_hyp_order", None), attempt=prompt_attempt)
         # Whether this request offers `list_experiments`: the fitted digest's cut receipt names that
         # call only when it does (`events/digest.py::_fit_receipt`).
-        offers_run_tools = offers_tool(self.tools, "list_experiments")
+        offers_run_tools = offers_tool(tools, "list_experiments")
         messages = [
             {"role": "system",
              # Part V/P6/P8: the shared concept-mode contract, capability suffix (sweep offer — gated
@@ -644,9 +650,9 @@ class ToolUsingResearcher:
                                                      run_tools=offers_run_tools,
                                                      verdict_support=bool(getattr(
                                                          self, "_verdict_support", False)))
-                + answered_by_context(self.tools)
+                + answered_by_context(tools)
                 + _established_block(_researcher_workspace(getattr(self, "_established", None),
-                                                           self.tools))
+                                                           tools))
                 + hint_block + cue +
                 "\nDecide the next experiment — a parameter change OR a structural one (architecture, "
                 "loss, data, training) if that's the stronger move. Consult knowledge if useful, then emit."},
@@ -691,6 +697,7 @@ class ToolUsingResearcher:
             # continuation's remaining token allowance is measured from (`propose_alternative`).
             session.tokens_at_start = thread_committed_tokens()
             session.thread = threading.get_ident()
+            session.tools = tools
         try:
             # Every loop OPTION (the turn/time/context budgets included) is folded into
             # self.loop_opts once in __init__ (see there) — pass the merged bundle straight through,
@@ -704,7 +711,7 @@ class ToolUsingResearcher:
             # alternatives, and the brief must describe the candidate it CHOOSES
             # (`ProposalSession.publish_brief`) — still one summary call.
             result = run_phase(
-                self.client, self.tools, messages, self._emit_spec(),
+                self.client, tools, messages, self._emit_spec(),
                 label="Researcher·propose",
                 next_label=next_label,
                 handoff=getattr(self, "handoff", True) and session is None,
@@ -761,8 +768,9 @@ class ToolUsingResearcher:
         ceiling and a cancelled phase PROPAGATE: neither is a failure to degrade around."""
         if not isinstance(session, ProposalSession) or not session.continuable:
             return None
-        if hasattr(self.tools, "bind_state"):    # same binding `propose` made for this proposal
-            self.tools.bind_state(state, parent)
+        # The binding `propose` made for this proposal: candidate 1's own view (crit_v51 F4).
+        tools = (session.tools if session.tools is not None
+                 else bound_toolset(self.tools, state, parent))
         # Reset per call and announced exactly as `propose` does (`RESEARCHER_OUTPUT_ATTRS`): with
         # a turn cap, "cut short" is a real possibility, and the panel publishes the receipt of the
         # candidate it CHOOSES, not of whichever call ran last. The session holds THIS call's own
@@ -829,7 +837,7 @@ class ToolUsingResearcher:
             opts = opts.replace(token_budget=left)
         try:
             result = run_phase(
-                self.client, self.tools, messages, emit_spec,
+                self.client, tools, messages, emit_spec,
                 label="Researcher·alternative", handoff=False, inject_notes=False,
                 finalize=_finalize_alternative, fallback=_no_alternative,
                 validate=_validate_alternative, on_budget=_note_cutoff,

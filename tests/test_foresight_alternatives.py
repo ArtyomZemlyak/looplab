@@ -992,3 +992,48 @@ def test_the_prompt_shows_the_window_this_call_binds_against(monkeypatch):
     brief = next(m["content"] for m in model.chats[0] if m["role"] == "user")
     assert "card-0" in brief and "card-1" in brief, "premise: the board reached the brief"
     assert "card-9" not in brief
+
+
+class _GoalTools:
+    """A run-aware provider: `bind_state` REBINDS it, as `RunTools` does."""
+
+    def __init__(self):
+        self.state = None
+
+    def bind_state(self, state, parent=None):
+        self.state = state
+
+    def specs(self):
+        return [{"type": "function", "function": {
+            "name": "run_goal", "description": "The bound run's goal.",
+            "parameters": {"type": "object", "properties": {}}}}]
+
+    def execute(self, name, args):
+        return f"goal of the bound run: {self.state.goal}"
+
+
+def test_a_proposal_s_tools_answer_about_its_own_state(monkeypatch):
+    """crit_v51 F4: `propose` rebound the SHARED toolset (`bind_state` mutates a provider), so a
+    second proposal on the same instance rebinding it mid-loop made the first call's `run_goal`
+    answer the OTHER run's goal. Each call now runs on its own view (`tool_loop.py::bound_toolset`),
+    and the continuation keeps candidate 1's. MUTATION: bind `self.tools` and run on it -> 'B'."""
+    import looplab.agents.agent as agent_mod
+    shared = _GoalTools()
+    model = _Model([_turn(_call("g1", "run_goal", {})),
+                    _turn(_emit("e1", "cache the per-depth scorer")),
+                    _turn(_call("g2", "run_goal", {})),
+                    _turn(_emit("e2", "batch the shared prompt pages", x=2.0))])
+    researcher = ToolUsingResearcher(model, shared)
+    real = agent_mod.run_phase
+
+    def another_call_rebinds(*args, **kwargs):
+        shared.bind_state(RunState(goal="B: maximise recall", direction="max"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(agent_mod, "run_phase", another_call_rebinds)
+    mine = RunState(goal="A: minimise latency", direction="min")
+    idea, session = researcher.propose_with_session(mine, None)
+    assert researcher.propose_alternative(mine, None, session, [idea]) is not None
+    answers = [m["content"] for m in session.messages if m.get("role") == "tool"
+               and "goal of the bound run" in str(m.get("content"))]
+    assert len(answers) == 2 and all("A: minimise latency" in a for a in answers), answers
