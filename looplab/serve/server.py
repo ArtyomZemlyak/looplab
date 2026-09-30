@@ -633,8 +633,11 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
                                          r"|concepts/lens)", p)
                          or (p.startswith("/api/scope-report/") and p.endswith("/generate"))
                          or re.fullmatch(r"/api/runs/[^/]+/(reset|deletions)", p)
+                         # The owner's prompts, skills and knowledge: every live internal run
+                         # re-reads them (critic crit_v61 M2, driven: a PUT answered 200).
+                         or re.fullmatch(r"/api/(prompts|skills|knowledge)/.+", p)
                          or (request.method == "DELETE" and re.fullmatch(r"/api/runs/[^/]+", p)))):
-                return JSONResponse({"detail": "harness token cannot change operator defaults, launch or reset/delete a run, or invoke an internal model workflow"},
+                return JSONResponse({"detail": "harness token cannot change operator defaults (settings, prompts, skills, knowledge), launch or reset/delete a run, or invoke an internal model workflow"},
                                     status_code=403)
             # WHO THIS IS (`serve/principal.py`): the token holder is the `owner` principal; a request
             # on the small open surface that presented nothing is `anonymous` — never promoted.

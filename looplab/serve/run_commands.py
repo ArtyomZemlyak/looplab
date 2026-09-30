@@ -3013,6 +3013,10 @@ class RunCommandService:
                     }
                     if drain:
                         record["drain_only"] = True
+                    if agent_token:
+                        # WHO asked (critic crit_v61 M1): the agent token is the `owner` principal,
+                        # and without this the owner could not tell its records from their own.
+                        record["submitted_by"] = "agent_token"
                     try:
                         if normalization_error is not None:
                             raise normalization_error

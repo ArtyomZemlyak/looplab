@@ -23,7 +23,7 @@ from fastapi.testclient import TestClient
 from looplab.core.config import Settings
 from looplab.events.eventstore import EventStore
 from looplab.serve.control_validation import (
-    AGENT_TOKEN_REFUSED_STARTS, CONTROL_SPECS, agent_token_refusal)
+    AGENT_TOKEN_INTERNAL_INTENTS, AGENT_TOKEN_REFUSED_STARTS, CONTROL_SPECS, agent_token_refusal)
 from looplab.serve.protocol import COMMAND_TERMINAL_STATUSES, EnginePolicy
 from looplab.serve.run_commands import RunCommandService
 from looplab.serve.server import make_app
@@ -144,10 +144,11 @@ def test_the_agent_token_keeps_only_the_no_spawn_intents_on_an_internal_run(tmp_
     for i, kind in enumerate(sorted(AGENT_TOKEN_REFUSED_STARTS)):
         response = post_command(client, kind, {}, key=f"agent-start-{i}", headers=AGENT)
         assert _refused(response), (kind, response.json())
-    # What stays open to the agent: intents that never start the engine.
+    # What stays open to the agent: the allow-list — and its records say who asked.
     hint = post_command(client, "hint", {"text": "try a smaller learning rate"},
                         key="agent-hint", headers=AGENT)
     assert not _refused(hint) and hint.json().get("status") != "rejected", hint.json()
+    assert hint.json().get("submitted_by") == "agent_token", hint.json()
     note = post_command(client, "annotation", {"node_id": 0, "text": "looks promising"},
                         key="agent-note", headers=AGENT)
     assert not _refused(note), note.json()
@@ -156,6 +157,32 @@ def test_the_agent_token_keeps_only_the_no_spawn_intents_on_an_internal_run(tmp_
     owner = post_command(client, "fork", {"from_node_id": 0}, key="owner-fork", headers=OWNER)
     assert owner.status_code == 200 and not _refused(owner), owner.json()
     assert owner.json().get("status") != "rejected", owner.json()
+    assert "submitted_by" not in owner.json(), "the owner's record is the owner's"
+
+
+_DRIVING = (
+    ("metric_retarget", {"key": "acc"}),
+    ("promote", {"node_id": 0}),
+    ("research_completed", {"memo": {"summary": "the agent's memo"}}),
+    ("report_generated", {"content": "the agent's report"}),
+    ("hypothesis_added", {"id": "h1", "statement": "the agent's hypothesis"}),
+    ("card_dropped", {"id": "card-0"}),
+)
+
+
+def test_the_agent_token_may_not_drive_an_internal_run_that_it_cannot_start(
+        tmp_path, monkeypatch):
+    """Critic crit_v61 M1 (driven): `NO_SPAWN` means an intent never STARTS the engine, not that it
+    never DRIVES the owner's run — an agent `metric_retarget` replaced the run's goal and dropped paid
+    confirmation evals, a `promote` moved the exported champion, a dropped Card cancelled an
+    in-flight evaluation, a memo, a report and a hypothesis spoke as the owner's. Each is refused to
+    the agent token now (after the payload's field allow-list, which every credential meets first).
+    MUTATION: admit every `NO_SPAWN` intent (the rule this replaced)."""
+    client = _client(tmp_path, monkeypatch, external=False)
+    for i, (kind, data) in enumerate(_DRIVING):
+        assert CONTROL_SPECS[kind].engine_policy is EnginePolicy.NO_SPAWN, kind
+        response = post_command(client, kind, data, key=f"drive-{i}", headers=AGENT)
+        assert _refused(response), (kind, response.json())
 
 
 @pytest.mark.parametrize("shape,kind,data", [
@@ -301,6 +328,22 @@ def test_the_agent_token_may_not_start_the_paid_concept_lens(tmp_path, monkeypat
     assert response.status_code == 403, response.text
 
 
+@pytest.mark.parametrize("kind", ["prompts", "skills", "knowledge"])
+def test_the_agent_token_may_not_rewrite_the_owner_s_prompts_skills_or_knowledge(
+        tmp_path, monkeypatch, kind):
+    """Critic crit_v61 M2 (driven): `PUT /api/prompts/<key>.md` and `PUT /api/skills/<name>.md`
+    answered the harness token 200, and every live internal run re-reads them — the owner's
+    defaults. Refused at the middleware, on both authoring write routes; the owner's write is not.
+    MUTATION: drop the authoring clause from the harness deny list."""
+    client = _client(tmp_path, monkeypatch, external=False)
+    for path in (f"/api/{kind}/agent.md", f"/api/{kind}/agent.md/operations/op-1"):
+        refused = client.put(path, json={"content": "x"}, headers=AGENT)
+        assert refused.status_code == 403, (path, refused.text)
+        assert "operator defaults" in refused.text
+        owner = client.put(path, json={"content": "x"}, headers=OWNER)
+        assert owner.status_code != 403, (path, owner.text)
+
+
 @pytest.mark.parametrize("kind,data,refused", [
     ("fork", {}, True), ("force_ablate", {}, True), ("deep_research", {}, True),
     ("resume", {}, True), ("restart", {}, True), ("run_reopened", {}, True),
@@ -310,8 +353,12 @@ def test_the_agent_token_may_not_start_the_paid_concept_lens(tmp_path, monkeypat
     ("inject_node", {"files": {"a.py": "x"}}, True), ("budget_extend", {}, True),
     ("set_strategy", {}, True), ("approval_granted", {}, True), ("spec_approved", {}, True),
     ("run_abort", {}, True), ("force_confirm", {}, True), ("not_an_intent", {}, True),
+    ("metric_retarget", {}, True), ("promote", {}, True), ("research_completed", {}, True),
+    ("report_generated", {}, True), ("hypothesis_added", {}, True), ("card_dropped", {}, True),
+    ("card_reopened", {}, True), ("run_concepts", {}, True),
     ("pause", {}, False), ("hint", {"text": "t"}, False), ("node_abort", {}, False),
-    ("annotation", {}, False), ("promote", {}, False),
+    ("annotation", {}, False), ("comment_created", {}, False), ("comment_edited", {}, False),
+    ("comment_resolution_changed", {}, False),
 ])
 def test_the_agent_token_rule_s_truth_table(kind, data, refused):
     got = agent_token_refusal(kind, data)
@@ -321,13 +368,38 @@ def test_the_agent_token_rule_s_truth_table(kind, data, refused):
         assert got.detail["retryable"] is False
 
 
-def test_the_rule_is_the_policy_table():
+def test_the_allow_list_starts_nothing_and_is_all_the_token_keeps():
     """Every control intent the agent token keeps on an internal run is one no admission can spawn an
-    engine for (`run_commands.py::admission_spawns_driver`), and every other one is refused — so an
-    intent added later is refused to the token until its policy says it starts nothing."""
+    engine for (`run_commands.py::admission_spawns_driver`), and it keeps exactly the allow-list — so
+    an intent added later is refused to the token until someone adds it there."""
     from looplab.serve.run_commands import admission_spawns_driver
     for kind, spec in CONTROL_SPECS.items():
         admitted = agent_token_refusal(kind, {}) is None
-        spawns = (admission_spawns_driver(spec.engine_policy, alive=False)
-                  or admission_spawns_driver(spec.engine_policy, alive=True))
-        assert admitted is (spec.engine_policy is EnginePolicy.NO_SPAWN) is (not spawns), kind
+        assert admitted is (kind in AGENT_TOKEN_INTERNAL_INTENTS), kind
+        if admitted:
+            assert not (admission_spawns_driver(spec.engine_policy, alive=False)
+                        or admission_spawns_driver(spec.engine_policy, alive=True)), kind
+
+
+# The words the manifest and the guide use for each intent the agent token keeps (crit_v61 M1: the
+# docs named five while the rule kept twenty).
+_KEPT_WORDS = {"pause": "pause", "node_abort": "abort a node", "hint": "hint",
+               "annotation": "annotat", "comment_created": "comment", "comment_edited": "comment",
+               "comment_resolution_changed": "comment"}
+
+
+def test_the_manifest_and_the_guide_name_what_the_token_keeps():
+    """The harness manifest's credential promise and the harness guide name the allow-list — the
+    same set, both ways. MUTATION: widen the allow-list without the docs -> red."""
+    from pathlib import Path
+
+    from looplab.harness.manifest import harness_manifest
+    assert set(_KEPT_WORDS) == set(AGENT_TOKEN_INTERNAL_INTENTS)
+    credential = harness_manifest()["external_run_mode"]["credential"]
+    guide = (Path(__file__).resolve().parents[1] / "docs" / "guide"
+             / "external-harness.md").read_text(encoding="utf-8")
+    scope = " ".join(guide.split("## Scope and provenance", 1)[1].split("\n## ", 1)[0].split())
+    for word in set(_KEPT_WORDS.values()):
+        assert word in credential, (word, credential)
+        assert word in scope, (word, scope)
+    assert "agent_token_refused" in credential and "agent_token_refused" in scope

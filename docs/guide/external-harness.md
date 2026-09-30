@@ -378,18 +378,21 @@ in this mode. `param_search` tasks do not use the external editing Developer.
 The MCP adapter forwards JSON API requests and limits a response to 256 KiB and
 a request body to 1 MiB. Query narrow routes for larger outputs; binary uploads
 need their dedicated API or CLI flow. A dedicated harness token can read and
-control launched runs but cannot change operator defaults, launch new runs,
-drive the owner assistant or the paid concept lens, or reset/delete runs. Commands that start internal agent
-work (fork, forced ablation, deep research, a node reset from `propose` or
-`implement`, a code-less inject — judged on what an import resolves to) are refused
-on a run launched with `external_harness` for every credential. On an INTERNAL run
-served by the same UI the harness token keeps only the commands that never start or
-drive that run's engine — a pause, a node abort, a hint, an annotation, a comment —
-and is refused (`agent_token_refused`, doc 70 item 70.8) everything else: a resume,
-restart or reopen, any inject or node reset, a budget extension, a strategy, an
-approval, an abort, a retry of such a command and an edit of the run's configuration.
-The operator, with the owner's token, keeps everything. A run whose snapshot cannot
-be read refuses the harness token those commands. Legacy configurations passing `LOOPLAB_UI_TOKEN` still give
+control launched runs but cannot change operator defaults (settings, prompts, skills,
+knowledge), launch new runs, drive the owner assistant or the paid concept lens, or
+reset/delete runs. Commands that start internal agent work (fork, forced ablation,
+deep research, a node reset from `propose` or `implement`, a code-less inject — judged
+on what an import resolves to) are refused on a run launched with `external_harness`
+for every credential. On an INTERNAL run served by the same UI the harness token may
+only pause the run, abort a node, hint, annotate or comment, and is refused
+(`agent_token_refused`, doc 70 item 70.8) everything else: a resume, restart or
+reopen, any inject or node reset, a budget extension, a strategy, an approval, an
+abort, a metric retarget, a promotion, a research memo or report, a hypothesis or
+Card change, a retry of any of those and an edit of the run's configuration. What it
+may submit is marked `submitted_by: agent_token` on the command record. The operator,
+with the owner's token, keeps everything. A run whose snapshot cannot be read refuses
+the harness token those
+commands. Legacy configurations passing `LOOPLAB_UI_TOKEN` still give
 the agent full UI owner authority; keep that owner credential out of its environment
 when operator policy must remain separate. Agent reasoning and model token cost
 happen outside LoopLab's ledger; the event log records the submitted candidate,

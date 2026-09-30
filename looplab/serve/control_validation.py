@@ -2212,40 +2212,45 @@ def external_intent_refusal(event_type: str, data: dict) -> Optional[HTTPExcepti
 # is the `owner` principal (`serve/server.py`), and the refusal below held only on an EXTERNALLY
 # driven run, so on an internal run its holder queued a `fork` the live engine then built with the
 # owner's paid Developer — though the harness manifest promises "scoped agent requests cannot …
-# invoke LoopLab's owner model workflows". An internal run's own loop IS that workflow, and every
-# control intent whose engine policy is not `NO_SPAWN` STARTS it — the command worker spawns a plain
-# `looplab resume` for it when no engine is alive (`run_commands.py::RunCommandService._admit`) — or
-# DRIVES it on a live engine: a fork, a budget extension, a strategy, an approval, an inject whose
-# crash the run's Developer repairs. Refusing a hand list of those (the external rule's five and the
-# three starts) left the rest open (critic crit_v60 F1, driven: an agent-token `node_reset` of a
-# paused run, a ready-made inject into one whose engine had died and a `budget_extend` of a finished
-# one each spawned the run's loop, which built nodes with the owner's Developer). So on an internal
-# run the token keeps exactly the `NO_SPAWN` intents — a pause, a node abort, a hint, annotations,
-# comments, … — read off the policy table, never a hand list, so an intent added later is refused to
-# it until its policy says it starts nothing. On an external run it meets the external rule only.
+# invoke LoopLab's owner model workflows". An internal run's own loop IS that workflow. Two readings
+# of "what it may not do" were each too wide. A hand list — the external rule's five intents and the
+# three starts — left every other intent whose engine policy is not `NO_SPAWN` able to START the loop:
+# the command worker spawns a plain `looplab resume` for it when no engine is alive (critic crit_v60
+# F1, driven: an agent `node_reset`, a ready-made inject and a `budget_extend` each did). The policy
+# table — keep the `NO_SPAWN` intents — then left twenty that never START the engine but DRIVE it: a
+# `metric_retarget` replaced the run's goal and discarded paid confirmation evals, a `promote` moved
+# the exported champion, a dropped Card cancelled an in-flight evaluation, a memo, a report and a
+# hypothesis spoke as the owner's (critic crit_v61 M1, driven). So on an internal run (or one with
+# no snapshot) the token keeps an explicit ALLOW-LIST — a pause, a node abort, a hint, an annotation,
+# a comment — asserted below to be `NO_SPAWN` intents; anything added later is refused to it until it
+# is added here. On an external run it meets the external rule only.
 AGENT_TOKEN_REFUSED_STARTS = frozenset({EV_RESUME, EV_RESTART, EV_RUN_REOPENED})
+AGENT_TOKEN_INTERNAL_INTENTS = frozenset({
+    EV_PAUSE, EV_NODE_ABORT, EV_HINT, EV_ANNOTATION,
+    EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED})
+assert all(CONTROL_SPECS[kind].engine_policy is EnginePolicy.NO_SPAWN
+           for kind in AGENT_TOKEN_INTERNAL_INTENTS), "an agent intent must never start the engine"
 
 
 def agent_token_refusal(event_type: str, data: dict) -> Optional[HTTPException]:
     """The refusal the AGENT token gets for this intent on an INTERNAL run, or None to admit it.
 
     PURE, like `external_intent_refusal` beside it: whether the run is internal is the caller's
-    question (`_external_mode_restriction`). Admitted: exactly the intents whose engine policy is
-    `NO_SPAWN` (`_CONTROL_POLICIES`); an unknown type is refused (fail closed). A 403 with its own
-    code — this credential may not, whoever else may — which the command service records on the
-    REJECTED command as it is."""
-    spec = CONTROL_SPECS.get(event_type)
-    if spec is not None and spec.engine_policy is EnginePolicy.NO_SPAWN:
+    question (`_external_mode_restriction`). Admitted: exactly `AGENT_TOKEN_INTERNAL_INTENTS`; an
+    unknown type is refused (fail closed). A 403 with its own code — this credential may not,
+    whoever else may — which the command service records on the REJECTED command as it is."""
+    if event_type in AGENT_TOKEN_INTERNAL_INTENTS:
         return None
+    external = external_intent_refusal(event_type, data)
     if event_type in AGENT_TOKEN_REFUSED_STARTS:
         message = ("the agent token cannot start an internal run's own Researcher/Developer loop "
                    "(resume, restart or reopen)")
-    elif external_intent_refusal(event_type, data) is not None:
+    elif external is not None:
         message = ("the agent token cannot queue an intent LoopLab's own model fulfils on an "
-                   "internal run: " + str(external_intent_refusal(event_type, data).detail))
+                   "internal run: " + str(external.detail))
     else:
-        message = (f"the agent token cannot submit {event_type!r} on an internal run: it starts or "
-                   "drives the run's own engine, whose Researcher and Developer are the owner's")
+        message = (f"the agent token cannot submit {event_type!r} on an internal run: it starts, "
+                   "drives or speaks for the owner's run")
     return agent_token_refused(message)
 
 
@@ -2315,7 +2320,8 @@ def normalize_control(srv, rd: Path, event_type: str, data, *, agent_token: bool
     """Validate/normalize one control payload for both /control and /commands.
 
     The common preamble and tail serve every registered ControlSpec. External mode restrictions
-    apply before the event-specific normalizer and before any durable append.
+    apply before the event-specific normalizer — and again over what it made of the payload — and
+    before any durable append.
     """
     spec = CONTROL_SPECS.get(event_type)
     if spec is None:
