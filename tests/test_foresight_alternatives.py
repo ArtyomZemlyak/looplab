@@ -968,3 +968,27 @@ def test_a_continuation_cut_short_holds_its_own_cutoff():
     session.cutoff = ""
     assert researcher.propose_alternative(_state(), None, session, [idea]) is not None
     assert session.cutoff == "turns"
+
+
+def test_the_prompt_shows_the_window_this_call_binds_against(monkeypatch):
+    """crit_v51 F5: the brief rendered the SHARED `_visible_board_cards`, the emit binds against this
+    call's own window — another proposal publishing its window between the two left the model looking
+    at cards its claim could not bind to. MUTATION: render `self._visible_board_cards` -> the other
+    call's card is in the prompt."""
+    import looplab.agents.agent as agent_mod
+    mine = [Card(id=f"card-{i}", statement=f"mine {i}") for i in range(2)]
+    theirs = [Card(id="card-9", statement="theirs 9")]
+    monkeypatch.setattr(agent_mod, "next_board_prompt_cards", lambda *a, **k: list(mine))
+    model = _Model([_turn(_emit("e1", "cache the per-depth scorer"))])
+    researcher = ToolUsingResearcher(model, _Tools())
+    real_offers = agent_mod.offers_tool
+
+    def another_call_publishes(*args, **kwargs):
+        researcher._visible_board_cards = list(theirs)
+        return real_offers(*args, **kwargs)
+
+    monkeypatch.setattr(agent_mod, "offers_tool", another_call_publishes)
+    researcher.propose_with_session(_state(), None)
+    brief = next(m["content"] for m in model.chats[0] if m["role"] == "user")
+    assert "card-0" in brief and "card-1" in brief, "premise: the board reached the brief"
+    assert "card-9" not in brief

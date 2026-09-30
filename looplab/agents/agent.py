@@ -632,7 +632,12 @@ class ToolUsingResearcher:
             {"role": "user", "content": _state_brief(state, parent,
                                                      digest_cap=getattr(self, "_digest_cap", 0),
                                                      hyp_order=getattr(self, "_hyp_order", None),
-                                                     board_cards=self._visible_board_cards,
+                                                     # THIS call's window (critic 2026-09-30,
+                                                     # crit_v51 F5): the attribute may already be
+                                                     # another call's, and the emit binds against
+                                                     # `visible`, so a card the prompt showed
+                                                     # could bind to nothing.
+                                                     board_cards=visible,
                                                      memo_verdicts=bool(getattr(
                                                          self, "_memo_verdict_cue", False)),
                                                      fit=bool(getattr(self, "_brief_fit", False)),
