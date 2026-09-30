@@ -1226,8 +1226,9 @@ def _card_identity_spellings(state, raw_card_id) -> frozenset[str]:
 
 def _workdir_manifest_digest(node) -> str:
     """Digest of the node source manifest AND lifecycle a workdir was materialized for: the workdir's
-    reuse stamp (`EvalAttempt.stamp_workdir`) and the eval canary's `code_digest` key, which
-    `canary_already_passed` reads off the FINISHED rows.
+    reuse stamp (`EvalAttempt.stamp_workdir`). The eval canary's `code_digest` key, which
+    `canary_already_passed` reads off the FINISHED rows, is this digest less the activation manifest
+    (`_canary_code_digest`).
 
     `attempt` in it makes every stamp stale after every `node_reset` — the only thing that sets
     `rerun_stage` — and the reuse gate itself is off (`_eval_prepare_workdir`): a lifecycle's OWN
@@ -5498,7 +5499,9 @@ class EvaluateMixin:
         # AN INERT CHAIN CANNOT MAKE PROGRESS, AND THE ENGINE CAN PROVE IT. `REPAIR_INERT`
         # means the engine compared the bytes and nothing the evaluation runs moved: the files
         # this loop is about to re-materialize are the ones already on disk (bar the activation
-        # manifest, 69.10a), `_safe_reuse_start` below will reuse every completed stage because
+        # manifest, 69.10a — which the engine's marker check reads and no pipeline of its own
+        # does; a candidate whose code reads its own manifest is outside that rule), and
+        # `_safe_reuse_start` below will reuse every completed stage because
         # the change set it is asked about is empty, and the eval it is about to pay for is the
         # eval that just failed. Repeating that is not a retry, it is a
         # transcription error with a GPU attached — rubertlite-dr-unified-v4 node 6 spent two
