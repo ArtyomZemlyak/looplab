@@ -72,7 +72,7 @@ class _World:
     shipped shape anyway.
     """
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, command_timeout: float = 0.12):
         from looplab.serve.run_commands import RunCommandService
         from looplab.serve.server import make_app
 
@@ -86,7 +86,7 @@ class _World:
         srv = make_app(self.root).state.looplab
         srv.commands = RunCommandService(
             srv, engine_alive=self._is_alive, spawn_engine=self._spawn,
-            startup_timeout=0.05, command_timeout=0.12, poll_interval=0.01,
+            startup_timeout=0.05, command_timeout=command_timeout, poll_interval=0.01,
             max_observation_timeout=0.2)
         self.srv = srv
         self.commands = srv.commands
@@ -738,8 +738,12 @@ def test_an_unreadable_command_record_has_a_confirmed_escape(tmp_path):
 
     This is the shape the operator's requirement allows an absorbing state to have and no other: it
     is reachable only through an explicit confirmation, and the refusal NAMES that escape.
+
+    The command deadline is generous here because this test's subject is the escape, not a deadline:
+    the search's 0.12 s is below the fake engine's ack latency on a loaded Windows runner, and the
+    closing pause read `timed_out` there (Windows CI, 1103ba87). A prompt ack settles it at once.
     """
-    world = _World(tmp_path / "runs")
+    world = _World(tmp_path / "runs", command_timeout=10.0)
     rd = world.seed("corrupt", alive=True)
     commands = world.commands
     try:
