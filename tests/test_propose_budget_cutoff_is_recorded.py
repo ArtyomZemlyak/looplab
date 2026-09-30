@@ -85,21 +85,19 @@ def test_the_engine_READS_it_at_the_one_proposal_funnel():
     (draft / improve / debug / a preproposed batch idea) passes through it, so a lane that forgets
     to look cannot exist.
 
-    Mutation: delete the getattr and this names the funnel that stopped looking.
+    Mutation: delete the read and this names the funnel that stopped looking.
     """
     # The one funnel lives with the build spine in `node_build.py` since ENG1-04 step 4c.
     src = (ROOT / "looplab/engine/node_build.py").read_text()
     fn = next(n for n in ast.walk(ast.parse(src))
               if isinstance(n, ast.FunctionDef) and n.name == "_prepare_node_idea")
-    reads = [call for call in ast.walk(fn)
-             if isinstance(call, ast.Call)
-             and getattr(call.func, "id", None) == "researcher_budget_exhausted"]
-    assert reads, (
-        "`_prepare_node_idea` must read the propose cutoff off the researcher — it is the one "
-        "funnel every proposal crosses, and a carrier with no consumer is a field that ships while "
-        "the record stays silent. It reads through `roles.researcher_budget_exhausted` rather than "
-        "a bare getattr because the receipt now has TWO spellings and one object can carry both: "
-        "see that helper and `RESEARCHER_OUTPUT_ATTRS`.")
+    called = {getattr(call.func, "id", None) for call in ast.walk(fn) if isinstance(call, ast.Call)}
+    assert {"propose_receipt_scope", "scoped_budget_exhausted"} <= called, (
+        "`_prepare_node_idea` must read the propose cutoff — it is the one funnel every proposal "
+        "crosses, and a carrier with no consumer is a field that ships while the record stays "
+        "silent. It reads the call's OWN receipt (`roles.propose_receipt_scope` + "
+        "`scoped_budget_exhausted`, doc 69 69.37): the role's attributes are a shared instance's, "
+        "and they are read only when nothing inside the scope noted a receipt.")
 
 
 def test_unified_facade_mirrors_the_researchers_cutoff_not_the_developers():
@@ -293,8 +291,10 @@ def test_the_endgame_sweep_reads_its_OWN_receipt_not_the_researchers_stale_one(
     And WHICH handle is asked, spied at the funnel: the sweep's surrogate for its own point, and
     `researcher` again once the novelty gate re-proposes through it.
 
-    MUTATIONS: drop `receipt_from=` from the sweep's `_link` reads -> the warm half warns; drop the
-    gate's hand-back -> the final read after a re-proposal still asks the sweep."""
+    MUTATIONS: propose the sweep through `researcher` in `_propose` -> the warm half warns; drop the
+    gate's receipt hand-back -> the final candidate keeps the sweep's receipt. Each propose is
+    asked ONCE, at its own call (doc 69 69.37); the final candidate carries the receipt it was
+    proposed with instead of asking again."""
     # Patched where `_prepare_node_idea` READS it — its module since ENG1-04 step 4c.
     import looplab.engine.node_build as build_module
     from looplab.adapters.toytask import ToyTask
@@ -309,13 +309,13 @@ def test_the_endgame_sweep_reads_its_OWN_receipt_not_the_researchers_stale_one(
         "run_id": engine.run_dir.name, "task_id": "toy", "goal": "g", "direction": "min"})
     monkeypatch.setattr(engine, "_apply_novelty_gate", lambda _state, idea, **_kw: idea)
     asked: list = []
-    real_reader = build_module.researcher_budget_exhausted
+    real_reader = build_module.scoped_budget_exhausted
 
-    def _asked(handle):
+    def _asked(box, handle):
         asked.append(handle)
-        return real_reader(handle)
+        return real_reader(box, handle)
 
-    monkeypatch.setattr(build_module, "researcher_budget_exhausted", _asked)
+    monkeypatch.setattr(build_module, "scoped_budget_exhausted", _asked)
 
     def _evaluated(i: int) -> None:
         engine.store.append("node_created", {
@@ -345,7 +345,7 @@ def test_the_endgame_sweep_reads_its_OWN_receipt_not_the_researchers_stale_one(
     assert cut.last_budget_exhausted == "turns", "precondition: the Researcher's receipt is STALE"
     assert warned == [], "a sweep point that made no call was reported TRUNCATED"
     sweeper = engine._sweep_researcher(cut)
-    assert asked == [sweeper, sweeper], "the funnel must ask the handle that proposed"
+    assert asked == [sweeper], "the funnel must ask the handle that proposed"
 
     # The novelty gate re-proposes through `researcher` (cut short again): from then on the funnel
     # asks `researcher`, for the re-proposal and for the final candidate it became.
@@ -353,4 +353,180 @@ def test_the_endgame_sweep_reads_its_OWN_receipt_not_the_researchers_stale_one(
                         lambda _state, _idea, *, repropose=None, **_kw: repropose())
     _idea, warned = _sweep(2, 5)
     assert cut.calls == 2 and warned, "the gate's cut-short re-proposal went unreported"
-    assert asked == [sweeper, cut, cut], asked
+    assert asked == [sweeper, cut], asked
+    assert len(warned) == 2, "the re-proposal and the final candidate it became, each once"
+
+
+# ------------------------------------------------------------ the call's own receipt (doc 69 69.37)
+
+def test_a_scope_holds_the_receipts_of_the_proposes_inside_it_and_no_other_thread_s():
+    """The channel's truth table: a propose notes into the scope its CALLER opened; the last note
+    is the call's receipt; a note outside any scope, or on another thread, reaches no scope; with
+    nothing noted the role's attributes answer (a researcher that predates the channel)."""
+    import threading
+
+    from looplab.agents.roles import (note_propose_receipt, propose_receipt_scope,
+                                      scoped_budget_exhausted)
+
+    note_propose_receipt("turns")                          # outside any scope: nothing, no error
+    with propose_receipt_scope() as box:
+        note_propose_receipt("turns")
+        worker = threading.Thread(target=lambda: note_propose_receipt("time"))
+        worker.start()
+        worker.join()
+        with propose_receipt_scope() as inner:
+            note_propose_receipt("tokens")
+        note_propose_receipt("")
+    assert (box, inner) == (["turns", ""], ["tokens"])
+    plain = type("R", (), {"last_budget_exhausted": "time"})()
+    assert scoped_budget_exhausted(box, plain) == ""       # the call's own, not the attribute
+    assert scoped_budget_exhausted([], plain) == "time"    # nothing noted: the attribute answers
+
+
+class _SharedAndRacing:
+    """ONE Researcher shared by two lanes. Lane A's propose is cut short; before A's caller reads its
+    receipt, lane B's whole propose runs on another thread and ends cleanly — rewriting the shared
+    attribute, as the card lane and the offloaded serial build do (critic crit_v53 N6)."""
+
+    def __init__(self):
+        self.calls = 0
+        self.last_budget_exhausted = ""
+
+    def propose(self, state, parent):
+        import threading
+
+        from looplab.agents.roles import note_propose_receipt
+        self.calls += 1
+        bound = "turns" if threading.current_thread().name == "lane-A" else ""
+        self.last_budget_exhausted = bound
+        note_propose_receipt(bound)
+        if bound:
+            lane_b = threading.Thread(target=self.propose, args=(state, parent), name="lane-B")
+            lane_b.start()
+            lane_b.join()
+        return Idea(operator="draft", params={"x": 0.5, "y": 0.5},
+                    rationale="an LLM proposal", hypothesis="an LLM hypothesis")
+
+
+def test_the_funnel_reads_its_own_call_s_receipt_not_the_shared_attribute(tmp_path, monkeypatch,
+                                                                          caplog):
+    """doc 69 69.37, driven: lane A's proposal was cut short by its turn budget, and lane B's clean
+    propose rewrote the shared attribute between A's return and the funnel's read — the warning
+    that marks A's proposal TRUNCATED was lost (and B's would have been reported for A's).
+    MUTATION: read `researcher_budget_exhausted(handle)` in `_propose` -> no warning."""
+    import threading
+
+    from looplab.adapters.toytask import ToyTask
+    from looplab.events.replay import fold
+    from tests.factories import TOY_TASK, make_engine
+
+    racing = _SharedAndRacing()
+    engine = make_engine(tmp_path / "race", task=ToyTask.load(TOY_TASK), researcher=racing)
+    engine.store.append("run_started", {
+        "run_id": engine.run_dir.name, "task_id": "toy", "goal": "g", "direction": "min"})
+    monkeypatch.setattr(engine, "_apply_novelty_gate", lambda _state, idea, **_kw: idea)
+    out = {}
+
+    def _lane_a():
+        out["idea"] = engine._prepare_node_idea(
+            {"kind": "draft"}, fold(engine.store.read_all()), researcher=engine.researcher,
+            prospective_node_id=0, source="researcher")
+
+    with caplog.at_level("WARNING", logger="looplab.engine.orchestrator"):
+        lane = threading.Thread(target=_lane_a, name="lane-A")
+        lane.start()
+        lane.join()
+    warned = [r.getMessage() for r in caplog.records if "cut short by its" in r.getMessage()]
+    assert racing.calls == 2 and racing.last_budget_exhausted == "", "premise: B wrote last"
+    assert out["idea"] is not None and warned and all("turns" in w for w in warned), warned
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_a_real_propose_notes_its_receipt_into_the_caller_s_scope(tmp_path, monkeypatch, raises):
+    """`ToolUsingResearcher.propose` notes the bound its loop announced into the scope its caller
+    opened — on a clean return and on a loop that raised (the fallback idea is still this call's).
+    MUTATION: drop the note from `propose`'s `finally` -> the scope is empty and the caller falls
+    back to the shared attribute."""
+    from looplab.agents.roles import propose_receipt_scope
+    from looplab.tools.knowledge_tools import KnowledgeTools
+
+    def _phase(client, tools, messages, emit_spec, *, on_budget=None, finalize=None, **_kw):
+        on_budget({"kind": "turns", "turns": 3, "seconds": 1.0})
+        if raises:
+            raise RuntimeError("the endpoint went away after the cut")
+        return finalize({"operator": "draft", "params": {"x": 0.5}, "rationale": "r"})
+
+    monkeypatch.setattr(agent_mod, "run_phase", _phase)
+    researcher = agent_mod.ToolUsingResearcher(object(), KnowledgeTools(str(tmp_path)))
+    monkeypatch.setattr(researcher, "_fallback", lambda _messages, _exc=None: Idea(
+        operator="draft", params={"x": 0.1}, rationale="fallback (endpoint)"))
+    with propose_receipt_scope() as box:
+        researcher.propose(RunState(goal="g", direction="min"), None)
+    assert box == ["turns"] and researcher.last_budget_exhausted == "turns"
+
+
+class _CleanThenCut:
+    """The first propose ends on its own terms, every later one is cut by its turn budget."""
+
+    def __init__(self):
+        self.calls = 0
+        self.last_budget_exhausted = ""
+
+    def propose(self, _state, _parent):
+        from looplab.agents.roles import note_propose_receipt
+        self.calls += 1
+        self.last_budget_exhausted = "" if self.calls == 1 else "turns"
+        note_propose_receipt(self.last_budget_exhausted)
+        return Idea(operator="draft", params={"x": 0.1 * self.calls, "y": 0.5},
+                    rationale=f"proposal {self.calls}", hypothesis="h")
+
+
+def test_a_draft_the_gate_re_proposed_carries_the_re_proposal_s_receipt(tmp_path, monkeypatch,
+                                                                         caplog):
+    """The final candidate is the gate's RE-proposal, so it carries that call's receipt, not the
+    first one's. MUTATION: link the final draft with the first proposal's receipt -> one warning."""
+    from looplab.adapters.toytask import ToyTask
+    from looplab.events.replay import fold
+    from tests.factories import TOY_TASK, make_engine
+
+    researcher = _CleanThenCut()
+    engine = make_engine(tmp_path / "draft", task=ToyTask.load(TOY_TASK), researcher=researcher)
+    engine.store.append("run_started", {
+        "run_id": engine.run_dir.name, "task_id": "toy", "goal": "g", "direction": "min"})
+    monkeypatch.setattr(engine, "_apply_novelty_gate",
+                        lambda _state, _idea, *, repropose=None, **_kw: repropose())
+    with caplog.at_level("WARNING", logger="looplab.engine.orchestrator"):
+        idea = engine._prepare_node_idea({"kind": "draft"}, fold(engine.store.read_all()),
+                                         researcher=engine.researcher, prospective_node_id=0,
+                                         source="researcher")
+    warned = [r.getMessage() for r in caplog.records if "cut short by its" in r.getMessage()]
+    assert idea is not None and idea.rationale == "proposal 2" and researcher.calls == 2
+    assert len(warned) == 2, "the re-proposal and the final candidate it became, each once"
+
+
+def test_a_batch_roll_reads_its_own_receipt_not_the_shared_attribute(tmp_path, caplog):
+    """doc 69 69.37, the batch lane: its rolls go straight to the stager and warn at their own
+    propose site — from the roll's own scope, not the shared researcher's attribute a concurrent
+    lane rewrites. MUTATION: read the attribute -> no warning."""
+    import threading
+
+    from looplab.events.replay import fold
+    from tests.factories import make_engine
+
+    engine = make_engine(tmp_path / "batch", n_seeds=3, max_nodes=6)
+    engine.store.append("run_started", {"run_id": "r", "task_id": "toy", "direction": "min"})
+    engine._novelty_mode = "off"
+    racing = _SharedAndRacing()
+    engine.researcher = racing
+    out = {}
+
+    def _lane_a():
+        out["proposal"] = engine._propose_batch(fold(engine.store.read_all()), 1)
+
+    with caplog.at_level("WARNING"):
+        lane = threading.Thread(target=_lane_a, name="lane-A")
+        lane.start()
+        lane.join()
+    warned = [r.getMessage() for r in caplog.records if "was cut short by its" in r.getMessage()]
+    assert racing.last_budget_exhausted == "", "premise: the concurrent lane wrote last"
+    assert out["proposal"].ideas and len(warned) == 1 and "turns" in warned[0], warned

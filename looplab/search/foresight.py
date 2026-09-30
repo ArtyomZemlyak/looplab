@@ -36,7 +36,8 @@ from pydantic import BaseModel, Field
 
 from looplab.agents.roles import (
     BOARD_SEED_CHARS_MAX, WrapsResearcher, bind_idea_to_board_card, forward_hints,
-    is_researcher_fallback, next_board_prompt_cards, researcher_budget_exhausted,
+    is_researcher_fallback, next_board_prompt_cards, note_propose_receipt,
+    researcher_budget_exhausted,
 )
 from looplab.core.llm import BudgetExceeded
 from looplab.core.config import MAX_FORESIGHT_VERIFY_SAMPLES
@@ -727,6 +728,9 @@ class ForesightPanelResearcher(WrapsResearcher):
         handoff brief — when the call gathered them."""
         if receipts is not None:
             self.last_propose_budget_exhausted = receipts[index]
+            # The chosen candidate's receipt, noted LAST into the caller's scope so the engine
+            # reads this candidate's and not whichever member ran last (doc 69 69.37).
+            note_propose_receipt(receipts[index])
         if briefs is not None and callable(briefs[index]):
             briefs[index]()
         return ideas[index]

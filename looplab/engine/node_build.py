@@ -29,7 +29,7 @@ import anyio
 
 from looplab.agents.role_wrappers import audit_extra_of
 from looplab.agents.roles import (DeveloperResult, developer_call_lock,
-                                  researcher_budget_exhausted)
+                                  propose_receipt_scope, scoped_budget_exhausted)
 from looplab.core.containment import contain
 from looplab.core.errors import budget_stop_leaf
 from looplab.core.llm import BudgetExceeded, model_override
@@ -997,7 +997,15 @@ class NodeBuildMixin:
                 stopped.append("run_is_stopping")
             return True
 
-        def _link(candidate, *, proposed: bool = True, receipt_from=None) -> Optional[Idea]:
+        def _propose(handle, parent_node):
+            """One paid propose on `handle`, with the receipt THIS call noted into its own scope
+            (`roles.propose_receipt_scope`, doc 69 69.37) — never the shared instance's attribute,
+            which another proposal may write between this one's return and its read."""
+            with propose_receipt_scope() as box:
+                candidate = handle.propose(state, parent_node)
+            return candidate, scoped_budget_exhausted(box, handle)
+
+        def _link(candidate, *, proposed: bool = True, receipt: str = "") -> Optional[Idea]:
             if candidate is None:
                 return None
             # The proposal path's provider circuit breaker, at the ONE funnel every proposal
@@ -1026,16 +1034,15 @@ class NodeBuildMixin:
             # `agent_max_turns`/`agent_time_budget_s` both shipping at 0 this can only fire for an
             # operator who set a cap, and the value of saying so is telling a TRUNCATED proposal
             # from a converged one — the distinction a cap destroys if nobody records it.
-            # `receipt_from`: the handle whose propose produced THIS candidate when that is not
-            # `researcher` — the endgame sweep's own surrogate (see the improve path below).
-            if proposed:
-                _bound = researcher_budget_exhausted(
-                    researcher if receipt_from is None else receipt_from)
-                if _bound:
-                    _LOG.warning(
-                        "the proposal for node %s was cut short by its %s budget — it did not "
-                        "emit on its own terms, so treat it as TRUNCATED rather than converged",
-                        prospective_node_id, _bound)
+            # `receipt`: THIS candidate's own, taken by `_propose` from the call that produced it —
+            # the endgame sweep's own surrogate included (see the improve path below). "" for a
+            # candidate no propose in this call produced (a preproposed batch idea: the batch lane
+            # warned at its own propose site).
+            if proposed and receipt:
+                _LOG.warning(
+                    "the proposal for node %s was cut short by its %s budget — it did not "
+                    "emit on its own terms, so treat it as TRUNCATED rather than converged",
+                    prospective_node_id, receipt)
             linked = (candidate if isinstance(candidate, Idea)
                       else Idea.model_validate(candidate)).model_copy(deep=True)
             linked.card_id = None  # a Researcher/plugin can never claim writer namespace authority
@@ -1140,17 +1147,21 @@ class NodeBuildMixin:
         if kind == "draft":
             self._set_complexity_hint(state, None, researcher=researcher)
             with self.tracer.span("propose") as _span:
-                idea = _link(self._canonicalize_draft_idea(researcher.propose(state, None)))
+                proposal, receipt = _propose(researcher, None)
+                idea = _link(self._canonicalize_draft_idea(proposal), receipt=receipt)
                 stamp_proposal_span(_span, idea, node_id=prospective_node_id)
             if idea is None or _stopped_after_paying():
                 return None
+            # The receipt of the proposal the gate returns: the gate's re-proposal replaces it.
+            answered = [receipt]
 
             def _repropose_draft():
                 if self._run_halted_now():
                     # The gate's second proposal is a NEW paid call (WP-STOP): a stop that landed
                     # during the adjudication starts none. `None` keeps the original idea.
                     return None
-                return _link(self._canonicalize_draft_idea(researcher.propose(state, None)))
+                again, answered[0] = _propose(researcher, None)
+                return _link(self._canonicalize_draft_idea(again), receipt=answered[0])
 
             with self._paid_progress(PROGRESS_STAGE_BUILD, "novelty",
                                      node_id=prospective_node_id, prospective=True, operator=kind):
@@ -1159,7 +1170,7 @@ class NodeBuildMixin:
                     repropose=_repropose_draft,
                     researcher=researcher, prospective_node_id=prospective_node_id,
                     drop_repeated_duplicate=drop_repeated_duplicate)
-            return _link(final)
+            return _link(final, receipt=answered[0])
 
         if kind == "merge":
             parents = list(action["parent_ids"])
@@ -1190,27 +1201,28 @@ class NodeBuildMixin:
         # Researcher below warm-up); every other improve proposes exactly as before.
         proposer = (self._sweep_researcher(researcher)
                     if action.get(META_SWEEP) and self._endgame_reserve_frac > 0.0 else researcher)
-        # WHOSE PROPOSE RECEIPT `_link` READS (review 2026-09-22, W5-5 follow-up): the handle that
+        # WHOSE PROPOSE RECEIPT `_link` CARRIES (review 2026-09-22, W5-5 follow-up): the call that
         # produced the candidate. For a sweep that is the sweep's OWN surrogate, whose per-call
         # receipt is "" for a numeric point; reading `researcher` there reported the Researcher's
         # LAST cut-short proposal against a point that made no call — driven: two "cut short"
         # warnings for a sweep node whose fallback was never called. The gate's re-proposal goes
-        # through `researcher`, so it hands the read back. Every other improve: `researcher`, as
-        # before.
-        answered_by = [proposer]
+        # through `researcher` and its receipt replaces the first. Taken from the call's own scope
+        # since doc 69 69.37, not read off the handle afterwards.
+        answered = [""]
 
         def _repropose(p=parent):
             if self._run_halted_now():
                 # The gate's second proposal is a NEW paid call (WP-STOP): a stop that landed during
                 # the adjudication starts none. `None` keeps the original, which the fences refuse.
                 return None
-            answered_by[0] = researcher
-            return _link(self._canonicalize_idea_operator(
-                researcher.propose(state, p), authoritative_operator))
+            again, answered[0] = _propose(researcher, p)
+            return _link(self._canonicalize_idea_operator(again, authoritative_operator),
+                         receipt=answered[0])
 
         with self.tracer.span("propose") as _span:
-            idea = _link(self._canonicalize_idea_operator(
-                proposer.propose(state, parent), authoritative_operator), receipt_from=proposer)
+            proposal, answered[0] = _propose(proposer, parent)
+            idea = _link(self._canonicalize_idea_operator(proposal, authoritative_operator),
+                         receipt=answered[0])
             stamp_proposal_span(_span, idea, node_id=prospective_node_id)
         if idea is None or _stopped_after_paying():
             return None
@@ -1220,7 +1232,7 @@ class NodeBuildMixin:
                 state, idea, repropose=_repropose,
                 researcher=researcher, prospective_node_id=prospective_node_id,
                 drop_repeated_duplicate=drop_repeated_duplicate)
-        return _link(final, receipt_from=answered_by[0])
+        return _link(final, receipt=answered[0])
 
     @in_llm_lane("build")
     def _create_node(self, action: dict, roles=None, reserved=None, preproposed=None,

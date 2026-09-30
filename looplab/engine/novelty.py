@@ -28,7 +28,7 @@ from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import (NODE_CONCEPT_PROVENANCE_CLASSIFIER,
                                   NODE_CONCEPT_PROVENANCE_OPERATOR, Idea, NodeStatus, RunState,
                                   idea_proposal_digest, idea_proposal_ref)
-from looplab.agents.roles import researcher_budget_exhausted
+from looplab.agents.roles import propose_receipt_scope, scoped_budget_exhausted
 from looplab.engine.card_reservation import discarded_proposal_receipt
 from looplab.engine.shared import card_full_rationale, effective_researcher_eval_timeout
 from looplab.core.text import tokenize
@@ -1189,16 +1189,18 @@ class NoveltyGateMixin:
                                  "take these directions — propose a MEANINGFULLY DIFFERENT axis / theme / "
                                  f"component, not a variation of: {taken}"))
                 self._set_complexity_hint(state, None)          # A0d cues on the shared researcher
-                idea = self.researcher.propose(state, None)
+                with propose_receipt_scope() as _receipts:
+                    idea = self.researcher.propose(state, None)
                 # WHICH BOUND ENDED THIS PROPOSE — the batch lane's own read of the
-                # `roles.RESEARCHER_OUTPUT_ATTRS.last_budget_exhausted` receipt, per roll and
-                # BEFORE the next roll overwrites it on the shared researcher (the same reason
-                # `telem` snapshots per roll below). These Ideas go straight to the stager and
-                # never cross `_prepare_node_idea._link`, where the per-action lanes make this
-                # check — so without it the primary lane at the shipped width could not tell a
-                # TRUNCATED proposal from a converged one, which is the indistinguishability the
-                # receipt exists to remove. Warning-only, exactly like `_link`'s.
-                _bound = researcher_budget_exhausted(self.researcher)
+                # `roles.RESEARCHER_OUTPUT_ATTRS.last_budget_exhausted` receipt, per roll, from the
+                # roll's OWN scope (doc 69 69.37): the attribute is the shared researcher's, and a
+                # concurrent lane's propose could write it between this roll's return and its read.
+                # These Ideas go straight to the stager and never cross
+                # `_prepare_node_idea._link`, where the per-action lanes make this check — so
+                # without it the primary lane at the shipped width could not tell a TRUNCATED
+                # proposal from a converged one, which is the indistinguishability the receipt
+                # exists to remove. Warning-only, exactly like `_link`'s.
+                _bound = scoped_budget_exhausted(_receipts, self.researcher)
                 if _bound:
                     _LOG.warning(
                         "batch proposal roll %d (draft %d of %d) was cut short by its %s budget "

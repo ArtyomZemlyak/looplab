@@ -35,7 +35,7 @@ from looplab.agents.roles import (
     _attention_points, _clamp_fill,
     _hypothesis_system_suffix,
     _researcher_capability_suffix, _state_brief, bind_idea_to_board_card,
-    collect_hint_cues, next_board_prompt_cards,
+    collect_hint_cues, next_board_prompt_cards, note_propose_receipt,
     researcher_fallback_rationale,
     RESEARCHER_PROMPT_CUES)
 # The tool-loop machinery was split into `agents.tool_loop`. The moved names below are RE-IMPORTED
@@ -749,6 +749,11 @@ class ToolUsingResearcher:
                 # the loop announced before it raised is still this call's receipt (crit_v53 N5)
                 session.hold(messages, visible, "error", cutoff=cutoff[0])
             return self._fallback(messages, e)
+        finally:
+            # …and into the CALLER's scope, which is what the engine reads (doc 69 69.37): the
+            # attribute above is the shared instance's, and another call may write it before the
+            # caller reads it.
+            note_propose_receipt(cutoff[0])
 
     def _continuation_opts(self, session: ProposalSession):
         """The loop options a continuation of `session` runs under, or None when it may not run.

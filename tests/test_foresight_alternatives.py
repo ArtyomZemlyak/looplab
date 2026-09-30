@@ -1173,3 +1173,23 @@ def test_12_a_session_with_nothing_left_is_not_continued_and_is_left_untouched(m
     assert "Researcher·alternative" not in seen
     assert not any(_asks_for_alternative(req) for req in model.chats)
     assert after == before
+
+
+def test_the_panel_notes_the_chosen_candidate_s_receipt_last_into_the_caller_s_scope():
+    """doc 69 69.37: the engine reads a proposal's receipt from the scope its call opened, and the
+    panel's members note theirs there in the order they ran — so the panel notes the CHOSEN
+    candidate's receipt LAST, or the scope answered with whichever member ran last. MUTATION: drop
+    the note from `_chosen` -> "time" (the last member), not "" (the chosen one)."""
+    from looplab.agents.roles import (note_propose_receipt, propose_receipt_scope,
+                                      scoped_budget_exhausted)
+
+    model = _Model([], order=(1, 0))
+    panel = ForesightPanelResearcher(
+        UnifiedAgent(researcher=_OneShotResearcher(), developer=_Developer(model)),
+        k=2, client=model, alternatives=True)
+    with propose_receipt_scope() as box:
+        for member in ("turns", "", "time"):          # the members, noting as they ran
+            note_propose_receipt(member)
+        chosen = panel._chosen(["a", "b", "c"], 1, ["turns", "", "time"])
+    assert chosen == "b" and panel.last_propose_budget_exhausted == ""
+    assert scoped_budget_exhausted(box, panel) == ""
