@@ -71,13 +71,17 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // 2026-09-29 merge of master into the branch: measured 578,765 B JS / 56,311 B CSS — both sides' features, every closure still lazy.
     // 2026-09-29 campaign folders (doc 70 70.1): measured 580,162 B JS — a lazy CampaignRuns chunk
     // below the run list; the owner List closure grew 46 B (its lazy import), every gate still passes.
-    js: { gzip: 567 * KIB },
+    // 2026-09-30 merge of master (87cf8356) into the doc 69 branch: measured 580,772 B JS (+164 B
+    // over 567 KiB) — the withheld-evaluation readers (69.12b) and the Card held overlay beside
+    // master's Card-board copy; every closure and forbidden reachability proof still passes.
+    js: { gzip: 568 * KIB },
     css: { gzip: 55 * KIB },
   },
   individual: {
     js: { raw: 450 * KIB, gzip: 110 * KIB },
     // 2026-09-22: the one stylesheet (index CSS) measured 190,304 B raw / 35,933 B gzip (was 180/35).
-    css: { raw: 188 * KIB, gzip: 36 * KIB },
+    // 2026-09-30: index CSS measured 192,530 B raw (+18 B over 188 KiB) after the same merge.
+    css: { raw: 189 * KIB, gzip: 36 * KIB },
   },
   closures: [
     {
