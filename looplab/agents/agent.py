@@ -14,15 +14,16 @@ through this module holds. `run_phase` stays HERE (see the note above it).
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 from looplab.core import tracing
 from looplab.core.cards import idea_proposal_digest
 from looplab.core.containment import contain
 from looplab.core.evidence import fence_kwargs, fence_untrusted
 from looplab.core.llm import BudgetExceeded
-from looplab.core.llm_budget import thread_committed_tokens
+from looplab.core.llm_budget import thread_committed_tokens, thread_committed_usd_exact
 from looplab.core.models import Idea, IdeaEmission, Node, RunState
 from looplab.core.parse import ParseError, parse_structured
 from looplab.core.prompts import PromptStore, render
@@ -34,9 +35,9 @@ from looplab.agents.roles import (
     _attention_points, _clamp_fill,
     _hypothesis_system_suffix,
     _researcher_capability_suffix, _state_brief, bind_idea_to_board_card,
-    collect_hint_cues, next_board_prompt_cards,
-    researcher_fallback_rationale,
+    collect_hint_cues, next_board_prompt_cards, researcher_fallback_rationale,
     RESEARCHER_PROMPT_CUES)
+from looplab.agents.propose_receipts import note_propose_receipt
 # The tool-loop machinery was split into `agents.tool_loop`. The moved names below are RE-IMPORTED
 # here under their original names because callers and tests import AND monkeypatch them THROUGH this
 # module — `looplab.agents.agent.agentic_struct` / `.drive_tool_loop` are documented patch seams
@@ -53,7 +54,7 @@ from looplab.agents.roles import (
 # forwarding one by default hands a caller that ambiguity for nothing.
 from looplab.agents.tool_loop import (  # noqa: F401
     CompositeTools, LoopOptions, _cap_tool_result, _flatten_transcript, _force_emit, _handoff_ctx,
-    agentic_struct, agentic_text, drive_tool_loop, emit_loop, handoff_scope,
+    agentic_struct, agentic_text, bound_toolset, drive_tool_loop, emit_loop, handoff_scope,
     loop_opts_from_settings, phase_cancel_check, phase_cancel_scope, phase_cancelled,
     summarize_phase)
 from looplab.core.errors import LLMCancelled, PhaseCancelled
@@ -321,10 +322,17 @@ class ProposalSession:
     cutoff: str = ""
     tokens_at_start: Optional[int] = None
     thread: Optional[int] = None
+    # …and its dollars (exact, `core/llm_budget.py::thread_committed_usd_exact`) and its monotonic
+    # start, so the continuation's wall clock and money ceiling are the session's too (crit_v45 L3).
+    usd_at_start: Any = None
+    started_at: Optional[float] = None
     # The transcript AS IT STOOD when each candidate finished — `publish_brief` distills from it. The
     # live `messages` list is compacted IN PLACE by later turns (`_compact_in_place`), so an index into
     # it can name a prefix that already holds an alternative's reads (the critic, 2026-09-30).
     snapshots: list = field(default_factory=list, repr=False)
+    # The toolset VIEW candidate 1 ran with (`tool_loop.py::bound_toolset`, bound to its state), which
+    # a continuation keeps: the instance's own toolset is shared by every call (crit_v51 F4).
+    tools: Any = field(default=None, repr=False, compare=False)
 
     @property
     def continuable(self) -> bool:
@@ -590,8 +598,13 @@ class ToolUsingResearcher:
         # `session`: a per-CALL handle `propose_with_session` passes to get this call's transcript
         # back (the foresight panel's alternatives continue it). None — every other caller — changes
         # nothing about the call.
-        if hasattr(self.tools, "bind_state"):    # let run-aware tools see the current search
-            self.tools.bind_state(state, parent)
+        # A PER-CALL VIEW bound to this proposal's state (critic 2026-09-30, crit_v51 F4, driven):
+        # `bind_state` MUTATES a provider, and this instance is the shared primary — two proposals
+        # on two threads rebound ONE toolset, and one call's `run_goal` answered the other run's
+        # goal. `bound_toolset` is the view triage already uses. A view is new per call, so a
+        # provider's memo is per call too, unless it is shared on purpose: the knowledge index is
+        # (`tools/knowledge_tools.py::_SharedIndex`, crit_v53 N2, a rebuild per proposal otherwise).
+        tools = bound_toolset(self.tools, state, parent)
         from looplab.agents.hints import render_hint_directives
         hint_block = render_hint_directives(state.pending_hints)
         # A0d breadth-keyed complexity cue + Strategist `prefer_sweep` bias + T5 novelty-gate
@@ -611,7 +624,7 @@ class ToolUsingResearcher:
             state, getattr(self, "_hyp_order", None), attempt=prompt_attempt)
         # Whether this request offers `list_experiments`: the fitted digest's cut receipt names that
         # call only when it does (`events/digest.py::_fit_receipt`).
-        offers_run_tools = offers_tool(self.tools, "list_experiments")
+        offers_run_tools = offers_tool(tools, "list_experiments")
         messages = [
             {"role": "system",
              # Part V/P6/P8: the shared concept-mode contract, capability suffix (sweep offer — gated
@@ -632,16 +645,21 @@ class ToolUsingResearcher:
             {"role": "user", "content": _state_brief(state, parent,
                                                      digest_cap=getattr(self, "_digest_cap", 0),
                                                      hyp_order=getattr(self, "_hyp_order", None),
-                                                     board_cards=self._visible_board_cards,
+                                                     # THIS call's window (critic 2026-09-30,
+                                                     # crit_v51 F5): the attribute may already be
+                                                     # another call's, and the emit binds against
+                                                     # `visible`, so a card the prompt showed
+                                                     # could bind to nothing.
+                                                     board_cards=visible,
                                                      memo_verdicts=bool(getattr(
                                                          self, "_memo_verdict_cue", False)),
                                                      fit=bool(getattr(self, "_brief_fit", False)),
                                                      run_tools=offers_run_tools,
                                                      verdict_support=bool(getattr(
                                                          self, "_verdict_support", False)))
-                + answered_by_context(self.tools)
+                + answered_by_context(tools)
                 + _established_block(_researcher_workspace(getattr(self, "_established", None),
-                                                           self.tools))
+                                                           tools))
                 + hint_block + cue +
                 "\nDecide the next experiment — a parameter change OR a structural one (architecture, "
                 "loss, data, training) if that's the stronger move. Consult knowledge if useful, then emit."},
@@ -685,7 +703,10 @@ class ToolUsingResearcher:
             # What this thread had committed before the session's first loop: the base a
             # continuation's remaining token allowance is measured from (`propose_alternative`).
             session.tokens_at_start = thread_committed_tokens()
+            session.usd_at_start = thread_committed_usd_exact()
+            session.started_at = time.monotonic()
             session.thread = threading.get_ident()
+            session.tools = tools
         try:
             # Every loop OPTION (the turn/time/context budgets included) is folded into
             # self.loop_opts once in __init__ (see there) — pass the merged bundle straight through,
@@ -699,7 +720,7 @@ class ToolUsingResearcher:
             # alternatives, and the brief must describe the candidate it CHOOSES
             # (`ProposalSession.publish_brief`) — still one summary call.
             result = run_phase(
-                self.client, self.tools, messages, self._emit_spec(),
+                self.client, tools, messages, self._emit_spec(),
                 label="Researcher·propose",
                 next_label=next_label,
                 handoff=getattr(self, "handoff", True) and session is None,
@@ -724,9 +745,68 @@ class ToolUsingResearcher:
             # (parse_structured swallows LLMError -> draft Idea), so it can't re-raise the transport error.
             # Hand it the CAUSE, though: the degraded node is the only record that this happened, and a
             # rationale that just says "parse failed" is indistinguishable from a weak model's bad JSON.
-            if session is not None:     # a session that raised is never continued
-                session.hold(messages, visible, "error")
+            if session is not None:     # a session that raised is never continued — and a cutoff
+                # the loop announced before it raised is still this call's receipt (crit_v53 N5)
+                session.hold(messages, visible, "error", cutoff=cutoff[0])
             return self._fallback(messages, e)
+        finally:
+            # …and into the CALLER's scope, which is what the engine reads (doc 69 69.37): the
+            # attribute above is the shared instance's, and another call may write it before the
+            # caller reads it.
+            note_propose_receipt(cutoff[0])
+
+    def _continuation_opts(self, session: ProposalSession):
+        """The loop options a continuation of `session` runs under, or None when it may not run.
+
+        Every bound here is the SESSION'S, measured from where candidate 1 began: the continuation
+        is more of the same session, not a new one."""
+        # The cap may only LOWER the operator's own turn limit: `agent_max_turns` 3 means an
+        # alternative gets 3, never 8. 0 / unset is "unlimited", which the cap then bounds.
+        configured = getattr(getattr(self, "loop_opts", None), "max_turns", None)
+        cap = (min(int(configured), ALTERNATIVE_MAX_TURNS) if configured and int(configured) > 0
+               else ALTERNATIVE_MAX_TURNS)
+        opts = self.loop_opts.replace(max_turns=cap)
+        # THE SESSION'S TOKEN CEILING, NOT A FRESH ONE (the critic, 2026-09-30). The continuation
+        # re-sends the whole transcript, and `agent_token_budget` bounds a SESSION: it runs on what is
+        # left, measured on the thread that ran candidate 1 (`core/llm_budget.py`); with nothing left,
+        # or on another thread where that cannot be measured, there is no continuation. (Its first
+        # request re-sends the transcript whatever is left, so a session can pass the ceiling by
+        # that one request before the loop's own check stops it.)
+        budget = int(getattr(self.loop_opts, "token_budget", 0) or 0)
+        if budget > 0:
+            if session.thread != threading.get_ident() or session.tokens_at_start is None:
+                return None
+            left = budget - (thread_committed_tokens() - session.tokens_at_start)
+            if left <= 0:
+                return None
+            opts = opts.replace(token_budget=left)
+        # …AND ITS WALL CLOCK AND MONEY CEILING, for the same reason (critic 2026-09-30, crit_v45
+        # L3): a continuation was handed the whole `agent_time_budget_s` and a fresh money ceiling
+        # after candidate 1 had spent most of both, so one session could take twice its bound.
+        wall = float(getattr(self.loop_opts, "time_budget_s", 0) or 0)
+        if wall > 0:
+            if session.started_at is None:
+                return None
+            left_s = wall - (time.monotonic() - session.started_at)
+            if left_s <= 0:
+                return None
+            opts = opts.replace(time_budget_s=left_s)
+        money = float(getattr(self.loop_opts, "cost_budget_usd", 0) or 0)
+        if money > 0:
+            if session.thread != threading.get_ident() or session.usd_at_start is None:
+                return None
+            try:
+                spent_usd = float(thread_committed_usd_exact() - session.usd_at_start)
+            except OverflowError:
+                # Past the float range the session has spent more than any ceiling can name: no
+                # continuation, never an OverflowError that loses the paid candidate 1 with it
+                # (crit_v57 L2, driven through the panel; `tool_loop.py::_session_spend` reads `inf`).
+                return None
+            left_usd = money - spent_usd
+            if left_usd <= 0:
+                return None
+            opts = opts.replace(cost_budget_usd=left_usd)
+        return opts
 
     def propose_with_session(self, state: RunState,
                              parent: Optional[Node]) -> tuple[Idea, ProposalSession]:
@@ -756,8 +836,14 @@ class ToolUsingResearcher:
         ceiling and a cancelled phase PROPAGATE: neither is a failure to degrade around."""
         if not isinstance(session, ProposalSession) or not session.continuable:
             return None
-        if hasattr(self.tools, "bind_state"):    # same binding `propose` made for this proposal
-            self.tools.bind_state(state, parent)
+        # The session's ceilings, decided BEFORE anything is touched: a refused continuation leaves
+        # the transcript and the receipt as candidate 1 left them (critic 2026-09-30, crit_v45 NIT).
+        opts = self._continuation_opts(session)
+        if opts is None:
+            return None
+        # The binding `propose` made for this proposal: candidate 1's own view (crit_v51 F4).
+        tools = (session.tools if session.tools is not None
+                 else bound_toolset(self.tools, state, parent))
         # Reset per call and announced exactly as `propose` does (`RESEARCHER_OUTPUT_ATTRS`): with
         # a turn cap, "cut short" is a real possibility, and the panel publishes the receipt of the
         # candidate it CHOOSES, not of whichever call ran last. The session holds THIS call's own
@@ -804,27 +890,9 @@ class ToolUsingResearcher:
                         "alternative must test a DIFFERENT mechanism, not repeat one")
             return None
 
-        # The cap may only LOWER the operator's own turn limit: `agent_max_turns` 3 means an
-        # alternative gets 3, never 8. 0 / unset is "unlimited", which the cap then bounds.
-        configured = getattr(getattr(self, "loop_opts", None), "max_turns", None)
-        cap = (min(int(configured), ALTERNATIVE_MAX_TURNS) if configured and int(configured) > 0
-               else ALTERNATIVE_MAX_TURNS)
-        opts = self.loop_opts.replace(max_turns=cap)
-        # THE SESSION'S TOKEN CEILING, NOT A FRESH ONE (the critic, 2026-09-30). The continuation
-        # re-sends the whole transcript, and `agent_token_budget` bounds a SESSION: it runs on what is
-        # left, measured on the thread that ran candidate 1 (`core/llm_budget.py`); with nothing left,
-        # or on another thread where that cannot be measured, there is no continuation.
-        budget = int(getattr(self.loop_opts, "token_budget", 0) or 0)
-        if budget > 0:
-            if session.thread != threading.get_ident() or session.tokens_at_start is None:
-                return None
-            left = budget - (thread_committed_tokens() - session.tokens_at_start)
-            if left <= 0:
-                return None
-            opts = opts.replace(token_budget=left)
         try:
             result = run_phase(
-                self.client, self.tools, messages, emit_spec,
+                self.client, tools, messages, emit_spec,
                 label="Researcher·alternative", handoff=False, inject_notes=False,
                 finalize=_finalize_alternative, fallback=_no_alternative,
                 validate=_validate_alternative, on_budget=_note_cutoff,

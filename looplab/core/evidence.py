@@ -65,8 +65,10 @@ evidence is.
 """
 from __future__ import annotations
 
+import bisect
 import functools
 import re
+from array import array
 import sys
 import unicodedata
 from typing import NamedTuple
@@ -208,8 +210,12 @@ def is_fenced(text: str, label: str) -> bool:
 
 
 def neutralize_markers(text: str, label: str) -> str:
-    """`text` with every spelling of `label`'s two fence markers folded inert — and nothing else, so
-    a text holding no marker comes back byte for byte.
+    """`text` with every spelling of `label`'s two fence markers the matcher reads folded inert — and
+    nothing else, so a text holding no marker comes back byte for byte. What it reads is
+    `_sub_through_format_chars`'s VIEW; what it does not is stated there and beside `_CONFUSABLE`: a
+    look-alike from a script outside that table, an ASCII look-alike (`l`, `1` or `|` for the `I`),
+    and a visible separator inside a word (a space of any kind, the Ogham space mark U+1680), which
+    splits the word for the matcher as it does for a reader.
 
     For a message that is evidence FROM ITS LABEL TO ITS END, where no marker inside it can be true:
     the Boss's (`serve/llm_context.py::boss_prompt_parts`). Its label is a bare prefix, so a block
@@ -322,40 +328,296 @@ def _neutralize_fences(text: str, label: str) -> str:
     return _sub_through_format_chars(_fence_pattern(label), text, _mark)
 
 
+# Default_Ignorable_Code_Point OUTSIDE category Cf (Unicode's DerivedCoreProperties): they render as
+# nothing too — the combining grapheme joiner, the Khmer inherent vowels, the Mongolian free variation
+# selectors, the variation selectors — plus the unassigned code points the standard reserves as
+# default-ignorable (critic 2026-09-30, crit_v46 L4, driven: U+034F, U+FE0F, U+E0100 and U+180B
+# each kept a forged marker live). The Hangul fillers (U+115F, U+1160, U+3164, U+FFA0) are in the
+# set: they are not whitespace to `re` and render as a blank, so inside a word they kept a close
+# live (crit_v54 F3, driven: `END UNTRUS<filler>TED_RUN_EVIDENCE`); as the gap between the close's
+# two words they drop out of the view and the label-only pass folds what is left.
+_DEFAULT_IGNORABLE_NOT_CF = ((0x034F, 0x034F), (0x115F, 0x1160), (0x17B4, 0x17B5),
+                             (0x180B, 0x180D), (0x180F, 0x180F), (0x2065, 0x2065),
+                             (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFFA0, 0xFFA0),
+                             (0xFFF0, 0xFFF8), (0xE0000, 0xE0000), (0xE0002, 0xE001F),
+                             (0xE0080, 0xE0FFF))
+
+# Two SYMBOLS that render as a blank glyph and are neither format characters nor whitespace to `re`:
+# the braille blank (U+2800) and the musical null notehead (U+1D159). Inside a word they kept a close
+# live exactly as the Hangul fillers did (crit_v56 F6, driven); the view drops them the same way.
+_BLANK_GLYPHS = ((0x2800, 0x2800), (0x1D159, 0x1D159))
+
+# A combining mark (category Mn or Me) renders ON the letter before it, never as a letter of its own:
+# a model reads `E` + U+0336 (a strike through it) or `E` + U+0301 as the `E`, and an accented
+# letter (`É`) as its base. The view reads each as its base letter — the marks dropped, a
+# precomposed letter decomposed (NFKD) before they go (crit_v56 F6, driven: U+0336 inside a word
+# kept a close live).
+_MARKS = frozenset({"Mn", "Me"})
+
+# The TAG characters that spell printable ASCII (U+E0020–E007E): format characters, so the view
+# dropped them, and a close spelled ENTIRELY in them vanished from the view and survived byte for
+# byte — the "ASCII smuggling" encoding a model has been shown to read (crit_v54 F4, driven). In the
+# view each one reads as the ASCII character it encodes.
+_TAG_ASCII = (0xE0020, 0xE007E)
+
+# Look-alikes of the Latin letters: Cyrillic and Greek letters drawn like a Latin one, the Latin small
+# capitals, the dotless i and j (crit_v54 F4, driven: a close in Greek, Cyrillic or small-capital
+# letters read as live), the eth and the African D, drawn as a `D` with a stroke (crit_v58 N1). Each
+# reads as its Latin twin in the view — asked BEFORE NFKC, which moves the lunate sigmas `Ϲ`/`ϲ` to
+# `Σ`/`ς` and so made their rows dead (crit_v56 F1, driven); the matcher is case-insensitive, so either
+# case serves. The palochka reads as the `I` it stands in for in the one label in use, and the izhitsa
+# as its `V` (crit_v56 F1), the open e of Greek (`ε`, `ϵ`) and Cyrillic (`є`, `Є`, and the reversed
+# ze `ԑ`, `Ԑ` drawn exactly as `ε`, crit_v63 N2) and the Abkhasian che (`ҽ`, `Ҽ`) as the `e` the
+# Latin open e reads as, the r rotunda as `r` (crit_v62 N2), and the small Cyrillic letters drawn as
+# a Latin small capital (`т`, `н`, `к`, `м`, `в`) as the capital the small capital reads as (crit_v64
+# F1, driven: `END UNтRUSтED_RUN_EVIDENCE` read as live while its `ᴛ` spelling was folded). A Latin
+# letter its Unicode NAME spells with a mark is not a row here but a rule (`_latin_variants`), and
+# so is a Cyrillic one whose base is a row (`_cyrillic_variants`). LIMITS, stated rather than hidden: a look-alike from any other script
+# (Cherokee, Armenian, Coptic, …) is not folded — the fold covers the scripts a model most readily
+# reads as Latin, and the fence's markers are one defence among several — nor a turned, reversed or
+# inverted letter, nor a parenthesized one (NFKC keeps its parentheses), and neither is an ASCII one:
+# ASCII is its own view (`_fold_char`), so `l`, `1` or `|` standing for the label's `I` keeps a close
+# live to the matcher. Folding those would rewrite the view of every honest ASCII text for a letter
+# the label spells once (crit_v58 N1).
+_CONFUSABLE = dict(zip(
+    "АВЕКМНОРСТХУЅІЈԀԚԜҮҺӀѴаеорсухѕіјһԁԛԝүӏѵєЄԑԐҽҼтнкмв"  # Cyrillic
+    "ΑΒΕΖΗΙΚΜΝΟΡΤΥΧϹͿονικαυϲϳεϵ"                       # Greek
+    "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘʀꜱᴛᴜᴠᴡʏᴢıȷ"                       # small capitals, dotless i and j
+    "ÐðƉᴆꝛꝚ",                                           # the eths, the African D, r rotunda
+    "ABEKMHOPCTXYSIJDQWYHIVaeopcyxsijhdqwyIveEeEeETHKMB"
+    "ABEZHIKMNOPTYXCJovikaucjee"
+    "ABCDEFGHIJKLMNOPRSTUVWYZij"
+    "DdDDrR"))
+
+# THE LATIN LETTERS A NAME SPELLS WITH A MARK (crit_v58 N1, driven: `ENĐ UNŦRUSŦEĐ_RUN_ɆVƗĐENCE` read
+# as live). A letter with a stroke, a bar, a hook, a tail or a curl has no decomposition, so NFKD kept
+# it; Unicode names it `LATIN <CAPITAL|SMALL> LETTER <X> WITH <mark>` (or `… <X> BAR`), and the view
+# reads it as that X. A SHAPED letter puts its shape BEFORE the letter instead — `… LETTER BARRED E`,
+# `… BLACKLETTER E`, `… INSULAR D`, `… SCRIPT R`, `… OPEN E`, `… DOTLESS J` — with a mark or without
+# (crit_v61 L4, driven: a close in those letters read as live). A SMALL CAPITAL is drawn as its
+# capital, and Unicode spells it three ways — `LATIN LETTER SMALL CAPITAL <X>`, `LATIN SMALL CAPITAL
+# LETTER <X>`, `LATIN CAPITAL LETTER SMALL CAPITAL <X>` (crit_v59 F3); so is an ENCLOSED letter that
+# has no decomposition — `NEGATIVE CIRCLED|SQUARED LATIN CAPITAL LETTER <X>`, `REGIONAL INDICATOR
+# SYMBOL LETTER <X>` (crit_v61 L4); each reads as that capital. A name that adds a second LETTER
+# (`… D WITH SMALL LETTER Z`, a digraph) names no mark and is left to NFKD, which spells both; a
+# turned, reversed or inverted shape is not drawn as its letter and is not read as one. Derived from
+# the names of the blocks below — the Latin ones and the enclosed-letter supplement (1,904 code
+# points) — once, on first use.
+_LATIN_BLOCKS = ((0x0080, 0x02AF), (0x1D00, 0x1DBF), (0x1E00, 0x1EFF), (0x2C60, 0x2C7F),
+                 (0xA720, 0xA7FF), (0xAB30, 0xAB6F), (0x10780, 0x107BF), (0x1DF00, 0x1DFFF),
+                 (0x1F100, 0x1F1FF))
+_SHAPE = r"(?:(?:DOTLESS|BARRED|BLACKLETTER|INSULAR|SCRIPT|OPEN) )"
+_MARK = r"(?: WITH (?!SMALL LETTER|CAPITAL LETTER).+| BAR)"
+_LATIN_WITH_A_MARK = re.compile(
+    r"LATIN (?P<case>CAPITAL|SMALL) LETTER (?:(?P<plain>[A-Z])" + _MARK
+    + r"|" + _SHAPE + r"(?P<shaped>[A-Z])" + _MARK + r"?)"
+    r"|LATIN (?:LETTER SMALL CAPITAL|SMALL CAPITAL LETTER|CAPITAL LETTER SMALL CAPITAL) "
+    + _SHAPE + r"?(?P<smallcap>[A-Z])" + _MARK + r"?"
+    r"|(?:NEGATIVE (?:CIRCLED|SQUARED) LATIN CAPITAL LETTER|REGIONAL INDICATOR SYMBOL LETTER) "
+    r"(?P<enclosed>[A-Z])")
+
+
+@functools.lru_cache(maxsize=1)
+def _latin_variants() -> dict:
+    """Every letter of the Latin blocks its NAME spells as a base letter with a mark, to that letter
+    in its case (see `_LATIN_WITH_A_MARK`)."""
+    table = {}
+    for low, high in _LATIN_BLOCKS:
+        for cp in range(low, high + 1):
+            named = _LATIN_WITH_A_MARK.fullmatch(unicodedata.name(chr(cp), ""))
+            if named is None:
+                continue
+            capital = named["smallcap"] or named["enclosed"]
+            if capital:
+                table[chr(cp)] = capital       # a small capital or an enclosed letter: its capital
+            else:
+                letter = named["plain"] or named["shaped"]
+                table[chr(cp)] = letter if named["case"] == "CAPITAL" else letter.lower()
+    return table
+
+
+# THE CYRILLIC LETTERS A NAME SPELLS AS A ROW WITH A MARK (crit_v64 F1, driven: `END
+# UNTRUSTED_RUN_EVIDENҪE` and `ҾND …` read as live). A Cyrillic letter with a descender, a hook, a tail
+# or a stroke has no decomposition either; Unicode names it `CYRILLIC <CAPITAL|SMALL> LETTER <X> WITH
+# <mark>`, and a WIDE, TALL or NARROW one `… LETTER <shape> <X>`. When `CYRILLIC <case> LETTER <X>` is
+# a row of `_CONFUSABLE`, the view reads the letter as that row's twin. A shape that is not drawn as
+# its base (`THREE-LEGGED TE`, `LONG-LEGGED DE`, `ROUNDED VE`) is not read as it. Derived from the
+# names of the Cyrillic blocks below (the Supplement and Extended-B and -C included) once, on first use.
+_CYRILLIC_BLOCKS = ((0x0400, 0x052F), (0x1C80, 0x1C8F), (0xA640, 0xA69F))
+_CYRILLIC_WITH_A_MARK = re.compile(
+    r"CYRILLIC (?P<case>CAPITAL|SMALL) LETTER (?:(?:WIDE|TALL|NARROW) (?P<shaped>[A-Z -]+)"
+    r"|(?P<marked>[A-Z -]+?) WITH .+)")
+
+
+@functools.lru_cache(maxsize=1)
+def _cyrillic_variants() -> dict:
+    """Every letter of the Cyrillic blocks its NAME spells as a `_CONFUSABLE` row with a mark or a
+    shape, to that row's twin (see `_CYRILLIC_WITH_A_MARK`)."""
+    table = {}
+    for low, high in _CYRILLIC_BLOCKS:
+        for cp in range(low, high + 1):
+            named = _CYRILLIC_WITH_A_MARK.fullmatch(unicodedata.name(chr(cp), ""))
+            if named is None:
+                continue
+            try:
+                base = unicodedata.lookup(
+                    f"CYRILLIC {named['case']} LETTER {named['shaped'] or named['marked']}")
+            except KeyError:
+                continue
+            twin = _CONFUSABLE.get(base)
+            if twin is not None:
+                table[chr(cp)] = twin
+    return table
+
+
+def _twin(ch: str):
+    """The Latin letter `ch` is drawn as — a look-alike's twin, or the base of a letter with a mark —
+    else None."""
+    return _CONFUSABLE.get(ch) or _latin_variants().get(ch) or _cyrillic_variants().get(ch)
+
+
 @functools.lru_cache(maxsize=1)
 def _format_chars() -> dict:
-    """Every Unicode FORMAT character (category Cf) this Python knows, as a `str.translate` table
-    that deletes them. Built on first use, because the scan costs ~0.2 s — and only a NON-ASCII text
-    ever asks for it (every Cf character is outside ASCII), so an ASCII log never pays it."""
-    return {cp: None for cp in range(sys.maxunicode + 1)
-            if unicodedata.category(chr(cp)) == "Cf"}
+    """Every Unicode FORMAT character (category Cf) this Python knows, every other default-ignorable
+    one (`_DEFAULT_IGNORABLE_NOT_CF`) and the blank glyphs (`_BLANK_GLYPHS`), as a `str.translate`
+    table that deletes them. Built on first use, because the scan costs ~0.2 s — and only a NON-ASCII text ever asks for
+    it (every such character is outside ASCII), so an ASCII log never pays it."""
+    table = {cp: None for cp in range(sys.maxunicode + 1)
+             if unicodedata.category(chr(cp)) == "Cf"}
+    for low, high in _DEFAULT_IGNORABLE_NOT_CF + _BLANK_GLYPHS:
+        table.update((cp, None) for cp in range(low, high + 1))
+    return table
+
+
+def _fold_char(cp: int):
+    """What the character `cp` reads as in the matcher's VIEW: None (it renders as nothing, or only as
+    a mark on the letter before it), the ASCII character a TAG character encodes, its Latin twin when
+    it is a look-alike or a Latin letter with a mark (`_twin`), or else its NFKC compatibility form
+    with its diacritics dropped (`_MARKS`) and every such letter in it read as its twin."""
+    if cp < 0x80:
+        return cp                         # ASCII is its own view
+    if _TAG_ASCII[0] <= cp <= _TAG_ASCII[1]:
+        return chr(cp - 0xE0000)
+    ignorable = _format_chars()
+    if cp in ignorable:
+        return None
+    ch = chr(cp)
+    twin = _twin(ch)
+    if twin is not None:
+        return twin                       # before NFKC, which moves `Ϲ` to `Σ` (crit_v56 F1)
+    # A lone combining mark decomposes to itself and is dropped here, so it reads as nothing.
+    bare = "".join(c for c in unicodedata.normalize("NFKD", ch)
+                   if unicodedata.category(c) not in _MARKS and ord(c) not in ignorable)
+    folded = "".join(_twin(c) or c for c in unicodedata.normalize("NFKC", bare)
+                     if ord(c) not in ignorable)
+    return folded if folded != ch else cp
+
+
+# The most distinct characters either memo below keeps: a text past it restarts the memo rather than
+# hold every code point it ever saw (crit_v56 F5, driven: all 1,112,064 of them retained 77.8 MB).
+# 65,536 entries is ~5 MB; a text with more distinct characters than that folds them again.
+_FOLD_MEMO_CAP = 1 << 16
+
+
+class _ViewFold(dict):
+    """`str.translate` table of the VIEW, filled one character at a time on first sight: a text is
+    folded at C speed and each distinct character is folded once per process (crit_v54 F5: the view
+    re-derived NFKC for EVERY character — 5-12x slower than before it, 15-25x the memory, on text
+    that held one NBSP or `µs`) — at most `_FOLD_MEMO_CAP` of them at a time."""
+
+    def __missing__(self, cp: int):
+        if len(self) >= _FOLD_MEMO_CAP:
+            self.clear()
+        self[cp] = folded = _fold_char(cp)
+        return folded
+
+
+_VIEW_FOLD = _ViewFold()
+
+
+def _width(folded) -> int:
+    """How many view characters one `_VIEW_FOLD` entry stands for."""
+    return 1 if type(folded) is int else len(folded) if folded else 0
+
+
+class _ShiftMark(dict):
+    """`str.translate` table that marks each character whose view fold is NOT one character wide
+    (U+0001, every other one U+0000): where the view's offsets shift, found by scanning for one literal.
+    The scan it replaced was a character class of every such character in the text, and the regex
+    engine checks non-BMP members of a class one by one: 3,968 distinct ignorables made a 1M-character
+    match 12.6-14.3 s against 0.7 s before (crit_v56 F4, driven). Memoized like `_ViewFold`."""
+
+    def __missing__(self, cp: int):
+        if len(self) >= _FOLD_MEMO_CAP:
+            self.clear()
+        self[cp] = mark = "\x00" if cp < 0x80 or _width(_VIEW_FOLD[cp]) == 1 else "\x01"
+        return mark
+
+
+_SHIFT_MARK = _ShiftMark()
 
 
 def _sub_through_format_chars(pattern: "re.Pattern", text: str, mark) -> str:
-    """`pattern.sub(mark, text)`, matched as if every FORMAT character (Cf) were absent.
+    """`pattern.sub(mark, text)`, matched on the text as a model READS it — the VIEW.
 
     Review 2026-09-22, CORE-15. The marker matcher is tolerant because the reader is a language
     model, and a model reads straight THROUGH a zero-width space, a word joiner, a soft hyphen, a
-    BOM or a bidi mark — they render as nothing. So `END UNTRUSTED_RUN\\u200bEVIDENCE` reads as the
+    BOM or a bidi mark — they render as nothing. So `END UNTRUSTED_RUN_\\u200bEVIDENCE` reads as the
     real close, and it survived here because the regex saw the U+200B: everything after it spoke as
-    the loop. Matching on a Cf-stripped VIEW closes that without rewriting honest text: only the
-    matched span of the original is replaced (its invisible characters go with the forged marker
-    they were hiding in), and every byte outside a match — an emoji's ZWJ, a BOM in real output — is
-    kept exactly, so a text holding no forged marker is fenced byte for byte as before. A text with
-    no Cf character at all takes `pattern.sub` itself.
+    the loop. The VIEW is the text with every character folded by `_fold_char`: ignorables dropped,
+    TAG characters read as the ASCII they encode, a Latin look-alike as its twin, a combining mark
+    dropped and everything else in its NFKC form without its diacritics. Only the matched span of the original is replaced (its invisible
+    characters go with the forged marker they were hiding in), and every character outside a match
+    — an emoji's ZWJ, a BOM in real output, a fullwidth digit — is kept exactly, so a text holding no
+    forged marker comes back byte for byte. An ASCII text is its own view; any other text is folded
+    once at C speed (`_ViewFold`), and only a text the pattern matches pays the per-character map
+    back to the original.
+
+    A match that starts or ends INSIDE one character's multi-character NFKC form (`㉐`, `PTE`)
+    replaces that whole character: the forged marker's neighbour loses the rest of its expansion.
+    Only a forgery can do that, and what it loses is inert.
     """
     if text.isascii():
         return pattern.sub(mark, text)
-    table = _format_chars()
-    if len(text.translate(table)) == len(text):
+    view = text.translate(_VIEW_FOLD)
+    if view == text:
         return pattern.sub(mark, text)
-    keep = [i for i, ch in enumerate(text) if ord(ch) not in table]
-    view = "".join(text[i] for i in keep)
+    if pattern.search(view) is None:
+        return text
+    # Map the view back to the text. A character whose fold is ONE character — itself, or its twin —
+    # sits at the same offset in both, so only the characters that fold to nothing or to several
+    # shift what follows: one breakpoint each, where its fold starts in the view, its index in the
+    # text and the fold's width. A position between breakpoints maps back by its offset from the
+    # last one. Found by one literal over the marked copy (`_ShiftMark`), kept in machine-integer
+    # arrays (crit_v56 F4: Python int lists raised the match path's peak by ~70 %).
+    marks = text.translate(_SHIFT_MARK)
+    at_view, at_text, widths = array("q"), array("q"), array("q")
+    shift, index = 0, marks.find("\x01")
+    while index != -1:
+        width = _width(_VIEW_FOLD[ord(text[index])])
+        at_view.append(index + shift)
+        at_text.append(index)
+        widths.append(width)
+        shift += width - 1
+        index = marks.find("\x01", index + 1)
+
+    def _owner(position: int) -> int:
+        k = bisect.bisect_right(at_view, position) - 1
+        if k < 0:
+            return position
+        if position < at_view[k] + widths[k]:
+            return at_text[k]
+        return at_text[k] + 1 + (position - at_view[k] - widths[k])
+
     out, cursor = [], 0
     for match in pattern.finditer(view):
         if match.end() == match.start():
             continue                      # a label is never empty; a zero-width match folds nothing
-        start, end = keep[match.start()], keep[match.end() - 1] + 1
+        start, end = _owner(match.start()), _owner(match.end() - 1) + 1
+        if start < cursor:
+            # Defensive: two matches inside ONE character's fold. No NFKC form is long enough to
+            # hold two markers of the one label in use, so this is unreachable today.
+            continue
         out.append(text[cursor:start])
         out.append(mark(match))
         cursor = end

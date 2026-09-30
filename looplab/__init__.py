@@ -50,6 +50,7 @@ _LAYOUT = {
     "state_brief": "agents",    # the board prompt window + `_state_brief`: what a proposal role SEES
     "role_wrappers": "agents",  # WrapsResearcher/WrapsDeveloper/bind_state_on + ValidatingDeveloper
     "toy_roles": "agents",      # the offline ToyResearcher/ToyObjectiveDeveloper backends
+    "propose_receipts": "agents",  # the propose receipt scope, by call (doc 69 69.37)
     "developer_backends": "agents",  # the three developer-backend wirings `make_roles` composes (RA-01)
     "perception": "adapters",  # bounded on-disk data perception shared by dataset_task + repo_task
     "task_schema": "adapters",  # the composable/legacy task-schema front-end `normalize_task`,

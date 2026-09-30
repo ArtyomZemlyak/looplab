@@ -582,8 +582,23 @@ def _carries_settle(e, node_id: int, generation: int) -> bool:
                 and event_generation_binds(d, generation, legacy_attempt=True))
     if e.type == EV_EVAL_ATTEMPT_WITHHELD and d.get("at") != "decide_repair":
         return False
+    # A salvage-cause fix's row carries NO seconds — the salvaged attempt's are its terminal's — so
+    # it cannot close the window it would otherwise end (critic 2026-09-30, crit_v46 L1 C, driven:
+    # a 4,560 s settle, that row, a death and a reset charged nothing).
+    if (e.type == EV_NODE_REPAIRED
+            and str(d.get("triage_action") or "") == SALVAGE_CAUSE_TRIAGE_ACTION):
+        return False
     return (e.type in (EV_NODE_REPAIRED, EV_DEPS_INSTALLED, EV_EVAL_ATTEMPT_WITHHELD)
             and _durable_row_belongs(d, node_id, generation))
+
+
+def _positive_seconds(raw) -> float:
+    """A row's `eval_seconds` as a finite non-negative float — 0.0 for junk, a bool, NaN or inf."""
+    try:
+        seconds = 0.0 if isinstance(raw, bool) else float(raw or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return seconds if math.isfinite(seconds) and seconds > 0 else 0.0
 
 
 def _durable_orphan_settle_seconds(events, node_id: int, generation: int) -> float:
@@ -596,35 +611,70 @@ def _durable_orphan_settle_seconds(events, node_id: int, generation: int) -> flo
     read: a reset then refunded them (driven: a 26,830 s `ok` settle, a reset, and
     `abandoned_lifecycle_charges` answered []), and a resumed chain re-ran the attempt and charged
     only its own run. A settle is an ORPHAN when no carrying row follows it before the lifecycle's
-    next settle, or at all — read in log order, because the carrying rows name no invocation. A
-    carrying row that ends a window without the settle's seconds (a salvage-cause repair row carries
-    none) under-charges, which is the safe direction. The `ok` settle `_eval_recover_settled`
-    finalizes from is always an orphan here, so that phase prices its terminal off this sum and adds
-    nothing for the settle itself."""
+    next settle, or at all — read in log order, because the carrying rows name no invocation. A row
+    that carries none of the settle's seconds ends no window (`_carries_settle`: a salvage-cause
+    repair row). An eval CANARY is a window too: the settle of the attempt that ran it carries it,
+    and one nothing carries — its process died before claiming, or mid-eval with the resume skipping
+    the passed canary by code digest — is an orphan; whose canary is open at a claim is on the claim
+    (`canary_ran`). The `ok` settle `_eval_recover_settled` finalizes from is always an orphan here,
+    so that phase prices its terminal off this sum and adds nothing for the settle itself."""
     spent = 0.0
-    open_seconds = None
+    # The seconds of this lifecycle's latest step that no row has carried yet, and whether that step
+    # was a SETTLE or a CANARY (crit_v46 L1): a canary runs inside the attempt's clock (`_t0`), so the
+    # settle that follows it carries it, and a canary nothing followed is an orphan like a settle.
+    open_seconds, open_kind = None, None
     for e in events or []:
         d = e.data if isinstance(e.data, Mapping) else {}
-        if e.type == EV_EVAL_INVOCATION_SETTLED:
+        if e.type in (EV_EVAL_INVOCATION_SETTLED, EV_EVAL_CANARY_STARTED, EV_EVAL_CANARY_FINISHED,
+                      EV_EVAL_INVOCATION_CLAIMED):
             if not _durable_row_belongs(d, node_id, generation):
                 continue
-            if open_seconds is not None:
-                spent += open_seconds
-            raw = d.get("eval_seconds")
-            try:
-                seconds = 0.0 if isinstance(raw, bool) else float(raw or 0.0)
-            except (TypeError, ValueError):
-                seconds = 0.0
-            open_seconds = seconds if math.isfinite(seconds) and seconds > 0 else 0.0
-        elif open_seconds is not None and _carries_settle(e, node_id, generation):
-            open_seconds = None
+            if e.type == EV_EVAL_INVOCATION_CLAIMED:
+                # WHOSE canary is open at a claim is on the claim (`canary_ran`, crit_v57 M1/L1).
+                # THIS attempt's own: its settle is measured from `_t0` and carries it, so the window
+                # stays open. None of its own: the open canary is an earlier process's, inside no
+                # clock of this one (the resume skips a passed canary by code digest), and nothing
+                # else will carry it. A claim written before the key falls back to its
+                # interrupted-repeat flag, which misreads both ways — a resumed process's own
+                # re-run canary charged twice, a canary whose process died before claiming refunded
+                # — and is why the key exists.
+                own = d.get("canary_ran")
+                if open_kind == "canary" and (own is False or (
+                        not isinstance(own, bool) and d.get("after_interrupted_attempt") is True)):
+                    spent += open_seconds
+                    open_seconds, open_kind = None, None
+            elif e.type == EV_EVAL_INVOCATION_SETTLED:
+                if open_kind == "settle":
+                    spent += open_seconds
+                open_seconds, open_kind = _positive_seconds(d.get("eval_seconds")), "settle"
+            elif e.type == EV_EVAL_CANARY_STARTED:
+                # A NEW ATTEMPT begins (a retry of the same canary does not): whatever the last one
+                # left uncarried never will be. A failed canary claims no invocation, so without this
+                # its carrying row closed an OLDER orphan settle's window (crit_v46 L1 A, driven: a
+                # 100 s orphan, a failed 2 s canary withheld, a reset — 2 s charged).
+                if not d.get("retry") and open_seconds is not None:
+                    spent += open_seconds
+                    open_seconds, open_kind = None, None
+            else:
+                # Held OPEN until a row carries it — its attempt's settle, an `after_canary` or
+                # `decide_repair` withhold, a repair row, the terminal. A passed canary whose full
+                # eval a dead process never settled was charged nowhere: the resume skips it by code
+                # digest (crit_v46 L1 B, driven: 900 s, a death mid-eval, a reset — nothing).
+                seconds = _positive_seconds(d.get("eval_seconds"))
+                open_seconds = (open_seconds or 0.0) + seconds if open_kind == "canary" else seconds
+                open_kind = "canary"
+        elif open_seconds is not None and (
+                _carries_settle(e, node_id, generation)
+                or (open_kind == "canary" and e.type == EV_EVAL_ATTEMPT_WITHHELD
+                    and d.get("at") == "after_canary" and _durable_row_belongs(d, node_id, generation))):
+            open_seconds, open_kind = None, None
     return spent + (open_seconds or 0.0)
 
 
 def _durable_prior_seconds(events, node_id: int, generation: int) -> float:
     """The eval seconds this lifecycle already spent that NO terminal carries yet: its repair
-    attempts, its dependency rounds, its withheld attempts and the settled invocations whose next
-    row a dead process never wrote, each off its own durable rows — the ONE sum every terminal of
+    attempts, its dependency rounds, its withheld attempts and the settled invocations and eval
+    canaries whose next row a dead process never wrote, each off its own durable rows — the ONE sum every terminal of
     the lifecycle charges (SEED_LEDGERS seeds `prior_repair_seconds` with it for the terminal the
     attempt loop writes).
 
@@ -662,7 +712,8 @@ def abandoned_lifecycle_charges(events, state) -> list:
     (`attempt` is the terminals' legacy generation alias), and an UNSTAMPED legacy terminal binds
     every generation, so it can only suppress a charge, never add a second one. A spend row names
     its lifecycle by an explicit stamp or not at all; a settle row is one, for the invocation a dead
-    process settled and never carried (`_durable_orphan_settle_seconds`)."""
+    process settled and never carried, and so is a canary's finished row, for a canary nothing
+    carried (`_durable_orphan_settle_seconds`)."""
     terminals: dict = {}
     spent: set = set()
     for e in events or []:
@@ -673,7 +724,7 @@ def abandoned_lifecycle_charges(events, state) -> list:
         if e.type in (EV_NODE_EVALUATED, EV_NODE_FAILED):
             terminals.setdefault(node_id, []).append(d)
         elif e.type in (EV_NODE_REPAIRED, EV_DEPS_INSTALLED, EV_EVAL_ATTEMPT_WITHHELD,
-                        EV_EVAL_INVOCATION_SETTLED):
+                        EV_EVAL_INVOCATION_SETTLED, EV_EVAL_CANARY_FINISHED):
             generation = coerce_node_id({"node_id": d.get("generation")})
             if generation is not None and generation >= 0:
                 spent.add((node_id, generation))
@@ -1226,8 +1277,9 @@ def _card_identity_spellings(state, raw_card_id) -> frozenset[str]:
 
 def _workdir_manifest_digest(node) -> str:
     """Digest of the node source manifest AND lifecycle a workdir was materialized for: the workdir's
-    reuse stamp (`EvalAttempt.stamp_workdir`) and the eval canary's `code_digest` key, which
-    `canary_already_passed` reads off the FINISHED rows.
+    reuse stamp (`EvalAttempt.stamp_workdir`). The eval canary's `code_digest` key, which
+    `canary_already_passed` reads off the FINISHED rows, is this digest less the activation manifest
+    (`_canary_code_digest`).
 
     `attempt` in it makes every stamp stale after every `node_reset` — the only thing that sets
     `rerun_stage` — and the reuse gate itself is off (`_eval_prepare_workdir`): a lifecycle's OWN
@@ -1283,7 +1335,10 @@ def _repair_forces_full_retrain(res, next_start, *, rolled_back: bool = False) -
     and a second counter would let a Developer alternate rollback / full-retrain and pay neither cap.
     It is checked FIRST because the existing three conditions cannot see it: a rollback leaves
     `next_start` set to the suspect's name, so `next_start is None` is False and the historical rule
-    reads an accepted rollback as free.
+    reads an accepted rollback as free. (A rollback the reuse rule cannot start at the suspect — the
+    repair also moved what precedes it, an opaque stage, a non-default `cwd`, a deleted file, a moved
+    manifest entry; `eval_stages.py::_rollback_start` names them — re-runs from the first stage
+    instead, `next_start` None, and is still ONE charge.)
     """
     # Count a full re-train against the cap ONLY when completed EARLIER-stage work is being
     # discarded: a LATER stage failed yet reuse was refused because the repair could
@@ -1488,7 +1543,7 @@ class EvalAttempt:
     full_retrains: int = 0
     rolled_to: set = field(default_factory=set)
     rollback_refusal: str = ""
-    # --- per attempt: RUN_ATTEMPT binds the first seven, SETTLE_OUTCOME the next seven, SALVAGE
+    # --- per attempt: RUN_ATTEMPT binds the first nine, SETTLE_OUTCOME the next seven, SALVAGE
     #     `err_evidence`, DECIDE_REPAIR the last three
     _t0: float = 0.0
     # This attempt's evaluator-invocation receipt: bound and CLAIMED by RUN_ATTEMPT immediately
@@ -1497,6 +1552,10 @@ class EvalAttempt:
     invocation_id: str = ""
     _log_snapshot: Any = None
     _log_plan: Any = None
+    # The attempt-start log cursors the activation-marker check reads at (`_eval_run_attempt`), and
+    # the logs the engine itself appends to — the only ones read past those cursors.
+    _marker_snapshot: Any = None
+    _marker_engine_logs: Any = None
     _live_questions: list = field(default_factory=list)
     _external_observed_phases: set = field(default_factory=set)
     _seen: dict = field(default_factory=dict)          # the intervention watcher's one verdict
@@ -1537,6 +1596,14 @@ class EvalAttempt:
     # recover a number from a canary — and by APPLY_REPAIR, which must not reuse a stage the node's
     # workdir never ran.
     canary_failed: bool = False
+    # True once THIS attempt's eval canary RAN in THIS process and let the full eval start — it passed,
+    # or it failed open on an engine fault (`_eval_run_canary` answers True for both): bound by
+    # RUN_ATTEMPT (reset at its top, set as the canary answers — before the pause rule may still
+    # withhold the full eval, which then claims nothing) and stamped on the invocation's claim
+    # (`canary_ran`), the one row that can say whose canary an open window holds
+    # (`_durable_orphan_settle_seconds`, crit_v57 M1/L1). A canary skipped as passed by digest, or one
+    # that failed, leaves it False.
+    canary_ran: bool = False
 
     def charged_eval_seconds(self, extra: float = 0.0) -> float:
         """What this lifecycle's TERMINAL charges the run's eval budget: the attempts a DEAD process
@@ -1805,9 +1872,17 @@ class EvaluateMixin:
 
         The id itself is bound by the PHASE (`_eval_run_attempt`), beside every other per-attempt
         value it binds, so the record's own slots keep their one declaring site.
+
+        `canary_ran` is written on EVERY claim, true or false, because both answers are facts the
+        seconds ledger needs and its absence is a third one — a claim written before the key: did
+        THIS attempt run an eval canary of its own (inside `_t0`, so its settle carries it), or is
+        any canary still uncarried in the log an earlier process's (`_durable_orphan_settle_seconds`,
+        crit_v57 M1/L1)? `after_interrupted_attempt` could not answer that: a resumed process
+        re-runs a canary whose digest moved or that faulted, and a process can die between its
+        passed canary and its claim.
         """
         row = {"node_id": a.node_id, "generation": a.generation, "attempt": a.attempt,
-               "invocation_id": a.invocation_id}
+               "invocation_id": a.invocation_id, "canary_ran": bool(a.canary_ran)}
         if a.invocation_id in a.unsettled_at_start:
             row["after_interrupted_attempt"] = True
         async with self._write_lock:
@@ -2954,7 +3029,8 @@ class EvaluateMixin:
         try:
             with anyio.CancelScope(shield=True):
                 async with self._write_lock:
-                    state = fold(self.store.read_all())
+                    events = self.store.read_all()
+                    state = fold(events)
                     node = state.nodes.get(node_id)
                     # Only if this lifecycle is still open. A body that already wrote its own
                     # terminal and then raised on the way out (a tracer teardown, a span export) must
@@ -2962,9 +3038,15 @@ class EvaluateMixin:
                     # would carry a reason that contradicts the first.
                     if (node is not None and node.status is NodeStatus.pending
                             and generation >= 0 and node.attempt == generation):
+                        # The lifecycle's DURABLE spend, like every other zero-compute terminal
+                        # (`_durable_prior_seconds`): this one wrote none, so the repairs, dependency
+                        # rounds, withheld attempts and settled invocations before the crash reached
+                        # no terminal at all (crit_v46, driven). The attempt the crash cut short left
+                        # no durable row and goes uncharged — the under-charging direction.
                         self.store.append(EV_NODE_FAILED, {
                             "node_id": node_id, "generation": generation,
-                            "error": self._redact(detail)[:400], "reason": "engine_error"})
+                            "error": self._redact(detail)[:400], "reason": "engine_error",
+                            "eval_seconds": _durable_prior_seconds(events, node_id, generation)})
                     # AND THE PAUSE SKIPS A LIFECYCLE THAT ALREADY CLOSED ITSELF. Until
                     # 2026-09-08 this was a separate `if` on the RUN's state alone, so a body that
                     # had written its own `node_evaluated` and then raised on the way OUT — a span
@@ -3600,7 +3682,12 @@ class EvaluateMixin:
         # history and skip a full eval for the doomed bottom fraction (cost lever). Deterministic
         # + replay-safe: the skip is recorded as node_failed reason="proxy_skipped" and a
         # proxy_scored audit event. OFF by default (kill_fraction=0 -> never skips).
-        if self.proxy_scorer is not None and self.proxy_kill_fraction > 0:
+        # NOT a lifecycle a dead process already MEASURED: its `ok` settle is finalized from the
+        # record in the next phase (RECOVER_SETTLED), and predicting it wrote `proxy_skipped` over a
+        # real result (crit_v46, driven). The GPU-pin exit above keeps its order on purpose — the
+        # recovery may still decide to re-run, and a re-run must never launch unpinned.
+        if (self.proxy_scorer is not None and self.proxy_kill_fraction > 0
+                and settled_ok_awaiting_terminal(a.events_at_start, a.node_id, a.generation) is None):
             # The pair, not the point estimate (doc 52 row 17): the kill abstains on a candidate
             # whose nearest evaluated neighbour is beyond the explored region's own radius, and
             # the row records the distance and the abstention beside the score (additive).
@@ -3958,6 +4045,7 @@ class EvaluateMixin:
         # measured", wrote that stale result as this lifecycle's terminal.
         a.res = None
         a.canary_failed = False
+        a.canary_ran = False
         # ONE pause decision, and the devices follow it (critic 2026-09-29, MEDIUM-1): a withheld
         # attempt takes nothing back — on a busy pool the reclaim WAITS, and a paused engine sat on
         # the pool for devices it would never use — and a launching one is re-pinned before it
@@ -3988,6 +4076,17 @@ class EvaluateMixin:
         # not asked for anything yet. See that function for the whole argument.
         _watching_logs = needs_log_snapshot(self, _eval_spec)
         a._log_snapshot = snapshot_training_logs(a.workdir) if _watching_logs else None
+        # THE FOURTH READER: the activation-marker check after a success (below) reads the stage
+        # logs for a declared marker, and a stage that re-ran APPENDS to its log — without this
+        # attempt's "before" an earlier attempt's marker vouched for a path the scored run never
+        # took (critic crit_v51 F1b / crit_v52 F2, driven). The watchers' snapshot when there is
+        # one, else its own, taken only for a node that declares a marker (a node that declares
+        # none costs one bounded manifest read here and nothing else).
+        from looplab.engine.activation import read_markers
+        _declares_markers = bool(read_markers(a.workdir))
+        a._marker_snapshot = (a._log_snapshot if a._log_snapshot is not None
+                              else snapshot_training_logs(a.workdir) if _declares_markers
+                              else None)
         # Which log each phase of THIS attempt writes. Both watchdogs live across the WHOLE
         # eval — setup, every stage, and the ALWAYS-appended `score` stage — so without the
         # resolved pipeline they can only guess whose bytes they are reading, and the freshest
@@ -3995,6 +4094,13 @@ class EvaluateMixin:
         # already SUCCEEDED. `_resolved_stages` re-resolves exactly what `_run_eval` will run
         # ([] = the single-command path, whose `eval.log` IS the training log).
         a._log_plan = eval_log_plan(self._resolved_stages(a.node, a.workdir)) if _watching_logs else None
+        # …and WHICH logs that cursor may cut: only the ones the ENGINE appends to, named from the
+        # same resolved pipeline this attempt runs. A log the candidate writes itself may be
+        # rewritten in place with the same bytes at the old boundary, and the cursor then dropped
+        # the marker this attempt really printed (crit_v55 A1, `activation._fresh_logs`).
+        a._marker_engine_logs = (
+            frozenset((a._log_plan or eval_log_plan(self._resolved_stages(a.node, a.workdir))).roles)
+            if _declares_markers else None)
         # Mid-eval intervention: a watcher polls while the eval runs in a worker thread. An
         # exact node lifecycle mutation or operator drop of THIS node's Card sets the cancel
         # Event, which tree-kills the in-flight subprocess (sandbox._run_argv). The pre-eval
@@ -4026,6 +4132,7 @@ class EvaluateMixin:
                     cancel.set()
                     _tg.cancel_scope.cancel()
                     return PHASE_NEXT
+                a.canary_ran = True
                 if self._pause_withholds_attempt(a):
                     a.sp.set("eval_withheld", "paused_after_canary")
                     _LOG.info("node %s: full eval withheld — the run was paused while its canary "
@@ -4196,7 +4303,8 @@ class EvaluateMixin:
             if _declared:
                 _missing = missing_markers(
                     _declared, texts=(a.res.stdout or "", a.res.stderr or ""),
-                    workdir=a.workdir, since=a._t0)
+                    workdir=a.workdir, since=a._t0, snapshot=a._marker_snapshot,
+                    engine_logs=a._marker_engine_logs)
                 if _missing:
                     a.res.inert_path = {"missing": _missing, "metric": a.res.metric}
                     a.res.metric = None
@@ -5486,7 +5594,9 @@ class EvaluateMixin:
         # AN INERT CHAIN CANNOT MAKE PROGRESS, AND THE ENGINE CAN PROVE IT. `REPAIR_INERT`
         # means the engine compared the bytes and nothing the evaluation runs moved: the files
         # this loop is about to re-materialize are the ones already on disk (bar the activation
-        # manifest, 69.10a), `_safe_reuse_start` below will reuse every completed stage because
+        # manifest, 69.10a — which the engine's marker check reads and no pipeline of its own
+        # does; a candidate whose code reads its own manifest is outside that rule), and
+        # `_safe_reuse_start` below will reuse every completed stage because
         # the change set it is asked about is empty, and the eval it is about to pay for is the
         # eval that just failed. Repeating that is not a retry, it is a
         # transcription error with a GPU attached — rubertlite-dr-unified-v4 node 6 spent two
@@ -5565,7 +5675,19 @@ class EvaluateMixin:
                 _stages, a.res.failed_stage, _rollback_ask, changed, a.workdir,
                 already_rolled_back=a.rolled_to, cwd=_cwd)
             if _suspect:
-                a.next_start, _rolled_back = _suspect, True
+                # A ROLLBACK STILL REUSES WHAT PRECEDES THE SUSPECT, and the ladder checks only the
+                # suspect's own closure (critic 2026-09-30, crit_v51 F2, driven): a repair that also
+                # rewrote an EARLIER stage's script rolled back onto that stage's stale artifact —
+                # `prep.py` rewritten, `train` named, `prep` reused and its v0 data scored against
+                # v1 code. The start is the suspect only where the reuse predicate itself would
+                # start there; anywhere else the whole pipeline re-runs.
+                _reuse_to_suspect = self._safe_reuse_start(
+                    _stages, _suspect, _reuse_changed, a.workdir,
+                    deleted=_reuse_deleted, cwd=_cwd,
+                    prev_manifest=prev_files.get(STAGE_MANIFEST_NAME),
+                    params=a.node.idea.params)
+                a.next_start = _suspect if _reuse_to_suspect == _suspect else None
+                _rolled_back = True
                 a.rolled_to = a.rolled_to | {_suspect}
             else:
                 a.rollback_refusal = _refusal or ""
@@ -5576,11 +5698,14 @@ class EvaluateMixin:
                 # ignored, so this append is splice-neutral by construction (see the event's
                 # own note in events/types.py); on the main task under the write lock like
                 # every other append in this loop.
+                # An accepted row also says where the next eval STARTS: the suspect, or "" for the
+                # first stage when the repair also moved what precedes it (crit_v53 N4).
                 self.store.append(EV_STAGE_ROLLBACK, {
                     "node_id": a.node_id, "generation": a.generation, "attempt": a.attempt,
                     "stage": _rollback_ask, "failed_stage": str(a.res.failed_stage or ""),
                     "accepted": bool(_suspect),
-                    "refusal": str(_refusal or "")[:300]})
+                    "refusal": str(_refusal or "")[:300],
+                    **({"start": str(a.next_start or "")} if _suspect else {})})
         if a.canary_failed:
             # The failure was the CANARY's: the node's workdir ran no stage this attempt, so there
             # is nothing to reuse and nothing was discarded — the next attempt runs the full chain
@@ -5602,9 +5727,12 @@ class EvaluateMixin:
                 # cover both cases at once ("expensive re-run(s)") stranded both of them on a
                 # substring that no longer existed — a contract change dressed as a tidy-up.
                 # A new case gets a new sentence; it does not get to edit the old one.
+                # The SUSPECT, not `next_start`: a rollback that also re-runs what precedes it
+                # starts at the first stage, and the sentence read "back to stage None" (crit_v53 N1).
                 a.triage_outcome = ("abandon",
-                    (f"repair rolled the pipeline back to stage {a.next_start!r} — "
-                     f"{a.full_retrains} expensive re-run(s) already spent"
+                    (f"repair rolled the pipeline back to stage {_suspect!r}"
+                     + ("" if a.next_start == _suspect else " (re-run from the first stage)")
+                     + f" — {a.full_retrains} expensive re-run(s) already spent"
                      if _rolled_back else
                      "repair keeps changing earlier-stage (training) code — "
                      f"{a.full_retrains} full re-train(s) already spent")

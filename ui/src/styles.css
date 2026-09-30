@@ -651,7 +651,7 @@ button { font: inherit; }
 /* Built, NOT started — deliberately not the working tone: `coded` exists precisely to stop the board
    painting a pre-built speculative node as work in flight. */
 .card-col.card-coded .card-col-h { color: var(--fg-dim); }
-/* Admitted, then HELD by a pause: not working now, and not "not started" either. */
+/* Admitted, then WITHHELD (a pause or the run stopping): not working now, and not "not started" either. */
 .card-col.card-held .card-col-h { color: var(--fg-dim); }
 .card-col.card-evaluated .card-col-h { color: color-mix(in srgb, var(--ok) 52%, var(--fg)); }
 .card-col.card-failed .card-col-h { color: color-mix(in srgb, var(--fail) 48%, var(--fg)); }

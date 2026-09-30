@@ -53,9 +53,9 @@ def _session(earlier: float, spent: float):
     """A client whose run had spent `earlier` before this session began and `spent` during it, both
     committed on THIS thread — and the thread's figure at the session's start (what the loop reads,
     `_session_spend`)."""
-    from looplab.core.llm_budget import thread_committed_usd
+    from looplab.core.llm_budget import thread_committed_usd_exact
     client = _Client(earlier)
-    start = thread_committed_usd()
+    start = thread_committed_usd_exact()
     client.accountant.spent = earlier + spent
     return client, start
 

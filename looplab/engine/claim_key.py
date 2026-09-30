@@ -22,6 +22,7 @@ semantic parse (subject/intervention/comparator) is a further TODO, but this is 
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import re
 
@@ -100,6 +101,10 @@ def _content(stems, *, allow_symbol: bool = False) -> tuple[str, ...]:
     return tuple(out)
 
 
+# MEMOIZED: a pure function of the text returning tuples and ints only, and the operator-rejected rule
+# asks it up to five times per lesson row for one statement (the candidate chain's scope/metric
+# widenings in `claims_assessments.py::decision_for_claim`) and again on every tool call (crit_v58 L1).
+@functools.lru_cache(maxsize=8192)
 def _analyze(statement: str, *, keep_clause: bool = False) -> tuple:
     """Return ``(subject, roles, polarity, relation_sign, negated)`` with conservative role-aware identity.
 

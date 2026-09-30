@@ -100,8 +100,10 @@ is not self-clearing either — a plateau persists until a new leader is crowned
 stall's **identity** rather than its persistence: `stall_rung` counts whole stall windows since the
 leader was crowned (1 = the stall the rule reacts to, 2 = the hard stall that requests deep
 research) and names the node count at which the current rung began; a decision recorded at or after
-that count closes the rung durably, and the consult's own in-process `(leader, rung)` memo covers
-the outcome that records nothing (the Strategist agreeing with itself). Bound: at most one extra
+that count closes the rung durably, and the consult's own in-process memo of the highest rung it
+consulted on, per leader, covers the outcome that records nothing (the Strategist agreeing with
+itself) — the highest and not the last, so an operator delete or abort that lowers the rung
+re-opens no consult. Bound: at most one extra
 consult per `stall_window` stall nodes, read off the Strategist that will act on it
 (`strategist_stall_window`, default 3); the coverage snapshot shares the gate and takes one extra
 sample per rung. A resumed engine re-asks once per rung — the same contract as the `(n, projection

@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-164 event types — 113 folded into `RunState`, 51 diagnostic; 1069 declared payload keys; 22 types whose whole payload is stored by the fold.
+164 event types — 113 folded into `RunState`, 51 diagnostic; 1071 declared payload keys; 22 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -86,7 +86,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `eval_attempt_withheld` | diagnostic | A pause (or a stop) withheld a lifecycle's evaluation work; the seconds it had already spent, for its next terminal. | `at`, `attempt`, `eval_seconds`, `generation`, `node_id`, `reason` | — |
 | `eval_canary_finished` | diagnostic | The eval canary's result: whether the node's stage chain survived the task's tiny slice. | `attempt`, `code_digest`, `eval_seconds`, `generation`, `node_id`, `passed` | `error`, `exit_code`, `failed_stage`, `log_dir`, `near_cap`, `retry`, `timed_out` |
 | `eval_canary_started` | diagnostic | An eval canary is about to run the node's stage chain on the task's tiny slice. | `attempt`, `code_digest`, `generation`, `node_id`, `timeout` | `retry` |
-| `eval_invocation_claimed` | diagnostic | One paid evaluation attempt is about to invoke the evaluator, under a reconciliable id. | `attempt`, `generation`, `invocation_id`, `node_id` | `after_interrupted_attempt` |
+| `eval_invocation_claimed` | diagnostic | One paid evaluation attempt is about to invoke the evaluator, under a reconciliable id. | `attempt`, `generation`, `invocation_id`, `node_id` | `after_interrupted_attempt`, `canary_ran` |
 | `eval_invocation_recovered` | diagnostic | An ok-settled invocation with no terminal, on resume: finalized from its evidence, or re-run and why. | `action`, `attempt`, `generation`, `invocation_id`, `node_id` | `reason`, `source` |
 | `eval_invocation_settled` | diagnostic | That evaluator invocation returned, with the outcome and the seconds it charged. | `attempt`, `eval_seconds`, `generation`, `invocation_id`, `node_id`, `outcome` | `result` |
 | `eval_noise_floor` | folded | The repeated-seed spread of ONE candidate's metric: the run's own evaluation noise floor. | `generation`, `mean`, `metrics`, `n`, `node_id`, `profile`, `search_metric`, `seeds`, `sem`, `spread`, `std` | `mid_search`, `protocol_mixed`, `protocol_profile`, `reason` |
@@ -181,7 +181,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `spec_proposed` | folded · whole | The onboarding agent's proposed evaluation spec and metric adapter. | — | `eval`, `metric` |
 | `speculation_depth_settled` | folded | The speculation depth this run settled on, and the evidence behind it. | `reason` | `depth`, `error`, `eval_seconds`, `evidence`, `generation`, `node_id`, `previous` |
 | `stage_finished` | folded | One stage of a multi-stage eval pipeline finished: name, status, exit code, seconds. | — | `attempt`, `exit_code`, `generation`, `name`, `node_id`, `seconds`, `status` |
-| `stage_rollback` | diagnostic | A failed stage's rollback to a checkpoint — accepted, or refused with a reason. | `accepted`, `attempt`, `failed_stage`, `generation`, `node_id`, `refusal`, `stage` | — |
+| `stage_rollback` | diagnostic | A failed stage's rollback to a checkpoint — accepted, or refused with a reason. | `accepted`, `attempt`, `failed_stage`, `generation`, `node_id`, `refusal`, `stage` | `start` |
 | `strategy_decision` | folded | The Strategist's consult: the strategy it returned and the context it was given. | `at_node`, `ctx`, `strategy` | `developer_application`, `width_unfilled` |
 | `task_changed` | diagnostic | A re-entry read a task whose identity (defaults left out) differs from the last recorded: the start's, or a row's `now`. | `now`, `was` | — |
 | `trace_export_health` | diagnostic | The span exporter is unhealthy — one row per distinct state, never on a healthy run. | — | `accepted_spans`, `buffered_bytes`, `dropped_queue_bytes`, `dropped_queue_full`, `dropped_serialization_error`, `dropped_shutdown`, `dropped_shutdown_timeout`, `dropped_spans`, `dropped_worker_start`, `export_failures`, `exported_spans`, `last_export_error`, `loss_receipt_failures`, `loss_receipts`, `queued_spans`, `shutdown`, `stopped_abandoned`, `stopped_crashed`, `stopped_idle`, `stopped_receipt_failed`, `stopped_retired`, `stopped_shutdown`, `worker_alive`, `worker_stop_detail`, `worker_stop_reason` |

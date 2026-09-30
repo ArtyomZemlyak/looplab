@@ -38,6 +38,8 @@ from looplab.agents.roles import (
     BOARD_SEED_CHARS_MAX, WrapsResearcher, bind_idea_to_board_card, forward_hints,
     is_researcher_fallback, next_board_prompt_cards, researcher_budget_exhausted,
 )
+from looplab.agents.propose_receipts import (note_propose_receipt, propose_receipt_scope,
+                                             scoped_budget_exhausted)
 from looplab.core.llm import BudgetExceeded
 from looplab.core.config import MAX_FORESIGHT_VERIFY_SAMPLES
 from looplab.core.models import NodeStatus
@@ -627,6 +629,15 @@ class ForesightPanelResearcher(WrapsResearcher):
         idea = self.base.propose(state, parent)
         return bind_idea_to_board_card(idea, self._base_board_window(state))
 
+    def _member(self, state, parent, receipts: list):
+        """One of the K independent members, its receipt read from its OWN scope into `receipts` —
+        the members note theirs as they run, so the caller's scope ended with the LAST member's
+        whichever was picked (crit_v58 L3); `_chosen` notes the pick's last."""
+        with propose_receipt_scope() as box:
+            idea = self._bind_base_proposal(state, parent)
+        receipts.append(scoped_budget_exhausted(box, self.base))
+        return idea
+
     def propose(self, state, parent):
         # Forward hints FIRST, even on the no-client pass-through: the engine setattrs them on THIS
         # wrapper (the active researcher), so skipping the mirror would shadow them (P2).
@@ -652,26 +663,37 @@ class ForesightPanelResearcher(WrapsResearcher):
         # halted run abstains exactly as `r is None` does below: the first member comes back, which
         # is the one proposal this method must return, and nothing is recorded as a foresight pick.
         # Outside a run `run_halted()` is always False, so every other call is byte-identical.
-        ideas = [self._bind_base_proposal(state, parent)]
+        receipts: list = []
+        ideas = [self._member(state, parent, receipts)]
         while len(ideas) < self.k and not run_halted():
-            ideas.append(self._bind_base_proposal(state, parent))
+            ideas.append(self._member(state, parent, receipts))
         if len(ideas) < self.k or run_halted():
             self.last_foresight = None
-            return ideas[0]
-        return self._pick(state, parent, ideas)
+            return self._chosen(ideas, 0, receipts)
+        return self._pick(state, parent, ideas, receipts=receipts)
 
     def _propose_alternatives(self, state, parent):
         """Candidate 1 as a session, candidates 2..K as alternatives continuing it (class docstring).
 
-        The per-candidate budget receipt is read right after each call, because the base's copy is
-        overwritten by the next one — and the ENGINE must read the chosen candidate's: with the
-        alternatives' turn cap a converged candidate 1 would otherwise be logged TRUNCATED whenever
-        an alternative after it was cut (`engine/node_build.py::_prepare_node_idea`'s `_link`)."""
+        The per-candidate budget receipt is read right after each call — the session's own cutoff
+        when the base held one (`_receipt`), else the base's attribute, which the next call
+        overwrites — and the ENGINE must read the chosen candidate's: with the alternatives' turn
+        cap a converged candidate 1 would otherwise be logged TRUNCATED whenever an alternative after
+        it was cut (`engine/node_build.py::_prepare_node_idea`'s `_link`). The panel still publishes
+        it on a shared attribute (doc 69, 69.37)."""
         first, session = self.base.propose_with_session(state, parent)
         cards = getattr(session, "visible_board_cards", None)
         window = list(cards) if isinstance(cards, list) else self._base_board_window(state)
         ideas = [bind_idea_to_board_card(first, window)]
-        alternative, receipts = [False], [researcher_budget_exhausted(self.base)]
+        def _receipt() -> str:
+            # THE CANDIDATE'S OWN CUTOFF when the base held a session (critic 2026-09-30, crit_v51
+            # F3, driven): the base's attribute is the SHARED instance's last write — a proposal on
+            # another thread cut by its ceiling made a converged pick here read `tokens`. The
+            # session holds each candidate's own (`agents/agent.py::ProposalSession.hold`).
+            cutoff = getattr(session, "cutoff", None) if session is not None else None
+            return cutoff if isinstance(cutoff, str) else researcher_budget_exhausted(self.base)
+
+        alternative, receipts = [False], [_receipt()]
         # The session's handoff brief, DEFERRED by `propose` to the candidate chosen here: candidate
         # `i` of the session is summarized from the transcript up to its own end, once, after the
         # pick (`agents/agent.py::ProposalSession.publish_brief`). None where there is no session.
@@ -693,7 +715,7 @@ class ForesightPanelResearcher(WrapsResearcher):
                 briefs.append(functools.partial(publish, len(ideas)) if callable(publish) else None)
                 ideas.append(bind_idea_to_board_card(alt, window))
                 alternative.append(True)
-            receipts.append(researcher_budget_exhausted(self.base))
+            receipts.append(_receipt())
         # A degraded candidate is the ABSENCE of a proposal: ranked first it would pause the run
         # (`orchestrator.py::_refuse_degraded_proposal`). Only when nothing else is left is it
         # returned — so a dead provider still reaches that circuit breaker.
@@ -717,6 +739,9 @@ class ForesightPanelResearcher(WrapsResearcher):
         handoff brief — when the call gathered them."""
         if receipts is not None:
             self.last_propose_budget_exhausted = receipts[index]
+            # The chosen candidate's receipt, noted LAST into the caller's scope so the engine
+            # reads this candidate's and not whichever member ran last (doc 69 69.37).
+            note_propose_receipt(receipts[index])
         if briefs is not None and callable(briefs[index]):
             briefs[index]()
         return ideas[index]
@@ -724,9 +749,10 @@ class ForesightPanelResearcher(WrapsResearcher):
     def _pick(self, state, parent, ideas, *, alternative=None, receipts=None, briefs=None):
         """Rank `ideas` with the world model, record the pick, return it (the first on abstain).
 
-        `alternative` / `receipts` / `briefs` come from `_propose_alternatives` and are None on the
-        historical path, whose telemetry and returned Idea are byte-identical to before they
-        existed."""
+        `alternative` / `briefs` come from `_propose_alternatives` and are None on the historical path,
+        whose telemetry and returned Idea are byte-identical to before they existed. `receipts` rides
+        both paths since crit_v58 L3: the pick's own receipt, noted into the caller's scope and
+        published on this panel's attribute — the returned Idea and the telemetry do not move."""
         # Slice 3: the Strategist's novelty stance biases the K->1 pick. "balanced" (default) leaves
         # the ranking a pure predicted-metric choice — byte-identical to today; "explore" appends a
         # directive so that when candidates are close the ranker PREFERS the more novel/divergent one

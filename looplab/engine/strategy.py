@@ -37,13 +37,14 @@ from looplab.agents.strategist import (NOVELTY_STANCES, StrategyContext,
                                        validate_card_scoring, validate_strategy)
 from looplab.core.config import parallelism_aliases
 from looplab.core.llm_broker import LLM_LANES, in_llm_lane
-from looplab.core.models import RunState
+from looplab.core.models import RunState, search_outcome
 from looplab.engine.cadence import (at_creation_boundary, cadence_due, cadence_marks,
-                                     plateau_due, seed_boundary_due)
+                                     plateau_consulted, plateau_due, seed_boundary_due)
 from looplab.engine.widths import (EVAL_WIDTH_MAX, LLM_WIDTH_MAX, operator_width_axes,
                                    per_experiment_gpu_budget, settle_width)
 from looplab.engine.costs import bind_cost_accountants
 from looplab.engine.governance_health import GovernanceLedgerUnavailable
+from looplab.engine.plan import final_reserve_reached
 from looplab.engine.shared import (effective_max_eval_timeout, strategist_budget_brief,
                                    strategist_gpu_brief)
 # Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
@@ -58,6 +59,19 @@ from looplab.trust.cross_run import (cross_run_text, keep_retarget_clause, same_
 
 
 _NO_PREPARED_DEVELOPER = object()
+
+
+def _plateau_leader(state: RunState):
+    """WHOSE plateau the memo files a consulted rung under: the leader's `(node id, lifecycle)`.
+    The stall is counted on the leader's CURRENT lifecycle (`agents/strategist.py::stall_rung` reads
+    each attempt's `parent_generations` against `champion.attempt`), so an operator reset of the
+    leader, or the holdout epoch's requeue of it, starts a new count — a new plateau the memo must
+    not read as the old one's rungs (crit_v56 F2, driven: after a reset, a new stall and hard stall
+    bought no consult, where a resumed engine's durable gate said both were due). `None` for the
+    lifecycle when the leader is not in the state."""
+    leader = state.best_node_id
+    node = state.nodes.get(leader) if leader is not None else None
+    return leader, getattr(node, "attempt", None)
 
 
 class StrategyCadenceMixin:
@@ -121,9 +135,11 @@ class StrategyCadenceMixin:
             defaults["_budget_frac"] = max(0.0, (rem or 0.0) / max_es)
         # Mean per-node eval cost so far — the cost signal the Strategist uses to bias toward an
         # intra-node sweep (amortizing data load / warm-up pays off when each eval is expensive).
-        # A deleted node's partial seconds (an abandoned attempt's charge) are not an eval's cost
+        # Over the search's OUTCOMES (`core/models.py::search_outcome`): a deleted node's partial
+        # seconds (an abandoned attempt's charge) or a benign terminal's are not an eval's cost
         # (`strategist.py::failure_rate` has the account, crit_v46 L2: 30.0 -> 15.4 on one delete).
-        ev = [n.eval_seconds for n in state.nodes.values() if n.eval_seconds and not n.tombstoned]
+        ev = [n.eval_seconds for n in state.nodes.values()
+              if n.eval_seconds and search_outcome(state, n) is not None]
         avg_es = (sum(ev) / len(ev)) if ev else None
         cross_run_note = self._cross_run_note_for_ctx(state)
         # A built Engine always owns the broker. Keep this accessor direct so a wiring typo fails
@@ -140,6 +156,9 @@ class StrategyCadenceMixin:
             avg_eval_seconds=avg_es,
             node_budget_frac=(node_budget_used / self.policy.max_nodes
                               if getattr(self.policy, "max_nodes", 0) else 0.0),  # P2 endgame reserve
+            # …and the reserve the dispatcher honours, the one the rule's switch follows when the
+            # run has a plan (doc 69 69.25a): the gate's own count, `len(state.nodes)`.
+            plan_endgame=final_reserve_reached(getattr(state, "plan", None), len(state.nodes)),
             current_policy=self._policy_name,   # D3: lets the rule switch BACK to greedy post-stall
             eval_parallel=self._eval_parallel,
             llm_parallel=self._llm_parallel,
@@ -225,9 +244,15 @@ class StrategyCadenceMixin:
         from looplab.core.cards import effective_card_footprint
         from looplab.core.models import NodeStatus
         out: list = []
+        building = set(getattr(state, "buildings", None) or {})
         for node in (getattr(state, "nodes", None) or {}).values():
             if (node.status is not NodeStatus.pending or getattr(node, "tombstoned", False)
                     or getattr(node, "eval_activity_started", False)):
+                continue
+            # A node reset to be re-proposed or re-implemented is pending with its OLD idea until the
+            # re-run lands: it is waiting to be BUILT, not to run (critic 2026-09-30, crit_v45 NIT,
+            # driven — a 4-GPU footprint the rebuild may drop was counted as queued work).
+            if getattr(node, "rerun_from", None) or node.id in building:
                 continue
             raw = effective_card_footprint(
                 getattr(getattr(node, "idea", None), "footprint", None),
@@ -238,18 +263,20 @@ class StrategyCadenceMixin:
     def _eval_width_operator_owned(self, state: RunState) -> bool:
         """Is `eval_parallel` the operator's — so a width the Strategist chooses is not applied?
 
-        Two routes, both the engine's own: an axis `_strategy_may` refuses the Strategist
-        (`_operator_width_axes` — launch-explicit settings and `budget_extend`), and a `set_strategy`
-        pin that names the width, which overwrites the Strategist's value when the strategy is recorded
-        (the critic, 2026-09-30: the line stayed silent for that route). The pin is read as the engine
-        will apply it: the fields already ACTIVE under `_pinned`, or a pending pin carrying an int."""
+        Three routes, each read the way the consult APPLIES it (critic 2026-09-30, crit_v45 L4,
+        driven — the line said "not applied" of widths that were, and was silent about one that was
+        not): an axis `_strategy_may` refuses the Strategist (`_operator_width_axes` — launch-explicit
+        settings and `budget_extend`); the CURRENT pending `set_strategy` pin naming a valid width,
+        which `_maybe_consult_strategist` overlays on the decision (its `raw_pin` reads canonical
+        names only, and a later pin REPLACES the pinned set, so an older `_pinned` and a legacy
+        `max_parallel` pin decide nothing); and `agent_control` revoking the Strategist's grant."""
         spellings = set(parallelism_aliases("eval_parallel"))
         if spellings & set(getattr(self, "_operator_width_axes", frozenset())):
             return True
-        if spellings & set((getattr(state, "active_strategy", None) or {}).get("_pinned") or []):
+        pin = (getattr(state, "pending_strategy", None) or {}).get("eval_parallel")
+        if type(pin) is int and 0 <= pin <= 1024:      # `validate_strategy`'s own bound
             return True
-        pending = getattr(state, "pending_strategy", None) or {}
-        return any(type(pending.get(name)) is int for name in spellings)
+        return not self._agent_may("strategist", "eval_parallel")
 
     def _node_budget_ctx(self, state: RunState) -> dict:
         """The node budget and the plan's endgame reserve the Strategist's brief states under
@@ -475,12 +502,14 @@ class StrategyCadenceMixin:
         return coverage_signal(state, resolution=self.archive_resolution)
 
     def _plateau_key(self, state: RunState) -> tuple:
-        """The `(leader, rung)` identity of the plateau the run is on — `(best_node_id, 0)` when it is
-        not on one. The in-process memo `_maybe_consult_strategist` keeps for `plateau_due`'s `seen`
-        is one of these, so it is computed in exactly one place for the gate and for the memo."""
+        """The `(leader, rung)` identity of the plateau the run is on — rung 0 when it is not on one;
+        the leader named by its node id AND lifecycle (`_plateau_leader`). The in-process memo
+        `_maybe_consult_strategist` keeps for `plateau_due`'s `seen` is built from these
+        (`cadence.plateau_consulted`: the highest rung consulted per leader lifecycle), so the
+        identity is computed in exactly one place for the gate and for the memo."""
         rung, _started_at = stall_rung(
             state, strategist_stall_window(getattr(self, "strategist", None)))
-        return state.best_node_id, rung
+        return _plateau_leader(state), rung
 
     def _should_consult(self, state: RunState, *, marks=None, plateau_seen=None) -> bool:
         """Bounded, deterministic cadence: only at a creation decision point (no pending evals),
@@ -494,8 +523,8 @@ class StrategyCadenceMixin:
         `strategist_every - 1` nodes of paid, leader-less pushing (FML-bench: the stagnation-adaptive
         agent beat all six fixed baselines, and the adaptation is only worth what its latency leaves).
         `cadence.plateau_due` states the trigger and its bound; `plateau_seen` is the CONSUMER's
-        in-process memo of the last plateau it consulted on (the Strategist passes its own, the
-        coverage snapshot passes none because a snapshot always records a mark). A plateau firing
+        in-process memo of the highest rung it consulted on per leader LIFECYCLE (the Strategist
+        passes its own, the coverage snapshot passes none because a snapshot always records a mark). A plateau firing
         does not move the cadence window unless it records — the same rule as every other firing.
 
         Since-last, not `n % every == 0`. Under `llm_parallel > 1` the node count advances in
@@ -537,7 +566,8 @@ class StrategyCadenceMixin:
         # would act — at the stall, and once more at the hard stall that requests deep research.
         rung, started_at = stall_rung(
             state, strategist_stall_window(getattr(self, "strategist", None)))
-        if plateau_due(rung, started_at, last, seen=plateau_seen, key=(state.best_node_id, rung)):
+        if plateau_due(rung, started_at, last, seen=plateau_seen,
+                       key=(_plateau_leader(state), rung)):
             return True
         # `strategist_every` is `ge=1` via Settings, but the Engine kwarg / EngineOptions accept 0, and
         # this cadence is reused for coverage snapshots even with NO strategist wired
@@ -1002,10 +1032,11 @@ class StrategyCadenceMixin:
         consulting = (allow_consult and self.strategist is not None
                       and self._should_consult(
                           state, marks=state.strategy_history,
-                          # The plateau memo (doc 52 row 7): the `(leader, rung)` this process last
-                          # consulted on. Spent beside `_strategist_consulted_at` below, and for the
-                          # same reason — a stalled run whose Strategist agrees with itself records
-                          # nothing, and without this the plateau re-fires at every new node count.
+                          # The plateau memo (doc 52 row 7): the highest rung this process consulted
+                          # on, per leader LIFECYCLE (`_plateau_leader`). Spent beside
+                          # `_strategist_consulted_at` below, and for the same reason — a stalled run
+                          # whose Strategist agrees with itself records nothing, and without this the
+                          # plateau re-fires at every new node count.
                           plateau_seen=getattr(self, "_strategist_plateau_seen", None))
                       and not self._autonomous_strategy_already_recorded_at(state, n)
                       # THE MONEY BOUND for the in-flight cadence (F1i). Both durable gates above close
@@ -1101,7 +1132,8 @@ class StrategyCadenceMixin:
             # node-count for this process, or the very failure mode the memo bounds — one paid consult
             # per outer-loop turn at a fixed `n` — comes back through the error path.
             self._strategist_consulted_at = (n, analytics_projection_token(state))
-            self._strategist_plateau_seen = self._plateau_key(state)
+            self._strategist_plateau_seen = plateau_consulted(
+                getattr(self, "_strategist_plateau_seen", None), self._plateau_key(state))
             with self._op_span("strategist_consult"):
                 strat = validate_strategy(self.strategist.decide(state, ctx), ctx)
                 if strat:

@@ -75,8 +75,16 @@ _ROLE_RESEARCHER = "researcher"
 class MemoryTools:
     """``search_lessons`` and ``recall_notes`` over one cross-run memory directory."""
 
-    def __init__(self, memory_dir: str | None, *, role: str = "researcher"):
+    def __init__(self, memory_dir: str | None, *, role: str = "researcher",
+                 claim_decisions: bool = False):
         self.dir = Path(memory_dir) if memory_dir else None
+        # THE OPERATOR'S CLAIM DECISIONS REACH THE PULL TOO (doc 69 69.21b). The passive prior has
+        # withheld a lesson whose claim the operator rejected since 69.21, and `search_lessons`
+        # read the same `lessons.jsonl` with no such filter — the prior hid a row this tool then
+        # returned as `UNTRUSTED_OUTCOME='supported'` (critic crit_v49, driven). The same rule
+        # (`_operator_rejected`), under the same setting: OFF here because it changes what a tool
+        # returns, i.e. a prompt; `agents/providers.py` passes `Settings.lesson_prior_claim_decisions`.
+        self.claim_decisions = bool(claim_decisions)
         # ROLE-SCOPED since 2026-08-23, mirroring `lessons_priors._render_role_prior` exactly, and
         # for the same two reasons it gives.
         #
@@ -162,6 +170,27 @@ class MemoryTools:
             rows.append(row)
         return rows, receipt
 
+    def _operator_rejected(self, rows: list[dict]) -> tuple[frozenset, bool]:
+        """`(claim keys of the rows the operator REJECTED, decision ledger unreadable?)` — the passive
+        prior's own rule, one function for both (`engine/claims_assessments.py::
+        operator_rejected_lessons`), over the rows the prior's scan groups: the same window, a
+        statement, in scope, EVERY role (a claim group's representative spelling may be another
+        role's row) — `operator_rejected_keys`, memoized per store state. An unreadable ledger
+        withholds nothing and says so: a guessed subset of an operator's decisions is not a
+        decision. With no candidate the ledger is not read at all."""
+        if not self.claim_decisions or not self.dir:
+            return frozenset(), False
+        if not any(row.get("statement") and self._scope.allows(row) for row in rows):
+            return frozenset(), False
+        try:
+            # DEFERRED: `tools` reaches `engine` at module level only through its leaves.
+            from looplab.engine.claims import operator_rejected_keys
+            return operator_rejected_keys(self.dir, self._scope), False
+        except Exception as exc:  # noqa: BLE001 — an advisory filter: disclosed, never a failed search
+            from looplab.core.containment import contain
+            contain("memory tool claim decisions", exc)
+            return frozenset(), True
+
     def execute(self, name: str, args: dict) -> str:
         # ToolProvider contract: a malformed call or damaged store must never discard an agent phase.
         self._last_rows: list[dict] = []
@@ -227,6 +256,10 @@ class MemoryTools:
 
         if name == "search_lessons":
             rows, source = self._load("lessons.jsonl")
+            rejected, decisions_unavailable = self._operator_rejected(rows)
+            if rejected:
+                from looplab.engine.claims import lesson_claim_key   # DEFERRED: layering, as above
+            withheld = 0
             ranked: list[tuple[int, int, dict]] = []
             for index, row in enumerate(rows):
                 statement = row.get("statement")
@@ -259,6 +292,9 @@ class MemoryTools:
                 overlap = len(query_tokens & _toks(statement))
                 if query_tokens and not overlap:
                     continue
+                if rejected and lesson_claim_key(row) in rejected:   # 69.21b — counted where it matched
+                    withheld += 1
+                    continue
                 ranked.append((overlap, index, row))
             # Prefer stronger lexical matches and newer rows for ties. Blank search means newest.
             ordered = sorted(ranked, reverse=True)
@@ -266,6 +302,12 @@ class MemoryTools:
             hits = [item[2] for item in ordered[:limit]]
             header = self._header(source, limit_capped,
                                   matched=matched_count, returned=len(hits))
+            if withheld:
+                header.append(f"[OPERATOR_REJECTED: {withheld} matching lesson(s) whose claim the "
+                              "operator rejected are withheld.]")
+            if decisions_unavailable:
+                header.append("[CLAIM_DECISIONS_UNAVAILABLE: the operator's claim decisions could "
+                              "not be read; a lesson they reject may be shown.]")
             if not hits:
                 message = ("(no matching lessons in the bounded recent memory window visible to this run)"
                            if self._scope.bound else

@@ -555,9 +555,11 @@ def attempt_byte_floor(fh, path, snapshot: Optional[TrainingLogSnapshot]) -> Opt
 
     Extracted from `read_training_tail_raw` so the SECOND reader of these bytes — the log tools the
     judge queries (`tools/log_tools.py`, wired in `monitor_log_sources`) — cannot come to a different
-    conclusion about where the previous attempt ended. One boundary, two readers; the alternative is a
-    role that seeks past a floor the digest respects and reads a dead attempt's curve as the live one's.
-    Leaves `fh`'s position undefined — every caller seeks before reading.
+    conclusion about where the previous attempt ended. One boundary, three readers since the
+    activation-marker check (`engine/activation.py::_fresh_logs`) joined them for the ENGINE's own
+    logs; the alternative is a role that seeks past a floor the digest respects and reads a dead
+    attempt's curve as the live one's. Leaves `fh`'s position undefined — every caller seeks before
+    reading.
     """
     if snapshot is not None and not snapshot.complete:
         return None
@@ -572,8 +574,10 @@ def attempt_byte_floor(fh, path, snapshot: Optional[TrainingLogSnapshot]) -> Opt
                        if old.identity == current_identity), None)
     if cursor is None and snapshot is not None:
         # Some filesystems expose no stable inode. A matching old EOF probe is sufficient to
-        # classify an unknown path as a renamed old log; a false match only suppresses advisory
-        # evidence (safe), whereas treating it as new could resurrect a stale kill metric.
+        # classify an unknown path as a renamed old log. A false match suppresses this attempt's
+        # bytes: advisory evidence for a monitor, and a declared marker for the activation check —
+        # a withheld metric the node repairs, the refusing direction there too — whereas treating
+        # it as new could resurrect a stale kill metric or credit an earlier attempt's marker.
         for old in snapshot.cursors.values():
             if old.offset is None or old.probe is None or size < old.offset:
                 continue

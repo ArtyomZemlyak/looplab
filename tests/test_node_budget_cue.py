@@ -184,3 +184,17 @@ def test_the_flag_ships_on_resumes_off_and_is_off_at_every_constructor():
     assert settings_from_snapshot(Settings().masked_snapshot()).node_budget_cue is True
     assert EngineOptions().node_budget_cue is False
     assert EngineOptions.from_settings(Settings()).node_budget_cue is True
+
+
+def test_the_strategist_and_the_researcher_name_the_endgame_kinds_in_the_same_words():
+    """crit_v46 NIT: the Strategist's brief (`agents/strategist.py::_ENDGAME_KIND_SPEND`) and the
+    Researcher's cue (`engine/proposal_cues.py::_ENDGAME_KIND_WORDS`) spell what the endgame reserve
+    is spent on in two tables — `agents` may not import the engine's at module level — and nothing
+    held them together. Both cover exactly the plan's kinds, word for word. MUTATION: edit one
+    table's sentence -> red."""
+    from looplab.agents.strategist import _ENDGAME_KIND_SPEND
+    from looplab.engine.plan import ENDGAME_KINDS
+    from looplab.engine.proposal_cues import _ENDGAME_KIND_WORDS
+
+    assert _ENDGAME_KIND_SPEND == _ENDGAME_KIND_WORDS
+    assert set(_ENDGAME_KIND_WORDS) == set(ENDGAME_KINDS)

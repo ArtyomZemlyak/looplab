@@ -515,7 +515,12 @@ class ToolProvider(Protocol):
       arguments — `bind_state(state, parent)` (`agents/agent.py`) — so a provider must
       accept the second one (default it to None), or it raises TypeError at dispatch.
       Providers that don't need run state simply omit the hook (`CompositeTools` forwards
-      it only where present), hence the no-op default here.
+      it only where present), hence the no-op default here. The hook may be called on a
+      VIEW: `agents/tool_loop.py::bound_toolset` binds a shallow copy per call, so it must
+      REBIND attributes on the object it is called on and never mutate a container the copies
+      share (a list, a dict, a scout it held). A memo every call should share lives in a
+      container shared by reference ON PURPOSE and is only ever replaced under its own lock
+      (`tools/knowledge_tools.py::_SharedIndex`).
 
     Additive typed extensions (optional; CompositeTools supplies conservative adapters):
 

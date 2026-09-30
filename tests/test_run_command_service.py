@@ -254,6 +254,14 @@ def _ack_marked(rd, command_id=None):
     return intent
 
 
+# THE ABSOLUTE DEADLINE A TIMED-OUT COMMAND MUST STILL HAVE RECORDED ITS INTENT BY. Three tests below
+# need a command that times out waiting for an ack that never comes, AFTER its intent is in the log;
+# at 0.09 s the Windows leg's worker had not admitted `budget_extend` yet, and the record settled
+# `deadline_passed_before_intent` with nothing appended (master CI run 143). The ack deadline stays
+# short (`timeout`); only the ceiling on admission gets a margin a loaded runner meets.
+_ADMISSION_MARGIN_S = 1.5
+
+
 def _wait_for_intent(rd, command_id, timeout=1.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -892,11 +900,13 @@ def test_spawn_exception_and_no_progress_startup_are_structured_failures(tmp_pat
     app = make_app(tmp_path)
     srv = app.state.looplab
     silent = _Driver()
+    # The deadline falls after the worker has spawned, on a loaded runner too (the same shape failed
+    # the Windows leg in test_node_reset_drain_command.py, master CI run 144).
     srv.commands = RunCommandService(
         srv, engine_alive=silent.is_alive, spawn_engine=silent.spawn,
         process_alive=silent.is_process_alive,
-        startup_timeout=0.05, command_timeout=0.15, poll_interval=0.01,
-        max_observation_timeout=0.25)
+        startup_timeout=0.05, command_timeout=_ADMISSION_MARGIN_S, poll_interval=0.01,
+        max_observation_timeout=_ADMISSION_MARGIN_S + 0.5)
     client2 = TestClient(app)
     response = client2.post("/api/runs/other/commands", headers={"Idempotency-Key": "silent"},
                             json={"type": "budget_extend", "data": {"add_nodes": 1},
@@ -1458,7 +1468,7 @@ def test_same_key_is_observational_new_key_conflicts_and_explicit_retry_reuses_i
 def test_semantically_equivalent_additive_payload_cannot_bypass_unresolved_guard(tmp_path):
     rd = _seed(tmp_path)
     driver = _Driver(alive=True)
-    client, _srv = _client(tmp_path, driver, timeout=0.08, observation=0.25)
+    client, _srv = _client(tmp_path, driver, timeout=0.3, observation=_ADMISSION_MARGIN_S)
     first = _terminal(client, _post(
         client, "budget_extend", {"add_nodes": "1"}, key="semantic-budget-a").json())
     assert first["status"] == "timed_out"
@@ -1475,10 +1485,11 @@ def test_a_read_reconciles_a_late_ack_and_a_vanished_intent(tmp_path):
     those routes were retired 2026-09-23 and a read of the record is the path that is left."""
     rd = _seed(tmp_path)
     driver = _Driver(alive=True)
-    client, _srv = _client(tmp_path, driver, timeout=0.04, observation=0.09)
+    client, _srv = _client(tmp_path, driver, timeout=0.3, observation=_ADMISSION_MARGIN_S)
     command = _terminal(client, _post(
         client, "budget_extend", {"add_nodes": 2}, key="legacy-late-ack").json())
     assert command["status"] == "timed_out"
+    assert command["error"]["code"] == "postcondition_timeout", command
     intent = _wait_for_intent(rd, command["id"])
     EventStore(rd / "events.jsonl").append(
         "command_ack", {"command_id": command["id"], "event_seq": intent.seq})
@@ -2533,7 +2544,7 @@ def test_live_but_unacknowledging_driver_has_bounded_observation_ceiling(tmp_pat
     _seed(tmp_path)
     driver = _Driver(alive=True)
     client, _srv = _client(
-        tmp_path, driver, startup=0.05, timeout=0.08, observation=0.28)
+        tmp_path, driver, startup=0.05, timeout=0.3, observation=_ADMISSION_MARGIN_S)
     command = _post(client, "set_strategy", {"strategy": {"policy": "asha"}}, key="wedged").json()
     timed = _terminal(client, command, timeout=_TERMINAL_SETTLE_TIMEOUT_S)
     assert timed["status"] == "timed_out" and timed["error"]["code"] == "postcondition_timeout"

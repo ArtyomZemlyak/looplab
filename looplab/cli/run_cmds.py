@@ -1108,13 +1108,15 @@ def run(
         # Pass the file's task: block (if any) as a draft so --goal refines it instead of discarding it.
         # `evidence_envelope`: the scout's file reads and the cross-run rows arrive fenced when the
         # run's envelope is on (review 2026-09-22, TAT-02) — through the ONE Settings reader.
+        from looplab.core.config import claim_decisions_enabled
         from looplab.core.evidence import envelope_enabled
         result = _genesis.author_task(goal, client=client, kinds=_TASK_KINDS, kind=kind, data=data,
                                       direction=direction, draft=(file_task or None),
                                       parser=settings.llm_parser,
                                       memory_dir=getattr(settings, "memory_dir", None),          # PART V §22
                                       cross_run_read_tools=getattr(settings, "cross_run_read_tools", False),
-                                      evidence_envelope=envelope_enabled(settings))
+                                      evidence_envelope=envelope_enabled(settings),
+                                      claim_decisions=claim_decisions_enabled(settings))
         if result.error:    # transport/endpoint failure -> NOT a vague goal; say so plainly
             raise typer.BadParameter(
                 f"Genesis couldn't reach the model to author the task ({result.error}). Check "
@@ -1953,8 +1955,8 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
     if commands["unreadable"]:
         typer.echo(f"note: command record(s) {', '.join(commands['unreadable'])} cannot be read by "
                    "any LoopLab server, so none can start an engine — but each blocks every later "
-                   "command on this run until it is quarantined through `POST /api/runs/<run>/"
-                   "resolve-activity-claims`")
+                   "command on this run until the operator quarantines it through `POST /api/runs/"
+                   "<run>/resolve-activity-claims` (the owner's token; a harness token is refused)")
 
 
 @app.command()

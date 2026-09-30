@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import anyio
+import pytest
 
 from looplab.adapters.repo_developer import co_parent_block
 from looplab.core.models import Idea, Node, NodeStatus, RunState
@@ -284,6 +285,193 @@ def test_the_endgame_rule_names_the_sweep_and_a_strategist_may_switch_it_off(tmp
     assert eng._endgame_sweep is True
     eng._apply_strategy({"policy": "greedy", "operators": {"endgame_sweep": False}})
     assert eng._endgame_sweep is False
+
+
+def test_the_rule_s_endgame_is_the_plan_s_final_reserve_when_the_run_has_one(tmp_path):
+    """doc 69 69.25a (critic crit_v48 F4, driven): the rule switched on 80 % of the WHOLE budget while
+    the dispatcher honoured the plan an inject batch had re-cut — on minionerec-v10's shape the reserve
+    began at node 18 and the rule, at node 17 (89 %), already returned the ensemble. It follows the
+    plan's FINAL reserve now, the gate's own count; with no plan row it keeps the historical 80 %,
+    and a bounded stall episode is not the final reserve. MUTATIONS, each red here: read
+    `node_budget_frac` alone; count a bounded episode as the reserve; drop the engine's wiring."""
+    from looplab.agents.strategist import (RuleStrategist, StrategyContext, _rule_novelty_stance,
+                                           endgame_reached)
+    from looplab.engine.plan import final_reserve_reached
+
+    recut = {"max_nodes": 19, "endgame_start": 18, "n_seeds": 3}
+    # A stall episode [10, 13) of a 19-slot budget whose ordinary reserve starts at 15.
+    episode = {"max_nodes": 19, "endgame_start": 10, "endgame_end": 13, "reserve_frac": 0.2,
+               "phases": [{"name": "seed", "nodes": 3}]}
+
+    def _ctx(n, plan_row, **kw):
+        return StrategyContext(node_count=n, phase="exploit", node_budget_frac=n / 19,
+                               plan_endgame=final_reserve_reached(plan_row, n),
+                               available_policies=["greedy"], available_developers=["default"],
+                               **kw)
+
+    def _ensemble(ctx):
+        decision = RuleStrategist()._decide_machinery(RunState(), ctx) or {}
+        return (decision.get("operators") or {}).get("merge_mode") == "ensemble", decision
+
+    # The v10 shape: node 17 is 89 % of the budget and still before the re-cut reserve.
+    assert not endgame_reached(_ctx(17, recut)) and not _ensemble(_ctx(17, recut))[0]
+    reached, decision = _ensemble(_ctx(18, recut))
+    assert reached and "inside the plan's reserve" in decision["rationale"], decision
+    # No plan row: the historical 80 %, byte for byte in its rationale.
+    reached, decision = _ensemble(_ctx(17, None))
+    assert reached and decision["rationale"].startswith("endgame (89% of node budget spent)")
+    # A plan whose reserve starts EARLY is obeyed early, as the gate does.
+    early = {"max_nodes": 19, "endgame_start": 9, "n_seeds": 3}
+    assert endgame_reached(_ctx(10, early)) and _ensemble(_ctx(10, early))[0]
+    # A bounded stall episode before the ordinary cut reopens into the search: not the final reserve.
+    assert final_reserve_reached(episode, 11) is False and not endgame_reached(_ctx(11, episode))
+    # The coverage stance reads the same switch.
+    broad = {"nodes": 8, "dominant_theme_frac": 0.3, "recent_dominant_frac": 0.3}
+    assert _rule_novelty_stance(_ctx(17, recut, coverage=broad)) is None
+    assert _rule_novelty_stance(_ctx(18, recut, coverage=broad)) == "exploit"
+
+    # The engine hands the rule the gate's own reading of the folded plan row.
+    eng = make_engine(tmp_path / "run", endgame_reserve_frac=0.25)
+    state = RunState(nodes={i: _node(i, 1.0, {}) for i in range(4)})
+    assert eng._strategy_ctx(state).plan_endgame is None, "no plan row: the caller's own reading"
+    state.plan = {"max_nodes": 8, "endgame_start": 4, "n_seeds": 3}
+    assert eng._strategy_ctx(state).plan_endgame is True
+    state.plan = {"max_nodes": 8, "endgame_start": 6, "n_seeds": 3}
+    assert eng._strategy_ctx(state).plan_endgame is False
+
+
+def _episode(max_nodes, start, end, *, frac=0.2, seeds=3, **extra):
+    """A stall-episode row as `_episode_row` writes it: what `_ordinary_start` reads off it."""
+    return {"max_nodes": max_nodes, "endgame_start": start, "endgame_end": end,
+            "reserve_frac": frac, "phases": [{"name": "seed", "nodes": seeds}], **extra}
+
+
+def test_the_final_reserve_s_truth_table():
+    """`engine/plan.py::final_reserve_reached`: None without a readable row (the caller keeps its own
+    reading), the gate's `in_endgame` over the same count otherwise, and inside a bounded episode
+    only from the start its `reopened` row would cut on — read off the row's own budget, seeds,
+    fraction and injected count (`_ordinary_start`). MUTATIONS, each red here: count a bounded
+    episode out; drop the `in_endgame` half; ignore the row's fraction or its injected count."""
+    from looplab.engine.plan import final_reserve_reached
+
+    assert final_reserve_reached(None, 5) is None and final_reserve_reached({}, 5) is None
+    assert final_reserve_reached({"endgame_start": "x"}, 5) is None
+    assert final_reserve_reached({"max_nodes": 8}, 5) is None
+    row = {"max_nodes": 8, "endgame_start": 6}
+    assert [final_reserve_reached(row, n) for n in (5, 6, 7)] == [False, True, True]
+    # An episode wholly before the ordinary cut (19 slots at 0.2: the reserve starts at 15).
+    before = _episode(19, 10, 13)
+    assert [final_reserve_reached(before, n) for n in (9, 10, 12, 13)] == [False] * 4
+    # An episode straddling the cut (12 slots at 0.2: 10): final from the cut on, while it holds.
+    straddle = _episode(12, 9, 11)
+    assert [final_reserve_reached(straddle, n) for n in (8, 9, 10, 11)] == [False, False, True,
+                                                                           False]
+    # An episode whose end is past the budget's (no `reopened` row closes it): final from the cut.
+    past = _episode(12, 9, 12)
+    assert [final_reserve_reached(past, n) for n in (9, 10, 11)] == [False, True, True]
+    # The row's OWN fraction and injected count decide the cut: 20 slots at 0.25 start at 15; with 8
+    # operator-injected nodes the engine's share is 12 and the reserve 3, so it starts at 17.
+    assert [final_reserve_reached(_episode(20, 13, 20, frac=0.25), n) for n in (14, 15)] == [
+        False, True]
+    assert [final_reserve_reached(_episode(20, 13, 20, frac=0.25, injected=8), n)
+            for n in (16, 17)] == [False, True]
+    # A row that cannot say where its ordinary cut starts: the caller's own reading.
+    assert final_reserve_reached({**before, "phases": []}, 11) is None
+    assert final_reserve_reached({**before, "reserve_frac": "0.2"}, 11) is None
+    assert final_reserve_reached({**before, "reserve_frac": True}, 11) is None
+
+
+@pytest.mark.parametrize("frac,injected,live_frac", [
+    (0.2, 0, 0.2), (0.25, 0, 0.25), (0.25, 4, 0.25), (0.2, 0, 0.1)])
+def test_the_final_reserve_is_where_the_episode_reopens(frac, injected, live_frac):
+    """crit_v61 L1/L3, driven: the start the rule reads off an episode row is the start its
+    `reopened` row cuts — at another fraction, with operator-injected nodes, and when the live
+    fraction moved mid-episode (lowered on resume, it reopened into the search at nodes the rule had
+    already read as final), through an inject extension and a budget carry too. Every episode row
+    and the reopen are cut with the row's OWN fraction. MUTATIONS, each red here: reopen, carry or
+    extend with the live fraction; read the final start without the row's injected count."""
+    from looplab.engine.plan import _ordinary_start, build_plan, replan
+
+    cut = dict(max_nodes=40, n_seeds=3, reserve_frac=frac, endgame_sweep=True, injected=injected)
+    plan = build_plan(**cut, at_node=5)
+    episode = replan(plan, **cut, at_node=12, stall_rung=2, stall_nodes=3, champion=6)
+    assert episode["reason"] == "stagnation" and episode["endgame_end"] == 15
+    reopened = replan(episode, **{**cut, "reserve_frac": live_frac}, at_node=15, stall_rung=0,
+                      stall_nodes=3, champion=6)
+    assert reopened["reason"] == "reopened"
+    assert _ordinary_start(episode) == reopened["endgame_start"] == plan["endgame_start"]
+    # A budget carry and an inject extension keep the row's fraction too (critic crit_v62 F3,
+    # driven: both took the moved live fraction and unread nodes the rule had read as final).
+    moved = {**cut, "reserve_frac": live_frac}
+    batch = replan(episode, **{**moved, "injected": injected + 2}, at_node=14, stall_rung=2,
+                   stall_nodes=3, champion=6)
+    assert batch["reason"] == "injected" and batch["endgame_end"] == 17
+    assert batch["reserve_frac"] == episode["reserve_frac"]
+    after = replan(batch, **{**moved, "injected": injected + 2}, at_node=17, stall_rung=0,
+                   stall_nodes=3, champion=6)
+    assert _ordinary_start(batch) == after["endgame_start"]
+    carried = replan(episode, **{**moved, "max_nodes": 39}, at_node=13, stall_rung=2,
+                     stall_nodes=3, champion=6)
+    assert carried["reason"] == "budget_changed" and carried["endgame_end"] == 15
+    assert carried["reserve_frac"] == episode["reserve_frac"]
+    after_carry = replan(carried, **{**moved, "max_nodes": 39}, at_node=15, stall_rung=0,
+                         stall_nodes=3, champion=6)
+    assert after_carry["reason"] == "reopened"
+    assert _ordinary_start(carried) == after_carry["endgame_start"]
+    # The episode's START keeps the row's fraction, and so does the migration of an unbounded stall
+    # row written with the setting off (critic crit_v63 N1: reverting either to the live fraction
+    # kept every assertion above green) — the reserve reopens where the plan put it, as a run with
+    # no stall keeps it: a fraction moved on resume re-cuts nothing until the budget moves.
+    started = replan(plan, **moved, at_node=12, stall_rung=2, stall_nodes=3, champion=6)
+    assert started["reason"] == "stagnation" and started["endgame_end"] == 15
+    assert started["reserve_frac"] == plan["reserve_frac"]
+    back = replan(started, **moved, at_node=15, stall_rung=0, stall_nodes=3, champion=6)
+    assert back["reason"] == "reopened"
+    assert _ordinary_start(started) == back["endgame_start"] == plan["endgame_start"]
+    legacy = replan(plan, **cut, at_node=12, stall_rung=2, stall_nodes=0, champion=6)
+    assert legacy["reason"] == "stagnation" and legacy.get("endgame_end") is None
+    migrated = replan(legacy, **moved, at_node=13, stall_rung=2, stall_nodes=3, champion=6)
+    assert migrated["reason"] == "stagnation" and migrated["endgame_end"] == 15
+    assert migrated["reserve_frac"] == plan["reserve_frac"]
+    home = replan(migrated, **moved, at_node=15, stall_rung=0, stall_nodes=3, champion=6)
+    assert home["reason"] == "reopened"
+    assert _ordinary_start(migrated) == home["endgame_start"] == plan["endgame_start"]
+
+
+def test_a_stall_episode_that_reaches_the_final_reserve_hands_the_rule_its_endgame(tmp_path):
+    """Critic crit_v59 F1 (driven): the episode row bounds the stall's endgame, and 69.25a counted
+    every node inside one out of the final reserve — on an episode [9, 12) of a 12-slot budget whose
+    ordinary reserve starts at 10, the rule never entered its endgame (no `reopened` row closes an
+    episode whose end is the budget's), while the gate admitted only endgame actions from node 9.
+    The rule now switches at the start the episode's `reopened` row would cut, read off the row —
+    where it switched before 69.25a (10/12 = 83 %). Driven through the real `replan` rows, the
+    engine's `_strategy_ctx` and `RuleStrategist`. MUTATION: `final_reserve_reached` counts a
+    bounded episode out."""
+    from looplab.agents.strategist import RuleStrategist, endgame_reached
+    from looplab.engine.plan import build_plan, final_reserve_reached, in_endgame, replan
+
+    cut = dict(max_nodes=12, n_seeds=3, reserve_frac=0.2, endgame_sweep=True)
+    plan = build_plan(**cut, at_node=4)
+    assert plan["endgame_start"] == 10
+    episode = replan(plan, **cut, at_node=9, stall_rung=2, stall_nodes=3, champion=5)
+    assert episode["reason"] == "stagnation" and episode["endgame_end"] == 12
+    eng = make_engine(tmp_path / "run", endgame_reserve_frac=0.2)
+    decided = {}
+    for n in (9, 10, 11):
+        state = RunState(nodes={i: _node(i, 1.0, {}) for i in range(n)})
+        state.plan = dict(episode)
+        assert in_endgame(state.plan, n), "the gate is in the episode's endgame from node 9"
+        ctx = eng._strategy_ctx(state)
+        assert ctx.plan_endgame is final_reserve_reached(episode, n)
+        decision = RuleStrategist()._decide_machinery(RunState(), ctx) or {}
+        decided[n] = (endgame_reached(ctx),
+                      (decision.get("operators") or {}).get("merge_mode") == "ensemble")
+    assert decided == {9: (False, False), 10: (True, True), 11: (True, True)}, decided
+    # A budget change inside the live episode carries it, and its final start moves with the budget.
+    carried = replan(episode, **{**cut, "max_nodes": 20}, at_node=10, stall_rung=2, stall_nodes=3,
+                     champion=5)
+    assert carried["reason"] == "budget_changed" and carried["endgame_start"] == 9
+    assert final_reserve_reached(carried, 11) is False
 
 
 def test_the_brief_names_the_sweep_only_when_the_run_has_a_reserve():

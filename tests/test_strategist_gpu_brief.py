@@ -6,13 +6,15 @@ budget, nothing the queued work had declared and nothing about the operator's wi
 experiments ran on one card each (a torchrun port conflict, ~2.4 h with no metric), and after the
 operator pinned the width it asked to widen four more times. (The "0 GPUs" in its system prompt was
 the failed-probe cache 69.23a fixed.) Under `Settings.strategist_gpu_brief` every consult's brief
-states the pool the engine schedules on, what ONE experiment may claim at each width, what the open
-proposals declare and whether the width is the operator's; OFF, the brief is byte for byte what it
-was.
+states the pool the engine schedules on, what admission grants an experiment, the most each may
+declare for every experiment at a width to run at once, what the open proposals declare and whether
+the width is the operator's; OFF, the brief is byte for byte what it was.
 """
 from __future__ import annotations
 
 from types import SimpleNamespace
+
+import pytest
 
 from looplab.agents.strategist import StrategyContext, _gpu_pool_note, _strategist_brief
 from looplab.core.config import LEGACY_CONFIG_SNAPSHOT_DEFAULTS, Settings
@@ -40,8 +42,8 @@ def test_the_line_states_the_grant_the_concurrent_declaration_the_queue_and_the_
                     "every experiment to run at once each may declare at most: eval_parallel "
                     "1 -> 4, 2 -> 2, 4 -> 1 (now 2); 3 open proposal(s): the widest declares 4 "
                     "GPU(s), 1 declare none; 2 built node(s) waiting to run: the widest declares 4 "
-                    "GPU(s), 1 declare none; eval_parallel was set by the operator, so a width "
-                    "you choose is not applied.\n")
+                    "GPU(s), 1 declare none; eval_parallel is not yours to set (the operator set "
+                    "it or withheld it), so a width you choose is not applied.\n")
     assert "the most GPUs ONE experiment may claim" not in line
 
 
@@ -185,7 +187,8 @@ def test_a_width_past_the_pool_is_shown_and_a_zero_declaration_counts_as_declare
     ctx = wide._strategy_ctx(RunState())
     assert ctx.gpu_budget_by_width == {1: 2, 2: 1}, (
         "past the pool no declaration keeps every experiment running: not a row of that table")
-    assert "(now 6, above the pool: at most 2 run at once and the rest queue)" in _gpu_pool_note(ctx)
+    assert ("(now 6, above the pool: at most 2 experiments that take a device run at once and "
+            "the rest of those queue)") in _gpu_pool_note(ctx)
     huge = _engine(tmp_path / "huge", on=True, gpus=range(2000), width=2)
     assert max(huge._gpu_pool_ctx(RunState())["gpu_budget_by_width"]) <= 1024
     zero = _engine(tmp_path / "zero", on=True)
@@ -203,21 +206,86 @@ def test_a_non_int_width_is_dropped_before_the_sort(tmp_path):
 
 def test_the_operator_owns_the_width_through_a_set_strategy_pin_too(tmp_path):
     """The critic: a `set_strategy{eval_parallel}` pin overwrites the Strategist's width, and the line
-    stayed silent. Pending (an int) or already active under `_pinned`, either spelling."""
+    stayed silent. Read as the consult APPLIES it (crit_v45 L4): the CURRENT pending pin, canonical
+    name, a valid width — a legacy `max_parallel` pin and an older `_pinned` decide nothing there."""
     engine = _engine(tmp_path, on=True)
     state = RunState()
     assert engine._strategy_ctx(state).eval_parallel_operator_owned is False
     state.pending_strategy = {"eval_parallel": 3}
     assert engine._strategy_ctx(state).eval_parallel_operator_owned is True
-    state.pending_strategy = {"max_parallel": 3}
-    assert engine._strategy_ctx(state).eval_parallel_operator_owned is True
-    state.pending_strategy = {"eval_parallel": "four"}
-    assert engine._strategy_ctx(state).eval_parallel_operator_owned is False, "not a width"
-    state.pending_strategy = {}
+    # `validate_strategy`'s whole range, both ends: 0 is a width (live 0 settles to serial), 1024
+    # the ceiling (crit_v57 L4 s06, MUTATION: `0 < pin`).
+    for width in (0, 1024):
+        state.pending_strategy = {"eval_parallel": width}
+        assert engine._strategy_ctx(state).eval_parallel_operator_owned is True, width
+    for not_a_width in ({"max_parallel": 3}, {"eval_parallel": "four"}, {"eval_parallel": 2000},
+                        {"eval_parallel": True}, {"eval_parallel": -1}, {"eval_parallel": 1025}):
+        state.pending_strategy = not_a_width
+        assert engine._strategy_ctx(state).eval_parallel_operator_owned is False, not_a_width
+    state.pending_strategy = {"developer": "default"}
     state.active_strategy = {"eval_parallel": 2, "_pinned": ["eval_parallel"]}
-    assert engine._strategy_ctx(state).eval_parallel_operator_owned is True
-    state.active_strategy = {"eval_parallel": 2, "_pinned": ["policy"]}
-    assert engine._strategy_ctx(state).eval_parallel_operator_owned is False
+    assert engine._strategy_ctx(state).eval_parallel_operator_owned is False, (
+        "a later pin REPLACED the pinned set: the next consult applies the Strategist's width")
+
+
+class _Widen:
+    def __init__(self):
+        self.ctxs = []
+
+    def decide(self, state, ctx):
+        self.ctxs.append(ctx)
+        return {"eval_parallel": 4, "source": "rule", "rationale": "widen"}
+
+
+def _consulted(tmp_path, pins=(), **engine_kwargs):
+    """One real consult by a Strategist that asks for width 4, after the operator's `pins`: what the
+    brief SAID about the width, and whether 4 was then APPLIED."""
+    from looplab.core.models import Idea, Node, NodeStatus
+    from looplab.events.replay import fold
+    from tests.factories import make_engine
+
+    stub = _Widen()
+    engine = make_engine(tmp_path / "run", strategist=stub, strategist_every=1, eval_parallel=1,
+                         strategist_gpu_brief=True, **engine_kwargs)
+    engine._gpu_ids, engine._task_gpu_capable = [0, 1, 2, 3], lambda: True
+    engine.store.append("run_started", {"run_id": "r", "task_id": "toy", "goal": "g",
+                                        "direction": "min"})
+    for count, pin in enumerate(pins, start=1):
+        engine.store.append("set_strategy", {"strategy": pin})
+        state = fold(engine.store.read_all())
+        state.nodes = {i: Node(id=i, operator="draft", idea=Idea(operator="draft"),
+                               status=NodeStatus.evaluated, metric=float(i)) for i in range(count)}
+        engine._strategist_consulted_at = None
+        engine._maybe_consult_strategist(state)
+    stub.ctxs.clear()
+    engine._strategist_consulted_at = None
+    state = fold(engine.store.read_all())
+    state.nodes = {i: Node(id=i, operator="draft", idea=Idea(operator="draft"),
+                           status=NodeStatus.evaluated, metric=float(i)) for i in range(9)}
+    engine._maybe_consult_strategist(state)
+    return stub.ctxs[-1].eval_parallel_operator_owned, engine._eval_parallel == 4
+
+
+@pytest.mark.parametrize("pins, engine_kwargs", [
+    ((), {}),
+    (({"eval_parallel": 1},), {}),
+    (({"max_parallel": 1},), {}),
+    (({"eval_parallel": 1}, {"developer": "default"}), {}),
+    ((), {"agent_control": "revoke"}),
+], ids=["open", "pinned", "legacy-pin", "pin-then-another-pin", "grant-revoked"])
+def test_the_brief_says_not_applied_exactly_when_the_width_is_not_applied(tmp_path, pins,
+                                                                           engine_kwargs):
+    """crit_v45 L4, driven through real consults: the line said "a width you choose is not applied"
+    of a legacy pin and of a pin a later `set_strategy` had replaced — both applied — and nothing
+    when `agent_control` revoked the grant, which applied nothing. MUTATIONS: read `_pinned` or the
+    legacy spelling again; drop the `agent_control` clause."""
+    if engine_kwargs.get("agent_control") == "revoke":
+        from looplab.core.config import default_agent_control
+        control = default_agent_control()
+        control["eval_parallel"] = []
+        engine_kwargs = {"agent_control": control}
+    said_not_applied, applied = _consulted(tmp_path, pins, **engine_kwargs)
+    assert said_not_applied is (not applied)
 
 
 def test_built_nodes_waiting_to_run_are_the_queue_a_width_admits_next(tmp_path):
@@ -239,5 +307,13 @@ def test_built_nodes_waiting_to_run_are_the_queue_a_width_admits_next(tmp_path):
     node(2, {"gpus": 8}, eval_activity_started=True)
     node(3, {"gpus": 8}, tombstoned=True)
     node(4, {"gpus": 8}, status=NodeStatus.evaluated)
+    # …nor a node being REBUILT: reset to be re-proposed (its idea is about to be replaced) or with a
+    # build in flight (crit_v45 NIT). MUTATION: drop either clause -> 8 GPUs of work "queued".
+    node(5, {"gpus": 8}, rerun_from="propose")
+    node(6, {"gpus": 8})
+    state.buildings = {6: {"node_id": 6, "operator": "draft", "generation": 1}}
+    # …and one reset to be re-IMPLEMENTED is waiting for its build too (crit_v57 L4 w03, MUTATION:
+    # read only a re-proposal as a rebuild).
+    node(7, {"gpus": 8}, rerun_from="implement")
     ctx = engine._strategy_ctx(state)
     assert (ctx.waiting_nodes, ctx.widest_waiting_gpus, ctx.undeclared_waiting) == (2, 4, 1)

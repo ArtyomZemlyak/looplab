@@ -169,22 +169,41 @@ def test_benign_is_a_subset_of_the_registry():
         "is not a terminal reason at all")
 
 
+def _fold_counts_none_of(reasons) -> bool:
+    """The FOLD's reading of a benign reason, driven: a failed terminal with it adds nothing to
+    `current_failure_count`, where an ordinary failure adds one. (The fold reads the shared set
+    through `core/models.py::search_outcome`; the alias `replay.py` once held was read by nothing,
+    crit_v56 F6.)"""
+    from looplab.events.eventstore import Event
+    from looplab.events.replay import fold
+
+    def count(reason) -> int:
+        rows = [("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                  "idea": {"operator": "draft", "params": {}, "rationale": "r"},
+                                  "code": "print(1)"}),
+                ("node_failed", {"node_id": 0, "generation": 0, "reason": reason})]
+        return fold([Event(seq=i + 1, type=t, ts=float(i), data=d)
+                     for i, (t, d) in enumerate(rows)]).current_failure_count
+
+    assert count("crash") == 1, "the drive counts an ordinary failure"
+    return all(count(reason) == 0 for reason in reasons)
+
+
 def test_both_readers_derive_the_benign_set_rather_than_spelling_it():
     """THE ACTUAL DEFECT. Two hand-written copies is how one dead word survived in both.
 
     MUTATION: re-inline either set -> they drift again, and nothing notices until someone counts.
     """
-    from looplab.events import replay
     from looplab.serve import attention
 
     from looplab.engine import orchestrator
 
-    assert set(replay._FAILURE_SPIKE_IGNORED_REASONS) == set(BENIGN_TERMINAL_REASONS)
+    assert _fold_counts_none_of(BENIGN_TERMINAL_REASONS)
     assert set(attention._IGNORED_FAILURE_REASONS) == set(BENIGN_TERMINAL_REASONS)
     # The THIRD reader (review 2026-09-22, ENG1-08): the systemic-failure stop spelled `superseded`
     # alone, so an operator's Card drops ended a run as an environment failure.
     assert set(orchestrator._NON_EVIDENCE_FAILURE_REASONS) == set(BENIGN_TERMINAL_REASONS)
-    assert "cancelled" not in replay._FAILURE_SPIKE_IGNORED_REASONS, (
+    assert "cancelled" not in BENIGN_TERMINAL_REASONS, (
         "no terminal writer mints `cancelled`; it can never match and must not read as if it could")
 
 
@@ -195,8 +214,7 @@ def test_a_frozen_build_is_benign_to_BOTH_readers():
     frozen by a transient pause/stop/budget crossing keeps its Card for a later resume — while the
     failure-spike filter counted it as a failure. One judgement, so one answer.
     """
-    from looplab.events import replay
     from looplab.serve import attention
 
-    assert "frozen" in replay._FAILURE_SPIKE_IGNORED_REASONS
+    assert _fold_counts_none_of({"frozen"})
     assert "frozen" in attention._IGNORED_FAILURE_REASONS

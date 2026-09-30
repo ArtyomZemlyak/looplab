@@ -339,6 +339,21 @@ def test_repo_developer_scouts_include_cross_run_when_enabled(tmp_path):
     assert crt[0]._task_id == "repo-a" and crt[0]._scope.run_uid == "uid-live"
 
 
+@pytest.mark.parametrize("flag", [True, False])
+def test_repo_developer_pull_tools_carry_the_claim_decisions_flag(tmp_path, flag):
+    """doc 69 69.21b: both of the Developer's cross-run readers get the flag the prior reads.
+    MUTATION: drop it from either construction -> that reader serves a rejected lesson."""
+    from types import SimpleNamespace
+    from looplab.adapters.repo_developer import LLMRepoDeveloper
+    from looplab.tools.memory_tools import MemoryTools
+    d = LLMRepoDeveloper.__new__(LLMRepoDeveloper)
+    d._cross_run_read_tools, d._cross_run_memory_dir, d._editables = True, str(tmp_path), []
+    d._claim_decisions = flag
+    d.task = SimpleNamespace(id="repo-a", goal="g", direction="max")
+    readers = [t for t in d._scout_tools() if isinstance(t, (CrossRunTools, MemoryTools))]
+    assert len(readers) == 2 and all(t.claim_decisions is flag for t in readers), readers
+
+
 def test_repo_developer_scouts_omit_cross_run_when_off(tmp_path):
     from looplab.adapters.repo_developer import LLMRepoDeveloper
     d = LLMRepoDeveloper.__new__(LLMRepoDeveloper)
@@ -1556,3 +1571,156 @@ def test_the_atlas_and_the_search_keep_a_retargeted_claims_clause(tmp_path):
     search = tools.execute("cross_run_search", {"query": "hard negatives stayed apart mnr"})
     claim_lines = [line for line in search.splitlines() if line.startswith("[claim ")]
     assert claim_lines and all(clause.strip() in line for line in claim_lines), search
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_the_concept_card_notes_withhold_what_the_operator_rejected(tmp_path, flag):
+    """doc 69 69.21b: the card's "what runs noted" read `lessons.jsonl` with no rejection filter —
+    the prior hid a lesson this card then printed. Under the flag the prior's rule applies and the
+    card says how many it held back; OFF, the historical card. The claims tool already drops the
+    rejected claim whatever the flag. MUTATION: skip the filter -> the rejected lesson prints."""
+    from looplab.engine.claims import record_claim_decision
+
+    rejected = "r-drop kept the hard negatives apart and lifted recall"
+    kept = "r-drop with a short warmup lifted recall on the long tail"
+    _seed(tmp_path, lessons=[_lesson(rejected, "supported", [1], run_id="a"),
+                             _lesson(kept, "supported", [2], run_id="b")],
+          capsules=[_cap_scoped("a", "t", concepts=["regularization/r-drop"],
+                                fingerprint=["kind:dataset"]),
+                    _cap_scoped("b", "t", concepts=["regularization/r-drop"],
+                                fingerprint=["kind:dataset"])])
+    record_claim_decision(str(tmp_path), statement=rejected, decision="rejected", scope="t")
+    card = _bind(CrossRunTools(tmp_path, claim_decisions=flag)).execute(
+        "concept_card", {"slug": "regularization/r-drop"})
+    assert "what runs noted:" in card and kept in card, card
+    assert (rejected in card) is (not flag), card
+    note = "(1 noted lesson(s) whose claim the operator rejected are not shown)"
+    assert (note in card) is flag, card
+    claims = _bind(CrossRunTools(tmp_path, claim_decisions=flag)).execute("cross_run_claims", {})
+    assert kept in claims and rejected not in claims, claims
+
+
+def test_the_concept_card_groups_claims_over_every_role_as_the_prior_does(tmp_path):
+    """doc 69 69.21b: the prior files claims over EVERY role's rows before its role filter; the card
+    now does too. A statement over `normalize_statement`'s 160-character cap shares its legacy key
+    with any claim that differs only past the cap, so an old unscoped decision on `decided` reaches
+    the group the DEVELOPER's two rows head — and with it the researcher's respelled row in that
+    group, which the prior withholds and the card now holds back (MUTATION: group the role's own
+    rows only -> the card prints it)."""
+    from looplab.engine.claims import record_claim_decision
+    from looplab.engine.lesson_hygiene import normalize_statement
+
+    head = ("r-drop regularization on the dual encoder kept the hard negatives apart and lifted "
+            "recall on the long-tail queries of the retrieval benchmark when the batch held many "
+            "near duplicates")
+    decided, rep = head + " of the anchor", head + " and the warmup was short"
+    respelled = rep.replace("on the dual encoder", "on a dual encoder", 1)
+    assert normalize_statement(decided) == normalize_statement(rep) != normalize_statement(respelled)
+    _seed(tmp_path, lessons=[_lesson(rep, "supported", [1], run_id="a", role="developer"),
+                             _lesson(rep, "supported", [2], run_id="b", role="developer"),
+                             _lesson(respelled, "supported", [3], run_id="c", role="researcher")],
+          capsules=[_cap_scoped(run, "t", concepts=["regularization/r-drop"],
+                                fingerprint=["kind:dataset"]) for run in ("a", "b", "c")])
+    record_claim_decision(str(tmp_path), statement=decided, decision="rejected")
+    for flag in (True, False):
+        card = _bind(CrossRunTools(tmp_path, role="researcher", claim_decisions=flag)).execute(
+            "concept_card", {"slug": "regularization/r-drop"})
+        assert ("on a dual encoder" in card) is (not flag), card
+        assert ("(1 noted lesson(s) whose claim the operator rejected are not shown)" in card) is flag
+        assert "on the dual encoder" not in card, "the developer's rows stay the developer's"
+
+
+def test_the_concept_card_withholds_what_the_prior_withholds_past_its_window(tmp_path):
+    """crit_v58 L2, driven: the card grouped the WHOLE store while the prior groups its bounded window,
+    and a group's decision is read under its evidence-weighted representative spelling — so five old
+    heavily-evidenced rows outside the window made the card withhold the respelled lessons the prior
+    serves. The card now decides a window row by the window's grouping and an older note by its own
+    claim (MUTATION: group the whole store -> the respelled notes vanish from the card)."""
+    from looplab.core.memory_window import MEMORY_SOURCE_ROWS
+    from looplab.engine.claims import record_claim_decision
+
+    head = ("r-drop regularization on the dual encoder kept the hard negatives apart and lifted "
+            "recall on the long-tail queries of the retrieval benchmark when the batch held many "
+            "near duplicates")
+    decided, rep = head + " of the anchor", head + " and the warmup was short"
+    respelled = rep.replace("on the dual encoder", "on a dual encoder", 1)
+    old = [_lesson(rep, "supported", list(range(1, 11)), run_id=f"old-{i}") for i in range(5)]
+    filler = [_lesson(f"filler lesson {i} about the batch size schedule", "supported", [],
+                      run_id=f"f-{i}") for i in range(MEMORY_SOURCE_ROWS)]
+    window = [_lesson(respelled, "supported", [1], run_id="w-a"),
+              _lesson(respelled, "supported", [2], run_id="w-b"),
+              _lesson(rep, "supported", [3], run_id="w-c")]
+    _seed(tmp_path, lessons=old + filler + window,
+          capsules=[_cap_scoped(run, "t", concepts=["regularization/r-drop"],
+                                fingerprint=["kind:dataset"]) for run in ("w-a", "w-b", "w-c")])
+    record_claim_decision(str(tmp_path), statement=decided, decision="rejected")
+    card = _bind(CrossRunTools(tmp_path, role="researcher", claim_decisions=True)).execute(
+        "concept_card", {"slug": "regularization/r-drop"})
+    assert "on a dual encoder" in card and "on the dual encoder" not in card, card
+    assert "noted lesson(s) whose claim the operator rejected are not shown" in card
+
+
+def test_the_concept_card_decides_a_note_older_than_the_window_by_its_own_claim(tmp_path):
+    """crit_v59 F4 (M11, driven): a rejected note that exists only OLDER than the prior's window is in
+    no group the window decides, and the card reads the whole store — so it decides such a note by
+    the note's own claim (`lesson_rejected`). MUTATION: drop that clause -> the note is shown."""
+    from looplab.core.memory_window import MEMORY_SOURCE_ROWS
+    from looplab.engine.claims import record_claim_decision
+
+    rejected = "r-drop regularization kept the hard negatives apart and lifted recall"
+    kept = "r-drop with a short warmup lifted recall on the long tail"
+    filler = [_lesson(f"filler lesson {i} about the batch size schedule", "supported", [],
+                      run_id=f"f-{i}") for i in range(MEMORY_SOURCE_ROWS)]
+    _seed(tmp_path, lessons=[_lesson(rejected, "supported", [1], run_id="old"), *filler,
+                             _lesson(kept, "supported", [2], run_id="new")],
+          capsules=[_cap_scoped("new", "t", concepts=["regularization/r-drop"],
+                                fingerprint=["kind:dataset"])])
+    record_claim_decision(str(tmp_path), statement=rejected, decision="rejected", scope="t")
+    card = _bind(CrossRunTools(tmp_path, role="researcher", claim_decisions=True)).execute(
+        "concept_card", {"slug": "regularization/r-drop"})
+    assert rejected not in card and kept in card, card
+    assert "(1 noted lesson(s) whose claim the operator rejected are not shown)" in card
+
+
+def test_the_concept_card_groups_in_its_reader_s_scope(tmp_path):
+    """crit_v59 F4 (M15): the card groups the rows the prior groups — its READER's scope, which fences
+    out the live run's own rows — so the live run's heavily evidenced spelling, which its prior
+    never sees, does not decide which of the prior runs' spellings the rejection withholds (the
+    window test's shape, with the heavy rows the reader's own instead of older than the window).
+    MUTATION: group portfolio-wide -> the respelled notes vanish from the card."""
+    from looplab.engine.claims import record_claim_decision
+
+    head = ("r-drop regularization on the dual encoder kept the hard negatives apart and lifted "
+            "recall on the long-tail queries of the retrieval benchmark when the batch held many "
+            "near duplicates")
+    decided, rep = head + " of the anchor", head + " and the warmup was short"
+    respelled = rep.replace("on the dual encoder", "on a dual encoder", 1)
+    own = [_lesson(rep, "supported", list(range(1, 11)), run_id="current") for _ in range(5)]
+    local = [_lesson(respelled, "supported", [1], run_id="w-a"),
+             _lesson(respelled, "supported", [2], run_id="w-b"),
+             _lesson(rep, "supported", [3], run_id="w-c")]
+    _seed(tmp_path, lessons=own + local,
+          capsules=[_cap_scoped(run, "t", concepts=["regularization/r-drop"],
+                                fingerprint=["kind:dataset"]) for run in ("w-a", "w-b", "w-c")])
+    record_claim_decision(str(tmp_path), statement=decided, decision="rejected")
+    card = _bind(CrossRunTools(tmp_path, role="researcher", claim_decisions=True)).execute(
+        "concept_card", {"slug": "regularization/r-drop"})
+    assert "on a dual encoder" in card and "on the dual encoder" not in card, card
+
+
+def test_the_concept_card_decides_only_the_notes_it_would_show(tmp_path):
+    """Only the notes the card would SHOW are decided, and the count is of those: a rejected note past
+    the three shown was never going to be shown (MUTATION: decide every note -> "(1 ...)")."""
+    from looplab.engine.claims import record_claim_decision
+
+    kept = [_lesson(f"r-drop helped seed {i} with a short warmup", "supported", [i], run_id=f"k{i}")
+            for i in range(4)]
+    rejected = "r-drop kept the hard negatives apart and lifted recall"
+    _seed(tmp_path, lessons=kept + [_lesson(rejected, "supported", [9], run_id="z")],
+          capsules=[_cap_scoped("k0", "t", concepts=["regularization/r-drop"],
+                                fingerprint=["kind:dataset"])])
+    record_claim_decision(str(tmp_path), statement=rejected, decision="rejected", scope="t")
+    card = _bind(CrossRunTools(tmp_path, claim_decisions=True)).execute(
+        "concept_card", {"slug": "regularization/r-drop"})
+    assert rejected not in card and "not shown)" not in card, card
+    assert sum("UNTRUSTED_MEMORY='r-drop helped seed" in line for line in card.splitlines()) == 3

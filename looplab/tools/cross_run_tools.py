@@ -181,9 +181,15 @@ class CrossRunTools:
     AUDIENCES = ("portfolio", "run")
 
     def __init__(self, memory_dir: str | Path | None, *, role: str = "researcher",
-                 audience: str = "portfolio"):
+                 audience: str = "portfolio", claim_decisions: bool = False):
         self.dir = Path(memory_dir) if memory_dir else None
         self.role = str(role or "researcher")
+        # The concept card's "what runs noted" withholds a lesson whose claim the operator rejected,
+        # exactly as the passive prior and `MemoryTools.search_lessons` do (doc 69 69.21b). OFF at
+        # the constructor because it changes what a tool returns (a prompt); `agents/providers.py`
+        # passes `Settings.lesson_prior_claim_decisions`. The claims tool needs no flag: it has
+        # always dropped an `operator-rejected` claim (`_tool_cross_run_claims`).
+        self.claim_decisions = bool(claim_decisions)
         # The visibility predicate itself is `trust/cross_run.py::LessonScope`, shared with
         # `MemoryTools` so the two readers of `lessons.jsonl` cannot disagree (doc 25 TO-07). The
         # five loose fields it replaced are still readable as properties — a dozen call sites here
@@ -1439,13 +1445,40 @@ class CrossRunTools:
         name_terms = _toks(cname or canon)
         notes = [lz for lz in self._role_lessons()
                  if name_terms and name_terms <= _toks(str(lz.get("statement") or ""))]
+        shown, withheld_notes = 3, 0
+        decisions = (_governance or {}).get("decisions")
+        if notes and self.claim_decisions:
+            # The prior's own rule (doc 69 69.21b), decided over the rows the prior GROUPS — its
+            # bounded window, in scope, every role (`engine/claims.py::operator_rejected_keys`,
+            # memoized per store state) — and, for a note older than that window, over the note's own
+            # claim, which is how the rule reads a row its grouping cannot see. The card reads the
+            # whole store, and grouping all of it disagreed with the prior both ways and cost 25 s at
+            # 20k rows (crit_v58 L1/L2, driven); only the notes it would SHOW are decided, and the
+            # count is of those — a LOWER bound on the rejected notes that mention the concept, met
+            # before the card had its three (crit_v59 N3), which is all the line claims. The decisions
+            # are the governance snapshot's, so an unreadable ledger already failed the tool closed.
+            from looplab.engine.claims import (lesson_claim_key, lesson_rejected,
+                                               operator_rejected_keys, rejects_anything)
+            if rejects_anything(decisions):
+                rejected, kept = operator_rejected_keys(self.dir, self._scope), []
+                for lz in notes:
+                    if len(kept) == shown:
+                        break
+                    if lesson_claim_key(lz) in rejected or lesson_rejected(lz, decisions):
+                        withheld_notes += 1
+                    else:
+                        kept.append(lz)
+                notes = kept
         if notes:
             lines.append("  what runs noted:")
-            for lz in notes[:3]:
+            for lz in notes[:shown]:
                 out = _safe_text(str(lz.get("outcome") or "noted"), 20)
                 # A retargeted run's lesson keeps the clause its cut would take (doc 68 68.2).
                 lines.append(f"    [{out}] UNTRUSTED_MEMORY="
                              f"{with_retarget_clause(_safe_text(lz.get('statement'), 200), lz)!r}")
+        if withheld_notes:
+            lines.append(f"  ({withheld_notes} noted lesson(s) whose claim the operator rejected "
+                         "are not shown)")
 
         lines.append("  (No authored prose/paper overview yet — this card is assembled from cross-run "
                      "evidence; deep-research summarization is future work.)")

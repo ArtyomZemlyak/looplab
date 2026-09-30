@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from looplab.core.config import claim_decisions_enabled
 from looplab.core.evidence import envelope_enabled
 from looplab.core.llm import resolve_llm_target, run_cost_accountant
 
@@ -93,6 +94,7 @@ def in_house_repo_developer(task: TaskAdapter, settings, client, *, param_search
         step_feedback_command=getattr(settings, "developer_step_feedback_command", "") or "",
         cross_run_read_tools=getattr(settings, "cross_run_read_tools", False),   # PART V §22 (dev-scoped)
         memory_dir=getattr(settings, "memory_dir", None),
+        claim_decisions=claim_decisions_enabled(settings),  # doc 69 69.21b
         # F2 · the PROBE (tools/dev_probe.py). Plain values, not the Settings object, like every
         # knob above: `make_roles` — whose developer-backend wirings live in this module since
         # 2026-09-08 — is the ONE place a setting becomes a role's behaviour.

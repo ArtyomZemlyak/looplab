@@ -123,8 +123,15 @@ test('activityKey: every field of the server row moves the key, and a non-row is
   assert.notEqual(activityKey({ ...base, status: 'evaluating' }), key)
   assert.notEqual(activityKey({ ...base, generation: 1 }), key)
   assert.notEqual(activityKey({ ...base, evidence: 'node_eval_started' }), key)
+  // …and the fields the row carries beyond those three (crit_v46 NIT).
+  assert.notEqual(activityKey({ ...base, started_at: 12.5 }), key)
+  assert.notEqual(activityKey({ ...base, started_at: 12.5 }), activityKey({ ...base, started_at: 13 }))
+  assert.notEqual(activityKey({ ...base, schema: 2 }), activityKey({ ...base, schema: 1 }))
   assert.equal(activityKey({ ...base }), key, 'the same statement is the same key')
+  assert.equal(activityKey({ evidence: base.evidence, generation: 0, status: 'queued' }), key,
+    'field order is not a statement')
   assert.equal(activityKey(null), '')
   assert.equal(activityKey(undefined), '')
   assert.equal(activityKey('queued'), '')
+  assert.equal(activityKey([]), '', 'a list is no row')
 })

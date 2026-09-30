@@ -294,6 +294,64 @@ def in_endgame(plan: Optional[dict], total_nodes: int) -> bool:
         return False
 
 
+def final_reserve_reached(plan: Optional[dict], total_nodes: int) -> Optional[bool]:
+    """Whether node `total_nodes` is inside the plan's FINAL reserve — the endgame the budget's end
+    closes, which no re-cut of the same budget reopens — or None when there is no readable plan row.
+
+    The rule Strategist's endgame switch (doc 69 69.25a, `agents/strategist.py::endgame_reached`):
+    `in_endgame` over the SAME count the dispatcher's gate reads, so on an ordinary row the machinery
+    the rule sets and the actions the gate admits start at one node, wherever an inject batch or a
+    budget change has moved the cut. A permanent stall row (`endgame_stall_nodes` 0, no
+    `endgame_end`) is final too: it runs to the budget's end, so a resumed run whose log holds one
+    switches at its start, as its gate did.
+
+    A BOUNDED stall episode (`endgame_end`) is final only from the start its `reopened` row would
+    cut on (`_ordinary_start`: the ordinary cut of the row's own budget, seeds, fraction and injected
+    count — the one `_reopened` takes): before it, the episode reopens into the search — after its K
+    nodes or on a new champion — and the endgame settings the rule would write (no ablation, the
+    ensemble merge) would outlive it; from it on, every reopening lands inside the ordinary reserve.
+    Counting the whole episode out (critic crit_v59 F1, driven) switched late by the overlap on an
+    episode that straddles the cut, and never on one whose end is past the budget's, which no
+    `reopened` row closes. Read off the row rather than stored beside it, so an episode row written
+    before this reads the same way (crit_v61 L2). None — a missing or unreadable row — leaves the
+    caller's own reading in place."""
+    if not isinstance(plan, dict):
+        return None
+    try:
+        int(plan["endgame_start"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    if plan.get("endgame_end") is None:
+        return in_endgame(plan, total_nodes)
+    final = _ordinary_start(plan)
+    if final is None:
+        return None
+    try:
+        return in_endgame(plan, total_nodes) and int(total_nodes) >= final
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _ordinary_start(plan: dict) -> Optional[int]:
+    """Where the ORDINARY cut of `plan`'s own budget, seed count, fraction and injected count starts
+    its reserve — the start a `reopened` row cut from this row takes (`_reopened` cuts with the row's
+    own fraction) — or None when the row cannot say. The seed count is the seed phase's, which an
+    episode row's start (always past the seeds) leaves whole."""
+    phases = plan.get("phases")
+    try:
+        seeds = phases[0]["nodes"]
+        frac = plan["reserve_frac"]
+        # A fraction `_own_fraction` would not take is not the one the reopen cuts with.
+        if (type(seeds) is not int or not isinstance(frac, (int, float))
+                or isinstance(frac, bool)):
+            return None
+        row = build_plan(max_nodes=int(plan["max_nodes"]), n_seeds=seeds,
+                         reserve_frac=float(frac), at_node=0, injected=_recorded_injected(plan))
+    except (KeyError, IndexError, TypeError, ValueError, OverflowError):
+        return None
+    return None if row is None else row["endgame_start"]
+
+
 def _int_or_none(value) -> Optional[int]:
     return value if type(value) is int else None
 
@@ -366,13 +424,28 @@ def _injected_recut(plan: dict, cut: dict, planned_start: int,
     # …and cut with the row's OWN fraction (F6): the historical rule never re-cuts on a changed
     # `endgame_reserve_frac`, and a batch must not smuggle one in — driven, a fraction raised from
     # 0.25 to 0.5 moved the start from 15 to 10 on one inject, earlier than without the batch.
-    frac = plan.get("reserve_frac")
-    if isinstance(frac, (int, float)) and not isinstance(frac, bool) and frac > 0:
-        cut = {**cut, "reserve_frac": frac}
-    row = build_plan(**cut, reason="injected")
+    row = build_plan(**_own_fraction(plan, cut), reason="injected")
     if row is None or row["endgame_start"] == planned_start:
         return None
     return _with_spent(row, spent)
+
+
+def _own_fraction(plan: dict, cut: dict) -> dict:
+    """`cut` with the row's OWN `reserve_frac` when it records a usable one. Only a row cut FRESH from
+    the configuration takes the live fraction — an ordinary budget re-cut (the historical rule) and
+    the unbounded stall row of `stall_nodes` 0; an episode's rows — its start, the migration of that
+    unbounded row, a budget carry, an inject extension — and its `reopened` row keep the fraction
+    the row was cut with, so the start `final_reserve_reached` reads off an episode row is the one
+    its reopen cuts (critic crit_v62 F3, driven: a carry and an extension took a fraction lowered on
+    resume and unread nodes the rule had read as final). One corner stays (critic crit_v63 N1): a
+    stall while `stall_nodes` was 0 records the fraction live THEN, so a fraction moved on resume
+    before it moves the reopen too — later when lowered, earlier when raised (critic crit_v64) —
+    against the same history with the setting on at the stall. A stored fraction is rounded to 4
+    places; a fraction the row rounded to 0 is no usable one, and the live cut stands."""
+    frac = plan.get("reserve_frac")
+    if isinstance(frac, (int, float)) and not isinstance(frac, bool) and frac > 0:
+        return {**cut, "reserve_frac": frac}
+    return cut
 
 
 def _recorded_injected(plan: dict) -> int:
@@ -381,8 +454,11 @@ def _recorded_injected(plan: dict) -> int:
     return recorded if type(recorded) is int and recorded > 0 else 0
 
 
-def _reopened(cut: dict, spent: list[int], cause: str) -> Optional[dict]:
-    row = build_plan(**cut, reason="reopened")
+def _reopened(plan: dict, cut: dict, spent: list[int], cause: str) -> Optional[dict]:
+    # The row's OWN fraction, as `_injected_recut` takes (critic crit_v61 L1, driven: a fraction
+    # lowered on resume mid-episode reopened into the search at nodes the rule had already read as
+    # its final reserve — `final_reserve_reached` reads the start this cut gives).
+    row = build_plan(**_own_fraction(plan, cut), reason="reopened")
     if row is None:
         return None
     row["reopen_cause"] = cause if cause in REOPEN_CAUSES else "episode_spent"
@@ -436,23 +512,24 @@ def replan(plan: Optional[dict], *, max_nodes: int, n_seeds: int, reserve_frac: 
     cut = {"max_nodes": max_nodes, "n_seeds": n_seeds, "reserve_frac": reserve_frac,
            "at_node": at_node, "endgame_sweep": endgame_sweep, "injected": injected}
     spent = _stall_champions(plan)
+    own = _own_fraction(plan, cut)         # every episode row keeps the row's fraction (crit_v62 F3)
     episode = _episode(plan)
     if episode is not None:
         start, end, holder = episode
         if champion != holder:
-            return _reopened(cut, spent, "champion_changed")
+            return _reopened(plan, cut, spent, "champion_changed")
         # A BATCH LANDING INSIDE A LIVE EPISODE extends it by the batch (critic 2026-09-30, crit_v48
         # F3): the episode is K of the ENGINE's nodes, and the operator's ids used to spend it —
         # driven, three injects at node 9 of an episode [8, 11) reopened it after one engine node,
         # and the champion's one episode was gone. `injected` is 0 with the setting off.
         batch = injected - _recorded_injected(plan)
         if batch > 0 and at_node - batch < end:
-            return _episode_row(cut, start=start, end=end + batch, champion=holder, spent=spent,
+            return _episode_row(own, start=start, end=end + batch, champion=holder, spent=spent,
                                 reason="injected")
         if at_node >= end:
-            return _reopened(cut, spent, "episode_spent")
+            return _reopened(plan, cut, spent, "episode_spent")
         if int(max_nodes) != planned_budget:
-            return _episode_row(cut, start=start, end=end, champion=holder, spent=spent,
+            return _episode_row(own, start=start, end=end, champion=holder, spent=spent,
                                 reason="budget_changed")
         return None
     if stall_nodes <= 0:
@@ -471,21 +548,21 @@ def replan(plan: Optional[dict], *, max_nodes: int, n_seeds: int, reserve_frac: 
         # again, now, on the corrected count — and a champion whose id is at or past the row's start
         # did not exist when it was written, so the stall it recorded was some other champion's.
         if stall_rung < HARD_STALL_RUNGS or champion is None:
-            return _reopened(cut, spent, "stall_retracted")
+            return _reopened(plan, cut, spent, "stall_retracted")
         if champion >= planned_start:
-            return _reopened(cut, spent, "champion_changed")
+            return _reopened(plan, cut, spent, "champion_changed")
         if champion in spent:
-            return _reopened(cut, spent, "episode_spent")
+            return _reopened(plan, cut, spent, "episode_spent")
         end = planned_start + stall_nodes
         if at_node >= end:
-            return _reopened(cut, spent + [champion], "episode_spent")
-        return _episode_row(cut, start=planned_start, end=end, champion=champion,
+            return _reopened(plan, cut, spent + [champion], "episode_spent")
+        return _episode_row(own, start=planned_start, end=end, champion=champion,
                             spent=spent + [champion], reason="stagnation")
     if int(max_nodes) != planned_budget:
         return _with_spent(build_plan(**cut, reason="budget_changed"), spent)
     if (stall_rung >= HARD_STALL_RUNGS and n_seeds < at_node < planned_start
             and champion is not None and champion not in spent):
-        return _episode_row(cut, start=at_node, end=at_node + stall_nodes, champion=champion,
+        return _episode_row(own, start=at_node, end=at_node + stall_nodes, champion=champion,
                             spent=spent + [champion], reason="stagnation")
     return _injected_recut(plan, cut, planned_start, spent)
 

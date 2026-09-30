@@ -1380,7 +1380,11 @@ class EvalStagesMixin:
 
         Returns ``(start_stage, refusal)``: exactly one is non-None. `start_stage` is the suspect's
         name, to be used as the next eval's `start_stage`, which re-runs the pipeline FROM there and
-        so discards every artifact the suspect and everything after it produced.
+        so discards every artifact the suspect and everything after it produced. The caller starts
+        there only where `_safe_reuse_start` would too (`evaluate.py::_eval_apply_repair`, crit_v51
+        F2): a repair that also changed what an EARLIER stage runs — or one whose reuse cannot be
+        proven (an opaque stage, a non-default `cwd`, a deleted file, a moved manifest entry) —
+        re-runs the whole pipeline, and the `stage_rollback` row's `start` says which.
 
         THE GAP THIS FILLS. `next_start` and `_safe_reuse_start` only ever move the start point
         FORWARD: they answer "which completed stages may I skip". Neither can express the opposite

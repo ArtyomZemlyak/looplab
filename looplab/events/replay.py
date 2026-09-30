@@ -30,7 +30,7 @@ from looplab.core.models import (Event, Idea, Node, NodeStatus, RunState, Trial,
                      EXTRA_METRIC_DECLARED, normalize_extra_metric_backfill,
                      normalize_extra_metric_channels, normalize_extra_metric_directions, normalize_extra_metrics,
                      normalize_researcher_footprint,
-                     run_setup_key, BENIGN_TERMINAL_REASONS)
+                     run_setup_key, search_outcome)
 # No longer read here — the concept family's materializer inherits through it — but still readable
 # from this module as it always was (`tests/test_shared_identity_rules.py` derives the card ledger's
 # display set from it).
@@ -761,32 +761,24 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
             _charge_terminal_cost(st, n, d, ctx)
 
 
-# DERIVED, not spelled. This set and `serve/attention.py`'s owner-alert filter are the same
-# judgement — "this node ended for a reason that says nothing about the experiment" — and were
-# hand-written twice; both carried `cancelled`, which no terminal writer mints, so each held one
-# word that could never match and neither could tell. See `core/models.py::BENIGN_TERMINAL_REASONS`.
-#
-# THE UNIFICATION MOVED THIS SET, AND SAYING ONLY THE `cancelled` HALF UNDERSTATED IT. The two
-# hand-written copies were not the same: `attention.py` also carried `frozen` and this one did not,
-# so taking the shared set ADDED a live reason here. `frozen` is minted by
+# WHICH TERMINALS ARE NO FAILURE is `core/models.py::BENIGN_TERMINAL_REASONS`, read through
+# `search_outcome` below: the same judgement `serve/attention.py`'s owner-alert filter makes ("this
+# node ended for a reason that says nothing about the experiment"). It was hand-written here once, and
+# the unification onto the shared set ADDED `frozen` — minted by
 # `engine/speculation.py::_fail_reserved_build` when a speculative build is terminalized by a
-# transient pause/stop/budget crossing — the engine's own doing, at a moment the run is already
-# stopping — which is exactly the judgement this set encodes, so the two readers agreeing is the
-# correct end state and `attention.py` was the one that had it right.
-#
-# BUT IT CHANGES FOLDED STATE ON A PRESERVED LOG, which is why it is written down rather than left
-# to the shared set's docstring. `_counts_as_current_failure` feeds `_add_current_failure`, so
-# `RunState.current_failure_count`, `failure_spike_level` and `failure_spike_seq` all move on any
-# log containing a `frozen` terminal, and the consecutive-failure breaker no longer counts one. All
-# three fields are `Field(exclude=True)`, so a corpus check that digests `model_dump()` cannot see
-# this at all — the reason it went unnoticed. `tests/test_failure_spike_ignores_frozen.py` pins the
-# membership deliberately.
-_FAILURE_SPIKE_IGNORED_REASONS = set(BENIGN_TERMINAL_REASONS)
+# transient pause/stop/budget crossing, the engine's own doing — which CHANGES FOLDED STATE on a
+# preserved log: `current_failure_count`, `failure_spike_level` and `failure_spike_seq` all move on
+# any log holding a `frozen` terminal. All three are `Field(exclude=True)`, so a corpus check that
+# digests `model_dump()` cannot see it; `tests/test_failure_spike_ignores_frozen.py` pins it. (The
+# set's own alias here was read by nothing once the rule became `search_outcome`'s, crit_v56 F6.)
 
 
 def _counts_as_current_failure(st: RunState, n: Node) -> bool:
-    return (n.status is NodeStatus.failed and not n.tombstoned and n.id not in st.aborted_nodes
-            and str(n.error_reason or "").strip().lower() not in _FAILURE_SPIKE_IGNORED_REASONS)
+    # THE ONE RULE (crit_v54 F6): a current failure is what `core/models.py::search_outcome` calls a
+    # failure, and the Strategist's failure rate, mean eval cost and stall signals read the same
+    # function — two copies pinned equal over a fixed list of reasons let a reason added to one
+    # (`| {"oom"}`) pass every test.
+    return search_outcome(st, n) is True
 
 
 def _add_current_failure(st: RunState, n: Node, event: Event) -> None:

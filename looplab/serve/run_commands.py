@@ -55,7 +55,7 @@ from looplab.serve import engine_proc as _engine_proc   # `_PENDING_RECHECK_S`, 
 from looplab.serve.command_observation import CommandObservation, CommandObservationIndex
 from looplab.serve.control_validation import (
     CONTROL_SPECS, EnginePolicy, _error, _normalize_finalize_data, normalize_control,
-    task_file_for)
+    refuse_agent_token_intent, task_file_for)
 from looplab.serve.durable_op import refuse_unless_quiescent
 from looplab.serve.engine_proc import (
     EngineSpawnOutcomeUnknown, _claim_and_spawn_resume, _engine_alive, _engine_liveness,
@@ -2142,7 +2142,7 @@ class RunCommandService:
                 "remediation": (
                     f"GET /commands/{command_id} to a terminal status first; if that record cannot "
                     f"be read at all, POST /api/runs/{{run}}/resolve-activity-claims with its "
-                    f"confirmation phrase."),
+                    f"confirmation phrase (the owner's token: a harness agent asks the operator)."),
             })
         unresolved_path, unresolved = self._unresolved_terminal_record(rd)
         if unresolved is not None:
@@ -2822,7 +2822,8 @@ class RunCommandService:
                                 retryable=bool(refused["retryable"]))
 
     def submit(self, rd: Path, idempotency_key: str, event_type: str, data,
-               *, expected_generation: object = None, drain_only: object = None) -> dict:
+               *, expected_generation: object = None, drain_only: object = None,
+               agent_token: bool = False) -> dict:
         key = str(idempotency_key or "")
         if not key or len(key) > 512:
             raise HTTPException(400, "Idempotency-Key is required and must be at most 512 characters")
@@ -2903,7 +2904,7 @@ class RunCommandService:
                                if gate_field is not None else None)
                 try:
                     normalized_candidate = normalize_control(
-                        self.srv, rd, event_type, raw_data)
+                        self.srv, rd, event_type, raw_data, agent_token=agent_token)
                     if gate_field is not None:
                         gate_after = getattr(self.srv.state(rd), gate_field, None)
                         if (not isinstance(gate_before, int) or isinstance(gate_before, bool)
@@ -2991,7 +2992,7 @@ class RunCommandService:
                                     f"GET /commands/{existing_id} to a terminal status before submitting "
                                     "the next command; if that record cannot be read at all, POST "
                                     "/api/runs/{run}/resolve-activity-claims with its confirmation "
-                                    "phrase."),
+                                    "phrase (the owner's token: a harness agent asks the operator)."),
                             })
                     now = time.time()
                     record = {
@@ -3012,6 +3013,10 @@ class RunCommandService:
                     }
                     if drain:
                         record["drain_only"] = True
+                    if agent_token:
+                        # WHO asked (critic crit_v61 M1): the agent token is the `owner` principal,
+                        # and without this the owner could not tell its records from their own.
+                        record["submitted_by"] = "agent_token"
                     try:
                         if normalization_error is not None:
                             raise normalization_error
@@ -3103,12 +3108,16 @@ class RunCommandService:
             raise HTTPException(503, detail)
         return result
 
-    def retry(self, rd: Path, command_id: str) -> dict:
+    def retry(self, rd: Path, command_id: str, *, agent_token: bool = False) -> dict:
         path = self._path(rd, command_id)
         with self.sequence(rd):
             record = self._read_existing(path)
             if record is None:
                 raise HTTPException(404, "no such command")
+            if agent_token:
+                # A retry re-drives a record someone ELSE may have submitted: the AGENT token meets
+                # the submit rule for its intent first (doc 70 70.8, critic crit_v60 F5).
+                refuse_agent_token_intent(rd, record.get("event_type"), record.get("data"))
             generation_match, current_generation = self._record_generation_match(rd, record)
             if generation_match is not True:
                 detail = self._record_generation_error(record, generation_match, current_generation)

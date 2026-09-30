@@ -10,6 +10,7 @@ import json
 import os
 import posixpath
 import re
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -134,6 +135,26 @@ def _merged_grep(results, where: str, glob: str) -> str:
 # lies under no mount root (`RepoTools._spelling`): a mount may itself sit below a `nodes/node_N`
 # directory, and a relative `results/nodes/node_3/x.py` may be a directory the repo itself has.
 _NODE_DIR_PATH = re.compile(r"/nodes/node_(\d+)/(.+)$")
+_DRIVE_ROOT = re.compile(r"^[A-Za-z]:/")
+
+
+def _absolute_root_spelling(root) -> str | None:
+    """A mount root as a model may copy it — separators folded to `/`, no trailing `/` — or None when
+    it is not absolute. A Windows drive root (`C:/…`) is absolute too: only a leading `/` was
+    accepted, so on Windows no absolute spelling of any mount was ever mapped (the Windows CI leg,
+    2026-09-30: `C:\\…\\a/x.py` read as "(no such file …)").
+
+    NORMALISED exactly as `RepoTools._spelling` normalises the path it is compared with — its
+    `posixpath.normpath` and its `//` head folded to one `/` — or the two can never be equal: a UNC
+    root `\\\\server\\share\\repo` was registered as `//server/share/repo` and every path under it
+    arrived as `/server/share/repo/…` (crit_v54 F9)."""
+    root = str(root).replace("\\", "/")
+    if root.startswith("//"):
+        root = "/" + root.lstrip("/")
+    root = root.rstrip("/")
+    if root.startswith("/") or _DRIVE_ROOT.match(root):
+        return posixpath.normpath(root)
+    return None
 
 
 def _unreadable(name: str) -> str:
@@ -245,8 +266,8 @@ class RepoTools:
         for m in mounts:
             name = m["name"] or "."
             for root in (os.path.expanduser(os.path.expandvars(m["path"])), str(self.roots[name])):
-                root = str(root).replace("\\", "/").rstrip("/")
-                if root.startswith("/") and len(root) > 1:
+                root = _absolute_root_spelling(root)
+                if root is not None:
                     spelled.setdefault(root, name)
         self._spellings = sorted(spelled.items(), key=lambda row: -len(row[0]))
 
@@ -667,6 +688,35 @@ _NO_NOTES = ("(there are NO knowledge notes at all — the note set is operator-
              "about past CASES, which only `kb_search` reads.)")
 
 
+class _SharedIndex:
+    """The ONE index every per-call view of a `KnowledgeTools` adopts (critic 2026-09-30, crit_v53 N2).
+
+    `agents/tool_loop.py::bound_toolset` hands each call a SHALLOW copy of the provider and binds the
+    copy, so the provider itself is never bound and keeps its construction-time scope. Each view then
+    saw "unbound -> bound" and rebuilt the index eagerly, whether or not the model searched, and
+    re-embedded every record the construction-time memo lacked. Driven: five proposals, one note
+    written after construction, made 6 builds and 7 embeddings where the shared binding had made
+    2 and 3, and with `embed_model` set each embedding is a paid call. This container is shared by
+    reference, so a view ADOPTS what an earlier view built for the same scope and sources. The lock
+    serializes the one build a scope or source change owes, so two views never pay for it twice. What
+    it publishes is never mutated again, because a build starts a new index and a new memo.
+
+    THE COST, bounded and stated (crit_v55 K3, measured): the provider keeps its construction-time
+    index while this slot holds the last bound scope's, so a provider used through views holds TWO
+    resident indexes (and memos) where the bound-in-place provider held one — 100 stored items
+    against 50 for 50 records — plus whatever a live view still references. It does not grow with
+    views or scopes: the slot holds one scope at a time."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.key: tuple | None = None
+        self.revision = ""
+        self.index = None
+        self.memo: dict = {}
+        self.memo_embedder = None
+        self.case_window_health = None
+
+
 class KnowledgeTools:
     def __init__(self, knowledge_dir: str | None = None,
                  cases_path: str | None = None, k: int = 3, embed=None,
@@ -695,7 +745,47 @@ class KnowledgeTools:
         # it, and a memo that outlived that would mix two embedding spaces in one index.
         self._vector_memo: dict[str, list] = {}
         self._vector_memo_embedder = self.embed
+        self._shared = _SharedIndex()
         self._build_index()
+        self._publish_index()
+
+    @staticmethod
+    def _scope_key(scope) -> tuple:
+        """The adoption key: EVERY field of the scope (`LessonScope.__slots__`), so a field the
+        visibility predicate grows is part of the key without anyone remembering to add it. The
+        hand-listed tuple this replaced was one dropped field away from a leak, and no test would
+        have seen it: without `goal_terms` an unrelated goal adopted a related goal's index and read
+        its case, without `run_uid` a run's own replaced incarnation read the row it must not
+        (crit_v55 K1, driven)."""
+        return tuple((name, getattr(scope, name)) for name in type(scope).__slots__)
+
+    def _publish_index(self) -> None:
+        shared = self._shared
+        shared.key, shared.revision, shared.index = (self._scope_key(self._scope),
+                                                     self._index_revision, self._index)
+        shared.memo, shared.memo_embedder = self._vector_memo, self._vector_memo_embedder
+        shared.case_window_health = self._case_window_health
+
+    def _adopt_or_build(self, revision: str | None = None) -> None:
+        """This view's index: the shared one when it was built for this scope (and, given a
+        `revision`, over these sources) by this embedder; else one build, from the freshest memo,
+        that every later view adopts (`_SharedIndex`)."""
+        shared = getattr(self, "_shared", None)
+        if shared is None:
+            self._build_index()
+            return
+        with shared.lock:
+            if (shared.index is not None and shared.key == self._scope_key(self._scope)
+                    and shared.memo_embedder is self.embed
+                    and (revision is None or shared.revision == revision)):
+                self._index, self._index_revision = shared.index, shared.revision
+                self._vector_memo, self._vector_memo_embedder = shared.memo, shared.memo_embedder
+                self._case_window_health = shared.case_window_health
+                return
+            if shared.memo_embedder is self.embed:
+                self._vector_memo, self._vector_memo_embedder = shared.memo, shared.memo_embedder
+            self._build_index()
+            self._publish_index()
 
     def bind_state(self, state, parent=None) -> None:
         """Bind case retrieval to the same live scope as lessons and cross-run tools.
@@ -705,13 +795,10 @@ class KnowledgeTools:
         filtering after a lossy merge cannot recover a compatible member that was discarded.
         """
         next_scope = LessonScope.of(state)
-        current = (self._scope.bound, self._scope.run_uid, self._scope.run_id,
-                   self._scope.task_id, self._scope.direction, self._scope.goal_terms)
-        updated = (next_scope.bound, next_scope.run_uid, next_scope.run_id,
-                   next_scope.task_id, next_scope.direction, next_scope.goal_terms)
+        current, updated = self._scope_key(self._scope), self._scope_key(next_scope)
         self._scope = next_scope
         if current != updated:
-            self._build_index()
+            self._adopt_or_build()
 
     def _source_revision(self) -> str:
         """Stable identity of the files feeding the in-memory index; unavailable files stay explicit."""
@@ -946,7 +1033,7 @@ class KnowledgeTools:
             if name == "kb_search":
                 revision = self._source_revision()
                 if revision != self._index_revision:
-                    self._build_index()
+                    self._adopt_or_build(revision)
                 q = args.get("query", "")
                 # Embed the query in the SAME space as the index. When a HARMONIC (abstraction-keyed)
                 # index is in use (self.abstract set — _build_index keys each entry by

@@ -21,8 +21,10 @@ import difflib
 import inspect
 import json
 import logging
+import math
 import re
 import time
+from fractions import Fraction
 from typing import Optional
 
 from looplab.core import tracing
@@ -32,7 +34,7 @@ from looplab.core.phase_events import (PHASE_CHECKPOINTED, PHASE_COMPLETED, PHAS
 from looplab.tools.clock import LoopClock, set_current_clock
 from looplab.core.errors import LLMCancelled
 from looplab.core.llm import BudgetExceeded, cancel_check_scope
-from looplab.core.llm_budget import (thread_committed_tokens, thread_committed_usd,
+from looplab.core.llm_budget import (thread_committed_tokens, thread_committed_usd_exact,
                                      thread_unreported_calls)
 from looplab.tools._base import (RESULT_CAP, ToolCapability, ToolResult, collect_inventory,
                                  capability_manifest)
@@ -287,8 +289,11 @@ def bound_toolset(tools, state, parent=None):
     stay one object. The hook's contract (`tools/_base.py`) is what makes that sound — `bind_state`
     REBINDS attributes on the provider it is called on, it does not mutate shared containers. The
     price is that an attribute a provider memoizes across calls (`CrossRunTools`' capsule read) is
-    now memoized per call — recomputed at most once, and only by a call that uses the tool. A provider
-    with no `bind_state` has nothing to bind and is shared as it is. A `CompositeTools` is viewed all
+    now memoized per call — recomputed at most once, and only by a call that uses the tool. A memo
+    a bind recomputes EAGERLY is the exception and is shared by reference instead: the knowledge
+    index, whose rebuild re-embeds (paid with `embed_model`) — `tools/knowledge_tools.py::
+    _SharedIndex` (crit_v53 N2). A provider with no `bind_state` has nothing to bind and is
+    shared as it is. A `CompositeTools` is viewed all
     the way down, keeping its route, its capabilities and its spec ORDER, which is what the model is
     offered.
     """
@@ -970,17 +975,33 @@ def _accountant_spend(client) -> float | None:
     return spent if spent >= 0 else None
 
 
-def _session_spend(client, at_start: float | None) -> float | None:
+def _session_spend(client, at_start: Fraction | None) -> float | None:
     """What THIS session has spent, or None when it cannot be known.
 
     Read off the THREAD (`core/llm_budget.py::note_committed_cost`), not the accountant: the
     accountant is the RUN's, so its delta also counted every CONCURRENT session — the critic's
     driver (2026-09-30) cut a plan step at "$2.0200 of $0.2500 for this session" whose own three
-    calls cost $0.03, because pooled builds share one accountant. `at_start` is the thread's figure
-    when the session began, None when the client keeps no accountant (see `_accountant_spend`)."""
+    calls cost $0.03, because pooled builds share one accountant. `at_start` is the thread's EXACT
+    figure when the session began (`thread_committed_usd_exact`), None when the client keeps no
+    accountant (see `_accountant_spend`)."""
     if at_start is None or _accountant_spend(client) is None:
         return None
-    return max(0.0, thread_committed_usd() - at_start)
+    # On the EXACT readings: after one large reported cost a float difference lost every small
+    # commit to absorption and the ceiling never fired (crit_v52 F5). A float START is the same
+    # defect entered one step earlier — it already rounded away what the large cost absorbed, and
+    # the difference reads that rounding as this session's spend ($0.18 for three $0.05 calls,
+    # crit_v54 F7) — so it is refused, not converted. The one caller reads the exact figure, so
+    # only a new, wrong caller reaches the refusal, and it does so on its first test.
+    if isinstance(at_start, bool) or not isinstance(at_start, (Fraction, int)):
+        raise TypeError("_session_spend needs the exact start reading "
+                        f"(thread_committed_usd_exact), not {type(at_start).__name__}")
+    try:
+        return max(0.0, float(thread_committed_usd_exact() - at_start))
+    except OverflowError:
+        # Past the float range this session has spent more than any ceiling can name: `inf`, never
+        # an OverflowError out of the loop — two float-max reports inside ONE session raised here,
+        # where the float total before the exact ledger cut cleanly at "$inf" (crit_v54 F2).
+        return math.inf
 
 
 def _session_tokens(client, at_start: int) -> int | None:
@@ -1372,7 +1393,8 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     # Read once, before the first turn: the ceiling is for THIS session, so it is measured from what
     # this THREAD had committed when the session began (`_session_spend`); None — no ceiling — when
     # the client keeps no accountant.
-    _spend_at_start = thread_committed_usd() if _accountant_spend(client) is not None else None
+    _spend_at_start = (thread_committed_usd_exact() if _accountant_spend(client) is not None
+                       else None)
     turns = itertools.count() if max_turns is None or max_turns <= 0 else range(max_turns)
     for turn_idx in turns:
         if _cancelled():                # user hit stop -> finalize from what we have, promptly

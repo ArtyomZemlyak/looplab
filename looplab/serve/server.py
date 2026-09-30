@@ -44,7 +44,8 @@ from looplab.serve.engine_proc import (  # noqa: F401 — _engine_alive/_kill_pr
     _engine_alive, _kill_process_tree, _on_shared_hub, install_reap_hooks,
     install_resume_reconcile_hooks, sweep_stale_lifecycle_locks)
 from looplab.serve.principal import (ANONYMOUS_PRINCIPAL, LOCAL_PRINCIPAL, OWNER_PRINCIPAL,
-                                     review_principal, stamp as _stamp_principal)
+                                     review_principal, stamp as _stamp_principal,
+                                     stamp_agent_token)
 from looplab.serve.owner_token import (
     log_owner_token_decision, on_shared_origin, resolve_owner_token)
 from looplab.serve.projects import ProjectStore
@@ -627,16 +628,38 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
                          or p in ("/api/research", "/api/llm/health",
                                   "/api/cross-run/concept-steward",
                                   "/api/cross-run/claim-steward")
-                         or re.fullmatch(r"/api/runs/[^/]+/(chat|suggest|command|report_refresh)", p)
+                         # The concept lens is a paid `derive_lens` call (critic crit_v60 F2). The
+                         # chat log holds the pending actions the owner's TUI replays with the
+                         # owner's token (critic crit_v62 F1, driven: a forged row became a fork,
+                         # a resume and a paid report refresh).
+                         or re.fullmatch(r"/api/runs/[^/]+/(chat|chat-log|suggest|command"
+                                         r"|report_refresh|concepts/lens)", p)
+                         # Destructive recovery and cleanup of the owner's work (crit_v62 F5,
+                         # driven: `memory-purge` emptied the lesson store of a live run).
+                         or re.fullmatch(r"/api/runs/[^/]+/(memory-purge|resolve-activity-claims"
+                                         r"|concepts/lens/abandon|concepts/lens/recovery/abandon"
+                                         r"|nodes/[^/]+/clear_trace)", p)
+                         or re.fullmatch(r"/api/scope-report-actions/[^/]+/abandon", p)
                          or (p.startswith("/api/scope-report/") and p.endswith("/generate"))
                          or re.fullmatch(r"/api/runs/[^/]+/(reset|deletions)", p)
-                         or (request.method == "DELETE" and re.fullmatch(r"/api/runs/[^/]+", p)))):
-                return JSONResponse({"detail": "harness token cannot change operator defaults, launch or reset/delete a run, or invoke an internal model workflow"},
+                         # The owner's prompts, skills and knowledge: every live internal run
+                         # re-reads them (critic crit_v61 M2, driven: a PUT answered 200).
+                         or re.fullmatch(r"/api/(prompts|skills|knowledge)/.+", p)
+                         # Deleting a run, revoking the owner's share link, deleting a project or
+                         # a super-task (the last three: critic crit_v63, incidental).
+                         or (request.method == "DELETE"
+                             and re.fullmatch(r"/api/(runs/[^/]+|runs/[^/]+/reviews/[^/]+"
+                                              r"|projects/[^/]+|supertasks/[^/]+)", p)))):
+                return JSONResponse({"detail": "harness token cannot change operator defaults (settings, prompts, skills, knowledge), launch, reset, purge or delete a run, write a run's chat log, clear or abandon the owner's work (a trace, an activity claim, a lens, a scope action, a share link, a project or super-task), or invoke an internal model workflow; ask the operator"},
                                     status_code=403)
             # WHO THIS IS (`serve/principal.py`): the token holder is the `owner` principal; a request
             # on the small open surface that presented nothing is `anonymous` — never promoted.
             _stamp_principal(request, OWNER_PRINCIPAL if (_owner_authenticated(request) or harness_auth)
                              else ANONYMOUS_PRINCIPAL)
+            if harness_auth:
+                # …and WHICH credential made it the owner: the agent token may not queue an intent
+                # LoopLab's own model fulfils on an internal run (doc 70 70.8).
+                stamp_agent_token(request)
             response = await call_next(request)
             # Keep authenticated API responses out of shared/browser caches, but do not defeat the
             # immutable cache policy of Vite's content-hashed /assets.  The owner and review HTML

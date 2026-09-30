@@ -33,6 +33,7 @@ from looplab.serve.launch import (
     safe_run_dir,
     validate_idempotency_key,
 )
+from looplab.serve.principal import request_agent_token
 from looplab.serve.protocol import EXPECTED_RUN_GENERATION_FIELD, GENESIS_CHAT_SEQ_BASE
 from looplab.serve.reset_route import durable_reset_run
 from looplab.serve.settings_store import SettingsRevisionConflict
@@ -197,10 +198,13 @@ def build_router(srv) -> APIRouter:
         body = await json_object(request, "command body")
         idem = request.headers.get("Idempotency-Key", "")
         # submit() takes the run flock and folds the log — offload so it never blocks the event loop.
+        # WHICH credential asks: the agent token is refused an intent LoopLab's own model
+        # fulfils on an internal run (doc 70 70.8, `control_validation.py::agent_token_refusal`).
+        agent_token = request_agent_token(request)
         return await anyio.to_thread.run_sync(lambda: srv.commands.submit(
             rd, idem, body.get("type"), body.get("data"),
             expected_generation=body.get(EXPECTED_RUN_GENERATION_FIELD),
-            drain_only=body.get("drain_only")))
+            drain_only=body.get("drain_only"), agent_token=agent_token))
 
     @router.get(
         "/api/runs/{run_id}/commands/{command_id}",
@@ -214,9 +218,10 @@ def build_router(srv) -> APIRouter:
         "/api/runs/{run_id}/commands/{command_id}/retry",
         responses=_command_responses("Retried durable command record"),
     )
-    def retry_command(run_id: str, command_id: str, response: Response):
+    def retry_command(run_id: str, command_id: str, request: Request, response: Response):
         _command_response_headers(response)
-        return srv.commands.retry(_run_dir(run_id), command_id)
+        return srv.commands.retry(_run_dir(run_id), command_id,
+                                  agent_token=request_agent_token(request))
 
     @router.post("/api/runs/{run_id}/resolve-activity-claims")
     async def resolve_activity_claims(run_id: str, request: Request, response: Response):

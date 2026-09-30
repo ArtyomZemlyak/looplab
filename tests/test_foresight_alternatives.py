@@ -968,3 +968,263 @@ def test_a_continuation_cut_short_holds_its_own_cutoff():
     session.cutoff = ""
     assert researcher.propose_alternative(_state(), None, session, [idea]) is not None
     assert session.cutoff == "turns"
+
+
+def test_the_prompt_shows_the_window_this_call_binds_against(monkeypatch):
+    """crit_v51 F5: the brief rendered the SHARED `_visible_board_cards`, the emit binds against this
+    call's own window — another proposal publishing its window between the two left the model looking
+    at cards its claim could not bind to. MUTATION: render `self._visible_board_cards` -> the other
+    call's card is in the prompt."""
+    import looplab.agents.agent as agent_mod
+    mine = [Card(id=f"card-{i}", statement=f"mine {i}") for i in range(2)]
+    theirs = [Card(id="card-9", statement="theirs 9")]
+    monkeypatch.setattr(agent_mod, "next_board_prompt_cards", lambda *a, **k: list(mine))
+    model = _Model([_turn(_emit("e1", "cache the per-depth scorer"))])
+    researcher = ToolUsingResearcher(model, _Tools())
+    real_offers = agent_mod.offers_tool
+
+    def another_call_publishes(*args, **kwargs):
+        researcher._visible_board_cards = list(theirs)
+        return real_offers(*args, **kwargs)
+
+    monkeypatch.setattr(agent_mod, "offers_tool", another_call_publishes)
+    researcher.propose_with_session(_state(), None)
+    brief = next(m["content"] for m in model.chats[0] if m["role"] == "user")
+    assert "card-0" in brief and "card-1" in brief, "premise: the board reached the brief"
+    assert "card-9" not in brief
+
+
+class _GoalTools:
+    """A run-aware provider: `bind_state` REBINDS it, as `RunTools` does."""
+
+    def __init__(self):
+        self.state = None
+
+    def bind_state(self, state, parent=None):
+        self.state = state
+
+    def specs(self):
+        return [{"type": "function", "function": {
+            "name": "run_goal", "description": "The bound run's goal.",
+            "parameters": {"type": "object", "properties": {}}}}]
+
+    def execute(self, name, args):
+        return f"goal of the bound run: {self.state.goal}"
+
+
+def test_a_proposal_s_tools_answer_about_its_own_state(monkeypatch):
+    """crit_v51 F4: `propose` rebound the SHARED toolset (`bind_state` mutates a provider), so a
+    second proposal on the same instance rebinding it mid-loop made the first call's `run_goal`
+    answer the OTHER run's goal. Each call now runs on its own view (`tool_loop.py::bound_toolset`),
+    and the continuation keeps candidate 1's. MUTATION: bind `self.tools` and run on it -> 'B'."""
+    import looplab.agents.agent as agent_mod
+    shared = _GoalTools()
+    model = _Model([_turn(_call("g1", "run_goal", {})),
+                    _turn(_emit("e1", "cache the per-depth scorer")),
+                    _turn(_call("g2", "run_goal", {})),
+                    _turn(_emit("e2", "batch the shared prompt pages", x=2.0))])
+    researcher = ToolUsingResearcher(model, shared)
+    real = agent_mod.run_phase
+
+    def another_call_rebinds(*args, **kwargs):
+        shared.bind_state(RunState(goal="B: maximise recall", direction="max"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(agent_mod, "run_phase", another_call_rebinds)
+    mine = RunState(goal="A: minimise latency", direction="min")
+    idea, session = researcher.propose_with_session(mine, None)
+    assert researcher.propose_alternative(mine, None, session, [idea]) is not None
+    answers = [m["content"] for m in session.messages if m.get("role") == "tool"
+               and "goal of the bound run" in str(m.get("content"))]
+    assert len(answers) == 2 and all("A: minimise latency" in a for a in answers), answers
+
+
+@pytest.mark.parametrize("order", [(0, 1), (1, 0)])
+def test_the_panel_publishes_the_chosen_candidate_s_own_receipt(monkeypatch, order):
+    """crit_v51 F3: the panel read each candidate's receipt off the base's SHARED attribute, so a
+    concurrent proposal cut by its ceiling made a converged pick read `tokens` (the engine then
+    logged it truncated). It reads the session's own cutoff now — candidate 1's and the
+    continuation's alike (both picks). MUTATION: read `researcher_budget_exhausted(self.base)` at
+    either site -> 'tokens'."""
+    model, researcher, _base, panel = _chain(
+        [_turn(_read("r1")), _turn(_emit("e1", "cache the per-depth scorer")),
+         _turn(_emit("e2", "batch the shared prompt pages", x=2.0))], order=order)
+    _another_call_writes(monkeypatch, researcher, "tokens")
+    panel.propose(_state(), None)
+    assert panel.last_foresight is not None, "premise: two candidates were ranked"
+    assert panel.last_propose_budget_exhausted == ""
+
+
+def test_every_reader_of_one_proposal_reads_the_same_bound_view(monkeypatch):
+    """crit_v53 N3: the run-tools offer, the inventory block, the workspace token and the loop each
+    read the toolset, and a reader left on the SHARED provider reads an unbound one — driven, the
+    inventory block of an unbound `RunTools` rendered '' where the view's named the run's rows. The
+    continuation runs on candidate 1's very view. MUTATIONS: any of the four reads `self.tools`; the
+    continuation binds a fresh view (or the session does not keep the one it ran on)."""
+    import looplab.agents.agent as agent_mod
+
+    seen: dict = {"offers": [], "inventory": [], "workspace": [], "loop": []}
+    real = {name: getattr(agent_mod, name) for name in
+            ("offers_tool", "answered_by_context", "_researcher_workspace", "run_phase")}
+    monkeypatch.setattr(agent_mod, "offers_tool", lambda tools, name: (
+        seen["offers"].append(tools), real["offers_tool"](tools, name))[1])
+    monkeypatch.setattr(agent_mod, "answered_by_context", lambda tools: (
+        seen["inventory"].append(tools), real["answered_by_context"](tools))[1])
+    monkeypatch.setattr(agent_mod, "_researcher_workspace", lambda store, tools=None: (
+        seen["workspace"].append(tools), real["_researcher_workspace"](store, tools))[1])
+    monkeypatch.setattr(agent_mod, "run_phase", lambda client, tools, *a, **kw: (
+        seen["loop"].append(tools), real["run_phase"](client, tools, *a, **kw))[1])
+    shared = _GoalTools()
+    model = _Model([_turn(_emit("e1", "cache the per-depth scorer")),
+                    _turn(_emit("e2", "batch the shared prompt pages", x=2.0))])
+    researcher = ToolUsingResearcher(model, shared)
+    state = RunState(goal="A: minimise latency", direction="min")
+    idea, session = researcher.propose_with_session(state, None)
+    assert researcher.propose_alternative(state, None, session, [idea]) is not None
+    view = session.tools
+    assert view is not shared and view.state is state and shared.state is None
+    assert [len(seen[k]) for k in ("offers", "inventory", "workspace", "loop")] == [1, 1, 1, 2]
+    assert all(tools is view for calls in seen.values() for tools in calls), seen
+
+
+def test_a_proposal_cut_by_its_budget_that_then_raised_keeps_its_receipt(monkeypatch):
+    """crit_v53 N5: the loop announced its wall-clock cutoff and the phase then raised; the error
+    exit held the session with no cutoff, so the panel published '' ("converged") where the bound had
+    fired. MUTATION: hold the error exit without `cutoff=`."""
+    import looplab.agents.agent as agent_mod
+
+    real = agent_mod.run_phase
+
+    def cut_then_raise(*args, **kwargs):
+        if kwargs.get("label") == "Researcher·propose":
+            kwargs["on_budget"]({"kind": "time", "turns": 3, "seconds": 99.0})
+            raise LLMError("HTTP 502 from the salvage call")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(agent_mod, "run_phase", cut_then_raise)
+    _model, researcher, _agent, panel = _chain([_turn(_emit("e1", "x"))], forced=[_emission("f")])
+    panel.propose(_state(), None)
+    assert researcher_budget_exhausted(panel) == "time"
+
+
+class _SlowPaid(_Model):
+    """`_Model` whose every chat takes 30 s of a FAKE clock and commits $0.25 on this thread."""
+
+    def __init__(self, script, clock, **kw):
+        super().__init__(script, **kw)
+        from looplab.core.llm import CostAccountant
+        self.accountant, self.clock = CostAccountant(), clock
+
+    def chat(self, messages, tools=None, tool_choice="auto", **kw):
+        self.clock.now += 30.0
+        self.accountant.add(0.25, usage={"prompt_tokens": 9, "completion_tokens": 1,
+                                         "total_tokens": 10})
+        return super().chat(messages, tools, tool_choice, **kw)
+
+
+class _FakeClock:
+    now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+
+def _continued_with(monkeypatch, *, wall, money, spent_before=0.0):
+    """Candidate 1 (a read, an emit: 60 s and $0.50 of the fake clock and accountant), then one
+    continuation. Returns what the alternative's loop was handed and the model's requests.
+    `spent_before` is what this THREAD committed before the session began (an earlier session)."""
+    import looplab.agents.agent as agent_mod
+    from looplab.core.llm_budget import note_committed_cost
+
+    if spent_before:
+        note_committed_cost(spent_before)
+
+    clock = _FakeClock()
+    monkeypatch.setattr(agent_mod, "time", clock)   # agent.py's session clock only
+    seen: dict = {}
+    real = agent_mod.run_phase
+
+    def spy(*args, **kwargs):
+        seen[kwargs.get("label")] = (kwargs.get("time_budget_s"), kwargs.get("cost_budget_usd"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(agent_mod, "run_phase", spy)
+    model = _SlowPaid(_capped_script(), clock)
+    researcher = ToolUsingResearcher(model, _Tools(), loop_opts=LoopOptions(
+        time_budget_s=wall, cost_budget_usd=money))
+    idea, session = researcher.propose_with_session(_state(), None)
+    researcher.last_budget_exhausted = "marker"
+    before = (len(session.messages), researcher.last_budget_exhausted)
+    researcher.propose_alternative(_state(), None, session, [idea])
+    return seen, model, before, (len(session.messages), researcher.last_budget_exhausted)
+
+
+def test_12_a_continued_session_runs_on_what_is_left_of_its_wall_clock_and_money(monkeypatch):
+    """crit_v45 L3: the continuation was handed the whole `agent_time_budget_s` and a fresh money
+    ceiling after candidate 1 had spent most of both. It runs on what is LEFT, measured from where
+    candidate 1 began. MUTATION: hand it `self.loop_opts`' own wall clock or money ceiling."""
+    seen, _model, _before, _after = _continued_with(monkeypatch, wall=100.0, money=1.0)
+    assert seen["Researcher·propose"] == (100.0, 1.0)
+    assert seen["Researcher·alternative"] == (40.0, 0.5)
+    # What the thread spent BEFORE the session is not the session's (crit_v57 L4 a08, MUTATION: take
+    # the session's money baseline from 0 -> 0.2).
+    seen, _model, _before, _after = _continued_with(monkeypatch, wall=100.0, money=1.0,
+                                                    spent_before=0.3)
+    assert seen["Researcher·alternative"] == (40.0, 0.5)
+
+
+@pytest.mark.parametrize("wall, money", [(60.0, 5.0), (500.0, 0.5)])
+def test_12_a_session_with_nothing_left_is_not_continued_and_is_left_untouched(monkeypatch, wall,
+                                                                               money):
+    """Nothing left of the wall clock (60 s spent of 60) or the money ($0.50 of $0.50): no
+    continuation — and the refusal is decided before the transcript or the receipt is touched
+    (crit_v45 NIT). MUTATIONS: `<= 0` -> `< 0`; check after appending the alternative turn."""
+    seen, model, before, after = _continued_with(monkeypatch, wall=wall, money=money)
+    assert "Researcher·alternative" not in seen
+    assert not any(_asks_for_alternative(req) for req in model.chats)
+    assert after == before
+
+
+def test_the_panel_notes_the_chosen_candidate_s_receipt_last_into_the_caller_s_scope():
+    """doc 69 69.37: the engine reads a proposal's receipt from the scope its call opened, and the
+    panel's members note theirs there in the order they ran — so the panel notes the CHOSEN
+    candidate's receipt LAST, or the scope answered with whichever member ran last. MUTATION: drop
+    the note from `_chosen` -> "time" (the last member), not "" (the chosen one)."""
+    from looplab.agents.propose_receipts import (note_propose_receipt, propose_receipt_scope,
+                                                 scoped_budget_exhausted)
+
+    model = _Model([], order=(1, 0))
+    panel = ForesightPanelResearcher(
+        UnifiedAgent(researcher=_OneShotResearcher(), developer=_Developer(model)),
+        k=2, client=model, alternatives=True)
+    with propose_receipt_scope() as box:
+        for member in ("turns", "", "time"):          # the members, noting as they ran
+            note_propose_receipt(member)
+        chosen = panel._chosen(["a", "b", "c"], 1, ["turns", "", "time"])
+    assert chosen == "b" and panel.last_propose_budget_exhausted == ""
+    assert scoped_budget_exhausted(box, panel) == ""
+
+
+def test_12_a_session_past_the_float_range_is_not_continued_and_does_not_raise(monkeypatch):
+    """crit_v57 L2, driven through the panel: two float-max cost reports on candidate 1's emit turn,
+    a money ceiling on, and the continuation's reading of what was left raised OverflowError — the
+    already-paid candidate 1 lost with it. `tool_loop.py::_session_spend` reads that spend as `inf`
+    since crit_v54 F2; this reading refuses the continuation instead. MUTATION: drop the catch."""
+    import sys
+    import threading
+    from fractions import Fraction
+
+    import looplab.agents.agent as agent_mod
+    from looplab.agents.agent import ProposalSession
+
+    researcher = ToolUsingResearcher(_Model([]), _Tools(), loop_opts=LoopOptions(cost_budget_usd=1.0))
+    session = ProposalSession(thread=threading.get_ident(), usd_at_start=Fraction(0))
+    monkeypatch.setattr(agent_mod, "thread_committed_usd_exact",
+                        lambda: Fraction(sys.float_info.max) * 2)
+    assert researcher._continuation_opts(session) is None
+    monkeypatch.setattr(agent_mod, "thread_committed_usd_exact", lambda: Fraction(1, 4))
+    assert researcher._continuation_opts(session).cost_budget_usd == 0.75
+    # On another thread the session's spend cannot be measured: no continuation (crit_v57 L4 a04,
+    # MUTATION: drop the thread test -> this thread's ledger is read as the session's).
+    elsewhere = ProposalSession(thread=threading.get_ident() + 1, usd_at_start=Fraction(0))
+    assert researcher._continuation_opts(elsewhere) is None

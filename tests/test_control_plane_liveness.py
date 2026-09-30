@@ -72,7 +72,7 @@ class _World:
     shipped shape anyway.
     """
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, command_timeout: float = 0.12):
         from looplab.serve.run_commands import RunCommandService
         from looplab.serve.server import make_app
 
@@ -86,7 +86,7 @@ class _World:
         srv = make_app(self.root).state.looplab
         srv.commands = RunCommandService(
             srv, engine_alive=self._is_alive, spawn_engine=self._spawn,
-            startup_timeout=0.05, command_timeout=0.12, poll_interval=0.01,
+            startup_timeout=0.05, command_timeout=command_timeout, poll_interval=0.01,
             max_observation_timeout=0.2)
         self.srv = srv
         self.commands = srv.commands
@@ -738,15 +738,24 @@ def test_an_unreadable_command_record_has_a_confirmed_escape(tmp_path):
 
     This is the shape the operator's requirement allows an absorbing state to have and no other: it
     is reachable only through an explicit confirmation, and the refusal NAMES that escape.
+
+    The command deadline is generous here because this test's subject is the escape, not a deadline:
+    the search's 0.12 s is below the fake engine's ack latency on a loaded Windows runner, and the
+    closing pause read `timed_out` there (Windows CI, 1103ba87). A prompt ack settles it at once. The
+    service's `max_observation_timeout` follows the deadline up (it is never below it); nothing here
+    observes one. The damaged record is aged in DEADLINES, so "nothing expires it" still covers 5,000
+    of them — at 600 s it covered 60 once the deadline was 10 s (crit_v57 NIT).
     """
-    world = _World(tmp_path / "runs")
+    deadline = 10.0
+    world = _World(tmp_path / "runs", command_timeout=deadline)
     rd = world.seed("corrupt", alive=True)
     commands = world.commands
     try:
         damaged = rd / ".commands" / ("cmd_" + "ab" * 16 + ".json")
         damaged.parent.mkdir(parents=True, exist_ok=True)
         damaged.write_text("{not json at all")
-        os.utime(damaged, (time.time() - 600, time.time() - 600))
+        aged = time.time() - 5000 * deadline
+        os.utime(damaged, (aged, aged))
 
         # Wedged, in both directions, and BOTH refusals name the way out: the record's own GET
         # answers 503, so "GET it to a terminal status" alone is a dead end (the command path's

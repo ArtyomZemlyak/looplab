@@ -1996,8 +1996,10 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
     # no principal at all, now gets none of these providers whatever the flag says.
     portfolio_ok, _portfolio_why = portfolio_access(principal, settings)
     if portfolio_ok:
+        from looplab.core.config import claim_decisions_enabled
         from looplab.tools.cross_run_tools import CrossRunTools
-        providers.append(CrossRunTools(mdir, role="researcher"))
+        providers.append(CrossRunTools(mdir, role="researcher",
+                                       claim_decisions=claim_decisions_enabled(settings)))
     if mutation_recovery:
         if mode != "plan" and mutation_journal_path is not None and command_key_namespace:
             providers.append(RunControlTools(

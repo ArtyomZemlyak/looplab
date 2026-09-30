@@ -225,6 +225,36 @@ def operator_rejected_claim_uids(lessons, decisions) -> frozenset:
                      if row.get("maturity") == "operator-rejected" and row.get("claim_uid"))
 
 
+def lesson_claim_key(row):
+    """`(claim_uid, normalized statement)` of a lesson row — everything `operator_rejected_lessons`'
+    answer for one row reads besides its GROUP (the uid carries the scope and metric the candidate
+    chain recomputes, the statement the legacy key), so a reader that got the rejected rows of one
+    window as keys can hold ANOTHER read of the same store to them (`claims.py::
+    operator_rejected_keys`). None for a row that states no claim."""
+    uid = lesson_claim_uid(row)
+    if uid is None:
+        return None
+    return uid, normalize_statement(str(row.get("statement") or ""))
+
+
+def operator_rejected_lessons(lessons, decisions) -> frozenset:
+    """The indices of `lessons` whose claim the operator REJECTED — the ONE rule the passive prior
+    (`engine/lessons_priors.py`, doc 69 69.21) and the agents' pull tools (`tools/memory_tools.py`,
+    `tools/cross_run_tools.py`, 69.21b, through `claims.py::operator_rejected_keys` over the same
+    window), so the push and the pull cannot disagree about a row of that window: the
+    claims surface's groups over these rows marked `operator-rejected`
+    (`operator_rejected_claim_uids`, its representative-spelling lookup included), or the row's
+    own claim resolved to a rejection through the surface's candidate chain (`lesson_rejected` — a
+    row the surface refuses still answers for itself). With no rejection in `decisions` nothing is
+    projected at all (`rejects_anything`). Pure."""
+    if not rejects_anything(decisions):
+        return frozenset()
+    rows = list(lessons or ())
+    rejected = operator_rejected_claim_uids(rows, decisions)
+    return frozenset(index for index, row in enumerate(rows)
+                     if lesson_claim_uid(row) in rejected or lesson_rejected(row, decisions))
+
+
 def _structured_assessments(lessons, research_claims, decisions, *,
                             research_source: Optional[dict] = None,
                             claim_source: Optional[dict] = None) -> list[dict]:

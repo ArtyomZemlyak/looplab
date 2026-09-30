@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
 import anyio
+import pytest
 
 from looplab.adapters.toytask import ToyTask
 from looplab.core.models import FAILURE_REASONS, Idea
@@ -86,6 +88,126 @@ def test_one_unreadable_log_entry_does_not_drop_every_log(tmp_path, monkeypatch)
     monkeypatch.setattr(Path, "stat", stat)
     assert activation.missing_markers(["MARK fast path on"], texts=(), workdir=tmp_path,
                                       since=time.time() - 60) == []
+
+
+@pytest.mark.posix_only("symlink")
+def test_a_self_looping_log_link_does_not_drop_every_log(tmp_path):
+    """crit_v52 F7-3: a real `loop.log -> loop.log` link raises ELOOP from `stat`, which is an
+    `OSError` and not a `FileNotFoundError`. MUTATION: `_mtime`'s `except OSError` ->
+    `except FileNotFoundError` -> the listing is empty and the marker reads as missing."""
+    (tmp_path / "score.log").write_text("MARK fast path on\n")
+    os.symlink("loop.log", tmp_path / "loop.log")
+    assert activation.missing_markers(["MARK fast path on"], texts=(), workdir=tmp_path,
+                                      since=time.time() - 60) == []
+
+
+def test_an_appended_log_s_earlier_bytes_do_not_vouch_for_this_attempt(tmp_path):
+    """crit_v52 F2 (crit_v51 F1b): a stage that RE-RAN appends to its log, so the file is fresh by
+    mtime and still holds the earlier attempt's marker line. Only the bytes past the attempt-start
+    cursor (`snapshot_training_logs`) are this attempt's. MUTATION: read from byte 0 whatever the
+    cursor says -> the earlier line is credited."""
+    from looplab.engine.eval_log_plan import snapshot_training_logs
+
+    log, marker, since = tmp_path / "train.log", "MARK fast path on", time.time() - 60
+    log.write_text(marker + "\n")                               # attempt 0 printed it
+    snap = snapshot_training_logs(tmp_path)                      # attempt 1 starts
+    with open(log, "a", encoding="utf-8") as fh:
+        fh.write("fast path self-check failed; falling back\n")  # attempt 1 re-ran: no marker
+    assert activation.missing_markers([marker], workdir=tmp_path, since=since,
+                                      snapshot=snap) == [marker]
+    # …which the mtime floor alone credits: the file is fresh.
+    assert activation.missing_markers([marker], workdir=tmp_path, since=since) == []
+    with open(log, "a", encoding="utf-8") as fh:
+        fh.write(marker + "\n")                                  # this attempt printed it too
+    assert activation.missing_markers([marker], workdir=tmp_path, since=since, snapshot=snap) == []
+
+
+def test_a_log_this_attempt_created_or_rewrote_is_read_whole(tmp_path):
+    """The cursor only ever SKIPS a prefix whose boundary still matches the attempt-start probe: a new
+    log, a truncated one and a rewritten one (its bytes at the old boundary changed) are this
+    attempt's from byte 0."""
+    from looplab.engine.eval_log_plan import snapshot_training_logs
+
+    marker, since = "MARK fast path on", time.time() - 60
+    (tmp_path / "train.log").write_text("x" * 500 + "\n")
+    (tmp_path / "infer.log").write_text("y" * 500 + "\n")
+    snap = snapshot_training_logs(tmp_path)
+    (tmp_path / "score.log").write_text(marker + "\n")          # created by this attempt
+    assert activation.missing_markers([marker], workdir=tmp_path, since=since, snapshot=snap) == []
+    (tmp_path / "score.log").unlink()
+    (tmp_path / "train.log").write_text(marker + "\n")          # truncated and rewritten
+    assert activation.missing_markers([marker], workdir=tmp_path, since=since, snapshot=snap) == []
+    (tmp_path / "train.log").write_text("x" * 500 + "\n")
+    snap = snapshot_training_logs(tmp_path)
+    (tmp_path / "train.log").write_text(marker + "\n" + "z" * 600 + "\n")   # rewritten, longer
+    assert activation.missing_markers([marker], workdir=tmp_path, since=since, snapshot=snap) == []
+
+
+def test_a_log_the_candidate_rewrote_in_place_is_read_whole(tmp_path):
+    """crit_v55 A1: a log the CANDIDATE writes in 'w' mode, rewritten with the same bytes up to the
+    old end, passes the boundary probe — the cursor read the rewrite as an append and dropped the
+    marker this attempt really printed. Only the ENGINE's logs (`engine_logs`) are cut at the cursor;
+    they are append-only. MUTATION: cut every log at the cursor -> the marker is missing."""
+    from looplab.engine.eval_log_plan import snapshot_training_logs
+
+    marker, since = "MARK fast path on", time.time() - 60
+    body = marker + "\n" + "".join(f"epoch {i} loss {1.0 / (i + 1):.4f}\n" for i in range(5))
+    (tmp_path / "own.log").write_text(body)                     # the candidate's, attempt 0
+    (tmp_path / "train.log").write_text(marker + "\n")          # the engine's, attempt 0
+    snap = snapshot_training_logs(tmp_path)
+    with open(tmp_path / "own.log", "w", encoding="utf-8") as fh:   # attempt 1: 'w', same bytes
+        fh.write(body)
+    with open(tmp_path / "train.log", "a", encoding="utf-8") as fh:  # the engine appends
+        fh.write("fast path self-check failed; falling back\n")
+    engine = frozenset({"setup.log", "train.log", "score.log"})
+    assert activation.missing_markers([marker], workdir=tmp_path, since=since, snapshot=snap,
+                                      engine_logs=engine) == []
+    # …and the engine's appended log alone still vouches for nothing it did not print this time.
+    (tmp_path / "own.log").unlink()
+    assert activation.missing_markers([marker], workdir=tmp_path, since=since, snapshot=snap,
+                                      engine_logs=engine) == [marker]
+    # Case-folded on the name, as `EvalLogPlan.roles` keys are (a no-op off Windows).
+    assert activation.missing_markers(
+        [marker], workdir=tmp_path, since=since, snapshot=snap,
+        engine_logs=frozenset(os.path.normcase(n) for n in engine)) == [marker]
+
+
+def test_a_long_log_is_read_at_both_ends(tmp_path):
+    """crit_v55 A3: the check read only a log's last 8 MiB, so a warmup marker followed by 9 MiB of
+    training output read as missing — a false `inert_path`. Both ends are read now; only the middle
+    of a log longer than twice the window goes unread, and that is the stated bound. MUTATION: read
+    the tail alone -> the warmup marker is missing.
+
+    Written as BYTES: the windows are byte counts, and a text write on Windows turns each `\n` into
+    `\r\n` — 13 bytes a line where 12 were meant, which carried the "at most two windows" log past
+    two windows on the Windows CI leg (master run 142)."""
+    cap, since = activation._MAX_LOG_BYTES, time.time() - 60
+    filler = "loss 0.1234\n" * (cap // 12 + 1)                     # a little over one window
+    (tmp_path / "train.log").write_bytes(("WARMUP_ON\n" + filler + filler + "TAIL_ON\n").encode())
+    assert activation.missing_markers(["WARMUP_ON", "TAIL_ON"], workdir=tmp_path, since=since) == []
+    (tmp_path / "train.log").write_bytes((filler + filler + "MIDDLE_ON\n" + filler + filler).encode())
+    assert activation.missing_markers(["MIDDLE_ON"], workdir=tmp_path, since=since) == ["MIDDLE_ON"]
+    short = tmp_path / "short"
+    short.mkdir()                                     # at most two windows: read whole, once
+    under = "loss 0.1234\n" * (cap // 12 - 1)
+    (short / "train.log").write_bytes((under + "MIDDLE_ON\n" + under).encode())
+    assert (short / "train.log").stat().st_size <= 2 * cap
+    assert activation.missing_markers(["MIDDLE_ON"], workdir=short, since=since) == []
+
+
+def test_a_log_whose_boundary_is_unknown_is_not_read(tmp_path):
+    """No credit is the refusing direction: a listing that failed at the attempt's start, or a log
+    that could not be read then, vouches for nothing. MUTATION: treat an unknown floor as 0."""
+    from looplab.engine.eval_log_plan import TrainingLogCursor, TrainingLogSnapshot, _log_path_key
+
+    marker, since = "MARK fast path on", time.time() - 60
+    (tmp_path / "train.log").write_text(marker + "\n")
+    assert activation.missing_markers([marker], workdir=tmp_path, since=since,
+                                      snapshot=TrainingLogSnapshot({}, complete=False)) == [marker]
+    unread = TrainingLogSnapshot({_log_path_key(tmp_path / "train.log"): TrainingLogCursor(
+        offset=None, identity=None, probe=None)})
+    assert activation.missing_markers([marker], workdir=tmp_path, since=since,
+                                      snapshot=unread) == [marker]
 
 
 def test_the_match_is_exact_and_case_sensitive():
@@ -189,6 +311,120 @@ def test_a_node_that_declares_nothing_is_judged_exactly_as_before(tmp_path):
     assert [e.type for e in events] == ["node_evaluated"]
     events, _dev = _drive(tmp_path / "empty", prints="anything at all", markers=[])
     assert [e.type for e in events] == ["node_evaluated"]
+
+
+_MARKED_TRAIN = "print('MARK fast path on'); open('ckpt.txt', 'w').write('v0')\n"
+_FALLBACK_TRAIN = ("print('fast path self-check failed; falling back'); "
+                   "open('ckpt.txt', 'w').write('v1')\n")
+_FIXED_INFER = "open('preds.txt', 'w').write(open('ckpt.txt').read())\n"
+
+
+def _two_stage_run(tmp_path, *, repairs, flaky: int = 1, repair_log_tools: bool = True,
+                   train0: str = _MARKED_TRAIN):
+    """crit_v51 F1's pipeline through the real sandbox and inline repair: attempt 0's `train` prints
+    the marker and `infer` fails `flaky` times; each repair writes the next files of `repairs`. A
+    repair that rewrites `train.py` RE-RUNS `train` — appending to `train.log`; one that fixes only
+    `infer.py` REUSES it. Returns the node's terminal and `train.log`'s lines."""
+    from looplab.adapters.repo_task import EvalSpec, RepoTask
+
+    py = sys.executable
+    src, run_dir = tmp_path / "src", tmp_path / "run"
+    src.mkdir()
+    counter = tmp_path / "flaky.count"
+    (src / "train.py").write_text(train0)
+    (src / "infer.py").write_text(
+        f"import os\nc = {str(counter)!r}\nn = int(open(c).read()) if os.path.exists(c) else 0\n"
+        f"if n < {flaky}:\n    open(c, 'w').write(str(n + 1)); raise RuntimeError('flaky OOM')\n"
+        + _FIXED_INFER)
+    (src / "looplab_eval.py").write_text("import json; print(json.dumps({'metric': 0.5}))\n")
+    (src / "looplab_stages.json").write_text(json.dumps({"stages": [
+        {"name": "train", "command": [py, "train.py"], "timeout": 120},
+        {"name": "infer", "command": [py, "infer.py"], "timeout": 120}]}))
+    (src / activation.ACTIVATION_MANIFEST_NAME).write_text(
+        activation.manifest_text(["MARK fast path on"]))
+    task = RepoTask(id="r", direction="max", editable_path=str(src), edit_surface=["*.py", "*.json"],
+                    eval=EvalSpec(command=[py, "looplab_eval.py"],
+                                  metric={"kind": "stdout_json", "key": "metric"}, cwd="."))
+    plan = list(repairs)
+
+    class Dev:
+        last_files: dict = {}
+        last_deleted: list = []
+
+        def implement(self, idea):
+            return ""
+
+        def repair(self, idea, code, error):
+            self.last_files = dict(plan.pop(0)) if plan else {}
+            return ""
+
+    researcher, _ = task.build_roles()
+    eng = Engine(run_dir, task=task, researcher=researcher, developer=Dev(),
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
+                 auto_install_deps=False, inline_repair=True, inline_repair_attempts=4,
+                 inline_repair_retrain_cap=2)
+    eng._repair_log_tools = repair_log_tools   # False: no watcher takes a snapshot for the check
+    anyio.run(eng.run)
+    events = EventStore(run_dir / "events.jsonl").read_all()
+    log = (run_dir / "nodes" / "node_0" / "train.log").read_text().splitlines()
+    return [(e.type, e.data.get("reason"), e.data.get("metric")) for e in events
+            if e.type in ("node_evaluated", "node_failed")], log
+
+
+@pytest.mark.parametrize("repair_log_tools", [True, False])
+def test_a_re_run_stage_s_earlier_marker_does_not_vouch_for_the_scored_path(tmp_path,
+                                                                          repair_log_tools):
+    """crit_v52 F2, driven: the repaired `train` falls back and prints no marker; its log still holds
+    attempt 0's line. The number measured the fallback, so it is withheld (`inert_path`) — it was
+    scored 0.5 as the declared path before the attempt-start cursor. Both ways the check gets its
+    cursor: the watchers' snapshot, and its own when nothing else takes one."""
+    terminal, log = _two_stage_run(tmp_path, repairs=[
+        {"train.py": _FALLBACK_TRAIN, "infer.py": _FIXED_INFER}], repair_log_tools=repair_log_tools)
+    assert log[0] == "MARK fast path on" and "MARK fast path on" not in log[1:]
+    assert terminal == [("node_failed", "inert_path", None)], terminal
+
+
+def test_a_reused_stage_s_earlier_marker_does_not_vouch_for_it_either(tmp_path):
+    """crit_v51 F1 (why 01ab182d was reverted): `train` re-ran as the fallback, then a repair of
+    `infer` alone REUSED it — the scored checkpoint is the fallback's, and the appended log's only
+    marker is attempt 0's. Crediting a reused stage's whole log scored it 0.5; the owed fix (doc 69,
+    69.10b) may credit only the bytes of the stage's last `ok` run."""
+    terminal, log = _two_stage_run(tmp_path, repairs=[
+        {"train.py": _FALLBACK_TRAIN}, {"infer.py": _FIXED_INFER}], flaky=2)
+    assert log[0] == "MARK fast path on" and "MARK fast path on" not in log[1:]
+    assert terminal == [("node_failed", "inert_path", None)], terminal
+
+
+# The marker goes ONLY to the candidate's own log, rewritten in 'w' mode by every run of `train`.
+_OWN_LOG = ("f = open('own.log', 'w')\nf.write('MARK fast path on\\n')\n"
+            "for i in range(5): f.write(f'epoch {i} loss {1.0 / (i + 1):.4f}\\n')\n")
+_OWN_LOG_TRAIN = _OWN_LOG + "f.close(); open('ckpt.txt', 'w').write('v0')\n"
+
+
+@pytest.mark.parametrize("case", ["later_stage_failed", "train_crashed"])
+def test_a_marker_in_a_log_the_candidate_rewrote_is_credited(tmp_path, case):
+    """crit_v55 A1, driven through the real sandbox and inline repair: `train` writes its marker to
+    its OWN log in 'w' mode and re-runs deterministically — after `infer` failed (the repair touched
+    `train.py`), or after `train` itself crashed past the marker (the fix grows the log past the old
+    end). The bytes at the old boundary match, and the attempt-start cursor dropped the marker this
+    attempt really printed: a real 0.5 withheld as `inert_path`."""
+    if case == "later_stage_failed":
+        terminal, _log = _two_stage_run(tmp_path, train0=_OWN_LOG_TRAIN, repairs=[
+            {"train.py": _OWN_LOG_TRAIN + "# reviewed\n", "infer.py": _FIXED_INFER}])
+    else:
+        crash = _OWN_LOG + "f.flush()\nraise RuntimeError('checkpoint save failed: disk quota')\n"
+        fixed = (_OWN_LOG + "f.write('saved checkpoint\\n'); f.close(); "
+                 "open('ckpt.txt', 'w').write('v1')\n")
+        terminal, _log = _two_stage_run(tmp_path, train0=crash, flaky=0,
+                                        repairs=[{"train.py": fixed}])
+    assert terminal == [("node_evaluated", None, 0.5)], terminal
+
+
+def test_a_re_run_stage_that_prints_its_marker_again_is_scored(tmp_path):
+    """The control: the same pipeline whose repaired `train` still takes the declared path."""
+    terminal, _log = _two_stage_run(tmp_path, repairs=[
+        {"train.py": _MARKED_TRAIN.replace("v0", "v1"), "infer.py": _FIXED_INFER}])
+    assert terminal == [("node_evaluated", None, 0.5)], terminal
 
 
 # ------------------------------------------------------------ the Developer declares it

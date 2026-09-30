@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import math
 import threading
+from fractions import Fraction
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Optional
 
@@ -264,6 +265,7 @@ class RunBudget:
 # reads this counter at its start and again at each turn reads its OWN volume, its nested loops'
 # included. What it cannot see is a call a tool hands to ANOTHER thread, which no tool does today.
 _THREAD_TOKENS = threading.local()
+_NO_SPEND = Fraction(0)
 
 
 def note_committed_tokens(tokens) -> None:
@@ -289,13 +291,20 @@ def note_committed_cost(cost) -> None:
     ceiling's twin of `note_committed_tokens`, for the same reason: the accountant is the RUN's, so
     "what the run spent since this session started" also counts every concurrent session (the
     critic's driver, 2026-09-30: a session cut at "$2.0200 of $0.2500" whose own three calls cost
-    $0.03). Called by `CostAccountant.add` with the delta it committed. Never raises."""
+    $0.03). Called by `CostAccountant.add` with the delta it committed. Never raises.
+
+    EXACT, not a float running total (critic 2026-09-30, crit_v52 F5, driven): the ceiling reads
+    a DIFFERENCE of two readings, and once one large provider-reported cost sat in a long-lived
+    thread's total — 1e15 is enough, no overflow needed — a $0.05 commit was below half an ulp of
+    it and vanished, so every later session on that thread ran past its money ceiling (20 turns
+    and $1.00 against a $0.20 ceiling). A finite float is a dyadic rational, so the sum of
+    `Fraction`s is the exact sum and the difference is exactly what was committed in between."""
     try:
         c = float(cost)
     except (TypeError, ValueError, OverflowError):
         return
     if math.isfinite(c) and c > 0:
-        _THREAD_TOKENS.usd = getattr(_THREAD_TOKENS, "usd", 0.0) + c
+        _THREAD_TOKENS.usd = thread_committed_usd_exact() + Fraction(c)
 
 
 def thread_committed_tokens() -> int:
@@ -304,10 +313,14 @@ def thread_committed_tokens() -> int:
     return getattr(_THREAD_TOKENS, "total", 0)
 
 
-def thread_committed_usd() -> float:
-    """Every provider dollar committed on this thread so far — read twice, one session's spend
-    (`agents/tool_loop.py::drive_tool_loop(cost_budget_usd=)`)."""
-    return getattr(_THREAD_TOKENS, "usd", 0.0)
+def thread_committed_usd_exact() -> Fraction:
+    """Every provider dollar committed on this thread so far, EXACTLY — read twice, one session's
+    spend (`agents/tool_loop.py::drive_tool_loop(cost_budget_usd=)`, `_session_spend`).
+
+    The ONE reading: its float display twin was removed (crit_v54 F7) once nothing in production
+    read it, because a difference of two display readings is exactly the absorption this exact
+    total exists to prevent, and a start taken on one is what `_session_spend` now refuses."""
+    return getattr(_THREAD_TOKENS, "usd", _NO_SPEND)
 
 
 def thread_unreported_calls() -> int:

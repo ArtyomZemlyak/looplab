@@ -314,15 +314,34 @@ def plateau_due(rung: int, started_at: int, last: int, *, seen, key) -> bool:
 
       * DURABLY, a mark `last >= started_at` — the consumer already spoke since this rung began,
         on cadence or on plateau — closes the rung on every resume and re-entry;
-      * IN-PROCESS, `seen == key` — the consumer's own memo of the last `(leader, rung)` it consulted
-        on — covers the outcome that leaves no mark. A resumed engine re-asks once per rung, which is
-        the same contract the `(n, projection token)` memo states about its own window.
+      * IN-PROCESS, `seen` — the consumer's own memo of the HIGHEST rung it consulted on, per
+        leader (`plateau_consulted`; the consumer names a leader by its node id AND lifecycle,
+        since a reset restarts the count, `strategy.py::_plateau_leader`) — covers the outcome
+        that leaves no mark. A resumed engine
+        re-asks once per rung, which is the same contract the `(n, projection token)` memo states
+        about its own window.
 
-    Each next rung is a NEW fact (the stall doubled), so it may fire once more; between rungs the
-    ordinary `cadence_due` window is untouched. Bound: at most one extra firing per `stall_window`
+    Only a rung ABOVE every rung consulted for that leader is a NEW fact (the stall doubled), so it
+    may fire once more; between rungs the ordinary `cadence_due` window is untouched. The highest
+    rung, not the last one: an operator delete or abort lowers the rung (`stall_rung` skips removed
+    nodes), and a memo of the last `(leader, rung)` read the lower rung as new and the next failed
+    push's return to it as new again — three delete+push cycles bought eight consults where nine
+    pushes allow three (crit_v54 F1, driven). Bound: at most one extra firing per `stall_window`
     stall nodes, against the cadence's one per `strategist_every` nodes.
     """
-    return rung >= 1 and last < started_at and seen != key
+    leader, key_rung = key
+    return rung >= 1 and last < started_at and key_rung > (seen or {}).get(leader, 0)
+
+
+def plateau_consulted(seen, key) -> dict:
+    """`plateau_due`'s `seen` after a consult at `key = (leader, rung)`: the HIGHEST rung consulted
+    per leader — named by the consumer by node id AND lifecycle (`strategy.py::_plateau_leader`), so
+    a reset leader is a new one. Per leader, not the last leader only: an operator who deletes the
+    champion hands the lead back to its predecessor, whose rungs were already consulted on."""
+    leader, rung = key
+    memo = dict(seen or {})
+    memo[leader] = max(memo.get(leader, 0), rung)
+    return memo
 
 
 # ---------------------------------------------------------------------------------- backfill (F1h)

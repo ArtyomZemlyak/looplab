@@ -361,6 +361,16 @@ def default_agent_control() -> dict[str, list[str]]:
     return {k: list(v) for k, v in DEFAULT_AGENT_CONTROL.items()}
 
 
+def claim_decisions_enabled(settings) -> bool:
+    """`Settings.lesson_prior_claim_decisions` as the `claim_decisions=` argument the two pull tools
+    take (`tools/memory_tools.py::MemoryTools`, `tools/cross_run_tools.py::CrossRunTools`; doc 69
+    69.21b). ONE reader, because the switch reaches the role builders, the Developer backends,
+    Genesis's two doors and the owner Assistant — three of which never passed it (critic crit_v58
+    N2), so an operator's rejected lesson still reached them. Absent (a duck-typed settings stub)
+    means OFF: the tools' historical results."""
+    return bool(getattr(settings, "lesson_prior_claim_decisions", False))
+
+
 def governed_eval_timeout(requested, ceiling) -> float | None:
     """An AGENT-requested eval timeout as it may be ACCEPTED: a finite positive number, clamped to the
     operator's `max_eval_timeout` — or None when the request is not a usable number at all.
@@ -1613,7 +1623,9 @@ class Settings(BaseSettings):
     # prompt and the `prior_injected` receipt, discloses an unreadable decision ledger instead of
     # guessing, and a decision made mid-run counts as a change for the refresh. It changes a PROMPT
     # and buys no call: OFF at every constructor, and a pre-field snapshot resumes OFF
-    # (`LEGACY_CONFIG_SNAPSHOT_DEFAULTS`). One reader: the engine knob `_lesson_prior_claim_decisions`.
+    # (`LEGACY_CONFIG_SNAPSHOT_DEFAULTS`). Read by the engine knob `_lesson_prior_claim_decisions`
+    # (the prior) and by the two builders of the agents' pull tools, `agents/providers.py` and
+    # `agents/developer_backends.py`, which hand it to `MemoryTools`/`CrossRunTools` (doc 69 69.21b).
     lesson_prior_claim_decisions: bool = True
     # B3 output redaction: the HIGH-ENTROPY half of the persisted-tail redactor.
     # **This flag no longer decides whether tails are redacted at all** (backlog C2, 2026-08-14).
@@ -1789,8 +1801,9 @@ class Settings(BaseSettings):
     # named no pool, no per-experiment GPU budget, nothing the queued work declared and nothing about
     # an operator's width — the 4-GPU nodes then ran on one card each (a port conflict, ~2.4 h with
     # no metric), and after the operator pinned the width it asked to widen four more times. ON, every
-    # consult's brief gains one line: the pool the engine schedules on, what ONE experiment may claim
-    # at each width (`engine/widths.py::per_experiment_gpu_budget`), what the open proposals declare
+    # consult's brief gains one line: the pool the engine schedules on, what admission GRANTS an
+    # experiment and the most each may declare for every experiment at a width to run at once
+    # (`engine/widths.py::per_experiment_gpu_budget`), what the open proposals declare
     # and whether the width is the operator's. It changes the Strategist's PROMPT and buys no call,
     # so `false` reproduces the historical brief, every constructor defaults it OFF, and a pre-field
     # snapshot resumes OFF (its `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row). Read through ONE reader,

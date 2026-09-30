@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+from looplab.agents.propose_receipts import (note_propose_receipt, propose_receipt_scope,
+                                             scoped_budget_exhausted)
 from looplab.agents.roles import WrapsResearcher, forward_hints
 from looplab.core.models import Idea, Node, RunState
 from looplab.core.numeric import euclidean, knn_idw, numeric_params
@@ -115,9 +117,19 @@ class PanelResearcher(WrapsResearcher):
         # Members 2..K are each a NEW paid call: a run that halted while one was proposing starts
         # no further member (WP-STOP, `core/phase_events.py::run_halted` — always False outside a
         # run, so this is the historical fan-out there) and ranks what it already has.
-        ideas = [self.base.propose(state, parent)]
+        # Each member proposes inside its OWN receipt scope and the pick's receipt is noted LAST into
+        # the caller's, so the engine reads the chosen proposal's cutoff — not whichever member ran
+        # last (crit_v58 L3, driven: a converged pick warned TRUNCATED from a later member's cut).
+        ideas, receipts = [], []
+
+        def _member():
+            with propose_receipt_scope() as box:
+                ideas.append(self.base.propose(state, parent))
+            receipts.append(scoped_budget_exhausted(box, self.base))
+
+        _member()
         while len(ideas) < self.k and not run_halted():
-            ideas.append(self.base.propose(state, parent))
+            _member()
         best, best_pred = None, None
         for idea in ideas:
             res = _predict_with_distance(idea.params, hist, self.bounds)
@@ -130,5 +142,7 @@ class PanelResearcher(WrapsResearcher):
                 best, best_pred = idea, score
         if best is not None:
             best.rationale = (best.rationale + f" [panel: best of {self.k} by surrogate]").strip()
-            return best
-        return ideas[0]
+        chosen = next(i for i, idea in enumerate(ideas)
+                      if idea is (best if best is not None else ideas[0]))
+        note_propose_receipt(receipts[chosen])
+        return ideas[chosen]

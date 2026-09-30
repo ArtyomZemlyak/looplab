@@ -326,15 +326,12 @@ class LessonPriorsMixin:
         decisions_unavailable = False
         if getattr(self._e, "_lesson_prior_claim_decisions", False) and parsed:
             try:
-                from looplab.engine.claims import (
-                    lesson_claim_uid, lesson_rejected, load_claim_decisions,
-                    operator_rejected_claim_uids, rejects_anything)
+                from looplab.engine.claims import load_claim_decisions, operator_rejected_lessons
                 decisions = load_claim_decisions(base)
-                if rejects_anything(decisions):
-                    rejected = operator_rejected_claim_uids([o for _idx, o in parsed], decisions)
-                    claim_rejected = frozenset(
-                        idx for idx, o in parsed
-                        if lesson_claim_uid(o) in rejected or lesson_rejected(o, decisions))
+                # The ONE rule, shared with the agents' pull tools (doc 69 69.21b).
+                claim_rejected = frozenset(
+                    parsed[hit][0] for hit in operator_rejected_lessons(
+                        [o for _idx, o in parsed], decisions))
             except Exception as exc:  # noqa: BLE001 — an advisory filter: disclosed, never a failed prior
                 from looplab.core.containment import contain
                 contain("prior claim decisions", exc)

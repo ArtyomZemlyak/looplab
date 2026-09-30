@@ -31,14 +31,23 @@ class Phase:
         for key in ("reads", "writes", "prompts"):
             row[key] = list(row[key])
         # This index covers both orchestration modes. An agent using the scoped
-        # harness credential can inspect global settings and the task launch
-        # surface, but cannot mutate operator defaults or start another run.
+        # harness credential can inspect global settings, the task launch surface
+        # and the authoring stores, but cannot mutate operator defaults — settings,
+        # prompts, skills, knowledge — or start another run (`serve/server.py`'s
+        # harness deny list; critic crit_v62 F2: the authoring write read as the
+        # agent's after the middleware had closed it).
         row["write_access"] = {
-            ref: ("operator" if ref in {"PUT /api/settings", "POST /api/start"}
-                  else "external_agent") for ref in self.writes
+            ref: ("operator" if ref in OPERATOR_WRITES else "external_agent")
+            for ref in self.writes
         }
         row["obligation"] = "see GET /api/runs/{run_id}/harness-contract and /harness-progress"
         return row
+
+
+# The writes the scoped harness credential may not make (`tests/test_agent_token_scope.py` drives
+# each against the middleware, and every other HTTP write of the index through it).
+OPERATOR_WRITES = frozenset({"PUT /api/settings", "POST /api/start",
+                             "PUT /api/{kind}/{name}/operations/{operation_id}"})
 
 
 # A write of "command:NAME" means POST /api/runs/{run_id}/commands with
@@ -55,9 +64,11 @@ PHASES: tuple[Phase, ...] = (
           ("PUT /api/runs/{run_id}/config", "PUT /api/settings",
            "PUT /api/{kind}/{name}/operations/{operation_id}")),
     Phase("agent_knowledge", "Skill/KnowledgeFile", "tools/skills.py; serve/authoring_store.py",
-          "Manage editable skills and knowledge documents with revision-fenced writes.",
+          "Manage editable skills and knowledge documents with revision-fenced writes (the "
+          "operator's), and propose a skill from a measured lesson (the agent's).",
           ("GET /api/{kind}",),
-          ("PUT /api/{kind}/{name}/operations/{operation_id}",)),
+          ("PUT /api/{kind}/{name}/operations/{operation_id}",
+           "POST /api/runs/{run_id}/skill-candidates")),
     Phase("genesis", "TaskSpec", "engine/genesis.py::author_task",
           "Design a task and its evaluation contract before launching a run.",
           ("GET /api/runs",), ("POST /api/start",), legacy_prompt_family="genesis"),

@@ -268,7 +268,11 @@ the engine will not invent a pipeline cost in order to abandon your node.
 that exited 0 was counted successful, but exit 0 only means it did not crash — a data/mining stage can
 "succeed" having produced a fraction of what it should have, and the failure then surfaces one stage
 later. A repair session's `done` emit carries `rollback_stage`: name that earlier stage and the engine
-re-runs the pipeline **from** it, discarding its output and everything built on it. Three things bound
+re-runs the pipeline **from** it, discarding its output and everything built on it — or from the first
+stage wherever the rule that decides what a repair may reuse cannot keep what precedes it: the repair
+also changed something an earlier stage runs, a stage's command is opaque, the pipeline runs in a
+non-default `cwd`, a file was deleted or a manifest entry moved (the `stage_rollback` event's `start`
+records which). Three things bound
 it, so a wrong guess cannot become an expensive loop: the repair must also have **changed** something
 that stage runs or imports (naming a stage you did not fix is refused — re-running it unchanged would
 produce the same bytes); each suspect stage may be rolled back to **at most once per node** (read back

@@ -205,3 +205,14 @@ def test_an_external_preset_takes_precedence_over_the_in_house_editor():
     assert isinstance(developer, ValidatingDeveloper)
     assert isinstance(developer.inner, CliAgentDeveloper)
     assert not isinstance(developer.fallback, LLMRepoDeveloper)
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_the_in_house_editor_carries_the_operator_s_claim_decisions_to_its_pull_tools(flag):
+    """doc 69 69.21b: the Developer's own `search_lessons` and concept card withhold what the
+    operator rejected exactly when the passive prior does. MUTATION: drop the keyword -> False."""
+    developer = in_house_repo_developer(
+        _repo_task(), Settings(backend="llm", unified_agent=False,
+                               lesson_prior_claim_decisions=flag),
+        client=None, param_search=False, established=None)
+    assert developer._claim_decisions is flag

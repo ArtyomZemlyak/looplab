@@ -2258,7 +2258,7 @@ def _total_predicate(predicate, state, node, *, on_error: bool) -> bool:
 # is kept for the discard axis, since an unrecognised reason falls through to the "did it ever run"
 # test rather than being trusted.
 #
-# `events/replay.py::_FAILURE_SPIKE_IGNORED_REASONS` draws a neighbouring line for a different
+# `core/models.py::BENIGN_TERMINAL_REASONS` (the failure-spike rule's) draws a neighbouring line for a different
 # question ("is the SEARCH failing?"), and deliberately does not coincide: `card_dropped`/`aborted`
 # are operator intent, not build-lifecycle discards, and `build_crash` is a genuine build failure that
 # the spike counter should see.

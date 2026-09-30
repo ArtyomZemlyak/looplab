@@ -124,6 +124,8 @@ def test_one_evaluation_brackets_its_evaluator_with_a_claim_and_a_settle(tmp_pat
     assert len(claims) == 1 and len(settles) == 1
     assert claims[0]["invocation_id"] == settles[0]["invocation_id"]
     assert claims[0]["attempt"] == 0 and "after_interrupted_attempt" not in claims[0]
+    # Written on EVERY claim, so an absent key means an older claim (crit_v57 M1/L1).
+    assert claims[0]["canary_ran"] is False
     assert settles[0]["outcome"] == "ok" and settles[0]["eval_seconds"] >= 0.0
     # The receipt is EVIDENCE about an invocation, never a second authority for the node: exactly
     # one terminal, exactly as before (invariant #2).

@@ -630,3 +630,156 @@ def test_the_repair_emit_is_the_only_one_that_offers_a_rollback():
     # The two things a model must know at the moment of answering, in the text it actually reads.
     assert "must have EDITED that stage's script" in desc
     assert "ONE rollback per stage per node" in desc
+
+
+def _prep(v):
+    return f"open('data.txt', 'w').write('{v}')\n"
+
+
+def _train(v):
+    return f"open('ckpt.txt', 'w').write('trained({v}) on ' + open('data.txt').read())\n"
+
+
+def _rollback_run(tmp_path, plan, *, fails=1, cap=2, cwd="."):
+    """prep -> train -> infer through the real sandbox and inline repair; `infer` fails `fails`
+    times, and repair N writes `plan[N-1]` = (files, rollback_stage). The scripts live under the
+    eval's `cwd`, the manifest at the root. Returns the log and the run dir."""
+    import json
+    import sys
+
+    import anyio
+
+    from looplab.adapters.repo_task import EvalSpec, RepoTask
+    from looplab.engine.orchestrator import Engine
+    from looplab.events.eventstore import EventStore
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.search.policy import GreedyTree
+
+    py = sys.executable
+
+    class _Dev:
+        def __init__(self):
+            self.repair_calls = 0
+            self.last_files: dict = {}
+            self.last_deleted: list = []
+            self.last_rollback_stage = ""
+
+        def implement(self, idea):
+            return ""
+
+        def repair(self, idea, code, error):
+            self.repair_calls += 1
+            files, stage = (plan[self.repair_calls - 1] if self.repair_calls <= len(plan)
+                            else ({}, ""))
+            self.last_files, self.last_rollback_stage = dict(files), stage
+            return ""
+
+    src = tmp_path / "src"
+    scripts = src / cwd
+    scripts.mkdir(parents=True)
+    count = tmp_path / "fails.count"
+    (scripts / "prep.py").write_text(_prep("v0"))
+    (scripts / "train.py").write_text(_train("v0"))
+    (scripts / "infer.py").write_text(
+        f"import os\ncount = {str(count)!r}\n"
+        "n = int(open(count).read()) if os.path.exists(count) else 0\n"
+        f"if n < {fails}:\n    open(count, 'w').write(str(n + 1)); raise RuntimeError('flaky OOM')\n"
+        "print(open('ckpt.txt').read())\n")
+    (scripts / "looplab_eval.py").write_text("import json; print(json.dumps({'metric': 0.5}))\n")
+    (src / "looplab_stages.json").write_text(json.dumps({"stages": [
+        {"name": "prep", "command": [py, "prep.py"], "timeout": 120},
+        {"name": "train", "command": [py, "train.py"], "timeout": 120},
+        {"name": "infer", "command": [py, "infer.py"], "timeout": 120}]}))
+    task = RepoTask(id="r", direction="max", editable_path=str(src),
+                    edit_surface=["*.py", "*.json", "**/*.py"],
+                    eval=EvalSpec(command=[py, "looplab_eval.py"],
+                                  metric={"kind": "stdout_json", "key": "metric"}, cwd=cwd))
+    researcher, _ = task.build_roles()
+    run_dir = tmp_path / "run"
+    eng = Engine(run_dir, task=task, researcher=researcher, developer=_Dev(),
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
+                 auto_install_deps=False, inline_repair=True, inline_repair_attempts=4,
+                 inline_repair_retrain_cap=cap)
+    anyio.run(eng.run)
+    return list(EventStore(run_dir / "events.jsonl").read_all()), run_dir
+
+
+def _rollbacks(evs):
+    return [(e.data.get("stage"), e.data.get("accepted"), e.data.get("start")) for e in evs
+            if e.type == "stage_rollback"]
+
+
+def test_a_rollback_re_runs_an_earlier_stage_the_repair_also_rewrote(tmp_path):
+    """crit_v51 F2, driven through the real sandbox: repair 1 rewrites `prep.py` AND `train.py` and
+    names `train`; the ladder accepts (the suspect's closure changed), and `prep` — before the
+    suspect — used to be REUSED: its v0 data was scored against the v1 code. The rollback now starts
+    at the suspect only where the reuse predicate would, and its row says it started at the first
+    stage (`start` ""). MUTATION: take the suspect as the start without asking `_safe_reuse_start`
+    -> `prep` is reused and `trained(v1) on v0` is scored."""
+    evs, run_dir = _rollback_run(tmp_path, [({"prep.py": _prep("v1"), "train.py": _train("v1")},
+                                             "train")])
+    assert _rollbacks(evs) == [("train", True, "")], "premise: the ladder accepted"
+    assert "reused" not in [e.data.get("status") for e in evs if e.type == "stage_finished"]
+    assert (run_dir / "nodes" / "node_0" / "ckpt.txt").read_text() == "trained(v1) on v1"
+
+
+def test_a_rollback_that_changed_only_the_suspect_still_reuses_what_precedes_it(tmp_path):
+    """The positive control (crit_v53 N4): the repair rewrote only `train.py`, so `prep`'s output
+    still stands and the rollback starts AT `train`. MUTATIONS: ask the reuse question from the
+    failed stage, or never start at the suspect -> `prep` re-runs and the rollback is a full re-run."""
+    evs, run_dir = _rollback_run(tmp_path, [({"train.py": _train("v1")}, "train")])
+    assert _rollbacks(evs) == [("train", True, "train")]
+    assert [e.data.get("status") for e in evs
+            if e.type == "stage_finished" and e.data.get("name") == "prep"] == ["ok", "reused"]
+    assert (run_dir / "nodes" / "node_0" / "ckpt.txt").read_text() == "trained(v1) on v0"
+
+
+def test_a_rollback_under_a_subdirectory_cwd_re_runs_the_whole_pipeline(tmp_path):
+    """Under a non-default `cwd` the reuse question cannot be proven (changed-file keys and stage
+    script paths resolve against different bases), so a rollback re-runs everything (crit_v53 N4).
+    MUTATION: ask the reuse question with `cwd=None` -> `prep` (rewritten too) is reused and
+    `trained(v1) on v0` is scored."""
+    evs, run_dir = _rollback_run(tmp_path, [(
+        {"sub/prep.py": _prep("v1"), "sub/train.py": _train("v1")}, "train")], cwd="sub")
+    assert _rollbacks(evs) == [("train", True, "")]
+    assert (run_dir / "nodes" / "node_0" / "sub" / "ckpt.txt").read_text() == "trained(v1) on v1"
+
+
+def test_a_capped_rollback_names_the_stage_it_rolled_back_to(tmp_path):
+    """crit_v53 N1: with the retrain cap spent, a second rollback's terminal said "rolled the pipeline
+    back to stage None" — the suspect was `prep`, the FIRST stage, whose start is the whole pipeline.
+    MUTATION: render `next_start` again -> `None` in the operator's sentence."""
+    evs, _run_dir = _rollback_run(tmp_path, [
+        ({"prep.py": _prep("v1"), "train.py": _train("v1")}, "train"),
+        ({"prep.py": _prep("v2"), "train.py": _train("v2")}, "prep")], fails=2, cap=1)
+    assert _rollbacks(evs) == [("train", True, ""), ("prep", True, "")]
+    failed = [e.data for e in evs if e.type == "node_failed"]
+    assert len(failed) == 1
+    said = str(failed[0].get("triage_rationale") or failed[0].get("error") or "")
+    assert "rolled the pipeline back to stage 'prep' (re-run from the first stage)" in said, said
+    assert "None" not in said
+
+
+def test_a_capped_rollback_that_kept_what_precedes_it_says_so(tmp_path):
+    """crit_v55 R2: the capped sentence says "(re-run from the first stage)" only when the rollback
+    did not start at its suspect. Here the second rollback names `train` having changed only
+    `train.py`, so it starts AT `train` and `prep` is reused — the sentence must not claim a whole
+    re-run. MUTATION: always append the suffix -> red."""
+    evs, _run_dir = _rollback_run(tmp_path, [
+        ({"prep.py": _prep("v1")}, "prep"),
+        ({"train.py": _train("v2")}, "train")], fails=2, cap=1)
+    assert _rollbacks(evs) == [("prep", True, ""), ("train", True, "train")]
+    failed = [e.data for e in evs if e.type == "node_failed"]
+    assert len(failed) == 1
+    said = str(failed[0].get("triage_rationale") or failed[0].get("error") or "")
+    assert "rolled the pipeline back to stage 'train' —" in said, said
+    assert "first stage" not in said, said
+
+
+def test_a_refused_rollback_row_records_no_start(tmp_path):
+    """crit_v55 R3: `start` is what an ACCEPTED rollback re-runs from; a refused one re-runs nothing
+    from its suspect, so its row carries no `start`. MUTATION: stamp `start` on every row -> red."""
+    evs, _run_dir = _rollback_run(tmp_path, [({"train.py": _train("v1")}, "no_such_stage")])
+    rows = [e.data for e in evs if e.type == "stage_rollback"]
+    assert len(rows) == 1 and rows[0].get("accepted") is False, rows
+    assert "start" not in rows[0], rows[0]
