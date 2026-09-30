@@ -253,3 +253,16 @@ def test_engine_checks_python_output_in_mixed_file_candidate(tmp_path):
     source = eng._trust_scan_surface(node)
     signals = {row["signal"] for row in eng._trust_gate_signals(node, source)}
     assert "critic:hardcoded_metric" in signals
+
+
+def test_a_host_scored_task_has_no_in_tree_scorer_even_when_a_stage_resolves_in_tree():
+    """A declared host scorer owns the metric, so the candidate's source has no metric-output
+    contract whatever its stages resolve to (MiniOneRec inf13: a `compileall` syntax stage resolved
+    in-tree and the critic flagged `no_metric_output` on nodes whose score the host computes).
+    MUTATION: drop the host-scorer branch -> the second assertion answers True."""
+    ev = _Eval(stages=[{"name": "work", "command": ["python", "score.py"]}])
+    assert scorer_is_in_tree(_Task(ev)) is True      # no host scorer: today's answer
+    ev.host_scorer = object()
+    assert scorer_is_in_tree(_Task(ev)) is False
+    assert "no_metric_output" not in _issues(SOLVER, scorer_in_tree=scorer_is_in_tree(_Task(ev)))
+

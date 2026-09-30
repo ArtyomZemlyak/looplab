@@ -376,6 +376,14 @@ def scorer_is_in_tree(task) -> bool:
     ev = getattr(task, "eval", None)
     if ev is None:
         return True
+    # A HOST SCORER owns the metric (`adapters/repo_task.py`, `eval.host_scorer`): the number the run
+    # keeps is the one the host program prints over the candidate's tree, and whatever the candidate
+    # prints rides beside it unused — so no file of the candidate's is the scorer, however its stages
+    # resolve. Measured on MiniOneRec inf13 (2026-09-29/30): the task's one stage is `python -m
+    # compileall -q service optimizations`, which resolves in-tree, the score is the host's
+    # `harness/bench_infer.py`, and the critic flagged `no_metric_output` on nodes 33 and 35.
+    if getattr(ev, "host_scorer", None) is not None:
+        return False
     try:
         from looplab.adapters.repo_task import entrypoint_candidates
         argvs = [getattr(ev, "command", None) or []]
