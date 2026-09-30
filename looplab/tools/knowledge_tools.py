@@ -142,10 +142,18 @@ def _absolute_root_spelling(root) -> str | None:
     """A mount root as a model may copy it — separators folded to `/`, no trailing `/` — or None when
     it is not absolute. A Windows drive root (`C:/…`) is absolute too: only a leading `/` was
     accepted, so on Windows no absolute spelling of any mount was ever mapped (the Windows CI leg,
-    2026-09-30: `C:\\…\\a/x.py` read as "(no such file …)")."""
-    root = str(root).replace("\\", "/").rstrip("/")
-    if (root.startswith("/") and len(root) > 1) or _DRIVE_ROOT.match(root):
-        return root
+    2026-09-30: `C:\\…\\a/x.py` read as "(no such file …)").
+
+    NORMALISED exactly as `RepoTools._spelling` normalises the path it is compared with — its
+    `posixpath.normpath` and its `//` head folded to one `/` — or the two can never be equal: a UNC
+    root `\\\\server\\share\\repo` was registered as `//server/share/repo` and every path under it
+    arrived as `/server/share/repo/…` (crit_v54 F9)."""
+    root = str(root).replace("\\", "/")
+    if root.startswith("//"):
+        root = "/" + root.lstrip("/")
+    root = root.rstrip("/")
+    if root.startswith("/") or _DRIVE_ROOT.match(root):
+        return posixpath.normpath(root)
     return None
 
 
@@ -691,7 +699,13 @@ class _SharedIndex:
     2 and 3, and with `embed_model` set each embedding is a paid call. This container is shared by
     reference, so a view ADOPTS what an earlier view built for the same scope and sources. The lock
     serializes the one build a scope or source change owes, so two views never pay for it twice. What
-    it publishes is never mutated again, because a build starts a new index and a new memo."""
+    it publishes is never mutated again, because a build starts a new index and a new memo.
+
+    THE COST, bounded and stated (crit_v55 K3, measured): the provider keeps its construction-time
+    index while this slot holds the last bound scope's, so a provider used through views holds TWO
+    resident indexes (and memos) where the bound-in-place provider held one — 100 stored items
+    against 50 for 50 records — plus whatever a live view still references. It does not grow with
+    views or scopes: the slot holds one scope at a time."""
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -737,8 +751,13 @@ class KnowledgeTools:
 
     @staticmethod
     def _scope_key(scope) -> tuple:
-        return (scope.bound, scope.run_uid, scope.run_id, scope.task_id, scope.direction,
-                scope.goal_terms)
+        """The adoption key: EVERY field of the scope (`LessonScope.__slots__`), so a field the
+        visibility predicate grows is part of the key without anyone remembering to add it. The
+        hand-listed tuple this replaced was one dropped field away from a leak, and no test would
+        have seen it: without `goal_terms` an unrelated goal adopted a related goal's index and read
+        its case, without `run_uid` a run's own replaced incarnation read the row it must not
+        (crit_v55 K1, driven)."""
+        return tuple((name, getattr(scope, name)) for name in type(scope).__slots__)
 
     def _publish_index(self) -> None:
         shared = self._shared

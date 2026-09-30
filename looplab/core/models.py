@@ -1514,11 +1514,13 @@ BENIGN_TERMINAL_REASONS: frozenset[str] = frozenset({
 def search_outcome(state, node) -> "Optional[bool]":
     """Whether a node is an OUTCOME of the search, and which: True = a failure, False = an evaluated
     node, None = not an outcome at all — deleted (`tombstoned`), aborted by the operator, a benign
-    terminal (`BENIGN_TERMINAL_REASONS`), or not finished. The failure half is exactly the fold's
-    failure-spike rule (`events/replay.py::_counts_as_current_failure`, pinned equal by
-    `tests/test_strategist_outcome_rule.py`); the Strategist's `failure_rate` and mean eval cost and
-    its stall signals read this one rule (critic 2026-09-30, crit_v52 F1/F6: a deleted node's
-    charge-only `failed` terminal read as a failed push on the champion and requested paid research)."""
+    terminal (`BENIGN_TERMINAL_REASONS`), or not finished. The fold's failure-spike rule
+    (`events/replay.py::_counts_as_current_failure`) CALLS this for its failure half, and the
+    Strategist's `failure_rate` and mean eval cost and its stall signals read it too (critic
+    2026-09-30, crit_v52 F1/F6: a deleted node's charge-only `failed` terminal read as a failed push
+    on the champion and requested paid research). One rule for those readers, not for every one:
+    the Researcher digest's headline (`events/digest.py`, "N experiment(s), M failed") still counts
+    every failed terminal, and it is a prompt — changing it is a flag's decision (crit_v54 F6)."""
     if node.tombstoned or node.id in getattr(state, "aborted_nodes", ()):
         return None
     if node.status is NodeStatus.evaluated:

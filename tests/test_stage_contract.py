@@ -758,3 +758,28 @@ def test_a_capped_rollback_names_the_stage_it_rolled_back_to(tmp_path):
     said = str(failed[0].get("triage_rationale") or failed[0].get("error") or "")
     assert "rolled the pipeline back to stage 'prep' (re-run from the first stage)" in said, said
     assert "None" not in said
+
+
+def test_a_capped_rollback_that_kept_what_precedes_it_says_so(tmp_path):
+    """crit_v55 R2: the capped sentence says "(re-run from the first stage)" only when the rollback
+    did not start at its suspect. Here the second rollback names `train` having changed only
+    `train.py`, so it starts AT `train` and `prep` is reused — the sentence must not claim a whole
+    re-run. MUTATION: always append the suffix -> red."""
+    evs, _run_dir = _rollback_run(tmp_path, [
+        ({"prep.py": _prep("v1")}, "prep"),
+        ({"train.py": _train("v2")}, "train")], fails=2, cap=1)
+    assert _rollbacks(evs) == [("prep", True, ""), ("train", True, "train")]
+    failed = [e.data for e in evs if e.type == "node_failed"]
+    assert len(failed) == 1
+    said = str(failed[0].get("triage_rationale") or failed[0].get("error") or "")
+    assert "rolled the pipeline back to stage 'train' —" in said, said
+    assert "first stage" not in said, said
+
+
+def test_a_refused_rollback_row_records_no_start(tmp_path):
+    """crit_v55 R3: `start` is what an ACCEPTED rollback re-runs from; a refused one re-runs nothing
+    from its suspect, so its row carries no `start`. MUTATION: stamp `start` on every row -> red."""
+    evs, _run_dir = _rollback_run(tmp_path, [({"train.py": _train("v1")}, "no_such_stage")])
+    rows = [e.data for e in evs if e.type == "stage_rollback"]
+    assert len(rows) == 1 and rows[0].get("accepted") is False, rows
+    assert "start" not in rows[0], rows[0]

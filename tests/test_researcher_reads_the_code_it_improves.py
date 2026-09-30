@@ -662,5 +662,19 @@ def test_a_windows_drive_root_is_an_absolute_spelling_too():
     assert _absolute_root_spelling("C:\\Users\\runner\\a\\") == "C:/Users/runner/a"
     assert _absolute_root_spelling("d:/work/repo") == "d:/work/repo"
     assert _absolute_root_spelling("/abs/repo/") == "/abs/repo"
-    for relative in ("repo", "./repo", "", "/", "C:", "C:repo"):
-        assert _absolute_root_spelling(relative) is None, relative
+    for relative in ("repo", "./repo", "", "/", "C:", "C:repo", "ab:/x", "1:/x"):
+        assert _absolute_root_spelling(relative) is None, relative   # crit_v54 KT3: ONE letter
+
+
+def test_a_unc_mount_maps_like_any_other_absolute_root(tmp_path):
+    """crit_v54 F9: a UNC root was registered as `//server/share/repo` while `_spelling` folds a
+    leading `//` to `/`, so no path under a UNC mount ever mapped. The root is normalised exactly as
+    the path it is compared with. MUTATION: drop the fold from the root -> the path is repo-relative
+    and misses the mount."""
+    from looplab.tools.knowledge_tools import _absolute_root_spelling
+    assert _absolute_root_spelling("\\\\server\\share\\repo\\") == "/server/share/repo"
+    assert _absolute_root_spelling("/abs/./repo/../repo") == "/abs/repo"
+    tools = _reader(tmp_path)
+    tools._spellings = [(_absolute_root_spelling("\\\\server\\share\\repo"), ".")]
+    assert tools._spelling("\\\\server\\share\\repo\\service\\x.py") == ("service/x.py", None)
+    assert tools._spelling("//server/share/repo/x.py") == ("x.py", None)

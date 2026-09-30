@@ -1325,8 +1325,10 @@ def _repair_forces_full_retrain(res, next_start, *, rolled_back: bool = False) -
     and a second counter would let a Developer alternate rollback / full-retrain and pay neither cap.
     It is checked FIRST because the existing three conditions cannot see it: a rollback leaves
     `next_start` set to the suspect's name, so `next_start is None` is False and the historical rule
-    reads an accepted rollback as free. (A rollback whose repair also moved what precedes the
-    suspect re-runs from the first stage instead — `next_start` None — and is still ONE charge.)
+    reads an accepted rollback as free. (A rollback the reuse rule cannot start at the suspect — the
+    repair also moved what precedes it, an opaque stage, a non-default `cwd`, a deleted file, a moved
+    manifest entry; `eval_stages.py::_rollback_start` names them — re-runs from the first stage
+    instead, `next_start` None, and is still ONE charge.)
     """
     # Count a full re-train against the cap ONLY when completed EARLIER-stage work is being
     # discarded: a LATER stage failed yet reuse was refused because the repair could

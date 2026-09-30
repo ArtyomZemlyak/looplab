@@ -30,7 +30,7 @@ from looplab.core.models import (Event, Idea, Node, NodeStatus, RunState, Trial,
                      EXTRA_METRIC_DECLARED, normalize_extra_metric_backfill,
                      normalize_extra_metric_channels, normalize_extra_metric_directions, normalize_extra_metrics,
                      normalize_researcher_footprint,
-                     run_setup_key, BENIGN_TERMINAL_REASONS)
+                     run_setup_key, BENIGN_TERMINAL_REASONS, search_outcome)
 # No longer read here — the concept family's materializer inherits through it — but still readable
 # from this module as it always was (`tests/test_shared_identity_rules.py` derives the card ledger's
 # display set from it).
@@ -781,12 +781,15 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
 # three fields are `Field(exclude=True)`, so a corpus check that digests `model_dump()` cannot see
 # this at all — the reason it went unnoticed. `tests/test_failure_spike_ignores_frozen.py` pins the
 # membership deliberately.
-_FAILURE_SPIKE_IGNORED_REASONS = set(BENIGN_TERMINAL_REASONS)
+_FAILURE_SPIKE_IGNORED_REASONS = BENIGN_TERMINAL_REASONS
 
 
 def _counts_as_current_failure(st: RunState, n: Node) -> bool:
-    return (n.status is NodeStatus.failed and not n.tombstoned and n.id not in st.aborted_nodes
-            and str(n.error_reason or "").strip().lower() not in _FAILURE_SPIKE_IGNORED_REASONS)
+    # THE ONE RULE (crit_v54 F6): a current failure is what `core/models.py::search_outcome` calls a
+    # failure, and the Strategist's failure rate, mean eval cost and stall signals read the same
+    # function — two copies pinned equal over a fixed list of reasons let a reason added to one
+    # (`| {"oom"}`) pass every test.
+    return search_outcome(st, n) is True
 
 
 def _add_current_failure(st: RunState, n: Node, event: Event) -> None:

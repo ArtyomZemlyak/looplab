@@ -153,3 +153,43 @@ def test_search_outcome_reads_a_log_the_way_the_fold_does():
     state = fold([Event(seq=i + 1, type=t, ts=float(i), data=d) for i, (t, d) in enumerate(rows)])
     assert [search_outcome(state, state.nodes[n]) for n in range(4)] == [False, None, None, True]
     assert state.current_failure_count == 1 and failure_rate(state) == 0.5
+
+
+def test_a_failure_s_seconds_count_toward_the_mean_eval_cost(tmp_path):
+    """crit_v54 survivor ST7: a CRASH is an outcome, and the seconds it burned are what an eval of
+    this run costs — only a non-outcome's (a deleted node's, an abort's) are skipped. MUTATION: read
+    only evaluated nodes' seconds -> 30.0, not 20.0."""
+    from tests.factories import make_engine
+
+    engine = make_engine(tmp_path / "run", n_seeds=1, max_nodes=100)
+    rows = [("run_started", {"run_id": "t", "task_id": "toy", "goal": "g", "direction": "max"})]
+    for nid in (0, 1):
+        rows.append(("node_created", {"node_id": nid, "parent_ids": [], "operator": "draft",
+                                      "idea": {"operator": "draft", "params": {"x": float(nid)}}}))
+    rows += [("node_evaluated", {"node_id": 0, "generation": 0, "metric": 1.0, "eval_seconds": 30.0}),
+             ("node_failed", {"node_id": 1, "generation": 0, "reason": "crash", "error": "boom",
+                              "eval_seconds": 10.0})]
+    for kind, data in rows:
+        engine.store.append(kind, data)
+    assert engine._strategy_ctx(fold(engine.store.read_all())).avg_eval_seconds == 20.0
+
+
+def test_an_evaluated_node_is_an_outcome_whatever_its_metric():
+    """crit_v54 survivor ST10: the TERMINAL decides, not the number on it. MUTATION: require a
+    metric -> an evaluated node without one reads as no outcome and leaves the failure rate."""
+    node = Node(id=0, operator="draft", idea=Idea(operator="draft"), status=NodeStatus.evaluated,
+                metric=None)
+    state = RunState(nodes={0: node, 1: _node(1, NodeStatus.failed, reason="crash")})
+    assert search_outcome(state, node) is False
+    assert failure_rate(state) == 0.5
+
+
+@pytest.mark.parametrize("reason", sorted(__import__("looplab.core.models", fromlist=["x"])
+                                          .FAILURE_REASONS))
+def test_every_registered_failure_reason_is_a_failure_unless_it_is_benign(reason):
+    """crit_v54 F6 / ST8: the rule is ONE function now, so what it calls a failure is pinned over
+    the whole reason registry, not a hand-picked list. MUTATION: add a reason to the benign set
+    inside `search_outcome` (`| {"oom"}`) -> that reason's row is red."""
+    node = _node(1, NodeStatus.failed, reason=reason)
+    state = RunState(nodes={1: node})
+    assert search_outcome(state, node) is (None if reason in BENIGN_TERMINAL_REASONS else True)
