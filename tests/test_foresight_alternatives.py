@@ -1105,3 +1105,71 @@ def test_a_proposal_cut_by_its_budget_that_then_raised_keeps_its_receipt(monkeyp
     _model, researcher, _agent, panel = _chain([_turn(_emit("e1", "x"))], forced=[_emission("f")])
     panel.propose(_state(), None)
     assert researcher_budget_exhausted(panel) == "time"
+
+
+class _SlowPaid(_Model):
+    """`_Model` whose every chat takes 30 s of a FAKE clock and commits $0.25 on this thread."""
+
+    def __init__(self, script, clock, **kw):
+        super().__init__(script, **kw)
+        from looplab.core.llm import CostAccountant
+        self.accountant, self.clock = CostAccountant(), clock
+
+    def chat(self, messages, tools=None, tool_choice="auto", **kw):
+        self.clock.now += 30.0
+        self.accountant.add(0.25, usage={"prompt_tokens": 9, "completion_tokens": 1,
+                                         "total_tokens": 10})
+        return super().chat(messages, tools, tool_choice, **kw)
+
+
+class _FakeClock:
+    now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+
+def _continued_with(monkeypatch, *, wall, money):
+    """Candidate 1 (a read, an emit: 60 s and $0.50 of the fake clock and accountant), then one
+    continuation. Returns what the alternative's loop was handed and the model's requests."""
+    import looplab.agents.agent as agent_mod
+
+    clock = _FakeClock()
+    monkeypatch.setattr(agent_mod, "time", clock)   # agent.py's session clock only
+    seen: dict = {}
+    real = agent_mod.run_phase
+
+    def spy(*args, **kwargs):
+        seen[kwargs.get("label")] = (kwargs.get("time_budget_s"), kwargs.get("cost_budget_usd"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(agent_mod, "run_phase", spy)
+    model = _SlowPaid(_capped_script(), clock)
+    researcher = ToolUsingResearcher(model, _Tools(), loop_opts=LoopOptions(
+        time_budget_s=wall, cost_budget_usd=money))
+    idea, session = researcher.propose_with_session(_state(), None)
+    researcher.last_budget_exhausted = "marker"
+    before = (len(session.messages), researcher.last_budget_exhausted)
+    researcher.propose_alternative(_state(), None, session, [idea])
+    return seen, model, before, (len(session.messages), researcher.last_budget_exhausted)
+
+
+def test_12_a_continued_session_runs_on_what_is_left_of_its_wall_clock_and_money(monkeypatch):
+    """crit_v45 L3: the continuation was handed the whole `agent_time_budget_s` and a fresh money
+    ceiling after candidate 1 had spent most of both. It runs on what is LEFT, measured from where
+    candidate 1 began. MUTATION: hand it `self.loop_opts`' own wall clock or money ceiling."""
+    seen, _model, _before, _after = _continued_with(monkeypatch, wall=100.0, money=1.0)
+    assert seen["Researcher·propose"] == (100.0, 1.0)
+    assert seen["Researcher·alternative"] == (40.0, 0.5)
+
+
+@pytest.mark.parametrize("wall, money", [(60.0, 5.0), (500.0, 0.5)])
+def test_12_a_session_with_nothing_left_is_not_continued_and_is_left_untouched(monkeypatch, wall,
+                                                                               money):
+    """Nothing left of the wall clock (60 s spent of 60) or the money ($0.50 of $0.50): no
+    continuation — and the refusal is decided before the transcript or the receipt is touched
+    (crit_v45 NIT). MUTATIONS: `<= 0` -> `< 0`; check after appending the alternative turn."""
+    seen, model, before, after = _continued_with(monkeypatch, wall=wall, money=money)
+    assert "Researcher·alternative" not in seen
+    assert not any(_asks_for_alternative(req) for req in model.chats)
+    assert after == before

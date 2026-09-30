@@ -208,7 +208,7 @@
           "label": "Strategist sees the GPU pool",
           "type": "bool",
           "default": true,
-          "help": "Each Strategist consult is told the GPU pool it schedules on, how many GPUs ONE experiment may claim at each evaluation width, what the open proposals declare they need, and whether you fixed the width yourself. Without it a Strategist once widened a run of 4-GPU experiments onto one card each. Off = the brief as before."
+          "help": "Each Strategist consult is told the GPU pool it schedules on, what admission grants an experiment, the most each may declare for every experiment at a width to run at once, what the open proposals declare they need, and whether you fixed the width yourself. Without it a Strategist once widened a run of 4-GPU experiments onto one card each. Off = the brief as before."
         },
         {
           "key": "strategist_budget_brief",

@@ -6,9 +6,9 @@ budget, nothing the queued work had declared and nothing about the operator's wi
 experiments ran on one card each (a torchrun port conflict, ~2.4 h with no metric), and after the
 operator pinned the width it asked to widen four more times. (The "0 GPUs" in its system prompt was
 the failed-probe cache 69.23a fixed.) Under `Settings.strategist_gpu_brief` every consult's brief
-states the pool the engine schedules on, what ONE experiment may claim at each width, what the open
-proposals declare and whether the width is the operator's; OFF, the brief is byte for byte what it
-was.
+states the pool the engine schedules on, what admission grants an experiment, the most each may
+declare for every experiment at a width to run at once, what the open proposals declare and whether
+the width is the operator's; OFF, the brief is byte for byte what it was.
 """
 from __future__ import annotations
 
@@ -185,7 +185,8 @@ def test_a_width_past_the_pool_is_shown_and_a_zero_declaration_counts_as_declare
     ctx = wide._strategy_ctx(RunState())
     assert ctx.gpu_budget_by_width == {1: 2, 2: 1}, (
         "past the pool no declaration keeps every experiment running: not a row of that table")
-    assert "(now 6, above the pool: at most 2 run at once and the rest queue)" in _gpu_pool_note(ctx)
+    assert ("(now 6, above the pool: at most 2 experiments that take a device run at once and "
+            "the rest of those queue)") in _gpu_pool_note(ctx)
     huge = _engine(tmp_path / "huge", on=True, gpus=range(2000), width=2)
     assert max(huge._gpu_pool_ctx(RunState())["gpu_budget_by_width"]) <= 1024
     zero = _engine(tmp_path / "zero", on=True)

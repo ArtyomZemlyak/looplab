@@ -1789,8 +1789,9 @@ class Settings(BaseSettings):
     # named no pool, no per-experiment GPU budget, nothing the queued work declared and nothing about
     # an operator's width — the 4-GPU nodes then ran on one card each (a port conflict, ~2.4 h with
     # no metric), and after the operator pinned the width it asked to widen four more times. ON, every
-    # consult's brief gains one line: the pool the engine schedules on, what ONE experiment may claim
-    # at each width (`engine/widths.py::per_experiment_gpu_budget`), what the open proposals declare
+    # consult's brief gains one line: the pool the engine schedules on, what admission GRANTS an
+    # experiment and the most each may declare for every experiment at a width to run at once
+    # (`engine/widths.py::per_experiment_gpu_budget`), what the open proposals declare
     # and whether the width is the operator's. It changes the Strategist's PROMPT and buys no call,
     # so `false` reproduces the historical brief, every constructor defaults it OFF, and a pre-field
     # snapshot resumes OFF (its `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row). Read through ONE reader,

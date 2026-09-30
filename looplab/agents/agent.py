@@ -14,6 +14,7 @@ through this module holds. `run_phase` stays HERE (see the note above it).
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -22,7 +23,7 @@ from looplab.core.cards import idea_proposal_digest
 from looplab.core.containment import contain
 from looplab.core.evidence import fence_kwargs, fence_untrusted
 from looplab.core.llm import BudgetExceeded
-from looplab.core.llm_budget import thread_committed_tokens
+from looplab.core.llm_budget import thread_committed_tokens, thread_committed_usd_exact
 from looplab.core.models import Idea, IdeaEmission, Node, RunState
 from looplab.core.parse import ParseError, parse_structured
 from looplab.core.prompts import PromptStore, render
@@ -321,6 +322,10 @@ class ProposalSession:
     cutoff: str = ""
     tokens_at_start: Optional[int] = None
     thread: Optional[int] = None
+    # …and its dollars (exact, `core/llm_budget.py::thread_committed_usd_exact`) and its monotonic
+    # start, so the continuation's wall clock and money ceiling are the session's too (crit_v45 L3).
+    usd_at_start: Any = None
+    started_at: Optional[float] = None
     # The transcript AS IT STOOD when each candidate finished — `publish_brief` distills from it. The
     # live `messages` list is compacted IN PLACE by later turns (`_compact_in_place`), so an index into
     # it can name a prefix that already holds an alternative's reads (the critic, 2026-09-30).
@@ -698,6 +703,8 @@ class ToolUsingResearcher:
             # What this thread had committed before the session's first loop: the base a
             # continuation's remaining token allowance is measured from (`propose_alternative`).
             session.tokens_at_start = thread_committed_tokens()
+            session.usd_at_start = thread_committed_usd_exact()
+            session.started_at = time.monotonic()
             session.thread = threading.get_ident()
             session.tools = tools
         try:
@@ -743,6 +750,52 @@ class ToolUsingResearcher:
                 session.hold(messages, visible, "error", cutoff=cutoff[0])
             return self._fallback(messages, e)
 
+    def _continuation_opts(self, session: ProposalSession):
+        """The loop options a continuation of `session` runs under, or None when it may not run.
+
+        Every bound here is the SESSION'S, measured from where candidate 1 began: the continuation
+        is more of the same session, not a new one."""
+        # The cap may only LOWER the operator's own turn limit: `agent_max_turns` 3 means an
+        # alternative gets 3, never 8. 0 / unset is "unlimited", which the cap then bounds.
+        configured = getattr(getattr(self, "loop_opts", None), "max_turns", None)
+        cap = (min(int(configured), ALTERNATIVE_MAX_TURNS) if configured and int(configured) > 0
+               else ALTERNATIVE_MAX_TURNS)
+        opts = self.loop_opts.replace(max_turns=cap)
+        # THE SESSION'S TOKEN CEILING, NOT A FRESH ONE (the critic, 2026-09-30). The continuation
+        # re-sends the whole transcript, and `agent_token_budget` bounds a SESSION: it runs on what is
+        # left, measured on the thread that ran candidate 1 (`core/llm_budget.py`); with nothing left,
+        # or on another thread where that cannot be measured, there is no continuation. (Its first
+        # request re-sends the transcript whatever is left, so a session can pass the ceiling by
+        # that one request before the loop's own check stops it.)
+        budget = int(getattr(self.loop_opts, "token_budget", 0) or 0)
+        if budget > 0:
+            if session.thread != threading.get_ident() or session.tokens_at_start is None:
+                return None
+            left = budget - (thread_committed_tokens() - session.tokens_at_start)
+            if left <= 0:
+                return None
+            opts = opts.replace(token_budget=left)
+        # …AND ITS WALL CLOCK AND MONEY CEILING, for the same reason (critic 2026-09-30, crit_v45
+        # L3): a continuation was handed the whole `agent_time_budget_s` and a fresh money ceiling
+        # after candidate 1 had spent most of both, so one session could take twice its bound.
+        wall = float(getattr(self.loop_opts, "time_budget_s", 0) or 0)
+        if wall > 0:
+            if session.started_at is None:
+                return None
+            left_s = wall - (time.monotonic() - session.started_at)
+            if left_s <= 0:
+                return None
+            opts = opts.replace(time_budget_s=left_s)
+        money = float(getattr(self.loop_opts, "cost_budget_usd", 0) or 0)
+        if money > 0:
+            if session.thread != threading.get_ident() or session.usd_at_start is None:
+                return None
+            left_usd = money - float(thread_committed_usd_exact() - session.usd_at_start)
+            if left_usd <= 0:
+                return None
+            opts = opts.replace(cost_budget_usd=left_usd)
+        return opts
+
     def propose_with_session(self, state: RunState,
                              parent: Optional[Node]) -> tuple[Idea, ProposalSession]:
         """`propose`, plus the research session that produced the Idea — THIS call's, in a handle
@@ -770,6 +823,11 @@ class ToolUsingResearcher:
         engine pauses the run on one (`orchestrator.py::_refuse_degraded_proposal`). The spend
         ceiling and a cancelled phase PROPAGATE: neither is a failure to degrade around."""
         if not isinstance(session, ProposalSession) or not session.continuable:
+            return None
+        # The session's ceilings, decided BEFORE anything is touched: a refused continuation leaves
+        # the transcript and the receipt as candidate 1 left them (critic 2026-09-30, crit_v45 NIT).
+        opts = self._continuation_opts(session)
+        if opts is None:
             return None
         # The binding `propose` made for this proposal: candidate 1's own view (crit_v51 F4).
         tools = (session.tools if session.tools is not None
@@ -820,24 +878,6 @@ class ToolUsingResearcher:
                         "alternative must test a DIFFERENT mechanism, not repeat one")
             return None
 
-        # The cap may only LOWER the operator's own turn limit: `agent_max_turns` 3 means an
-        # alternative gets 3, never 8. 0 / unset is "unlimited", which the cap then bounds.
-        configured = getattr(getattr(self, "loop_opts", None), "max_turns", None)
-        cap = (min(int(configured), ALTERNATIVE_MAX_TURNS) if configured and int(configured) > 0
-               else ALTERNATIVE_MAX_TURNS)
-        opts = self.loop_opts.replace(max_turns=cap)
-        # THE SESSION'S TOKEN CEILING, NOT A FRESH ONE (the critic, 2026-09-30). The continuation
-        # re-sends the whole transcript, and `agent_token_budget` bounds a SESSION: it runs on what is
-        # left, measured on the thread that ran candidate 1 (`core/llm_budget.py`); with nothing left,
-        # or on another thread where that cannot be measured, there is no continuation.
-        budget = int(getattr(self.loop_opts, "token_budget", 0) or 0)
-        if budget > 0:
-            if session.thread != threading.get_ident() or session.tokens_at_start is None:
-                return None
-            left = budget - (thread_committed_tokens() - session.tokens_at_start)
-            if left <= 0:
-                return None
-            opts = opts.replace(token_budget=left)
         try:
             result = run_phase(
                 self.client, tools, messages, emit_spec,

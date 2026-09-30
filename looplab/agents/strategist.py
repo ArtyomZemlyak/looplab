@@ -986,7 +986,11 @@ def _gpu_pool_note(ctx) -> str:
                  f"count 1 device at eval_parallel > 1 (the whole box, unpinned, at 1) and one that "
                  f"declares k GPUs min(k, {pool}), which then waits until they are free"]
         now = ctx.eval_parallel
-        over = (f"now {now}, above the pool: at most {pool} run at once and the rest queue"
+        # Past the pool only the experiments that TAKE a device queue: one declaring `gpus: 0` runs
+        # on CPU at any width, so "at most P run at once" was false of a CPU-locked batch
+        # (critic 2026-09-30, crit_v45 L5, driven: width 6 on 2 GPUs ran 5 of 6 at once).
+        over = (f"now {now}, above the pool: at most {pool} experiments that take a device run at "
+                f"once and the rest of those queue"
                 if type(now) is int and now > pool else f"now {now}")
         if budgets:
             table = ", ".join(f"{w} -> {b}" for w, b in sorted(budgets.items()))
