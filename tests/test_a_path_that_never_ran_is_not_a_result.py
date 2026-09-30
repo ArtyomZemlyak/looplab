@@ -176,17 +176,21 @@ def test_a_long_log_is_read_at_both_ends(tmp_path):
     """crit_v55 A3: the check read only a log's last 8 MiB, so a warmup marker followed by 9 MiB of
     training output read as missing — a false `inert_path`. Both ends are read now; only the middle
     of a log longer than twice the window goes unread, and that is the stated bound. MUTATION: read
-    the tail alone -> the warmup marker is missing."""
+    the tail alone -> the warmup marker is missing.
+
+    Written as BYTES: the windows are byte counts, and a text write on Windows turns each `\n` into
+    `\r\n` — 13 bytes a line where 12 were meant, which carried the "at most two windows" log past
+    two windows on the Windows CI leg (master run 142)."""
     cap, since = activation._MAX_LOG_BYTES, time.time() - 60
     filler = "loss 0.1234\n" * (cap // 12 + 1)                     # a little over one window
-    (tmp_path / "train.log").write_text("WARMUP_ON\n" + filler + filler + "TAIL_ON\n")
+    (tmp_path / "train.log").write_bytes(("WARMUP_ON\n" + filler + filler + "TAIL_ON\n").encode())
     assert activation.missing_markers(["WARMUP_ON", "TAIL_ON"], workdir=tmp_path, since=since) == []
-    (tmp_path / "train.log").write_text(filler + filler + "MIDDLE_ON\n" + filler + filler)
+    (tmp_path / "train.log").write_bytes((filler + filler + "MIDDLE_ON\n" + filler + filler).encode())
     assert activation.missing_markers(["MIDDLE_ON"], workdir=tmp_path, since=since) == ["MIDDLE_ON"]
     short = tmp_path / "short"
     short.mkdir()                                     # at most two windows: read whole, once
     under = "loss 0.1234\n" * (cap // 12 - 1)
-    (short / "train.log").write_text(under + "MIDDLE_ON\n" + under)
+    (short / "train.log").write_bytes((under + "MIDDLE_ON\n" + under).encode())
     assert (short / "train.log").stat().st_size <= 2 * cap
     assert activation.missing_markers(["MIDDLE_ON"], workdir=short, since=since) == []
 
