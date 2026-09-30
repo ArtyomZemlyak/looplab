@@ -29,7 +29,7 @@ SETTINGS_UI_SCHEMA_VERSION = 2
 # here reading as if 207 were derived while it is typed, which is the drift it warns about. The
 # unforgeable gate is `SETTINGS_UI_SCHEMA_KEYSET_REVISION` further down; this integer is the
 # human-readable half the docs sentence quotes, and `_load_schema` refuses when the two disagree.
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 244
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 245
 # On the KEYSET REVISION below: DERIVED, and deliberately no longer a hand-pinned review gate: a
 # bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
@@ -387,7 +387,12 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # Strategist consult is told the GPU pool, the per-experiment GPU budget at each width, what the open
 # proposals declare and whether the operator owns the width (doc 69 69.23). A row because it decides
 # what the Strategist is told before it sets a width, and it is ON in the product surface.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "8945cd05c6445d992bd22d18358cbfc611c7300e46a798d983632c580a229782"
+# 244 -> 245 on 2026-09-30: `developer_scorer_status`, beside `developer_parent_code` — whether the
+# repo STAGES turn says the scorer is NOT frozen when the write tools would let the Developer edit the
+# file the scoring command runs (doc 69 69.5). A row because it decides what the Developer is told
+# before it declares a pipeline, and it is ON in the product surface. Verified by INTERSECTION: the
+# 244 previous keys plus exactly that one, none removed.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "789b62922a70983d8235834aafc4bb35cee33de86d3cd377ba6a406ee80f3e6e"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

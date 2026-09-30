@@ -2973,6 +2973,20 @@ class Settings(BaseSettings):
     # resumes OFF (its `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row). One reader:
     # `agents/roles.py::parent_code_enabled`, set on the role by `agents/factory.py::make_roles`.
     developer_parent_code: bool = True
+    # THE STAGES TURN SAYS WHETHER THE SCORER IS FROZEN (doc 69 69.5). The repo STAGES turn told every
+    # phase the operator's scoring command "is FIXED … the final, protected `score` stage" that reads
+    # "a trained checkpoint" — true of the command and the stage, and of the code it runs only when
+    # the write tools refuse that code. On `minionerec-backbones-v10` the command was a shell script
+    # that prepares, trains and scores and that nothing protected: node 7 declared a `train` stage
+    # and trained twice (~8 H200-hours), node 17 rewrote the scorer. ON, the turn names the file the
+    # command runs when the write tools would accept an edit to it (or says no file can be named),
+    # that such an edit changes the measurement, and that work the command already does runs again
+    # inside `score` — `adapters/repo_developer.py::scorer_frozen` / `scorer_status_note`. A frozen
+    # scorer's turn is unchanged. It changes a PROMPT and buys no call, so `false` is the historical
+    # turn byte for byte, the constructor defaults it OFF, and a pre-field snapshot resumes OFF (its
+    # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row). One reader: `adapters/repo_developer.py::
+    # scorer_status_enabled`.
+    developer_scorer_status: bool = True
     # A5 (docs/60 §60.9): seed every chain root (Researcher propose, Developer stages/plan/step/
     # implement/repair) with a small block carrying what EARLIER phases of this run already read —
     # the reference file, the manifest, the config — verbatim under `established_context_bytes`,
@@ -4045,6 +4059,13 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # `tests/test_script_developer_parent_code.py` holds that `false` is `implement`'s request byte
     # for byte.
     "developer_parent_code": False,
+    # THE STAGES TURN'S SCORER STATUS, added 2026-09-30 defaulting ON (doc 69 69.5). (a) holds. (b)
+    # is the rows above's DIFFERENT-PROMPT ground: ON, a repo STAGES turn whose scorer the write
+    # tools would let the Developer edit (or whose argv names no file) gains a sentence saying so, so
+    # a resumed run would change what its Developer is told mid-log. (c) is `False`, pointable at
+    # every commit before this one; `tests/test_stages_scorer_status.py` holds that `false` is the
+    # historical turn byte for byte.
+    "developer_scorer_status": False,
     # THE RESEARCHER'S NODE-FOLLOWING REPO VIEW, added 2026-09-29 defaulting ON (WP-TOOLS T3). (a)
     # holds. (b) is the rows above's DIFFERENT-PROMPT ground: ON, the Researcher's and deep
     # research's repo tools gain a `node_id` argument and a `[view: …]` line, read the parent's (or

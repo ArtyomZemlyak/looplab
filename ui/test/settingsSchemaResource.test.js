@@ -265,7 +265,9 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   provider that prices nothing.
   //   243 -> 244: `strategist_gpu_brief` — the Strategist's brief names the GPU pool and what one
   //   experiment may claim at each width.
-  assert.equal(Object.keys(schema.fieldByKey).length, 244)
+  //   244 -> 245 (2026-09-30): `developer_scorer_status` — the STAGES phase is told when the file the
+  //   scoring command runs is one the Developer could edit. The Python half moved too.
+  assert.equal(Object.keys(schema.fieldByKey).length, 245)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

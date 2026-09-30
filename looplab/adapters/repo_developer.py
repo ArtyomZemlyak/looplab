@@ -618,6 +618,128 @@ def phase_context_enabled(settings) -> bool:
     return bool(getattr(settings, "developer_phase_context", False))
 
 
+def scorer_status_enabled(settings) -> bool:
+    """`Settings.developer_scorer_status` as the constructor argument `LLMRepoDeveloper` takes.
+
+    ONE reader, beside the class whose STAGES prompt it decides (CLAUDE.md "Prompt strings are
+    contracts"). Absent means OFF — the historical STAGES turn byte for byte — which is what the
+    constructor default, the class default and a pre-field snapshot (its
+    `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row) all read.
+    """
+    return bool(getattr(settings, "developer_scorer_status", False))
+
+
+# The shells whose `<shell> [options] <script> [args]` argv names the script it runs, and the
+# options that consume the NEXT token (so it is not read as the script). A short-option cluster
+# holding `c` (`-c`, `-ec`) or `s` runs inline text or stdin: there is no script file at all.
+_SCRIPT_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
+_SHELL_VALUE_OPTIONS = frozenset({"-o", "+o", "-O", "+O", "--rcfile", "--init-file"})
+
+
+def _shell_script(argv) -> Optional[str]:
+    """The script a `bash|sh|zsh|dash|ksh [options] <script> [args]` argv runs, or None.
+
+    Narrow on purpose, like `repo_task.py::entrypoint_candidates`, which reads only the Python
+    forms and answers [] for a shell wrapper: None for any other head, for inline text (`-c`) or
+    stdin (`-s`), and for a relative path that escapes the workdir or an absolute one. What it
+    returns is only ever TOLD to the Developer (`scorer_frozen`); nothing is frozen or refused by it.
+    """
+    argv = [t for t in (argv or []) if isinstance(t, str)]
+    if not argv or argv[0].replace("\\", "/").rsplit("/", 1)[-1] not in _SCRIPT_SHELLS:
+        return None
+    i = 1
+    while i < len(argv):
+        tok = argv[i]
+        if tok == "--":
+            i += 1
+            break
+        if tok in _SHELL_VALUE_OPTIONS:
+            i += 2
+            continue
+        if tok.startswith("-") and not tok.startswith("--") and ({"c", "s"} & set(tok[1:])):
+            return None
+        if tok.startswith(("-", "+")):
+            i += 1
+            continue
+        break
+    if i >= len(argv):
+        return None
+    script = argv[i].replace("\\", "/").strip()
+    while script.startswith("./"):
+        script = script[2:]
+    if (not script or script.startswith(("/", "~")) or script == ".."
+            or script.startswith("../") or "/../" in script):
+        return None
+    return script
+
+
+def scorer_frozen(ev: dict, surface, protected, prefixes) -> tuple[Optional[bool], tuple]:
+    """Is the code the operator's score command runs FROZEN — refused by the Developer's write tools?
+
+    doc 69 §3.4 (item 69.5): on `minionerec-backbones-v10` the command was `bash MiniOneRec/looplab/
+    run_experiment.sh`, a script that prepares, trains AND scores and that nothing protected
+    (`entrypoint_candidates` answers [] for a shell wrapper), while the STAGES turn told every phase
+    the scoring command "is FIXED … the final, protected `score` stage" that reads "a trained
+    checkpoint". Node 7 declared a `train` stage and trained twice (~8 H200-hours); node 17 rewrote
+    the scorer. This answers the question that turn assumed, by the write gate's own rule:
+
+      (True, files)   the host scores the node (`host_scorer`, outside every editable tree: files is
+                      empty), or a file the argv names is refused by `RepoWriteTools._refusal`'s
+                      policy — protected, or outside the edit surface.
+      (False, files)  the argv names file(s) and the write tools would accept an edit to each: the
+                      scorer is part of what the Developer can change.
+      (None, ())      the argv names no file this rule reads (a console script, `python -c`, a
+                      launcher `entrypoint_candidates` refuses): nobody can say what it runs.
+
+    The files are what the argv EXECUTES — the Python forms `entrypoint_candidates` reads, else the
+    script of a plain shell invocation (`_shell_script`) — joined to the eval `cwd` the way
+    `RepoTask._entrypoint_protect` joins them, so the name is the one the protect list holds. A
+    config the scorer reads is not a file it executes and is not examined.
+    """
+    from looplab.adapters.repo_task import entrypoint_candidates
+
+    if (ev or {}).get("host_scorer"):
+        return True, ()
+    argv = [t for t in ((ev or {}).get("command") or []) if isinstance(t, str)]
+    names = list(entrypoint_candidates(argv)) or [s for s in (_shell_script(argv),) if s]
+    cwd = str((ev or {}).get("cwd") or ".").replace("\\", "/").strip()
+    while cwd.startswith("./"):
+        cwd = cwd[2:]
+    cwd = cwd.strip("/")
+    pre = "" if cwd in (".", "") else cwd + "/"
+    files = tuple(p for p in (RepoWriteTools._safe_rel(pre + n) for n in names) if p)
+    if not files:
+        return None, ()
+    policy = SurfacePolicy(surface, protected, prefixes, protected_exact=True, check_escapes=False)
+    if any(policy.check(f) is not None for f in files):
+        return True, files
+    return False, files
+
+
+def scorer_status_note(state: Optional[bool], files) -> str:
+    """The STAGES turn's sentence for `scorer_frozen`'s answer (doc 69 69.5).
+
+    "" when the scorer is frozen, where the turn's "FIXED … protected" already holds, and when it is
+    editable but none of `files` exists yet: that is the file this build AUTHORS — the designed flow
+    the system prompt describes ("Author the eval entrypoint") — with nothing in it to repeat. The
+    caller passes only the named files that exist (`RepoWriteTools.exists`)."""
+    if state is True or (state is False and not files):
+        return ""
+    if state is False:
+        named = " or ".join(f"`{f}`" for f in files)
+        head = (f" THE CODE IT RUNS IS NOT FROZEN: {named} is inside your editable surface, so an "
+                "edit to it changes the MEASUREMENT itself — how every node is scored — not only "
+                "the work before it.")
+    else:
+        head = (" THE CODE IT RUNS MAY NOT BE FROZEN: its argv names no file the engine can "
+                "protect, so what it ends up running may be inside your editable surface, and an "
+                "edit to that changes the MEASUREMENT itself — how every node is scored.")
+    return (head + " READ what the command runs before you declare anything: work it already does "
+            "itself (preparing data, training a model) runs AGAIN inside the `score` stage, so a "
+            "stage of yours that repeats it pays for it twice. Declare only the work it does not "
+            "already do — possibly none.")
+
+
 _REPO_DEV_REPAIR_BLOCK = (
     "\n\nThe PREVIOUS attempt FAILED — fix ONLY the stage that failed (see the error) with "
     "MINIMAL edit_file hunks on the offending file(s) (re-write a file only if it is beyond patching). "
@@ -897,6 +1019,9 @@ class LLMRepoDeveloper:
     # The decomposed build's per-phase context (`Settings.developer_phase_context`; review
     # 2026-09-23, Q-2). A CLASS default too, so a `__new__` instance renders the historical phases.
     _phase_context = False
+    # Whether the STAGES turn states if the scorer is frozen (`Settings.developer_scorer_status`,
+    # doc 69 69.5). A CLASS default for the same `__new__` reason: OFF is the historical turn.
+    _scorer_status = False
 
     def __init__(self, client: LLMClient, task, *, parser: str = "tool_call",
                  loop_opts: Optional[dict] = None, plan_decompose: bool = True,
@@ -908,7 +1033,7 @@ class LLMRepoDeveloper:
                  probe_confine: bool = True, probe_max_calls: int = 0, command_runtime=None,
                  step_feedback_command: str = "", established=None,
                  evidence_envelope: bool = False, prompt_truths: bool = False,
-                 phase_context: bool = False):
+                 phase_context: bool = False, scorer_status: bool = False):
         self.client = client
         self.task = task
         self.parser = parser
@@ -928,6 +1053,11 @@ class LLMRepoDeveloper:
         # constructor because it changes prompts; `agents/developer_backends.py` passes
         # `phase_context_enabled(settings)`.
         self._phase_context = bool(phase_context)
+        # WHETHER THE SCORER IS FROZEN (doc 69 69.5): ON, the STAGES turn says so when the code the
+        # operator's score command runs is NOT refused by the write tools, or cannot be named —
+        # `scorer_frozen` / `scorer_status_note`. OFF at the constructor because it changes a
+        # prompt; `agents/developer_backends.py` passes `scorer_status_enabled(settings)`.
+        self._scorer_status = bool(scorer_status)
         # THE FENCE ON WHAT EVERY PHASE'S TOOLS RETURN (`core/evidence.py`; review 2026-09-22,
         # TAT-02): the task repository and this node's staged files through the scouts, the
         # environment, the operator's dev commands run over candidate code, the probe — text the
@@ -2393,7 +2523,7 @@ class LLMRepoDeveloper:
         # SAME pipeline the eval will run (M7) — they can no longer drift.
         return materialized_stages(obj) or []
 
-    def _stages_user(self, idea: Idea, ev: dict, has_cmd: bool) -> str:
+    def _stages_user(self, idea: Idea, ev: dict, has_cmd: bool, write=None) -> str:
         import json as _json
         params = ", ".join(f"{k}={v}" for k, v in (idea.params or {}).items()) or "(bake sensible values)"
         if has_cmd:
@@ -2404,6 +2534,14 @@ class LLMRepoDeveloper:
                 f"the metric via {metric}. The engine appends it as the final, protected `score` stage. "
                 "Your job: declare the ordered stages that run BEFORE it (do NOT include a `score` stage — "
                 "it's reserved), producing whatever that scorer reads (a trained checkpoint, prepared data).")
+            # doc 69 69.5: "FIXED … protected" is true of the COMMAND and the stage, and of the code
+            # it runs only when the write tools refuse that code. When they would not (or nobody can
+            # name it), say so — appended, so a frozen scorer's turn is byte for byte the old one.
+            if self._scorer_status:
+                state, files = scorer_frozen(ev, self._surface, self._protected, self._prefixes)
+                if state is False and write is not None:
+                    files = tuple(f for f in files if write.exists(f))
+                contract += scorer_status_note(state, files)
         else:
             contract = (
                 "There is NO operator scoring command — declare the FULL pipeline, INCLUDING a final stage "
@@ -2539,7 +2677,7 @@ class LLMRepoDeveloper:
         # one exists the honest state is no block rather than an empty string and a false comment.
         read_only = CompositeTools([EnvInspectTools(self._grader_packages(), task_python=self._task_python())] + self._scout_tools(write))
         messages = [{"role": "system", "content": system},
-                    {"role": "user", "content": self._stages_user(idea, ev, has_cmd)}]
+                    {"role": "user", "content": self._stages_user(idea, ev, has_cmd, write)}]
 
         def _validate(args):                      # bounce a malformed manifest back to the model
             stages = (args or {}).get("stages")
