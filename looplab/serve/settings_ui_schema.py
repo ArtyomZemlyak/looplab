@@ -413,7 +413,7 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 SETTINGS_UI_SCHEMA_KEYSET_REVISION = "cddee7735674b37ccb9a4efd6eecaf8db785cc02cb5c6acbb22003182446f2d0"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
-_OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")
+_OPTIONAL_TEXT = ("help", "shortHelp", "shortLabel", "placeholder", "warning", "warningTitle", "warningTone")
 _MODEL_BOUND_KEYS = (("ge", "minimum"), ("gt", "exclusiveMinimum"),
                      ("le", "maximum"), ("lt", "exclusiveMaximum"))
 # The two defaults derived from the HOST (`~/.looplab/...`): a literal pin would be one developer's
@@ -641,6 +641,9 @@ def _load_schema() -> tuple[dict, str]:
             raise RuntimeError("settings UI schema group must be an object")
         title = _text(group.get("title"), "group title", maximum=200)
         _text(group.get("sub"), f"group {title}.sub", maximum=1000, empty=True)
+        for attribute in ("essentialTitle", "essentialSub"):
+            if attribute in group:
+                _text(group[attribute], f"group {title}.{attribute}", maximum=1000, empty=True)
         if title in seen_groups:
             raise RuntimeError(f"settings UI schema repeats group {title!r}")
         seen_groups.add(title)

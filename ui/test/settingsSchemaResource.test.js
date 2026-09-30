@@ -336,6 +336,8 @@ test('settings metadata fails closed on version, revision, identity and role dri
     value => { value.groups[1].fields[0].key = value.groups[0].fields[0].key },
     value => { value.groups[0].fields[0].agents = ['unknown-role'] },
     value => { value.groups[0].fields[2].options = ['not-an-enum'] },
+    value => { value.groups[0].fields[0].shortHelp = { text: 'untrusted shape' } },
+    value => { value.groups[0].essentialTitle = ['not a label'] },
   ]) {
     const value = payload()
     mutate(value)

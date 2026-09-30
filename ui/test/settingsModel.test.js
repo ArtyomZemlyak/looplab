@@ -38,7 +38,30 @@ test('essential mode keeps a compact cross-section of the catalogue', () => {
   assert.ok(stats.keys.has('llm_parallel'))
   assert.ok(!stats.keys.has('max_parallel'))
   assert.ok(stats.keys.has('llm_model'))
+  assert.ok(stats.keys.has('llm_cost_limit') && stats.keys.has('llm_token_limit'))
+  assert.ok(!stats.keys.has('profile') && !stats.keys.has('policy'))
   assert.ok(!stats.keys.has('proxy_kill_fraction'))
+})
+
+test('essential copy starts with the model and keeps the complete schema behind concise help', () => {
+  const groups = filterSettingsGroups(SETTINGS_GROUPS, { mode: 'essential' })
+  assert.equal(groups[0].title, 'LLM')
+  assert.equal(groups[0].displayTitle, 'Model')
+  const fields = Object.fromEntries(groups.flatMap(group => group.fields.map(field => [field.key, field])))
+  for (const key of ESSENTIAL_SETTING_KEYS) {
+    assert.equal(fields[key].technicalHelp, FIELD_BY_KEY[key].help)
+    assert.equal(fields[key].default, FIELD_BY_KEY[key].default)
+    assert.equal(fields[key].type, FIELD_BY_KEY[key].type)
+    assert.equal(fields[key].nullable, FIELD_BY_KEY[key].nullable)
+  }
+  assert.match(fields.eval_parallel.help, /0 = AUTO.*at least 1/)
+  assert.match(fields.llm_parallel.help, /no shared model-call cap/)
+  assert.match(fields.max_seconds.help, /Blank = no time cap/)
+  assert.match(fields.llm_cost_limit.help, /0 = no cap.*without provider prices/)
+  assert.equal(FIELD_BY_KEY.eval_parallel.label, 'Eval parallel', 'the shared schema stays immutable')
+  const all = filterSettingsGroups(SETTINGS_GROUPS, { mode: 'all' })
+  assert.equal(all[0].title, 'Search & policy')
+  assert.equal(all[0].fields.find(field => field.key === 'eval_parallel'), FIELD_BY_KEY.eval_parallel)
 })
 
 test('search is normalized and spans advanced settings from Essential mode', () => {

@@ -2,8 +2,6 @@
 // progressive-disclosure rules testable without React or a browser.
 
 export const ESSENTIAL_SETTING_KEYS = new Set([
-  'profile',
-  'policy',
   'max_nodes',
   'n_seeds',
   'eval_parallel',
@@ -11,23 +9,24 @@ export const ESSENTIAL_SETTING_KEYS = new Set([
   'max_seconds',
   'max_eval_seconds',
   'timeout',
+  'llm_cost_limit',
+  'llm_token_limit',
   'backend',
   'llm_model',
   'llm_base_url',
   'llm_api_key',
-  'unified_agent',
-  'agent_max_turns',
-  'trust_mode',
-  'require_approval',
-  'redact_output',
 ])
 
 const searchableText = (group, field) => [
   group.title,
   group.sub,
+  group.essentialTitle,
+  group.essentialSub,
   field.key,
   field.label,
   field.help,
+  field.shortLabel,
+  field.shortHelp,
   field.placeholder,
   ...(field.options || []),
 ].filter(Boolean).join(' ').toLowerCase()   // locale-INVARIANT: toLocaleLowerCase() folds "I"→"ı"
@@ -44,19 +43,29 @@ export function filterSettingsGroups(groups, {
   mode = 'all', query = '', only, hideSecret = false,
 } = {}) {
   const needle = normalizeSettingsQuery(query)
+  const compact = mode === 'essential' && !needle
   const allowedGroups = only ? new Set(only) : null
 
-  return groups
+  const visible = groups
     .filter(group => !allowedGroups || allowedGroups.has(group.title))
     .map(group => ({
       ...group,
+      displayTitle: compact ? group.essentialTitle || group.title : group.title,
+      sub: compact ? group.essentialSub || group.sub : group.sub,
       fields: group.fields.filter(field => {
         if (hideSecret && field.type === 'secret') return false
         if (needle) return searchableText(group, field).includes(needle)
         return mode !== 'essential' || ESSENTIAL_SETTING_KEYS.has(field.key)
-      }),
+      }).map(field => compact && field.shortHelp ? {
+        ...field, label: field.shortLabel || field.label, help: field.shortHelp,
+        technicalHelp: field.help,
+      } : field).sort((a, b) => compact
+        ? Number(a.key === 'backend') - Number(b.key === 'backend') : 0),
     }))
     .filter(group => group.fields.length > 0)
+  // Preserve canonical group identities so switching All/Essential retains the chosen section.
+  return compact ? visible.sort((a, b) => Number(b.fields.some(f => f.key === 'llm_model'))
+    - Number(a.fields.some(f => f.key === 'llm_model'))) : visible
 }
 
 export function settingsViewStats(groups) {

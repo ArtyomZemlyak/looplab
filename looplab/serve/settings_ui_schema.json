@@ -79,7 +79,9 @@
             "strategist",
             "boss"
           ],
-          "help": "Node (experiment) budget — the loop stops after this many."
+          "help": "Node (experiment) budget — the loop stops after this many.",
+          "shortLabel": "Experiments per run",
+          "shortHelp": "Maximum experiments in one run. The run stops when this budget is reached."
         },
         {
           "key": "n_seeds",
@@ -89,7 +91,9 @@
           "agents": [
             "strategist"
           ],
-          "help": "Eval seeds per node (variance handling)."
+          "help": "Eval seeds per node (variance handling).",
+          "shortLabel": "Evaluations per experiment",
+          "shortHelp": "Evaluate each experiment with this many random seeds to check how variable its score is."
         },
         {
           "key": "eval_parallel",
@@ -99,7 +103,9 @@
           "agents": [
             "strategist"
           ],
-          "help": "Concurrent evaluations inside one Run (GPU/experiment consumers). 0 = AUTO at launch: one evaluation per detected GPU, clamped to at least 1 — and 0 is the DEFAULT, so an untouched run is already as wide as the box; set 1 for strictly serial evaluation. Separate local GPU-owning Runs in the same OS-user filesystem namespace serialize through a crash-released host lease; other users, containers, and hosts need external admission. Live Strategist/operator updates settle 0 to serial width 1. Canonical setting; max_parallel remains raw-config compatibility only."
+          "help": "Concurrent evaluations inside one Run (GPU/experiment consumers). 0 = AUTO at launch: one evaluation per detected GPU, clamped to at least 1 — and 0 is the DEFAULT, so an untouched run is already as wide as the box; set 1 for strictly serial evaluation. Separate local GPU-owning Runs in the same OS-user filesystem namespace serialize through a crash-released host lease; other users, containers, and hosts need external admission. Live Strategist/operator updates settle 0 to serial width 1. Canonical setting; max_parallel remains raw-config compatibility only.",
+          "shortLabel": "Concurrent evaluations",
+          "shortHelp": "Within one run: 0 = AUTO at launch, one evaluation per detected GPU, at least 1. Set 1 for serial evaluation."
         },
         {
           "key": "llm_parallel",
@@ -109,7 +115,9 @@
           "agents": [
             "strategist"
           ],
-          "help": "Shared total for concurrent LLM-provider calls; its settled value also controls node-build fan-out and remains independent from eval concurrency. 0 = AUTO at launch and is the DEFAULT: leave the broker total unbounded and track the resolved eval width for builds. Only an explicit POSITIVE value caps the shared total and enables the named lanes the Strategist can reallocate at cadence. Live Strategist/operator updates settle 0 to serial width 1. Canonical setting; parallel_build remains raw-config compatibility only, and is inert at startup while this canonical field is set."
+          "help": "Shared total for concurrent LLM-provider calls; its settled value also controls node-build fan-out and remains independent from eval concurrency. 0 = AUTO at launch and is the DEFAULT: leave the broker total unbounded and track the resolved eval width for builds. Only an explicit POSITIVE value caps the shared total and enables the named lanes the Strategist can reallocate at cadence. Live Strategist/operator updates settle 0 to serial width 1. Canonical setting; parallel_build remains raw-config compatibility only, and is inert at startup while this canonical field is set.",
+          "shortLabel": "Concurrent model calls",
+          "shortHelp": "At launch: 0 = AUTO, with no shared model-call cap; builds follow evaluation parallelism. A positive value caps model calls."
         },
         {
           "key": "proposal_width",
@@ -177,7 +185,9 @@
           "default": 1,
           "help": "E2: propose K ideas and keep the best by an empirical surrogate (not LLM-judge). 1 = off."
         }
-      ]
+      ],
+      "essentialTitle": "Experiments & resources",
+      "essentialSub": "Choose how many experiments to try and how much work can run at once."
     },
     {
       "title": "Strategist & operators",
@@ -786,7 +796,9 @@
           "type": "float",
           "default": null,
           "placeholder": "unbounded",
-          "help": "Abort the run cleanly after this many seconds of wall-clock."
+          "help": "Abort the run cleanly after this many seconds of wall-clock.",
+          "shortLabel": "Run time limit (seconds)",
+          "shortHelp": "Total run time in seconds. Blank = no time cap."
         },
         {
           "key": "max_eval_seconds",
@@ -798,7 +810,9 @@
             "strategist",
             "boss"
           ],
-          "help": "Ceiling on cumulative time spent INSIDE evals (survives resume)."
+          "help": "Ceiling on cumulative time spent INSIDE evals (survives resume).",
+          "shortLabel": "Total evaluation time (seconds)",
+          "shortHelp": "Total time inside evaluations across the run, including after resume. Blank = no cap."
         },
         {
           "key": "llm_cost_limit",
@@ -806,7 +820,9 @@
           "type": "float",
           "default": 0.0,
           "placeholder": "0 = no cap",
-          "help": "The run’s LLM spend cap in the provider’s own currency (USD on every priced gateway), reserved at the broker’s permit BEFORE a request is queued: committed + reserved + this call’s estimate (the run’s own mean per priced call) may not exceed it, so a fan-out cannot overshoot by N calls the way a post-hoc check does. A refusal raises the same hard budget stop the accountant raises. 0 = no cap. On a gateway that reports no prices the committed cost is a floor and this cap is inert — use the token limit. It and llm_budget_usd are ONE ceiling since 2026-09-08: the tightest declared cap binds this reserve half AND the post-hoc accountant (with its node-open floor), and the refusal names the knob that was typed."
+          "help": "The run’s LLM spend cap in the provider’s own currency (USD on every priced gateway), reserved at the broker’s permit BEFORE a request is queued: committed + reserved + this call’s estimate (the run’s own mean per priced call) may not exceed it, so a fan-out cannot overshoot by N calls the way a post-hoc check does. A refusal raises the same hard budget stop the accountant raises. 0 = no cap. On a gateway that reports no prices the committed cost is a floor and this cap is inert — use the token limit. It and llm_budget_usd are ONE ceiling since 2026-09-08: the tightest declared cap binds this reserve half AND the post-hoc accountant (with its node-open floor), and the refusal names the knob that was typed.",
+          "shortLabel": "Run model cost budget",
+          "shortHelp": "Budget in the provider's currency. 0 = no cap. Calls use estimates; without provider prices this cost cap cannot be enforced."
         },
         {
           "key": "llm_token_limit",
@@ -814,7 +830,9 @@
           "type": "int",
           "default": 0,
           "placeholder": "0 = no cap",
-          "help": "The run’s LLM spend cap in TOTAL TOKENS, reserved at the broker’s permit exactly like the cost cap (the estimate is the run’s own mean tokens per call). The one that holds against a local model that prices nothing. 0 = no cap."
+          "help": "The run’s LLM spend cap in TOTAL TOKENS, reserved at the broker’s permit exactly like the cost cap (the estimate is the run’s own mean tokens per call). The one that holds against a local model that prices nothing. 0 = no cap.",
+          "shortLabel": "Run model token budget",
+          "shortHelp": "Budget for total tokens across run model calls. 0 = no cap. Requests reserve estimated tokens."
         },
         {
           "key": "timeout",
@@ -825,7 +843,9 @@
             "researcher",
             "strategist"
           ],
-          "help": "Kill a single eval after this long. Researcher = the “auto” per-node mode (it sizes heavy/neural-net experiments; this is the fallback)."
+          "help": "Kill a single eval after this long. Researcher = the “auto” per-node mode (it sizes heavy/neural-net experiments; this is the fallback).",
+          "shortLabel": "One evaluation timeout (seconds)",
+          "shortHelp": "Fallback timeout for one evaluation. The agent can choose a different timeout per experiment."
         },
         {
           "key": "max_eval_timeout",
@@ -946,7 +966,9 @@
           "default": 3,
           "help": "Independent verifier samples per tied candidate (1–32). More samples reduce judgment noise at higher model cost; pinned when a run starts."
         }
-      ]
+      ],
+      "essentialTitle": "Time & model budgets",
+      "essentialSub": "Blank time limits and zero model budgets are uncapped. Model budgets apply to the run; Assistant chat is billed separately."
     },
     {
       "title": "LLM",
@@ -961,7 +983,9 @@
             "llm"
           ],
           "default": "llm",
-          "help": "Which roles do the work. llm is the DEFAULT: Researcher/Developer are the live model, and looplab run REFUSES to start when that endpoint is unreachable rather than degrading to empty fallback proposals that finish flat and report success. toy keeps Researcher/Developer offline (a deterministic optimizer) and is how you run without a model; optional embedding and Memora features may still use the configured model. Wrapping up a run that is already over (finalize, or a run/resume that only completes a pending finalization) never refuses — it warns and names the artifacts a missing model degrades."
+          "help": "Which roles do the work. llm is the DEFAULT: Researcher/Developer are the live model, and looplab run REFUSES to start when that endpoint is unreachable rather than degrading to empty fallback proposals that finish flat and report success. toy keeps Researcher/Developer offline (a deterministic optimizer) and is how you run without a model; optional embedding and Memora features may still use the configured model. Wrapping up a run that is already over (finalize, or a run/resume that only completes a pending finalization) never refuses — it warns and names the artifacts a missing model degrades.",
+          "shortLabel": "Experiment runner",
+          "shortHelp": "llm uses a model to propose and implement experiments. toy uses an offline optimizer; optional memory features may still call a model. Assistant chat needs a model in either case."
         },
         {
           "key": "external_harness",
@@ -976,7 +1000,9 @@
           "type": "text",
           "default": "qwen3:8b",
           "placeholder": "qwen3:8b",
-          "help": "Model id for live Researcher/Developer roles and optional model-backed memory features."
+          "help": "Model id for live Researcher/Developer roles and optional model-backed memory features.",
+          "shortLabel": "Model",
+          "shortHelp": "Model ID exposed by the endpoint below. Separate role overrides are available in All."
         },
         {
           "key": "llm_base_url",
@@ -984,14 +1010,18 @@
           "type": "text",
           "default": "http://localhost:11434/v1",
           "placeholder": "http://localhost:11434/v1",
-          "help": "OpenAI-compatible endpoint (Ollama by default)."
+          "help": "OpenAI-compatible endpoint (Ollama by default).",
+          "shortLabel": "Base URL",
+          "shortHelp": "OpenAI-compatible endpoint reachable from the LoopLab server. Local Ollama usually uses http://localhost:11434/v1."
         },
         {
           "key": "llm_api_key",
           "label": "API key",
           "type": "secret",
           "default": null,
-          "help": "Stored together with its normalized endpoint binding in a separate server-side secrets.json, never in a run snapshot or API response, and passed to active consumers as LOOPLAB_LLM_API_KEY with LOOPLAB_LLM_API_KEY_BASE_URL. POSIX mode 0600 is requested; Windows/shared-mount ACLs remain operator-managed. Leave blank to keep the existing stored credential material."
+          "help": "Stored together with its normalized endpoint binding in a separate server-side secrets.json, never in a run snapshot or API response, and passed to active consumers as LOOPLAB_LLM_API_KEY with LOOPLAB_LLM_API_KEY_BASE_URL. POSIX mode 0600 is requested; Windows/shared-mount ACLs remain operator-managed. Leave blank to keep the existing stored credential material.",
+          "shortLabel": "API key",
+          "shortHelp": "Leave blank to keep the saved key. Local endpoints may need no key. A new key is saved together with its endpoint binding."
         },
         {
           "key": "llm_temperature",
@@ -1103,7 +1133,9 @@
           "default": 0.1,
           "help": "With a spend ceiling set: refuse to OPEN a new node once less than this many dollars remain, and finish the run on the same budget stop the ceiling raises — one step earlier, before a node cycle is bought that the ceiling would discard mid-way. Measured over 76 AlgoTune runs (docs/56 §156): 7.7 % of all spend landed after the last node a run ever evaluated; at $0.10 the floor refuses 61 such cycles and costs exactly one real node (which scored 0), while the audit's p75 ($0.45) would refuse 54 real nodes including the best in the corpus. Asked on the main task at the node-open decision only, so an evaluation already running still lands its result. Inert without a ceiling; 0 = off. A run resumed from before this field keeps 0."
         }
-      ]
+      ],
+      "essentialTitle": "Model",
+      "essentialSub": "Set Model and Base URL, Save, then test the saved connection. The test makes one provider request and may be billed."
     },
     {
       "title": "Agent loop & models",

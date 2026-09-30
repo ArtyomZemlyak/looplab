@@ -152,7 +152,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-09-29 master's Card-board model (withheld-return copy): 396,291 B, 3 B over 387 KiB.
       // 2026-09-30 first-run model status: measured 398,146 B JS in this closure.
       // 2026-09-30 plain launch decision: measured 398,906 B JS; the exact review stays visible.
-      limits: { js: { gzip: 390 * KIB }, css: { gzip: 45 * KIB } },
+      // 2026-09-30 Essential settings: measured 399,477 B JS (+272 B since permissions);
+      // concise descriptions share the existing Config renderer. Lazy boundaries remain unchanged.
+      limits: { js: { gzip: 391 * KIB }, css: { gzip: 45 * KIB } },
     },
     {
       name: 'valid review DAG route',

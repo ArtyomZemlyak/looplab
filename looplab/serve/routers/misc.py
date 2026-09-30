@@ -74,6 +74,8 @@ class SettingsUIField(BaseModel):
     type: str
     options: list[str] | None = None
     help: str | None = None
+    shortLabel: str | None = Field(default=None, max_length=16_000)
+    shortHelp: str | None = Field(default=None, max_length=16_000)
     placeholder: str | int | float | None = None
     warning: str | None = None
     warningTitle: str | None = None
@@ -102,6 +104,8 @@ class SettingsUIGroup(BaseModel):
 
     title: str
     sub: str
+    essentialTitle: str | None = Field(default=None, max_length=1000)
+    essentialSub: str | None = Field(default=None, max_length=1000)
     fields: list[SettingsUIField]
 
 

@@ -41,7 +41,7 @@ const credentialSourceLabel = source => ({
 
 function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted, onToggleAgent,
                  secretSet, credential, onClearSecret, secretActionDisabled, readOnly, rolePills,
-                 interactionDisabled = false }) {
+                 interactionDisabled = false, compact = false }) {
   const set = (v) => onChange(f.key, v)
   const inputId = `${idPrefix}-setting-${safeId(f.key)}`
   const helpId = `${inputId}-help`
@@ -129,13 +129,19 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted,
   }
 
   const dot = changeDot(unsaved, changed)
+  const permissions = <AgentPills f={f} granted={granted || []}
+    onToggleAgent={readOnly ? undefined : onToggleAgent}
+    rolePills={rolePills} interactionDisabled={interactionDisabled} />
   return <div className={'sf-field' + (unsaved ? ' unsaved' : changed ? ' changed' : '') + (error ? ' invalid' : '') + (readOnly ? ' readonly' : '')}>
     <div className="sf-label-row">
       <label className="sf-label" htmlFor={inputId}>{f.label}{dot}
         {readOnly && <span className="muted" title="Fixed when this run started"> · launch-pinned</span>}
       </label>
-      <AgentPills f={f} granted={granted || []} onToggleAgent={readOnly ? undefined : onToggleAgent}
-        rolePills={rolePills} interactionDisabled={interactionDisabled} />
+      {compact && f.agents && onToggleAgent && !readOnly
+        ? <details className="sf-details sf-runtime-access"><summary>Runtime permissions</summary>
+          {permissions}
+        </details>
+        : permissions}
     </div>
     <div className="sf-input">{input}</div>
     {error && <div id={errorId} className="sf-error" role="alert">{error}</div>}
@@ -165,6 +171,9 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted,
       </span>)}
       {f.help}
     </div>}
+    {f.technicalHelp && <details className="sf-details"><summary>Technical details</summary>
+      <div className="sf-help">{f.technicalHelp}</div>
+    </details>}
     {f.warning && <div id={warningId} className={`sf-warning${f.warningTone === 'info' ? ' info' : ''}`} role="note">
       <strong>{f.warningTitle || 'High-risk experimental setting.'}</strong> {f.warning}
     </div>}
@@ -173,13 +182,13 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted,
 
 function GroupPanel({ group, idPrefix, form, onChange, dirty, unsaved, errors, agentControl,
                       onToggleAgent, secretState, credential, onClearSecret, secretActionDisabled, readOnlyKeys,
-                      panelId, labelledBy, searchable, rolePills, interactionDisabled }) {
+                      panelId, labelledBy, searchable, rolePills, interactionDisabled, compact }) {
   const headingId = `${idPrefix}-heading-${safeId(group.title)}`
   return <section className="sf-group" id={panelId}
                   role={labelledBy ? 'tabpanel' : undefined}
                   aria-labelledby={labelledBy || headingId} tabIndex={labelledBy ? 0 : undefined}>
     <div className="sf-group-h">
-      {searchable && <h2 id={headingId}>{group.title}</h2>}
+      {searchable && <h2 id={headingId}>{group.displayTitle || group.title}</h2>}
       {group.sub && <span className="muted">{group.sub}</span>}
     </div>
     <div className="sf-grid">
@@ -190,7 +199,7 @@ function GroupPanel({ group, idPrefix, form, onChange, dirty, unsaved, errors, a
         onClearSecret={onClearSecret}
         secretActionDisabled={secretActionDisabled}
         readOnly={readOnlyKeys?.has(f.key)} rolePills={rolePills}
-        interactionDisabled={interactionDisabled} />)}
+        interactionDisabled={interactionDisabled} compact={compact} />)}
     </div>
   </section>
 }
@@ -293,7 +302,7 @@ export default function SettingsForm({ form, onChange, dirty, unsaved, errors, o
         className={'tab' + (index === idx ? ' active' : '')}
         onClick={() => setActiveGroup(gr.title)} onKeyDown={event => onTabKeyDown(event, index)}
         title={gr.sub || ''}>
-        {gr.title}{changeDot(groupUnsaved(gr), groupChanged(gr))}
+        {gr.displayTitle || gr.title}{changeDot(groupUnsaved(gr), groupChanged(gr))}
       </button>)}
     </div>
     <GroupPanel key={group.title} group={group} idPrefix={idPrefix} form={form}
@@ -302,6 +311,6 @@ export default function SettingsForm({ form, onChange, dirty, unsaved, errors, o
       onClearSecret={onClearSecret}
       secretActionDisabled={secretActionDisabled}
       readOnlyKeys={readOnlyKeys} panelId={panelId} labelledBy={tabId} rolePills={rolePills}
-      interactionDisabled={interactionDisabled} />
+      interactionDisabled={interactionDisabled} compact={mode === 'essential'} />
   </div>
 }

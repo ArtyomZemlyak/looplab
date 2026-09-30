@@ -9,8 +9,10 @@ describe your goal and where the code or data live, then review its launch card.
 The run opens with its current status, and **Report** shows the measured result and caveats.
 For a complete first-run example, see the [Assistant quickstart](quickstart.md#assistant-in-the-web-ui).
 
-The chat needs a configured model. Open **LoopLab → Settings → LLM** to check the saved
+The chat needs a configured model. Open **LoopLab → Settings → Essential → Model** to check the saved
 model and endpoint. **Test active LLM** makes one provider request and may be billed.
+Essential also shows experiment resources and time/model budgets. **All** and search
+keep the complete settings catalogue available; **Technical details** explains each field fully.
 An offline engine demonstration is available through the
 [CLI walkthrough](cli-walkthrough.md).
 

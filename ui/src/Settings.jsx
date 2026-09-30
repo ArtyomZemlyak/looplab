@@ -1280,7 +1280,7 @@ export default function Settings({ onBack, initialSection = '' }) {
       <GlobalMenu current="settings" />
       <button className="btn sm ghost" onClick={requestBack}>← runs</button>
       <span className="ttl" style={{ fontWeight: 700, fontSize: 15 }}>Settings</span>
-      <span className="muted">engine defaults for new runs</span>
+      <span className="muted">model, resources, and limits</span>
       <span className="spacer" style={{ flex: 1 }} />
     </div>
 
@@ -1293,8 +1293,8 @@ export default function Settings({ onBack, initialSection = '' }) {
         <section className="settings-overview" aria-labelledby="settings-heading">
           <div className="settings-heading-row">
             <div>
-              <h1 id="settings-heading">Engine defaults</h1>
-              <p>Applied to every new run. A run can still override these values before launch.</p>
+              <h1 id="settings-heading">Defaults for new runs</h1>
+              <p>Connect a model, choose limits, then return to Assistant. Review overrides on each launch card.</p>
             </div>
             <details className="settings-help">
               <summary>How changes work</summary>

@@ -3,7 +3,7 @@ import { deadlineGet } from './api.js'
 export const SETTINGS_SCHEMA_VERSION = 2
 const SETTINGS_SCHEMA_TIMEOUT_MS = 15_000
 const FIELD_TYPES = new Set(['bool', 'enum', 'secret', 'int', 'float', 'list', 'text'])
-const OPTIONAL_TEXT = ['help', 'placeholder', 'warning', 'warningTitle', 'warningTone']
+const OPTIONAL_TEXT = ['help', 'shortHelp', 'shortLabel', 'placeholder', 'warning', 'warningTitle', 'warningTone']
 const NUMERIC_BOUNDS = ['minimum', 'exclusiveMinimum', 'maximum', 'exclusiveMaximum']
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const schemaError = () => { throw new TypeError('Invalid settings schema') }
@@ -45,6 +45,9 @@ export function validateSettingsSchema(value) {
     if (!record(group)) schemaError()
     const title = boundedText(group.title, 200)
     boundedText(group.sub, 1_000, true)
+    for (const attribute of ['essentialTitle', 'essentialSub']) {
+      if (Object.hasOwn(group, attribute)) boundedText(group[attribute], 1_000, true)
+    }
     if (groupNames.has(title) || !Array.isArray(group.fields)
         || !group.fields.length || group.fields.length > 256) schemaError()
     groupNames.add(title)
