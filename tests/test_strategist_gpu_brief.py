@@ -302,5 +302,10 @@ def test_built_nodes_waiting_to_run_are_the_queue_a_width_admits_next(tmp_path):
     node(2, {"gpus": 8}, eval_activity_started=True)
     node(3, {"gpus": 8}, tombstoned=True)
     node(4, {"gpus": 8}, status=NodeStatus.evaluated)
+    # …nor a node being REBUILT: reset to be re-proposed (its idea is about to be replaced) or with a
+    # build in flight (crit_v45 NIT). MUTATION: drop either clause -> 8 GPUs of work "queued".
+    node(5, {"gpus": 8}, rerun_from="propose")
+    node(6, {"gpus": 8})
+    state.buildings = {6: {"node_id": 6, "operator": "draft", "generation": 1}}
     ctx = engine._strategy_ctx(state)
     assert (ctx.waiting_nodes, ctx.widest_waiting_gpus, ctx.undeclared_waiting) == (2, 4, 1)

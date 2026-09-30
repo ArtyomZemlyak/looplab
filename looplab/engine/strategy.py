@@ -227,9 +227,15 @@ class StrategyCadenceMixin:
         from looplab.core.cards import effective_card_footprint
         from looplab.core.models import NodeStatus
         out: list = []
+        building = set(getattr(state, "buildings", None) or {})
         for node in (getattr(state, "nodes", None) or {}).values():
             if (node.status is not NodeStatus.pending or getattr(node, "tombstoned", False)
                     or getattr(node, "eval_activity_started", False)):
+                continue
+            # A node reset to be re-proposed or re-implemented is pending with its OLD idea until the
+            # re-run lands: it is waiting to be BUILT, not to run (critic 2026-09-30, crit_v45 NIT,
+            # driven — a 4-GPU footprint the rebuild may drop was counted as queued work).
+            if getattr(node, "rerun_from", None) or node.id in building:
                 continue
             raw = effective_card_footprint(
                 getattr(getattr(node, "idea", None), "footprint", None),
