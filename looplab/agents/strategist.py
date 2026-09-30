@@ -178,6 +178,14 @@ class StrategyContext(BaseModel):
     widest_declared_gpus: Optional[int] = None
     undeclared_proposals: int = 0
     eval_parallel_operator_owned: bool = False
+    # The node budget and the plan's endgame reserve the brief's budget line states (doc 69 69.25,
+    # `Settings.strategist_budget_brief`), filled by the engine only when that switch is on:
+    # `node_budget_limit` None means "say nothing". The same facts the Researcher's per-proposal cue
+    # reads (`engine/proposal_cues.py::_cue_node_budget`). Not in the recorded `ctx` subset.
+    node_budget_limit: Optional[int] = None
+    endgame_start: Optional[int] = None
+    endgame_end: Optional[int] = None
+    endgame_kinds: list[str] = Field(default_factory=list)
 
 
 class Strategist(Protocol):
@@ -967,6 +975,49 @@ def _gpu_pool_note(ctx) -> str:
     return "; ".join(parts) + ".\n"
 
 
+# What the plan's endgame reserve spends each kind on, in the words the Researcher's cue uses
+# (`engine/proposal_cues.py::_ENDGAME_KIND_WORDS`, kept beside that cue's own sentence).
+_ENDGAME_KIND_SPEND = {"merge": "an ensemble of the two best results",
+                       "sweep": "refinements of the champion"}
+
+
+def _node_budget_note(ctx) -> str:
+    """One line: how many of the run's experiments exist and how many more at most will run, and —
+    when the run has a plan — where its endgame reserve begins or that the run is inside it; "" when
+    the engine sent no budget.
+
+    THE STRATEGIST CHOSE BLIND TO THE BUDGET (doc 69 §6.2, 69.25). On `minionerec-backbones-v10`
+    the operator's "main axis is the BACKBONE" directive became `evolutionary` -> `merge_mode:
+    ensemble` -> node 17, on the run's last budget slot: nothing in the brief said how many
+    experiments were left or that the plan's reserve was about to spend them. The rule Strategist
+    has read `node_budget_frac` since the reserve landed; the model's brief never rendered it. The
+    numbers are the ones the dispatcher and the Researcher's per-proposal cue use: the operator's
+    node ceiling with refunded reservations added back (`_hard_node_reservation_limit`) and the
+    plan row the reserve is spent from, inside it by `engine/plan.py::in_endgame`'s own rule.
+    """
+    limit = getattr(ctx, "node_budget_limit", None)
+    if type(limit) is not int or limit <= 0:
+        return ""
+    used = max(0, int(getattr(ctx, "node_count", 0) or 0))
+    left = max(0, limit - used)
+    line = (f"NODE BUDGET: {used} of this run's {limit} experiment(s) exist, so at most {left} more "
+            "will run")
+    start, end = ctx.endgame_start, ctx.endgame_end
+    words = [_ENDGAME_KIND_SPEND[k] for k in (ctx.endgame_kinds or ())
+             if isinstance(k, str) and k in _ENDGAME_KIND_SPEND]
+    if type(start) is int and 0 < start < limit and words:
+        final = (min(end, limit) if type(end) is int else limit) - 1
+        spend = " and ".join(words)
+        if used < start:
+            line += (f"; the plan reserves experiments #{start}-#{final} for its endgame ({spend}), "
+                     f"so at most {start - used} more can open a new direction before it begins")
+        elif type(end) is not int or used < end:
+            line += (f"; the run is INSIDE the plan's endgame reserve (experiments #{start}-"
+                     f"#{final}): the dispatcher replaces every node the search would open with "
+                     f"{spend}, whatever policy you choose")
+    return line + ".\n"
+
+
 def _strategist_brief(state: RunState, ctx: StrategyContext) -> str:
     """The compact decision brief shared by the structured-output and tool-using Strategists."""
     brief = (
@@ -980,6 +1031,7 @@ def _strategist_brief(state: RunState, ctx: StrategyContext) -> str:
         f"(the value to change with canonical llm_parallel); "
         f"current build fan-out={ctx.llm_parallel}; LLM lanes={ctx.llm_lane_limits}\n"
         + _gpu_pool_note(ctx)
+        + _node_budget_note(ctx)
         + f"coverage (narrowing signal): {_fmt_coverage(ctx.coverage)}\n"
         + (f"bounded cross-run observations (not coverage): {ctx.cross_run_note}\n"
            if ctx.cross_run_note else "")

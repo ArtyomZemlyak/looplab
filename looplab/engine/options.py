@@ -264,6 +264,11 @@ class EngineOptions:
     # (`Settings.strategist_gpu_brief`). A divergence-table row on `node_budget_cue`'s ground: a
     # prompt flag, OFF here so a bare `Engine(...)` keeps the historical brief.
     strategist_gpu_brief: bool = False
+    # doc 69 69.25 (2026-09-30): the Strategist's brief states the node budget and the plan's
+    # endgame reserve (`Settings.strategist_budget_brief`). A divergence-table row on
+    # `node_budget_cue`'s ground: a prompt flag, OFF here so a bare `Engine(...)` keeps the
+    # historical brief.
+    strategist_budget_brief: bool = False
     # doc 67 67.4 (2026-09-26): the ablation refiner's prompt carries its probes' signed results
     # (`Settings.ablation_probe_hint`). A divergence-table row on `node_budget_cue`'s ground: a
     # prompt flag, OFF here so a bare `Engine(...)` keeps the historical bytes.

@@ -171,6 +171,9 @@ class EngineKnobs:
     # doc 69 69.23: the pool line of the Strategist's brief, read by
     # `shared.py::strategist_gpu_brief`, the one place the consult learns it.
     _strategist_gpu_brief = Knob("strategist_gpu_brief", bool)
+    # doc 69 69.25: the budget line of the Strategist's brief, read by
+    # `shared.py::strategist_budget_brief`, the one place the consult learns it.
+    _strategist_budget_brief = Knob("strategist_budget_brief", bool)
     # doc 67 67.4: the ablation refiner's probes, stamped onto the Researcher as
     # `_ablation_probe_hint` for the ONE refine proposal (`engine/ablation.py::_ablate`).
     _ablation_probe_hint = Knob("ablation_probe_hint", bool)

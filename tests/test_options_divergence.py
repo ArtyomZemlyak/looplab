@@ -106,6 +106,10 @@ EXPECTED = {
     # surface, OFF in the bare library — a PROMPT flag, so a direct `Engine(...)` keeps the
     # historical brief byte for byte.
     "strategist_gpu_brief": (True, False),
+    # The Strategist's brief states the node budget and the plan's endgame reserve (doc 69 69.25,
+    # 2026-09-30): ON in the product surface, OFF in the bare library — a PROMPT flag, so a direct
+    # `Engine(...)` keeps the historical brief byte for byte.
+    "strategist_budget_brief": (True, False),
     # The proposal prompt's NODE-BUDGET line (Q-3, the Researcher's context audit, 2026-09-23): ON
     # in the product surface, OFF in the bare library on `evidence_envelope`'s ground — it changes a
     # PROMPT, and a prompt flag defaults off at every constructor, so a direct `Engine(...)` keeps

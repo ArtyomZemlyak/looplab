@@ -44,7 +44,8 @@ from looplab.engine.widths import (EVAL_WIDTH_MAX, LLM_WIDTH_MAX, operator_width
                                    per_experiment_gpu_budget, settle_width)
 from looplab.engine.costs import bind_cost_accountants
 from looplab.engine.governance_health import GovernanceLedgerUnavailable
-from looplab.engine.shared import effective_max_eval_timeout, strategist_gpu_brief
+from looplab.engine.shared import (effective_max_eval_timeout, strategist_budget_brief,
+                                   strategist_gpu_brief)
 # Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
 from looplab.engine.shared import engine_fold as fold
 from looplab.events.types import EV_COVERAGE_SNAPSHOT, EV_STRATEGY_DECISION
@@ -160,6 +161,7 @@ class StrategyCadenceMixin:
             cross_run_note=cross_run_note,
             cross_run_receipt=getattr(self, "_cross_run_note_receipt", {}),
             **self._gpu_pool_ctx(state),
+            **self._node_budget_ctx(state),
         )
 
     def _gpu_pool_ctx(self, state: RunState) -> dict:
@@ -198,6 +200,42 @@ class StrategyCadenceMixin:
             "eval_parallel_operator_owned": (parallelism_aliases("eval_parallel")[0]
                                              in getattr(self, "_operator_width_axes", frozenset())),
         }
+
+    def _node_budget_ctx(self, state: RunState) -> dict:
+        """The node budget and the plan's endgame reserve the Strategist's brief states under
+        `Settings.strategist_budget_brief` (doc 69 69.25), or `{}` — OFF, the context and the brief
+        keep their historical shape.
+
+        The same two facts the Researcher's per-proposal cue reads (`proposal_cues.py::
+        _cue_node_budget`): the ceiling is `_hard_node_reservation_limit` (the operator's node budget
+        with refunded reservations added back — what the dispatcher opens nodes against), and the
+        reserve is the folded plan row (`engine/plan.py`), whose `in_endgame` rule the brief's
+        "inside" clause restates. A ceiling that cannot be read sends nothing rather than a guess."""
+        if not strategist_budget_brief(self):
+            return {}
+        try:
+            limit = int(self._hard_node_reservation_limit(state))
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return {}
+        if limit <= 0:
+            return {}
+        out: dict = {"node_budget_limit": limit}
+        plan = getattr(state, "plan", None)
+        if isinstance(plan, dict):
+            try:
+                out["endgame_start"] = int(plan.get("endgame_start"))
+            except (TypeError, ValueError, OverflowError):
+                pass
+            try:
+                end = plan.get("endgame_end")
+                out["endgame_end"] = None if end is None else int(end)
+            except (TypeError, ValueError, OverflowError):
+                pass
+            phases = plan.get("phases")
+            last = phases[-1] if isinstance(phases, list) and phases else {}
+            kinds = last.get("kinds") if isinstance(last, dict) else None
+            out["endgame_kinds"] = [k for k in (kinds or ()) if isinstance(k, str)]
+        return out
 
     def _cross_run_note_for_ctx(
             self, state: Optional[RunState] = None, *,

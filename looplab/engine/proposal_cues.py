@@ -246,8 +246,10 @@ class ProposalCuesMixin:
         `llm_budget_usd` that ships 0 — while `max_nodes` bounds every run. Rendered through the real
         `cli._engine` + `Engine.run` over a scripted toy run, no proposal prompt said how many
         experiments were left or that the plan had entered its endgame reserve, and the proposal for
-        the run's LAST node read exactly like the one for its fourth. The Strategist has been handed
-        `node_budget_frac` since the reserve landed; the role that spends the slots had nothing.
+        the run's LAST node read exactly like the one for its fourth. The Strategist's context has
+        carried `node_budget_frac` since the reserve landed (read by the RULE Strategist; the model's
+        brief states the budget only under `strategist_budget_brief`, doc 69 69.25); the role that
+        spends the slots had nothing.
 
         THE COUNTS ARE THE ADMISSION'S OWN. `limit` is `_hard_node_reservation_limit` — the operator
         budget plus a live `add_nodes`, plus the slots the L3 accounting refunded — and `used` is the

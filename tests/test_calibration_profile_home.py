@@ -392,7 +392,12 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               added and `[]` removed; `_EXPECTED_FIELD_COUNT` goes 276 -> 277 and both pins are
 #               re-set (the pre-change tree re-derives 286dde9c…). INERT for a calibration replicate:
 #               the toy backend builds no repo Developer, so no STAGES turn is ever rendered.
-_EXPECTED_DIGEST = "sha256:d451dc8220a7721f1a8e9cb82341c3f1967720be89a4b69d91246d9412bec5cb"
+#   2026-09-30  + strategist_budget_brief (the Strategist's brief states the node budget, doc 69
+#               69.25). The 'field set changed too' branch: exactly `['strategist_budget_brief']`
+#               added and `[]` removed; `_EXPECTED_FIELD_COUNT` goes 277 -> 278 and both pins are
+#               re-set (the pre-change tree re-derives d451dc82…). INERT for a calibration
+#               replicate: the profile ships `strategist_backend: off`, so no brief is rendered.
+_EXPECTED_DIGEST = "sha256:96c2004edd0ac18730db3eefeb3c5150c2855a86241fe79f8fc5e1aeab3043ec"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -904,7 +909,8 @@ _EXPECTED_DIGEST = "sha256:d451dc8220a7721f1a8e9cb82341c3f1967720be89a4b69d91246
 #   2026-09-30  + agent_token_budget (doc 69 69.2): 274 -> 275.
 #   2026-09-30  + strategist_gpu_brief (doc 69 69.23): 275 -> 276.
 #   2026-09-30  + developer_scorer_status (doc 69 69.5): 276 -> 277; see the digest history.
-_EXPECTED_FIELD_COUNT = 277
+#   2026-09-30  + strategist_budget_brief (doc 69 69.25): 277 -> 278; see the digest history.
+_EXPECTED_FIELD_COUNT = 278
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

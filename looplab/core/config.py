@@ -1017,8 +1017,9 @@ class Settings(BaseSettings):
     # (first node, a clear winner, two same-error failures, a novelty rejection, memo + lessons +
     # open beliefs, the plan's endgame reserve), not one proposal prompt states how many
     # experiments the run has left or that the plan has entered its endgame; the proposal for the
-    # run's LAST node read exactly like the one for its fourth. The Strategist has been told
-    # (`StrategyContext.node_budget_frac`) since the endgame reserve landed. ON: one line per
+    # run's LAST node read exactly like the one for its fourth. The RULE Strategist has read
+    # `StrategyContext.node_budget_frac` since the endgame reserve landed; the LLM Strategist's brief
+    # states the budget only under `strategist_budget_brief` (doc 69 69.25). ON: one line per
     # proposal (`engine/proposal_cues.py::_cue_node_budget`) — how many of the run's experiments
     # exist, how many more at most will run, and, when the run has a plan, where its endgame
     # reserve begins or that this proposal is inside it. It changes a PROMPT and buys no call, so
@@ -1764,6 +1765,20 @@ class Settings(BaseSettings):
     # snapshot resumes OFF (its `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row). Read through ONE reader,
     # `engine/shared.py::strategist_gpu_brief`.
     strategist_gpu_brief: bool = True
+    # THE STRATEGIST SEES THE NODE BUDGET (doc 69 §6.2, 69.25). On `minionerec-backbones-v10` the
+    # operator's "main axis is the BACKBONE" directive became `evolutionary` -> `merge_mode: ensemble`
+    # -> node 17 on the run's last budget slot: the brief named how many nodes exist but not how many
+    # the run has, nor that the plan's endgame reserve was about to spend them. The RULE Strategist
+    # reads `StrategyContext.node_budget_frac`; the model's brief never rendered it. ON, every
+    # consult's brief gains one line — how many of the run's experiments exist and how many more at
+    # most will run (the ceiling `_hard_node_reservation_limit` opens nodes against), and, when the
+    # run has a plan, where its endgame reserve begins or that the run is inside it and what the
+    # dispatcher spends it on — the facts the Researcher's per-proposal cue (`node_budget_cue`)
+    # already states. It changes the Strategist's PROMPT and buys no call, so `false` reproduces the
+    # historical brief, every constructor defaults it OFF, and a pre-field snapshot resumes OFF (its
+    # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row). Read through ONE reader,
+    # `engine/shared.py::strategist_budget_brief`.
+    strategist_budget_brief: bool = True
     # Stop the whole RUN when NOTHING has ever worked: this many DISTINCT nodes ended failed and not
     # one has ever produced a metric. It is the run-level companion to `inline_repair_attempts`,
     # which bounds one node's repairs but says nothing about a run whose every node fails for the
@@ -3975,6 +3990,11 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # so a resumed run would change what its Strategist is told mid-log. (c) is `False`, pointable at
     # every commit before this one.
     "strategist_gpu_brief": False,
+    # THE STRATEGIST SEES THE NODE BUDGET, added 2026-09-30 defaulting ON (doc 69 69.25). (a)
+    # holds. (b) is the DIFFERENT-PROMPT ground: ON, every Strategist consult's brief gains the
+    # budget line, so a resumed run would change what its Strategist is told mid-log. (c) is
+    # `False`, pointable at every commit before this one.
+    "strategist_budget_brief": False,
     # THE NODE BUDGET CUE, added 2026-09-23 defaulting ON (Q-3, the Researcher's context audit).
     # (a) holds. (b) is the rows above's DIFFERENT-PROMPT ground: ON, every proposal prompt gains a
     # line stating the run's remaining node budget and its plan phase, so a resumed run would change

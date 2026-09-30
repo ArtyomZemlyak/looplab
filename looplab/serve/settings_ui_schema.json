@@ -211,6 +211,13 @@
           "help": "Each Strategist consult is told the GPU pool it schedules on, how many GPUs ONE experiment may claim at each evaluation width, what the open proposals declare they need, and whether you fixed the width yourself. Without it a Strategist once widened a run of 4-GPU experiments onto one card each. Off = the brief as before."
         },
         {
+          "key": "strategist_budget_brief",
+          "label": "Strategist sees the node budget",
+          "type": "bool",
+          "default": true,
+          "help": "Each Strategist consult is told how many of the run's experiments exist and how many more at most will run, and — when the run has a plan — where its endgame reserve begins or that the run is already inside it and what the reserve is spent on. The Researcher's proposals have carried the same facts; without them a Strategist once switched a run to ensembling on its last budget slot. Off = the brief as before."
+        },
+        {
           "key": "merge_mode",
           "label": "Merge mode",
           "type": "enum",
