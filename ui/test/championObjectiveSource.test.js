@@ -61,7 +61,7 @@ test('a salvaged champion is a run-level caveat, not just a table cell', () => {
 
   const v = verdict(run, analyze(run))
   assert.equal(v.trust, 'suspect', 'the champion’s number being unmeasured flags the win itself')
-  assert.match(v.headline, /the win is flagged, treat with caution/)
+  assert.match(v.headline, /result is flagged, treat with caution/)
   assert.doesNotMatch(v.headline, /no trust flags are recorded/,
     'the exact clean-win sentence this run used to publish')
 })

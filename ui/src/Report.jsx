@@ -21,7 +21,9 @@ const TRUST_CLASS = { unverified: 'neutral', caveats: 'warn', suspect: 'alarm' }
 const TRUST_LABEL = { unverified: 'not fully verified', caveats: 'with caveats', suspect: 'flags found' }
 const SOLUTION_DETAIL_TIMEOUT_MS = 12_000
 const RUN_GENERATION_RE = /^[0-9a-f]{64}$/
-const OUTCOME_LABEL = { improved: '▲ improved', flat: '— flat', regressed: '▼ regressed', none: 'no result' }
+const OUTCOME_LABEL = { improved: 'better evaluation score', flat: 'same evaluation score',
+  regressed: 'worse evaluation score', baseline: 'first eligible result',
+  uncompared: 'comparison not established', none: 'no selected result' }
 
 export const reportRefreshFailure = (failure, thrown = false) => {
   const code = failure?.code
@@ -76,6 +78,7 @@ function VerdictBanner({ v, onOpenPanel, canOpenPanel }) {
         <span className="pill verdict-trust-label">{TRUST_LABEL[v.trust] || v.trust}</span>
       </div>
       <h2 id="report-verdict-heading" className="verdict-headline">{v.headline}</h2>
+      <p className="report-next-step"><strong>Next step</strong> {v.nextStep}</p>
       {v.caveats.length > 0 && <div className="caveat-chips">
         {v.caveats.map((c, i) => {
           const openable = canOpen(c.panel)
@@ -187,11 +190,10 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
   onPickNode, onPickEvidence, readOnly = false,
   historySeq = null, expectedGeneration = null, observedSeq = null,
   readOnlyReason = 'history', evidenceAvailable = true }) {
-  const candidate = state.best_node_id != null ? state.nodes[state.best_node_id] : null
-  const best = nodeIsActive(candidate, state) ? candidate : null
   const failed = Object.values(state.nodes).filter(n => nodeIsActive(n, state) && n.status === 'failed')
   const a = useMemo(() => analyze(state), [state])
   const v = useMemo(() => verdict(state, a), [state, a])
+  const best = v.best
   const rep = useMemo(() => normalizeRunReport(state.report), [state.report])
   const nodeCount = Object.keys(state.nodes).length
   const coverage = useMemo(() => reportNarrativeCoverage(rep, nodeCount), [rep, nodeCount])
@@ -555,7 +557,9 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
         <ChampionCard best={best} state={state} /></>}
 
       {a.steps.length > 0 && <>
-        <h2 id="report-section-trajectory" tabIndex={-1} className="section-h">{a.steps.length > 1 ? 'How the metric got better' : 'Metric baseline'}</h2>
+        <h2 id="report-section-trajectory" tabIndex={-1} className="section-h">{a.steps.length > 1 ? 'Recorded metric trajectory' : 'First eligible metric'}</h2>
+        <p className="muted">This numeric frontier may combine evaluation scores and confirmation means.
+          Its changes do not establish a comparable improvement. Use the selected-result verdict above.</p>
         <Trajectory nodes={Object.values(state.nodes)} direction={state.direction} state={state}
           steps={a.steps} onPick={onPickNode} />
         <ImprovementWaterfall steps={a.steps} direction={state.direction} />
@@ -572,7 +576,7 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
                   <span>{paramDiffLabel(s.diff)}</span></details>
               : paramDiffLabel(s.diff)}</td></tr>)}
         </tbody></table></DataTable>
-        {a.steps.length > 1 && <div className="muted">Total improvement <b>{fmt(a.totalGain)}</b> over {a.steps.length} steps (baseline {fmt(a.firstBest)} → best {fmt(a.finalBest)}).</div>}
+        {a.steps.length > 1 && <div className="muted">Recorded frontier change <b>{fmt(a.totalGain)}</b> over {a.steps.length} steps (first eligible {fmt(a.firstBest)} → numeric frontier {fmt(a.finalBest)}).</div>}
       </>}
 
       {(memos.length || imp.length) ? <>

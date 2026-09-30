@@ -9,6 +9,7 @@ import { activeNodeMap, nodeIsActive } from './nodeProjection.js'
 import { normalizeRunReport, reportCoverageText, reportNarrativeCoverage } from './reportModel.js'
 import { OBJECTIVE_SOURCE_LABEL, objectiveMetricSource,
   objectiveSourceCaveated } from './trustSemantics.js'
+import { nodeComparabilityStatus, sourceIncomplete } from './runIndex.js'
 
 const metricOf = (n) => (n.confirmed_mean ?? n.metric)
 const isEvaluated = (n) => n.status === 'evaluated' && metricOf(n) != null
@@ -286,8 +287,9 @@ export function trustCaveats(state, best) {
     .filter(n => isEvaluated(n) && n.feasible === false)
   if (infeasible.length)
     out.push({ kind: 'infeasible', severity: 'warn', text: `${infeasible.length} evaluated node(s) violated a constraint`, panel: 'trust' })
-  if (best && best.confirmed_mean == null)
-    out.push({ kind: 'single-seed', severity: 'warn', text: 'champion is single-seed (not multi-seed confirmed)', panel: 'trust' })
+  if (best && !(Number.isFinite(best.confirmed_mean)
+      && Number.isSafeInteger(best.confirmed_seeds) && best.confirmed_seeds >= 2))
+    out.push({ kind: 'single-seed', severity: 'warn', text: 'multiple successful repeat checks are not established', panel: 'trust' })
   // WHAT THE CHAMPION'S NUMBER IS, in the aggregator every run-level claim is built from.
   //
   // The salvage/subject vocabulary was wired into four DISPLAY surfaces (the Metrics tab, the Pareto
@@ -323,52 +325,53 @@ export function trustCaveats(state, best) {
 // The deterministic verdict — classify the outcome purely from data so the Report always leads with a
 // plain-language bottom line, even with no model. `a` is the analyze() result (reused, not recomputed).
 export function verdict(state, a) {
-  const dir = state.direction || 'min'
-  const candidate = state.best_node_id != null ? state.nodes[state.best_node_id] : null
-  const best = nodeIsActive(candidate, state) ? candidate : null
+  const dir = state.direction
+  const candidate = state.best_node_id != null ? state.nodes?.[state.best_node_id] : null
+  const finite = value => typeof value === 'number' && Number.isFinite(value)
+  const eligible = node => nodeIsActive(node, state) && node.status === 'evaluated'
+    && node.feasible !== false && finite(metricOf(node))
+  const best = eligible(candidate) ? candidate : null
   const caveats = trustCaveats(state, best)
-  if (!best || a.finalBest == null) {
-    return { outcome: 'none', robustness: 'n/a', trust: caveats.length ? 'caveats' : 'unverified', best, caveats,
-      headline: a.nEval ? 'No feasible result yet — every evaluated node violated a constraint.' : 'No experiments have been evaluated yet.' }
+  if (sourceIncomplete(state)) caveats.unshift({ kind: 'incomplete-record', severity: 'alarm',
+    text: 'the event record is incomplete', panel: 'trust' })
+  const trust = caveats.some(c => c.severity === 'alarm') ? 'suspect'
+    : caveats.length ? 'caveats' : 'unverified'
+  if (!best) {
+    return { outcome: 'none', robustness: 'n/a', trust, best, caveats,
+      headline: a.nEval ? 'No completed eligible result is selected. Review evaluation and selection evidence.'
+        : 'No experiments have been evaluated yet.',
+      nextStep: a.nEval ? 'Inspect failed or excluded experiments in Trace and Trust before proposing another candidate.'
+        : 'Complete an evaluation before judging the result.' }
   }
-  const baseline = a.firstBest, finalv = a.finalBest
-  const gain = baseline != null ? finalv - baseline : 0
-  const moved = baseline != null && finalv !== baseline
-  const improved = moved && (dir === 'min' ? finalv < baseline : finalv > baseline)
-  const outcome = !moved ? 'flat' : (improved ? 'improved' : 'regressed')
-  // robustness from the champion's multi-seed confirmation
-  let robustness = 'unconfirmed'
-  if (best.confirmed_mean != null && (best.confirmed_seeds || 0) >= 2) {
-    // An ABSENT spread used to become `0`, which makes `sd <= |gain|` trivially true and printed
-    // "robust across N seeds" on no evidence at all — the same unknown-as-zero that read a run
-    // nobody priced as free, except this one asserts a TRUST property. A confirmation whose spread
-    // was not recorded is not evidence of a small spread; it stays unconfirmed.
-    const sd = typeof best.confirmed_std === 'number' && Number.isFinite(best.confirmed_std)
-      ? best.confirmed_std : null
-    const mean = Math.abs(best.confirmed_mean) || 1
-    if (sd !== null) robustness = (sd <= Math.abs(gain) || sd / mean < 0.1) ? 'robust' : 'fragile'
-  }
-  // trust rollup
-  const hasAlarm = caveats.some(c => c.severity === 'alarm')
-  // No recorded caveat is not proof that every optional detector ran. Without the run config and
-  // per-detector coverage in this folded report state, the honest roll-up is unverified, not green.
-  const trust = hasAlarm ? 'suspect' : (caveats.length ? 'caveats' : 'unverified')
-  const gainPct = baseline ? Math.abs(gain / baseline) * 100 : null
-  const gainStr = fmt(Math.abs(gain)) + (gainPct != null ? ` (${fmt(gainPct, 1)}%)` : '')
-  let headline
-  if (outcome === 'improved') {
-    const rob = robustness === 'robust' ? `robust across ${best.confirmed_seeds} seeds`
-      : robustness === 'fragile' ? `but the multi-seed spread is wide` : `single-seed so far`
-    headline = `Improved the metric by ${gainStr} over baseline — champion #${best.id} is ${rob}`
-      + (trust === 'suspect' ? '; the win is flagged, treat with caution.'
-        : trust === 'caveats' ? ' (with caveats).'
-          : '; no trust flags are recorded, but detector coverage is not fully verified.')
-  } else if (outcome === 'flat') {
-    headline = `No improvement over the baseline yet — best stays at ${fmt(finalv)} (#${best.id}).`
-  } else if (outcome === 'regressed') {
-    headline = `Best result ${fmt(finalv)} (#${best.id}) is below the first baseline — search hasn't paid off.`
-  }
-  return { outcome, robustness, trust, best, baseline, gain, gainPct, direction: dir, caveats, headline }
+  const first = Object.values(state.nodes || {}).filter(eligible).sort((x, y) => x.id - y.id)[0]
+  const baseline = finite(first?.metric) ? first.metric : null
+  const comparable = !sourceIncomplete(state) && !state.objective_key
+    && ['min', 'max'].includes(dir) && best.feasible === true && first?.feasible === true
+    && baseline != null && finite(best.metric)
+    && !objectiveSourceCaveated(objectiveMetricSource(best))
+    && !objectiveSourceCaveated(objectiveMetricSource(first))
+    && nodeComparabilityStatus(first, best) === 'same'
+  // Base-evaluation receipts describe scores. They do not certify comparability of confirmation means.
+  const gain = comparable ? best.metric - baseline : null
+  const outcome = first?.id === best.id ? 'baseline' : !comparable ? 'uncompared'
+    : gain === 0 ? 'flat' : (dir === 'min' ? gain < 0 : gain > 0) ? 'improved' : 'regressed'
+  const repeated = finite(best.confirmed_mean) && Number.isSafeInteger(best.confirmed_seeds)
+    && best.confirmed_seeds >= 2
+  const robustness = repeated ? 'repeat-checked' : finite(best.confirmed_mean) ? 'mean recorded' : 'unconfirmed'
+  const valueLabel = finite(best.confirmed_mean) ? 'confirmation mean' : 'evaluation score'
+  let headline = `Selected #${best.id}: ${valueLabel} ${fmt(metricOf(best))}.`
+  if (outcome === 'baseline') headline += ' This is the first eligible experiment; it does not establish improvement.'
+  else if (outcome === 'uncompared') headline += ' Improvement over the first eligible experiment is not established.'
+  else headline += outcome === 'flat' ? ' Its evaluation score matches the first eligible experiment.'
+    : ` Its evaluation score is ${outcome === 'improved' ? 'better' : 'worse'} by ${fmt(Math.abs(gain))} under matching recorded conditions.`
+  headline += trust === 'suspect' ? ' The result is flagged, treat with caution.'
+    : ' Detector coverage is not fully verified.'
+  const nextStep = trust === 'suspect' ? 'Review the flagged evidence in Trust before using the selected result.'
+    : !comparable && outcome !== 'baseline' ? 'Establish matching evaluation conditions before claiming improvement. Compare evaluation scores and confirmation means separately.'
+      : !repeated ? 'Repeat the selected experiment with multiple seeds and inspect Trust before relying on the result.'
+        : 'Inspect the spread and evaluation conditions of repeat checks. Multiple seeds alone do not establish generalization or statistical significance.'
+  return { outcome, robustness, trust, best, baseline, first, gain, gainPct: null,
+    direction: dir, caveats, headline, nextStep }
 }
 
 const reportContext = context => ({
@@ -404,7 +407,8 @@ export function buildModelCard(state, _best = null, context = {}) {
     deterministic_trust: { status: v.trust, caveats: v.caveats.map(caveat => caveat.text) },
     counts: { nodes: nodeCount, evaluated: a.nEval },
     deterministic_verdict: { headline: v.headline, outcome: v.outcome,
-      robustness: v.robustness, trust: v.trust, caveats: v.caveats.map(caveat => caveat.text) },
+      robustness: v.robustness, trust: v.trust, caveats: v.caveats.map(caveat => caveat.text),
+      next_step: v.nextStep },
     agent_narrative: rep ? {
       advisory: true, headline: rep.headline, verdict: rep.verdict, summary: rep.summary,
       champion_summary: rep.champion_summary, what_worked: rep.what_worked,
@@ -436,6 +440,7 @@ export function toMarkdown(state, _best, context = {}) {
   L.push(`## Verdict`)
   L.push('')
   L.push(`**${v.headline}**`)
+  L.push('', `**Next step:** ${v.nextStep}`)
   if (v.caveats.length) {
     L.push('')
     L.push('Deterministic trust caveats: ' + v.caveats.map(c => c.text).join('; ') + '.')
@@ -475,13 +480,14 @@ export function toMarkdown(state, _best, context = {}) {
     })
   }
   L.push('')
-  L.push(a.steps.length === 1 ? '## Metric baseline' : '## What worked — key improvements')
+  L.push(a.steps.length === 1 ? '## First eligible metric' : '## Recorded metric trajectory')
+  L.push('', 'This numeric frontier may combine evaluation scores and confirmation means. Its changes do not establish a comparable improvement. Use the selected-result verdict above.')
   if (a.steps.length) {
     L.push('')
     L.push('| step | node | operator | metric | Δ | what changed |')
     L.push('|---|---|---|---|---|---|')
     a.steps.forEach((s, i) => L.push(`| ${i + 1} | #${s.id} | ${s.operator}${s.theme ? ` (${s.theme})` : ''} | ${fmt(s.to)} | ${s.delta == null ? 'baseline' : fmt(s.delta)} | ${paramDiffLabel(s.diff)} |`))
-    if (a.steps.length > 1) L.push(`\nTotal improvement: **${fmt(a.totalGain)}** across ${a.steps.length} steps (baseline ${fmt(a.firstBest)} → best ${fmt(a.finalBest)}).`)
+    if (a.steps.length > 1) L.push(`\nRecorded frontier change: **${fmt(a.totalGain)}** across ${a.steps.length} steps (first eligible ${fmt(a.firstBest)} → numeric frontier ${fmt(a.finalBest)}).`)
   } else L.push('\n_No improving steps recorded yet._')
   L.push('')
   L.push('## What didn\'t work')

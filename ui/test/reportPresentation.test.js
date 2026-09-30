@@ -51,10 +51,10 @@ test('report solution evidence fails closed on wrong node and historical snapsho
 test('total improvement is positive for both objective directions and Markdown names a lone baseline truthfully', () => {
   assert.equal(analyze(state('min', 10, 7)).totalGain, 3)
   assert.equal(analyze(state('max', 10, 13)).totalGain, 3)
-  assert.match(toMarkdown(state('min', 10, 7)), /Total improvement: \*\*3\*\*/)
+  assert.match(toMarkdown(state('min', 10, 7)), /Recorded frontier change: \*\*3\*\*/)
 
   const baseline = toMarkdown(state('min', 10))
-  assert.match(baseline, /^## Metric baseline$/m)
+  assert.match(baseline, /^## First eligible metric$/m)
   assert.doesNotMatch(baseline, /What worked — key improvements/)
 })
 
@@ -122,7 +122,7 @@ test('Report uses semantic section headings and exposes an unambiguous operator/
       const sections = [...dom.window.document.querySelectorAll('.report-view .section-h')]
       assert.ok(sections.length >= 4)
       assert.ok(sections.every(heading => heading.tagName === 'H2'))
-      assert.equal(sections[1].textContent, 'How the metric got better')
+      assert.equal(sections[1].textContent, 'Recorded metric trajectory')
       const jumps = [...dom.window.document.querySelectorAll('.report-sections button')]
       assert.deepEqual(jumps.map(button => button.textContent),
         ['Summary', 'Champion', 'Trajectory', 'Failures', 'Solution'])
@@ -148,7 +148,7 @@ test('Report uses semantic section headings and exposes an unambiguous operator/
     }))
     assert.match(baselineMarkup, /<h2 id="report-section-summary" tabindex="-1" class="report-title">report-min<\/h2>/)
     assert.doesNotMatch(baselineMarkup, /class="report-sub muted">report-min/)
-    assert.match(baselineMarkup, /<h2 id="report-section-trajectory" tabindex="-1" class="section-h">Metric baseline<\/h2>/)
+    assert.match(baselineMarkup, /<h2 id="report-section-trajectory" tabindex="-1" class="section-h">First eligible metric<\/h2>/)
     assert.doesNotMatch(baselineMarkup, /How the metric got better/)
     assert.match(baselineMarkup, /First feasible metric; no improvement is recorded yet/)
   } finally {
@@ -284,7 +284,7 @@ test('deterministic verdict stays authoritative across UI, Markdown, and model-c
     try {
       const chips = [...scopedDom.window.document.querySelectorAll('.caveat-chip')]
       const dataChip = chips.find(chip => chip.textContent.includes('data-leakage'))
-      const trustChip = chips.find(chip => chip.textContent.includes('single-seed'))
+      const trustChip = chips.find(chip => chip.textContent.includes('repeat checks'))
       assert.equal(dataChip?.disabled, false)
       assert.match(dataChip?.getAttribute('title') || '', /^see data/)
       assert.equal(trustChip?.disabled, true)

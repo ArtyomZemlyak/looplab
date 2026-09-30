@@ -25,6 +25,8 @@
 
 .report-view .report-title { font-size: clamp(20px, 2.2vw, 27px); line-height: 1.2; letter-spacing: -.015em; }
 .report-view .report-sub { color: var(--fg-dim); line-height: 1.55; }
+.report-next-step { margin: 12px 0 0; font-size: 13px; line-height: 1.55; }
+.report-next-step strong { display: block; margin-bottom: 3px; }
 .report-view .section-h { margin-top: 24px; color: var(--fg); font-size: 15px; line-height: 1.35; }
 .report-view .tbl { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 .report-view .tbl th { color: var(--fg-dim); font-weight: 650; }
