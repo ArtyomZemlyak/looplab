@@ -69,6 +69,25 @@ def test_a_log_left_by_an_earlier_attempt_does_not_vouch_for_this_one(tmp_path):
                                       since=time.time()) == ["prefix cache: ON"]
 
 
+def test_a_reused_stage_s_log_is_its_earlier_run_s_account(tmp_path):
+    """crit_v45 M1: a stage the attempt REUSED did not run again; its log — older than the attempt by
+    construction — is the account of the run whose artifacts are being scored. MUTATIONS: drop the
+    `reused` exemption -> red (first assert); exempt every log -> red (second assert)."""
+    old = time.time() - 3600
+    for name, text in (("train.log", "MARK fast path on\n"), ("score.log", "MARK warm\n"),
+                       ("None.log", "MARK fast path on\n")):
+        (tmp_path / name).write_text(text)
+        os.utime(tmp_path / name, (old, old))
+    now = time.time()
+    assert activation.missing_markers(["MARK fast path on"], texts=(), workdir=tmp_path, since=now,
+                                      reused_stages=["train"]) == []
+    assert activation.missing_markers(["MARK warm"], texts=(), workdir=tmp_path, since=now,
+                                      reused_stages=["train"]) == ["MARK warm"], \
+        "a stage that RAN this attempt still needs a fresh log"
+    assert activation.missing_markers(["MARK fast path on"], texts=(), workdir=tmp_path, since=now,
+                                      reused_stages=[None, "", 3]) == ["MARK fast path on"]
+
+
 def test_the_match_is_exact_and_case_sensitive():
     assert activation.missing_markers(["Cache: ON"], texts=("cache: on",)) == ["Cache: ON"]
 

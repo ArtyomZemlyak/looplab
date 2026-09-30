@@ -4194,9 +4194,13 @@ class EvaluateMixin:
             from looplab.engine.activation import missing_markers, read_markers
             _declared = read_markers(a.workdir)
             if _declared:
+                # A stage this attempt REUSED printed its markers in its earlier run; its log is
+                # that account (`activation.py::_fresh_logs`, crit_v45 M1).
+                _reused = [s.get("name") for s in (getattr(a.res, "stages", None) or [])
+                           if isinstance(s, dict) and s.get("status") == "reused"]
                 _missing = missing_markers(
                     _declared, texts=(a.res.stdout or "", a.res.stderr or ""),
-                    workdir=a.workdir, since=a._t0)
+                    workdir=a.workdir, since=a._t0, reused_stages=_reused)
                 if _missing:
                     a.res.inert_path = {"missing": _missing, "metric": a.res.metric}
                     a.res.metric = None
