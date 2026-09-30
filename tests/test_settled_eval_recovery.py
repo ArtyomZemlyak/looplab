@@ -271,3 +271,33 @@ def test_the_record_round_trips_through_the_log(tmp_path):
     assert res.extra_metrics == {"recall": 0.5} and res.stages[0]["name"] == "train"
     assert settled_recovery.result_from_record({**rec, "v": 99})[0] is None
     assert settled_recovery.result_from_record({**rec, "metric": None})[0] is None
+
+
+class _AlwaysSkip:
+    """A proxy scorer that would kill every candidate it is asked about."""
+
+    def score_with_uncertainty(self, state, node):
+        return (0.0, 0.0)
+
+    def abstains(self, state, node, nearest):
+        return False
+
+    def should_skip(self, state, node, pred, nearest):
+        return True
+
+
+def test_the_proxy_kill_never_predicts_a_result_already_measured(tmp_path):
+    """crit_v46 (pre-existing, driven): ADMIT's opt-in proxy kill runs BEFORE RECOVER_SETTLED, so a
+    lifecycle whose evaluation a dead process had already measured was failed `proxy_skipped` — the
+    recorded metric discarded for a prediction. MUTATION: drop the settle guard -> `proxy_skipped`."""
+    run_dir = tmp_path / "run"
+    dead = _die_before_the_terminal(run_dir)
+    metric = _rows(dead, "eval_invocation_settled")[0]["result"].get("metric")
+    calls: list = []
+    resumed = _resumed(run_dir, calls)
+    resumed.proxy_scorer, resumed.proxy_kill_fraction = _AlwaysSkip(), 0.5
+    _drive(resumed)
+    (terminal,) = _terminals(resumed)
+    assert (terminal.type, terminal.data.get("metric")) == ("node_evaluated", metric)
+    assert len(_rows(resumed, "eval_invocation_recovered")) == 1
+    assert _rows(resumed, "proxy_scored") == []

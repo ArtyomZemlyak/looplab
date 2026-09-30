@@ -44,10 +44,12 @@ export function recordedNodeActivity(node) {
 // The server's activity row as ONE comparable key — what the Inspector re-reads a node's detail on
 // (its `deps`), because `pending` covers the whole lifecycle and a withhold moves the activity
 // alone (doc 69 69.12b). Every field is in the key: a change of ANY of them is a new server
-// statement (critic 2026-09-30 — a key of one field missed a move of the others).
+// statement (critic 2026-09-30 — a key of one field missed a move of the others). EVERY field, not
+// a hand-picked three: the row also carries `started_at` and `schema`, and a list is no row
+// (crit_v46 NIT: `activityKey([])` read as "undefined:undefined:undefined").
 export function activityKey(activity) {
-  return activity && typeof activity === 'object'
-    ? `${activity.status}:${activity.generation}:${activity.evidence}` : ''
+  if (!activity || typeof activity !== 'object' || Array.isArray(activity)) return ''
+  return JSON.stringify(Object.keys(activity).sort().map(field => [field, activity[field]]))
 }
 
 export function nodeActivityStatus(node, state = null) {

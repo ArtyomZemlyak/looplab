@@ -936,6 +936,12 @@ def card_child_rollup(children, *, champion_metric: float | None = None,
     it because `nodes` is in ITS scope, not this module's. Absent anchor or metrics simply yields
     ``None`` for the pair — never a zero, for the same reason a child with no measurement
     contributes nothing.
+
+    A child the board draws as HELD (its evaluation admitted, then withheld by a pause or a stop)
+    counts as ``running`` here, and that is a stated limit rather than an oversight (crit_v46 NIT):
+    the rollup is a FOLD product, and a withhold is a diagnostic row the fold never reads (invariant
+    1) — the board's `held` lane is an overlay from the server's node activity
+    (`ui/src/cardBoardModel.js::withheldRunning`), not a folded status.
     """
     rows = [c for c in (children or []) if c is not None]
     if not rows:

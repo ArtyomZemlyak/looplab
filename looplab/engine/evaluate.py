@@ -3003,7 +3003,8 @@ class EvaluateMixin:
         try:
             with anyio.CancelScope(shield=True):
                 async with self._write_lock:
-                    state = fold(self.store.read_all())
+                    events = self.store.read_all()
+                    state = fold(events)
                     node = state.nodes.get(node_id)
                     # Only if this lifecycle is still open. A body that already wrote its own
                     # terminal and then raised on the way out (a tracer teardown, a span export) must
@@ -3011,9 +3012,15 @@ class EvaluateMixin:
                     # would carry a reason that contradicts the first.
                     if (node is not None and node.status is NodeStatus.pending
                             and generation >= 0 and node.attempt == generation):
+                        # The lifecycle's DURABLE spend, like every other zero-compute terminal
+                        # (`_durable_prior_seconds`): this one wrote none, so the repairs, dependency
+                        # rounds, withheld attempts and settled invocations before the crash reached
+                        # no terminal at all (crit_v46, driven). The attempt the crash cut short left
+                        # no durable row and goes uncharged — the under-charging direction.
                         self.store.append(EV_NODE_FAILED, {
                             "node_id": node_id, "generation": generation,
-                            "error": self._redact(detail)[:400], "reason": "engine_error"})
+                            "error": self._redact(detail)[:400], "reason": "engine_error",
+                            "eval_seconds": _durable_prior_seconds(events, node_id, generation)})
                     # AND THE PAUSE SKIPS A LIFECYCLE THAT ALREADY CLOSED ITSELF. Until
                     # 2026-09-08 this was a separate `if` on the RUN's state alone, so a body that
                     # had written its own `node_evaluated` and then raised on the way OUT — a span
@@ -3649,7 +3656,12 @@ class EvaluateMixin:
         # history and skip a full eval for the doomed bottom fraction (cost lever). Deterministic
         # + replay-safe: the skip is recorded as node_failed reason="proxy_skipped" and a
         # proxy_scored audit event. OFF by default (kill_fraction=0 -> never skips).
-        if self.proxy_scorer is not None and self.proxy_kill_fraction > 0:
+        # NOT a lifecycle a dead process already MEASURED: its `ok` settle is finalized from the
+        # record in the next phase (RECOVER_SETTLED), and predicting it wrote `proxy_skipped` over a
+        # real result (crit_v46, driven). The GPU-pin exit above keeps its order on purpose — the
+        # recovery may still decide to re-run, and a re-run must never launch unpinned.
+        if (self.proxy_scorer is not None and self.proxy_kill_fraction > 0
+                and settled_ok_awaiting_terminal(a.events_at_start, a.node_id, a.generation) is None):
             # The pair, not the point estimate (doc 52 row 17): the kill abstains on a candidate
             # whose nearest evaluated neighbour is beyond the explored region's own radius, and
             # the row records the distance and the abstention beside the score (additive).

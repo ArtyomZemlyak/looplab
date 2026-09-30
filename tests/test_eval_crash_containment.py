@@ -300,3 +300,33 @@ def test_a_failing_append_inside_the_handler_is_swallowed(tmp_path):
         await engine._contain_eval_crash(node_id, 0, OSError("original"))
 
     anyio.run(_drive)          # must not raise
+
+
+def test_the_contained_terminal_charges_the_lifecycle_s_durable_spend(tmp_path):
+    """crit_v46 (pre-existing, driven): the `engine_error` terminal carried no `eval_seconds`, so a
+    lifecycle's DURABLE spend — here a dead process's settled 3,600 s invocation — reached no
+    terminal and the run's total read 0. It charges `_durable_prior_seconds` like every other
+    zero-compute terminal. MUTATION: drop the key -> 0.0."""
+    from test_settled_eval_recovery import _drive, _engine, _seed, _terminals
+
+    run_dir = tmp_path / "run"
+    dead = _engine(run_dir)
+    _seed(dead)
+    for kind, data in (
+            ("eval_invocation_claimed", {"node_id": 0, "generation": 0, "attempt": 0,
+                                         "invocation_id": "k0"}),
+            ("eval_invocation_settled", {"node_id": 0, "generation": 0, "attempt": 0,
+                                         "invocation_id": "k0", "outcome": "failed",
+                                         "eval_seconds": 3600.0})):
+        dead.store.append(kind, data)
+    resumed = _engine(run_dir)
+
+    def _enospc(_attempt):
+        raise OSError(28, "No space left on device")
+
+    resumed._eval_prepare_workdir = _enospc
+    _drive(resumed)
+    (terminal,) = _terminals(resumed)
+    assert (terminal.type, terminal.data.get("reason")) == ("node_failed", "engine_error")
+    assert terminal.data.get("eval_seconds") == 3600.0
+    assert fold(resumed.store.read_all()).total_eval_seconds == 3600.0
