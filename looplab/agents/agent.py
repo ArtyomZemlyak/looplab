@@ -35,9 +35,9 @@ from looplab.agents.roles import (
     _attention_points, _clamp_fill,
     _hypothesis_system_suffix,
     _researcher_capability_suffix, _state_brief, bind_idea_to_board_card,
-    collect_hint_cues, next_board_prompt_cards, note_propose_receipt,
-    researcher_fallback_rationale,
+    collect_hint_cues, next_board_prompt_cards, researcher_fallback_rationale,
     RESEARCHER_PROMPT_CUES)
+from looplab.agents.propose_receipts import note_propose_receipt
 # The tool-loop machinery was split into `agents.tool_loop`. The moved names below are RE-IMPORTED
 # here under their original names because callers and tests import AND monkeypatch them THROUGH this
 # module — `looplab.agents.agent.agentic_struct` / `.drive_tool_loop` are documented patch seams

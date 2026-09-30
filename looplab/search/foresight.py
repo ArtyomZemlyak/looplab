@@ -36,9 +36,9 @@ from pydantic import BaseModel, Field
 
 from looplab.agents.roles import (
     BOARD_SEED_CHARS_MAX, WrapsResearcher, bind_idea_to_board_card, forward_hints,
-    is_researcher_fallback, next_board_prompt_cards, note_propose_receipt,
-    researcher_budget_exhausted,
+    is_researcher_fallback, next_board_prompt_cards, researcher_budget_exhausted,
 )
+from looplab.agents.propose_receipts import note_propose_receipt
 from looplab.core.llm import BudgetExceeded
 from looplab.core.config import MAX_FORESIGHT_VERIFY_SAMPLES
 from looplab.core.models import NodeStatus

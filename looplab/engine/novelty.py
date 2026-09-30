@@ -28,7 +28,7 @@ from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import (NODE_CONCEPT_PROVENANCE_CLASSIFIER,
                                   NODE_CONCEPT_PROVENANCE_OPERATOR, Idea, NodeStatus, RunState,
                                   idea_proposal_digest, idea_proposal_ref)
-from looplab.agents.roles import propose_receipt_scope, scoped_budget_exhausted
+from looplab.agents.propose_receipts import propose_receipt_scope, scoped_budget_exhausted
 from looplab.engine.card_reservation import discarded_proposal_receipt
 from looplab.engine.shared import card_full_rationale, effective_researcher_eval_timeout
 from looplab.core.text import tokenize

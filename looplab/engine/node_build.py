@@ -28,8 +28,8 @@ from typing import NamedTuple, Optional
 import anyio
 
 from looplab.agents.role_wrappers import audit_extra_of
-from looplab.agents.roles import (DeveloperResult, developer_call_lock,
-                                  propose_receipt_scope, scoped_budget_exhausted)
+from looplab.agents.propose_receipts import propose_receipt_scope, scoped_budget_exhausted
+from looplab.agents.roles import DeveloperResult, developer_call_lock
 from looplab.core.containment import contain
 from looplab.core.errors import budget_stop_leaf
 from looplab.core.llm import BudgetExceeded, model_override
@@ -999,7 +999,7 @@ class NodeBuildMixin:
 
         def _propose(handle, parent_node):
             """One paid propose on `handle`, with the receipt THIS call noted into its own scope
-            (`roles.propose_receipt_scope`, doc 69 69.37) — never the shared instance's attribute,
+            (`propose_receipts.propose_receipt_scope`, doc 69 69.37) — never the shared instance's attribute,
             which another proposal may write between this one's return and its read."""
             with propose_receipt_scope() as box:
                 candidate = handle.propose(state, parent_node)

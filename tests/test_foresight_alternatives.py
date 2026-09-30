@@ -1190,8 +1190,8 @@ def test_the_panel_notes_the_chosen_candidate_s_receipt_last_into_the_caller_s_s
     panel's members note theirs there in the order they ran — so the panel notes the CHOSEN
     candidate's receipt LAST, or the scope answered with whichever member ran last. MUTATION: drop
     the note from `_chosen` -> "time" (the last member), not "" (the chosen one)."""
-    from looplab.agents.roles import (note_propose_receipt, propose_receipt_scope,
-                                      scoped_budget_exhausted)
+    from looplab.agents.propose_receipts import (note_propose_receipt, propose_receipt_scope,
+                                                 scoped_budget_exhausted)
 
     model = _Model([], order=(1, 0))
     panel = ForesightPanelResearcher(

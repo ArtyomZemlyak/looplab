@@ -95,7 +95,7 @@ def test_the_engine_READS_it_at_the_one_proposal_funnel():
     assert {"propose_receipt_scope", "scoped_budget_exhausted"} <= called, (
         "`_prepare_node_idea` must read the propose cutoff — it is the one funnel every proposal "
         "crosses, and a carrier with no consumer is a field that ships while the record stays "
-        "silent. It reads the call's OWN receipt (`roles.propose_receipt_scope` + "
+        "silent. It reads the call's OWN receipt (`propose_receipts.propose_receipt_scope` + "
         "`scoped_budget_exhausted`, doc 69 69.37): the role's attributes are a shared instance's, "
         "and they are read only when nothing inside the scope noted a receipt.")
 
@@ -365,8 +365,8 @@ def test_a_scope_holds_the_receipts_of_the_proposes_inside_it_and_no_other_threa
     nothing noted the role's attributes answer (a researcher that predates the channel)."""
     import threading
 
-    from looplab.agents.roles import (note_propose_receipt, propose_receipt_scope,
-                                      scoped_budget_exhausted)
+    from looplab.agents.propose_receipts import (note_propose_receipt, propose_receipt_scope,
+                                                 scoped_budget_exhausted)
 
     note_propose_receipt("turns")                          # outside any scope: nothing, no error
     with propose_receipt_scope() as box:
@@ -395,7 +395,7 @@ class _SharedAndRacing:
     def propose(self, state, parent):
         import threading
 
-        from looplab.agents.roles import note_propose_receipt
+        from looplab.agents.propose_receipts import note_propose_receipt
         self.calls += 1
         bound = "turns" if threading.current_thread().name == "lane-A" else ""
         self.last_budget_exhausted = bound
@@ -447,7 +447,7 @@ def test_a_real_propose_notes_its_receipt_into_the_caller_s_scope(tmp_path, monk
     opened — on a clean return and on a loop that raised (the fallback idea is still this call's).
     MUTATION: drop the note from `propose`'s `finally` -> the scope is empty and the caller falls
     back to the shared attribute."""
-    from looplab.agents.roles import propose_receipt_scope
+    from looplab.agents.propose_receipts import propose_receipt_scope
     from looplab.tools.knowledge_tools import KnowledgeTools
 
     def _phase(client, tools, messages, emit_spec, *, on_budget=None, finalize=None, **_kw):
@@ -473,7 +473,7 @@ class _CleanThenCut:
         self.last_budget_exhausted = ""
 
     def propose(self, _state, _parent):
-        from looplab.agents.roles import note_propose_receipt
+        from looplab.agents.propose_receipts import note_propose_receipt
         self.calls += 1
         self.last_budget_exhausted = "" if self.calls == 1 else "turns"
         note_propose_receipt(self.last_budget_exhausted)

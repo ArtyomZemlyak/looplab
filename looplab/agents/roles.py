@@ -23,8 +23,6 @@ the Researcher never sees, and together they exercise the real loop deterministi
 """
 from __future__ import annotations
 
-import contextlib
-import contextvars
 import threading
 import weakref
 from dataclasses import dataclass, field
@@ -300,46 +298,6 @@ def researcher_budget_exhausted(researcher) -> str:
     if scoped is not None:
         return str(scoped or "").strip()[:32]
     return str(getattr(researcher, "last_budget_exhausted", "") or "").strip()[:32]
-
-
-# THE RECEIPT'S CALL CHANNEL (doc 69 69.37). The two attributes above live on a SHARED instance —
-# the card lane and the offloaded serial build propose through one Researcher, and the foresight
-# panel through one panel — so a caller that read them after its propose returned could read the
-# OTHER call's receipt, written between the return and the read (critic crit_v53 N6). A propose
-# notes its receipt into the scope its CALLER opened (`propose_receipt_scope`); the scope is a
-# `ContextVar`, so a call on another thread or task notes into its own scope, never this one's.
-_PROPOSE_RECEIPTS: contextvars.ContextVar = contextvars.ContextVar(
-    "looplab_propose_receipts", default=None)
-
-
-@contextlib.contextmanager
-def propose_receipt_scope():
-    """The receipts the proposes made INSIDE this block noted, in order — read with
-    `scoped_budget_exhausted` once the block has returned."""
-    box: list = []
-    token = _PROPOSE_RECEIPTS.set(box)
-    try:
-        yield box
-    finally:
-        _PROPOSE_RECEIPTS.reset(token)
-
-
-def note_propose_receipt(bound) -> None:
-    """Which bound ended the propose that is returning — "" when the model emitted on its own terms —
-    into the scope this call runs in. Outside any scope: nothing. A role that proposes several times
-    for ONE answer (the foresight panel) notes the chosen candidate's receipt LAST."""
-    box = _PROPOSE_RECEIPTS.get()
-    if box is not None:
-        box.append(str(bound or "").strip()[:32])
-
-
-def scoped_budget_exhausted(box, researcher) -> str:
-    """The receipt of the propose a `propose_receipt_scope` wrapped: the last one noted inside it.
-    Only when nothing inside it noted one does it read the role's attributes
-    (`researcher_budget_exhausted`) — a researcher that writes those alone."""
-    if box:
-        return box[-1]
-    return researcher_budget_exhausted(researcher)
 
 # Duck-typed attributes that answer "does building one node make provider calls at all?" — the seam
 # `engine/orchestrator.py::_build_calls_an_llm` reads, and the other half of the same AUTO width
