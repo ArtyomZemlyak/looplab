@@ -76,7 +76,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // master's Card-board copy; every closure and forbidden reachability proof still passes.
     // 2026-09-30 first-run model status: measured 582,970 B JS / 56,354 B CSS. The lazy status
     // reads saved settings and reuses only explicit health results; no provider probe is automatic.
-    js: { gzip: 570 * KIB },
+    // 2026-09-30 plain launch decision: measured 583,762 B JS; +792 B buys the goal/score/edit
+    // boundaries before Start, with the launch card still loaded through the Assistant route.
+    js: { gzip: 571 * KIB },
     css: { gzip: 56 * KIB },
   },
   individual: {
@@ -147,7 +149,8 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-09-29 merge of master into the branch: measured 396,112 B JS.
       // 2026-09-29 master's Card-board model (withheld-return copy): 396,291 B, 3 B over 387 KiB.
       // 2026-09-30 first-run model status: measured 398,146 B JS in this closure.
-      limits: { js: { gzip: 389 * KIB }, css: { gzip: 45 * KIB } },
+      // 2026-09-30 plain launch decision: measured 398,906 B JS; the exact review stays visible.
+      limits: { js: { gzip: 390 * KIB }, css: { gzip: 45 * KIB } },
     },
     {
       name: 'valid review DAG route',
@@ -179,7 +182,8 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-09-29 workspace UI: measured 43,377 B CSS with the Concepts empty and evidence rows.
       // 2026-09-29 merge of master into the branch: measured 261,117 B JS (both sides' Concepts work).
       // 2026-09-30 first-run model status: measured 262,618 B JS in this closure.
-      limits: { js: { gzip: 257 * KIB }, css: { gzip: 43 * KIB } },
+      // 2026-09-30 plain launch decision: measured 263,369 B JS in this closure.
+      limits: { js: { gzip: 258 * KIB }, css: { gzip: 43 * KIB } },
     },
     {
       name: 'panel-hub increment',

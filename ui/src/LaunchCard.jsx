@@ -5,7 +5,8 @@ import {
 } from './util.js'
 import {
   LAUNCH_RUNTIME_FIELDS, buildLaunchBody, createLaunchDraft,
-  launchFingerprint, parseObjectJson, runtimeValue, summarizeLaunchTask, updateRuntimeValue,
+  launchFingerprint, parseObjectJson, runtimeValue, summarizeLaunchDecision, summarizeLaunchTask,
+  updateRuntimeValue,
 } from './launchDraft.js'
 import { launchStatusOutcome, pollLaunchStatus } from './launchRecovery.js'
 import {
@@ -683,6 +684,9 @@ export default function LaunchCard({
   const reviewSettings = validatedCurrent ? preview?.settings : draftSettings
   const visibleTaskRows = validatedCurrent
     ? summarizeLaunchTask({ source: 'task', task_json: JSON.stringify(preview.task) }) : taskRows
+  const decisionRows = validatedCurrent
+    ? summarizeLaunchDecision({ source: 'task', task_json: JSON.stringify(preview.task) })
+    : summarizeLaunchDecision(draft)
   const inheritedReview = 'inherit (validate)'
   const reviewSetting = (key, { resolvedNull = 'not set', format = String } = {}) => {
     if (!settingsParsed.ok) return 'invalid JSON'
@@ -793,11 +797,17 @@ export default function LaunchCard({
 
     {/* Compact, always-visible run summary + a toggle. Collapsed by default so the common path is just
         "Start"; the editable settings below open on demand (or automatically when there's an error). */}
-    {!showConfig && <dl className="asst-launch-summary" aria-label="Run summary">
-      {visibleTaskRows.map((row, index) => <div key={`${row.label}-${index}`} className={row.invalid ? 'invalid' : ''}>
-        <dt>{row.label}</dt><dd>{row.value}</dd>
-      </div>)}
-    </dl>}
+    {!showConfig && <section className="asst-launch-section asst-launch-decision" aria-label="What this run will do">
+      <h4>What this run will do</h4>
+      <dl className="asst-launch-summary">
+        {decisionRows.map((row, index) => <div key={`${row.label}-${index}`} className={row.invalid ? 'invalid' : ''}>
+          <dt>{row.label}</dt><dd>{row.value}</dd>
+        </div>)}
+        <div><dt>Limits</dt><dd>{validatedCurrent
+          ? `${reviewSettings.max_nodes} experiments · run time ${timeReview('max_seconds')}`
+          : 'Validate to see effective limits.'}</dd></div>
+      </dl>
+    </section>}
     {hasFieldErrors
       ? <p className="asst-launch-openreason">Proposal details are open so you can fix the highlighted fields.</p>
       : <button type="button" className="btn xs ghost asst-launch-configtoggle" aria-expanded={showConfig}

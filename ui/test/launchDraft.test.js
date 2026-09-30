@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 
 import {
   LAUNCH_RUNTIME_FIELDS, buildLaunchBody, createLaunchDraft, launchFingerprint, parseObjectJson,
-  runtimeValue, summarizeLaunchTask, updateRuntimeValue, validateLaunchDraft,
+  runtimeValue, summarizeLaunchDecision, summarizeLaunchTask, updateRuntimeValue,
+  validateLaunchDraft,
 } from '../src/launchDraft.js'
 
 const proposal = {
@@ -133,4 +134,43 @@ test('task summary exposes the decision-critical contract instead of only a kind
   assert.ok(labels.has('Source'))
   assert.ok(labels.has('Evaluation'))
   assert.ok(labels.has('Metric'))
+})
+
+test('plain launch decision names measured score, edit bounds, and every repo/data source', () => {
+  const task = {
+    kind: 'repo', goal: 'Improve recall', direction: 'max', editable_path: '/srv/model',
+    edit_surface: ['src/**/*.py'], protect: ['score.py'],
+    editables: [{ name: 'pipeline', path: '/srv/pipeline', surface: ['config/*.json'],
+      protect: ['eval.json'] }],
+    data: { train: { path: '/srv/data/train.csv' } },
+    eval: { command: ['python', 'score.py'], metric: { kind: 'stdout_json', key: 'recall' } },
+  }
+  const rows = summarizeLaunchDecision(createLaunchDraft({ task }))
+  const byLabel = Object.fromEntries(rows.map(row => [row.label, row.value]))
+  assert.equal(byLabel.Goal, 'Improve recall')
+  assert.equal(byLabel.Score, 'recall · higher is better')
+  assert.match(byLabel['Code or data'], /\/srv\/model.*\/srv\/pipeline.*\/srv\/data\/train\.csv/)
+  assert.match(byLabel['May edit'], /root: src\/\*\*\/\*\.py; pipeline: config\/\*\.json/)
+  assert.equal(byLabel.Protected, 'score.py, eval.json')
+  assert.equal(byLabel['Original data'], 'No editable originals declared.')
+  const writable = summarizeLaunchDecision(createLaunchDraft({ task: {
+    ...task, data: { train: { path: '/srv/data/train.csv', edit: true } },
+  } }))
+  assert.match(writable.find(row => row.label === 'Original data').value, /^train editable;/)
+})
+
+test('unknown launch facts are called unknown before task-file validation', () => {
+  const fileRows = summarizeLaunchDecision(createLaunchDraft({ task_file: '/srv/task.json' }))
+  assert.match(fileRows[1].value, /Validate to inspect/)
+  const inline = summarizeLaunchDecision(createLaunchDraft({ task: { kind: 'repo',
+    editable_path: '/srv/repo', direction: 'min' } }))
+  const byLabel = Object.fromEntries(inline.map(row => [row.label, row.value]))
+  assert.equal(byLabel.Goal, 'Not stated in the task.')
+  assert.match(byLabel.Score, /Metric not explicitly stated · lower is better/)
+  assert.match(byLabel['May edit'], /not stated/)
+  assert.equal(byLabel.Protected, 'No protected paths listed in the task.')
+  const auto = summarizeLaunchDecision(createLaunchDraft({ task: {
+    kind: 'mlebench_real', competition: 'example', direction: 'auto',
+  } }))
+  assert.match(auto.find(row => row.label === 'Score').value, /direction resolved by evaluator/)
 })

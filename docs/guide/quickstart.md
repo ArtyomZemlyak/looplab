@@ -25,8 +25,9 @@ and LoopLab's internal research roles. For setup from a fresh checkout, use
    Give the goal, accessible paths, and constraints. The Assistant can inspect a repo
    and ask for missing information. The paths must exist on the **LoopLab server**,
    which may be a different machine from your browser.
-4. Review the launch card: task, scorer/metric and direction, paths, edit surface,
-   backend, and limits. Choose **Validate**, inspect the effective preview, then
+4. Review **What this run will do** on the launch card: goal, score direction, paths,
+   edit rules where applicable, and limits. Missing facts are marked explicitly.
+   Choose **Validate**, inspect the effective preview and technical settings, then
    **Start run**. Changing the proposal invalidates its validation, so validate again.
    Chatting about a plan does not start a run. A live model or evaluator may incur cost;
    the preview names the backend and current limits but does not impose a monetary cap.

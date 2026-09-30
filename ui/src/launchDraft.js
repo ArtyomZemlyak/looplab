@@ -199,3 +199,56 @@ export function summarizeLaunchTask(draft) {
   }
   return rows
 }
+
+export function summarizeLaunchDecision(draft) {
+  if (draft?.source === 'task_file') return [
+    { label: 'Task file', value: String(draft.task_file || '').split(/[\\/]/).pop() || 'Not selected' },
+    { label: 'Before launch', value: 'Validate to inspect the goal, score, and edit rules in this file.' },
+  ]
+  const parsed = parseObjectJson(draft?.task_json, 'Task')
+  if (!parsed.ok) return [{ label: 'Task', value: 'Fix the task JSON before review.', invalid: true }]
+  const task = parsed.value
+  const metric = task.eval?.metric || task.cmd?.metric
+  const metricName = typeof metric === 'string' ? metric
+    : metric && typeof metric === 'object' ? metric.key || metric.path || '' : ''
+  const direction = task.direction === 'max' ? 'higher is better'
+    : task.direction === 'min' ? 'lower is better'
+      : task.direction === 'auto' ? 'direction resolved by evaluator' : 'direction not stated'
+  const paths = [task.repo || task.editable_path, task.dataset || task.data_path,
+    task.competition || task.kaggle,
+    ...(Array.isArray(task.editables) ? task.editables.map(item => item?.path) : []),
+    ...(task.data && typeof task.data === 'object'
+      ? Object.values(task.data).map(item => typeof item === 'string' ? item : item?.path) : []),
+  ].filter(value => typeof value === 'string' && value.trim())
+  const rows = [
+    { label: 'Goal', value: task.goal ? short(task.goal, 180) : 'Not stated in the task.' },
+    { label: 'Score', value: `${metricName ? short(metricName, 80) : 'Metric not explicitly stated'} · ${direction}` },
+    { label: 'Code or data', value: paths.length
+      ? [...new Set(paths)].join(', ') : 'No external path stated in the task.' },
+  ]
+  if (task.editable_path || task.repo || (Array.isArray(task.editables) && task.editables.length)) {
+    const surfaces = [
+      ...(task.editable_path || task.repo
+        ? [`root: ${Array.isArray(task.edit_surface) && task.edit_surface.length
+          ? task.edit_surface.join(', ') : 'not stated'}`] : []),
+      ...(Array.isArray(task.editables) ? task.editables.map(item =>
+        `${item?.name || 'repo'}: ${Array.isArray(item?.surface) && item.surface.length
+          ? item.surface.join(', ') : 'not stated'}`) : []),
+    ]
+    rows.push({ label: 'May edit', value: surfaces.join('; ') })
+    const protectedPaths = [
+      ...(Array.isArray(task.protect) ? task.protect : []),
+      ...(Array.isArray(task.editables) ? task.editables.flatMap(item => item?.protect || []) : []),
+    ]
+    rows.push({ label: 'Protected', value: protectedPaths.length
+      ? protectedPaths.join(', ') : 'No protected paths listed in the task.' })
+    if (task.data && typeof task.data === 'object' && !Array.isArray(task.data)) {
+      const writable = Object.entries(task.data).filter(([, spec]) => spec?.edit === true)
+        .map(([name]) => name)
+      rows.push({ label: 'Original data', value: writable.length
+        ? `${short(writable.join(', '), 140)} editable; others read-only.`
+        : 'No editable originals declared.' })
+    }
+  }
+  return rows
+}
