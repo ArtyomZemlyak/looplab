@@ -1374,7 +1374,7 @@
           "label": "Stages phase: say whether the scorer is frozen",
           "type": "bool",
           "default": true,
-          "help": "The repo STAGES phase is told the scoring command is FIXED and protected and that it reads what the earlier stages produce. That is true of the command, and of the code it runs only when the write tools refuse that code. ON, when the file the command runs is one the Developer could edit — or no file can be named — the phase is told so: an edit to it changes the measurement, and work the command already does (prep, training) runs again inside the score stage. Measured on a MiniOneRec run: an unprotected shell scorer that trained by itself was trained a second time by a declared train stage (~8 GPU-hours). A frozen scorer's prompt is unchanged. Off = the pre-2026-09-30 prompt, byte for byte."
+          "help": "The repo STAGES phase is told the scoring command is FIXED and protected and that it reads what the earlier stages produce. That is true of the command, and of the code it runs only when the write tools refuse that code. ON, when the file the command runs is one the Developer could edit — or no file can be named — the phase is told so: an edit to it changes the measurement, and work the command already does (prep, training) runs again inside the score stage. Every phase's instructions then say the same, and the phase may declare no stages at all: the command runs alone. Measured on a MiniOneRec run: an unprotected shell scorer that trained by itself was trained a second time by a declared train stage (~8 GPU-hours). A frozen scorer's prompt is unchanged. Off = the pre-2026-09-30 prompt, byte for byte."
         },
         {
           "key": "established_context",

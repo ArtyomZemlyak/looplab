@@ -354,7 +354,9 @@ def test_an_empty_declaration_drops_the_parent_s_pipeline(tmp_path, monkeypatch)
     seen, dev = _drive(monkeypatch, task, stages=[], parent=_parent_with_train_stage(),
                        scorer_status=True)
     assert "looplab_stages.json" not in dev.last_files
-    assert "looplab_stages.json" in dev.last_deleted
+    # …and NOT deleted: the source ships no manifest, so a deletion would only ride into every
+    # descendant's `deleted` (critic crit_v47, H1 — this assertion used to pin that root cause).
+    assert "looplab_stages.json" not in dev.last_deleted
     implement = [m[1]["content"] for name, m in seen if name != "declare_stages"][0]
     assert "NO pipeline stages are declared for this node" in implement
     assert "carried over from the parent" not in implement
@@ -433,3 +435,291 @@ def test_the_derived_protection_normalizes_the_spelling_it_protects(tmp_path):
                                                      metric=_M))
     (mount,) = task._editable_mounts()
     assert "sub/score.py" in mount["protect"]
+
+
+# ------------------------------------------------------------------------------------ critic crit_v47
+def _materialize(tmp_path: Path, name: str, dev) -> Path:
+    """The build's working set written the way the engine writes a node's workdir
+    (`engine/workspace.py::WorkspaceSeeder.write_node_files`: the files, THEN the deletions), over a
+    copy of the shipped source."""
+    import shutil
+    from looplab.engine.workspace import WorkspaceSeeder
+    wd = tmp_path / name
+    shutil.copytree(tmp_path / "src", wd)
+    seeder = WorkspaceSeeder(SimpleNamespace(_assets=(), _repo_spec={}))
+    seeder.write_node_files(SimpleNamespace(files=dict(dev.last_files),
+                                            deleted=list(dev.last_deleted)), wd)
+    return wd
+
+
+def _lineage_repo(tmp_path: Path, *, shipped: bool) -> RepoTask:
+    src = tmp_path / "src"
+    src.mkdir()
+    task = _repo(src, command=["bash", "run.sh"])
+    if shipped:
+        import json
+        (src / "looplab_stages.json").write_text(json.dumps(
+            {"stages": [{"name": "prep", "command": ["python", "train.py"]}]}))
+    return task
+
+
+@pytest.mark.parametrize("shipped", [False, True], ids=["overlay-manifest", "shipped-manifest"])
+def test_a_child_that_declares_again_keeps_its_manifest_through_materialize(tmp_path, monkeypatch,
+                                                                          shipped):
+    """H1 (driven by the critic as `d1_grandchild`): a parent's empty declaration put the manifest in
+    `deleted`, the child inherited it, and `write_node_files` unlinked the pipeline the child then
+    declared — the node ran the command alone. MUTATIONS: the manifest's writers leave `deleted`
+    alone; the empty declaration deletes a name the source does not ship."""
+    import json
+    task = _lineage_repo(tmp_path, shipped=shipped)
+    _seen, parent_dev = _drive(monkeypatch, task, stages=[], parent=_parent_with_train_stage(),
+                               scorer_status=True)
+    assert ("looplab_stages.json" in parent_dev.last_deleted) is shipped
+    parent = SimpleNamespace(id=8, metric=0.4, files=dict(parent_dev.last_files),
+                             deleted=list(parent_dev.last_deleted))
+    assert not (_materialize(tmp_path, "parent", parent_dev) / "looplab_stages.json").exists()
+    _seen, child = _drive(monkeypatch, task, parent=parent, scorer_status=True)
+    assert "looplab_stages.json" in child.last_files
+    assert not set(child.last_files) & set(child.last_deleted), "no name both written and deleted"
+    manifest = _materialize(tmp_path, "child", child) / "looplab_stages.json"
+    assert json.loads(manifest.read_text())["stages"][0]["name"] == "train"
+
+
+def test_the_write_tool_s_declaration_takes_the_manifest_back_out_of_deleted(tmp_path):
+    """The `declare_stages` TOOL is the manifest's other writer (MUTATION: it alone keeps writing
+    `files` directly)."""
+    from looplab.adapters.repo_write_tools import RepoWriteTools
+    write = RepoWriteTools(["**/*.py"], [], editables=[{"name": "", "path": str(tmp_path)}])
+    write.deleted = ["looplab_stages.json"]
+    (tmp_path / "train.py").write_text("print(1)\n")
+    out = write._declare_stages([{"name": "train", "command": ["python", "train.py"]}])
+    assert out.startswith("declared 1 preceding stage(s)")
+    assert "looplab_stages.json" in write.files and write.deleted == []
+
+
+def test_the_manifest_s_own_gate_decides_both_ways(tmp_path):
+    """M1: the removal went through `_delete`'s SURFACE gate — the legacy `**/*.py` default refused a
+    `.json`, and the empty declaration was accepted and did nothing (`d4_py_surface`). The manifest's
+    writers gate on the protect list only; so does its removal now (MUTATION: `_refusal`)."""
+    from looplab.adapters.repo_write_tools import RepoWriteTools
+    (tmp_path / "looplab_stages.json").write_text("[]")
+    write = RepoWriteTools(["**/*.py"], [], editables=[{"name": "", "path": str(tmp_path)}])
+    assert write._delete("looplab_stages.json").startswith("(refused:")   # the surface's answer
+    assert write.drop_stage_manifest() is None and write.deleted == ["looplab_stages.json"]
+    assert write.materialized_text("looplab_stages.json") is None
+    guarded = RepoWriteTools(_ALL, ["looplab_stages.json"],
+                             editables=[{"name": "", "path": str(tmp_path)}])
+    assert guarded.drop_stage_manifest() == guarded.manifest_refusal() is not None
+    assert guarded.deleted == [] and guarded.materialized_text("looplab_stages.json") == "[]"
+
+
+def test_an_empty_declaration_on_the_legacy_surface_drops_a_shipped_manifest(tmp_path,
+                                                                          monkeypatch):
+    """The critic's `d4`/`d7`: `**/*.py` surface, a scorer nobody can name (so not known frozen),
+    the manifest shipped by the source. `_delete`'s surface gate refused the `.json`, so the eval ran
+    the shipped `prep` stage while the implement sessions were told no pipeline."""
+    task = _lineage_repo(tmp_path, shipped=True)
+    task.edit_surface = ["**/*.py"]
+    task.eval = EvalSpec(command=["my-scorer", "--quick"], metric=_M)   # nameable by nobody
+    seen, dev = _drive(monkeypatch, task, stages=[], scorer_status=True)
+    assert dev.last_deleted == ["looplab_stages.json"]
+    assert not (_materialize(tmp_path, "wd", dev) / "looplab_stages.json").exists()
+    implement = [m[1]["content"] for name, m in seen if name != "declare_stages"][0]
+    assert "NO pipeline stages are declared for this node" in implement
+
+
+def test_a_degraded_phase_over_a_shipped_manifest_names_the_pipeline_that_runs(tmp_path,
+                                                                            monkeypatch):
+    """M7 read `files` alone, so a manifest the SOURCE ships read as absent while the eval ran it
+    (MUTATION: read `files`). Off, the historical overlay-only read."""
+    task = _lineage_repo(tmp_path, shipped=True)
+    bad = [{"name": "score", "command": ["python", "x.py"]}]            # refused: `score` is reserved
+    seen, _dev = _drive(monkeypatch, task, stages=bad, scorer_status=True)
+    implement = [m[1]["content"] for name, m in seen if name != "declare_stages"][0]
+    assert "PIPELINE for this node (shipped with the repository's own looplab_stages.json" in implement
+    assert "prep → score (operator cmd)" in implement
+    seen, _dev = _drive(monkeypatch, task, stages=bad)
+    implement = [m[1]["content"] for name, m in seen if name != "declare_stages"][0]
+    assert "NO pipeline stages are declared for this node" in implement
+
+
+def test_a_frozen_scorer_still_bounces_an_empty_declaration(tmp_path, monkeypatch):
+    """M2: the empty list was accepted wherever the flag and a command were on — a FROZEN scorer
+    that only scores too, which then trained nothing (`d6_frozen_empty`). MUTATION: drop the
+    `scorer_unfrozen` condition."""
+    import looplab.agents.agent as agent_mod
+    verdicts: list = []
+
+    def fake_loop(client, tools, messages, emit_spec, *, finalize, fallback, validate=None, **opts):
+        if emit_spec["function"]["name"] == "declare_stages":
+            verdicts.append(validate({"stages": []}))
+            return finalize({"stages": [{"name": "train", "command": ["python", "train.py"]}]})
+        return finalize({"summary": "s"})
+
+    monkeypatch.setattr(agent_mod, "drive_tool_loop", fake_loop)
+    monkeypatch.setattr(LLMRepoDeveloper, "_time_budget_note", lambda self: "")
+    monkeypatch.setattr(LLMRepoDeveloper, "_gpu_footprint_note", lambda self, idea: "")
+    for n, (command, protect, files) in enumerate([
+            (["bash", "run.sh"], ["run.sh"], ("run.sh", "train.py")),       # frozen
+            (["python", "score.py"], [], ("train.py",)),                    # the build authors it
+            (["my-scorer"], [], ("train.py",))]):                           # cannot be named
+        (tmp_path / str(n)).mkdir()
+        task = _repo(tmp_path / str(n), command=command, protect=protect, files=files)
+        LLMRepoDeveloper(object(), task, plan_decompose=False, scorer_status=True).implement(_IDEA)
+    frozen, authored, unnamed = verdicts
+    assert frozen and authored, "bounced by `validate_stages` as before"
+    assert unnamed is None, "the hedge invites it, so it is accepted"
+
+
+def test_no_operator_command_never_accepts_an_empty_declaration(tmp_path, monkeypatch):
+    """MUTATION: drop `_scorer_answer`'s no-command guard -> a task with no scorer would accept an
+    empty FULL pipeline, which then measures nothing."""
+    dev = LLMRepoDeveloper(object(), _repo(tmp_path, command=["bash", "run.sh"]),
+                           scorer_status=True)
+    monkeypatch.setattr(LLMRepoDeveloper, "_cmd_context", lambda self: ({}, False))
+    assert dev._scorer_answer(SimpleNamespace(exists=lambda p: True)) is None
+
+
+@pytest.mark.parametrize("stages", [{}, "", None, 0], ids=["dict", "str", "none", "zero"])
+def test_only_an_empty_LIST_is_a_declaration_of_none(tmp_path, monkeypatch, stages):
+    """MUTATION: drop `isinstance(stages, list)` -> a falsy non-list would drop the manifest."""
+    import looplab.agents.agent as agent_mod
+    verdicts: list = []
+
+    def fake_loop(client, tools, messages, emit_spec, *, finalize, fallback, validate=None, **opts):
+        if emit_spec["function"]["name"] == "declare_stages":
+            verdicts.append(validate({"stages": stages}))
+            return finalize({"stages": [{"name": "train", "command": ["python", "train.py"]}]})
+        return finalize({"summary": "s"})
+
+    monkeypatch.setattr(agent_mod, "drive_tool_loop", fake_loop)
+    monkeypatch.setattr(LLMRepoDeveloper, "_time_budget_note", lambda self: "")
+    monkeypatch.setattr(LLMRepoDeveloper, "_gpu_footprint_note", lambda self, idea: "")
+    task = _repo(tmp_path, command=["bash", "run.sh"])
+    LLMRepoDeveloper(object(), task, plan_decompose=False, scorer_status=True).implement(_IDEA)
+    assert verdicts[0], verdicts
+
+
+def test_the_empty_declaration_invalidates_the_carried_manifest_page(tmp_path, monkeypatch):
+    """L6: the emit writes the manifest outside every tool call, so the carried pages kept the
+    PARENT's manifest as current (`d14`). MUTATION: skip the invalidation."""
+    from looplab.agents.established import EstablishedContext
+
+    class _Spy(EstablishedContext):
+        def __init__(self):
+            super().__init__()
+            self.calls: list = []
+
+        def invalidate(self, tool, args):
+            self.calls.append((tool, dict(args or {})))
+            return super().invalidate(tool, args)
+
+    task = _repo(tmp_path, command=["bash", "run.sh"])
+    for stages in ([], None):
+        store = _Spy()
+        store.record("read_file", {"path": "looplab_stages.json"}, "the parent's manifest",
+                     phase="stages")
+        _seen, dev = _drive(monkeypatch, task, stages=stages, parent=_parent_with_train_stage(),
+                            scorer_status=True, established=store)
+        assert ("declare_stages", {}) in store.calls, stages
+        (page,) = [item for item in store._items.values()
+                   if item["path"] == "looplab_stages.json"]
+        assert page["changed"] and page["content"] is None, stages
+
+
+def test_dropping_the_manifest_is_not_work_of_a_fresh_build():
+    """L7 (`d9`): a fresh build whose only change was dropping a shipped manifest was not refused as
+    empty. MUTATION: count the manifest's deletion."""
+    from looplab.adapters.repo_developer import empty_build_refusal
+    assert empty_build_refusal(error=None, base=None, base_deleted=None, files={},
+                               deleted=["looplab_stages.json"])
+    assert empty_build_refusal(error=None, base=None, base_deleted=None, files={},
+                               deleted=["old.py"]) == ""
+
+
+def test_the_stage_note_says_what_is_known_of_code_nobody_can_name():
+    """L1: "not frozen: it does whatever that code does" was a claim about code the engine cannot
+    name (MUTATION: drop the `None` branch)."""
+    dev = LLMRepoDeveloper.__new__(LLMRepoDeveloper)
+    declared = [{"name": "train"}]
+    hedge = dev._stage_note(False, declared, False, False, (None, ()))
+    assert "the engine cannot tell from its argv which code that runs" in hedge
+    named = dev._stage_note(False, declared, False, False, (False, ("run.sh",)))
+    assert "the code it runs is not frozen" in named
+    frozen = dev._stage_note(False, declared, False, False, (True, ("run.sh",)))
+    assert frozen == dev._stage_note(False, declared, False, False, None)
+    assert "only SCORES" in frozen
+
+
+@pytest.mark.parametrize("argv", [
+    [".venv/bin/torchrun", "--nproc_per_node", "2", "score.py"],
+    ["bin/bash", "-c", "python score.py"],
+    [".venv/bin/python", "-c", "print(1)"],
+    ["tools/accelerate", "launch", "score.py"],
+], ids=["torchrun", "shell-inline", "python-inline", "accelerate"])
+def test_a_runner_head_is_not_the_scorer_file(argv):
+    """L2 (`d8_heads`): a relative launcher head was read as the file `exec` runs — "authored,
+    nothing to tell" without the venv, "frozen" with it — while the real scorer stayed editable."""
+    assert _exec_path(argv) is None
+    assert scorer_frozen({"command": argv}, _ALL, [], [], exists=lambda p: True) == (None, ())
+
+
+def test_a_transparent_launcher_head_is_read_through_not_executed():
+    """`./nohup python score.py` runs `score.py` — `entrypoint_candidates` reads through the launcher,
+    and the head itself is no file `exec` runs."""
+    argv = ["./nohup", "python", "score.py"]
+    assert _exec_path(argv) is None
+    assert scorer_frozen({"command": argv}, _ALL, [], [], exists=lambda p: True) == \
+        (False, ("score.py",))
+
+
+def test_a_module_under_a_repo_package_is_authored_and_an_installed_one_hedged():
+    """L3: `python -m pkg.score` whose `pkg/` the repo holds is the entrypoint this build writes; a
+    module nothing in the repo holds is installed code. A script named `pkg/__main__.py` is a
+    script, not a module (MUTATIONS: hedge every absent module; read the script as a module)."""
+    ev = {"command": ["python", "-m", "pkg.score"]}
+    assert scorer_frozen(ev, _ALL, [], [], exists=lambda p: p == "pkg/__init__.py") == (False, ())
+    assert scorer_frozen(ev, _ALL, [], [], exists=lambda p: False) == (None, ())
+    top = {"command": ["python", "-m", "score"]}
+    assert scorer_frozen(top, _ALL, [], [], exists=lambda p: False) == (None, ())
+    sub = {"command": ["python", "-m", "pkg.score"], "cwd": "sub"}
+    assert scorer_frozen(sub, _ALL, [], [], exists=lambda p: p == "sub/pkg/__init__.py") == \
+        (False, ())
+    script = {"command": ["python", "pkg/__main__.py"]}
+    assert scorer_frozen(script, _ALL, [], [], exists=lambda p: False) == (False, ())
+
+
+@pytest.mark.parametrize("argv,script", [
+    (["bash", "+c", "run.sh"], None),
+    (["bash", "+s"], None),
+    (["bash", "+xc", "run.sh"], None),
+    (["bash", "+o", "posix", "run.sh"], "run.sh"),
+    (["env", "--", "bash", "run.sh"], "run.sh"),
+    (["env", "--", "A=1", "bash", "run.sh"], "run.sh"),
+    (["/usr/bin/env", "A=1", "bash", "run.sh"], "run.sh"),
+    (["bash.EXE", "run.sh"], "run.sh"),
+], ids=["plus-c", "plus-s", "plus-cluster-c", "plus-o", "env-dashdash", "env-dashdash-assign",
+        "env-path", "exe"])
+def test_plus_clusters_and_env_spellings(argv, script):
+    """L4: `bash +c run.sh` runs inline text and `bash +s` reads stdin — measured with bash; `env --`
+    ends env's options; `/usr/bin/env` is env (MUTATIONS: `-`-only c/s; `argv[0] == "env"`)."""
+    assert _shell_script(argv) == script
+
+
+def test_a_backslash_head_is_normalized_before_it_is_read():
+    """MUTATION: drop the head's separator normalization -> a Windows-spelled relative head names
+    no file."""
+    assert _exec_path(["bin\\score", "--x"]) == "bin/score"
+    assert _exec_path([".\\run.sh"]) == "run.sh"
+
+
+def test_the_system_clause_hedges_for_code_nobody_can_name():
+    """MUTATION (crit_v47 M37/V26): answer the unnameable case with the historical "PROTECTED"
+    sentence -> every phase is told the code is frozen while the engine cannot tell."""
+    from looplab.adapters.repo_developer import _SCORER_CODE_PROTECTED
+    hedge = scorer_system_clause((None, ()))
+    assert hedge != _SCORER_CODE_PROTECTED
+    assert hedge.startswith("That covers the stage; whether it covers the code the stage runs, "
+                            "the engine cannot tell")
+    for answer in (None, (True, ("run.sh",)), (False, ())):
+        assert scorer_system_clause(answer) == _SCORER_CODE_PROTECTED, answer

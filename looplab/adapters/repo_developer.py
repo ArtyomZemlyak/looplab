@@ -646,7 +646,9 @@ _ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 def _argv_after_env(argv: list) -> Optional[list]:
     """`argv` with a leading `env NAME=value …` read through; None when `env` takes an option."""
     if argv and _program_name(argv[0]) == "env":
-        i = 1
+        # `env -- bash run.sh`: a `--` straight after `env` ends its options, and the assignments
+        # and the command follow as usual (critic 2026-09-30).
+        i = 2 if len(argv) > 1 and argv[1] == "--" else 1
         while i < len(argv) and _ENV_ASSIGNMENT.match(argv[i]):
             i += 1
         return None if i < len(argv) and argv[i].startswith("-") else argv[i:]
@@ -670,12 +672,26 @@ def _relative_script(token: str) -> Optional[str]:
     return script
 
 
+# Heads that run ANOTHER file: an interpreter, a shell, a launcher. `.venv/bin/torchrun … score.py`
+# executes `score.py`, which this rule cannot name (`entrypoint_candidates` refuses torchrun's
+# grammar) — reading the launcher itself as the scorer answered "authored, nothing to tell" when the
+# venv was absent and "frozen" when it was present, while `score.py` stayed editable (critic
+# 2026-09-30, L2). `repo_task.py::_TRANSPARENT_LAUNCHERS` joins at the call, a deferred import.
+_RUNNER_HEADS = _SCRIPT_SHELLS | frozenset({"torchrun", "accelerate", "deepspeed"})
+_INTERPRETER_HEAD = re.compile(r"^(?:python|pypy)[\d.]*$", re.I)
+
+
 def _exec_path(argv) -> Optional[str]:
     """The file an argv whose head is itself a RELATIVE PATH executes (`./run.sh`, `bin/score`):
     `exec` runs that file from the cwd — the kernel's rule, not a guess. None for a bare name, which
-    is looked up on PATH (critic 2026-09-30: `./run.sh` was answered "names no file")."""
+    is looked up on PATH (critic 2026-09-30: `./run.sh` was answered "names no file"), and for a
+    head that runs another file (`_RUNNER_HEADS`, an interpreter, a transparent launcher)."""
+    from looplab.adapters.repo_task import _TRANSPARENT_LAUNCHERS
     argv = _argv_after_env([t for t in (argv or []) if isinstance(t, str)]) or []
     head = argv[0].replace("\\", "/").strip() if argv else ""
+    name = _program_name(head).lower()
+    if name in _RUNNER_HEADS or name in _TRANSPARENT_LAUNCHERS or _INTERPRETER_HEAD.match(name):
+        return None
     return _relative_script(head) if "/" in head else None
 
 
@@ -707,7 +723,10 @@ def _shell_script(argv) -> Optional[str]:
             i += 1
             continue
         if tok.startswith(("-", "+")):
-            if tok[0] == "-" and ({"c", "s"} & set(tok[1:])):
+            # `c` and `s` in EITHER cluster: `bash +c run.sh` runs `run.sh` as inline text and
+            # `bash +s` reads stdin, exactly as their `-` spellings do (critic 2026-09-30, L4,
+            # measured with bash).
+            if {"c", "s"} & set(tok[1:]):
                 return None
             i += 1 + sum(ch in "oO" for ch in tok[1:])
             continue
@@ -754,7 +773,9 @@ def scorer_frozen(ev: dict, surface, protected, prefixes, *,
         return True, ()
     argv = [t for t in ((ev or {}).get("command") or []) if isinstance(t, str)]
     names = list(entrypoint_candidates(argv))
-    module = any(n.endswith("/__main__.py") for n in names)
+    # The `-m` form, by its SHAPE — `entrypoint_candidates` answers it with exactly its two spellings.
+    # A script named `pkg/__main__.py` is a script (critic 2026-09-30: it was read as a module).
+    module = len(names) == 2 and names[1] == names[0][:-3] + "/__main__.py"
     names = names or [s for s in (_shell_script(argv) or _exec_path(argv),) if s]
     cwd = str((ev or {}).get("cwd") or ".").replace("\\", "/").strip()
     if cwd.startswith(("/", "~")) or PureWindowsPath(cwd).drive:
@@ -770,7 +791,14 @@ def scorer_frozen(ev: dict, surface, protected, prefixes, *,
     if exists is not None:
         files = tuple(f for f in files if exists(f))
         if not files:
-            return (None, ()) if module else (False, ())
+            if not module:
+                return (False, ())
+            # A module under a package the REPO holds is one this build authors, as a script is
+            # (critic 2026-09-30, L3); only a module no package of the repo holds is installed code.
+            top = names[0].split("/", 1)[0] if "/" in names[0] else ""
+            init = (RepoWriteTools._safe_rel(posixpath.normpath(pre + top + "/__init__.py"))
+                    if top else "")
+            return (False, ()) if init and exists(init) else (None, ())
     policy = SurfacePolicy(surface, protected, prefixes, protected_exact=True, check_escapes=False)
     if any(policy.check(f) is not None for f in files):
         return True, files
@@ -1022,7 +1050,10 @@ def empty_build_refusal(*, error, base, base_deleted, files, deleted) -> str:
     # loosening of this predicate.
     from looplab.adapters.repo_write_tools import STAGES_MANIFEST
     authored = [name for name in (files or {}) if name != STAGES_MANIFEST]
-    if not authored and not deleted:
+    # …and removing it is no candidate either: an empty declaration that dropped a manifest the
+    # source ships is the same declaration, not an experiment (critic 2026-09-30, L7).
+    removed = [name for name in (deleted or []) if name != STAGES_MANIFEST]
+    if not authored and not removed:
         only_manifest = bool(files)
         # SPELLED AS "STUCK", NOT AS A CRASH, since 2026-08-28. The docstring above already says
         # why: the cause is "a missing forcing function rather than a confused model" and the
@@ -2585,10 +2616,18 @@ class LLMRepoDeveloper:
         if declared:
             _src = ("carried over from the parent solution — your STAGES phase declared "
                     "nothing new this node" if carried_over else "declared by your STAGES phase")
+            if carried_over == "shipped":
+                _src = ("shipped with the repository's own looplab_stages.json — your STAGES phase "
+                        "declared nothing new this node")
             _then = ("the operator's cmd then runs as `score`, and the code it runs is not frozen: "
                      "it does whatever that code does, so do not assume it only scores."
                      if scorer_unfrozen(scorer) else
                      "the eval entrypoint only SCORES the artifacts the earlier stages produce.")
+            if scorer_unfrozen(scorer) and scorer[0] is None:
+                # Nobody can NAME that code (critic 2026-09-30, L1): "not frozen" was a claim the
+                # engine cannot make about it either way.
+                _then = ("the operator's cmd then runs as `score`, and the engine cannot tell from "
+                         "its argv which code that runs: read it, and do not assume it only scores.")
             return (f"\nPIPELINE for this node ({_src}): {_chain} "
                     "→ score (operator cmd). Implement the code those stages run; " + _then)
         return ("\nNO pipeline stages are declared for this node"
@@ -2621,11 +2660,19 @@ class LLMRepoDeveloper:
         the PARENT's manifest carried over on an improve (base preload). This is exactly what the
         eval's `_resolve_stages` runs when the STAGES phase declares nothing new, so validate it the
         SAME way the eval does (reserved 'score'): an invalid manifest the eval would DROP to the
-        single command returns [] here too, keeping the implement prompt in step with the eval."""
+        single command returns [] here too, keeping the implement prompt in step with the eval.
+        Under `developer_scorer_status` it is read as the WORKSPACE will hold it
+        (`RepoWriteTools.materialized_text`): the overlay, else a manifest the source ships and this
+        build did not delete — `files` alone read a shipped one as absent while the eval ran it
+        (critic 2026-09-30). Off, the historical overlay-only read, byte for byte."""
         import json as _json
         from looplab.runtime.command_eval import materialized_stages
+        if getattr(self, "_scorer_status", False):
+            text = write.materialized_text("looplab_stages.json") or ""
+        else:
+            text = write.files.get("looplab_stages.json", "")
         try:
-            obj = _json.loads(write.files.get("looplab_stages.json", ""))
+            obj = _json.loads(text)
         except (ValueError, TypeError):
             return []
         # ONE source of truth with the eval's `_resolve_stages`: `materialized_stages` accepts both the
@@ -2780,7 +2827,6 @@ class LLMRepoDeveloper:
         from looplab.agents.agent import run_phase, CompositeTools
         from looplab.tools.env_inspect import EnvInspectTools
         from looplab.runtime.command_eval import validate_stages
-        import json as _json
         # THIS PHASE IS READ-ONLY TOO, and its system prompt said the opposite. `_propose_plan` has
         # handed its model `read_only_intro(system)` since doc 56 §153 measured the cost of the
         # promise (51 `write_file` calls from `plan`, all 51 errors); the toolset below has no writer
@@ -2796,11 +2842,23 @@ class LLMRepoDeveloper:
         # the work, and `validate_stages` refuses an empty list — driven, the obedient model was
         # bounced twice and the parent's `train` stage then ran again in the child (critic
         # 2026-09-30). Accepted here only; `validate_stages` stays the definition of a manifest.
-        allow_none = bool(has_cmd and getattr(self, "_scorer_status", False))
+        # Only where that sentence is SAID — the scorer's code not known to be frozen
+        # (`scorer_unfrozen`): a frozen scorer that only scores is bounced as before, since an empty
+        # pipeline there trains nothing (critic 2026-09-30, M2). `_scorer_answer` is None when the
+        # flag is off or no operator command scores the node.
+        allow_none = scorer_unfrozen(self._scorer_answer(write))
 
         def _declared_none(args) -> bool:
             stages = (args or {}).get("stages")
             return allow_none and isinstance(stages, list) and not stages
+
+        def _pages_saw_manifest() -> None:
+            # This phase's EMIT writes the manifest outside every tool call, so the carried pages'
+            # own hook never sees it (critic 2026-09-30, L6): a page of the PARENT's manifest read
+            # earlier would ride into the plan and implement phases as current.
+            store = getattr(self, "_established", None)
+            if store is not None:
+                store.invalidate("declare_stages", {})
         # scouts read the LIVE overlay (the parent solution on improve/merge), not the pristine repo.
         # Composed first so the user turn can name what it already holds — see the plan phase above.
         # NO `answered_by_context` HERE, deliberately. It was spliced in and measured INERT: the
@@ -2816,6 +2874,8 @@ class LLMRepoDeveloper:
 
         def _validate(args):                      # bounce a malformed manifest back to the model
             if _declared_none(args):
+                # Accepted: this phase never runs over a PROTECTED manifest (`_fresh_stage_note` skips
+                # it), so the manifest's own gate (`drop_stage_manifest`) always lets it go.
                 return None
             stages = (args or {}).get("stages")
             _, err = validate_stages(stages, reserved=reserved)
@@ -2851,10 +2911,12 @@ class LLMRepoDeveloper:
         def _finalize(args):
             if _declared_none(args):
                 # The command alone is the pipeline: drop a manifest carried over from the parent (or
-                # shipped unprotected), by the write tool's own gate. A refused delete leaves it, and
-                # the node degrades as a failed phase does — the M7 note then names what runs.
-                if write.exists("looplab_stages.json"):
-                    write._delete("looplab_stages.json")
+                # shipped unprotected), by the MANIFEST's gate (`drop_stage_manifest`), never the edit
+                # surface's — `_delete` went through the surface, which the legacy `**/*.py` default
+                # refuses for a `.json`, and the declaration was accepted and did nothing (critic
+                # 2026-09-30, M1). A refusal leaves it, and the M7 note then names what runs.
+                write.drop_stage_manifest()
+                _pages_saw_manifest()
                 return []
             clean, _ = validate_stages((args or {}).get("stages"), reserved=reserved)
             # PERSIST a well-formed manifest even if a path still looks missing. The missing-path guard
@@ -2865,7 +2927,8 @@ class LLMRepoDeveloper:
             # metric, the worst outcome for the search). A stage pipeline that FileNotFoundErrors at eval
             # is instead LOUD and recoverable — inline repair can fix the path. So ship it, don't hide it.
             if clean:
-                write.files["looplab_stages.json"] = _json.dumps({"stages": clean}, indent=1)
+                write.stage_manifest(clean)
+                _pages_saw_manifest()
                 return clean
             return []
         try:
@@ -3368,7 +3431,10 @@ class LLMRepoDeveloper:
             # entrypoint's own training, not the declared pipeline).
             if not declared:
                 declared = self._materialized_stage_list(write)
-                carried_over = bool(declared)
+                # "shipped": the manifest the eval will run is the SOURCE's, not a parent's — only
+                # reachable under the scorer-status read above (`_materialized_stage_list`).
+                carried_over = (("shipped" if "looplab_stages.json" not in write.files else True)
+                                if declared else False)
         # Tell the implement sessions what pipeline ACTUALLY exists. The old prompt asserted
         # "your STAGES phase already declared a train stage" unconditionally — after a failed/
         # empty stages phase the model then wrote a score-only entrypoint that scored a stale

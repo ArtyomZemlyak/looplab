@@ -532,11 +532,9 @@ class RepoWriteTools:
         # The surface still governs the STAGE SCRIPTS the manifest points at (write_file), and the
         # declared commands run under the same sandbox tier as the eval — declaring a stage grants
         # nothing an in-surface .py edit (imported by the eval) couldn't already run.
-        reason = SurfacePolicy(None, self._protected, self._prefixes,
-                               protected_exact=True, check_escapes=False).check("looplab_stages.json")
-        if reason is not None:
-            return ("(refused: looplab_stages.json is protected — the operator owns the eval; "
-                    "you may not declare stages in it)")
+        refusal = self.manifest_refusal()
+        if refusal is not None:
+            return refusal
         # The shared stage rules (runtime/command_eval.validate_stages) — the SAME validator the
         # engine's _resolve_stages runs at consume time, so a manifest this tool accepts is never
         # silently re-filtered engine-side. The refusal strings stay byte-identical to the original
@@ -564,9 +562,63 @@ class RepoWriteTools:
         collision = self.manifest_collision_refusal(clean)
         if collision is not None:
             return collision
-        self.files[STAGES_MANIFEST] = json.dumps({"stages": clean}, indent=1)
+        self.stage_manifest(clean)
         chain = " → ".join(s["name"] for s in clean) + " → score (operator cmd)"
         return f"declared {len(clean)} preceding stage(s): {chain}"
+
+    def manifest_refusal(self) -> Optional[str]:
+        """The manifest's OWN write gate, or None: the PROTECT list only, never the edit surface (the
+        reason is `_declare_stages`' comment). Shared by the three writers of the file — the
+        `declare_stages` tool, the STAGES phase's emit and its empty declaration — so what may write
+        the manifest is exactly what may remove it (critic 2026-09-30, M1: the removal went through
+        `_delete`'s SURFACE gate, and the legacy `**/*.py` surface refused it)."""
+        reason = SurfacePolicy(None, self._protected, self._prefixes,
+                               protected_exact=True, check_escapes=False).check(STAGES_MANIFEST)
+        if reason is None:
+            return None
+        return ("(refused: looplab_stages.json is protected — the operator owns the eval; "
+                "you may not declare stages in it)")
+
+    def stage_manifest(self, clean: list) -> None:
+        """Stage `looplab_stages.json` for the validated `clean` stages — the ONE write of it.
+
+        It also takes the name back out of `deleted`. A parent whose empty declaration removed a
+        manifest the source ships passes that deletion down (`implement_from` seeds `deleted` from
+        the parent), and `engine/workspace.py::write_node_files` writes the files THEN applies the
+        deletions — so a child that declared a pipeline had its own manifest unlinked after it was
+        written, and ran the command alone (critic 2026-09-30, H1). `_write`/`_edit` already undo a
+        deletion for the file they write; the manifest's writers did not."""
+        import json
+        self.files[STAGES_MANIFEST] = json.dumps({"stages": clean}, indent=1)
+        if STAGES_MANIFEST in self.deleted:
+            self.deleted.remove(STAGES_MANIFEST)
+
+    def drop_stage_manifest(self) -> Optional[str]:
+        """Remove the manifest from this build — an empty declaration's write (doc 69 69.5) — by the
+        manifest's own gate (`manifest_refusal`); None when done, else the refusal.
+
+        The overlay copy (a parent's, carried over) is dropped, and the name joins `deleted` ONLY
+        when the SOURCE ships the file: a deletion of a name nothing below holds would ride into every
+        descendant's `deleted` for no reason, which is how H1 reached a grandchild."""
+        refusal = self.manifest_refusal()
+        if refusal is not None:
+            return refusal
+        self.files.pop(STAGES_MANIFEST, None)
+        if self.original(STAGES_MANIFEST) is not None and STAGES_MANIFEST not in self.deleted:
+            self.deleted.append(STAGES_MANIFEST)
+        return None
+
+    def materialized_text(self, p: str) -> Optional[str]:
+        """`p`'s text as the node's workspace will hold it, or None when it will hold none: the staged
+        overlay first, else the editable roots' copy — unless this build DELETED it. The eval's
+        `_resolve_stages` reads the manifest off that workspace, so a reader that must say which
+        pipeline will run asks this, not `files` (critic 2026-09-30: a manifest the source ships was
+        read as absent, and the implement sessions were told no pipeline while it ran)."""
+        if p in self.files:
+            return self.files[p]
+        if p in self.deleted:
+            return None
+        return self.original(p)
 
     def _refusal(self, p: str, verb: str):
         """Run the shared SurfacePolicy (tools/patch.py) over an already-canonicalized path and map
