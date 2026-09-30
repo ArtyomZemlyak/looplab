@@ -823,3 +823,89 @@ def test_the_runs_stop_ends_the_alternatives_before_a_further_member_or_the_rank
     assert model.rank_requests == []
     assert model.summaries == 0
     assert panel.last_foresight is None
+
+
+# ------------------------------------------------------------------ (12) the session's own ceilings
+# The critic, 2026-09-30: 69.2's `token_budget` bounds a SESSION, and a continuation of candidate 1's
+# session was handed a fresh one — candidate 1 cut at 400 tokens under a 250 budget, then the
+# alternative spent 400 more re-sending the same transcript.
+class _Billed(_Model):
+    """`_Model` with the run's accountant: every chat commits `per` tokens on this thread."""
+
+    def __init__(self, script, *, per=100, **kw):
+        super().__init__(script, **kw)
+        from looplab.core.llm import CostAccountant
+        self.accountant, self.per = CostAccountant(), per
+
+    def chat(self, messages, tools=None, tool_choice="auto", **kw):
+        self.accountant.add(0.0, usage={"prompt_tokens": self.per - 1, "completion_tokens": 1,
+                                        "total_tokens": self.per})
+        return super().chat(messages, tools, tool_choice, **kw)
+
+
+def _billed_chain(script, *, budget, forced=()):
+    from looplab.agents.agent import ToolUsingResearcher
+    model = _Billed(script, order=(0, 1), forced=list(forced))
+    researcher = ToolUsingResearcher(model, _Tools(), loop_opts=LoopOptions(token_budget=budget))
+    panel = ForesightPanelResearcher(researcher, k=2, client=model, alternatives=True)
+    return model, researcher, panel
+
+
+def test_12_a_session_its_token_ceiling_cut_is_not_continued():
+    """MUTATION: drop the spend clause from `continuable` -> an alternative request is sent."""
+    def reply(messages):
+        return _turn(_read(f"r{len(messages)}", f"src/f{len(messages)}.py"))   # reads until cut
+    model, researcher, panel = _billed_chain(reply, budget=250,
+                                             forced=[_emission("salvaged at the ceiling")])
+    panel.propose(_state(), None)
+    assert researcher_budget_exhausted(researcher) == "tokens"
+    assert not any(_ALT_MARK in str(req[-1].get("content")) for req in model.chats), (
+        "a session cut by its token ceiling was continued under a fresh one")
+
+
+def test_12_a_continued_session_runs_on_what_is_left_of_its_token_ceiling():
+    """Candidate 1 commits 200 tokens (a read, an emit) of a 1,000 budget; the alternative's own
+    loop is started with the 800 left. MUTATION: hand it `self.loop_opts` unchanged -> 1,000."""
+    from looplab.core.phase_events import PHASE_STARTED, phase_sink_scope
+    model, _researcher, panel = _billed_chain(_capped_script(), budget=1000)
+    rows = []
+    with phase_sink_scope(lambda t, d: rows.append((t, d))):
+        panel.propose(_state(), None)
+    started = {d.get("label"): d for t, d in rows if t == PHASE_STARTED}
+    assert started["Researcher·propose"]["token_budget"] == 1000
+    assert started["Researcher·alternative"]["token_budget"] == 800, started
+
+
+def test_12_no_continuation_is_measured_from_another_thread():
+    """The allowance is read off the thread that ran candidate 1; from another thread it cannot be,
+    and the continuation is refused rather than handed a fresh ceiling."""
+    import threading
+    model, researcher, _panel = _billed_chain(_capped_script(), budget=1000)
+    idea, session = researcher.propose_with_session(_state(), None)
+    assert idea is not None and session.continuable
+    out = []
+    worker = threading.Thread(
+        target=lambda: out.append(researcher.propose_alternative(_state(), None, session, [idea])))
+    worker.start()
+    worker.join()
+    assert out == [None]
+
+
+def test_12_the_brief_is_distilled_from_the_transcript_as_it_stood(monkeypatch):
+    """The live list is compacted IN PLACE by later turns; the chosen candidate's brief reads the
+    snapshot taken when it finished. MUTATION: index into the live list -> the alternative's turn
+    (or the summary that replaced candidate 1's reads) reaches the brief."""
+    import looplab.agents.agent as agent_mod
+    seen = []
+    monkeypatch.setattr(agent_mod, "_contribute_brief",
+                        lambda client, prefix, **kw: seen.append(list(prefix)))
+    session = ProposalSession()
+    live = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"},
+            {"role": "tool", "tool_call_id": "r1", "content": "candidate 1's read"}]
+    session.hold(live, [], "fallback")
+    original = list(live)
+    live[:] = [live[0], {"role": "user", "content": "[summary of earlier turns]"},
+               {"role": "user", "content": "ONE ALTERNATIVE experiment, please"}]
+    session.pending_brief = (object(), "Researcher·propose", "the Developer", object())
+    session.publish_brief(0)
+    assert seen == [original]

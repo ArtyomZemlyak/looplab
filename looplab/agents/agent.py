@@ -13,6 +13,7 @@ through this module holds. `run_phase` stays HERE (see the note above it).
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -21,6 +22,7 @@ from looplab.core.cards import idea_proposal_digest
 from looplab.core.containment import contain
 from looplab.core.evidence import fence_kwargs, fence_untrusted
 from looplab.core.llm import BudgetExceeded
+from looplab.core.llm_budget import thread_committed_tokens
 from looplab.core.models import Idea, IdeaEmission, Node, RunState
 from looplab.core.parse import ParseError, parse_structured
 from looplab.core.prompts import PromptStore, render
@@ -287,6 +289,13 @@ _EMIT_RECORDED = "(recorded: this proposal is one of the candidates for the next
 _NOT_EXECUTED = "(not executed: your emit ended that turn)"
 
 
+# The loop cutoffs that end a proposal session for good: its token, money or wall-clock ceiling
+# (`tool_loop.py::LOOP_CUTOFF_KINDS`). Continuing one would re-send the whole transcript under a
+# fresh allowance of the very ceiling that just fired. `turns`, `stuck`, `stalled` and `emit_force`
+# are not spend: a continuation carries its own turn cap (`ALTERNATIVE_MAX_TURNS`).
+SPEND_CUTOFFS = frozenset({"tokens", "cost", "time"})
+
+
 @dataclass
 class ProposalSession:
     """ONE proposal's research session, as the call that ran it hands it back.
@@ -304,12 +313,25 @@ class ProposalSession:
     exit: str = ""
     ends: list = field(default_factory=list)
     pending_brief: Optional[tuple] = field(default=None, repr=False)
+    # Which bound ended the last loop of the session ("" = none) — a SPEND ceiling ends the session
+    # for good (`continuable`) — and what its thread had committed when it began, so a continuation
+    # is held to what is LEFT of the session's token ceiling rather than handed a fresh one (the
+    # critic, 2026-09-30: candidate 1 cut at 400 tokens under a 250 budget, and the alternative spent
+    # 400 more).
+    cutoff: str = ""
+    tokens_at_start: Optional[int] = None
+    thread: Optional[int] = None
+    # The transcript AS IT STOOD when each candidate finished — `publish_brief` distills from it. The
+    # live `messages` list is compacted IN PLACE by later turns (`_compact_in_place`), so an index into
+    # it can name a prefix that already holds an alternative's reads (the critic, 2026-09-30).
+    snapshots: list = field(default_factory=list, repr=False)
 
     @property
     def continuable(self) -> bool:
-        return self.exit in ("emitted", "salvaged")
+        return self.exit in ("emitted", "salvaged") and self.cutoff not in SPEND_CUTOFFS
 
-    def hold(self, messages: list, cards, exit_kind: str, *, emit_name: str = "emit") -> None:
+    def hold(self, messages: list, cards, exit_kind: str, *, emit_name: str = "emit",
+             cutoff: str = "") -> None:
         """Record a finished loop. `finalized` (the loop called `finalize`) is split into
         `emitted` / `salvaged` by whether the accepted emit call is in the transcript."""
         self.messages = messages
@@ -321,7 +343,9 @@ class ProposalSession:
                 and call.get("id", "") in open_ids for call in turn["tool_calls"])
                 else "salvaged")
         self.exit = exit_kind
+        self.cutoff = str(cutoff or "")
         self.ends.append(len(messages))
+        self.snapshots.append(list(messages))
 
     def publish_brief(self, candidate: int) -> None:
         """Contribute the handoff brief `propose` deferred, distilled from the session UP TO the end
@@ -333,8 +357,9 @@ class ProposalSession:
         if pending is None or not 0 <= candidate < len(self.ends):
             return
         client, label, next_label, ledger = pending
-        _contribute_brief(client, self.messages[:self.ends[candidate]], label=label,
-                          next_label=next_label, ledger=ledger)
+        prefix = (self.snapshots[candidate] if candidate < len(self.snapshots)
+                  else self.messages[:self.ends[candidate]])
+        _contribute_brief(client, prefix, label=label, next_label=next_label, ledger=ledger)
 
 
 def _open_calls(messages: list) -> tuple[Optional[dict], set]:
@@ -649,6 +674,11 @@ class ToolUsingResearcher:
 
         next_label = ("the Developer (stages → plan → implement)" if getattr(self, "handoff", True)
                       else "the Developer (single-shot implement)")
+        if session is not None:
+            # What this thread had committed before the session's first loop: the base a
+            # continuation's remaining token allowance is measured from (`propose_alternative`).
+            session.tokens_at_start = thread_committed_tokens()
+            session.thread = threading.get_ident()
         try:
             # Every loop OPTION (the turn/time/context budgets included) is folded into
             # self.loop_opts once in __init__ (see there) — pass the merged bundle straight through,
@@ -674,7 +704,7 @@ class ToolUsingResearcher:
                 **fence_kwargs(self.evidence_envelope),
                 **self.loop_opts)
             if session is not None:
-                session.hold(messages, visible, exit_kind[0])
+                session.hold(messages, visible, exit_kind[0], cutoff=self.last_budget_exhausted)
                 ledger = _handoff_ctx.get()
                 if getattr(self, "handoff", True) and ledger is not None:
                     session.pending_brief = (self.client, "Researcher·propose", next_label, ledger)
@@ -769,6 +799,19 @@ class ToolUsingResearcher:
         configured = getattr(getattr(self, "loop_opts", None), "max_turns", None)
         cap = (min(int(configured), ALTERNATIVE_MAX_TURNS) if configured and int(configured) > 0
                else ALTERNATIVE_MAX_TURNS)
+        opts = self.loop_opts.replace(max_turns=cap)
+        # THE SESSION'S TOKEN CEILING, NOT A FRESH ONE (the critic, 2026-09-30). The continuation
+        # re-sends the whole transcript, and `agent_token_budget` bounds a SESSION: it runs on what is
+        # left, measured on the thread that ran candidate 1 (`core/llm_budget.py`); with nothing left,
+        # or on another thread where that cannot be measured, there is no continuation.
+        budget = int(getattr(self.loop_opts, "token_budget", 0) or 0)
+        if budget > 0:
+            if session.thread != threading.get_ident() or session.tokens_at_start is None:
+                return None
+            left = budget - (thread_committed_tokens() - session.tokens_at_start)
+            if left <= 0:
+                return None
+            opts = opts.replace(token_budget=left)
         try:
             result = run_phase(
                 self.client, self.tools, messages, emit_spec,
@@ -777,7 +820,7 @@ class ToolUsingResearcher:
                 validate=_validate_alternative, on_budget=_note_cutoff,
                 on_tool_result=_established_hook(getattr(self, "_established", None), "propose"),
                 **fence_kwargs(self.evidence_envelope),
-                **self.loop_opts.replace(max_turns=cap))
+                **opts)
         except (BudgetExceeded, PhaseCancelled):
             session.exit = "error"
             raise
@@ -788,7 +831,8 @@ class ToolUsingResearcher:
             session.exit = "error"
             contain("researcher alternative", exc)
             return None
-        session.hold(messages, cards, exit_kind[0] or "fallback", emit_name=emit_name)
+        session.hold(messages, cards, exit_kind[0] or "fallback", emit_name=emit_name,
+                     cutoff=self.last_budget_exhausted)
         if result is None:
             return None
         digest = idea_proposal_digest(result)

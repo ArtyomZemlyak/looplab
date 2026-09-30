@@ -1401,7 +1401,7 @@ def _in_flight_node_ids(state, withheld=frozenset()) -> list[int]:
                   and (n.id, n.attempt) not in withheld)
 
 
-def _what_the_engine_is_finishing(state, events) -> str:
+def _what_the_engine_is_finishing(state, events, withheld=None) -> str:
     """What a stopped engine that still holds its lock is finishing, named from the log alone.
 
     WP-STOP (MiniOneRec inf13, 2026-09-29): `stop --wait` gave up saying the engine "exits once its
@@ -1416,7 +1416,8 @@ def _what_the_engine_is_finishing(state, events) -> str:
     stop path: their start receipt outlives the withhold, so the fold alone calls them running."""
     from looplab.events.stop_account import open_phase_line
 
-    running = _in_flight_node_ids(state, withheld_lifecycles(events))
+    running = _in_flight_node_ids(
+        state, withheld_lifecycles(events) if withheld is None else withheld)
     if running:
         return (f"the engine exits once its running evaluation(s) finish "
                 f"(node {', '.join(map(str, running))})")
@@ -1714,9 +1715,13 @@ class _TailFold:
     def __init__(self, store):
         self._store, self._key, self._state = store, None, None
         self.withheld: frozenset = frozenset()
+        # The rows of the latest call, so a caller that needs the log as well as the fold reads the
+        # SAME prefix both describe rather than a second `read_all` (the critic, 2026-09-30).
+        self.events: list = []
 
     def __call__(self):
         events = self._store.read_all()
+        self.events = events
         key = (len(events), events[0] if events else None, events[-1] if events else None)
         if (self._state is None or self._key is None or key[0] != self._key[0]
                 or key[1] is not self._key[1] or key[2] is not self._key[2]):
@@ -1894,7 +1899,8 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
         now = current()
         open_builds = _open_build_card_ids(now) if draining else []
         typer.echo(f"gave up after {limit:g}s: the engine on {run_dir} still holds its lock. The stop "
-                   "is recorded; " + _what_the_engine_is_finishing(now, store.read_all())
+                   "is recorded; " + _what_the_engine_is_finishing(now, current.events,
+                                                                     current.withheld)
                    + (" and the Card build(s) it is draining commit or close"
                       + (f" (still open: {', '.join(open_builds)})" if open_builds else "")
                       if draining else ""))

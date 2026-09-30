@@ -177,6 +177,11 @@ class StrategyContext(BaseModel):
     open_proposals: int = 0
     widest_declared_gpus: Optional[int] = None
     undeclared_proposals: int = 0
+    # Built nodes admission has not started yet — the queue a width change lets in next (the critic,
+    # 2026-09-30: the incident's 4-GPU work was exactly that, and the Card population missed it).
+    waiting_nodes: int = 0
+    widest_waiting_gpus: Optional[int] = None
+    undeclared_waiting: int = 0
     eval_parallel_operator_owned: bool = False
     # The node budget and the plan's endgame reserve the brief's budget line states (doc 69 69.25,
     # `Settings.strategist_budget_brief`), filled by the engine only when that switch is on:
@@ -940,8 +945,9 @@ def _policy_width_note(ctx) -> str:
 
 
 def _gpu_pool_note(ctx) -> str:
-    """One line: the GPU pool, what ONE experiment may claim at each width, what the open proposals
-    declare, and whether the width is the operator's — or "" when the engine sent no pool.
+    """One line: the GPU pool, what admission GRANTS an experiment at each width, the most one may
+    declare for every experiment to run at once, what the queued work declares, and whether the
+    width is the operator's — or "" when the engine sent no pool.
 
     THE WIDTH WAS CHOSEN BLIND (doc 69 §6.1, 69.23). `minionerec-backbones-v10`'s Strategist set
     `eval_parallel=2` "without oversubscribing 192 CPU-only cores" on four H200s: the 4-GPU
@@ -950,26 +956,44 @@ def _gpu_pool_note(ctx) -> str:
     its brief said what a width COSTS each experiment, what the queued work had declared it needs,
     or that the width was no longer its to choose. It states facts the engine schedules by and
     forbids nothing: a wider width is still the Strategist's call where the operator left it open.
+
+    THE GRANT, NOT A CEILING (the critic, 2026-09-30). The first cut called `pool // width` "the
+    most GPUs ONE experiment may claim" — but admission (`resources.py::_resource_request_for_node`)
+    grants an UNDECLARED experiment exactly one device at any width > 1 (the whole box, unpinned, at
+    width 1) and a DECLARED one `min(declared, pool)` at any width. So `pool // width` is only the
+    declaration that keeps `width` experiments running at once — the Researcher's own default
+    (`widths.py::per_experiment_gpu_budget`) — and it is said as that.
     """
     pool = getattr(ctx, "gpu_pool", None)
     if isinstance(pool, bool) or not isinstance(pool, int) or pool < 0:
         return ""
     budgets = getattr(ctx, "gpu_budget_by_width", None) or {}
     if pool == 0:
-        parts = ["GPU POOL: 0 devices detected — every experiment runs on CPU at any width"]
-    elif budgets:
-        table = ", ".join(f"{w} -> {b}" for w, b in sorted(budgets.items()))
-        parts = [f"GPU POOL: {pool} device(s); the most GPUs ONE experiment may claim at "
-                 f"eval_parallel = {table} (now {ctx.eval_parallel})"]
+        parts = ["GPU POOL: 0 devices detected — an experiment that declares no GPU count runs on "
+                 "CPU, and one that declares GPUs is refused admission"]
     else:
-        parts = [f"GPU POOL: {pool} device(s)"]
-    if ctx.open_proposals:
-        widest = ctx.widest_declared_gpus
+        parts = [f"GPU POOL: {pool} device(s) — admission grants an experiment that declares no GPU "
+                 f"count 1 device at eval_parallel > 1 (the whole box, unpinned, at 1) and one that "
+                 f"declares k GPUs min(k, {pool}), which then waits until they are free"]
+        now = ctx.eval_parallel
+        over = (f"now {now}, above the pool: at most {pool} run at once and the rest queue"
+                if type(now) is int and now > pool else f"now {now}")
+        if budgets:
+            table = ", ".join(f"{w} -> {b}" for w, b in sorted(budgets.items()))
+            parts.append(f"for every experiment to run at once each may declare at most: "
+                         f"eval_parallel {table} ({over})")
+    for count, widest, undeclared, what in (
+            (ctx.open_proposals, ctx.widest_declared_gpus, ctx.undeclared_proposals,
+             "open proposal(s)"),
+            (getattr(ctx, "waiting_nodes", 0), getattr(ctx, "widest_waiting_gpus", None),
+             getattr(ctx, "undeclared_waiting", 0), "built node(s) waiting to run")):
+        if not count:
+            continue
         claim = (f"the widest declares {widest} GPU(s)" if widest is not None
                  else "none declares a GPU count")
-        if widest is not None and ctx.undeclared_proposals:
-            claim += f", {ctx.undeclared_proposals} declare none"
-        parts.append(f"{ctx.open_proposals} open proposal(s): {claim}")
+        if widest is not None and undeclared:
+            claim += f", {undeclared} declare none"
+        parts.append(f"{count} {what}: {claim}")
     if ctx.eval_parallel_operator_owned:
         parts.append("eval_parallel was set by the operator, so a width you choose is not applied")
     return "; ".join(parts) + ".\n"

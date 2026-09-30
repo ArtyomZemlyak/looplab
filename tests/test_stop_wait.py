@@ -1002,3 +1002,44 @@ def test_a_command_waiting_on_a_live_engine_is_named_after_its_exit(tmp_path):
     holder.join(5)
     assert out.exit_code == 1, out.output
     assert "will start an engine now that this one has exited" in out.output
+
+
+
+@FLOCK
+@pytest.mark.parametrize("generation", [0, 1])
+def test_a_withhold_that_lands_after_the_stop_is_read_off_the_same_prefix(tmp_path, generation):
+    """The critic (2026-09-30): in a real run the withhold comes AFTER the stop's pause, and a node
+    on its second lifecycle is keyed by its generation. MUTATIONS: read the withheld set off
+    `events[:-1]`; key it on `(id, 0)` -> the timed-out line names the withheld node running."""
+    rd = _run_dir(tmp_path, in_flight=generation == 0)
+    store = EventStore(rd / "events.jsonl")
+    if generation:
+        store.append("node_reset", {"node_id": 0})
+        store.append("node_eval_started", {"node_id": 0, "generation": generation})
+    release, held = threading.Event(), threading.Event()
+    holder = threading.Thread(target=_hold_lock, args=(rd, release, held), daemon=True)
+    holder.start()
+    assert held.wait(5)
+
+    def _withhold_after_the_pause():
+        import time as _t
+        for _ in range(100):
+            rows = store.read_all()
+            if any(e.type == "pause" for e in rows):
+                store.append("eval_attempt_withheld", {**_WITHHELD, "generation": generation,
+                                                       "attempt": generation})
+                return
+            _t.sleep(0.01)
+
+    late = threading.Thread(target=_withhold_after_the_pause, daemon=True)
+    late.start()
+    try:
+        out = CliRunner().invoke(app, ["stop", str(rd), "--wait", "--timeout", "0.5"])
+    finally:
+        release.set()
+        holder.join(5)
+        late.join(5)
+    assert out.exit_code == 1, out.output
+    said = " ".join(out.output.split())
+    assert "gave up after 0.5s" in said
+    assert "no evaluation is running" in said, out.output

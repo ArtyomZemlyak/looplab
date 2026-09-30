@@ -26,23 +26,42 @@ def _ctx(**kw) -> StrategyContext:
 
 
 # ------------------------------------------------------------------------------------ the line
-def test_the_line_states_the_pool_the_budget_per_width_the_queue_and_the_pin():
+def test_the_line_states_the_grant_the_concurrent_declaration_the_queue_and_the_pin():
+    """The critic (2026-09-30, HIGH): `pool // width` is NOT what admission grants — an undeclared
+    experiment gets 1 device at width > 1 and a declared one min(k, pool) — so the line states the
+    grant and offers `pool // width` only as the declaration that keeps every experiment running."""
     line = _gpu_pool_note(_ctx(gpu_pool=4, gpu_budget_by_width={1: 4, 2: 2, 4: 1},
                                open_proposals=3, widest_declared_gpus=4, undeclared_proposals=1,
+                               waiting_nodes=2, widest_waiting_gpus=4, undeclared_waiting=1,
                                eval_parallel_operator_owned=True))
-    assert line == ("GPU POOL: 4 device(s); the most GPUs ONE experiment may claim at "
-                    "eval_parallel = 1 -> 4, 2 -> 2, 4 -> 1 (now 2); 3 open proposal(s): the widest "
-                    "declares 4 GPU(s), 1 declare none; eval_parallel was set by the operator, so a "
-                    "width you choose is not applied.\n")
+    assert line == ("GPU POOL: 4 device(s) — admission grants an experiment that declares no GPU "
+                    "count 1 device at eval_parallel > 1 (the whole box, unpinned, at 1) and one "
+                    "that declares k GPUs min(k, 4), which then waits until they are free; for "
+                    "every experiment to run at once each may declare at most: eval_parallel "
+                    "1 -> 4, 2 -> 2, 4 -> 1 (now 2); 3 open proposal(s): the widest declares 4 "
+                    "GPU(s), 1 declare none; 2 built node(s) waiting to run: the widest declares 4 "
+                    "GPU(s), 1 declare none; eval_parallel was set by the operator, so a width "
+                    "you choose is not applied.\n")
+    assert "the most GPUs ONE experiment may claim" not in line
 
 
 def test_each_clause_speaks_only_when_it_has_something_to_say():
     assert _gpu_pool_note(_ctx()) == "", "no pool sent: say nothing"
     assert _gpu_pool_note(SimpleNamespace(gpu_pool=True)) == "", "a bool is not a pool"
-    assert _gpu_pool_note(_ctx(gpu_pool=3)) == "GPU POOL: 3 device(s).\n", "no table, no clause"
+    assert _gpu_pool_note(_ctx(gpu_pool=3)).endswith("which then waits until they are free.\n"), \
+        "no table, no clause"
     bare = _gpu_pool_note(_ctx(gpu_pool=2, gpu_budget_by_width={1: 2, 2: 1}))
     assert "open proposal" not in bare and "operator" not in bare
-    assert _gpu_pool_note(_ctx(gpu_pool=0)).startswith("GPU POOL: 0 devices detected")
+    zero = _gpu_pool_note(_ctx(gpu_pool=0, open_proposals=1, widest_declared_gpus=2))
+    # The critic: "every experiment runs on CPU" was false of a declared-GPU proposal (refused).
+    assert zero.startswith("GPU POOL: 0 devices detected — an experiment that declares no GPU "
+                           "count runs on CPU, and one that declares GPUs is refused admission")
+    assert _gpu_pool_note(SimpleNamespace(gpu_pool=-1)) == "", "a negative pool is not a pool"
+    # Exactly one proposal is still named (MUTATION: `if ctx.open_proposals > 1`).
+    assert "1 open proposal(s): the widest declares 2 GPU(s)" in zero
+    # The width table is sorted whatever order the engine handed it in.
+    shuffled = _gpu_pool_note(_ctx(gpu_pool=4, gpu_budget_by_width={4: 1, 1: 4, 2: 2}))
+    assert "eval_parallel 1 -> 4, 2 -> 2, 4 -> 1 (now 2)" in shuffled
     undeclared = _gpu_pool_note(_ctx(gpu_pool=2, gpu_budget_by_width={1: 2, 2: 1},
                                      open_proposals=2, undeclared_proposals=2))
     assert "2 open proposal(s): none declares a GPU count." in undeclared
@@ -59,10 +78,12 @@ def test_off_the_brief_is_byte_for_byte_the_historical_one():
 
 
 # ------------------------------------------------------------------------------------ the engine
-def _engine(tmp_path, *, on: bool, gpus=(0, 1, 2, 3), width=2):
+def _engine(tmp_path, *, on: bool, gpus=(0, 1, 2, 3), width=2, gpu_capable=True):
     engine = make_engine(tmp_path / "run", strategist_gpu_brief=on)
     engine._gpu_ids = list(gpus)
     engine._eval_parallel = width
+    # The factory's toy task is CPU-locked; the line is about a GPU-capable one unless asked.
+    engine._task_gpu_capable = lambda: gpu_capable
     return engine
 
 
@@ -145,3 +166,78 @@ def test_the_consult_s_own_prompt_carries_the_line_only_when_on(tmp_path):
         user = [m["content"] for msgs in client.sent for m in msgs if m["role"] == "user"]
         assert user, "the Strategist sent nothing"
         assert ("GPU POOL: 4 device(s)" in user[0]) is on, user[0][:400]
+
+
+# ------------------------------------------------------------------------------------ the critic
+def test_a_cpu_locked_task_gets_no_gpu_line(tmp_path):
+    """Admission grants an undeclared experiment 0 devices there and AUTO width is 1 on purpose;
+    the Researcher's GPU cue is silent for the same reason. MUTATION: drop the gate -> red."""
+    engine = _engine(tmp_path, on=True, gpu_capable=False)
+    ctx = engine._strategy_ctx(RunState())
+    assert ctx.gpu_pool is None and ctx.gpu_budget_by_width == {}
+
+
+def test_a_width_past_the_pool_is_shown_and_a_zero_declaration_counts_as_declared(tmp_path,
+                                                                                   monkeypatch):
+    """MUTATIONS: cap the widths at the pool alone; drop the 1,024 ceiling; `f > 0` for a declared
+    `gpus: 0` (a CPU declaration IS a declaration); count only `None` as undeclared."""
+    wide = _engine(tmp_path / "wide", on=True, gpus=(0, 1), width=6)
+    ctx = wide._strategy_ctx(RunState())
+    assert ctx.gpu_budget_by_width == {1: 2, 2: 1}, (
+        "past the pool no declaration keeps every experiment running: not a row of that table")
+    assert "(now 6, above the pool: at most 2 run at once and the rest queue)" in _gpu_pool_note(ctx)
+    huge = _engine(tmp_path / "huge", on=True, gpus=range(2000), width=2)
+    assert max(huge._gpu_pool_ctx(RunState())["gpu_budget_by_width"]) <= 1024
+    zero = _engine(tmp_path / "zero", on=True)
+    monkeypatch.setattr(zero, "_proposal_footprints", lambda state: [0, 0, "junk"])
+    ctx = zero._strategy_ctx(RunState())
+    assert (ctx.widest_declared_gpus, ctx.undeclared_proposals) == (0, 1)
+
+
+def test_a_non_int_width_is_dropped_before_the_sort(tmp_path):
+    """The critic: `sorted({1, 2, None, 4})` raised inside `_strategy_ctx` with the switch ON."""
+    engine = _engine(tmp_path, on=True)
+    engine._eval_parallel = None
+    assert engine._gpu_pool_ctx(RunState())["gpu_budget_by_width"] == {1: 4, 2: 2, 4: 1}
+
+
+def test_the_operator_owns_the_width_through_a_set_strategy_pin_too(tmp_path):
+    """The critic: a `set_strategy{eval_parallel}` pin overwrites the Strategist's width, and the line
+    stayed silent. Pending (an int) or already active under `_pinned`, either spelling."""
+    engine = _engine(tmp_path, on=True)
+    state = RunState()
+    assert engine._strategy_ctx(state).eval_parallel_operator_owned is False
+    state.pending_strategy = {"eval_parallel": 3}
+    assert engine._strategy_ctx(state).eval_parallel_operator_owned is True
+    state.pending_strategy = {"max_parallel": 3}
+    assert engine._strategy_ctx(state).eval_parallel_operator_owned is True
+    state.pending_strategy = {"eval_parallel": "four"}
+    assert engine._strategy_ctx(state).eval_parallel_operator_owned is False, "not a width"
+    state.pending_strategy = {}
+    state.active_strategy = {"eval_parallel": 2, "_pinned": ["eval_parallel"]}
+    assert engine._strategy_ctx(state).eval_parallel_operator_owned is True
+    state.active_strategy = {"eval_parallel": 2, "_pinned": ["policy"]}
+    assert engine._strategy_ctx(state).eval_parallel_operator_owned is False
+
+
+def test_built_nodes_waiting_to_run_are_the_queue_a_width_admits_next(tmp_path):
+    """The critic: the incident's 4-GPU work was BUILT nodes, which the Card population misses. A
+    node already admitted (its eval started), a tombstone and a finished node are not waiting."""
+    from looplab.core.models import Idea, Node, NodeStatus
+    engine = _engine(tmp_path, on=True)
+    state = RunState()
+
+    def node(i, footprint=None, **kw):
+        n = Node(id=i, parent_ids=[], operator="draft", code="",
+                 idea=Idea(operator="draft", params={}, rationale="r", footprint=footprint))
+        for k, v in kw.items():
+            setattr(n, k, v)
+        state.nodes[i] = n
+
+    node(0, {"gpus": 4})
+    node(1)
+    node(2, {"gpus": 8}, eval_activity_started=True)
+    node(3, {"gpus": 8}, tombstoned=True)
+    node(4, {"gpus": 8}, status=NodeStatus.evaluated)
+    ctx = engine._strategy_ctx(state)
+    assert (ctx.waiting_nodes, ctx.widest_waiting_gpus, ctx.undeclared_waiting) == (2, 4, 1)

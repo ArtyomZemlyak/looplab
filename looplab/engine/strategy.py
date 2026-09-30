@@ -179,27 +179,75 @@ class StrategyCadenceMixin:
         the choices that change the answer — capped at 1,024, the width's own ceiling."""
         if not strategist_gpu_brief(self):
             return {}
+        # A CPU-LOCKED task gets no GPU line (the critic, 2026-09-30): admission grants an
+        # undeclared experiment 0 devices there and AUTO width resolves to 1 on purpose, and the
+        # Researcher's own GPU cue is silent for the same reason (naming GPU counts to such a task is
+        # the category error `proposal_cues.py` refuses).
+        if not self._task_gpu_capable():
+            return {}
         pool = len(self._gpu_ids or [])
         width = self._eval_parallel
-        top = min(EVAL_WIDTH_MAX, max(pool, width if type(width) is int else 1, 1))
+        # Widths up to the POOL only: the table says what each experiment may declare for EVERY one
+        # to run at once, and past the pool no declaration does — `per_experiment_gpu_budget` answers
+        # 1 there (the scheduler queues), which that sentence would turn false. The line names an
+        # over-pool current width on its own.
+        top = min(EVAL_WIDTH_MAX, max(pool, 1))
         budgets = {}
-        for candidate in sorted({1, 2, width, pool}):
-            if type(candidate) is not int or not 1 <= candidate <= top:
-                continue
+        # Typed BEFORE the sort: a non-int width (a legacy `max_parallel` setter) must be dropped, not
+        # compared with an int (the critic: `sorted` raised TypeError inside `_strategy_ctx`).
+        for candidate in sorted(c for c in {1, 2, width, pool} if type(c) is int and 1 <= c <= top):
             budget = per_experiment_gpu_budget(pool, candidate)
             if budget is not None:
                 budgets[candidate] = budget
         footprints = self._proposal_footprints(state)
         declared = [f for f in footprints if type(f) is int and f >= 0]
+        waiting = self._waiting_node_footprints(state)
+        waiting_declared = [f for f in waiting if type(f) is int and f >= 0]
         return {
             "gpu_pool": pool,
             "gpu_budget_by_width": budgets,
             "open_proposals": len(footprints),
             "widest_declared_gpus": max(declared, default=None),
             "undeclared_proposals": sum(1 for f in footprints if type(f) is not int),
-            "eval_parallel_operator_owned": (parallelism_aliases("eval_parallel")[0]
-                                             in getattr(self, "_operator_width_axes", frozenset())),
+            "waiting_nodes": len(waiting),
+            "widest_waiting_gpus": max(waiting_declared, default=None),
+            "undeclared_waiting": sum(1 for f in waiting if type(f) is not int),
+            "eval_parallel_operator_owned": self._eval_width_operator_owned(state),
         }
+
+    def _waiting_node_footprints(self, state: RunState) -> list:
+        """The declared `gpus` of every built node admission has not started — the queue a width change
+        lets in next (the critic, 2026-09-30: the incident's 4-GPU experiments were built nodes, and
+        `_proposal_footprints` counts only selection-ready Cards). Merged with an operator's Card pin
+        exactly as admission merges it (`_resource_request_for_node`); None for an undeclared one."""
+        from looplab.core.cards import effective_card_footprint
+        from looplab.core.models import NodeStatus
+        out: list = []
+        for node in (getattr(state, "nodes", None) or {}).values():
+            if (node.status is not NodeStatus.pending or getattr(node, "tombstoned", False)
+                    or getattr(node, "eval_activity_started", False)):
+                continue
+            raw = effective_card_footprint(
+                getattr(getattr(node, "idea", None), "footprint", None),
+                self._card_resource_pin_for_node(state, node))
+            out.append((raw or {}).get("gpus") if isinstance(raw, dict) else None)
+        return out
+
+    def _eval_width_operator_owned(self, state: RunState) -> bool:
+        """Is `eval_parallel` the operator's — so a width the Strategist chooses is not applied?
+
+        Two routes, both the engine's own: an axis `_strategy_may` refuses the Strategist
+        (`_operator_width_axes` — launch-explicit settings and `budget_extend`), and a `set_strategy`
+        pin that names the width, which overwrites the Strategist's value when the strategy is recorded
+        (the critic, 2026-09-30: the line stayed silent for that route). The pin is read as the engine
+        will apply it: the fields already ACTIVE under `_pinned`, or a pending pin carrying an int."""
+        spellings = set(parallelism_aliases("eval_parallel"))
+        if spellings & set(getattr(self, "_operator_width_axes", frozenset())):
+            return True
+        if spellings & set((getattr(state, "active_strategy", None) or {}).get("_pinned") or []):
+            return True
+        pending = getattr(state, "pending_strategy", None) or {}
+        return any(type(pending.get(name)) is int for name in spellings)
 
     def _node_budget_ctx(self, state: RunState) -> dict:
         """The node budget and the plan's endgame reserve the Strategist's brief states under
