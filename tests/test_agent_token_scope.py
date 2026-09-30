@@ -24,7 +24,8 @@ from looplab.core.config import Settings
 from looplab.events.eventstore import EventStore
 from looplab.serve.control_validation import (
     AGENT_TOKEN_REFUSED_STARTS, CONTROL_SPECS, agent_token_refusal)
-from looplab.serve.protocol import EnginePolicy
+from looplab.serve.protocol import COMMAND_TERMINAL_STATUSES, EnginePolicy
+from looplab.serve.run_commands import RunCommandService
 from looplab.serve.server import make_app
 from tests.factories import command_terminal, http_run_generation, post_command
 
@@ -63,12 +64,42 @@ def _client(tmp_path, monkeypatch, *, external: bool, snapshot: bool = True,
     elif shape == "finished":
         store.append("run_finished", {"reason": "budget"})
     app = make_app(tmp_path)
+    srv = app.state.looplab
     spawns: list = []
-    app.state.looplab.commands.spawn_engine = (
-        lambda args, env=None, run_dir=None: spawns.append(list(args)) or None)
+    # SHORT deadlines: a command the recorder "spawned" waits for an engine that never comes, and at
+    # the service's default 120 s its worker outlived the test, polling with `time.sleep` into every
+    # later test that patches the clock (full suite, shard 1: the retry ladder's recorded sleeps and
+    # the finalize monitor's tick meter). `_no_worker_outlives_the_test` waits them out on top.
+    srv.commands = RunCommandService(
+        srv, spawn_engine=lambda args, env=None, run_dir=None: spawns.append(list(args)) or None,
+        startup_timeout=0.2, command_timeout=0.4, poll_interval=0.01, max_observation_timeout=0.8)
     client = TestClient(app)
     client.spawns = spawns
+    _OPEN.append((client, rd))
     return client
+
+
+_OPEN: list = []
+
+
+@pytest.fixture(autouse=True)
+def _no_worker_outlives_the_test():
+    """Every command a test admitted, read to a terminal status before the next test starts."""
+    yield
+    try:
+        for client, rd in _OPEN:
+            deadline = time.time() + 15.0
+            for record in sorted((rd / ".commands").glob("cmd_*.json")):
+                while time.time() < deadline:
+                    status = client.get(f"/api/runs/demo/commands/{record.stem}",
+                                        headers=OWNER).json().get("status")
+                    if status in COMMAND_TERMINAL_STATUSES:
+                        break
+                    time.sleep(0.02)
+                else:
+                    raise AssertionError(f"command {record.stem} never settled")
+    finally:
+        _OPEN.clear()
 
 
 def _refused(response) -> bool:
