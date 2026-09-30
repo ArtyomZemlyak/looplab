@@ -21,6 +21,7 @@ import difflib
 import inspect
 import json
 import logging
+import math
 import re
 import time
 from fractions import Fraction
@@ -974,23 +975,33 @@ def _accountant_spend(client) -> float | None:
     return spent if spent >= 0 else None
 
 
-def _session_spend(client, at_start: float | None) -> float | None:
+def _session_spend(client, at_start: Fraction | None) -> float | None:
     """What THIS session has spent, or None when it cannot be known.
 
     Read off the THREAD (`core/llm_budget.py::note_committed_cost`), not the accountant: the
     accountant is the RUN's, so its delta also counted every CONCURRENT session — the critic's
     driver (2026-09-30) cut a plan step at "$2.0200 of $0.2500 for this session" whose own three
-    calls cost $0.03, because pooled builds share one accountant. `at_start` is the thread's figure
-    when the session began, None when the client keeps no accountant (see `_accountant_spend`)."""
+    calls cost $0.03, because pooled builds share one accountant. `at_start` is the thread's EXACT
+    figure when the session began (`thread_committed_usd_exact`), None when the client keeps no
+    accountant (see `_accountant_spend`)."""
     if at_start is None or _accountant_spend(client) is None:
         return None
-    # On the EXACT readings (`thread_committed_usd_exact`): after one large reported cost a float
-    # difference lost every small commit to absorption and the ceiling never fired (crit_v52 F5).
+    # On the EXACT readings: after one large reported cost a float difference lost every small
+    # commit to absorption and the ceiling never fired (crit_v52 F5). A float START is the same
+    # defect entered one step earlier — it already rounded away what the large cost absorbed, and
+    # the difference reads that rounding as this session's spend ($0.18 for three $0.05 calls,
+    # crit_v54 F7) — so it is refused, not converted. The one caller reads the exact figure, so
+    # only a new, wrong caller reaches the refusal, and it does so on its first test.
+    if isinstance(at_start, bool) or not isinstance(at_start, (Fraction, int)):
+        raise TypeError("_session_spend needs the exact start reading "
+                        f"(thread_committed_usd_exact), not {type(at_start).__name__}")
     try:
-        start = at_start if isinstance(at_start, Fraction) else Fraction(at_start)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    return max(0.0, float(thread_committed_usd_exact() - start))
+        return max(0.0, float(thread_committed_usd_exact() - at_start))
+    except OverflowError:
+        # Past the float range this session has spent more than any ceiling can name: `inf`, never
+        # an OverflowError out of the loop — two float-max reports inside ONE session raised here,
+        # where the float total before the exact ledger cut cleanly at "$inf" (crit_v54 F2).
+        return math.inf
 
 
 def _session_tokens(client, at_start: int) -> int | None:

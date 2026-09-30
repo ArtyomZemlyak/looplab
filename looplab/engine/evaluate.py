@@ -1531,7 +1531,7 @@ class EvalAttempt:
     full_retrains: int = 0
     rolled_to: set = field(default_factory=set)
     rollback_refusal: str = ""
-    # --- per attempt: RUN_ATTEMPT binds the first eight, SETTLE_OUTCOME the next seven, SALVAGE
+    # --- per attempt: RUN_ATTEMPT binds the first nine, SETTLE_OUTCOME the next seven, SALVAGE
     #     `err_evidence`, DECIDE_REPAIR the last three
     _t0: float = 0.0
     # This attempt's evaluator-invocation receipt: bound and CLAIMED by RUN_ATTEMPT immediately
@@ -1540,8 +1540,10 @@ class EvalAttempt:
     invocation_id: str = ""
     _log_snapshot: Any = None
     _log_plan: Any = None
-    # The attempt-start log cursors the activation-marker check reads at (`_eval_run_attempt`).
+    # The attempt-start log cursors the activation-marker check reads at (`_eval_run_attempt`), and
+    # the logs the engine itself appends to — the only ones read past those cursors.
     _marker_snapshot: Any = None
+    _marker_engine_logs: Any = None
     _live_questions: list = field(default_factory=list)
     _external_observed_phases: set = field(default_factory=set)
     _seen: dict = field(default_factory=dict)          # the intervention watcher's one verdict
@@ -4037,10 +4039,12 @@ class EvaluateMixin:
         # logs for a declared marker, and a stage that re-ran APPENDS to its log — without this
         # attempt's "before" an earlier attempt's marker vouched for a path the scored run never
         # took (critic crit_v51 F1b / crit_v52 F2, driven). The watchers' snapshot when there is
-        # one, else its own, taken only for a node that declares a marker (`off == today` else).
+        # one, else its own, taken only for a node that declares a marker (a node that declares
+        # none costs one bounded manifest read here and nothing else).
         from looplab.engine.activation import read_markers
+        _declares_markers = bool(read_markers(a.workdir))
         a._marker_snapshot = (a._log_snapshot if a._log_snapshot is not None
-                              else snapshot_training_logs(a.workdir) if read_markers(a.workdir)
+                              else snapshot_training_logs(a.workdir) if _declares_markers
                               else None)
         # Which log each phase of THIS attempt writes. Both watchdogs live across the WHOLE
         # eval — setup, every stage, and the ALWAYS-appended `score` stage — so without the
@@ -4049,6 +4053,13 @@ class EvaluateMixin:
         # already SUCCEEDED. `_resolved_stages` re-resolves exactly what `_run_eval` will run
         # ([] = the single-command path, whose `eval.log` IS the training log).
         a._log_plan = eval_log_plan(self._resolved_stages(a.node, a.workdir)) if _watching_logs else None
+        # …and WHICH logs that cursor may cut: only the ones the ENGINE appends to, named from the
+        # same resolved pipeline this attempt runs. A log the candidate writes itself may be
+        # rewritten in place with the same bytes at the old boundary, and the cursor then dropped
+        # the marker this attempt really printed (crit_v55 A1, `activation._fresh_logs`).
+        a._marker_engine_logs = (
+            frozenset((a._log_plan or eval_log_plan(self._resolved_stages(a.node, a.workdir))).roles)
+            if _declares_markers else None)
         # Mid-eval intervention: a watcher polls while the eval runs in a worker thread. An
         # exact node lifecycle mutation or operator drop of THIS node's Card sets the cancel
         # Event, which tree-kills the in-flight subprocess (sandbox._run_argv). The pre-eval
@@ -4250,7 +4261,8 @@ class EvaluateMixin:
             if _declared:
                 _missing = missing_markers(
                     _declared, texts=(a.res.stdout or "", a.res.stderr or ""),
-                    workdir=a.workdir, since=a._t0, snapshot=a._marker_snapshot)
+                    workdir=a.workdir, since=a._t0, snapshot=a._marker_snapshot,
+                    engine_logs=a._marker_engine_logs)
                 if _missing:
                     a.res.inert_path = {"missing": _missing, "metric": a.res.metric}
                     a.res.metric = None

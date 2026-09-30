@@ -904,8 +904,9 @@ over `agents/strategist.py::stall_rung` — the `(rung, started_at)` identity of
 `strategist_stall_window` (the Strategist's own window, default `DEFAULT_STALL_WINDOW` = 3; the LLM and
 agent Strategists expose their fallback rule's). Not a third pace and not self-clearing, so it fires on
 the stall's identity: a decision recorded at or after `started_at` closes the rung durably, the consult's
-in-process `(leader, rung)` memo (`_strategist_plateau_seen`, spent before the provider call beside
-`_strategist_consulted_at`) covers the unchanged outcome, and each further whole window (the hard
+in-process memo of the highest rung consulted per leader (`_strategist_plateau_seen`, spent before the
+provider call beside `_strategist_consulted_at`; the highest since crit_v54 F1, when a delete that
+lowered the rung re-opened it) covers the unchanged outcome, and each further whole window (the hard
 stall) is a new fact that fires once more — at most one extra consult per `stall_window` stall nodes.
 The coverage snapshot shares the gate and takes one extra sample per rung.
 `tests/test_strategist_plateau_trigger.py` drives the truth table, the property, the money bound, both

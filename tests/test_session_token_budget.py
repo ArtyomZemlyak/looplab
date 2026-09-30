@@ -481,13 +481,15 @@ def test_a_negative_cost_never_refunds_the_thread_s_committed_money():
     """`CostAccountant.add` commits a safe, non-negative cost; the per-thread ledger the session's
     money ceiling reads holds that line on its own (critic 2026-09-30). MUTATION: drop `c > 0` -> a
     negative report lowers the thread's committed spend."""
-    from looplab.core.llm_budget import note_committed_cost, thread_committed_usd
-    before = thread_committed_usd()
+    from fractions import Fraction
+
+    from looplab.core.llm_budget import note_committed_cost, thread_committed_usd_exact
+    before = thread_committed_usd_exact()
     note_committed_cost(-5.0)
     note_committed_cost(float("nan"))
-    assert thread_committed_usd() == before
+    assert thread_committed_usd_exact() == before
     note_committed_cost(0.25)
-    assert thread_committed_usd() == before + 0.25
+    assert thread_committed_usd_exact() == before + Fraction(1, 4)
 
 
 _USAGE = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
@@ -542,20 +544,88 @@ def test_one_large_reported_cost_does_not_disable_a_later_session_s_money_ceilin
     assert out == {"turns": 5, "kinds": ["cost"]}
 
 
-def test_the_float_reading_of_an_exact_total_past_the_float_range_is_inf():
-    """`thread_committed_usd` is the display reading of the exact total: past the float range it is
-    `inf`, never an OverflowError and never a small number. MUTATION: answer 0.0 on overflow."""
-    import math
+class _FloatMax:
+    """A gateway that reports the largest float as the cost of EVERY call, `calls` calls a turn (a
+    retried call is two), each committed through a REAL `CostAccountant` on the loop's thread."""
+    COST = 1.7976931348623157e308
 
-    from looplab.core.llm_budget import note_committed_cost, thread_committed_usd
+    def __init__(self, calls: int, pause_s: float = 0.0):
+        self.accountant, self.calls, self.pause_s, self.turns = CostAccountant(), calls, pause_s, 0
 
-    def _thread():
-        note_committed_cost(1.7976931348623157e308)
-        note_committed_cost(1.7976931348623157e308)
-        out.append(thread_committed_usd())
+    def chat(self, messages, tools, tool_choice="auto"):
+        import time
+        self.turns += 1
+        for _ in range(self.calls):
+            self.accountant.add(self.COST, _USAGE)
+        time.sleep(self.pause_s)
+        return {"content": "", "tool_calls": [
+            {"id": f"c{self.turns}", "function": {"name": "read_file", "arguments": "{}"}}]}
 
-    out: list = []
+    def complete_text(self, messages):
+        return "SUMMARY"
+
+
+def _float_max_session(client, **kw):
+    from looplab.agents import tool_loop
+    out = {}
+
+    def _thread():                     # a fresh thread: nothing committed before this session
+        cuts = []
+        try:
+            tool_loop.drive_tool_loop(
+                client, _Tools(), [{"role": "user", "content": "go"}], _EMIT, max_turns=20,
+                stuck_detection=False, finalize=lambda a: "emitted", fallback=lambda m: "fallback",
+                on_budget=lambda p: cuts.append((p.get("kind"), p.get("detail"))), **kw)
+        except Exception as exc:  # noqa: BLE001 — the test reports what escaped, it contains nothing
+            out["raised"] = repr(exc)
+        out.update(turns=client.turns, cuts=cuts)
+
     worker = threading.Thread(target=_thread)
     worker.start()
     worker.join()
-    assert out == [math.inf]
+    return out
+
+
+def test_a_session_past_the_float_range_is_cut_at_inf_never_raises():
+    """crit_v54 F2, driven: the exact ledger made a session's spend a float CONVERSION, and two
+    float-max reports inside ONE session overflowed it — the wall clock's cut read the spend for its
+    detail and raised `OverflowError` out of `drive_tool_loop` with no money ceiling set at all,
+    where the float total before it cut at "$inf". MUTATION: drop the `OverflowError` arm -> red."""
+    wall = _float_max_session(_FloatMax(calls=2, pause_s=0.02), time_budget_s=0.01)
+    assert "raised" not in wall, wall
+    assert wall["cuts"] == [("time", "$inf for this session, no money ceiling set")], wall
+    money = _float_max_session(_FloatMax(calls=2), cost_budget_usd=0.20)
+    assert money == {"turns": 1, "cuts": [("cost", "$inf of $0.2000 for this session")]}, money
+
+
+def test_a_session_start_must_be_the_exact_reading():
+    """crit_v54 F7, driven: a start taken on a FLOAT reading had already rounded away what an earlier
+    large cost absorbed, and the difference read that rounding as this session's spend — three
+    $0.05 calls read as $0.18 after an earlier 1e15 + 0.03. The exact start reads $0.15, a float
+    one is refused. MUTATION: convert a float start with `Fraction(at_start)` -> no TypeError."""
+    from fractions import Fraction
+
+    from looplab.agents import tool_loop
+    from looplab.core.llm_budget import thread_committed_usd_exact
+    out = {}
+
+    def _thread():
+        acct = CostAccountant()
+        client = type("C", (), {"accountant": acct})()
+        acct.add(1e15, _USAGE)
+        acct.add(0.03, _USAGE)
+        exact = thread_committed_usd_exact()
+        for _ in range(3):
+            acct.add(0.05, _USAGE)
+        out["exact"] = tool_loop._session_spend(client, exact)
+        out["zero"] = tool_loop._session_spend(client, 0) > 1e15   # an int start is exact too
+        with pytest.raises(TypeError, match="exact start"):
+            tool_loop._session_spend(client, float(exact))
+        with pytest.raises(TypeError, match="exact start"):
+            tool_loop._session_spend(client, True)
+        out["kind"] = type(exact) is Fraction
+
+    worker = threading.Thread(target=_thread)
+    worker.start()
+    worker.join()
+    assert out == {"exact": pytest.approx(0.15), "zero": True, "kind": True}, out

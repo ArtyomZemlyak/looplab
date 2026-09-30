@@ -39,7 +39,7 @@ from looplab.core.config import parallelism_aliases
 from looplab.core.llm_broker import LLM_LANES, in_llm_lane
 from looplab.core.models import RunState, search_outcome
 from looplab.engine.cadence import (at_creation_boundary, cadence_due, cadence_marks,
-                                     plateau_due, seed_boundary_due)
+                                     plateau_consulted, plateau_due, seed_boundary_due)
 from looplab.engine.widths import (EVAL_WIDTH_MAX, LLM_WIDTH_MAX, operator_width_axes,
                                    per_experiment_gpu_budget, settle_width)
 from looplab.engine.costs import bind_cost_accountants
@@ -487,7 +487,8 @@ class StrategyCadenceMixin:
     def _plateau_key(self, state: RunState) -> tuple:
         """The `(leader, rung)` identity of the plateau the run is on — `(best_node_id, 0)` when it is
         not on one. The in-process memo `_maybe_consult_strategist` keeps for `plateau_due`'s `seen`
-        is one of these, so it is computed in exactly one place for the gate and for the memo."""
+        is built from these (`cadence.plateau_consulted`: the highest rung consulted per leader), so
+        the identity is computed in exactly one place for the gate and for the memo."""
         rung, _started_at = stall_rung(
             state, strategist_stall_window(getattr(self, "strategist", None)))
         return state.best_node_id, rung
@@ -1012,8 +1013,8 @@ class StrategyCadenceMixin:
         consulting = (allow_consult and self.strategist is not None
                       and self._should_consult(
                           state, marks=state.strategy_history,
-                          # The plateau memo (doc 52 row 7): the `(leader, rung)` this process last
-                          # consulted on. Spent beside `_strategist_consulted_at` below, and for the
+                          # The plateau memo (doc 52 row 7): the highest rung this process consulted
+                          # on, per leader. Spent beside `_strategist_consulted_at` below, and for the
                           # same reason — a stalled run whose Strategist agrees with itself records
                           # nothing, and without this the plateau re-fires at every new node count.
                           plateau_seen=getattr(self, "_strategist_plateau_seen", None))
@@ -1111,7 +1112,8 @@ class StrategyCadenceMixin:
             # node-count for this process, or the very failure mode the memo bounds — one paid consult
             # per outer-loop turn at a fixed `n` — comes back through the error path.
             self._strategist_consulted_at = (n, analytics_projection_token(state))
-            self._strategist_plateau_seen = self._plateau_key(state)
+            self._strategist_plateau_seen = plateau_consulted(
+                getattr(self, "_strategist_plateau_seen", None), self._plateau_key(state))
             with self._op_span("strategist_consult"):
                 strat = validate_strategy(self.strategist.decide(state, ctx), ctx)
                 if strat:

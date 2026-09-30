@@ -28,13 +28,16 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from looplab.core.node_evidence import open_untrusted_regular, read_bounded_regular_file
-from looplab.engine.eval_log_plan import attempt_byte_floor
+from looplab.engine.eval_log_plan import _log_name_key, attempt_byte_floor
 
 ACTIVATION_MANIFEST_NAME = "looplab_activation.json"
 MAX_MARKERS = 8
 MAX_MARKER_CHARS = 200
-# Per file, from its END: a marker is usually printed at warmup and a log is usually short, but a
-# training log is not, and the check must stay bounded whatever the candidate printed.
+# Per file, from its START and from its END: a marker is usually printed at warmup and a log is
+# usually short, but a training log is not, and the check must stay bounded whatever the candidate
+# printed. The end alone missed a warmup marker followed by 9 MiB of training output (crit_v55 A3,
+# driven: a real metric withheld as `inert_path`), so a longer log is read at both ends and only
+# its middle goes unread.
 _MAX_LOG_BYTES = 8 * 1024 * 1024
 
 
@@ -85,8 +88,8 @@ def read_markers(workdir) -> list:
     return normalize_markers(data.get("markers") if isinstance(data, dict) else None)
 
 
-def _fresh_logs(workdir, since: Optional[float], snapshot=None) -> list:
-    """The tails of what THIS attempt wrote to the eval's own `*.log` files in `workdir`, newest first.
+def _fresh_logs(workdir, since: Optional[float], snapshot=None, engine_logs=None) -> list:
+    """What THIS attempt wrote to the `*.log` files in `workdir` — both ends of each — newest first.
 
     `snapshot` is the attempt-start cursor set (`engine/eval_log_plan.py::snapshot_training_logs`) and
     `attempt_byte_floor` the one boundary the watchdogs and the repair judge already read at: a stage
@@ -97,7 +100,18 @@ def _fresh_logs(workdir, since: Optional[float], snapshot=None) -> list:
     credit, the refusing direction. `since` (the attempt's start) still drops a whole log last written
     before it; with no snapshot it is the only floor, and the appended case is then credited.
     A stage this attempt REUSED wrote nothing, so its earlier markers are not credited either way —
-    doc 69, 69.10b."""
+    doc 69, 69.10b.
+
+    `engine_logs` names the logs the ENGINE appends to — the case-folded basenames of this attempt's
+    `EvalLogPlan.roles`: `setup.log`, one `<stage>.log` per resolved stage, or `eval.log` — and only
+    those are read past the cursor. The engine never truncates one, so a boundary that still matches
+    IS an append. A log the CANDIDATE writes is read whole from the `since` floor: rewritten in place
+    ('w' mode, same inode) with deterministic output, its bytes at the old boundary match, the probe
+    reads the rewrite as an append, and the marker this attempt really printed was dropped — a real
+    metric withheld as `inert_path` (crit_v55 A1, driven). The cost is the old one for that file: a
+    candidate that APPENDS to its own log across attempts gets its earlier line credited, and the
+    marker contract is the stage's stdout and stderr, which the engine's own logs carry. None =
+    every log is taken as the engine's."""
     out = []
 
     def _mtime(path) -> float:
@@ -123,10 +137,18 @@ def _fresh_logs(workdir, since: Optional[float], snapshot=None) -> list:
             # the event loop (critic 2026-09-26, driven) — and the size bound read off the SAME entry.
             with open_untrusted_regular(path) as fh:
                 size = os.fstat(fh.fileno()).st_size
-                floor = attempt_byte_floor(fh, path, snapshot) if snapshot is not None else 0
+                cursor = snapshot is not None and (engine_logs is None
+                                                   or _log_name_key(path.name) in engine_logs)
+                floor = attempt_byte_floor(fh, path, snapshot) if cursor else 0
                 if floor is None:
                     continue
-                fh.seek(max(floor, size - _MAX_LOG_BYTES))
+                fh.seek(floor)
+                if size - floor <= 2 * _MAX_LOG_BYTES:
+                    out.append(fh.read(2 * _MAX_LOG_BYTES).decode("utf-8", "replace"))
+                    continue
+                head = fh.read(_MAX_LOG_BYTES)
+                fh.seek(size - _MAX_LOG_BYTES)
+                out.append(head.decode("utf-8", "replace"))
                 out.append(fh.read(_MAX_LOG_BYTES).decode("utf-8", "replace"))
         except OSError:
             continue
@@ -134,18 +156,18 @@ def _fresh_logs(workdir, since: Optional[float], snapshot=None) -> list:
 
 
 def missing_markers(markers: Iterable[str], *, texts: Iterable[str] = (), workdir=None,
-                    since: Optional[float] = None, snapshot=None) -> list:
+                    since: Optional[float] = None, snapshot=None, engine_logs=None) -> list:
     """The declared markers that appear NOWHERE the evaluation printed: the captured streams in
-    `texts`, then what this attempt wrote to the stage logs in `workdir` (`_fresh_logs`). Exact
-    substring, case-sensitive -- the node wrote the line and named it, so there is nothing to
-    interpret."""
+    `texts`, then what this attempt wrote to the logs in `workdir` (`_fresh_logs`, which says what
+    `snapshot` and `engine_logs` bound). Exact substring, case-sensitive -- the node wrote the line
+    and named it, so there is nothing to interpret."""
     markers = [m for m in markers if m]
     if not markers:
         return []
     haystacks = [t for t in texts if isinstance(t, str) and t]
     missing = [m for m in markers if not any(m in h for h in haystacks)]
     if missing and workdir is not None and os.path.isdir(str(workdir)):
-        logs = _fresh_logs(workdir, since, snapshot)
+        logs = _fresh_logs(workdir, since, snapshot, engine_logs)
         missing = [m for m in missing if not any(m in h for h in logs)]
     return missing
 

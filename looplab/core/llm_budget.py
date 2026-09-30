@@ -315,17 +315,12 @@ def thread_committed_tokens() -> int:
 
 def thread_committed_usd_exact() -> Fraction:
     """Every provider dollar committed on this thread so far, EXACTLY — read twice, one session's
-    spend (`agents/tool_loop.py::drive_tool_loop(cost_budget_usd=)`, `_session_spend`)."""
+    spend (`agents/tool_loop.py::drive_tool_loop(cost_budget_usd=)`, `_session_spend`).
+
+    The ONE reading: its float display twin was removed (crit_v54 F7) once nothing in production
+    read it, because a difference of two display readings is exactly the absorption this exact
+    total exists to prevent, and a start taken on one is what `_session_spend` now refuses."""
     return getattr(_THREAD_TOKENS, "usd", _NO_SPEND)
-
-
-def thread_committed_usd() -> float:
-    """`thread_committed_usd_exact` as a float, for display; `inf` past the float range. A
-    difference of two of these is NOT one session's spend — take it on the exact readings."""
-    try:
-        return float(thread_committed_usd_exact())
-    except OverflowError:
-        return math.inf
 
 
 def thread_unreported_calls() -> int:

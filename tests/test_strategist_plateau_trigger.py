@@ -19,11 +19,13 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from looplab.agents.strategist import (DEFAULT_STALL_WINDOW, LLMStrategist, RuleStrategist,
                                        STALL_OPERATORS, ToolUsingStrategist, improves_since_best,
                                        stall_rung, strategist_stall_window)
 from looplab.core.models import Idea, Node, NodeStatus, RunState
-from looplab.engine.cadence import plateau_due
+from looplab.engine.cadence import plateau_consulted, plateau_due
 from looplab.engine.strategy import StrategyCadenceMixin
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
@@ -92,9 +94,14 @@ def test_plateau_due_truth_table():
     assert plateau_due(0, 0, 0, seen=None, key=(0, 0)) is False     # not stalled
     assert plateau_due(1, 4, 4, seen=None, key=key) is False        # a mark inside the rung closes it
     assert plateau_due(1, 4, 7, seen=None, key=key) is False        # ... or after it
-    assert plateau_due(1, 4, 1, seen=key, key=key) is False         # the consumer's own memo closes it
-    assert plateau_due(2, 7, 4, seen=key, key=(0, 2)) is True       # the NEXT rung is a new fact
-    assert plateau_due(1, 4, 1, seen=(3, 1), key=key) is True       # a memo about another leader is not
+    assert plateau_due(1, 4, 1, seen={0: 1}, key=key) is False      # the consumer's own memo closes it
+    assert plateau_due(2, 7, 4, seen={0: 1}, key=(0, 2)) is True    # the NEXT rung is a new fact
+    assert plateau_due(1, 5, 1, seen={0: 2}, key=key) is False      # a LOWER one is not (a delete)
+    assert plateau_due(1, 4, 1, seen={3: 1}, key=key) is True       # a memo about another leader is not
+    # The memo keeps the HIGHEST rung consulted, per leader (crit_v54 F1).
+    assert plateau_consulted(None, (0, 1)) == {0: 1}
+    assert plateau_consulted({0: 2}, (0, 1)) == {0: 2}
+    assert plateau_consulted({0: 2, 3: 1}, (3, 2)) == {0: 2, 3: 2}
 
 
 def test_stall_rung_counts_windows_of_the_stall_family_and_starts_at_a_node_count():
@@ -133,17 +140,17 @@ def test_the_gate_fires_at_the_stall_and_at_the_hard_stall_and_not_before_either
     assert gate._should_consult(stalled, marks=marks) is True
     # A decision recorded inside the rung closes it durably; the consumer's memo closes it too.
     assert gate._should_consult(stalled, marks=[{"at_node": 4}]) is False
-    assert gate._should_consult(stalled, marks=marks, plateau_seen=(0, 1)) is False
+    assert gate._should_consult(stalled, marks=marks, plateau_seen={0: 1}) is False
     # Two more failed attempts are the SAME plateau, not a new one.
     _push(store)
     _push(store)
-    assert gate._should_consult(fold(store.read_all()), marks=marks, plateau_seen=(0, 1)) is False
+    assert gate._should_consult(fold(store.read_all()), marks=marks, plateau_seen={0: 1}) is False
     # The sixth is the hard stall the rule requests deep research at: a new rung, fires once more.
     _push(store)
     hard = fold(store.read_all())
     assert stall_rung(hard, DEFAULT_STALL_WINDOW) == (2, 7)
-    assert gate._should_consult(hard, marks=[{"at_node": 4}], plateau_seen=(0, 1)) is True
-    assert gate._should_consult(hard, marks=[{"at_node": 7}], plateau_seen=(0, 1)) is False
+    assert gate._should_consult(hard, marks=[{"at_node": 4}], plateau_seen={0: 1}) is True
+    assert gate._should_consult(hard, marks=[{"at_node": 7}], plateau_seen={0: 1}) is False
     # A new leader ends the plateau: the count restarts from zero improves.
     _push(store, metric=0.95)
     crowned = fold(store.read_all())
@@ -159,10 +166,10 @@ def test_the_plateau_does_not_move_the_cadence_window_unless_it_records(tmp_path
     marks = [{"at_node": 1}]
     st = fold(store.read_all())                    # n == 4: plateau yes, cadence 4 - 1 < 5
     assert gate._should_consult(st, marks=marks) is True
-    assert gate._should_consult(st, marks=marks, plateau_seen=(0, 1)) is False
+    assert gate._should_consult(st, marks=marks, plateau_seen={0: 1}) is False
     _push(store)
     _push(store)                                   # n == 6: cadence 6 - 1 >= 5 fires as before
-    assert gate._should_consult(fold(store.read_all()), marks=marks, plateau_seen=(0, 1)) is True
+    assert gate._should_consult(fold(store.read_all()), marks=marks, plateau_seen={0: 1}) is True
 
 
 # ---------------------------------------------------------------------------------- 3. THE MONEY
@@ -188,6 +195,80 @@ def test_a_stalled_run_buys_one_consult_per_rung_however_many_nodes_land(tmp_pat
     assert stub.calls == 2
     recorded = [e for e in eng.store.read_all() if e.type == "strategy_decision"]
     assert len(recorded) == 1 and recorded[0].data["at_node"] == 1, "nothing but the seed decision"
+
+
+def _turn(eng, times: int = 4) -> None:
+    for _ in range(times):                         # the loop turns several times per node count
+        eng._maybe_consult_strategist(fold(eng.store.read_all()))
+
+
+def _remove(store: EventStore, nid: int, how: str) -> None:
+    if how == "delete":
+        store.append("node_tombstoned", {"node_ids": [nid]})
+    else:
+        store.append("node_abort", {"node_id": nid, "generation": 0})
+
+
+@pytest.mark.parametrize("how", ["delete", "abort"])
+def test_a_removed_stall_node_re_opens_no_consult_on_the_same_plateau(tmp_path, how):
+    """crit_v54 F1, driven: removing a counted node LOWERS the rung (`stall_rung` skips what the
+    operator deleted or aborted), and a memo of the LAST `(leader, rung)` read the lower rung as new
+    and the next failed push's return to the old one as new again — three delete+push cycles bought
+    eight paid consults where nine pushes allow three. MUTATION: remember the last rung, not the
+    highest (`plateau_consulted` -> the bare key) -> 8 consults, not 2."""
+    store = _stalled_store(tmp_path, improves=0)
+    stub = _Stub({})
+    eng = make_engine(tmp_path, strategist=stub, strategist_every=100,
+                      cadence_while_evaluating=True)
+    for _ in range(6):                             # the stall at 3, the hard stall at 6
+        _push(eng.store)
+        _turn(eng)
+    assert (stub.calls, stall_rung(fold(eng.store.read_all()), DEFAULT_STALL_WINDOW)) == (2, (2, 7))
+    for victim in (1, 2, 3):
+        _remove(eng.store, victim, how)
+        _turn(eng)                                 # the rung drops to 1: consulted already
+        _push(eng.store)
+        _turn(eng)                                 # and climbs back to 2: consulted already
+    assert stub.calls == 2, f"paid {stub.calls} consults for two rungs"
+    for _ in range(3):                             # a rung the search never reached IS new
+        _push(eng.store)
+        _turn(eng)
+    assert stall_rung(fold(eng.store.read_all()), DEFAULT_STALL_WINDOW)[0] == 3
+    assert stub.calls == 3
+    recorded = [e for e in eng.store.read_all() if e.type == "strategy_decision"]
+    assert len(recorded) == 1, "nothing recorded but the seed decision: the memo did all of it"
+
+
+def test_a_lead_handed_back_re_opens_no_rung_already_consulted(tmp_path):
+    """Per leader, not the last leader only: the operator deletes a newly crowned champion and the
+    lead goes back to node 0, whose two rungs this process already paid for."""
+    store = _stalled_store(tmp_path, improves=0)
+    stub = _Stub({})
+    eng = make_engine(tmp_path, strategist=stub, strategist_every=100,
+                      cadence_while_evaluating=True)
+    for _ in range(6):
+        _push(eng.store)
+        _turn(eng)
+    assert stub.calls == 2
+    # A new leader from a fresh draft, and three failed pushes ON IT (not descendants of node 0).
+    crowned = sum(1 for e in eng.store.read_all() if e.type == "node_created")
+    eng.store.append("node_created", {"node_id": crowned, "parent_ids": [], "operator": "draft",
+                                      "idea": {"operator": "draft", "params": {"x": -1.0}}})
+    eng.store.append("node_evaluated", {"node_id": crowned, "metric": 0.95})
+    for nid in range(crowned + 1, crowned + 4):
+        eng.store.append("node_created", {"node_id": nid, "parent_ids": [crowned],
+                                          "operator": "improve",
+                                          "idea": {"operator": "improve", "params": {"x": -nid}}})
+        eng.store.append("node_evaluated", {"node_id": nid, "metric": 0.1})
+        _turn(eng)
+    assert fold(eng.store.read_all()).best_node_id == crowned
+    assert stub.calls == 3, "the new leader's own first rung is a new fact"
+    eng.store.append("node_tombstoned", {"node_ids": [crowned]})
+    handed_back = fold(eng.store.read_all())
+    assert handed_back.best_node_id == 0
+    assert stall_rung(handed_back, DEFAULT_STALL_WINDOW)[0] == 2
+    _turn(eng)
+    assert stub.calls == 3, "rung 2 of node 0 was consulted on before the lead moved"
 
 
 # ------------------------------------------------------------------------------- 4. DURABILITY

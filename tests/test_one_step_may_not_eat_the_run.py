@@ -116,12 +116,12 @@ def test_session_spend_is_this_threads_own_not_the_run_total():
     import threading
 
     from looplab.core.llm import CostAccountant
-    from looplab.core.llm_budget import thread_committed_usd
+    from looplab.core.llm_budget import thread_committed_usd_exact
     acct = CostAccountant()
     usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
     acct.add(0.60, usage)                                   # an earlier phase, this thread
     client = type("C", (), {"accountant": acct})()
-    at_start = thread_committed_usd()
+    at_start = thread_committed_usd_exact()                 # the exact reading (crit_v54 F7)
     acct.add(0.15, usage)                                   # this session
     other = threading.Thread(target=lambda: acct.add(2.0, usage))   # a concurrent session
     other.start()

@@ -310,7 +310,8 @@ def stall_rung(state: RunState, stall_window: int) -> tuple[int, int]:
     subset of the old one. Its start can only move LATER for the same reason, so on a run upgraded
     mid-plateau the consult trigger (`engine/cadence.py::plateau_due`) may re-open one consult for
     the rung it re-derives; the endgame's stall trigger (`engine/plan.py::replan`) only ever fires
-    later or not at all.
+    later or not at all. Inside one process a delete or abort that LOWERS the rung re-opens nothing:
+    the trigger's memo keeps the highest rung consulted per leader (`plateau_consulted`, crit_v54 F1).
 
     Deterministic over the folded DAG, like `improves_since_best` above (of which it is the windowed
     reading; that count stays unfiltered by LINEAGE because it is a prompt input); `(0, 0)` when
