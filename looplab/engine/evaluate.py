@@ -1488,7 +1488,7 @@ class EvalAttempt:
     full_retrains: int = 0
     rolled_to: set = field(default_factory=set)
     rollback_refusal: str = ""
-    # --- per attempt: RUN_ATTEMPT binds the first seven, SETTLE_OUTCOME the next seven, SALVAGE
+    # --- per attempt: RUN_ATTEMPT binds the first eight, SETTLE_OUTCOME the next seven, SALVAGE
     #     `err_evidence`, DECIDE_REPAIR the last three
     _t0: float = 0.0
     # This attempt's evaluator-invocation receipt: bound and CLAIMED by RUN_ATTEMPT immediately
@@ -1497,6 +1497,8 @@ class EvalAttempt:
     invocation_id: str = ""
     _log_snapshot: Any = None
     _log_plan: Any = None
+    # The attempt-start log cursors the activation-marker check reads at (`_eval_run_attempt`).
+    _marker_snapshot: Any = None
     _live_questions: list = field(default_factory=list)
     _external_observed_phases: set = field(default_factory=set)
     _seen: dict = field(default_factory=dict)          # the intervention watcher's one verdict
@@ -3988,6 +3990,15 @@ class EvaluateMixin:
         # not asked for anything yet. See that function for the whole argument.
         _watching_logs = needs_log_snapshot(self, _eval_spec)
         a._log_snapshot = snapshot_training_logs(a.workdir) if _watching_logs else None
+        # THE FOURTH READER: the activation-marker check after a success (below) reads the stage
+        # logs for a declared marker, and a stage that re-ran APPENDS to its log — without this
+        # attempt's "before" an earlier attempt's marker vouched for a path the scored run never
+        # took (critic crit_v51 F1b / crit_v52 F2, driven). The watchers' snapshot when there is
+        # one, else its own, taken only for a node that declares a marker (`off == today` else).
+        from looplab.engine.activation import read_markers
+        a._marker_snapshot = (a._log_snapshot if a._log_snapshot is not None
+                              else snapshot_training_logs(a.workdir) if read_markers(a.workdir)
+                              else None)
         # Which log each phase of THIS attempt writes. Both watchdogs live across the WHOLE
         # eval — setup, every stage, and the ALWAYS-appended `score` stage — so without the
         # resolved pipeline they can only guess whose bytes they are reading, and the freshest
@@ -4196,7 +4207,7 @@ class EvaluateMixin:
             if _declared:
                 _missing = missing_markers(
                     _declared, texts=(a.res.stdout or "", a.res.stderr or ""),
-                    workdir=a.workdir, since=a._t0)
+                    workdir=a.workdir, since=a._t0, snapshot=a._marker_snapshot)
                 if _missing:
                     a.res.inert_path = {"missing": _missing, "metric": a.res.metric}
                     a.res.metric = None

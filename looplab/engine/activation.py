@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from looplab.core.node_evidence import open_untrusted_regular, read_bounded_regular_file
+from looplab.engine.eval_log_plan import attempt_byte_floor
 
 ACTIVATION_MANIFEST_NAME = "looplab_activation.json"
 MAX_MARKERS = 8
@@ -84,10 +85,19 @@ def read_markers(workdir) -> list:
     return normalize_markers(data.get("markers") if isinstance(data, dict) else None)
 
 
-def _fresh_logs(workdir, since: Optional[float]) -> list:
-    """The tails of the eval's own `*.log` files in `workdir`, newest first. `since` is the attempt's
-    start: a log left by an EARLIER attempt in the deliberately reused workdir may hold a marker the
-    failing attempt never printed, and must not vouch for it."""
+def _fresh_logs(workdir, since: Optional[float], snapshot=None) -> list:
+    """The tails of what THIS attempt wrote to the eval's own `*.log` files in `workdir`, newest first.
+
+    `snapshot` is the attempt-start cursor set (`engine/eval_log_plan.py::snapshot_training_logs`) and
+    `attempt_byte_floor` the one boundary the watchdogs and the repair judge already read at: a stage
+    that RE-RAN appends to its log (`runtime/sandbox.py::_tee_drain`), so an earlier attempt's marker
+    line sits in a file this attempt also wrote, fresh by mtime, and it vouched for a path the scored
+    run never took (critic crit_v51 F1b / crit_v52 F2, driven: the scored checkpoint written by a
+    fallback that printed no marker). A log whose boundary cannot be established is not read — no
+    credit, the refusing direction. `since` (the attempt's start) still drops a whole log last written
+    before it; with no snapshot it is the only floor, and the appended case is then credited.
+    A stage this attempt REUSED wrote nothing, so its earlier markers are not credited either way —
+    doc 69, 69.10b."""
     out = []
 
     def _mtime(path) -> float:
@@ -113,8 +123,10 @@ def _fresh_logs(workdir, since: Optional[float]) -> list:
             # the event loop (critic 2026-09-26, driven) — and the size bound read off the SAME entry.
             with open_untrusted_regular(path) as fh:
                 size = os.fstat(fh.fileno()).st_size
-                if size > _MAX_LOG_BYTES:
-                    fh.seek(size - _MAX_LOG_BYTES)
+                floor = attempt_byte_floor(fh, path, snapshot) if snapshot is not None else 0
+                if floor is None:
+                    continue
+                fh.seek(max(floor, size - _MAX_LOG_BYTES))
                 out.append(fh.read(_MAX_LOG_BYTES).decode("utf-8", "replace"))
         except OSError:
             continue
@@ -122,17 +134,18 @@ def _fresh_logs(workdir, since: Optional[float]) -> list:
 
 
 def missing_markers(markers: Iterable[str], *, texts: Iterable[str] = (), workdir=None,
-                    since: Optional[float] = None) -> list:
+                    since: Optional[float] = None, snapshot=None) -> list:
     """The declared markers that appear NOWHERE the evaluation printed: the captured streams in
-    `texts`, then the fresh stage logs in `workdir`. Exact substring, case-sensitive -- the node wrote
-    the line and named it, so there is nothing to interpret."""
+    `texts`, then what this attempt wrote to the stage logs in `workdir` (`_fresh_logs`). Exact
+    substring, case-sensitive -- the node wrote the line and named it, so there is nothing to
+    interpret."""
     markers = [m for m in markers if m]
     if not markers:
         return []
     haystacks = [t for t in texts if isinstance(t, str) and t]
     missing = [m for m in markers if not any(m in h for h in haystacks)]
     if missing and workdir is not None and os.path.isdir(str(workdir)):
-        logs = _fresh_logs(workdir, since)
+        logs = _fresh_logs(workdir, since, snapshot)
         missing = [m for m in missing if not any(m in h for h in logs)]
     return missing
 
