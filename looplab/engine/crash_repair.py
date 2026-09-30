@@ -210,10 +210,11 @@ def _format_repair_log(repair_log) -> str:
         # and until now it reached the judge on neither the live row nor the resumed one.
         #
         # PER KIND, because `_note_session_budget` stores any member of
-        # `tool_loop.py::LOOP_CUTOFF_KINDS` and only two of the five are budget bounds. Calling
-        # `stuck` or `emit_force` "ran out of clock" would be a confident wrong sentence in the one
-        # place this rung exists to stop being wrong. Appended, never substituted, so a row without
-        # the column renders byte-identically to what this prompt has always been.
+        # `tool_loop.py::LOOP_CUTOFF_KINDS` and only some are budget bounds. Calling `stuck` or
+        # `emit_force` "ran out of clock" would be a confident wrong sentence in the one place
+        # this rung exists to stop being wrong. Appended, never substituted, so a row without
+        # the column renders byte-identically to what this prompt has always been. `tokens` (doc 69
+        # 69.2) got its own sentence when the kind was born, so no row's text moved for it.
         _cutoff = str(r.get("budget_exhausted") or "").strip()
         if _cutoff:
             note += "\n    " + {
@@ -221,6 +222,9 @@ def _format_repair_log(repair_log) -> str:
                         "an empty or thin change set here is where it got to, not what it decided.",
                 "turns": "THE SESSION RAN OUT OF TURNS — it did not finish on its own terms, so an "
                          "empty or thin change set here is where it got to, not what it decided.",
+                "tokens": "THE SESSION RAN OUT OF ITS TOKEN BUDGET (the tokens its model calls may "
+                          "use) — it did not finish on its own terms, so an empty or thin change "
+                          "set here is where it got to, not what it decided.",
             }.get(_cutoff,
                   f"THE LOOP ENDED THIS SESSION ITSELF ({_cutoff}) rather than the Developer "
                   "finishing: it stopped without a model-chosen emit, so what this attempt changed "

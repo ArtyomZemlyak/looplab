@@ -2756,6 +2756,22 @@ class Settings(BaseSettings):
     # boss at max_turns=3 / 45s), which silently dropped a slow reasoning model to a no-op reply.
     agent_max_turns: int = 0           # max tool turns before the emit is forced (0 = unlimited)
     agent_time_budget_s: float = 0.0   # wall-clock ceiling across the loop's turns (0 = no cap)
+    # THE SESSION'S TOKEN CEILING (doc 69 §3.2, 69.2): the most prompt+completion tokens ONE
+    # tool-loop session may commit — cached prompt tokens included, since it bounds volume and not
+    # price — before the loop stops starting turns and forces the emit from what it gathered (the
+    # money ceiling's rule; `agents/tool_loop.py::drive_tool_loop(token_budget=)`). 0 = off. The
+    # currency that holds where the other two did not: `minionerec-backbones-v10` ran on an unpriced
+    # gateway (`cost = 0`, so a money ceiling cannot fire) and its seven plan phases committed
+    # 95.4 M tokens, 48 % of the run, while a cached prefix kept turns at ~2 s and the 1200 s wall
+    # never bit (card-4: 300 turns, context 27k -> 217k). Counted on the loop's own THREAD
+    # (`core/llm_budget.py::note_committed_tokens`), so concurrent builds sharing the run's
+    # accountant never count against each other and a nested loop counts toward both. OFF BY
+    # DEFAULT because no threshold was measured beyond that one run: size it from the `tokens` every
+    # loop stamps on its `agent_phase_completed` row, set or not. Reaches the loops that take the
+    # settings bundle (the Researcher, the Developer's sessions, triage, the Strategist,
+    # Deep-Research, the assistant). No `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row: 0 is the historical
+    # behaviour, and a positive value only ends a loop through the existing salvage exit.
+    agent_token_budget: int = Field(default=0, ge=0)
     # The CHAT's own wall clock, separate from the engine roles' above. `serve/assistant.py::run_turn`
     # used to read `agent_time_budget_s` and then apply `or 300.0` — so the documented "0 = no cap"
     # silently became a five-minute ceiling for the assistant and ONLY for the assistant, with no way

@@ -516,6 +516,17 @@ a loop is stamped on its `agent_phase_completed` row (`stuck_rule`, `stuck_detai
 scope; every phase runs through the shared `run_phase` wrapper, so with the setting off it's
 byte-identical to a plain `drive_tool_loop`.
 
+Beside the turn, wall-clock and money ceilings, **`agent_token_budget`** (0 = off) bounds a session
+in tokens: every prompt and completion token its provider calls commit, cached ones included, and
+past the ceiling the loop starts no turn and forces the emit from what it gathered — the money
+ceiling's rule, reported as the cutoff kind `tokens`. It is the ceiling that still holds on a
+provider that prices nothing: `minionerec-backbones-v10` ran on an unpriced gateway, its seven plan
+phases committed 95.4 M tokens (48 % of the run), and a cached prefix kept turns at ~2 s so the
+1200 s wall never bit (doc 69 §3.2). It counts on the loop's own thread, so concurrent builds that
+share the run's accountant never count against each other. Every loop stamps what it committed on
+its `agent_phase_completed` row (`tokens`) and, when a ceiling ended it, which one (`cutoff`) — size
+the budget from those rows; no threshold is shipped, because none was measured beyond that run.
+
 ## Agentic auxiliary steps
 
 Every remaining single-shot LLM step is now a **tool-using agent** (via the shared `agentic_text` /

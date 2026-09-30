@@ -2263,6 +2263,10 @@ _CUTOFF_SENTENCES = {
     # which is not the assistant's to raise -- so this kind gets the "narrow the question" advice,
     # which is the honest one, and the `detail` carries the two figures.
     "cost": "reached the spend ceiling for this session",
+    # Added with the loop's token ceiling (doc 69 69.2). Kept out of _CUTOFF_BUDGET_KINDS for the
+    # money ceiling's reason -- seconds do not buy tokens -- but unlike `llm_budget_usd` the knob
+    # that helps IS the operator's, `agent_token_budget`, so the notice names it.
+    "tokens": "reached the token ceiling for this session",
 }
 # Only the two clock/counter kinds are raised by raising the budget; telling an operator to raise
 # `assistant_time_budget_s` after a STUCK exit would send them to a knob that cannot help. The same
@@ -2285,6 +2289,7 @@ def cutoff_notice(budget: dict) -> str:
     because = f" ({detail})" if detail else ""
     raise_it = ("Ask me to continue, or raise `assistant_time_budget_s`."
                 if kind in _CUTOFF_BUDGET_KINDS
+                else "Ask me to continue, or raise `agent_token_budget`." if kind == "tokens"
                 else "Ask me to continue, or narrow the question.")
     return (f"\n\n---\n_This turn {what}{because} after {budget.get('turns')} tool turns "
             f"({budget.get('seconds')}s) and was cut short — the answer above is the best I could "
@@ -2406,7 +2411,7 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
     # WHAT HAPPENED TO MY TURN. On a cut-short exit the loop salvages one forced emit from what it
     # gathered — the right move — but presenting a cut-short investigation as a finished answer is
     # how "the assistant hangs around 40 tool uses and then something odd comes back" reads to an
-    # operator who was never told. All FIVE of `tool_loop.LOOP_CUTOFF_KINDS` report here, not only
+    # operator who was never told. Every one of `tool_loop.LOOP_CUTOFF_KINDS` reports here, not only
     # the two clock/counter ones: the `stuck` exit reproduces the operator's report most exactly
     # (a bare interstitial narration returned as the answer) and used to say nothing at all.
     budget_box: dict = {}

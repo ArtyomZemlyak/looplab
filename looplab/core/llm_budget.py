@@ -249,3 +249,37 @@ class RunBudget:
                 "reservations": self.reservations, "refusals": self.refusals,
                 "estimate_cost": est_cost, "estimate_tokens": est_tokens, "seeded": self.seeded,
             }
+
+
+# ------------------------------------------------------------------ one session's own tokens
+
+# EVERY provider token committed ON THIS THREAD, as `CostAccountant.add` committed it (doc 69 69.2).
+# A THREAD and not the accountant, because the accountant is the RUN's: `core/llm.py::
+# run_cost_accountant` shares one across every client a run builds, so "what the run committed
+# since this session started" also counts every CONCURRENT session — a build fan-out of four plan
+# phases would read four sessions' volume against one session's ceiling and cut all four early. A
+# tool loop is synchronous: every call it makes is billed on the thread that drives it (`_post`
+# and the streaming generator both commit on the caller's thread; `_bounded_create`'s worker
+# makes the request and bills nothing), and no two loops run on one thread at once. So a loop that
+# reads this counter at its start and again at each turn reads its OWN volume, its nested loops'
+# included. What it cannot see is a call a tool hands to ANOTHER thread, which no tool does today.
+_THREAD_TOKENS = threading.local()
+
+
+def note_committed_tokens(tokens) -> None:
+    """Add one committed provider call's tokens to THIS thread's running total.
+
+    Called by `CostAccountant.add` after it commits, and by nothing else. Never raises: a counter
+    must not turn a paid call that succeeded into an exception."""
+    try:
+        n = int(tokens)
+    except (TypeError, ValueError, OverflowError):
+        return
+    if n > 0:
+        _THREAD_TOKENS.total = getattr(_THREAD_TOKENS, "total", 0) + n
+
+
+def thread_committed_tokens() -> int:
+    """Every provider token committed on this thread so far. Read twice, the difference is what
+    one session committed in between (`agents/tool_loop.py::drive_tool_loop(token_budget=)`)."""
+    return getattr(_THREAD_TOKENS, "total", 0)

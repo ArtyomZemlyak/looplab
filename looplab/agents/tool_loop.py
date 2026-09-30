@@ -32,6 +32,7 @@ from looplab.core.phase_events import (PHASE_CHECKPOINTED, PHASE_COMPLETED, PHAS
 from looplab.tools.clock import LoopClock, set_current_clock
 from looplab.core.errors import LLMCancelled
 from looplab.core.llm import BudgetExceeded, cancel_check_scope
+from looplab.core.llm_budget import thread_committed_tokens
 from looplab.tools._base import (RESULT_CAP, ToolCapability, ToolResult, collect_inventory,
                                  capability_manifest)
 from looplab.core.redact import redact_secrets
@@ -893,7 +894,10 @@ def _run_tool_call(tools, name: str, args: dict, *, repeat_state: dict,
 # file.") presented as the answer, with nothing anywhere saying the investigation had been cut off.
 # That is the operator's "the assistant hangs around 40 tool uses and then a bare tool use arrives as
 # the reply", reproduced exactly.
-LOOP_CUTOFF_KINDS = ("time", "cost", "turns", "stuck", "stalled", "emit_force")
+#
+# `tokens` joined with `token_budget` (doc 69 69.2): the session's own committed prompt+completion
+# volume, the ceiling that still holds where a provider prices nothing and `cost` never fires.
+LOOP_CUTOFF_KINDS = ("time", "cost", "tokens", "turns", "stuck", "stalled", "emit_force")
 
 
 def _accountant_spend(client) -> float | None:
@@ -924,6 +928,20 @@ def _session_spend(client, at_start: float | None) -> float | None:
     return max(0.0, now - at_start)
 
 
+def _session_tokens(client, at_start: int) -> int | None:
+    """The tokens THIS session has committed, or None when its client keeps no accountant.
+
+    Read off the THREAD, not the accountant (`core/llm_budget.py::note_committed_tokens` says why:
+    the accountant is the run's, and a concurrent session's calls would count against this one).
+    None on a client with no accountant for `_accountant_spend`'s reason: nothing it calls is
+    committed anywhere, so a 0 would read as a session that used nothing rather than as a ceiling
+    measuring nothing — the ceiling is off there, like every other accountant-derived rung.
+    """
+    if getattr(client, "accountant", None) is None:
+        return None
+    return max(0, thread_committed_tokens() - at_start)
+
+
 def _spend_detail(client, at_start, ceiling: float) -> str:
     """"$X of $Y for this session", or "" when the spend cannot be known.
 
@@ -940,7 +958,7 @@ def _spend_detail(client, at_start, ceiling: float) -> str:
 
 
 def _note_budget(on_budget, kind: str, *, turns, seconds, detail: str = "") -> None:
-    """Report that the loop stopped WITHOUT a model-chosen emit, and which of the five ways it was.
+    """Report that the loop stopped WITHOUT a model-chosen emit, and which cutoff kind it was.
 
     An observer is best-effort by construction: this fires on the way to a salvage emit, and a
     broken callback must not turn a rescued answer into a crash.
@@ -977,6 +995,7 @@ def _reject_text(template: str, emit_name: str, err) -> str:
 def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     max_turns: int = 0, context_budget_chars: int | None = None,
                     time_budget_s: float = 0.0, cost_budget_usd: float = 0.0,
+                    token_budget: int = 0,
                     finalize=None, fallback=None, on_budget=None,
                     on_plan=None, phase_label: str = "",
                     stuck_detection: bool = True,
@@ -1012,6 +1031,16 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         same: 1212 s, 28 %. The same ceiling on `edge_expansion` never bit at all (worst step 8-9 %),
         so seconds and dollars are not proxies for each other across tasks, and bounding one does not
         bound the other.
+      - `token_budget` (0 = off): TOKEN ceiling for THIS session — every prompt and completion
+        token its provider calls committed, cached prompt tokens included, because the volume is
+        what it bounds and not the price — on the same "do not start another turn" rule. The
+        currency that still holds where the provider prices nothing (doc 69 §3.2): a plan phase on
+        a $0 model re-sent a 27k -> 217k context for 300 turns, the 1200 s wall never bit at ~2 s
+        a turn with a cached prefix, and `cost_budget_usd` is inert when every call costs 0. Read
+        off the loop's own THREAD (`core/llm_budget.py::note_committed_tokens`), so a concurrent
+        session's calls never count against this one and a nested loop's count toward both.
+        Off on a client with no accountant. Its figure is stamped on the phase's completion row
+        (`tokens`) on every exit, so a ceiling can be sized from the rows before it is set.
 
     Safe-by-default unlimited operation (the point of "the agents may loop forever in their own
     loop"): `max_turns`/`time_budget_s` are only BACKSTOPS. What actually stops a stuck loop is the
@@ -1160,16 +1189,30 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     # raise is not an exit of this loop's, so it leaves `started` unmatched — which is the record.
     _label = str(phase_label or emit_name or "")[:80]
     _plan_updates = 0
-    emit_phase_event(PHASE_STARTED, {
-        "label": _label, "emit": str(emit_name or "")[:80],
-        "tools": len(tool_specs), "max_turns": int(max_turns or 0),
-        "time_budget_s": float(time_budget_s or 0.0)})
+    _started = {"label": _label, "emit": str(emit_name or "")[:80],
+                "tools": len(tool_specs), "max_turns": int(max_turns or 0),
+                "time_budget_s": float(time_budget_s or 0.0)}
+    if token_budget:                    # only when set, so an unbounded phase writes its old bytes
+        _started["token_budget"] = int(token_budget)
+    emit_phase_event(PHASE_STARTED, _started)
 
     # Which no-progress rule stopped this loop, when one did: stamped on the phase's completion row
     # so a firing is countable on every loop inside a run, observer or not (critic 2026-09-29: the
     # long-cycle rule's rate could be read off only the four callers that pass `on_budget`, and
     # `agents/agent.py::_note_cutoff` kept its kind alone, `stuck`, as for a 1- or 2-cycle).
     _stuck_stamp: dict = {}
+    # ...and which CUTOFF ended it, for the same reason and every kind: `on_budget` reaches only the
+    # callers that pass one, so a token ceiling (doc 69 69.2) that fired on any other loop would be
+    # countable nowhere. Set by `_cut`, the one way this loop reports a cutoff.
+    _cutoff: dict = {}
+
+    def _cut(kind: str, **facts) -> None:
+        _cutoff["kind"] = kind
+        _note_budget(on_budget, kind, **facts)
+
+    # Read once, before the first turn, like `_spend_at_start` below: what this THREAD had
+    # committed before the session began, so every later read is the session's own volume.
+    _tokens_at_start = thread_committed_tokens()
 
     def _done(exit_kind: str) -> None:
         payload = {"label": _label, "exit": exit_kind, "turns": clock.turn + 1,
@@ -1177,6 +1220,14 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         if _stuck_stamp:
             payload["stuck_rule"] = _stuck_stamp["stuck_rule"]
             payload["stuck_detail"] = _stuck_stamp["stuck_detail"]
+        if _cutoff:
+            payload["cutoff"] = _cutoff["kind"]
+        # WHAT THE SESSION COMMITTED, on every exit and not only a cut one: a token ceiling is
+        # sized from the sessions that did NOT hit it, and a ceiling whose distance from firing
+        # cannot be read is the defect `_spend_detail` was written for. Absent when unmeasurable.
+        _tk = _session_tokens(client, _tokens_at_start)
+        if _tk is not None:
+            payload["tokens"] = _tk
         emit_phase_event(PHASE_COMPLETED, payload)
     # D11: history compression runs on the dedicated cheap compressor when configured, else the
     # loop's own client. A configured compressor that failed validation/construction is different:
@@ -1271,8 +1322,8 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             # because the only thing recorded was the word "time". A ceiling whose distance from
             # firing is unobservable cannot be tuned, defended or removed; it can only be asserted
             # about, which is what happened for several weeks.
-            _note_budget(on_budget, "time", turns=turn_idx, seconds=time.monotonic() - started,
-                         detail=_spend_detail(client, _spend_at_start, cost_budget_usd))
+            _cut("time", turns=turn_idx, seconds=time.monotonic() - started,
+                 detail=_spend_detail(client, _spend_at_start, cost_budget_usd))
             break                       # out of wall-clock budget -> salvage an emit below
         if cost_budget_usd:
             _sp = _session_spend(client, _spend_at_start)
@@ -1281,10 +1332,18 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 # Same reason the wall clock tells someone: a session cut for money that reports
                 # nothing looks exactly like one that finished, and the operator reads the short
                 # answer as the model's considered one.
-                _note_budget(on_budget, "cost", turns=turn_idx,
-                             seconds=time.monotonic() - started,
-                             detail=_spend_detail(client, _spend_at_start, cost_budget_usd))
+                _cut("cost", turns=turn_idx, seconds=time.monotonic() - started,
+                     detail=_spend_detail(client, _spend_at_start, cost_budget_usd))
                 break                   # out of money for THIS session -> salvage an emit below
+        if token_budget:
+            _tk = _session_tokens(client, _tokens_at_start)
+            if _tk is not None and _tk > token_budget:
+                exhausted = True
+                # The money ceiling's rule in the currency that holds at $0 (doc 69 69.2), and it
+                # says so with both figures for the same reason the other two do.
+                _cut("tokens", turns=turn_idx, seconds=time.monotonic() - started,
+                     detail=f"{_tk:,} of {int(token_budget):,} tokens for this session")
+                break                   # out of tokens for THIS session -> salvage an emit below
         _compact_in_place(messages, context_budget_chars, auto_summary, summarize,
                           label=tool_result_label, keep=request)
         # C1: re-surface the agent's own plan periodically so a long loop can't drift off-goal. A
@@ -1358,8 +1417,8 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 msg = None
         if msg is None:
             exhausted = True
-            _note_budget(on_budget, "time", turns=turn_idx, seconds=time.monotonic() - started,
-                         detail=_spend_detail(client, _spend_at_start, cost_budget_usd))
+            _cut("time", turns=turn_idx, seconds=time.monotonic() - started,
+                 detail=_spend_detail(client, _spend_at_start, cost_budget_usd))
             break                       # the turn overran the wall -> salvage an emit below
         calls = msg.get("tool_calls") or []
         if not calls:
@@ -1383,9 +1442,8 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 # SAY SO. Twice in a row the model answered in prose and the endpoint could not be
                 # forced into a structured emit, so `fallback` is about to hand back whatever prose
                 # was last said — which reads as a finished answer and is not one.
-                _note_budget(on_budget, "stalled", turns=turn_idx,
-                             seconds=time.monotonic() - started,
-                             detail="the model answered in prose and could not be forced to emit")
+                _cut("stalled", turns=turn_idx, seconds=time.monotonic() - started,
+                     detail="the model answered in prose and could not be forced to emit")
                 break
             # DELIVER THE REFUSAL. A validator that rejected this emit said WHY, and the generic
             # nudge threw that away — so the repair rung that bounces "you described an edit you
@@ -1553,9 +1611,8 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 # Announced BEFORE the salvage, like the wall-clock exit: an answer forced at the
                 # convergence ceiling is a salvage from what was gathered either way, and the
                 # operator has to be able to tell it from a conclusion.
-                _note_budget(on_budget, "emit_force", turns=call_turns,
-                             seconds=time.monotonic() - started,
-                             detail=f"the soft-convergence ceiling ({emit_force} tool turns) was hit")
+                _cut("emit_force", turns=call_turns, seconds=time.monotonic() - started,
+                     detail=f"the soft-convergence ceiling ({emit_force} tool turns) was hit")
                 if _cancelled():        # paid call — see the prose-reply force above
                     break
                 ok, result, _ = _salvage_emit()
@@ -1576,8 +1633,8 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             # investigation that starts circling, and (on an endpoint that ignores tool_choice)
             # falls through to the last thing the model said out loud. Unreported, that is
             # indistinguishable from a finished turn.
-            _note_budget(on_budget, "stuck", turns=turn_idx,
-                         seconds=time.monotonic() - started, detail=str(stuck_reason))
+            _cut("stuck", turns=turn_idx, seconds=time.monotonic() - started,
+                 detail=str(stuck_reason))
             _stuck_stamp.update({"stuck_rule": str(stuck_rule or "unknown"),
                                  "stuck_detail": str(stuck_reason)[:200]})
             messages.append({"role": "user",
@@ -1593,7 +1650,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             break
     else:
         exhausted = True                # every turn used without an emit
-        _note_budget(on_budget, "turns", turns=max_turns, seconds=time.monotonic() - started)
+        _cut("turns", turns=max_turns, seconds=time.monotonic() - started)
     if exhausted and not _cancelled():
         # Budget exhaustion (turns or wall-clock) used to fall STRAIGHT to fallback, discarding the
         # whole investigation — the Developer's STAGES phase read a big repo for its full 30-turn
@@ -1922,6 +1979,12 @@ def loop_opts_from_settings(settings) -> LoopOptions:
     cb = g(settings, "context_budget_chars", None)
     if cb is not None:
         opts = opts.replace(context_budget_chars=int(cb))
+    # The session token ceiling (doc 69 69.2), set only when an operator declared one: 0 is the
+    # loop's own "off", so an unset field keeps the bundle byte-identical to the one every caller
+    # spread before the knob existed.
+    tb = int(g(settings, "agent_token_budget", 0) or 0)
+    if tb > 0:
+        opts = opts.replace(token_budget=tb)
     # D11 compression model slot (open_deep_research's four-slot pattern): a dedicated CHEAP
     # summarizer for history compression, instead of paying the main model for it. Blank = the
     # loop's own client (byte-identical legacy behavior).

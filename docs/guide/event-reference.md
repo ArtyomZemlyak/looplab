@@ -23,15 +23,15 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-163 event types — 113 folded into `RunState`, 50 diagnostic; 1044 declared payload keys; 22 types whose whole payload is stored by the fold.
+163 event types — 113 folded into `RunState`, 50 diagnostic; 1047 declared payload keys; 22 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
 | `ablate` | folded · whole | One ablation of the champion's code: which blocks were removed and what each removal cost the metric. | `generation`, `impacts`, `parent_id` | `ablation_id`, `attempt`, `blocks`, `eval_seconds`, `mode`, `signed_impacts`, `skipped`, `superseded`, `top_block` |
 | `agent_checkpointed` | diagnostic | An agentic role's mid-loop checkpoint: the turn, the plan it works from, the todo updates it just made. | `label`, `plan`, `plan_updates`, `todos`, `turn` | — |
 | `agent_decision` | folded · whole | The unified agent's pick of the next action, beside the legal set it was offered. | `at_node`, `chosen`, `legal`, `rationale`, `recommended` | — |
-| `agent_phase_completed` | diagnostic | One agentic phase ended: how it exited, after how many turns and seconds, and which no-progress rule stopped it when one did. | `exit`, `label`, `plan_updates`, `seconds`, `turns` | `stuck_detail`, `stuck_rule` |
-| `agent_phase_started` | diagnostic | One agentic phase began: its label, tool surface and the turn/time budget it was given. | `emit`, `label`, `max_turns`, `time_budget_s`, `tools` | — |
+| `agent_phase_completed` | diagnostic | One agentic phase ended: how it exited, its turns, seconds and tokens, and which cutoff or no-progress rule stopped it. | `exit`, `label`, `plan_updates`, `seconds`, `turns` | `cutoff`, `stuck_detail`, `stuck_rule`, `tokens` |
+| `agent_phase_started` | diagnostic | One agentic phase began: its label, tool surface and the turn/time/token budget it was given. | `emit`, `label`, `max_turns`, `time_budget_s`, `tools` | `token_budget` |
 | `agent_validated` | folded | The Developer's self-validation over a build: which checks ran, whether it shipped, after how many attempts. | — | `attempt`, `attempts`, `checks`, `fell_back`, `generation`, `node_id`, `ok`, `shipped_ok` |
 | `annotation` | folded | An operator note pinned to one node. | `text` | `node_id` |
 | `applied_params_backfilled` | folded | What the configuration that actually RAN assigned to the declared params, read back off the workdir. | `applied_params`, `generation`, `node_id`, `read_at`, `unrecoverable`, `workdir_digest` | `attempt` |

@@ -82,6 +82,10 @@ class LoopOptions(Mapping):
     max_turns: int | _Unset = UNSET
     time_budget_s: float | _Unset = UNSET
     cost_budget_usd: float | _Unset = UNSET
+    # The session's TOKEN ceiling (doc 69 69.2): the money ceiling's rule in the currency that
+    # still holds when the provider prices nothing. A number an operator sets, so it rides the
+    # bundle (`Settings.agent_token_budget`); 0 = off, the loop's own default.
+    token_budget: int | _Unset = UNSET
     context_budget_chars: int | None | _Unset = UNSET
     stuck_detection: bool | _Unset = UNSET
     stuck_repeat: int | _Unset = UNSET

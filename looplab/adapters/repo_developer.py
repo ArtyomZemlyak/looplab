@@ -1357,14 +1357,14 @@ class LLMRepoDeveloper:
         emit, so a raise here would turn a rescued answer into a crash.
 
         `kind` IS THE WHOLE OF `tool_loop.py::LOOP_CUTOFF_KINDS`, not the two this docstring used to
-        name. `_note_budget` fires the same `on_budget` observer for all five — `time`, `turns`,
-        `stuck`, `stalled`, `emit_force` — and this stores whatever arrives, so three of them landed
-        on a durable column two comments described as "which BUDGET ended the session". Only the
-        first two are budget bounds; the other three are the loop ending a session that was not
-        going anywhere, which is a different fact with a different remedy, and
+        name. `_note_budget` fires the same `on_budget` observer for every kind — `time`, `cost`,
+        `tokens`, `turns`, `stuck`, `stalled`, `emit_force` — and this stores whatever arrives, so
+        the last three landed on a durable column two comments described as "which BUDGET ended the
+        session". The first four are bounds; the other three are the loop ending a session that was
+        not going anywhere, which is a different fact with a different remedy, and
         `crash_repair.py::_format_repair_log` now says which it was rather than implying a clock.
         CLAIM[budget-exhausted-vocabulary] the durable `budget_exhausted` column carries any of the
-        five loop cutoff kinds, not only the two budget bounds.
+        loop's cutoff kinds, not only its budget bounds.
         decided:`line:LOOP_CUTOFF_KINDS&&emit_force@looplab/agents/tool_loop.py`
         """
         try:

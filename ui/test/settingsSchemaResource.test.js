@@ -254,7 +254,9 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   and both stream tails) is what the judge and the repair read. The Python half moved too.
   //   239 -> 240 (2026-09-29): `card_full_rationale` — a Card's builds run the Researcher's whole
   //   rationale instead of the board's 400 characters. The Python half moved too.
-  assert.equal(Object.keys(schema.fieldByKey).length, 240)
+  //   240 -> 241 (2026-09-30): `agent_token_budget` — the session's token ceiling, the one that
+  //   holds on a provider that prices nothing. The Python half moved too.
+  assert.equal(Object.keys(schema.fieldByKey).length, 241)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

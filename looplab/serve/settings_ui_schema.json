@@ -1112,6 +1112,14 @@
           "help": "Wall-clock ceiling across an agent’s tool-loop turns. Blank/0 = no cap. Raise/clear this if a slow reasoning model gets cut off before it emits (replaces the old hardcoded 45s boss limit)."
         },
         {
+          "key": "agent_token_budget",
+          "label": "Agent tool-loop tokens",
+          "type": "int",
+          "default": 0,
+          "placeholder": "unlimited",
+          "help": "The most tokens ONE agent session (a plan phase, a triage, a chat turn…) may use — every prompt and completion token its model calls commit, cached ones included — before it stops and answers from what it gathered. Blank/0 = no cap. The ceiling that still holds on a provider that prices nothing: a plan phase on a free gateway once re-sent a growing context for 300 turns, faster than the wall clock and invisible to a money ceiling. Counted per session, so parallel builds never count against each other. Size it from the tokens each phase records."
+        },
+        {
           "key": "assistant_time_budget_s",
           "label": "Assistant turn time (s)",
           "type": "float",
