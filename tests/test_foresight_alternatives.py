@@ -909,3 +909,47 @@ def test_12_the_brief_is_distilled_from_the_transcript_as_it_stood(monkeypatch):
     session.pending_brief = (object(), "Researcher·propose", "the Developer", object())
     session.publish_brief(0)
     assert seen == [original]
+
+
+# ------------------------------------------------------------------ a session holds ITS cutoff
+
+def _another_call_writes(monkeypatch, researcher, value: str) -> None:
+    """A `run_phase` after which ANOTHER proposal on the same shared Researcher writes its cutoff:
+    the card lane and the offloaded serial build propose through one instance, and the attribute is
+    whichever call wrote last (the critic drove the same interleaving on two threads)."""
+    import looplab.agents.agent as agent_mod
+    real = agent_mod.run_phase
+
+    def run_phase(*a, **kw):
+        out = real(*a, **kw)
+        researcher.last_budget_exhausted = value
+        return out
+
+    monkeypatch.setattr(agent_mod, "run_phase", run_phase)
+
+
+def test_a_clean_session_is_not_handed_another_call_s_cutoff(monkeypatch):
+    """crit_v45 M2: `session.hold(cutoff=self.last_budget_exhausted)` read the SHARED attribute — a
+    session that emitted cleanly held the other call's `tokens` and lost its alternative. MUTATION:
+    hold the attribute at `propose` or at `propose_alternative` -> red."""
+    model = _Model([_turn(_read("r1")), _turn(_emit("e1", "cache the per-depth scorer")),
+                    _turn(_emit("e2", "batch the shared prompt pages", x=2.0))])
+    researcher = ToolUsingResearcher(model, _Tools())
+    _another_call_writes(monkeypatch, researcher, "tokens")
+    idea, session = researcher.propose_with_session(_state(), None)
+    assert session.cutoff == "" and session.continuable, "a clean emit stays continuable"
+    assert researcher.propose_alternative(_state(), None, session, [idea]) is not None
+    assert session.cutoff == "", "the continuation holds its own cutoff too"
+
+
+def test_a_session_cut_short_stays_cut_when_another_call_resets_the_attribute(monkeypatch):
+    """The reverse interleaving: this call hit its turn cap, the other call's `propose` reset the
+    attribute to "" before the session was held — so the session recorded no cutoff at all (the
+    critic's driven case was a WALL-CLOCK cut, a spend cutoff, and that session was then continued
+    past its own ceiling). MUTATION: hold the attribute at `propose` -> the cutoff is lost."""
+    model = _Model(lambda messages: _turn(_read(f"r{len(messages)}")),
+                   forced=[_emission("salvaged at the cap")])
+    researcher = ToolUsingResearcher(model, _Tools(), loop_opts=LoopOptions(max_turns=1))
+    _another_call_writes(monkeypatch, researcher, "")
+    _idea, session = researcher.propose_with_session(_state(), None)
+    assert (session.exit, session.cutoff) == ("salvaged", "turns")

@@ -655,10 +655,17 @@ class ToolUsingResearcher:
         # where a proposal converged, and under a cap a truncated proposal would be
         # indistinguishable from a converged one in the record. Reset per call, never accumulated.
         self.last_budget_exhausted = ""
+        # …and THIS call's own copy, which is what its session holds (critic 2026-09-30, crit_v45
+        # M2): the card lane and the offloaded serial build propose through ONE shared Researcher,
+        # and the attribute is whichever call wrote last — driven, a session that emitted cleanly
+        # held the other thread's `tokens` cutoff, and one cut by its wall clock held "" and was
+        # continued past its own ceiling.
+        cutoff = [""]
 
         def _note_cutoff(payload) -> None:
             kind = (payload or {}).get("kind") if isinstance(payload, dict) else None
-            self.last_budget_exhausted = str(kind or "")[:32]
+            cutoff[0] = str(kind or "")[:32]
+            self.last_budget_exhausted = cutoff[0]
 
         # HOW THE LOOP ENDED, for a caller holding a `session`: `finalize` runs on an accepted emit
         # (in-loop or salvaged), `fallback` when none came. Pass-throughs, so the call is unchanged.
@@ -704,7 +711,7 @@ class ToolUsingResearcher:
                 **fence_kwargs(self.evidence_envelope),
                 **self.loop_opts)
             if session is not None:
-                session.hold(messages, visible, exit_kind[0], cutoff=self.last_budget_exhausted)
+                session.hold(messages, visible, exit_kind[0], cutoff=cutoff[0])
                 ledger = _handoff_ctx.get()
                 if getattr(self, "handoff", True) and ledger is not None:
                     session.pending_brief = (self.client, "Researcher·propose", next_label, ledger)
@@ -753,12 +760,15 @@ class ToolUsingResearcher:
             self.tools.bind_state(state, parent)
         # Reset per call and announced exactly as `propose` does (`RESEARCHER_OUTPUT_ATTRS`): with
         # a turn cap, "cut short" is a real possibility, and the panel publishes the receipt of the
-        # candidate it CHOOSES, not of whichever call ran last.
+        # candidate it CHOOSES, not of whichever call ran last. The session holds THIS call's own
+        # copy (see `propose`, crit_v45 M2).
         self.last_budget_exhausted = ""
+        cutoff = [""]
 
         def _note_cutoff(payload) -> None:
             kind = (payload or {}).get("kind") if isinstance(payload, dict) else None
-            self.last_budget_exhausted = str(kind or "")[:32]
+            cutoff[0] = str(kind or "")[:32]
+            self.last_budget_exhausted = cutoff[0]
 
         emit_spec = self._emit_spec()
         emit_name = emit_spec["function"]["name"]
@@ -832,7 +842,7 @@ class ToolUsingResearcher:
             contain("researcher alternative", exc)
             return None
         session.hold(messages, cards, exit_kind[0] or "fallback", emit_name=emit_name,
-                     cutoff=self.last_budget_exhausted)
+                     cutoff=cutoff[0])
         if result is None:
             return None
         digest = idea_proposal_digest(result)
