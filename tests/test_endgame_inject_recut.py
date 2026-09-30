@@ -122,14 +122,20 @@ def test_a_stall_row_is_not_re_cut_by_a_batch():
     # `stall_nodes` 3: a live episode closes by its own terms …
     episode = _replan(plan, at_node=8, stall_rung=HARD_STALL_RUNGS, stall_nodes=3)
     assert (episode["endgame_start"], episode["endgame_end"]) == (8, 11)
-    assert _replan(episode, at_node=9, injected=2, stall_nodes=3, stall_rung=3) is None
+    # … a batch landing inside it EXTENDS it by the batch: the episode is K of the ENGINE's nodes
+    # (critic 2026-09-30, crit_v48 F3 — the operator's ids used to spend it) …
+    extended = _replan(episode, at_node=9, injected=2, stall_nodes=3, stall_rung=3)
+    assert (extended["reason"], extended["endgame_start"], extended["endgame_end"]) == (
+        "injected", 8, 13)
+    assert extended["injected"] == 2 and extended["stall_champions"] == [0]
+    assert _replan(extended, at_node=12, injected=2, stall_nodes=3, stall_rung=3) is None
     # … and its `reopened` row cuts over the engine's share.
-    reopened = _replan(episode, at_node=11, injected=6, stall_nodes=3, stall_rung=3)
+    reopened = _replan(extended, at_node=13, injected=2, stall_nodes=3, stall_rung=3)
     assert reopened["reason"] == "reopened" and reopened["reopen_cause"] == "episode_spent"
-    assert (reopened["endgame_start"], reopened["injected"]) == (16, 6)
+    assert (reopened["endgame_start"], reopened["injected"]) == (16, 2)
     assert reopened["stall_champions"] == [0]
     # The injected re-cut of a row after an episode keeps the spent-champion memory.
-    moved = _replan(reopened, at_node=12, injected=10, stall_nodes=3, stall_rung=3)
+    moved = _replan(reopened, at_node=14, injected=10, stall_nodes=3, stall_rung=3)
     assert moved["reason"] == "injected" and moved["stall_champions"] == [0]
 
 
