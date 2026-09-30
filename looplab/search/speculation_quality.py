@@ -286,6 +286,16 @@ _CALIBRATION_CARD_ADDED_FIELDS = frozenset({
 _CALIBRATION_CARD_IDEA_FIELDS = frozenset({
     "operator", "params", "space", "eval_profile", "eval_timeout",
 })
+# The one OPTIONAL key of a native registration: the Researcher's whole rationale, written beside
+# the receipt when the 400-character cut applied under `Settings.card_full_rationale` (doc 69 69.4,
+# default on, so a calibration replicate whose proposal runs long writes it). Admitted only as a
+# string that EXTENDS the row's own rationale, within the writer's bound
+# (`engine/card_reservation.py::CARD_RATIONALE_FULL_MAX` + its cut sentence; spelled here as a
+# literal because this layer imports no engine, and pinned equal by
+# `tests/test_card_full_rationale.py`). Refusing it made every such replicate "not one exact native
+# registration" (critic 2026-09-29).
+_CALIBRATION_CARD_ADDED_OPTIONAL_FIELDS = frozenset({"rationale_full"})
+_CALIBRATION_RATIONALE_FULL_MAX = 8_000 + 200
 
 # This is an allow-list, not merely a list of known-bad controls.  A future event type therefore
 # cannot silently become admissible calibration evidence until its selection/finalization semantics
@@ -1344,7 +1354,8 @@ def _validate_calibration_card_owners(
         idea = data.get("idea")
         if (
             not isinstance(event.data, dict)
-            or set(data) != set(_CALIBRATION_CARD_ADDED_FIELDS)
+            or set(data) - _CALIBRATION_CARD_ADDED_OPTIONAL_FIELDS
+            != set(_CALIBRATION_CARD_ADDED_FIELDS)
             or not _bounded_card_id(card_id)
             or card_id in by_card
             or not isinstance(idea, dict)
@@ -1365,6 +1376,11 @@ def _validate_calibration_card_owners(
             or not 0 <= data["at_node"] <= (1 << 31) - 1
             or not isinstance(data.get("rationale"), str)
             or len(data["rationale"]) > 400
+            or ("rationale_full" in data and not (
+                isinstance(data["rationale_full"], str) and data["rationale"]
+                and len(data["rationale"]) < len(data["rationale_full"])
+                <= _CALIBRATION_RATIONALE_FULL_MAX
+                and data["rationale_full"].startswith(data["rationale"])))
             or not isinstance(data.get("steering_context"), list)
             or expected_receipt is None
             or data.get("ownership_receipt") != expected_receipt

@@ -1073,18 +1073,25 @@ class Settings(BaseSettings):
     # THE WHOLE IDEA REACHES A CARD'S BUILDS (doc 69 §3.3, 69.4). A native Card's `card_added` row
     # keeps its rationale to 400 characters — the board brief, the ledger and the ownership round trip
     # read that bounded text — and a CLAIM of the Card rebuilt the executed Idea from it, so the
-    # Developer ran a cut idea. On the Card-driven lane EVERY build is a claim (driven: every
-    # Card-built node of a real run carried the first 400 characters), and so is a re-queue after
-    # `developer_stuck`. `minionerec-backbones-v10`: card-4's recipe went 2,410 -> 400 (the
+    # Developer ran a cut idea. On the Card-driven lane the proposal lane builds by claiming (driven:
+    # every Card-built node of a real run carried the first 400 characters), and so does a re-queue
+    # after `developer_stuck`; an inject, a refine, a rerun and an attach build the proposal's own
+    # Idea and were never cut. `minionerec-backbones-v10`: card-4's recipe went 2,410 -> 400 (the
     # prefix-CSV workaround it had already worked out included), card-5's reached the plan as "No
     # code change needed", card-6/7 lost what to change and where. ON, the row also carries
     # `rationale_full` — beside the receipt, OUTSIDE `action` and every digest, written only when the
     # rationale was cut, capped at `card_reservation.py::CARD_RATIONALE_FULL_MAX` and saying so when
     # that cut it — and the claim executes it when its first 400 characters are the Card's own
-    # rationale. It changes the Developer's PROMPT on a claimed Card and buys no call, so `false`
+    # rationale — ON only: OFF claims the bounded text whatever the row carries. The claimed node's
+    # `idea.rationale` is then the whole text, so every reader of a node's rationale reads more of
+    # it: the Developer's build prompt, the value estimate's headroom prompt (its first 1,200), the
+    # novelty identity and embeddings (a verbatim re-proposal can now defer to the paid gate), the
+    # proposal cues, the assistant's node context and the cross-run case rows. So `false`
     # reproduces the historical bytes (and writes the historical row), every constructor defaults it
-    # OFF, and a pre-field snapshot resumes OFF (its `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row). Read
-    # through ONE reader, `engine/shared.py::card_full_rationale`.
+    # OFF, and a pre-field snapshot resumes OFF (its `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row). The
+    # crash-prefix / live-dedupe matcher compares `rationale_full` on its own terms, so a switch an
+    # operator flips on a stopped run re-plans onto the same Card. Read through ONE reader,
+    # `engine/shared.py::card_full_rationale`.
     card_full_rationale: bool = True
     # THE LEADERS WERE NOT ALL MEASURED ON ONE RULER (doc 68 68.1a, 2026-09-26). A run can score its
     # search on `smoke` and its endgame on `full`, edit its host scorer mid-run or promote a fix into
@@ -3870,8 +3877,9 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # THE WHOLE IDEA REACHES A CARD'S BUILDS, added 2026-09-29 defaulting ON (doc 69 69.4). (a)
     # holds. (b) is the DIFFERENT-PROMPT ground: ON, a claimed Card's build runs the Researcher's full
     # rationale instead of its first 400 characters, and the `card_added` row gains a key — so a
-    # resumed run would change what its Developer is told mid-log, and write rows its own earlier
-    # crash-prefix mints would no longer match. (c) is `False`, pointable at every commit before this.
+    # resumed run would change what its Developer is told mid-log (the matcher tolerates the key
+    # either way, so no crash-prefix mint is orphaned by the change). (c) is `False`, pointable at
+    # every commit before this.
     "card_full_rationale": False,
     # THE NODE BUDGET CUE, added 2026-09-23 defaulting ON (Q-3, the Researcher's context audit).
     # (a) holds. (b) is the rows above's DIFFERENT-PROMPT ground: ON, every proposal prompt gains a

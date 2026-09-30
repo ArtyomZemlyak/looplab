@@ -697,15 +697,18 @@ class CardReservationMixin:
         return {"rationale_full": text}
 
     @staticmethod
-    def _claim_rationale(card, registration: dict) -> str:
-        """The rationale a claim of `card` executes: the whole one its own mint row carries
-        (`_full_rationale_field`), when that row's text extends the Card's bounded rationale — a
-        row whose `rationale_full` does not begin with it is not this Card's text and is ignored —
-        else the Card's 400 characters, which is what every row written without it holds."""
+    def _claim_rationale(card, registration: dict, *, full_rationale: bool) -> str:
+        """The rationale a claim of `card` executes: under `Settings.card_full_rationale`, the whole
+        one its own mint row carries (`_full_rationale_field`), when that row's text extends the
+        Card's bounded rationale — a row whose `rationale_full` does not begin with a non-empty
+        bounded text is not this Card's and is ignored — else the Card's 400 characters, which is
+        what every row written without it holds. OFF executes the bounded text whatever the row
+        carries: the switch is editable on a stopped run (`PUT /api/runs/{id}/config`), and OFF is
+        the historical bytes for a Card minted while it was on as well (critic 2026-09-29)."""
         full = registration.get("rationale_full") if isinstance(registration, dict) else None
         bounded = card.rationale or ""
-        if (isinstance(full, str) and len(full) > len(bounded) and full.startswith(bounded)
-                and len(full) <= CARD_RATIONALE_FULL_MAX + 200):
+        if (full_rationale and bounded and isinstance(full, str) and len(full) > len(bounded)
+                and full.startswith(bounded) and len(full) <= CARD_RATIONALE_FULL_MAX + 200):
             return full
         return bounded
 
@@ -747,7 +750,7 @@ class CardReservationMixin:
         # skipped the concept envelope is what let the claim quietly execute a different Idea.
         card_concepts = cls._authored_card_concepts(idea)
         rebuilt = cls._rebuilt_claim_idea(
-            card_id, statement, action, full.get("rationale_full", rationale),
+            card_id, statement, action, rationale,
             concepts=cls._claim_concept_envelope(card_concepts))
         rebuilt_action = cls._card_action(
             rebuilt, list(action.get("parent_ids") or []),
@@ -819,8 +822,7 @@ class CardReservationMixin:
     @classmethod
     def _card_event_matches(cls, data: dict, idea: Idea, action: dict, *, source: str,
                             at_node: int, implementation_ref: Optional[str],
-                            steering_context=(), cross_run_receipt=None,
-                            full_rationale: bool = False) -> bool:
+                            steering_context=(), cross_run_receipt=None) -> bool:
         """True only for the exact writer shape used by a crash-prefix card reservation."""
         card_id = data.get("id")
         if cls._engine_card_number(card_id) is None:
@@ -829,10 +831,23 @@ class CardReservationMixin:
         statement = cls._card_statement(rebound)
         if statement is None:
             return False
+        # THE WHOLE RATIONALE IS COMPARED ON ITS OWN TERMS (doc 69 69.4). `rationale_full` rides
+        # BESIDE the receipt and is written only while `Settings.card_full_rationale` is on — a
+        # switch an operator can flip on a stopped run between a Card's mint and the re-plan of the
+        # same proposal. Matched as part of the exact writer shape, a flipped switch minted a SECOND
+        # Card for the same proposal and, on the inject lane, built it twice (critic 2026-09-29,
+        # driven). So the row may carry it or not whatever this writer would write, but a row that
+        # carries one must carry exactly this proposal's; `proposal_ref`, compared with everything
+        # else below, already digests the whole rationale.
+        recorded_full = data.get("rationale_full")
+        if (recorded_full is not None
+                and recorded_full != cls._full_rationale_field(rebound).get("rationale_full")):
+            return False
+        data = {key: value for key, value in data.items() if key != "rationale_full"}
         expected = cls._card_added_payload(
             card_id, statement, action, rebound, source=source, at_node=at_node,
             implementation_ref=implementation_ref, steering_context=steering_context,
-            cross_run_receipt=cross_run_receipt, full_rationale=full_rationale,
+            cross_run_receipt=cross_run_receipt, full_rationale=False,
         )
         if data == expected:
             return True
@@ -1168,7 +1183,7 @@ class CardReservationMixin:
                         event.data, idea, action, source=source, at_node=at_node,
                         implementation_ref=implementation_ref,
                         steering_context=steering_context,
-                        cross_run_receipt=cross_run_receipt, full_rationale=full_rationale):
+                        cross_run_receipt=cross_run_receipt):
                     matches.append(cid)
             except (TypeError, ValueError, OverflowError):
                 continue
@@ -2055,7 +2070,8 @@ class CardReservationMixin:
             # is `_card_claim_receipt_action(card)`, i.e. exactly the action shape the mint digested.
             idea = self._rebuilt_claim_idea(
                 card.id, card.seed_statement, receipt_action,
-                self._claim_rationale(card, registrations[0].data),
+                self._claim_rationale(card, registrations[0].data,
+                                      full_rationale=card_full_rationale(self)),
                 concepts=calibration_concepts)
         except Exception:  # noqa: BLE001 — hostile/future Card data cannot escape the closed Idea schema
             return None

@@ -299,7 +299,7 @@
           "label": "Cards carry the whole idea",
           "type": "bool",
           "default": true,
-          "help": "A Card keeps its rationale to 400 characters on the board. A build of the Card — every build on the Card-driven lane, and a rebuild after the Developer got stuck — used to run that cut text, so the Developer lost the recipe the Researcher wrote. On, the Card's record also keeps the whole rationale (bounded, and saying so when that bound cuts it) and every build runs it. Off = the historical rows and prompts, byte for byte."
+          "help": "A Card keeps its rationale to 400 characters on the board. A build that claims the Card — the proposal lane's builds on the Card-driven lane, and a rebuild after the Developer got stuck — used to run that cut text, so the Developer lost the recipe the Researcher wrote. On, the Card's record also keeps the whole rationale (bounded, and saying so when that bound cuts it) and such a build runs it; the node then carries the whole idea for every later reader. Off = the historical rows and prompts, byte for byte."
         },
         {
           "key": "brief_mixed_comparability",
