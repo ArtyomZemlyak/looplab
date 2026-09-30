@@ -459,7 +459,11 @@ A positive D8 verifier verdict is promotable only when every retained citation w
 must name terminal, active attempts and every cited URL identity must match a source actually consulted by the
 research stage. Finalization reconstructs the complete unique node/URL identity set from the durable claim and
 requires exact equality with the verifier receipt; a subset receipt, pending attempt, reset, tombstone or abort
-downgrades the claim to unverified evidence rather than durable support.
+downgrades the claim to unverified evidence rather than durable support. Since doc 69 69.26 the receipt also
+records what the verdict was judged ON — the run's objective key and one outcome digest per cited node (its
+terminal status and ranked metric, or its failure reason) — so a `metric_retarget`, which moves every node's
+number without a new lifecycle, or any cited number that moved after the verdict, downgrades it the same way.
+A receipt written before those two keys is re-checked by lifecycle alone.
 
 Exact claim authority is the separate v1 `claim_source`. It joins the lesson and research read-health
 segments with D8 producer completeness and binds the combined snapshot with a digest. Retained evidence

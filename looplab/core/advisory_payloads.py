@@ -31,6 +31,12 @@ MAX_RESEARCH_CLAIMS = 64
 MAX_RESEARCH_NODE_REFS = 8
 MAX_RESEARCH_URL_REFS = 4
 RESEARCH_RECEIPT_VERSION = 1
+# WHAT A VERDICT WAS JUDGED ON, beside the identities it names (doc 69 69.26): the run's objective
+# key (None = the task's own metric) and, aligned with `node_refs`, one digest of each cited node's
+# outcome as the verifier was shown it (`trust/memo_verify.py::_node_outcome_sig`). Both OPTIONAL on
+# a receipt: a row written before them is re-checked by lifecycle alone, as it always was.
+RESEARCH_OUTCOME_PREFIX = "sha256:"
+MAX_RESEARCH_OBJECTIVE_CHARS = 256
 _MAX_ADVISORY_TEXT = 64_000
 _MAX_TREE_ITEMS = 512
 _MAX_VERIFICATION_TEXT = 24_000
@@ -514,6 +520,29 @@ def _tree(value, budget: list[int], items: list[int], depth: int = 0, *, env):
                                  str_cap=2_000, key_cap=128, depth=depth, env=env)
 
 
+def _outcome_binding(raw_evidence: dict, node_refs: int) -> Optional[dict]:
+    """The optional `objective` / `outcomes` of a verdict's evidence (doc 69 69.26), validated.
+
+    `{}` when the receipt carries neither (a legacy row); the keys that are present and well formed
+    otherwise; None when one is present and malformed. `outcomes` must be one outcome digest per
+    retained node ref, in order; `objective` a bounded key or None (the task's own metric)."""
+    out: dict = {}
+    if "objective" in raw_evidence:
+        objective = raw_evidence.get("objective")
+        if not (objective is None or (isinstance(objective, str) and objective.strip()
+                                      and len(objective) <= MAX_RESEARCH_OBJECTIVE_CHARS)):
+            return None
+        out["objective"] = objective
+    if "outcomes" in raw_evidence:
+        outcomes = raw_evidence.get("outcomes")
+        if (not isinstance(outcomes, (list, tuple)) or len(outcomes) != node_refs
+                or not all(valid_digest_ref(sig, prefix=RESEARCH_OUTCOME_PREFIX)
+                           for sig in outcomes)):
+            return None
+        out["outcomes"] = list(outcomes)
+    return out
+
+
 def _verification(value, budget: list[int], items: list[int], *, env):
     """Project the verifier's indexed verdict contract without starving late rows.
 
@@ -575,10 +604,16 @@ def _verification(value, budget: list[int], items: list[int], *, env):
                     identity for identity in raw_urls[:MAX_RESEARCH_URL_REFS]
                     if valid_source_identity(identity)
                 ]
+                # The two outcome bindings (69.26), carried only in the shape their writer mints;
+                # one present but malformed makes the receipt INCOMPLETE rather than silently
+                # legacy, so a forged or damaged binding can never ratify by being dropped.
+                bound = _outcome_binding(raw_evidence, len(evidence["node_refs"]))
+                evidence.update(bound or {})
                 evidence["complete"] = bool(
                     raw_evidence.get("complete") is True
                     and len(evidence["node_refs"]) == len(raw_nodes)
                     and len(evidence["url_identities"]) == len(raw_urls)
+                    and bound is not None
                 )
         raw_kind = str(row.get("kind") or "").strip().lower()
         kind = raw_kind if raw_kind in VERDICT_KINDS else DEFAULT_VERDICT_KIND

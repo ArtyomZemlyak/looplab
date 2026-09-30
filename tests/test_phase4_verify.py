@@ -358,10 +358,16 @@ def test_omitted_ninth_node_cannot_upgrade_the_inspected_prefix(monkeypatch):
 
     assert out["verdicts"][0]["verdict"] == "unclear"
     assert out["verdicts"][0]["note"] == "evidence set is incomplete or stale"
+    from looplab.trust.memo_verify import _node_outcome_sig
+
     assert out["verdicts"][0]["evidence"] == {
         "v": 1,
         "node_refs": [{"node_id": index, "generation": 0} for index in range(8)],
         "url_identities": [],
+        # What the verdict was judged on (doc 69 69.26): the objective in force and one outcome
+        # digest per retained node ref, in order.
+        "objective": None,
+        "outcomes": [_node_outcome_sig(state.nodes[index]) for index in range(8)],
         "complete": False,
     }
 

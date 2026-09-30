@@ -36,11 +36,13 @@ from looplab.core.advisory_payloads import (
     PROVENANCE_COVERAGE_VERSION,
     MAX_RESEARCH_NODE_REFS,
     MAX_RESEARCH_URL_REFS,
+    RESEARCH_OUTCOME_PREFIX,
     RESEARCH_RECEIPT_VERSION,
     research_claims_receipt,
     research_evidence_receipt,
 )
 from looplab.core.fitness import is_usable_metric
+from looplab.core.jsonutil import canonical_json_digest
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import NodeStatus, RunState
 from looplab.core.redact import redact_persisted_text
@@ -142,12 +144,35 @@ def _is_terminal_evidence(node, nid, aborted) -> bool:
                 or node.status not in (NodeStatus.evaluated, NodeStatus.failed))
 
 
+def _node_outcome_sig(node) -> Optional[str]:
+    """What a cited node's number WAS when a verdict was judged on it, as one digest (doc 69 69.26).
+
+    The evidence identity `(node_id, generation)` catches a reset, a delete and an abort — every
+    way the node's LIFECYCLE can move — and nothing else, while a node's number can move without
+    one: a `metric_retarget` re-ranks every node on another key, so "Node 6 (champion,
+    UnseenRecall@20=0.03328)" verified under one objective would have been ratified into the shared
+    claims store under the next. So the verdict also records what the verifier was shown — the
+    terminal status and, for an evaluated node, the metric the run ranks it by (the value the
+    evidence row prints), for a failed one its failure reason — and finalize compares. None when
+    the value has no canonical form, which no fold produces (`is_usable_metric` drops NaN/inf)."""
+    if node is None or getattr(node, "status", None) is None:
+        return None
+    if node.status is NodeStatus.failed:
+        body = {"status": node.status.value, "error": str(node.error_reason or "error")}
+    else:
+        metric = node.metric
+        body = {"status": node.status.value,
+                "metric": float(metric) if is_usable_metric(metric) else None}
+    return canonical_json_digest(body, prefix=RESEARCH_OUTCOME_PREFIX)
+
+
 def _evidence_snapshot(claim: dict, state: RunState,
                        sources: Optional[dict[str, dict[str, str]]] = None) -> tuple[dict, dict]:
     """Freeze exactly the evidence shown to the verifier and its lifecycle-aware identities."""
     receipt = research_evidence_receipt(claim) or _derived_evidence_receipt(claim)
     nodes: list[dict] = []
     node_refs: list[dict[str, int]] = []
+    outcomes: list = []
     node_inputs_valid = 0
     raw_nids = claim.get("node_ids") if isinstance(claim, dict) else ()
     cited_nids = (raw_nids if isinstance(raw_nids, (list, tuple)) else ())[:_MAX_NODE_REFS]
@@ -193,6 +218,7 @@ def _evidence_snapshot(claim: dict, state: RunState,
             row["built"] = _clean(report_note, 400)
         nodes.append(row)
         node_refs.append({"node_id": nid, "generation": generation})
+        outcomes.append(_node_outcome_sig(n))
 
     matched_sources: list[dict[str, str]] = []
     matched_identities: list[str] = []
@@ -222,7 +248,12 @@ def _evidence_snapshot(claim: dict, state: RunState,
         "v": RESEARCH_RECEIPT_VERSION,
         "node_refs": node_refs,
         "url_identities": matched_identities,
-        "complete": complete,
+        # WHAT THE VERDICT WAS JUDGED ON (doc 69 69.26): the objective in force and, aligned with
+        # `node_refs`, each cited node's outcome digest — `finalize_verified_evidence` rechecks
+        # both. A digest that could not be minted leaves the receipt incomplete, never unbound.
+        "objective": getattr(state, "objective_key", None),
+        "outcomes": outcomes,
+        "complete": complete and all(sig is not None for sig in outcomes),
     }
     return evidence, identity_receipt
 
@@ -349,6 +380,22 @@ def finalize_verified_evidence(claim: dict, verdict_row: dict,
     # identity set from the claim and require equality, so a forged/subset receipt cannot survive finalize.
     if node_refs != expected_node_refs or url_ids != expected_url_ids:
         return None, "verification evidence identity does not cover the complete claim"
+
+    # THE NUMBER, NOT ONLY THE LIFECYCLE (doc 69 69.26). A receipt written before these two keys
+    # carries neither and is checked by lifecycle alone, as it always was; one that carries them is
+    # refused when the run's objective or a cited node's outcome moved after the verdict — a
+    # `metric_retarget` does both, and neither is a new lifecycle. Two sentences, because the
+    # remedies differ: the objective changed under the whole memo, or one cited number did.
+    objective_now = getattr(state, "objective_key", None)
+    if "objective" in evidence and evidence.get("objective") != objective_now:
+        return None, "verification evidence was judged under another objective"
+    if "outcomes" in evidence:
+        raw_outcomes = evidence.get("outcomes")
+        if not isinstance(raw_outcomes, (list, tuple)) or len(raw_outcomes) != len(node_refs):
+            return None, "verification evidence identity is malformed"
+        for ref, sig in zip(node_refs, raw_outcomes):
+            if sig != _node_outcome_sig(final_nodes.get(ref["node_id"])):
+                return None, "verification evidence outcome changed after it was judged"
 
     if not node_refs and not url_ids:
         return None, "verification did not inspect usable evidence"
