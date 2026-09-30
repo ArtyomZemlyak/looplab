@@ -298,7 +298,8 @@ def test_the_rule_s_endgame_is_the_plan_s_final_reserve_when_the_run_has_one(tmp
     from looplab.engine.plan import final_reserve_reached
 
     recut = {"max_nodes": 19, "endgame_start": 18, "n_seeds": 3}
-    episode = {"max_nodes": 19, "endgame_start": 10, "endgame_end": 13, "n_seeds": 3}
+    episode = {"max_nodes": 19, "endgame_start": 10, "endgame_end": 13, "n_seeds": 3,
+               "final_start": 15}
 
     def _ctx(n, plan_row, **kw):
         return StrategyContext(node_count=n, phase="exploit", node_budget_frac=n / 19,
@@ -320,7 +321,7 @@ def test_the_rule_s_endgame_is_the_plan_s_final_reserve_when_the_run_has_one(tmp
     # A plan whose reserve starts EARLY is obeyed early, as the gate does.
     early = {"max_nodes": 19, "endgame_start": 9, "n_seeds": 3}
     assert endgame_reached(_ctx(10, early)) and _ensemble(_ctx(10, early))[0]
-    # A bounded stall episode reopens into the search: not the final reserve.
+    # A bounded stall episode before the ordinary cut reopens into the search: not the final reserve.
     assert final_reserve_reached(episode, 11) is False and not endgame_reached(_ctx(11, episode))
     # The coverage stance reads the same switch.
     broad = {"nodes": 8, "dominant_theme_frac": 0.3, "recent_dominant_frac": 0.3}
@@ -339,8 +340,10 @@ def test_the_rule_s_endgame_is_the_plan_s_final_reserve_when_the_run_has_one(tmp
 
 def test_the_final_reserve_s_truth_table():
     """`engine/plan.py::final_reserve_reached`: None without a readable row (the caller keeps its own
-    reading), the gate's `in_endgame` over the same count otherwise, and False inside a bounded
-    episode."""
+    reading), the gate's `in_endgame` over the same count otherwise, and inside a bounded episode
+    only from the ORDINARY cut's start (`final_start`) on — an episode row written before the key
+    keeps the caller's reading. MUTATIONS, each red here: count a bounded episode out whatever its
+    `final_start`; drop the `in_endgame` half; read a missing `final_start` as the episode's start."""
     from looplab.engine.plan import final_reserve_reached
 
     assert final_reserve_reached(None, 5) is None and final_reserve_reached({}, 5) is None
@@ -348,8 +351,58 @@ def test_the_final_reserve_s_truth_table():
     assert final_reserve_reached({"max_nodes": 8}, 5) is None
     row = {"max_nodes": 8, "endgame_start": 6}
     assert [final_reserve_reached(row, n) for n in (5, 6, 7)] == [False, True, True]
-    bounded = {"max_nodes": 8, "endgame_start": 3, "endgame_end": 5}
-    assert [final_reserve_reached(bounded, n) for n in (2, 3, 4, 5)] == [False] * 4
+    # An episode wholly before the ordinary cut: never the final reserve.
+    before = {"max_nodes": 8, "endgame_start": 3, "endgame_end": 5, "final_start": 6}
+    assert [final_reserve_reached(before, n) for n in (2, 3, 4, 5)] == [False] * 4
+    # An episode straddling the cut: final from the cut on, while the episode's gate holds.
+    straddle = {"max_nodes": 12, "endgame_start": 9, "endgame_end": 11, "final_start": 10}
+    assert [final_reserve_reached(straddle, n) for n in (8, 9, 10, 11)] == [False, False, True,
+                                                                           False]
+    # An episode whose end is past the budget's (no `reopened` row will close it): final from the cut.
+    past = {"max_nodes": 12, "endgame_start": 9, "endgame_end": 12, "final_start": 10}
+    assert [final_reserve_reached(past, n) for n in (9, 10, 11)] == [False, True, True]
+    # A legacy episode row, written before the key: the caller's own reading.
+    assert final_reserve_reached({"max_nodes": 8, "endgame_start": 3, "endgame_end": 5}, 4) is None
+    assert final_reserve_reached({**before, "final_start": "6"}, 4) is None
+
+
+def test_a_stall_episode_that_reaches_the_final_reserve_hands_the_rule_its_endgame(tmp_path):
+    """Critic crit_v59 F1 (driven): the episode row bounds the stall's endgame, and 69.25a counted
+    every node inside one out of the final reserve — on an episode [9, 12) of a 12-slot budget whose
+    ordinary reserve starts at 10, the rule never entered its endgame (no `reopened` row closes an
+    episode whose end is the budget's), while the gate admitted only endgame actions from node 9.
+    The row now carries the ordinary cut's start (`final_start`) and the rule switches there, where
+    it switched before 69.25a (10/12 = 83 %). Driven through the real `replan` rows, the engine's
+    `_strategy_ctx` and `RuleStrategist`. MUTATIONS, each red here: `_episode_row` writes no
+    `final_start`; `final_reserve_reached` counts a bounded episode out."""
+    from looplab.agents.strategist import RuleStrategist, endgame_reached
+    from looplab.engine.plan import build_plan, final_reserve_reached, in_endgame, replan
+
+    cut = dict(max_nodes=12, n_seeds=3, reserve_frac=0.2, endgame_sweep=True)
+    plan = build_plan(**cut, at_node=4)
+    assert plan["endgame_start"] == 10
+    episode = replan(plan, **cut, at_node=9, stall_rung=2, stall_nodes=3, champion=5)
+    assert episode["reason"] == "stagnation" and episode["endgame_end"] == 12
+    assert episode["final_start"] == 10, "the ordinary cut's start rides the episode row"
+    eng = make_engine(tmp_path / "run", endgame_reserve_frac=0.2)
+    decided = {}
+    for n in (9, 10, 11):
+        state = RunState(nodes={i: _node(i, 1.0, {}) for i in range(n)})
+        state.plan = dict(episode)
+        assert in_endgame(state.plan, n), "the gate is in the episode's endgame from node 9"
+        ctx = eng._strategy_ctx(state)
+        assert ctx.plan_endgame is final_reserve_reached(episode, n)
+        decision = RuleStrategist()._decide_machinery(RunState(), ctx) or {}
+        decided[n] = (endgame_reached(ctx),
+                      (decision.get("operators") or {}).get("merge_mode") == "ensemble")
+    assert decided == {9: (False, False), 10: (True, True), 11: (True, True)}, decided
+    # A budget change inside the live episode carries it, and re-cuts `final_start` with it.
+    carried = replan(episode, **{**cut, "max_nodes": 20}, at_node=10, stall_rung=2, stall_nodes=3,
+                     champion=5)
+    assert carried["reason"] == "budget_changed" and carried["endgame_start"] == 9
+    assert carried["final_start"] == build_plan(**{**cut, "max_nodes": 20}, at_node=10)[
+        "endgame_start"] == 16
+    assert final_reserve_reached(carried, 11) is False
 
 
 def test_the_brief_names_the_sweep_only_when_the_run_has_a_reserve():

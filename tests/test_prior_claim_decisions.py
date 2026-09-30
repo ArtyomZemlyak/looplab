@@ -504,6 +504,57 @@ def test_the_pull_tools_decide_once_per_store_state(tmp_path, monkeypatch):
     assert REJECTED not in both and KEPT not in both and len(calls) == 2
 
 
+def test_the_memo_is_keyed_on_the_store_s_state(tmp_path):
+    """crit_v59 F4 (M3, driven): a rejection recorded and a tool asked once, THEN a lesson stating
+    the rejected claim is appended — the store's identity is in the memo's key, so the new row is
+    decided. MUTATION: key the memo without the store's identity -> the stale empty answer serves
+    it."""
+    mem = _memory(tmp_path, _lesson(KEPT))
+    record_claim_decision(str(mem), statement=REJECTED, decision="rejected", scope=TASK)
+    assert KEPT in _search(mem, on=True)
+    with open(mem / "lessons.jsonl", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(_lesson(REJECTED)) + "\n")
+    after = _search(mem, on=True)
+    assert REJECTED not in after and KEPT in after, after
+
+
+def _bound_search(mem, *, goal="", on=True):
+    from types import SimpleNamespace
+
+    from looplab.tools.memory_tools import MemoryTools
+    tools = MemoryTools(str(mem), role="researcher", claim_decisions=on)
+    tools.bind_state(SimpleNamespace(run_id="live", task_id=TASK, direction="min", goal=goal))
+    return tools.execute("search_lessons", {"query": "recall"})
+
+
+def test_the_memo_is_keyed_on_the_reader_s_scope(tmp_path):
+    """crit_v59 F4 (M4, driven): two readers of one store — one BOUND to this task fills the memo
+    first, then an UNBOUND (portfolio-wide) one asks. The scope is in the key, so the unbound reader
+    groups every row and withholds the other task's rejected lesson. MUTATION: key the memo without
+    the scope -> the bound reader's empty answer serves it."""
+    mem = _memory(tmp_path, _lesson(KEPT), _lesson(REJECTED, task_id="other_task"))
+    record_claim_decision(str(mem), statement=REJECTED, decision="rejected", scope="other_task")
+    assert REJECTED not in _bound_search(mem), "another task's row: out of the bound reader's scope"
+    unbound = _search(mem, on=True)
+    assert REJECTED not in unbound and KEPT in unbound, unbound
+
+
+def test_the_memo_is_keyed_on_the_reader_s_goal(tmp_path):
+    """crit_v59 F4 (M5): a bound reader's GOAL decides which related-task rows it sees
+    (`trust/cross_run.py::LessonScope.related_goal`), so its terms are part of the key: a reader
+    whose goal relates to another task's rejected lesson withholds it after a reader whose goal does
+    not filled the memo. MUTATION: drop `goal_terms` from the scope key -> served."""
+    related = _lesson(REJECTED, task_id="other_task",
+                      fingerprint=["kind:quadratic", "tokenizer", "checkpoint", "recall"])
+    mem = _memory(tmp_path, _lesson(KEPT), related)
+    assert REJECTED in _bound_search(mem, goal="tokenizer checkpoint recall", on=False), \
+        "the related goal admits the other task's row"
+    record_claim_decision(str(mem), statement=REJECTED, decision="rejected", scope="other_task")
+    assert REJECTED not in _bound_search(mem, goal="quadratic bowl minimum")
+    related_out = _bound_search(mem, goal="tokenizer checkpoint recall")
+    assert REJECTED not in related_out and KEPT in related_out, related_out
+
+
 # ------------------------------------------------ every builder hands the pull tools the switch (N2)
 
 def test_every_pull_tool_the_package_builds_is_handed_the_operator_s_switch():
@@ -529,8 +580,13 @@ def test_every_pull_tool_the_package_builds_is_handed_the_operator_s_switch():
                     continue
                 site = (path.name, fn.name)
                 built.append(site)
-                if site not in exempt and "claim_decisions" not in {k.arg for k in call.keywords}:
+                switch = next((k.value for k in call.keywords if k.arg == "claim_decisions"), None)
+                if site not in exempt and switch is None:
                     offenders.append(f"{path.name}::{fn.name} builds {call.func.id}")
+                elif site not in exempt and isinstance(switch, ast.Constant):
+                    # The operator's switch, never a literal (crit_v59 F4, W3: the Genesis route
+                    # passing `claim_decisions=False` survived a keyword-only check).
+                    offenders.append(f"{path.name}::{fn.name} passes a constant switch")
     assert len(set(built)) >= 7 and set(exempt) <= set(built), "the scan saw the builders"
     assert not offenders, offenders
 

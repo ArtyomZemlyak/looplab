@@ -58,7 +58,8 @@ subject is exempt from the refusal the same way it is exempt from the in-flight 
 A BOUNDED STALL EPISODE (`Settings.endgame_stall_nodes`, product 3, 0 = the permanent endgame). A
 stall-triggered endgame used to run to the end of the budget: on inf13 (`max_nodes` 100000, the
 "unbounded" spelling) the row at node 12 reserved 99,988 nodes for merges and sweeps, forever. With
-`K > 0` the stall row carries `endgame_end = at_node + K` and the `champion` it was measured against;
+`K > 0` the stall row carries `endgame_end = at_node + K`, the `champion` it was measured against and
+`final_start`, the ordinary cut's start (where the FINAL reserve begins, `final_reserve_reached`);
 `in_endgame` is `start <= n < end` (a row without an end keeps the historical `n >= start`), and the
 next `replan` writes a `reopened` row — the ordinary cut, breadth again — once `n` reaches the end or
 the best node differs from `champion`. ONE episode per champion (`stall_champions` rides every later
@@ -295,23 +296,39 @@ def in_endgame(plan: Optional[dict], total_nodes: int) -> bool:
 
 
 def final_reserve_reached(plan: Optional[dict], total_nodes: int) -> Optional[bool]:
-    """Whether node `total_nodes` is inside the plan's FINAL reserve — the open-ended endgame the
-    budget's end closes — or None when there is no readable plan row.
+    """Whether node `total_nodes` is inside the plan's FINAL reserve — the endgame the budget's end
+    closes, which no re-cut of the same budget reopens — or None when there is no readable plan row.
 
     The rule Strategist's endgame switch (doc 69 69.25a, `agents/strategist.py::endgame_reached`):
-    `in_endgame` over the SAME count the dispatcher's gate reads, so the machinery the rule sets and
-    the actions the gate admits start at one node, wherever an inject batch or a budget change has
-    moved the cut. A BOUNDED stall episode (`endgame_end`) is not the final reserve: it reopens into
-    the search after its K nodes, and the endgame settings the rule would write (no ablation, the
-    ensemble merge) would outlive it. None — a missing or unreadable row — leaves the caller's own
-    reading in place."""
+    `in_endgame` over the SAME count the dispatcher's gate reads, so on an ordinary row the machinery
+    the rule sets and the actions the gate admits start at one node, wherever an inject batch or a
+    budget change has moved the cut. A permanent stall row (`endgame_stall_nodes` 0, no
+    `endgame_end`) is final too: it runs to the budget's end, so a resumed run whose log holds one
+    switches at its start, as its gate did.
+
+    A BOUNDED stall episode (`endgame_end`) is final only from the ORDINARY cut's start on
+    (`final_start`, the start its `reopened` row would cut): before it, the episode reopens into the
+    search — after its K nodes or on a new champion — and the endgame settings the rule would write
+    (no ablation, the ensemble merge) would outlive it; from it on, every reopening lands inside the
+    ordinary reserve. Counting the whole episode out (critic crit_v59 F1, driven) switched late by the
+    overlap on an episode that straddles the cut, and never on one whose end is past the budget's,
+    which no `reopened` row closes. None — a missing or unreadable row, or an episode row written
+    before `final_start` — leaves the caller's own reading in place."""
     if not isinstance(plan, dict):
         return None
     try:
         int(plan["endgame_start"])
     except (KeyError, TypeError, ValueError, OverflowError):
         return None
-    return in_endgame(plan, total_nodes) and plan.get("endgame_end") is None
+    if plan.get("endgame_end") is None:
+        return in_endgame(plan, total_nodes)
+    final = plan.get("final_start")
+    if type(final) is not int:
+        return None
+    try:
+        return in_endgame(plan, total_nodes) and int(total_nodes) >= final
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def _int_or_none(value) -> Optional[int]:
@@ -352,7 +369,9 @@ def _episode_row(cut: dict, *, start: int, end: int, champion: Optional[int], sp
                  reason: str) -> Optional[dict]:
     """A plan row that bounds a stall episode to `[start, end)`. Its `reserve` (and the endgame
     phase's `nodes`) is the episode's length, not the rest of the budget: the row describes what the
-    reserve will spend before the `reopened` row cuts the ordinary plan again."""
+    reserve will spend before the `reopened` row cuts the ordinary plan again. `final_start` is that
+    ordinary cut's start under the same cut — where the final reserve begins, which
+    `final_reserve_reached` reads."""
     row = build_plan(**cut, reason=reason, endgame_start=start)
     if row is None:
         return None
@@ -362,6 +381,9 @@ def _episode_row(cut: dict, *, start: int, end: int, champion: Optional[int], sp
     row["endgame_end"] = int(end)
     row["champion"] = champion
     row["stall_champions"] = list(spent)
+    ordinary = build_plan(**cut)
+    if ordinary is not None:
+        row["final_start"] = ordinary["endgame_start"]
     return row
 
 

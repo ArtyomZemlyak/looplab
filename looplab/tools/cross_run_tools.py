@@ -1454,8 +1454,9 @@ class CrossRunTools:
             # claim, which is how the rule reads a row its grouping cannot see. The card reads the
             # whole store, and grouping all of it disagreed with the prior both ways and cost 25 s at
             # 20k rows (crit_v58 L1/L2, driven); only the notes it would SHOW are decided, and the
-            # count is of those. The decisions are the governance snapshot's, so an unreadable ledger
-            # already failed the tool closed.
+            # count is of those — a LOWER bound on the rejected notes that mention the concept, met
+            # before the card had its three (crit_v59 N3), which is all the line claims. The decisions
+            # are the governance snapshot's, so an unreadable ledger already failed the tool closed.
             from looplab.engine.claims import (lesson_claim_key, lesson_rejected,
                                                operator_rejected_keys, rejects_anything)
             if rejects_anything(decisions):

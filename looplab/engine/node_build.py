@@ -273,7 +273,9 @@ def _receipt_of(final, answered) -> str:
     idea, receipt)` pairs in proposal order — by identity, because the gate may keep the original
     after asking for another, and the last receipt then named a re-proposal the node never built
     (crit_v58 N3, driven: a converged original warned TRUNCATED). A proposal the gate DERIVED (a
-    nudged copy) takes the latest receipt, the reading before this; "" with none."""
+    nudged copy) takes the latest receipt, the reading before this; "" with none. Only a proposal
+    that LINKED is in `answered`: a re-proposal that yielded nothing is no candidate, and its
+    receipt, last, made the nudged copy of a kept original read as truncated (crit_v59 F2, driven)."""
     for linked, receipt in answered:
         if linked is final:
             return receipt
@@ -1175,7 +1177,8 @@ class NodeBuildMixin:
                     return None
                 again, got = _propose(researcher, None)
                 linked = _link(self._canonicalize_draft_idea(again), receipt=got)
-                answered.append((linked, got))
+                if linked is not None:      # a re-proposal that linked nothing is no candidate's
+                    answered.append((linked, got))
                 return linked
 
             with self._paid_progress(PROGRESS_STAGE_BUILD, "novelty",
@@ -1235,7 +1238,8 @@ class NodeBuildMixin:
             again, got = _propose(researcher, p)
             linked = _link(self._canonicalize_idea_operator(again, authoritative_operator),
                            receipt=got)
-            answered.append((linked, got))
+            if linked is not None:          # a re-proposal that linked nothing is no candidate's
+                answered.append((linked, got))
             return linked
 
         with self.tracer.span("propose") as _span:

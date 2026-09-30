@@ -678,3 +678,64 @@ def test_a_proposal_the_gate_KEPT_carries_its_own_receipt_not_the_re_proposal_s(
     warned = [r.getMessage() for r in caplog.records if "cut short by its" in r.getMessage()]
     assert idea is not None and idea.rationale == "proposal 1" and researcher.calls == 2
     assert len(warned) == 1, "the re-proposal once, at its own link; the kept original never"
+
+
+class _CleanThenNothing:
+    """The first propose ends on its own terms; the gate's re-proposal is cut by its turn budget
+    and yields nothing."""
+
+    def __init__(self):
+        self.calls = 0
+        self.last_budget_exhausted = ""
+
+    def propose(self, _state, _parent):
+        from looplab.agents.propose_receipts import note_propose_receipt
+        self.calls += 1
+        self.last_budget_exhausted = "" if self.calls == 1 else "turns"
+        note_propose_receipt(self.last_budget_exhausted)
+        if self.calls > 1:
+            return None
+        return Idea(operator="draft", params={"x": 0.1, "y": 0.5}, rationale="proposal 1",
+                    hypothesis="h")
+
+
+@pytest.mark.parametrize("kind", ["draft", "improve"])
+def test_a_copy_the_gate_derived_from_the_kept_original_carries_the_original_s_receipt(
+        tmp_path, monkeypatch, caplog, kind):
+    """crit_v59 F2, driven: the gate's re-proposal was cut short by its turn budget and yielded
+    nothing, so the gate kept the original — and then NUDGED it off a numeric near-duplicate, a
+    copy no call returned as-is, which takes the latest receipt of a proposal that LINKED. The
+    re-proposal that linked nothing was recorded as one, and the converged original's copy warned
+    TRUNCATED. MUTATION: record the unlinked re-proposal's receipt -> one warning."""
+    from looplab.adapters.toytask import ToyTask
+    from looplab.events.replay import fold
+    from tests.factories import TOY_TASK, make_engine
+
+    researcher = _CleanThenNothing()
+    engine = make_engine(tmp_path / kind, task=ToyTask.load(TOY_TASK), researcher=researcher)
+    engine.store.append("run_started", {
+        "run_id": engine.run_dir.name, "task_id": "toy", "goal": "g", "direction": "min"})
+    action: dict = {"kind": "draft"}
+    if kind == "improve":
+        engine.store.append("node_created", {
+            "node_id": 0, "parent_ids": [], "operator": "draft", "code": "print(1)",
+            "idea": {"operator": "draft", "params": {"x": 0.0, "y": 0.0}}})
+        engine.store.append("node_evaluated", {
+            "node_id": 0, "generation": 0, "metric": 1.0, "eval_seconds": 0.1})
+        action = {"kind": "improve", "parent_id": 0}
+
+    def _gate_nudges_the_kept_original(_state, idea, *, repropose=None, **_kw):
+        assert repropose() is None
+        out = idea.model_copy()
+        out.params = {"x": 0.11, "y": 0.5}
+        return out
+
+    monkeypatch.setattr(engine, "_apply_novelty_gate", _gate_nudges_the_kept_original)
+    with caplog.at_level("WARNING", logger="looplab.engine.orchestrator"):
+        idea = engine._prepare_node_idea(action, fold(engine.store.read_all()),
+                                         researcher=engine.researcher, prospective_node_id=1,
+                                         source="researcher")
+    warned = [r.getMessage() for r in caplog.records if "cut short by its" in r.getMessage()]
+    assert idea is not None and idea.rationale == "proposal 1" and researcher.calls == 2
+    assert idea.params == {"x": 0.11, "y": 0.5}
+    assert warned == [], warned

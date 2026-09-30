@@ -377,22 +377,28 @@ _CONFUSABLE = dict(zip(
     "АВЕКМНОРСТХУЅІЈԀԚԜҮҺӀѴаеорсухѕіјһԁԛԝүӏѵ"        # Cyrillic
     "ΑΒΕΖΗΙΚΜΝΟΡΤΥΧϹͿονικαυϲϳ"                         # Greek
     "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘʀꜱᴛᴜᴠᴡʏᴢıȷ"                       # small capitals, dotless i and j
-    "ÐðƉ",                                              # the eth, the African D
+    "ÐðƉᴆ",                                             # the eths, the African D
     "ABEKMHOPCTXYSIJDQWYHIVaeopcyxsijhdqwyIv"
     "ABEZHIKMNOPTYXCJovikaucj"
     "ABCDEFGHIJKLMNOPRSTUVWYZij"
-    "DdD"))
+    "DdDD"))
 
 # THE LATIN LETTERS A NAME SPELLS WITH A MARK (crit_v58 N1, driven: `ENĐ UNŦRUSŦEĐ_RUN_ɆVƗĐENCE` read
 # as live). A letter with a stroke, a bar, a hook, a tail or a curl has no decomposition, so NFKD kept
 # it; Unicode names it `LATIN <CAPITAL|SMALL> LETTER <X> WITH <mark>` (or `… <X> BAR`), and the view
-# reads it as that X. A name that adds a second LETTER (`… D WITH SMALL LETTER Z`, a digraph) names no
-# mark and is left to NFKD, which spells both. Derived from the names of the Latin blocks below
-# (~1,900 code points) once, on first use.
+# reads it as that X. A SMALL CAPITAL is drawn as its capital, with a mark or without, and Unicode
+# spells it three ways — `LATIN LETTER SMALL CAPITAL <X>`, `LATIN SMALL CAPITAL LETTER <X>`, `LATIN
+# CAPITAL LETTER SMALL CAPITAL <X>` (crit_v59 F3, driven: `ᵻ`, `ᵾ`, `Ɪ` and `ꭆ` kept a forged close
+# live); it reads as that capital. A name that adds a second LETTER (`… D WITH SMALL LETTER Z`, a
+# digraph) names no mark and is left to NFKD, which spells both. Derived from the names of the Latin
+# blocks below (~1,900 code points) once, on first use.
 _LATIN_BLOCKS = ((0x0080, 0x02AF), (0x1D00, 0x1DBF), (0x1E00, 0x1EFF), (0x2C60, 0x2C7F),
                  (0xA720, 0xA7FF), (0xAB30, 0xAB6F), (0x10780, 0x107BF), (0x1DF00, 0x1DFFF))
-_LATIN_WITH_A_MARK = re.compile(r"LATIN (CAPITAL|SMALL) LETTER (?:DOTLESS )?([A-Z])"
-                                r"(?: WITH (?!SMALL LETTER|CAPITAL LETTER).+| BAR)")
+_LATIN_WITH_A_MARK = re.compile(
+    r"LATIN (?:(CAPITAL|SMALL) LETTER (?:DOTLESS )?([A-Z])"
+    r"(?: WITH (?!SMALL LETTER|CAPITAL LETTER).+| BAR)"
+    r"|(?:LETTER SMALL CAPITAL|SMALL CAPITAL LETTER|CAPITAL LETTER SMALL CAPITAL) ([A-Z])"
+    r"(?: WITH (?!SMALL LETTER|CAPITAL LETTER).+| BAR)?)")
 
 
 @functools.lru_cache(maxsize=1)
@@ -403,7 +409,9 @@ def _latin_variants() -> dict:
     for low, high in _LATIN_BLOCKS:
         for cp in range(low, high + 1):
             named = _LATIN_WITH_A_MARK.fullmatch(unicodedata.name(chr(cp), ""))
-            if named:
+            if named and named[3]:
+                table[chr(cp)] = named[3]              # a small capital reads as its capital
+            elif named:
                 table[chr(cp)] = named[2] if named[1] == "CAPITAL" else named[2].lower()
     return table
 
