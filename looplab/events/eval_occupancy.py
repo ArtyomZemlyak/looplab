@@ -155,6 +155,38 @@ def _withheld_segments(sequence, last: float) -> tuple[list, int]:
     return segments, 0
 
 
+def withheld_lifecycles(events) -> frozenset:
+    """The lifecycles `(node_id, generation)` whose evaluation a pause (or a stop) WITHHELD and that
+    no launch has taken up since: the latest of their start, relaunch and withheld rows is an
+    `eval_attempt_withheld`, and no terminal has closed them. The same rows and the same two rules as
+    the pairing above (`_withheld_segments`: the FIRST terminal ends a lifecycle, a relaunch row
+    counts only once the lifecycle has started), read by `serve/node_activity.py` so the public
+    activity does not call such a node `evaluating` (doc 69 69.12b). The row stays DIAGNOSTIC:
+    folding it would put a position-sensitive row inside the Card elections' fences, which is what
+    the projection reads around."""
+    latest: dict = {}
+    started: set = set()
+    ended: set = set()
+    for e in events or ():
+        kind = _field(e, "type")
+        if (kind != _EVAL_STARTED and kind != _WITHHELD and kind not in _TERMINALS
+                and kind not in _RELAUNCHES):
+            continue
+        lifecycle = _lifecycle(e)
+        if lifecycle is None or lifecycle in ended:
+            continue
+        if kind in _TERMINALS:
+            ended.add(lifecycle)
+            latest.pop(lifecycle, None)
+            continue
+        if kind == _EVAL_STARTED:
+            started.add(lifecycle)
+        elif kind in _RELAUNCHES and lifecycle not in started:
+            continue
+        latest[lifecycle] = kind
+    return frozenset(lifecycle for lifecycle, kind in latest.items() if kind == _WITHHELD)
+
+
 def eval_occupancy(events, width: int | None = None) -> dict:
     """Fold durable rows into an occupancy report. `events` is any iterable of event dicts.
 

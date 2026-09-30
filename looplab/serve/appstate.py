@@ -35,6 +35,7 @@ from looplab.core.run_deletion import RUN_DELETION_FENCE_PREFIX
 from looplab.core.trace_files import open_private_trace_file, trace_file_change_token
 from looplab.engine.finalize import incomplete_finalize_scope, is_guarded_abort
 from looplab.events.authoring_projection import card_authoring
+from looplab.events.eval_occupancy import withheld_lifecycles
 from looplab.events.eventstore import (
     EventStore, integrity_wire, iter_event_jsonl, log_integrity)
 from looplab.events.replay import fold
@@ -707,6 +708,9 @@ class AppState:
         max_seq = all_evs[-1].seq if all_evs else -1
         evs = all_evs if upto_seq is None else [e for e in all_evs if e.seq <= upto_seq]
         st = fold(evs)
+        # The lifecycles a pause withheld, off the same prefix the state is folded from — the row is
+        # diagnostic, so the fold alone would call each of them `evaluating` (doc 69 69.12b).
+        withheld = withheld_lifecycles(evs)
         last_seq = evs[-1].seq if evs else -1
         # Trim heavy per-node payloads from the live state (code/files/stdout/error) — they are
         # fetched on demand via /nodes/{id}. Keeps SSE ticks small even for code-writing runs.
@@ -768,7 +772,7 @@ class AppState:
             # evidence the fold already holds so every browser surface can distinguish building,
             # evaluating, and waiting without scanning a bounded timeline or guessing by node id.
             try:
-                n["activity"] = public_node_activity(st, int(node_id))
+                n["activity"] = public_node_activity(st, int(node_id), withheld=withheld)
             except (TypeError, ValueError, OverflowError):
                 # Pydantic's JSON dump produces integer/string integer keys, but keep this light
                 # public projection robust to a hand-built RunState with an exotic mapping key.

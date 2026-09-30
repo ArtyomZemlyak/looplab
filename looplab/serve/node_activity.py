@@ -10,7 +10,7 @@ fields directly.
 from __future__ import annotations
 
 import math
-from typing import Any, Mapping, Optional
+from typing import AbstractSet, Any, Mapping, Optional
 
 from looplab.core.models import NodeStatus, RunState
 
@@ -39,13 +39,18 @@ def _started_at(value: Any) -> Optional[float]:
     return number if math.isfinite(number) and number > 0 else None
 
 
-def public_node_activity(state: RunState, node_id: int) -> dict[str, Any]:
+def public_node_activity(state: RunState, node_id: int, *,
+                         withheld: AbstractSet = frozenset()) -> dict[str, Any]:
     """Project the current lifecycle phase without inferring execution from ``pending``.
 
     The status vocabulary is intentionally smaller than the engine's pipeline vocabulary:
 
     * ``building`` — a generation-matched ``node_building`` marker is still open;
-    * ``queued`` — ``node_created`` promised admission and the current owner has not admitted it;
+    * ``queued`` — ``node_created`` promised admission and the current owner has not admitted it
+      (evidence ``node_created_boundary``), or it admitted it and a pause then WITHHELD the
+      evaluation with no launch since (evidence ``eval_attempt_withheld``; doc 69 69.12b) —
+      `withheld` is `events/eval_occupancy.py::withheld_lifecycles` of the log the state was folded
+      from, because that row is diagnostic and the fold never sees it;
     * ``evaluating`` — the current engine owner admitted that exact generation;
     * ``pending`` — a legacy/untracked pending lifecycle, whose start cannot be proven;
     * terminal statuses mirror the node's durable status.
@@ -88,6 +93,11 @@ def public_node_activity(state: RunState, node_id: int) -> dict[str, Any]:
             return {**base, "status": "pending", "evidence": "legacy_untracked"}
         if getattr(node, "eval_activity_started", False) is not True:
             return {**base, "status": "queued", "evidence": "node_created_boundary"}
+        # THE EVALUATION A PAUSE WITHHELD waits for its re-dispatch: the admission still stands
+        # (`eval_activity_started`), but nothing is running until the next launch row — an
+        # `evaluating` here was a paused run reporting a node in training (doc 69 69.12b).
+        if (node_id, node.attempt) in withheld:
+            return {**base, "status": "queued", "evidence": "eval_attempt_withheld"}
         out = {**base, "status": "evaluating", "evidence": "node_eval_started"}
         if (started := _started_at(getattr(node, "eval_started_at", None))) is not None:
             out["started_at"] = started

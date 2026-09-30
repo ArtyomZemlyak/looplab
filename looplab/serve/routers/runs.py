@@ -29,7 +29,7 @@ from looplab.core.config import (
     settings_from_snapshot)
 from looplab.core.node_evidence import (
     node_attempt, node_workdir, read_bounded_regular_file)
-from looplab.core.models import Idea, idea_field_carried
+from looplab.core.models import Idea, NodeStatus, idea_field_carried
 from looplab.core.trace_files import (
     TraceFileIdentity, iter_bounded_trace_jsonl_lines, open_private_trace_file)
 from looplab.core.run_deletion import (RunDeletionFenceError, RunDeletionStorageError, assert_run_deletion_write_allowed)
@@ -38,6 +38,7 @@ from looplab.core.run_reset import (
     load_run_reset_marker)
 from looplab.serve.http import (
     generation_conflict, if_none_match, json_object, request_body_contract, refusal)
+from looplab.events.eval_occupancy import withheld_lifecycles
 from looplab.events.eventstore import (
     EventStore, EventStoreLockError, JsonlRecordInvalid,
     interprocess_lock, decode_jsonl_line, iter_event_jsonl)
@@ -1534,7 +1535,13 @@ def build_router(srv) -> APIRouter:
                         "trace_revision": trace_revision}
             raise HTTPException(404, "no such node")
         out = n.model_dump(mode="json")
-        out["activity"] = public_node_activity(st, nid)
+        # A lifecycle a pause WITHHELD reads `queued`, not `evaluating` (doc 69 69.12b) — its row is
+        # diagnostic, so the log is read for it, and only for the one state it can change: a pending
+        # lifecycle the current owner admitted.
+        withheld = (withheld_lifecycles(srv.events(rd, seq))
+                    if n.status is NodeStatus.pending and n.eval_activity_started is True
+                    else frozenset())
+        out["activity"] = public_node_activity(st, nid, withheld=withheld)
         out["annotations"] = st.annotations.get(nid, [])
         out["confirm_seeds_detail"] = st.confirm_seed_results.get(nid, {})
         # parent diff (vs the first parent's solution.py) — files-as-truth lineage
