@@ -799,3 +799,27 @@ def test_an_alternative_reads_the_run_fenced_when_the_envelope_is_on(envelope):
              "optimum (params: x=3.0)"
     assert (fence_untrusted(listed, EVIDENCE_LABEL) in turn) is envelope
     assert listed in turn
+
+
+# ------------------------------------------------------ the run's stop inside the alternatives path
+
+@pytest.mark.parametrize("stop_after_chats, expect_alternative_request", [(2, False), (3, True)])
+def test_the_runs_stop_ends_the_alternatives_before_a_further_member_or_the_ranking(
+        stop_after_chats, expect_alternative_request):
+    """WP-STOP x WP-F (merged 2026-09-30): the continuation path asks the run's stop exactly as the
+    independent path does — a stop that lands after candidate 1 buys no alternative, and one that
+    lands after the alternative buys no ranking (and no verifier, no deferred brief); candidate 1
+    comes back and nothing is recorded as a foresight pick. MUTATION: drop the loop's `run_halted()`
+    break -> the first case pays an alternative request; drop the pre-rank check -> the second case
+    pays a ranking."""
+    from looplab.core.phase_events import run_halt_scope
+    model, _researcher, _base, panel = _chain(
+        [_turn(_read("r1")), _turn(_emit("e1", "cache the per-depth scorer")),
+         _turn(_emit("e2", "batch the shared prompt pages", x=2.0))], order=(1, 0))
+    with run_halt_scope(lambda: len(model.chats) >= stop_after_chats):
+        idea = panel.propose(_state(), None)
+    assert "cache the per-depth scorer" in (idea.rationale or "")
+    assert any(_asks_for_alternative(req) for req in model.chats) is expect_alternative_request
+    assert model.rank_requests == []
+    assert model.summaries == 0
+    assert panel.last_foresight is None
