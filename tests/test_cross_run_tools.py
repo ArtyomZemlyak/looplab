@@ -1683,11 +1683,11 @@ def test_the_concept_card_decides_a_note_older_than_the_window_by_its_own_claim(
 
 
 def test_the_concept_card_groups_in_its_reader_s_scope(tmp_path):
-    """crit_v59 F4 (M15): the card groups the rows the prior groups — its READER's scope — so another
-    task's heavily evidenced spelling, which the reader's prior never sees, does not decide which of
-    this task's spellings the rejection withholds (the window test's shape, with the heavy rows in
-    another task instead of before the window). MUTATION: group portfolio-wide -> the respelled
-    notes vanish from the card."""
+    """crit_v59 F4 (M15): the card groups the rows the prior groups — its READER's scope, which fences
+    out the live run's own rows — so the live run's heavily evidenced spelling, which its prior
+    never sees, does not decide which of the prior runs' spellings the rejection withholds (the
+    window test's shape, with the heavy rows the reader's own instead of older than the window).
+    MUTATION: group portfolio-wide -> the respelled notes vanish from the card."""
     from looplab.engine.claims import record_claim_decision
 
     head = ("r-drop regularization on the dual encoder kept the hard negatives apart and lifted "
@@ -1695,12 +1695,11 @@ def test_the_concept_card_groups_in_its_reader_s_scope(tmp_path):
             "near duplicates")
     decided, rep = head + " of the anchor", head + " and the warmup was short"
     respelled = rep.replace("on the dual encoder", "on a dual encoder", 1)
-    foreign = [{**_lesson(rep, "supported", list(range(1, 11)), run_id=f"u-{i}"), "task_id": "u"}
-               for i in range(5)]
+    own = [_lesson(rep, "supported", list(range(1, 11)), run_id="current") for _ in range(5)]
     local = [_lesson(respelled, "supported", [1], run_id="w-a"),
              _lesson(respelled, "supported", [2], run_id="w-b"),
              _lesson(rep, "supported", [3], run_id="w-c")]
-    _seed(tmp_path, lessons=foreign + local,
+    _seed(tmp_path, lessons=own + local,
           capsules=[_cap_scoped(run, "t", concepts=["regularization/r-drop"],
                                 fingerprint=["kind:dataset"]) for run in ("w-a", "w-b", "w-c")])
     record_claim_decision(str(tmp_path), statement=decided, decision="rejected")
