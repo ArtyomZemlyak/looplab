@@ -181,9 +181,15 @@ class CrossRunTools:
     AUDIENCES = ("portfolio", "run")
 
     def __init__(self, memory_dir: str | Path | None, *, role: str = "researcher",
-                 audience: str = "portfolio"):
+                 audience: str = "portfolio", claim_decisions: bool = False):
         self.dir = Path(memory_dir) if memory_dir else None
         self.role = str(role or "researcher")
+        # The concept card's "what runs noted" withholds a lesson whose claim the operator rejected,
+        # exactly as the passive prior and `MemoryTools.search_lessons` do (doc 69 69.21b). OFF at
+        # the constructor because it changes what a tool returns (a prompt); `agents/providers.py`
+        # passes `Settings.lesson_prior_claim_decisions`. The claims tool needs no flag: it has
+        # always dropped an `operator-rejected` claim (`_tool_cross_run_claims`).
+        self.claim_decisions = bool(claim_decisions)
         # The visibility predicate itself is `trust/cross_run.py::LessonScope`, shared with
         # `MemoryTools` so the two readers of `lessons.jsonl` cannot disagree (doc 25 TO-07). The
         # five loose fields it replaced are still readable as properties — a dozen call sites here
@@ -413,15 +419,23 @@ class CrossRunTools:
                 ["slug"]),
         ]
 
-    def _role_lessons(self) -> list[dict]:
-        """Lessons visible to this role AND in scope: the role's own + shared/untagged (mirrors the
-        role-routed cross-run lesson priors), scoped to the bound run's task (portfolio-wide when unbound).
-        An unknown role sees every role."""
+    def _scoped_lessons(self) -> list[dict]:
+        """Lessons in scope for the bound run's task (portfolio-wide when unbound), of EVERY role —
+        the rows the passive prior files claims over (its scan is role-agnostic; the role filter
+        comes after), so the operator-rejected rule reads the same kind of row set in both (doc 69
+        69.21b)."""
         from looplab.engine.claims import load_claim_lessons
         from looplab.engine.knowledge_views import filter_claim_source_rows
-        lessons = filter_claim_source_rows(
+        return filter_claim_source_rows(
             load_claim_lessons(self.dir),
             lambda lz: self._in_scope(lz, source="lesson"), research=False)
+
+    def _role_lessons(self, scoped: list[dict] | None = None) -> list[dict]:
+        """Lessons visible to this role AND in scope: the role's own + shared/untagged (mirrors the
+        role-routed cross-run lesson priors), scoped to the bound run's task (portfolio-wide when unbound).
+        An unknown role sees every role. `scoped` is `_scoped_lessons()` when the caller holds it."""
+        from looplab.engine.knowledge_views import filter_claim_source_rows
+        lessons = self._scoped_lessons() if scoped is None else scoped
         if self.role not in ("researcher", "developer"):
             return lessons
         return filter_claim_source_rows(
@@ -1437,8 +1451,21 @@ class CrossRunTools:
 
         # Lessons that mention it (free-text pros/cons) — match the name token in the statement.
         name_terms = _toks(cname or canon)
-        notes = [lz for lz in self._role_lessons()
+        scoped_lessons = self._scoped_lessons()
+        notes = [lz for lz in self._role_lessons(scoped_lessons)
                  if name_terms and name_terms <= _toks(str(lz.get("statement") or ""))]
+        withheld_notes = 0
+        if notes and self.claim_decisions:
+            # The prior's own rule, over the rows the prior groups (in scope, every role — a claim
+            # group's representative spelling may be another role's row), doc 69 69.21b. The
+            # decisions are the governance snapshot's, so an unreadable ledger already failed the
+            # tool closed.
+            from looplab.engine.claims import operator_rejected_lessons
+            hits = operator_rejected_lessons(scoped_lessons, (_governance or {}).get("decisions"))
+            if hits:
+                rejected_rows = {id(scoped_lessons[hit]) for hit in hits}
+                kept = [lz for lz in notes if id(lz) not in rejected_rows]
+                withheld_notes, notes = len(notes) - len(kept), kept
         if notes:
             lines.append("  what runs noted:")
             for lz in notes[:3]:
@@ -1446,6 +1473,9 @@ class CrossRunTools:
                 # A retargeted run's lesson keeps the clause its cut would take (doc 68 68.2).
                 lines.append(f"    [{out}] UNTRUSTED_MEMORY="
                              f"{with_retarget_clause(_safe_text(lz.get('statement'), 200), lz)!r}")
+        if withheld_notes:
+            lines.append(f"  ({withheld_notes} noted lesson(s) whose claim the operator rejected "
+                         "are not shown)")
 
         lines.append("  (No authored prose/paper overview yet — this card is assembled from cross-run "
                      "evidence; deep-research summarization is future work.)")

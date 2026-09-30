@@ -868,6 +868,7 @@ from looplab.engine.claims_assessments import (  # noqa: F401,E402
     lesson_claim_uid,
     lesson_rejected,
     operator_rejected_claim_uids,
+    operator_rejected_lessons,
     rejects_anything,
 )
 

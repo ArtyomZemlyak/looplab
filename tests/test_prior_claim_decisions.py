@@ -228,18 +228,25 @@ def test_the_row_s_own_lookup_walks_the_surface_s_whole_candidate_chain():
 
 def test_with_no_rejection_in_the_ledger_no_claim_projection_is_built(tmp_path, monkeypatch):
     """F4: the projection cost +194 ms per prior build with no ledger at all. With no REJECTION in
-    the ledger nothing is projected (MUTATION: drop `rejects_anything`)."""
+    the ledger nothing is projected, by the prior or the pull (MUTATION: drop `rejects_anything`).
+    The patches name the module that READS the two names — `operator_rejected_lessons`' own — since
+    a patch on the `claims` re-export is read by nothing any more and passed with the guard gone."""
     import looplab.engine.claims as claims
+    import looplab.engine.claims_assessments as assessments
 
     def boom(*_a, **_k):
         raise AssertionError("projected with nothing to withhold")
 
-    monkeypatch.setattr(claims, "operator_rejected_claim_uids", boom)
-    monkeypatch.setattr(claims, "lesson_rejected", boom)
+    monkeypatch.setattr(assessments, "operator_rejected_claim_uids", boom)
+    monkeypatch.setattr(assessments, "lesson_rejected", boom)
     mem = _memory(tmp_path)
     record_claim_decision(str(mem), statement=KEPT, decision="ratified", scope=TASK)
     _eng, (text, receipt) = _prior(tmp_path, mem)
     assert REJECTED in text and "claim_decisions_unavailable" not in receipt
+    pulled = _search(mem, on=True)
+    assert REJECTED in pulled and "CLAIM_DECISIONS_UNAVAILABLE" not in pulled
+    assert claims.operator_rejected_lessons(
+        [_lesson(REJECTED)], {"k": {"decision": "ratified"}}) == frozenset()
     assert claims.rejects_anything({"k": {"decision": "rejected"}})
     assert not claims.rejects_anything({"k": {"decision": "ratified"}, "j": "rejected"})
     assert not claims.rejects_anything(None)
@@ -329,3 +336,148 @@ def test_a_same_size_rewrite_of_the_ledger_moves_the_stamp(tmp_path):
     os.replace(fresh, ledger)
     assert ledger.stat().st_size == len(body)
     assert eng.lessons.lessons_store_stamp() != before
+
+
+# ------------------------------------------------------------ the pull tools (doc 69 69.21b)
+
+def _search(mem, *, on, query="recall"):
+    from looplab.tools.memory_tools import MemoryTools
+    return MemoryTools(str(mem), role="researcher", claim_decisions=on).execute(
+        "search_lessons", {"query": query})
+
+
+def test_search_lessons_withholds_what_the_prior_withholds_and_says_how_many(tmp_path):
+    """crit_v49 (driven): the prior hid a rejected lesson and `search_lessons` returned it as
+    `UNTRUSTED_OUTCOME='supported'`. The same rule now answers for the pull, counted among the rows
+    the query matched. MUTATIONS: skip the filter; count rows the query never matched; drop the
+    disclosure. OFF: the historical result, byte for byte."""
+    mem = _memory(tmp_path)
+    record_claim_decision(str(mem), statement=REJECTED, decision="rejected", scope=TASK)
+    on = _search(mem, on=True)
+    assert REJECTED not in on and KEPT in on
+    assert "[OPERATOR_REJECTED: 1 matching lesson(s) whose claim the operator rejected are withheld.]" in on
+    unmatched = _search(mem, on=True, query="cosine")
+    assert KEPT in unmatched and "OPERATOR_REJECTED" not in unmatched
+    off = _search(mem, on=False)
+    assert REJECTED in off and "OPERATOR_REJECTED" not in off
+    (tmp_path / "plain").mkdir()
+    assert off == _search(_memory(tmp_path / "plain"), on=False), "OFF: as if nothing was decided"
+
+
+def test_search_lessons_with_an_unreadable_ledger_withholds_nothing_and_says_so(tmp_path):
+    mem = _memory(tmp_path)
+    (mem / "claim_decisions.jsonl").write_text('{"decision": "rejected"}\n', encoding="utf-8")
+    on = _search(mem, on=True)
+    assert REJECTED in on and KEPT in on and "[CLAIM_DECISIONS_UNAVAILABLE:" in on
+    assert "CLAIM_DECISIONS_UNAVAILABLE" not in _search(mem, on=False)
+
+
+def test_search_lessons_over_no_stated_lesson_reads_no_ledger_and_discloses_nothing(tmp_path):
+    """The prior's M02 for the pull: with no row stating a lesson there is nothing to withhold, so
+    an unreadable ledger is not read and not disclosed (MUTATIONS: read the ledger with no
+    candidate; count a statement-less row as one -> "a lesson they reject may be shown" over none)."""
+    mem = _memory(tmp_path, {"note": "a row that states no lesson"}, {"statement": ""})
+    (mem / "claim_decisions.jsonl").write_text('{"decision": "rejected"}\n', encoding="utf-8")
+    assert "CLAIM_DECISIONS_UNAVAILABLE" not in _search(mem, on=True, query="")
+
+
+def test_the_pull_tools_are_built_with_the_setting_the_prior_reads(tmp_path):
+    """The flag reaches BOTH builders of the agents' pull tools — the shared providers and the repo
+    Developer's own set — and the constructors stay OFF (a prompt is a contract). MUTATION: drop a
+    builder's keyword -> that toolset serves the rejected lesson."""
+    import inspect
+
+    from looplab.adapters.repo_developer import LLMRepoDeveloper
+    from looplab.agents.providers import _shared_providers
+    from looplab.tools.cross_run_tools import CrossRunTools
+    from looplab.tools.memory_tools import MemoryTools
+
+    for cls in (MemoryTools, CrossRunTools, LLMRepoDeveloper):
+        assert inspect.signature(cls).parameters["claim_decisions"].default is False, cls
+    from looplab.adapters.toytask import ToyTask
+    from tests.factories import TOY_TASK
+
+    mem = _memory(tmp_path)
+    for flag in (True, False):
+        settings = Settings(memory_dir=str(mem), cross_run_read_tools=True,
+                            lesson_prior_claim_decisions=flag)
+        built = [p for p in _shared_providers(ToyTask.load(TOY_TASK), settings, role="researcher")
+                 if isinstance(p, (MemoryTools, CrossRunTools))]
+        assert len(built) == 2 and all(p.claim_decisions is flag for p in built), built
+
+
+def test_search_lessons_withholds_a_row_the_claims_surface_refuses(tmp_path):
+    """The prior's F2 case, for the pull: a row whose fingerprint is over the fence is refused by the
+    claims surface, so no group marks it — its OWN claim still resolves to the rejection. MUTATION:
+    withhold by the window's groups only -> the rejected lesson is returned."""
+    mem = _memory(tmp_path, _lesson(REJECTED, fingerprint=_OVER_FENCE), _lesson(KEPT))
+    record_claim_decision(str(mem), statement=REJECTED, decision="rejected", scope=TASK)
+    on = _search(mem, on=True)
+    assert REJECTED not in on and KEPT in on and "[OPERATOR_REJECTED: 1 " in on
+
+
+# ------------------------------------------------------------ the shared rule's row mapping
+# A statement over `normalize_statement`'s 160-character cap: two claims that differ only past the
+# cap share one LEGACY statement key, which is how an old unscoped decision reaches a claim group
+# through the group's representative spelling alone (`claims_assessments.py::decision_for_claim`).
+_HEAD = ("Warm-starting the tokenizer from the base checkpoint improves recall on the long-tail "
+         "queries of the retrieval benchmark when the vocabulary overlap with the pretraining "
+         "corpus is high")
+_DECIDED = _HEAD + " and the batch is small"
+_GROUP_REP = _HEAD + " and the learning rate is warmed up"
+_RESPELLED = _GROUP_REP.replace("from the base", "from a base", 1)   # the same claim, another key
+_RESPELLED_MARK = "from a base checkpoint"
+
+
+def test_a_row_is_withheld_when_its_group_is_rejected_through_the_group_s_spelling(tmp_path):
+    """The claims surface looks a group's decision up under the group's REPRESENTATIVE spelling
+    (`_decision_for`): an unscoped decision on `_DECIDED` reaches the group `_GROUP_REP` heads (one
+    legacy key) and so marks `_RESPELLED`, filed in that group, rejected — while that row's own
+    lookup finds nothing. The prior and the pull withhold what the surface shows (MUTATION: drop
+    the group clause of `operator_rejected_lessons` -> the respelled lesson is served)."""
+    from looplab.engine.claims import lesson_rejected, operator_rejected_lessons
+    rows = [_lesson(_GROUP_REP), _lesson(_GROUP_REP, run_id="third-run"), _lesson(_RESPELLED)]
+    mem = _memory(tmp_path, *rows)
+    record_claim_decision(str(mem), statement=_DECIDED, decision="rejected")
+    decisions = load_claim_decisions(mem)
+    [group] = claim_assessments(rows, decisions=decisions, bounded=False)
+    assert group["maturity"] == "operator-rejected" and group["statement"] == _GROUP_REP
+    assert group["decision"]["resolved_via"] == "legacy_statement_key"
+    assert not lesson_rejected(rows[2], decisions), "the row's own spelling finds no decision"
+    assert operator_rejected_lessons(rows, decisions) == {0, 1, 2}
+    _eng, (text, _receipt) = _prior(tmp_path, mem)
+    _eng, (off, _off_receipt) = _prior(tmp_path, mem, on=False)
+    assert _RESPELLED_MARK not in text and _RESPELLED_MARK in off
+    pulled, plain = _search(mem, on=True, query="tokenizer"), _search(mem, on=False, query="tokenizer")
+    assert _RESPELLED_MARK not in pulled and _RESPELLED_MARK in plain
+
+
+def test_a_row_the_scan_skips_does_not_shift_the_withheld_lesson(tmp_path):
+    """The rule answers in positions of the rows it was HANDED; the prior and the pull hand it the
+    rows their scan keeps and map each answer back to the window's own position (MUTATION: read the
+    answer as a window position -> the statement-less row is "withheld" and the rejected lesson is
+    served)."""
+    mem = _memory(tmp_path, {"note": "a row that states no lesson"}, _lesson(REJECTED), _lesson(KEPT))
+    record_claim_decision(str(mem), statement=REJECTED, decision="rejected", scope=TASK)
+    _eng, (text, receipt) = _prior(tmp_path, mem)
+    assert REJECTED not in text and KEPT in text and receipt["operator_rejected"] == 1
+    pulled = _search(mem, on=True)
+    assert REJECTED not in pulled and KEPT in pulled and "[OPERATOR_REJECTED: 1 " in pulled
+
+
+def test_the_pull_groups_only_the_rows_its_scope_shows(tmp_path):
+    """The prior's scan keeps the rows its scope allows BEFORE it groups them; so does the pull. Two
+    of THIS run's own rows (never prior evidence) would otherwise lend the group their spelling —
+    and with it the legacy key an old decision sits under (MUTATION: group every loaded row -> the
+    respelled lesson is withheld on the strength of rows the tool never shows)."""
+    from types import SimpleNamespace
+
+    from looplab.tools.memory_tools import MemoryTools
+    mem = _memory(tmp_path, _lesson(_GROUP_REP, run_id="live"), _lesson(_GROUP_REP, run_id="live"),
+                  _lesson(_RESPELLED))
+    record_claim_decision(str(mem), statement=_DECIDED, decision="rejected")
+    tools = MemoryTools(str(mem), role="researcher", claim_decisions=True)
+    tools.bind_state(SimpleNamespace(run_id="live", task_id=TASK, direction="min", goal=""))
+    pulled = tools.execute("search_lessons", {"query": "tokenizer"})
+    assert _RESPELLED_MARK in pulled and "OPERATOR_REJECTED" not in pulled, pulled
+    assert "from the base checkpoint" not in pulled, "this run's own rows stay out of the pull"

@@ -1162,7 +1162,8 @@ class LLMRepoDeveloper:
                  probe_confine: bool = True, probe_max_calls: int = 0, command_runtime=None,
                  step_feedback_command: str = "", established=None,
                  evidence_envelope: bool = False, prompt_truths: bool = False,
-                 phase_context: bool = False, scorer_status: bool = False):
+                 phase_context: bool = False, scorer_status: bool = False,
+                 claim_decisions: bool = False):
         self.client = client
         self.task = task
         self.parser = parser
@@ -1199,6 +1200,10 @@ class LLMRepoDeveloper:
         # PART V §22: read-only cross-run knowledge, ROLE-SCOPED to the developer (repair/impl lessons).
         self._cross_run_read_tools = bool(cross_run_read_tools)
         self._cross_run_memory_dir = memory_dir
+        # …withholding a lesson whose claim the operator rejected, as the passive prior does (doc 69
+        # 69.21b). OFF at the constructor (it changes what a tool returns); `agents/developer_backends.py`
+        # passes `Settings.lesson_prior_claim_decisions`.
+        self._claim_decisions = bool(claim_decisions)
         self._memory_state = None
         # Coerced at the BOUNDARY (doc 25 AG-01) so an unknown option name raises here, in the
         # ctor, rather than surviving as dead weight in a dict until the drive call swallows it.
@@ -2124,7 +2129,8 @@ class LLMRepoDeveloper:
         # change fixed a crash across runs). Advisory only; role-scoped so it doesn't see the R&D claims.
         if getattr(self, "_cross_run_read_tools", False) and getattr(self, "_cross_run_memory_dir", None):
             from looplab.tools.cross_run_tools import CrossRunTools
-            tool = CrossRunTools(self._cross_run_memory_dir, role="developer", audience="run")
+            tool = CrossRunTools(self._cross_run_memory_dir, role="developer", audience="run",
+                                 claim_decisions=getattr(self, "_claim_decisions", False))
             state = getattr(self, "_memory_state", None)
             # …AND the lessons ledger itself, role-scoped. Until 2026-08-23 the Developer could read
             # what the prior renderer PUSHED at it and nothing more: `search_lessons` lives in
@@ -2136,7 +2142,8 @@ class LLMRepoDeveloper:
             # repeated the stage failure node 6 had already diagnosed and fixed.
             # `role="developer"` keeps meta-notes out — the same line the prior renderer draws.
             from looplab.tools.memory_tools import MemoryTools
-            lessons_tool = MemoryTools(self._cross_run_memory_dir, role="developer")
+            lessons_tool = MemoryTools(self._cross_run_memory_dir, role="developer",
+                                       claim_decisions=getattr(self, "_claim_decisions", False))
             if state is not None:
                 lessons_tool.bind_state(state)
             extra.append(lessons_tool)

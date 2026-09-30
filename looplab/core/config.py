@@ -1613,7 +1613,9 @@ class Settings(BaseSettings):
     # prompt and the `prior_injected` receipt, discloses an unreadable decision ledger instead of
     # guessing, and a decision made mid-run counts as a change for the refresh. It changes a PROMPT
     # and buys no call: OFF at every constructor, and a pre-field snapshot resumes OFF
-    # (`LEGACY_CONFIG_SNAPSHOT_DEFAULTS`). One reader: the engine knob `_lesson_prior_claim_decisions`.
+    # (`LEGACY_CONFIG_SNAPSHOT_DEFAULTS`). Read by the engine knob `_lesson_prior_claim_decisions`
+    # (the prior) and by the two builders of the agents' pull tools, `agents/providers.py` and
+    # `agents/developer_backends.py`, which hand it to `MemoryTools`/`CrossRunTools` (doc 69 69.21b).
     lesson_prior_claim_decisions: bool = True
     # B3 output redaction: the HIGH-ENTROPY half of the persisted-tail redactor.
     # **This flag no longer decides whether tails are redacted at all** (backlog C2, 2026-08-14).

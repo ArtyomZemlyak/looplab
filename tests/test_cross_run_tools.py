@@ -339,6 +339,21 @@ def test_repo_developer_scouts_include_cross_run_when_enabled(tmp_path):
     assert crt[0]._task_id == "repo-a" and crt[0]._scope.run_uid == "uid-live"
 
 
+@pytest.mark.parametrize("flag", [True, False])
+def test_repo_developer_pull_tools_carry_the_claim_decisions_flag(tmp_path, flag):
+    """doc 69 69.21b: both of the Developer's cross-run readers get the flag the prior reads.
+    MUTATION: drop it from either construction -> that reader serves a rejected lesson."""
+    from types import SimpleNamespace
+    from looplab.adapters.repo_developer import LLMRepoDeveloper
+    from looplab.tools.memory_tools import MemoryTools
+    d = LLMRepoDeveloper.__new__(LLMRepoDeveloper)
+    d._cross_run_read_tools, d._cross_run_memory_dir, d._editables = True, str(tmp_path), []
+    d._claim_decisions = flag
+    d.task = SimpleNamespace(id="repo-a", goal="g", direction="max")
+    readers = [t for t in d._scout_tools() if isinstance(t, (CrossRunTools, MemoryTools))]
+    assert len(readers) == 2 and all(t.claim_decisions is flag for t in readers), readers
+
+
 def test_repo_developer_scouts_omit_cross_run_when_off(tmp_path):
     from looplab.adapters.repo_developer import LLMRepoDeveloper
     d = LLMRepoDeveloper.__new__(LLMRepoDeveloper)
@@ -1556,3 +1571,60 @@ def test_the_atlas_and_the_search_keep_a_retargeted_claims_clause(tmp_path):
     search = tools.execute("cross_run_search", {"query": "hard negatives stayed apart mnr"})
     claim_lines = [line for line in search.splitlines() if line.startswith("[claim ")]
     assert claim_lines and all(clause.strip() in line for line in claim_lines), search
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_the_concept_card_notes_withhold_what_the_operator_rejected(tmp_path, flag):
+    """doc 69 69.21b: the card's "what runs noted" read `lessons.jsonl` with no rejection filter —
+    the prior hid a lesson this card then printed. Under the flag the prior's rule applies and the
+    card says how many it held back; OFF, the historical card. The claims tool already drops the
+    rejected claim whatever the flag. MUTATION: skip the filter -> the rejected lesson prints."""
+    from looplab.engine.claims import record_claim_decision
+
+    rejected = "r-drop kept the hard negatives apart and lifted recall"
+    kept = "r-drop with a short warmup lifted recall on the long tail"
+    _seed(tmp_path, lessons=[_lesson(rejected, "supported", [1], run_id="a"),
+                             _lesson(kept, "supported", [2], run_id="b")],
+          capsules=[_cap_scoped("a", "t", concepts=["regularization/r-drop"],
+                                fingerprint=["kind:dataset"]),
+                    _cap_scoped("b", "t", concepts=["regularization/r-drop"],
+                                fingerprint=["kind:dataset"])])
+    record_claim_decision(str(tmp_path), statement=rejected, decision="rejected", scope="t")
+    card = _bind(CrossRunTools(tmp_path, claim_decisions=flag)).execute(
+        "concept_card", {"slug": "regularization/r-drop"})
+    assert "what runs noted:" in card and kept in card, card
+    assert (rejected in card) is (not flag), card
+    note = "(1 noted lesson(s) whose claim the operator rejected are not shown)"
+    assert (note in card) is flag, card
+    claims = _bind(CrossRunTools(tmp_path, claim_decisions=flag)).execute("cross_run_claims", {})
+    assert kept in claims and rejected not in claims, claims
+
+
+def test_the_concept_card_groups_claims_over_every_role_as_the_prior_does(tmp_path):
+    """doc 69 69.21b: the prior files claims over EVERY role's rows before its role filter; the card
+    now does too. A statement over `normalize_statement`'s 160-character cap shares its legacy key
+    with any claim that differs only past the cap, so an old unscoped decision on `decided` reaches
+    the group the DEVELOPER's two rows head — and with it the researcher's respelled row in that
+    group, which the prior withholds and the card now holds back (MUTATION: group the role's own
+    rows only -> the card prints it)."""
+    from looplab.engine.claims import record_claim_decision
+    from looplab.engine.lesson_hygiene import normalize_statement
+
+    head = ("r-drop regularization on the dual encoder kept the hard negatives apart and lifted "
+            "recall on the long-tail queries of the retrieval benchmark when the batch held many "
+            "near duplicates")
+    decided, rep = head + " of the anchor", head + " and the warmup was short"
+    respelled = rep.replace("on the dual encoder", "on a dual encoder", 1)
+    assert normalize_statement(decided) == normalize_statement(rep) != normalize_statement(respelled)
+    _seed(tmp_path, lessons=[_lesson(rep, "supported", [1], run_id="a", role="developer"),
+                             _lesson(rep, "supported", [2], run_id="b", role="developer"),
+                             _lesson(respelled, "supported", [3], run_id="c", role="researcher")],
+          capsules=[_cap_scoped(run, "t", concepts=["regularization/r-drop"],
+                                fingerprint=["kind:dataset"]) for run in ("a", "b", "c")])
+    record_claim_decision(str(tmp_path), statement=decided, decision="rejected")
+    for flag in (True, False):
+        card = _bind(CrossRunTools(tmp_path, role="researcher", claim_decisions=flag)).execute(
+            "concept_card", {"slug": "regularization/r-drop"})
+        assert ("on a dual encoder" in card) is (not flag), card
+        assert ("(1 noted lesson(s) whose claim the operator rejected are not shown)" in card) is flag
+        assert "on the dual encoder" not in card, "the developer's rows stay the developer's"

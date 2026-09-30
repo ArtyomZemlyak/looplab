@@ -1868,7 +1868,7 @@
           "label": "↳ honour your claim decisions",
           "type": "bool",
           "default": true,
-          "help": "When you reject a claim (claim-decide --reject, or the Claims panel), the lessons that state it stop reaching the agents' cross-run prior, and the prompt says how many were held back. Without it the claims view showed your rejection while every later run's proposals were still told the rejected lesson. The same grouping and decision lookup as the Claims view decide what is withheld; if your decisions cannot be read, nothing is withheld and the prompt says so. Off = the prior as before."
+          "help": "When you reject a claim (claim-decide --reject, or the Claims panel), the lessons that state it stop reaching the agents' cross-run prior and the lesson search they call themselves, and each says how many were held back. Without it the claims view showed your rejection while every later run's proposals were still told the rejected lesson. The same grouping and decision lookup as the Claims view decide what is withheld; if your decisions cannot be read, nothing is withheld and the prompt says so. Off = the prior as before."
         },
         {
           "key": "embed_model",

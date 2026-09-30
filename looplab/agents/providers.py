@@ -100,7 +100,9 @@ def _shared_providers(task: TaskAdapter, settings, run_dir=None, *, core_only: b
         # constructor also serves the STRATEGIST, and a hard-coded "researcher" made
         # `_role_lessons` filter every developer-tagged production lesson out of its claims/Atlas/
         # search (an unknown role deliberately sees all roles — tools/cross_run_tools.py::CrossRunTools).
-        providers.append(CrossRunTools(settings.memory_dir, role=role, audience="run"))
+        providers.append(CrossRunTools(
+            settings.memory_dir, role=role, audience="run",
+            claim_decisions=getattr(settings, "lesson_prior_claim_decisions", False)))
     if core_only:
         return providers
     cases_path = (str(Path(settings.memory_dir) / "cases.jsonl")
@@ -117,7 +119,10 @@ def _shared_providers(task: TaskAdapter, settings, run_dir=None, *, core_only: b
         from looplab.tools.memory_tools import MemoryTools
         # THE ROLE TRAVELS, as it already does to `CrossRunTools` above (before 2026-08-30 a
         # Strategist read the store as a Researcher). Safe only beside `memory_tools`' known-role escape.
-        providers.append(MemoryTools(settings.memory_dir, role=role))
+        # …and the operator's claim decisions, as the passive prior reads them (doc 69 69.21b).
+        providers.append(MemoryTools(
+            settings.memory_dir, role=role,
+            claim_decisions=getattr(settings, "lesson_prior_claim_decisions", False)))
     # Skills: hand-written (skills_dir) + promoted M4 auto-distilled (<memory_dir>/skills) in ONE
     # SkillTools over BOTH dirs. Candidate auto-skills remain on disk for later promotion but the
     # library's production default hides them. Two separate providers would each register

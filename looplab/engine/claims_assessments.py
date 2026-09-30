@@ -225,6 +225,23 @@ def operator_rejected_claim_uids(lessons, decisions) -> frozenset:
                      if row.get("maturity") == "operator-rejected" and row.get("claim_uid"))
 
 
+def operator_rejected_lessons(lessons, decisions) -> frozenset:
+    """The indices of `lessons` whose claim the operator REJECTED — the ONE rule the passive prior
+    (`engine/lessons_priors.py`, doc 69 69.21) and the agents' pull tools (`tools/memory_tools.py`,
+    `tools/cross_run_tools.py`, 69.21b) withhold by, so the push and the pull cannot disagree: the
+    claims surface's groups over these rows marked `operator-rejected`
+    (`operator_rejected_claim_uids`, its representative-spelling lookup included), or the row's
+    own claim resolved to a rejection through the surface's candidate chain (`lesson_rejected` — a
+    row the surface refuses still answers for itself). With no rejection in `decisions` nothing is
+    projected at all (`rejects_anything`). Pure."""
+    if not rejects_anything(decisions):
+        return frozenset()
+    rows = list(lessons or ())
+    rejected = operator_rejected_claim_uids(rows, decisions)
+    return frozenset(index for index, row in enumerate(rows)
+                     if lesson_claim_uid(row) in rejected or lesson_rejected(row, decisions))
+
+
 def _structured_assessments(lessons, research_claims, decisions, *,
                             research_source: Optional[dict] = None,
                             claim_source: Optional[dict] = None) -> list[dict]:
