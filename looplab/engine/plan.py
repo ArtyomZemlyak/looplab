@@ -294,6 +294,26 @@ def in_endgame(plan: Optional[dict], total_nodes: int) -> bool:
         return False
 
 
+def final_reserve_reached(plan: Optional[dict], total_nodes: int) -> Optional[bool]:
+    """Whether node `total_nodes` is inside the plan's FINAL reserve — the open-ended endgame the
+    budget's end closes — or None when there is no readable plan row.
+
+    The rule Strategist's endgame switch (doc 69 69.25a, `agents/strategist.py::endgame_reached`):
+    `in_endgame` over the SAME count the dispatcher's gate reads, so the machinery the rule sets and
+    the actions the gate admits start at one node, wherever an inject batch or a budget change has
+    moved the cut. A BOUNDED stall episode (`endgame_end`) is not the final reserve: it reopens into
+    the search after its K nodes, and the endgame settings the rule would write (no ablation, the
+    ensemble merge) would outlive it. None — a missing or unreadable row — leaves the caller's own
+    reading in place."""
+    if not isinstance(plan, dict) or not plan:
+        return None
+    try:
+        int(plan["endgame_start"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    return in_endgame(plan, total_nodes) and plan.get("endgame_end") is None
+
+
 def _int_or_none(value) -> Optional[int]:
     return value if type(value) is int else None
 

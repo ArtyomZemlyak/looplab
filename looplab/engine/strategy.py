@@ -44,6 +44,7 @@ from looplab.engine.widths import (EVAL_WIDTH_MAX, LLM_WIDTH_MAX, operator_width
                                    per_experiment_gpu_budget, settle_width)
 from looplab.engine.costs import bind_cost_accountants
 from looplab.engine.governance_health import GovernanceLedgerUnavailable
+from looplab.engine.plan import final_reserve_reached
 from looplab.engine.shared import (effective_max_eval_timeout, strategist_budget_brief,
                                    strategist_gpu_brief)
 # Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
@@ -155,6 +156,9 @@ class StrategyCadenceMixin:
             avg_eval_seconds=avg_es,
             node_budget_frac=(node_budget_used / self.policy.max_nodes
                               if getattr(self.policy, "max_nodes", 0) else 0.0),  # P2 endgame reserve
+            # …and the reserve the dispatcher honours, the one the rule's switch follows when the
+            # run has a plan (doc 69 69.25a): the gate's own count, `len(state.nodes)`.
+            plan_endgame=final_reserve_reached(getattr(state, "plan", None), len(state.nodes)),
             current_policy=self._policy_name,   # D3: lets the rule switch BACK to greedy post-stall
             eval_parallel=self._eval_parallel,
             llm_parallel=self._llm_parallel,

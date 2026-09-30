@@ -191,6 +191,25 @@ class StrategyContext(BaseModel):
     endgame_start: Optional[int] = None
     endgame_end: Optional[int] = None
     endgame_kinds: list[str] = Field(default_factory=list)
+    # WHETHER THE NEXT NODE IS INSIDE THE PLAN'S FINAL RESERVE (doc 69 69.25a): the dispatcher's own
+    # reading (`engine/plan.py::final_reserve_reached`), which the rule's endgame switch follows
+    # (`endgame_reached`). None when the run holds no plan row — the rule then keeps its historical
+    # 80 % of `node_budget_frac`. Not in the recorded `ctx` subset.
+    plan_endgame: Optional[bool] = None
+
+
+def endgame_reached(ctx: StrategyContext) -> bool:
+    """Whether the rule Strategist is in the ENDGAME: the plan's final reserve when the run has a plan
+    (`ctx.plan_endgame`), else the historical 80 % of the node budget.
+
+    ONE RESERVE (doc 69 69.25a, critic crit_v48 F4, driven): the rule switched on `node_budget_frac
+    >= 0.8` of the whole budget while the dispatcher honoured the plan, which an operator's inject
+    batch re-cuts (`engine/plan.py::replan`). On minionerec-v10's shape the reserve began at node 18
+    and the rule, at node 17, already returned `merge_mode: ensemble` — "endgame (89% of node budget
+    spent)" — one node before the gate it sets the machinery for."""
+    if ctx.plan_endgame is not None:
+        return bool(ctx.plan_endgame)
+    return ctx.node_budget_frac >= 0.8
 
 
 class Strategist(Protocol):
@@ -389,7 +408,7 @@ def _rule_novelty_stance(ctx: StrategyContext) -> Optional[str]:
     cov = ctx.coverage or {}
     if cov.get("nodes", 0) < 3:                       # too little signal to steer novelty
         return None
-    if ctx.node_budget_frac >= 0.8 or ctx.defaults.get("_budget_frac", 1.0) < 0.2:
+    if endgame_reached(ctx) or ctx.defaults.get("_budget_frac", 1.0) < 0.2:
         return "exploit"
     if cov.get("recent_dominant_frac", 0.0) >= 0.75 or cov.get("dominant_theme_frac", 0.0) >= 0.6:
         return "explore"
@@ -612,10 +631,12 @@ class RuleStrategist:
         # machinery for it — the ensemble merge and, `endgame_sweep`, the champion sweep proposed
         # by the k-NN surrogate (EvoTrace: a 24-call sweep over one program's exposed
         # hyperparameters matched or beat the evolutionary final-best on 13 of 15 tasks).
-        if ctx.node_budget_frac >= 0.8 and ctx.phase in ("explore", "exploit"):
+        # The switch is the PLAN's reserve when the run has one (`endgame_reached`, doc 69 69.25a).
+        if endgame_reached(ctx) and ctx.phase in ("explore", "exploit"):
+            where = ("inside the plan's reserve, " if ctx.plan_endgame is not None else "")
             return {"policy": "greedy", "fidelity": "full",
                     "operators": {"merge_mode": "ensemble", "ablate_every": 0, "endgame_sweep": True},
-                    "rationale": f"endgame ({ctx.node_budget_frac:.0%} of node budget spent): "
+                    "rationale": f"endgame ({where}{ctx.node_budget_frac:.0%} of node budget spent): "
                                  "reserve for a final ensemble of the top solutions and a champion "
                                  "sweep, no new breadth",
                     "source": "rule"}

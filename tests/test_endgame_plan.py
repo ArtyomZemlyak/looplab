@@ -286,6 +286,72 @@ def test_the_endgame_rule_names_the_sweep_and_a_strategist_may_switch_it_off(tmp
     assert eng._endgame_sweep is False
 
 
+def test_the_rule_s_endgame_is_the_plan_s_final_reserve_when_the_run_has_one(tmp_path):
+    """doc 69 69.25a (critic crit_v48 F4, driven): the rule switched on 80 % of the WHOLE budget while
+    the dispatcher honoured the plan an inject batch had re-cut — on minionerec-v10's shape the reserve
+    began at node 18 and the rule, at node 17 (89 %), already returned the ensemble. It follows the
+    plan's FINAL reserve now, the gate's own count; with no plan row it keeps the historical 80 %,
+    and a bounded stall episode is not the final reserve. MUTATIONS, each red here: read
+    `node_budget_frac` alone; count a bounded episode as the reserve; drop the engine's wiring."""
+    from looplab.agents.strategist import (RuleStrategist, StrategyContext, _rule_novelty_stance,
+                                           endgame_reached)
+    from looplab.engine.plan import final_reserve_reached
+
+    recut = {"max_nodes": 19, "endgame_start": 18, "n_seeds": 3}
+    episode = {"max_nodes": 19, "endgame_start": 10, "endgame_end": 13, "n_seeds": 3}
+
+    def _ctx(n, plan_row, **kw):
+        return StrategyContext(node_count=n, phase="exploit", node_budget_frac=n / 19,
+                               plan_endgame=final_reserve_reached(plan_row, n),
+                               available_policies=["greedy"], available_developers=["default"],
+                               **kw)
+
+    def _ensemble(ctx):
+        decision = RuleStrategist()._decide_machinery(RunState(), ctx) or {}
+        return (decision.get("operators") or {}).get("merge_mode") == "ensemble", decision
+
+    # The v10 shape: node 17 is 89 % of the budget and still before the re-cut reserve.
+    assert not endgame_reached(_ctx(17, recut)) and not _ensemble(_ctx(17, recut))[0]
+    reached, decision = _ensemble(_ctx(18, recut))
+    assert reached and "inside the plan's reserve" in decision["rationale"], decision
+    # No plan row: the historical 80 %, byte for byte in its rationale.
+    reached, decision = _ensemble(_ctx(17, None))
+    assert reached and decision["rationale"].startswith("endgame (89% of node budget spent)")
+    # A plan whose reserve starts EARLY is obeyed early, as the gate does.
+    early = {"max_nodes": 19, "endgame_start": 9, "n_seeds": 3}
+    assert endgame_reached(_ctx(10, early)) and _ensemble(_ctx(10, early))[0]
+    # A bounded stall episode reopens into the search: not the final reserve.
+    assert final_reserve_reached(episode, 11) is False and not endgame_reached(_ctx(11, episode))
+    # The coverage stance reads the same switch.
+    broad = {"nodes": 8, "dominant_theme_frac": 0.3, "recent_dominant_frac": 0.3}
+    assert _rule_novelty_stance(_ctx(17, recut, coverage=broad)) is None
+    assert _rule_novelty_stance(_ctx(18, recut, coverage=broad)) == "exploit"
+
+    # The engine hands the rule the gate's own reading of the folded plan row.
+    eng = make_engine(tmp_path / "run", endgame_reserve_frac=0.25)
+    state = RunState(nodes={i: _node(i, 1.0, {}) for i in range(4)})
+    assert eng._strategy_ctx(state).plan_endgame is None, "no plan row: the caller's own reading"
+    state.plan = {"max_nodes": 8, "endgame_start": 4, "n_seeds": 3}
+    assert eng._strategy_ctx(state).plan_endgame is True
+    state.plan = {"max_nodes": 8, "endgame_start": 6, "n_seeds": 3}
+    assert eng._strategy_ctx(state).plan_endgame is False
+
+
+def test_the_final_reserve_s_truth_table():
+    """`engine/plan.py::final_reserve_reached`: None without a readable row (the caller keeps its own
+    reading), the gate's `in_endgame` over the same count otherwise, and False inside a bounded
+    episode."""
+    from looplab.engine.plan import final_reserve_reached
+
+    assert final_reserve_reached(None, 5) is None and final_reserve_reached({}, 5) is None
+    assert final_reserve_reached({"endgame_start": "x"}, 5) is None
+    assert final_reserve_reached({"max_nodes": 8}, 5) is None
+    row = {"max_nodes": 8, "endgame_start": 6}
+    assert [final_reserve_reached(row, n) for n in (5, 6, 7)] == [False, True, True]
+    bounded = {"max_nodes": 8, "endgame_start": 3, "endgame_end": 5}
+    assert [final_reserve_reached(bounded, n) for n in (2, 3, 4, 5)] == [False] * 4
+
+
 def test_the_brief_names_the_sweep_only_when_the_run_has_a_reserve():
     """PROMPT STRINGS ARE CONTRACTS, and `endgame_sweep` is an operator over the endgame RESERVE.
     `endgame_reserve_frac=0` — the legacy default a resumed pre-plan run keeps — builds no plan at
