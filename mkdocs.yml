@@ -144,6 +144,7 @@ nav:
       - Installation: guide/installation.md
       - JupyterHub onboarding: guide/jupyterhub-onboarding.md
       - Quickstart: guide/quickstart.md
+      - CLI walkthrough: guide/cli-walkthrough.md
       - CLI reference: guide/cli-reference.md
       - HTTP API reference: guide/api-reference.md
       - Event reference: guide/event-reference.md

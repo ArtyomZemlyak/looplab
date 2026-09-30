@@ -26,7 +26,7 @@ in Assistant. Describe the goal, where the code or data live, and any time or co
 Review the proposed task, evaluation, and effective settings; **Validate** and then **Start run**.
 The Assistant can discuss a plan without starting an experiment.
 
-For a no-model demonstration, follow the [offline CLI recipe](docs/guide/quickstart.md#offline-cli-walkthrough).
+For a no-model demonstration, follow the [offline CLI recipe](docs/guide/cli-walkthrough.md).
 To keep working in Codex or Claude Code while LoopLab evaluates your candidates, follow the
 [external-agent quickstart](docs/guide/external-harness.md#first-external-run).
 These are different modes: the external agent proposes candidates; the built-in Assistant
@@ -279,7 +279,7 @@ The full guide lives in **[`docs/guide/`](docs/guide/index.md)**:
 | Guide | Contents |
 |---|---|
 | [Installation](docs/guide/installation.md) | Requirements, extras, optional backends |
-| [Quickstart](docs/guide/quickstart.md) | Your first run, offline → LLM-driven |
+| [Quickstart](docs/guide/quickstart.md) | Your first run through Assistant |
 | [CLI reference](docs/guide/cli-reference.md) | Every command and option |
 | [Configuration](docs/guide/configuration.md) | Every `LOOPLAB_*` setting, grouped |
 | [Tasks](docs/guide/tasks.md) | All nine task kinds and their fields |

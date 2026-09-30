@@ -36,7 +36,7 @@ Windows installation. Open `http://127.0.0.1:8765`. The server uses `./runs` by 
 For the first model-backed chat, open **LoopLab → Settings → LLM** in the UI,
 save the endpoint/model and explicitly test the active connection. The test makes one
 provider request and may be billed. Then follow the [Assistant quickstart](quickstart.md#assistant-in-the-web-ui).
-If you have no model yet, the [offline CLI walkthrough](quickstart.md#offline-cli-walkthrough)
+If you have no model yet, the [offline CLI walkthrough](cli-walkthrough.md)
 can verify evaluation without a provider.
 
 ## Install

@@ -14,7 +14,7 @@ decision records, roadmap), see [`../00-INDEX.md`](../00-INDEX.md).
 | **[Assistant quickstart](quickstart.md#assistant-in-the-web-ui)** | Set up the UI, describe a goal, review and start the run, read the result |
 | **[External-agent quickstart](external-harness.md#first-external-run)** | Let Codex or Claude Code propose candidates; LoopLab evaluates them |
 | **[Installation](installation.md)** | Requirements, source install on Windows/POSIX, optional extras |
-| **[Offline CLI walkthrough](quickstart.md#offline-cli-walkthrough)** | Prove the engine works without a model |
+| **[Offline CLI walkthrough](cli-walkthrough.md)** | Prove the engine works without a model |
 | **[JupyterHub onboarding](jupyterhub-onboarding.md)** | Setup inside a hub single-user server, then work through Assistant |
 
 ## Reference

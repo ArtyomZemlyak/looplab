@@ -12,7 +12,7 @@ For a complete first-run example, see the [Assistant quickstart](quickstart.md#a
 The chat needs a configured model. Open **LoopLab → Settings → LLM** to check the saved
 model and endpoint. **Test active LLM** makes one provider request and may be billed.
 An offline engine demonstration is available through the
-[CLI walkthrough](quickstart.md#offline-cli-walkthrough).
+[CLI walkthrough](cli-walkthrough.md).
 
 For a run controlled by Codex or Claude Code, the first experiment can wait for that
 agent's decision. The empty Lineage view links to **Agent cycle**, which lists current
