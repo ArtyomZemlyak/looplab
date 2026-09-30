@@ -630,3 +630,77 @@ def test_the_repair_emit_is_the_only_one_that_offers_a_rollback():
     # The two things a model must know at the moment of answering, in the text it actually reads.
     assert "must have EDITED that stage's script" in desc
     assert "ONE rollback per stage per node" in desc
+
+
+def test_a_rollback_re_runs_an_earlier_stage_the_repair_also_rewrote(tmp_path):
+    """crit_v51 F2, driven through the real sandbox: repair 1 rewrites `prep.py` AND `train.py` and
+    names `train`; the ladder accepts (the suspect's closure changed), and `prep` — before the
+    suspect — used to be REUSED: its v0 data was scored against the v1 code. The rollback now starts
+    at the suspect only where the reuse predicate would. MUTATION: take the suspect as the start
+    without asking `_safe_reuse_start` -> `prep` is reused and `trained(v1) on v0` is scored."""
+    import json
+    import sys
+
+    import anyio
+
+    from looplab.adapters.repo_task import EvalSpec, RepoTask
+    from looplab.engine.orchestrator import Engine
+    from looplab.events.eventstore import EventStore
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.search.policy import GreedyTree
+
+    py = sys.executable
+
+    class _Dev:
+        def __init__(self):
+            self.repair_calls = 0
+            self.last_files: dict = {}
+            self.last_deleted: list = []
+            self.last_rollback_stage = ""
+
+        def implement(self, idea):
+            return ""
+
+        def repair(self, idea, code, error):
+            self.repair_calls += 1
+            if self.repair_calls == 1:
+                self.last_files = {
+                    "prep.py": "open('data.txt', 'w').write('v1')\n",
+                    "train.py": "open('ckpt.txt', 'w').write('trained(v1) on ' + "
+                                "open('data.txt').read())\n"}
+                self.last_rollback_stage = "train"
+            else:
+                self.last_files, self.last_rollback_stage = {}, ""
+            return ""
+
+    src = tmp_path / "src"
+    src.mkdir()
+    flag = tmp_path / "flaky.flag"
+    (src / "prep.py").write_text("open('data.txt', 'w').write('v0')\n")
+    (src / "train.py").write_text(
+        "open('ckpt.txt', 'w').write('trained on ' + open('data.txt').read())\n")
+    (src / "infer.py").write_text(
+        "import os\n"
+        f"flag = {str(flag)!r}\n"
+        "if not os.path.exists(flag):\n    open(flag, 'w').write('1'); raise RuntimeError('flaky OOM')\n"
+        "print(open('ckpt.txt').read())\n")
+    (src / "looplab_eval.py").write_text("import json; print(json.dumps({'metric': 0.5}))\n")
+    (src / "looplab_stages.json").write_text(json.dumps({"stages": [
+        {"name": "prep", "command": [py, "prep.py"], "timeout": 120},
+        {"name": "train", "command": [py, "train.py"], "timeout": 120},
+        {"name": "infer", "command": [py, "infer.py"], "timeout": 120}]}))
+    task = RepoTask(id="r", direction="max", editable_path=str(src), edit_surface=["*.py", "*.json"],
+                    eval=EvalSpec(command=[py, "looplab_eval.py"],
+                                  metric={"kind": "stdout_json", "key": "metric"}, cwd="."))
+    researcher, _ = task.build_roles()
+    run_dir = tmp_path / "run"
+    eng = Engine(run_dir, task=task, researcher=researcher, developer=_Dev(),
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
+                 auto_install_deps=False, inline_repair=True, inline_repair_attempts=3,
+                 inline_repair_retrain_cap=2)
+    anyio.run(eng.run)
+    evs = list(EventStore(run_dir / "events.jsonl").read_all())
+    assert [(e.data.get("stage"), e.data.get("accepted")) for e in evs
+            if e.type == "stage_rollback"] == [("train", True)], "premise: the ladder accepted"
+    assert "reused" not in [e.data.get("status") for e in evs if e.type == "stage_finished"]
+    assert (run_dir / "nodes" / "node_0" / "ckpt.txt").read_text() == "trained(v1) on v1"

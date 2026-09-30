@@ -5565,7 +5565,19 @@ class EvaluateMixin:
                 _stages, a.res.failed_stage, _rollback_ask, changed, a.workdir,
                 already_rolled_back=a.rolled_to, cwd=_cwd)
             if _suspect:
-                a.next_start, _rolled_back = _suspect, True
+                # A ROLLBACK STILL REUSES WHAT PRECEDES THE SUSPECT, and the ladder checks only the
+                # suspect's own closure (critic 2026-09-30, crit_v51 F2, driven): a repair that also
+                # rewrote an EARLIER stage's script rolled back onto that stage's stale artifact —
+                # `prep.py` rewritten, `train` named, `prep` reused and its v0 data scored against
+                # v1 code. The start is the suspect only where the reuse predicate itself would
+                # start there; anywhere else the whole pipeline re-runs.
+                _reuse_to_suspect = self._safe_reuse_start(
+                    _stages, _suspect, _reuse_changed, a.workdir,
+                    deleted=_reuse_deleted, cwd=_cwd,
+                    prev_manifest=prev_files.get(STAGE_MANIFEST_NAME),
+                    params=a.node.idea.params)
+                a.next_start = _suspect if _reuse_to_suspect == _suspect else None
+                _rolled_back = True
                 a.rolled_to = a.rolled_to | {_suspect}
             else:
                 a.rollback_refusal = _refusal or ""
