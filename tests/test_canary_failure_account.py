@@ -359,7 +359,9 @@ def test_the_engine_hands_the_account_its_own_funnel_and_no_fragment_reaches_the
     eng._redact = _recording
     _seed(eng, code)
     _evaluate(eng)
-    assert any(text.rstrip() == stream.rstrip() for text in seen), "the WHOLE stream, redacted"
+    # The child writes in TEXT mode, so on Windows its "\n" arrive as "\r\n" (the CI leg, 2026-09-30).
+    assert any(text.replace("\r\n", "\n").rstrip() == stream.rstrip() for text in seen), \
+        "the WHOLE stream, redacted"
     assert judge.triaged and _FRAGMENT not in judge.triaged[0] and _TOKEN not in judge.triaged[0]
     assert "export TOKEN=***" in judge.triaged[0]
 

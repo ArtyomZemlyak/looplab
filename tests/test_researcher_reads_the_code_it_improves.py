@@ -652,3 +652,15 @@ def test_a_workspace_file_is_found_however_spelled_when_every_mount_is_named(tmp
         assert _read(tools, spelled) == head + "{}\n", spelled
     for spelled in ("a/x.py", "a//x.py", "./a/./x.py", f"{a}/x.py"):
         assert _read(tools, spelled) == head + "NODE = 9\n", spelled
+
+
+def test_a_windows_drive_root_is_an_absolute_spelling_too():
+    """The Windows CI leg (2026-09-30): a mount's absolute spelling was registered only when it began
+    with `/`, so on Windows no absolute spelling of any mount mapped — `C:\\…\\a/x.py` read as
+    "(no such file …)" in the test above. MUTATION: drop the drive clause -> None for `C:/…`."""
+    from looplab.tools.knowledge_tools import _absolute_root_spelling
+    assert _absolute_root_spelling("C:\\Users\\runner\\a\\") == "C:/Users/runner/a"
+    assert _absolute_root_spelling("d:/work/repo") == "d:/work/repo"
+    assert _absolute_root_spelling("/abs/repo/") == "/abs/repo"
+    for relative in ("repo", "./repo", "", "/", "C:", "C:repo"):
+        assert _absolute_root_spelling(relative) is None, relative

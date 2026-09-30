@@ -320,10 +320,12 @@ def test_a_same_size_rewrite_of_the_ledger_moves_the_stamp(tmp_path):
                       lesson_prior_claim_decisions=True)
     before = eng.lessons.lessons_store_stamp()
     ledger = mem / "claim_decisions.jsonl"
-    body = ledger.read_text(encoding="utf-8")
+    # BYTES, not text: a text-mode write on Windows turns each "\n" into "\r\n", and the rewrite
+    # would no longer be the same size (the Windows CI leg, 2026-09-30: 362 vs 361).
+    body = ledger.read_bytes()
     assert len("rejected") == len("ratified")
     fresh = mem / "claim_decisions.jsonl.new"
-    fresh.write_text(body.replace('"rejected"', '"ratified"'), encoding="utf-8")
+    fresh.write_bytes(body.replace(b'"rejected"', b'"ratified"'))
     os.replace(fresh, ledger)
-    assert ledger.stat().st_size == len(body.encode("utf-8"))
+    assert ledger.stat().st_size == len(body)
     assert eng.lessons.lessons_store_stamp() != before

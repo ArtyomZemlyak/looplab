@@ -134,6 +134,18 @@ def _merged_grep(results, where: str, glob: str) -> str:
 # lies under no mount root (`RepoTools._spelling`): a mount may itself sit below a `nodes/node_N`
 # directory, and a relative `results/nodes/node_3/x.py` may be a directory the repo itself has.
 _NODE_DIR_PATH = re.compile(r"/nodes/node_(\d+)/(.+)$")
+_DRIVE_ROOT = re.compile(r"^[A-Za-z]:/")
+
+
+def _absolute_root_spelling(root) -> str | None:
+    """A mount root as a model may copy it — separators folded to `/`, no trailing `/` — or None when
+    it is not absolute. A Windows drive root (`C:/…`) is absolute too: only a leading `/` was
+    accepted, so on Windows no absolute spelling of any mount was ever mapped (the Windows CI leg,
+    2026-09-30: `C:\\…\\a/x.py` read as "(no such file …)")."""
+    root = str(root).replace("\\", "/").rstrip("/")
+    if (root.startswith("/") and len(root) > 1) or _DRIVE_ROOT.match(root):
+        return root
+    return None
 
 
 def _unreadable(name: str) -> str:
@@ -245,8 +257,8 @@ class RepoTools:
         for m in mounts:
             name = m["name"] or "."
             for root in (os.path.expanduser(os.path.expandvars(m["path"])), str(self.roots[name])):
-                root = str(root).replace("\\", "/").rstrip("/")
-                if root.startswith("/") and len(root) > 1:
+                root = _absolute_root_spelling(root)
+                if root is not None:
                     spelled.setdefault(root, name)
         self._spellings = sorted(spelled.items(), key=lambda row: -len(row[0]))
 
