@@ -277,10 +277,12 @@ def host_scorer_account(engine) -> bool:
 def canary_failure_account(engine) -> bool:
     """`Settings.canary_failure_account` as the failure text reads it — the ONE reading.
 
-    Asked by `evaluate._eval_failure_text`: whether a failed eval canary's text is its own account
-    (`RunResult.canary_account`: the header, then its stdout and stderr tails) in place of the
-    500-character stderr tail (doc 69 69.7). On `repair_context_record`'s ground (OFF when absent):
-    stubs that never ran `Engine.__init__` read the historical bytes."""
+    Asked by `evaluate.py` three times over one failed canary: at the canary, whether to build its
+    own account at all (`eval_canary.py::canary_account`: the header, its stdout and stderr tails
+    fenced, the footer); by `_eval_failure_text`, whether that account is the failure text in place
+    of the 500-character stderr tail (doc 69 69.7); and by `_install_gate_text`, whether the
+    dependency install must be handed the historical tail instead. On `repair_context_record`'s
+    ground (OFF when absent): stubs that never ran `Engine.__init__` read the historical bytes."""
     return bool(getattr(engine, "_canary_failure_account", False))
 
 

@@ -1066,9 +1066,11 @@ eval seconds.
   in its scratch directory for you to read — and the triage judge reads them there too. What the
   judge and the repair are TOLD (`canary_failure_account`, on by default) is the canary's own
   account: its header whole — how it failed, where its logs are — then the tails of both its
-  stdout and its stderr, each labelled with how much of the stream it shows. Off, it is the older
-  500-character tail of stderr, which a traceback of a few lines cut the header out of and which
-  never showed stdout.
+  stdout and its stderr, each labelled with how much of the stream it shows and fenced as the
+  candidate's evidence, then the engine's closing line; 2,000 characters in all, so the repair,
+  which keeps the first 4,000 of its context, sees the whole of it beside the diagnosis and its
+  own instructions. Off, it is the older 500-character tail of stderr, which a traceback of a few
+  lines cut the header out of and which never showed stdout.
 - **Canary runs out of time** (its `timeout`, on a stage or over the chain): the engine runs it
   **once more**, from a fresh scratch tree, at **twice** the cap, and asks no model — a cold JIT,
   compile or download cache is the one cause a re-run heals. A pass there lets the full eval start.

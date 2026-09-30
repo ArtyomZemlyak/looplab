@@ -52,6 +52,7 @@ import threading
 import time
 from typing import Iterable, Optional
 
+from looplab.core.evidence import EVIDENCE_LABEL, fence_untrusted
 from looplab.core.models import coerce_node_id
 from looplab.events.replay import event_generation_binds
 from looplab.events.types import EV_EVAL_CANARY_FINISHED
@@ -64,12 +65,22 @@ CANARY_ENV = "LOOPLAB_CANARY"
 # (`_eval_failure_text`, the durable evidence) cut again, so this only bounds memory.
 _CANARY_OUTPUT_CHARS = 200_000
 
-# How much of EACH of the canary's two streams its own account (`canary_failure_result`'s
-# `canary_account`, doc 69 69.7) shows. Two tails and the header stay under the 4,000 characters
-# `evaluate._SCORED_EVIDENCE_CHARS` was priced at — the first window of the 257 preserved stage logs
-# in which the redactor fired at all — because this text is the repair prompt, the triage judge's
-# `err`, `node_repaired.error_in` and the terminal's `error` alike.
-CANARY_ACCOUNT_TAIL_CHARS = 1_500
+# THE WHOLE BUDGET of a failed canary's own account (`canary_failure_result`'s `canary_account`,
+# doc 69 69.7): the header, both labelled and fenced stream tails, and the engine's footer. That text
+# is the repair context's failure text, and the repo Developer keeps only the FIRST 4,000 characters
+# of its repair context (`adapters/repo_developer.py`, `fenced_head(error, 4000)`), where the failure
+# text is not first: the diagnostician's lead (up to `failure_diagnosis.DIAGNOSIS_SUMMARY_CAP`) rides
+# in front of it, the per-kind directive and the stuck contract behind — 1,906 characters around a
+# 500-character tail, measured (critic 2026-09-29, driven). The first account, two 1,500-character
+# tails and ~3.5k in all, pushed the stream's last line and the whole stuck contract out of that
+# window; 2,000 keeps both inside it.
+CANARY_ACCOUNT_CHARS = 2_000
+# What one stream's label and fence cost on top of its tail (a label with two six-digit counts, the
+# evidence fence's 50 characters, the newlines), reserved before the tails share the rest.
+_ACCOUNT_TAIL_OVERHEAD = 130
+# The floor under each stream's share when a long log path or detail eats the budget: a tail too
+# short to hold one traceback line is no account at all.
+_ACCOUNT_MIN_TAIL = 200
 
 
 def canary_spec(eval_spec) -> Optional[dict]:
@@ -232,7 +243,7 @@ def canary_near_cap(seconds, cap) -> bool:
 
 
 def canary_failure_result(res, *, detail: str, log_dir: str, env_names: Iterable[str],
-                          expired: bool = False, redact=None):
+                          expired: bool = False, account_redact=None):
     """The metric-less `RunResult` a FAILED canary hands SETTLE_OUTCOME as the attempt's result.
 
     Deliberately NARROW: exit code non-zero (a clean exit that printed no number is still a failure
@@ -246,10 +257,10 @@ def canary_failure_result(res, *, detail: str, log_dir: str, env_names: Iterable
     header: "fix the defect below" is the wrong sentence for a run nothing was seen to be wrong with,
     and a non-expired failure keeps the historical header byte for byte.
 
-    `canary_account` is the same failure as the canary's OWN account (doc 69 69.7): the header, then
-    each stream's tail, labelled. `redact` — the engine's `_redact` funnel — is applied to each WHOLE
-    stream before its tail is cut, in `evaluate._redacted_tail`'s order: a secret straddling the cut
-    must reach the redactor whole, or its surviving fragment no longer matches any rule."""
+    `canary_account` is the same failure as the canary's OWN account (doc 69 69.7,
+    `canary_account`), built only when `account_redact` — the engine's `_redact` funnel, handed in
+    under `Settings.canary_failure_account` — is given: no funnel, no account, so an account can
+    never be cut before it is redacted, and a run with the switch off pays no whole-stream pass."""
     from looplab.runtime.command_eval import RunResult
     names = ", ".join(sorted(env_names))
     if expired:
@@ -263,34 +274,62 @@ def canary_failure_result(res, *, detail: str, log_dir: str, env_names: Iterable
                   f"own eval pipeline run on the task's tiny slice (env: {names}) in a scratch "
                   "directory; the FULL evaluation was NOT started. Fix the defect below so the "
                   f"canary passes. Canary logs: {log_dir}\n")
+    footer = f"[eval canary] ({detail}; the full evaluation was not started)"
     code = getattr(res, "exit_code", None) if res is not None else None
     stdout = (getattr(res, "stdout", "") or "") if res is not None else ""
     stderr = (getattr(res, "stderr", "") or "") if res is not None else ""
     return RunResult(
         exit_code=(code if isinstance(code, int) and code != 0 else 1),
         stdout=stdout[-_CANARY_OUTPUT_CHARS:],
-        stderr=header + stderr[-_CANARY_OUTPUT_CHARS:]
-        + f"\n[eval canary] ({detail}; the full evaluation was not started)",
+        stderr=header + stderr[-_CANARY_OUTPUT_CHARS:] + "\n" + footer,
         metric=None, timed_out=False, canary_expired=bool(expired),
-        canary_account=(header + _account_tail("stdout", stdout, redact)
-                        + _account_tail("stderr", stderr, redact)).rstrip("\n"))
+        canary_account=(None if account_redact is None
+                        else canary_account(header, footer, stdout, stderr, account_redact)))
 
 
-def _account_tail(stream: str, text, redact=None) -> str:
-    """One labelled stream of the canary's own account: the last `CANARY_ACCOUNT_TAIL_CHARS` of it,
-    saying how much of the stream that is, or that the stream was empty — which is itself evidence
-    (a crash that wrote only to stdout is exactly the case the stderr tail was blind to). Redacted
-    WHOLE first when `redact` is given (see `canary_failure_result`)."""
-    body = str(text or "")
-    if redact is not None:
-        body = str(redact(body) or "")
-    body = body.rstrip()
-    if not body.strip():
+def canary_account_shares(stdout_chars: int, stderr_chars: int, *, room: int) -> tuple[int, int]:
+    """How many characters of each stream's tail fit in `room`: half each, and a stream that needs
+    less than its half hands the rest to the other — an empty stdout gives stderr the whole room."""
+    half = room // 2
+    out_share = min(max(stdout_chars, 0), half)
+    err_share = min(max(stderr_chars, 0), room - out_share)
+    return min(max(stdout_chars, 0), room - err_share), err_share
+
+
+def canary_account(header: str, footer: str, stdout, stderr, redact) -> str:
+    """A failed canary's OWN account (doc 69 69.7): the engine's header whole (how it failed, where
+    its logs are), each stream's tail — labelled, and FENCED as the candidate's evidence, because a
+    stdout that ends in `[the canary's stderr was empty]` or a forged header would otherwise read as
+    the engine's words (critic 2026-09-29) — and the engine's footer LAST, so the narrow tail windows
+    of the same string (the judge's history rows, `fenced_tail(err, 200)`, the Researcher's
+    `error_last_line`) still say the failure was a canary's, as the historical tail always did.
+
+    Within `CANARY_ACCOUNT_CHARS`, shared by `canary_account_shares`. Each stream is redacted WHOLE
+    before its tail is cut, through `evaluate._redacted_tail`, the ONE spelling of that order: a
+    secret straddling the cut must reach the redactor whole, or its surviving fragment no longer
+    matches any rule. A label's second count is the RAW stream's length — what the canary's log file
+    holds."""
+    out_raw = str(stdout or "").rstrip()
+    err_raw = str(stderr or "").rstrip()
+    room = max(2 * _ACCOUNT_MIN_TAIL,
+               CANARY_ACCOUNT_CHARS - len(header) - len(footer) - 2 * _ACCOUNT_TAIL_OVERHEAD)
+    out_share, err_share = canary_account_shares(len(out_raw) if out_raw.strip() else 0,
+                                                 len(err_raw) if err_raw.strip() else 0, room=room)
+    return (header + _account_tail("stdout", out_raw, out_share, redact)
+            + _account_tail("stderr", err_raw, err_share, redact) + footer)
+
+
+def _account_tail(stream: str, raw: str, share: int, redact) -> str:
+    """One labelled, fenced stream of the canary's own account, or the sentence that it was empty —
+    itself evidence (a crash that wrote only to stdout is exactly the case the stderr tail was blind
+    to)."""
+    from looplab.engine.evaluate import _redacted_tail
+    shown = _redacted_tail(redact, raw, share)
+    if not shown.strip():
         return f"[the canary's {stream} was empty]\n"
-    shown = body[-CANARY_ACCOUNT_TAIL_CHARS:]
-    label = (f"[the canary's {stream}, its last {len(shown):,} of {len(body):,} characters]"
-             if len(shown) < len(body) else f"[the canary's {stream}]")
-    return f"{label}\n{shown}\n"
+    label = (f"[the canary's {stream}, its last {len(shown):,} of {len(raw):,} characters]"
+             if len(raw) > share else f"[the canary's {stream}]")
+    return f"{label}\n{fence_untrusted(shown, EVIDENCE_LABEL)}\n"
 
 
 def canary_already_passed(events, node_id: int, generation: int, code_digest: str) -> bool:

@@ -189,12 +189,15 @@ _JUDGE_ERROR_CHARS = 300
 # fenced_tail`. The fourth is the RECORD, and it has been the same 500 characters as the prompt
 # purely because one string served both.
 #
-# ONE DELIBERATE EXCEPTION to "500 characters": a host-contract refusal under
-# `Settings.host_scorer_account` carries the scorer's own account instead of the tail — the failed
-# stage, the broken relations, the protected-scorer warning and the account capped at 2,000
-# characters and fenced — about 2,300 characters with one declared relation, and bounded by that
-# cap plus the at most eight relations a contract may declare (`numeric_contract.
-# MAX_STAGE_NUMERIC_RELATIONS`). It is priced as that switch's cost: OFF, the text is the tail.
+# TWO DELIBERATE EXCEPTIONS to "500 characters", each a switch's priced cost (OFF, the text is the
+# tail). A host-contract refusal under `Settings.host_scorer_account` carries the scorer's own
+# account instead — the failed stage, the broken relations, the protected-scorer warning and the
+# account capped at 2,000 characters and fenced — about 2,300 characters with one declared
+# relation, and bounded by that cap plus the at most eight relations a contract may declare
+# (`numeric_contract.MAX_STAGE_NUMERIC_RELATIONS`). A failed eval canary under
+# `Settings.canary_failure_account` carries the canary's own account, within
+# `eval_canary.CANARY_ACCOUNT_CHARS` (2,000) — sized so the repo Developer's 4,000-character head
+# window still holds it with the diagnosis lead and the stuck contract around it.
 #
 # MEASURED (`judgebench/triage_corpus.py` states it in its own header): `res.stderr` was clamped at
 # 64,000 bytes per stream when the classifier read it, and 500 characters survived to disk. Not one
@@ -232,10 +235,12 @@ def _redacted_tail(redact, raw, chars: int) -> str:
     node terminal. `""` for nothing-to-keep, so a caller can tell "the stream was empty" from "this
     row predates the column"; whitespace-only counts as nothing.
 
-    DELIBERATELY NOT APPLIED TO `_eval_failure_text`, which caps the same stream at 500: that string
-    IS the repair prompt and `tests/test_diagnosis_record.py` pins its bytes as an EQUALITY. Its
-    window is the narrow one where the corpus measured ZERO masks, so the fragment shape has no
-    instance there; moving it is a prompt-contract change and belongs with that contract.
+    DELIBERATELY NOT APPLIED TO `_eval_failure_text`'s own tail, which caps the same stream at 500:
+    that string IS the repair prompt and `tests/test_diagnosis_record.py` pins its bytes as an
+    EQUALITY. Its window is the narrow one where the corpus measured ZERO masks, so the fragment
+    shape has no instance there; moving it is a prompt-contract change and belongs with that
+    contract. A failed canary's own account (`eval_canary.py::canary_account`, a switch's new text)
+    cuts its two wider tails through this helper.
     """
     text = "" if raw is None else str(raw)
     if not text.strip():
@@ -2251,12 +2256,13 @@ class EvaluateMixin:
         # footer run together, so a traceback of a few lines cut the header off, the footer spent a
         # fifth of the window, and the canary's stdout was never read at all: MiniOneRec v10 node 0
         # was triaged for 44 min over the wrapper's own text while a one-line `EADDRINUSE` sat in
-        # the canary's log. The account is the header whole and both streams' tails, labelled
-        # (`eval_canary.py::canary_failure_result`, which redacts each WHOLE stream before it cuts);
-        # the funnel is applied once more here, which leaves an already-masked text as it is.
+        # the canary's log. The account is the header whole, both streams' tails labelled and fenced,
+        # and the footer (`eval_canary.py::canary_account`), within `CANARY_ACCOUNT_CHARS`. Built
+        # only through this engine's funnel — each stream redacted WHOLE, then cut — so it is not
+        # redacted again here: its fences are the engine's own text.
         _canary = getattr(res, "canary_account", None)
         if canary_failure_account(self) and isinstance(_canary, str) and _canary.strip():
-            return self._redact(_canary)
+            return _canary
         _stderr_tail = self._redact(res.stderr[-500:])
         _inert = getattr(res, "inert_path", None)
         if _inert:
@@ -2317,6 +2323,24 @@ class EvaluateMixin:
         if _failed and f"stage '{_failed}'" not in _text:
             _text = f"[failed stage: {_failed}]\n{_text}"
         return _text
+
+    def _install_gate_text(self, a: "EvalAttempt") -> str:
+        """The TRACEBACK the triage-driven install gate reads (`crash_repair.py::
+        _prepare_env_from_triage`): `a.err`, except on a failed canary told through its own account
+        (`Settings.canary_failure_account`), where it is the text the gate always read — the
+        redacted last 500 characters of the canary result's stderr, which is what
+        `_eval_failure_text` returns for that result with the switch off, byte for byte (a canary
+        result has a non-zero exit, a header on its stderr and no failed stage; the equality is
+        driven by `tests/test_canary_failure_account.py`). The account's
+        stdout tail and wider stderr window are text `deps.unresolved_name_failure` was never
+        measured on: a tensorboard warning on the canary's stdout nominated a pip install into the
+        SHARED eval interpreter (critic 2026-09-29, driven). A rule of its own, not a second call of
+        `_eval_failure_text`, which the attempt loop reaches exactly once."""
+        account = getattr(a.res, "canary_account", None)
+        if (a.canary_failed and canary_failure_account(self) and isinstance(account, str)
+                and account.strip() and a.err == account):
+            return self._redact(str(getattr(a.res, "stderr", "") or "")[-500:])
+        return a.err
 
     def _salvage_eval_metric(self, res, reason: str, workdir, since: Optional[float]):
         """The metric this failed eval already produced, or None — see `engine/metric_salvage.py`.
@@ -3201,8 +3225,9 @@ class EvaluateMixin:
                 except OSError:
                     pass
             return True
-        a.res = canary_failure_result(res, detail=detail, log_dir=str(scratch),
-                                      env_names=spec["env"], expired=expired, redact=self._redact)
+        a.res = canary_failure_result(
+            res, detail=detail, log_dir=str(scratch), env_names=spec["env"], expired=expired,
+            account_redact=self._redact if canary_failure_account(self) else None)
         a.canary_failed = True
         return False
 
@@ -4790,7 +4815,7 @@ class EvaluateMixin:
         if (self._auto_install_deps and a._engine_reason == "crash"
                 and a.dep_rounds < _MAX_DEP_ROUNDS):
             installed = await anyio.to_thread.run_sync(
-                self._prepare_env_from_triage, a.triage, a.err)
+                self._prepare_env_from_triage, a.triage, self._install_gate_text(a))
             if installed:
                 a.dep_rounds += 1
                 async with self._write_lock:

@@ -543,8 +543,9 @@ DIAGNOSIS_CODE_LOOK_TURNS = 3
 # How far back into `res.stderr` the headline scan looks, and how much of one line it keeps. The
 # reach is generous because the evidence is measured at 1,659-14,192 characters from EOF on the
 # corpus and `res.stderr` is already clamped to 64 KB upstream; the keep is tight because this text
-# is PREPENDED to a 500-character window and a headline that crowds out the tail has traded one
-# missing fact for another.
+# is PREPENDED to a 500-character window (a failed canary's own account, under
+# `Settings.canary_failure_account`, is up to `eval_canary.CANARY_ACCOUNT_CHARS`) and a headline
+# that crowds out the tail has traded one missing fact for another.
 _HEADLINE_REACH = 64_000
 _HEADLINE_KEEP = 400
 _HEADLINE_LINES = 2
@@ -631,7 +632,8 @@ def failure_headline(stderr: str, redact=None) -> str:
 
     UP TO `_HEADLINE_LINES`, because the wrapper is not worthless — "this died under torchrun across
     two ranks" is real context — it is just not the headline. The total is bounded because this text
-    is PREPENDED to a 500-character tail, and a headline that crowds out the tail has traded one
+    is PREPENDED to a 500-character tail (or to a failed canary's own account, within
+    `eval_canary.CANARY_ACCOUNT_CHARS`), and a headline that crowds out the tail has traded one
     missing fact for another.
 
     `redact` IS `Engine._redact` AND IS NOT OPTIONAL IN PRODUCTION. This string is prepended to the

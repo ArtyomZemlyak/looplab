@@ -439,9 +439,11 @@ class AuditMixin:
         (three windows on one stream: `_eval_failure_text`, `_durable_failure_evidence`'s wider
         `error_evidence`, and the SCORED terminal's `stderr_tail` — see
         `_scored_output_evidence`), `eval_dispatch.py`'s `run_setup_finished.stderr_tail` and its
-        RuntimeError message, `train_monitor`/`asha_monitor`'s reason), so the split lands once.
+        RuntimeError message, `train_monitor`/`asha_monitor`'s reason), so the split lands once —
+        and, under `Settings.canary_failure_account`, the two stream tails of a failed canary's own
+        account (`eval_canary.py::canary_account`), handed this funnel at the canary.
 
-        ORDER, for the five that CAP: every one goes through `evaluate.py::_redacted_tail`, which
+        ORDER, for the ones that CAP: every one goes through `evaluate.py::_redacted_tail`, which
         calls this on the WHOLE stream and slices afterwards. Capping first severs a straddling
         secret's head and hands this function a fragment its shape rules no longer match — driven in
         `tests/test_scored_output_evidence.py`. `_eval_failure_text`'s 500-char prompt window is the

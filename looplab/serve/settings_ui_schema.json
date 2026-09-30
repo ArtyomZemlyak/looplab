@@ -874,7 +874,7 @@
           "label": "↳ failed canary's own account",
           "type": "bool",
           "default": true,
-          "help": "When a canary FAILS, the text the triage judge and the repair read is the canary's own account: its header (how it failed, where its logs are) and the tails of BOTH its stdout and its stderr, each labelled with how much it shows. Off, it is the historical 500-character tail of stderr, which a long traceback cut the header out of and which never showed stdout. Inert while the eval canary is off."
+          "help": "When a canary FAILS, the text the triage judge and the repair read is the canary's own account: its header (how it failed, where its logs are), the tails of BOTH its stdout and its stderr — each labelled with how much it shows and fenced as the candidate's evidence — and the engine's closing line, within 2,000 characters so the repair still sees all of it. Off, it is the historical 500-character tail of stderr, which a long traceback cut the header out of and which never showed stdout. Inert while the eval canary is off."
         },
         {
           "key": "holdout_fraction",

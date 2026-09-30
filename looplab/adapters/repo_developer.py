@@ -2746,9 +2746,11 @@ class LLMRepoDeveloper:
             user += self._repair_stage_note(op_stages, write)
             # The repair context's FIRST 4,000 characters, cut by `fenced_head`: byte for byte the
             # plain head, unless the cut falls inside a fenced block — a host refusal's account under
-            # `Settings.host_scorer_account` (`evaluate._eval_failure_text`), which rides behind the
-            # held verdict and the diagnosis and so can straddle 4,000 — whose interior is then cut
-            # and fenced again, never left open with its closing marker cut away.
+            # `Settings.host_scorer_account` (`evaluate._eval_failure_text`), or a failed canary's
+            # fenced stream tails under `Settings.canary_failure_account`, each riding behind the
+            # held verdict and the diagnosis and so able to straddle 4,000 — whose interior is then
+            # cut and fenced again, never left open with its closing marker cut away. The canary's
+            # account is budgeted against this window (`eval_canary.CANARY_ACCOUNT_CHARS`).
             user += (_REPO_DEV_REPAIR_BLOCK.format(already=already)
                      + fenced_head(error, 4000, EVIDENCE_LABEL))
         # A fresh implement (not a repair) on a real repo runs THREE explicit, separately-traced phases —

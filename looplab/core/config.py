@@ -846,13 +846,17 @@ class Settings(BaseSettings):
     # longer than a few lines cut the header off, the footer spent a fifth of the window, and stdout
     # was never read at all. `minionerec-backbones-v10` node 0: a triage of 44 min and 7.0 M tokens
     # over the engine's own wrapper text, for a one-line `EADDRINUSE` the canary's log held. ON, a
-    # failed canary's text is `RunResult.canary_account` (`eval_canary.py::canary_failure_result`):
-    # the header whole, then the tails of the canary's OWN stdout and stderr, each labelled with how
-    # much of it is shown (`CANARY_ACCOUNT_TAIL_CHARS` apiece). `false` is the historical tail BYTE
+    # failed canary's text is `RunResult.canary_account` (`eval_canary.py::canary_account`): the
+    # header whole, the tails of the canary's OWN stdout and stderr — each labelled with how much of
+    # it is shown and fenced as the candidate's evidence — and the engine's footer, within
+    # `CANARY_ACCOUNT_CHARS` (2,000, sized so the repo Developer's 4,000-character head window keeps
+    # it whole beside the diagnosis lead and the stuck contract). `false` is the historical tail BYTE
     # FOR BYTE, so it takes a `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row on `host_scorer_account`'s
     # different-prompt ground and is OFF at every constructor (`EngineOptions`); read through ONE
-    # reader, `engine/shared.py::canary_failure_account`. No call, no metric, no selection moves on
-    # it — only what the judge and the repair are TOLD. Inert while `eval_canary` is off.
+    # reader, `engine/shared.py::canary_failure_account`. It buys no call and moves no metric: it
+    # changes what the triage judge and the repair READ (so what they decide may differ) and the
+    # terminal's `error`, while the triage-driven dependency install keeps reading the historical
+    # tail (`evaluate.py::_install_gate_text`). Inert while `eval_canary` is off.
     canary_failure_account: bool = True
     # Sandbox tier (ADR-13): "trusted_local" (subprocess, no Docker) for the CLI;
     # "untrusted" (Docker --network none, shared-kernel runtime) for hosted/multi-tenant UI;
