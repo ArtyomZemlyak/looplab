@@ -23,6 +23,7 @@ import json
 import logging
 import re
 import time
+from fractions import Fraction
 from typing import Optional
 
 from looplab.core import tracing
@@ -32,7 +33,7 @@ from looplab.core.phase_events import (PHASE_CHECKPOINTED, PHASE_COMPLETED, PHAS
 from looplab.tools.clock import LoopClock, set_current_clock
 from looplab.core.errors import LLMCancelled
 from looplab.core.llm import BudgetExceeded, cancel_check_scope
-from looplab.core.llm_budget import (thread_committed_tokens, thread_committed_usd,
+from looplab.core.llm_budget import (thread_committed_tokens, thread_committed_usd_exact,
                                      thread_unreported_calls)
 from looplab.tools._base import (RESULT_CAP, ToolCapability, ToolResult, collect_inventory,
                                  capability_manifest)
@@ -983,7 +984,13 @@ def _session_spend(client, at_start: float | None) -> float | None:
     when the session began, None when the client keeps no accountant (see `_accountant_spend`)."""
     if at_start is None or _accountant_spend(client) is None:
         return None
-    return max(0.0, thread_committed_usd() - at_start)
+    # On the EXACT readings (`thread_committed_usd_exact`): after one large reported cost a float
+    # difference lost every small commit to absorption and the ceiling never fired (crit_v52 F5).
+    try:
+        start = at_start if isinstance(at_start, Fraction) else Fraction(at_start)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return max(0.0, float(thread_committed_usd_exact() - start))
 
 
 def _session_tokens(client, at_start: int) -> int | None:
@@ -1375,7 +1382,8 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     # Read once, before the first turn: the ceiling is for THIS session, so it is measured from what
     # this THREAD had committed when the session began (`_session_spend`); None — no ceiling — when
     # the client keeps no accountant.
-    _spend_at_start = thread_committed_usd() if _accountant_spend(client) is not None else None
+    _spend_at_start = (thread_committed_usd_exact() if _accountant_spend(client) is not None
+                       else None)
     turns = itertools.count() if max_turns is None or max_turns <= 0 else range(max_turns)
     for turn_idx in turns:
         if _cancelled():                # user hit stop -> finalize from what we have, promptly

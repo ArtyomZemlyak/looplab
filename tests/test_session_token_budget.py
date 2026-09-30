@@ -488,3 +488,74 @@ def test_a_negative_cost_never_refunds_the_thread_s_committed_money():
     assert thread_committed_usd() == before
     note_committed_cost(0.25)
     assert thread_committed_usd() == before + 0.25
+
+
+_USAGE = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+
+
+@pytest.mark.parametrize("earlier", [[], [1e15], [1e17], [1.7976931348623157e308] * 2])
+def test_one_large_reported_cost_does_not_disable_a_later_session_s_money_ceiling(earlier):
+    """crit_v52 F5, driven: the thread's committed-dollar total was a float read as a DIFFERENCE, so
+    after one large provider-reported cost on a long-lived thread (a pooled build worker, a server
+    thread) a later session's $0.05 commits fell below half an ulp and vanished — 20 turns and $1.00
+    against a $0.20 ceiling. The total is exact now (`note_committed_cost`). MUTATION: sum floats."""
+    from looplab.agents import tool_loop
+
+    class _Spending:
+        def __init__(self):
+            self.accountant, self.turns = CostAccountant(), 0
+
+        def chat(self, messages, tools, tool_choice="auto"):
+            self.turns += 1
+            self.accountant.add(0.05, _USAGE)
+            return {"content": "", "tool_calls": [
+                {"id": f"c{self.turns}", "function": {"name": "work", "arguments": "{}"}}]}
+
+        def complete_text(self, messages):
+            return "SUMMARY"
+
+    class _Work:
+        def specs(self):
+            return [{"type": "function", "function": {"name": "work", "parameters": {}}}]
+
+        def execute(self, name, args):
+            return "did some work"
+
+    out = {}
+
+    def _thread():
+        prior = CostAccountant()
+        for cost in earlier:
+            prior.add(cost, _USAGE)
+        client, kinds = _Spending(), []
+        tool_loop.drive_tool_loop(
+            client, _Work(), [{"role": "user", "content": "go"}],
+            {"type": "function", "function": {"name": "emit", "parameters": {}}},
+            max_turns=20, stuck_detection=False, cost_budget_usd=0.20,
+            finalize=lambda a: "emitted", fallback=lambda m: "fallback",
+            on_budget=lambda p: kinds.append(p.get("kind")))
+        out.update(turns=client.turns, kinds=kinds)
+
+    worker = threading.Thread(target=_thread)   # a fresh thread: its own committed total
+    worker.start()
+    worker.join()
+    assert out == {"turns": 5, "kinds": ["cost"]}
+
+
+def test_the_float_reading_of_an_exact_total_past_the_float_range_is_inf():
+    """`thread_committed_usd` is the display reading of the exact total: past the float range it is
+    `inf`, never an OverflowError and never a small number. MUTATION: answer 0.0 on overflow."""
+    import math
+
+    from looplab.core.llm_budget import note_committed_cost, thread_committed_usd
+
+    def _thread():
+        note_committed_cost(1.7976931348623157e308)
+        note_committed_cost(1.7976931348623157e308)
+        out.append(thread_committed_usd())
+
+    out: list = []
+    worker = threading.Thread(target=_thread)
+    worker.start()
+    worker.join()
+    assert out == [math.inf]
