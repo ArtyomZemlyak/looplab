@@ -73,6 +73,14 @@ def test_inside_is_the_dispatcher_s_own_rule_for_a_bounded_episode(n):
         assert line.endswith("will run.\n")
 
 
+def test_an_episode_ending_past_the_budget_names_the_budget_s_last_slot():
+    """crit_v46 survivor 25-04: an episode `[16, 24)` on a 20-node budget ends where the budget
+    does. MUTATION: `min(end, limit)` -> `end` -> '#16-#23', four slots that do not exist."""
+    line = _node_budget_note(_ctx(node_count=10, node_budget_limit=20, endgame_start=16,
+                                  endgame_end=24, endgame_kinds=["merge"]))
+    assert "#16-#19" in line and "#23" not in line
+
+
 def test_each_clause_speaks_only_when_it_has_something_to_say():
     assert _node_budget_note(_ctx()) == "", "no budget sent: say nothing"
     assert _node_budget_note(_ctx(node_budget_limit=0)) == ""
@@ -116,6 +124,18 @@ def test_the_engine_hands_the_dispatcher_s_ceiling_and_the_plan_row_and_nothing_
     assert (ctx.endgame_start, ctx.endgame_end, ctx.endgame_kinds) == (14, None, _KINDS)
     off = _engine(tmp_path / "off", on=False)._strategy_ctx(state)
     assert off.node_budget_limit is None and off.endgame_start is None and off.endgame_kinds == []
+
+
+def test_the_engine_hands_a_bounded_episode_s_end_and_only_the_kinds_it_can_state(tmp_path):
+    """crit_v46 survivors 25-12 / 25-11: the engine -> brief wiring of an episode row's
+    `endgame_end`, and a non-string kind on a hand-edited row dropped rather than raised out of
+    `StrategyContext`. MUTATIONS: write `endgame_end: None` -> red; `list(kinds)` -> ValidationError."""
+    plan = build_plan(max_nodes=18, n_seeds=2, reserve_frac=0.2, at_node=8, reason="stagnation",
+                      endgame_start=8)
+    plan["endgame_end"] = 11
+    plan["phases"][-1]["kinds"] = ["merge", 7, None, "sweep"]
+    ctx = _engine(tmp_path, on=True)._strategy_ctx(_state(9, plan))
+    assert (ctx.endgame_start, ctx.endgame_end, ctx.endgame_kinds) == (8, 11, _KINDS)
 
 
 def test_the_ceiling_is_the_admission_s_own_including_refunds(tmp_path, monkeypatch):

@@ -218,6 +218,24 @@ def test_a_deleted_node_s_current_lifecycle_is_charged_and_named_a_delete(tmp_pa
     assert engine._charge_abandoned_lifecycles(state) is False
 
 
+def test_an_orphan_settle_is_its_own_lifecycle_s_and_never_negative_or_infinite():
+    """crit_v46 survivors n1-11/n1-13/n1-14 (`evaluate.py::_durable_orphan_settle_seconds`).
+    MUTATIONS: match the settle on the node alone -> the other lifecycle's 10 s is charged too; drop
+    `seconds > 0` -> a clock stepped back charges -3 s; drop `isfinite` -> an `inf` settle charges
+    inf."""
+    from looplab.engine.evaluate import _durable_orphan_settle_seconds
+
+    def settle(generation, seconds):
+        return ("eval_invocation_settled", {"node_id": 0, "generation": generation, "attempt": 0,
+                                            "outcome": "failed", "eval_seconds": seconds})
+
+    events = _log(settle(0, 10.0), settle(1, 5.0))
+    assert _durable_orphan_settle_seconds(events, 0, 1) == 5.0
+    assert _durable_orphan_settle_seconds(events, 0, 0) == 10.0
+    assert _durable_orphan_settle_seconds(_log(settle(0, -3.0)), 0, 0) == 0.0
+    assert _durable_orphan_settle_seconds(_log(settle(0, float("inf"))), 0, 0) == 0.0
+
+
 def test_a_deleted_node_s_charge_is_not_a_failure_or_an_eval_to_the_strategist(tmp_path):
     """crit_v46 L2: the delete's charge-only `failed` terminal read as a search FAILURE and its
     partial seconds as an EVAL's cost in the Strategist's context — driven, one deleted node moved
