@@ -111,6 +111,17 @@ def _no_dotenv_in_tests(_isolation_patch):
 
 
 @pytest.fixture(autouse=True)
+def _fresh_thread_spend_counters():
+    """The per-THREAD committed token/cost counters (`core/llm_budget.py::_THREAD_TOKENS`) live as
+    long as the thread, and pytest runs every test on ONE thread. `test_llm_accounting.py` commits
+    `sys.float_info.max` twice, which leaves this thread's cost counter at inf, and every later
+    session-spend read on it is inf - inf = nan -> "$0.0000": red only where CI's split put the two
+    files in one shard (2026-09-30, `test_the_wall_says_what_it_spent.py`). Each test starts at zero."""
+    from looplab.core import llm_budget
+    llm_budget._THREAD_TOKENS.__dict__.clear()
+
+
+@pytest.fixture(autouse=True)
 def _no_repo_dotenv_in_tests(_isolation_patch):
     """`Settings.model_config["env_file"]` stopped being the only dotenv reader.
 
