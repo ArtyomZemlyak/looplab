@@ -353,14 +353,32 @@ def _injected_recut(plan: dict, cut: dict, planned_start: int,
     reaches here — is not re-cut by a batch."""
     if plan.get("reason") == "stagnation":
         return None
-    recorded = plan.get("injected")
-    recorded = recorded if type(recorded) is int and recorded > 0 else 0
+    recorded = _recorded_injected(plan)
     if cut["injected"] == recorded:
         return None
+    # A RESERVE THE RUN HAD ALREADY ENTERED keeps its start (critic 2026-09-30, crit_v48 F2): the
+    # batch's nodes are the operator's, and the engine's own count before them had reached the start,
+    # so moving it re-opened a reserve the run was spending — and owed its once-only ensemble again
+    # (driven: a second top-2 merge over the operator's two injects). Measured in ENGINE nodes: the
+    # count before the batch (`at_node` less the batch's size) against the row's start.
+    if cut["at_node"] - max(0, cut["injected"] - recorded) >= planned_start:
+        return None
+    # …and cut with the row's OWN fraction (F6): the historical rule never re-cuts on a changed
+    # `endgame_reserve_frac`, and a batch must not smuggle one in — driven, a fraction raised from
+    # 0.25 to 0.5 moved the start from 15 to 10 on one inject, earlier than without the batch.
+    frac = plan.get("reserve_frac")
+    if isinstance(frac, (int, float)) and not isinstance(frac, bool) and frac > 0:
+        cut = {**cut, "reserve_frac": frac}
     row = build_plan(**cut, reason="injected")
     if row is None or row["endgame_start"] == planned_start:
         return None
     return _with_spent(row, spent)
+
+
+def _recorded_injected(plan: dict) -> int:
+    """The operator-injected count a plan row was cut over (absent = 0)."""
+    recorded = plan.get("injected")
+    return recorded if type(recorded) is int and recorded > 0 else 0
 
 
 def _reopened(cut: dict, spent: list[int], cause: str) -> Optional[dict]:
@@ -423,6 +441,14 @@ def replan(plan: Optional[dict], *, max_nodes: int, n_seeds: int, reserve_frac: 
         start, end, holder = episode
         if champion != holder:
             return _reopened(cut, spent, "champion_changed")
+        # A BATCH LANDING INSIDE A LIVE EPISODE extends it by the batch (critic 2026-09-30, crit_v48
+        # F3): the episode is K of the ENGINE's nodes, and the operator's ids used to spend it —
+        # driven, three injects at node 9 of an episode [8, 11) reopened it after one engine node,
+        # and the champion's one episode was gone. `injected` is 0 with the setting off.
+        batch = injected - _recorded_injected(plan)
+        if batch > 0 and at_node - batch < end:
+            return _episode_row(cut, start=start, end=end + batch, champion=holder, spent=spent,
+                                reason="injected")
         if at_node >= end:
             return _reopened(cut, spent, "episode_spent")
         if int(max_nodes) != planned_budget:

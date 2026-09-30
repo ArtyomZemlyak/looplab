@@ -179,6 +179,8 @@ def test_the_count_is_the_operator_s_node_ids_the_fold_holds(tmp_path):
     created(3)
     store.append("node_reset", {"node_id": 1, "mode": "implement"})
     created(1, generation=1)                   # the reset rebuild of the operator's node
+    store.append("node_reset", {"node_id": 2, "mode": "implement"})
+    created(2, generation=1, source="manual")  # …a rebuild that keeps its stamp: still ONE id
     created("9", source="manual")               # the fold keys it as node 9, and so does the count
     created([7], source="manual")               # no usable id: the fold drops it, the count too
     events = store.read_all()
@@ -296,3 +298,113 @@ def test_a_batch_that_crosses_the_reserve_start_leaves_the_engine_its_search(tmp
         assert in_endgame(decided.plan, len(decided.nodes))
     replayed = fold(events)
     assert replayed.plan == plans[-1]
+
+
+# ------------------------------------------------------------------------------------ critic crit_v48
+def test_a_single_injected_node_is_recorded_on_the_row():
+    """MUTATION (M04): write the key only for a count above one."""
+    assert _plan(injected=1)["injected"] == 1
+
+
+def test_a_batch_inside_a_reserve_the_run_had_entered_keeps_its_start():
+    """F2 (driven by the critic: a second top-2 ensemble over the operator's two injects). The
+    engine's own count before the batch had reached the start, so the reserve it was spending stays
+    (MUTATION: drop the begun-reserve test). A batch before the start still re-cuts."""
+    plan = _plan()                                            # start 15 of 20
+    assert _replan(plan, at_node=18, injected=2) is None      # 16 engine nodes >= 15: entered
+    assert _replan(plan, at_node=17, injected=2) is None      # 15 >= 15: the reserve's first node
+    moved = _replan(plan, at_node=16, injected=2)             # 14 < 15: not entered yet
+    assert (moved["reason"], moved["endgame_start"]) == ("injected", 16)
+
+
+def test_a_batch_re_cuts_with_the_row_s_own_fraction():
+    """F6: a fraction raised live is not a re-cut by the historical rule, and a batch must not
+    smuggle one in (driven: 0.25 -> 0.5 moved the start from 15 to 10 on one inject). MUTATION: cut
+    with the live fraction."""
+    plan = _plan()
+    assert _replan(plan, reserve_frac=0.5, at_node=9, injected=1) is None
+    moved = _replan(plan, reserve_frac=0.5, at_node=9, injected=4)
+    assert (moved["endgame_start"], moved["reserve_frac"]) == (16, 0.25)
+
+
+def test_a_batch_inside_a_live_stall_episode_extends_it():
+    """F3: the episode is K of the ENGINE's nodes; three injects at node 9 of [8, 11) spent it after
+    one engine node, and the champion's one episode was gone (MUTATION: drop the extension)."""
+    base = build_plan(max_nodes=100, n_seeds=2, reserve_frac=0.2, at_node=0)
+    kw = {"max_nodes": 100, "n_seeds": 2, "reserve_frac": 0.2, "stall_rung": HARD_STALL_RUNGS,
+          "stall_nodes": 3, "champion": 0}
+    episode = replan(base, at_node=8, **kw)
+    assert (episode["endgame_start"], episode["endgame_end"]) == (8, 11)
+    grown = replan(episode, at_node=12, injected=3, **kw)
+    assert (grown["reason"], grown["endgame_start"], grown["endgame_end"]) == ("injected", 8, 14)
+    assert grown["injected"] == 3 and grown["champion"] == 0
+    assert replan(grown, at_node=13, injected=3, **kw) is None, "one row per batch"
+    spent = replan(grown, at_node=14, injected=3, **kw)
+    assert (spent["reason"], spent["reopen_cause"]) == ("reopened", "episode_spent")
+    assert replan(episode, at_node=11, **kw)["reason"] == "reopened", "no batch: as before"
+
+
+def test_the_count_is_over_the_nodes_the_caller_s_fold_holds(tmp_path):
+    """MUTATION (M31): count over a FRESH fold's nodes -> an inject that landed after the caller's
+    fold is counted into a plan cut for a state that does not hold it."""
+    eng = _seeded_engine(tmp_path, recut=True)
+    stale = fold(eng.store.read_all())
+    for node_id in (6, 7):
+        eng.store.append("node_created", {
+            "node_id": node_id, "parent_ids": [], "operator": "manual",
+            "idea": {"operator": "manual", "params": {"x": 0.0}}, "code": "c", "source": "manual"})
+    assert eng._ensure_plan(stale) is True
+    row = [e.data for e in eng.store.read_all() if e.type == EV_PLAN][-1]
+    assert row["injected"] == 4 and row["at_node"] == 6
+
+
+def test_the_strategist_brief_reads_the_plan_the_batch_re_cut(tmp_path):
+    """F1 (the critic's probe, driven in the product's cadence configuration): the consult the batch
+    makes due ran BEFORE the turn's re-cut, so its brief said the run was INSIDE a reserve the
+    `injected` row one seq later moved (MUTATION: re-cut only at the creation boundary)."""
+    from looplab.agents.strategist import RuleStrategist, _node_budget_note
+    kw = {"n_seeds": 2, "max_nodes": 14, "endgame_reserve_frac": 0.25,
+          "endgame_inject_recut": True, "strategist_budget_brief": True,
+          "cadence_while_evaluating": True}
+    rd = tmp_path / "run"
+    first = make_engine(rd, strategist=RuleStrategist(), **kw)
+    # The engine's own ceiling beside the policy's: the operator's batch is served against it.
+    first.max_nodes, first.n_seeds = 14, 2
+    real = first._ensure_plan
+
+    def pause_at_four(state):
+        wrote = real(state)
+        if len(state.nodes) >= 4 and not pause_at_four.done:
+            pause_at_four.done = True
+            first.store.append(EV_PAUSE, {"reason": "operator"})
+        return wrote
+
+    pause_at_four.done = False
+    first._ensure_plan = pause_at_four
+    assert anyio.run(first.run).paused
+    store = EventStore(rd / "events.jsonl")
+    for i in range(6):
+        store.append(EV_INJECT_NODE, {"idea": {"operator": "manual",
+                                               "params": {"x": float(i) - 2.0, "y": 0.5},
+                                               "rationale": f"operator batch {i}"}})
+    store.append(EV_RESUME, {})
+    second = make_engine(rd, strategist=RuleStrategist(), **kw)
+    second.max_nodes, second.n_seeds = 14, 2
+    seen: list = []
+    real_ctx = second._strategy_ctx
+
+    def record(state):
+        ctx = real_ctx(state)
+        seen.append((len(state.nodes), (state.plan or {}).get("endgame_start"),
+                     _node_budget_note(ctx), second.store.read_all()[-1].seq))
+        return ctx
+
+    second._strategy_ctx = record
+    anyio.run(second.run)
+    events = store.read_all()
+    injected = next(e for e in events if e.type == EV_PLAN and e.data["reason"] == "injected")
+    after_batch = [row for row in seen if row[0] >= 10]
+    assert after_batch, seen
+    nodes, start, note, seq = after_batch[0]
+    assert seq > injected.seq and start == injected.data["endgame_start"]
+    assert "INSIDE the plan's endgame reserve" not in note

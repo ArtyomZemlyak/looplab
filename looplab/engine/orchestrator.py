@@ -2059,6 +2059,20 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                     await anyio.sleep(0.5)
                 continue
 
+            # THE PLAN IS RE-CUT BEFORE ITS READERS (critic 2026-09-30: crit_v48 F1, crit_v46 M1).
+            # The Card session's elections and the cadences' Strategist brief (`_node_budget_ctx`)
+            # read `state.plan` too, and with the re-cut only at the creation boundary below a turn's
+            # first readers decided on the row the same turn then superseded — driven: a brief said
+            # the run was "INSIDE the plan's endgame reserve (#10-#13)" one seq before the `injected`
+            # row moved the start to 12, and a Card election was closed `plan_refused` on a plan
+            # nobody held any more. Here: after an inject batch lands (`_serve_forced_requests`
+            # above) and after the Card denominator's refresh the cut reads (`policy.max_nodes`,
+            # idempotent — the pre-cadence refresh below re-derives the same value). The
+            # creation-boundary call still re-cuts what the cadences themselves move.
+            self._refresh_speculation_budget(state, events=decision_events)
+            if self._ensure_plan(state):
+                continue
+
             if self._speculation_enabled():
                 # AUTO depth re-resolves HERE, on a stable decision prefix with no head request and
                 # no build in flight yet, so a settle can never land between a prefetch's request and

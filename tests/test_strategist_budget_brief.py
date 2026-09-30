@@ -8,7 +8,8 @@ landed, and the model's brief never rendered it. Under `Settings.strategist_budg
 consult's brief gains one line from the facts the Researcher's per-proposal cue already states
 (`engine/proposal_cues.py::_cue_node_budget`): the ceiling the dispatcher opens nodes against and the
 folded plan row, "inside" by `engine/plan.py::in_endgame`'s own rule. OFF, the brief is byte for
-byte what it was. (69.25's other half — re-planning on an inject batch — is still open.)
+byte what it was. 69.25's other half — re-planning on an inject batch — is
+`tests/test_endgame_inject_recut.py`, which also drives the brief reading the re-cut row.
 """
 from __future__ import annotations
 
