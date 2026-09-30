@@ -218,6 +218,32 @@ def test_a_deleted_node_s_current_lifecycle_is_charged_and_named_a_delete(tmp_pa
     assert engine._charge_abandoned_lifecycles(state) is False
 
 
+def test_a_deleted_node_s_charge_is_not_a_failure_or_an_eval_to_the_strategist(tmp_path):
+    """crit_v46 L2: the delete's charge-only `failed` terminal read as a search FAILURE and its
+    partial seconds as an EVAL's cost in the Strategist's context — driven, one deleted node moved
+    `failure_rate` 0.0 -> 0.5 and `avg_eval_seconds` 30.0 -> 15.4. The budget still counts them.
+    MUTATIONS: drop the tombstone filter from `failure_rate` / from `avg_eval_seconds` -> red."""
+    from tests.factories import make_engine
+
+    engine = make_engine(tmp_path / "run", strategist_budget_brief=True)
+    rows = [("run_started", {"run_id": "t", "task_id": "toy", "goal": "g", "direction": "max"})]
+    for nid in (0, 1):
+        rows.append(("node_created", {"node_id": nid, "parent_ids": [], "operator": "draft",
+                                      "idea": {"operator": "draft", "params": {"x": float(nid)}}}))
+    rows += [("node_evaluated", {"node_id": 0, "generation": 0, "metric": 1.0, "eval_seconds": 30.0}),
+             ("eval_attempt_withheld", {"node_id": 1, "generation": 0, "attempt": 0,
+                                        "at": "decide_repair", "reason": "paused",
+                                        "eval_seconds": 0.873}),
+             ("node_tombstoned", {"node_ids": [1]})]
+    for kind, data in rows:
+        engine.store.append(kind, data)
+    assert engine._charge_abandoned_lifecycles(fold(engine.store.read_all())) is True
+    state = fold(engine.store.read_all())
+    assert state.nodes[1].status.value == "failed" and state.total_eval_seconds == 30.873
+    ctx = engine._strategy_ctx(state)
+    assert (ctx.failure_rate, ctx.avg_eval_seconds) == (0.0, 30.0)
+
+
 def test_two_abandoned_lifecycles_are_both_charged_each_under_its_own_generation(tmp_path):
     """MUTATIONS: charge only the first sorted lifecycle; stamp the row with the node id instead of
     the generation (the fold then charges nothing, and every entry would append it again)."""

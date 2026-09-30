@@ -121,7 +121,9 @@ class StrategyCadenceMixin:
             defaults["_budget_frac"] = max(0.0, (rem or 0.0) / max_es)
         # Mean per-node eval cost so far — the cost signal the Strategist uses to bias toward an
         # intra-node sweep (amortizing data load / warm-up pays off when each eval is expensive).
-        ev = [n.eval_seconds for n in state.nodes.values() if n.eval_seconds]
+        # A deleted node's partial seconds (an abandoned attempt's charge) are not an eval's cost
+        # (`strategist.py::failure_rate` has the account, crit_v46 L2: 30.0 -> 15.4 on one delete).
+        ev = [n.eval_seconds for n in state.nodes.values() if n.eval_seconds and not n.tombstoned]
         avg_es = (sum(ev) / len(ev)) if ev else None
         cross_run_note = self._cross_run_note_for_ctx(state)
         # A built Engine always owns the broker. Keep this accessor direct so a wiring typo fails

@@ -205,11 +205,15 @@ class Strategist(Protocol):
 # --------------------------------------------------------------------------- #
 
 def failure_rate(state: RunState) -> float:
-    total = sum(1 for n in state.nodes.values()
-                if n.status in (NodeStatus.evaluated, NodeStatus.failed))
+    # A node the operator DELETED (`tombstoned`) is not an outcome of the search: the delete
+    # abandons its lifecycle with a charge-only `failed` terminal (`_charge_abandoned_lifecycles`),
+    # which read here as a failure — driven, one deleted node moved the rate 0.0 -> 0.5 (critic
+    # 2026-09-30, crit_v46 L2). Selection already reads it as invisible (`RunState.feasible_nodes`).
+    live = [n for n in state.nodes.values() if not n.tombstoned]
+    total = sum(1 for n in live if n.status in (NodeStatus.evaluated, NodeStatus.failed))
     if not total:
         return 0.0
-    failed = sum(1 for n in state.nodes.values() if n.status is NodeStatus.failed)
+    failed = sum(1 for n in live if n.status is NodeStatus.failed)
     return failed / total
 
 
