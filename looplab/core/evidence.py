@@ -65,6 +65,7 @@ evidence is.
 """
 from __future__ import annotations
 
+import bisect
 import functools
 import re
 import sys
@@ -208,8 +209,9 @@ def is_fenced(text: str, label: str) -> bool:
 
 
 def neutralize_markers(text: str, label: str) -> str:
-    """`text` with every spelling of `label`'s two fence markers folded inert — and nothing else, so
-    a text holding no marker comes back byte for byte.
+    """`text` with every spelling of `label`'s two fence markers the matcher reads folded inert — and
+    nothing else, so a text holding no marker comes back byte for byte. What it reads, and the one
+    stated limit (a look-alike from a script outside `_CONFUSABLE`), is `_sub_through_format_chars`'s.
 
     For a message that is evidence FROM ITS LABEL TO ITS END, where no marker inside it can be true:
     the Boss's (`serve/llm_context.py::boss_prompt_parts`). Its label is a bare prefix, so a block
@@ -326,12 +328,35 @@ def _neutralize_fences(text: str, label: str) -> str:
 # nothing too — the combining grapheme joiner, the Khmer inherent vowels, the Mongolian free variation
 # selectors, the variation selectors — plus the unassigned code points the standard reserves as
 # default-ignorable (critic 2026-09-30, crit_v46 L4, driven: U+034F, U+FE0F, U+E0100 and U+180B
-# each kept a forged marker live). The Hangul fillers are left out: they render as a blank, and the
-# matcher already reads one as the gap between two words of a marker.
-_DEFAULT_IGNORABLE_NOT_CF = ((0x034F, 0x034F), (0x17B4, 0x17B5), (0x180B, 0x180D),
-                             (0x180F, 0x180F), (0x2065, 0x2065), (0xFE00, 0xFE0F),
+# each kept a forged marker live). The Hangul fillers (U+115F, U+1160, U+3164, U+FFA0) are in the
+# set: they are not whitespace to `re` and render as a blank, so inside a word they kept a close
+# live (crit_v54 F3, driven: `END UNTRUS<filler>TED_RUN_EVIDENCE`); as the gap between the close's
+# two words they drop out of the view and the label-only pass folds what is left.
+_DEFAULT_IGNORABLE_NOT_CF = ((0x034F, 0x034F), (0x115F, 0x1160), (0x17B4, 0x17B5),
+                             (0x180B, 0x180D), (0x180F, 0x180F), (0x2065, 0x2065),
+                             (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFFA0, 0xFFA0),
                              (0xFFF0, 0xFFF8), (0xE0000, 0xE0000), (0xE0002, 0xE001F),
                              (0xE0080, 0xE0FFF))
+
+# The TAG characters that spell printable ASCII (U+E0020–E007E): format characters, so the view
+# dropped them, and a close spelled ENTIRELY in them vanished from the view and survived byte for
+# byte — the "ASCII smuggling" encoding a model has been shown to read (crit_v54 F4, driven). In the
+# view each one reads as the ASCII character it encodes.
+_TAG_ASCII = (0xE0020, 0xE007E)
+
+# Look-alikes of the Latin letters that NFKC leaves alone: Cyrillic and Greek letters drawn like a
+# Latin one, the Latin small capitals, the dotless i and j (crit_v54 F4, driven: a close in Greek,
+# Cyrillic or small-capital letters read as live). Each reads as its Latin twin in the view; the
+# matcher is case-insensitive, so either case serves. A LIMIT, stated rather than hidden: a look-alike
+# from any other script (Cherokee, Armenian, Coptic, …) is not folded — the fold covers the scripts
+# a model most readily reads as Latin, and the fence's markers are one defence among several.
+_CONFUSABLE = dict(zip(
+    "АВЕКМНОРСТХУЅІЈԀԚԜҮҺӀаеорсухѕіјһԁԛԝүӏ"          # Cyrillic
+    "ΑΒΕΖΗΙΚΜΝΟΡΤΥΧϹͿονικαυϲϳ"                         # Greek
+    "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘʀꜱᴛᴜᴠᴡʏᴢıȷ",                      # small capitals, dotless i and j
+    "ABEKMHOPCTXYSIJDQWYHIaeopcyxsijhdqwyl"
+    "ABEZHIKMNOPTYXCJovikaucj"
+    "ABCDEFGHIJKLMNOPRSTUVWYZij"))
 
 
 @functools.lru_cache(maxsize=1)
@@ -347,45 +372,102 @@ def _format_chars() -> dict:
     return table
 
 
+def _fold_char(cp: int):
+    """What the character `cp` reads as in the matcher's VIEW: None (it renders as nothing), the
+    ASCII character a TAG character encodes, or its NFKC compatibility form with every look-alike
+    read as its Latin twin (`_CONFUSABLE`)."""
+    if cp < 0x80:
+        return cp                         # ASCII is its own view
+    if _TAG_ASCII[0] <= cp <= _TAG_ASCII[1]:
+        return chr(cp - 0xE0000)
+    ignorable = _format_chars()
+    if cp in ignorable:
+        return None
+    folded = "".join(_CONFUSABLE.get(c, c) for c in unicodedata.normalize("NFKC", chr(cp))
+                     if ord(c) not in ignorable)
+    return folded if folded != chr(cp) else cp
+
+
+class _ViewFold(dict):
+    """`str.translate` table of the VIEW, filled one character at a time on first sight: a text is
+    folded at C speed and each distinct character is folded once per process (crit_v54 F5: the view
+    re-derived NFKC for EVERY character — 5-12x slower than before it, 15-25x the memory, on text
+    that held one NBSP or `µs`)."""
+
+    def __missing__(self, cp: int):
+        self[cp] = folded = _fold_char(cp)
+        return folded
+
+
+_VIEW_FOLD = _ViewFold()
+
+
+def _width(folded) -> int:
+    """How many view characters one `_VIEW_FOLD` entry stands for."""
+    return 1 if type(folded) is int else len(folded) if folded else 0
+
+
 def _sub_through_format_chars(pattern: "re.Pattern", text: str, mark) -> str:
-    """`pattern.sub(mark, text)`, matched as if every FORMAT character (Cf) were absent.
+    """`pattern.sub(mark, text)`, matched on the text as a model READS it — the VIEW.
 
     Review 2026-09-22, CORE-15. The marker matcher is tolerant because the reader is a language
     model, and a model reads straight THROUGH a zero-width space, a word joiner, a soft hyphen, a
-    BOM or a bidi mark — they render as nothing. So `END UNTRUSTED_RUN\\u200bEVIDENCE` reads as the
+    BOM or a bidi mark — they render as nothing. So `END UNTRUSTED_RUN_\\u200bEVIDENCE` reads as the
     real close, and it survived here because the regex saw the U+200B: everything after it spoke as
-    the loop. Matching on a Cf-stripped VIEW closes that without rewriting honest text: only the
-    matched span of the original is replaced (its invisible characters go with the forged marker
-    they were hiding in), and every byte outside a match — an emoji's ZWJ, a BOM in real output — is
-    kept exactly, so a text holding no forged marker is fenced byte for byte as before. A text with
-    no Cf character at all takes `pattern.sub` itself.
+    the loop. The VIEW is the text with every character folded by `_fold_char`: ignorables dropped,
+    TAG characters read as the ASCII they encode, everything else in its NFKC form with a Latin
+    look-alike read as its twin. Only the matched span of the original is replaced (its invisible
+    characters go with the forged marker they were hiding in), and every character outside a match
+    — an emoji's ZWJ, a BOM in real output, a fullwidth digit — is kept exactly, so a text holding no
+    forged marker comes back byte for byte. An ASCII text is its own view; any other text is folded
+    once at C speed (`_ViewFold`), and only a text the pattern matches pays the per-character map
+    back to the original.
+
+    A match that starts or ends INSIDE one character's multi-character NFKC form (`㉐`, `PTE`)
+    replaces that whole character: the forged marker's neighbour loses the rest of its expansion.
+    Only a forgery can do that, and what it loses is inert.
     """
     if text.isascii():
         return pattern.sub(mark, text)
-    table = _format_chars()
-    if len(text.translate(table)) == len(text) and unicodedata.is_normalized("NFKC", text):
+    view = text.translate(_VIEW_FOLD)
+    if view == text:
         return pattern.sub(mark, text)
-    # The VIEW: every ignorable character dropped and every other one folded to its compatibility
-    # form (NFKC, character by character), each view character remembering the original one it
-    # came from. A fullwidth `ＥＮＤ ＵＮＴＲＵＳＴＥＤ＿ＲＵＮ＿ＥＶＩＤＥＮＣＥ` reads as the close to a model
-    # and folded to nothing here (crit_v46 L4); it folds to the ASCII marker in the view.
-    view_chars: list = []
-    owner: list = []
-    folds: dict = {}
-    for index, ch in enumerate(text):
-        if ord(ch) in table:
-            continue
-        folded = ch if ch.isascii() else folds.setdefault(ch, unicodedata.normalize("NFKC", ch))
-        view_chars.extend(folded)
-        owner.extend([index] * len(folded))
-    view = "".join(view_chars)
+    if pattern.search(view) is None:
+        return text
+    # Map the view back to the text. A character whose fold is ONE character — itself, or its twin —
+    # sits at the same offset in both, so only the characters that fold to nothing or to several
+    # shift what follows: one breakpoint each, where its fold starts in the view, its index in the
+    # text and the fold's width. A position between breakpoints maps back by its offset from the
+    # last one.
+    shifting = [ch for ch in set(text) if not ch.isascii() and _width(_VIEW_FOLD[ord(ch)]) != 1]
+    at_view, at_text, widths = [], [], []
+    if shifting:
+        shift = 0
+        for match in re.finditer("[" + "".join(map(re.escape, shifting)) + "]", text):
+            index = match.start()
+            width = _width(_VIEW_FOLD[ord(text[index])])
+            at_view.append(index + shift)
+            at_text.append(index)
+            widths.append(width)
+            shift += width - 1
+
+    def _owner(position: int) -> int:
+        k = bisect.bisect_right(at_view, position) - 1
+        if k < 0:
+            return position
+        if position < at_view[k] + widths[k]:
+            return at_text[k]
+        return at_text[k] + 1 + (position - at_view[k] - widths[k])
+
     out, cursor = [], 0
     for match in pattern.finditer(view):
         if match.end() == match.start():
             continue                      # a label is never empty; a zero-width match folds nothing
-        start, end = owner[match.start()], owner[match.end() - 1] + 1
+        start, end = _owner(match.start()), _owner(match.end() - 1) + 1
         if start < cursor:
-            continue                      # two matches inside one folded character: fold it once
+            # Defensive: two matches inside ONE character's fold. No NFKC form is long enough to
+            # hold two markers of the one label in use, so this is unreachable today.
+            continue
         out.append(text[cursor:start])
         out.append(mark(match))
         cursor = end
