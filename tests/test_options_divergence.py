@@ -63,6 +63,10 @@ EXPECTED = {
     # product surface, OFF in the bare library on the rows above' ground — it changes what the
     # dispatcher builds, and a direct `Engine(...)` gains no dispatch it did not ask for.
     "endgame_inject_recut": (True, False),
+    # The passive prior withholds a lesson whose claim the operator rejected (doc 69 69.21,
+    # 2026-09-30): ON in the product surface, OFF in the bare library — a PROMPT flag, so a direct
+    # `Engine(...)` keeps the historical prior byte for byte.
+    "lesson_prior_claim_decisions": (True, False),
     "reflection_priors": (True, False),
     "report_every": (3, 0),
     "watchdog_reflection": (True, False),

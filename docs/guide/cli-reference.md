@@ -2534,7 +2534,9 @@ Structured lookup prefers exact scope+metric, then scope-only, global metric and
 is therefore an intentional portfolio-wide fallback; a scoped one does not reach another task.
 A rejected claim remains human-visible in the unfiltered claims CLI/API and can still contribute to Atlas
 top-level `n_claims`/`n_claims_total`; it is excluded from the **active** context pack, Atlas contradictions,
-agent-tool projection and hybrid retrieval. Pins have first retention priority, followed by ratified claims. This closes
+agent-tool projection and hybrid retrieval — and, since 2026-09-30 (`lesson_prior_claim_decisions`, doc 69
+69.21), from the passive cross-run prior every role's prompt carries: a lesson that states it is withheld,
+and the prompt says how many. Pins have first retention priority, followed by ratified claims. This closes
 the earlier steering leak without pretending rejection deletes evidence or history; scope, D8-verification and
 stable-identity gates in [doc 17 §22.8](../17-project-review-and-directions-2026-07-11.md) still block production
 advisory.

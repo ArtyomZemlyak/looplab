@@ -859,10 +859,13 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims
 # The lessons+research assessment projections, re-exported so `engine.claims` keeps its historical
 # surface (doc 25 EM-01). Imported before the retrieval barrel below, which reads these names.
 from looplab.engine.claims_assessments import (  # noqa: F401,E402
+    _claim_row_signature,
     _ingest_evidence,
     _register_incarnation,
     _structured_assessments,
     claim_assessments,
+    lesson_claim_uid,
+    operator_rejected_claim_uids,
 )
 
 # The context pack / retrieval planner / atlas, re-exported so `engine.claims` keeps its

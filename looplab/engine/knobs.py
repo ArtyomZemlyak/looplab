@@ -256,6 +256,9 @@ class EngineKnobs:
     # so a build worker can ask without reaching for Settings (doc 52 §4.3). Off = the Developer
     # prior is the run-wide text, byte for byte.
     _lesson_operator_scope = Knob("lesson_operator_scope", bool)
+    # doc 69 69.21: the operator's claim decisions in the passive prior, read by
+    # `lessons_priors.py::_scan_prior_context` and the refresh stamp (`lessons.py::lessons_store_stamp`).
+    _lesson_prior_claim_decisions = Knob("lesson_prior_claim_decisions", bool)
     _workdir_audit = Knob("workdir_audit", bool)
     # ADR-17 capture policy for THIS run's tracer (below). None = declare nothing and let the
     # process-wide `set_llm_capture` default decide, exactly as before this knob existed.

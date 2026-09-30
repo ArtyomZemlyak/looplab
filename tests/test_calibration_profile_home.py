@@ -404,7 +404,13 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               INERT for a calibration replicate: it runs under `EngineOptions`, whose reserve is
 #               0.0 (no plan is written) and whose `endgame_inject_recut` is False, and the toy
 #               workload injects nothing.
-_EXPECTED_DIGEST = "sha256:e2d334bf36ffc1d04a54bc06f83908acd0ca5a1b3e25aec149a630493bca3afd"
+#   2026-09-30  + lesson_prior_claim_decisions (the passive prior withholds a lesson whose claim
+#               the operator rejected, doc 69 69.21). The 'field set changed too' branch: exactly
+#               `['lesson_prior_claim_decisions']` added and `[]` removed; `_EXPECTED_FIELD_COUNT`
+#               goes 279 -> 280 and both pins are re-set (the pre-change tree re-derives
+#               e2d334bf…). INERT for a calibration replicate: it runs under `EngineOptions`, whose
+#               `lesson_prior_claim_decisions` is False.
+_EXPECTED_DIGEST = "sha256:75718f291ddda123d29737d06c453b3976a2395a6f63904add49af893a15ac20"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -918,7 +924,8 @@ _EXPECTED_DIGEST = "sha256:e2d334bf36ffc1d04a54bc06f83908acd0ca5a1b3e25aec149a63
 #   2026-09-30  + developer_scorer_status (doc 69 69.5): 276 -> 277; see the digest history.
 #   2026-09-30  + strategist_budget_brief (doc 69 69.25): 277 -> 278; see the digest history.
 #   2026-09-30  + endgame_inject_recut (doc 69 69.25): 278 -> 279; see the digest history.
-_EXPECTED_FIELD_COUNT = 279
+#   2026-09-30  + lesson_prior_claim_decisions (doc 69 69.21): 279 -> 280; see the digest history.
+_EXPECTED_FIELD_COUNT = 280
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

@@ -122,6 +122,43 @@ def _ingest_evidence(lessons, research_claims, resolve, *, weigh=None) -> None:
         group["sources"].update(_string_list(claim.get("urls"), maximum=32, item_maximum=2000))
 
 
+def _claim_row_signature(statement, scope, metric=""):
+    """`(text, signature)` for one claim-source row's statement under its scope and metric — the
+    identity `claim_assessments` groups by — or None when the row states no claim (no text, or no
+    subject content: polarity 0). ONE spelling, shared by the grouping below and `lesson_claim_uid`,
+    so a prompt reader cannot file a lesson under another claim than the claims surface shows it
+    under (doc 69 69.21)."""
+    from looplab.engine.claim_key import claim_signature
+    s = _claim_text(statement)
+    if not s:
+        return None
+    sig = claim_signature(
+        s, scope=_identity_text(scope, _MAX_DECISION_SCOPE),
+        metric=_identity_text(metric, _MAX_DECISION_METRIC))
+    if sig["polarity"] == 0:                     # no subject content -> not a claim
+        return None
+    return s, sig
+
+
+def lesson_claim_uid(row) -> Optional[str]:
+    """The `claim_uid` of the claim a LESSON row states — the group `claim_assessments` files it
+    under (its statement, its `task_id` scope, `_metric_identity`) — or None when it states none."""
+    if not isinstance(row, dict):
+        return None
+    got = _claim_row_signature(row.get("statement"), row.get("task_id"), _metric_identity(row))
+    return got[1]["uid"] if got is not None else None
+
+
+def operator_rejected_claim_uids(lessons, decisions) -> frozenset:
+    """The `claim_uid`s of the claims `lessons` state that `decisions` (`load_claim_decisions`)
+    REJECTS: `claim_assessments`' own groups and decision lookup over the same rows (the structured
+    uid first, the legacy statement keys as its reported fallback), so a prompt reader withholds
+    exactly what the claims surface shows as `operator-rejected` (doc 69 69.21). Pure."""
+    rows = claim_assessments(lessons, decisions=decisions, bounded=False)
+    return frozenset(row["claim_uid"] for row in rows
+                     if row.get("maturity") == "operator-rejected" and row.get("claim_uid"))
+
+
 def _structured_assessments(lessons, research_claims, decisions, *,
                             research_source: Optional[dict] = None,
                             claim_source: Optional[dict] = None) -> list[dict]:
@@ -129,7 +166,7 @@ def _structured_assessments(lessons, research_claims, decisions, *,
     `claim_signature` merge_key: (subject stems, scope=task, metric, polarity). Opposite-polarity claims
     sharing a `contra_key` are surfaced as a CONTRADICTION (they never merge, and each is marked contested).
     Governance overlays by the structured `claim_uid` (scope-precise)."""
-    from looplab.engine.claim_key import claim_signature, claim_uid
+    from looplab.engine.claim_key import claim_uid
     lessons = _valid_claim_source_rows(lessons, research=False)
     research_claims = _valid_claim_source_rows(research_claims, research=True)
     research_source = (safe_research_source_summary(research_source)
@@ -146,14 +183,10 @@ def _structured_assessments(lessons, research_claims, decisions, *,
     groups: dict[str, dict] = {}
 
     def _grp(statement, scope, metric=""):
-        s = _claim_text(statement)
-        if not s:
+        got = _claim_row_signature(statement, scope, metric)
+        if got is None:
             return None
-        sig = claim_signature(
-            s, scope=_identity_text(scope, _MAX_DECISION_SCOPE),
-            metric=_identity_text(metric, _MAX_DECISION_METRIC))
-        if sig["polarity"] == 0:                     # no subject content -> not a claim
-            return None
+        s, sig = got
         g = groups.get(sig["merge_key"])
         if g is None:
             g = groups[sig["merge_key"]] = {

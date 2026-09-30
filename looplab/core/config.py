@@ -1594,6 +1594,16 @@ class Settings(BaseSettings):
     # those two differ). Costs no store read and no provider call — the per-operator render re-ranks
     # the scan the run-start/refresh load already paid for, with its embedder memo intact.
     lesson_operator_scope: bool = False
+    # THE OPERATOR'S CLAIM DECISIONS REACH THE PASSIVE PRIOR (doc 69 69.21). `claim-decide --reject`
+    # was read by the claims surface and by nothing that writes a prompt, so a rejected lesson kept
+    # arriving in every proposal of every later run. With it on, `engine/lessons_priors.py` withholds
+    # a lesson whose claim group the operator rejected — `claim_assessments`' own grouping and decision
+    # lookup (`engine/claims_assessments.py::operator_rejected_claim_uids`) — says how many in the
+    # prompt and the `prior_injected` receipt, discloses an unreadable decision ledger instead of
+    # guessing, and a decision made mid-run counts as a change for the refresh. It changes a PROMPT
+    # and buys no call: OFF at every constructor, and a pre-field snapshot resumes OFF
+    # (`LEGACY_CONFIG_SNAPSHOT_DEFAULTS`). One reader: the engine knob `_lesson_prior_claim_decisions`.
+    lesson_prior_claim_decisions: bool = True
     # B3 output redaction: the HIGH-ENTROPY half of the persisted-tail redactor.
     # **This flag no longer decides whether tails are redacted at all** (backlog C2, 2026-08-14).
     # Known credential SHAPES and the operator's own secret env VALUES are masked on every persisted
@@ -3943,6 +3953,11 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # bought. (c) is `False`, the cut over the whole budget, pointable at every commit before this
     # one. An operator opts a run in the same way as `endgame_stall_nodes` above.
     "endgame_inject_recut": False,
+    # THE OPERATOR'S CLAIM DECISIONS IN THE PASSIVE PRIOR, added 2026-09-30 defaulting ON (doc 69
+    # 69.21). (a) holds. (b): it changes a PROMPT — the cross-run prior withholds a lesson whose claim
+    # the operator rejected and says so — so a resumed run would change what its proposals are told
+    # mid-log. (c) is `False`, the prior over every lesson, pointable at every commit before this one.
+    "lesson_prior_claim_decisions": False,
     # THE FORESIGHT PANEL'S ALTERNATIVES, added 2026-09-29 defaulting ON. (a) holds. (b) is both
     # grounds at once: a NEW PROMPT TURN (`tool_researcher_alternative`) and different paid calls —
     # candidates 2..K become a bounded continuation of candidate 1's session instead of K-1 full

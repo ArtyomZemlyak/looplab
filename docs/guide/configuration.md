@@ -90,8 +90,8 @@ and read leniently by read-only commands.
 ## Web editors, schema and concurrent saves
 
 The owner Web UI does not build forms by reflecting arbitrary Python fields in the browser. It fetches a
-server-owned curated catalogue with **247 of the 282 direct `Settings` fields in 10 groups**. The default
-**Essential** disclosure mode contains 18 high-frequency keys; search spans all 247 catalogued keys.
+server-owned curated catalogue with **248 of the 283 direct `Settings` fields in 10 groups**. The default
+**Essential** disclosure mode contains 18 high-frequency keys; search spans all 248 catalogued keys.
 Uncatalogued fields remain valid through environment/config/CLI inputs and are preserved by sparse Web
 writes. Which fields are catalogued is not a matter of taste: every `Settings` field is either a row or
 listed in `settings_ui_schema.py::SETTINGS_UI_SCHEMA_UNCURATED_FIELDS` with the reason the form omits it,
@@ -1192,6 +1192,7 @@ See [Concepts → Trust & sandbox](concepts.md#trust-the-sandbox) for what each 
 | `lessons_every` | `LOOPLAB_LESSONS_EVERY` | `4` | M6 live-share: write comparative lessons to the shared store every N created nodes, and promote the auto-skill of every card that has SETTLED on the same pace (0 = both run-end only) |
 | `lessons_refresh_every` | `LOOPLAB_LESSONS_REFRESH_EVERY` | `4` | M6 live-share: re-read the shared lessons store every N nodes so lessons from CONCURRENT runs reach this run (0 = run-start only) |
 | `lesson_operator_scope` | `LOOPLAB_LESSON_OPERATOR_SCOPE` | `false` | Scope the Developer's cross-run prior to the OPERATOR about to fire. Cross-run lessons are retrieved by task fingerprint (Jaccard >= 0.34) and role and by nothing about the action, so a merge, a repair and an improve all read the same five rows — while the in-run context has had parent-plus-sibling scoping all along. ON ranks the prior by the operator of the `Idea` being built: that operator's own lessons first, then untagged rows, then rows tagged only with other operators. It RANKS rather than filters — nothing is withheld, only the order of the five slots changes — because the only per-operator scoping ablation in the field (AIRA-dojo) came back null. OFF reproduces the Developer prompt byte for byte. Costs no store read and no provider call (it re-ranks the scan the run-start/refresh load already paid for). The evidence to decide the default accrues either way: every distilled lesson records the operators of its own evidence nodes, and a scoped render writes a `prior_injected` row naming the operator for `looplab prior-citations` |
+| `lesson_prior_claim_decisions` | `LOOPLAB_LESSON_PRIOR_CLAIM_DECISIONS` | `true` | The passive cross-run prior honours the operator's claim decisions: a lesson whose claim group the operator REJECTED (`claim-decide --reject`, or the Claims panel) is withheld from every role's prior, and the prompt and the `prior_injected` receipt say how many (`operator_rejected`). What is withheld is decided by the claims surface's own grouping and decision lookup (`engine/claims_assessments.py::operator_rejected_claim_uids`), so it is exactly what the Claims view shows as `operator-rejected`. An unreadable decision ledger withholds nothing and is disclosed (`claim_decisions_unavailable`), and a decision made mid-run counts as a change for the next prior refresh. Before it the claims view showed the rejection while every later run's proposals were still told the rejected lesson. `false` = the prior over every lesson (the historical text; the bare-library `EngineOptions` value and what a pre-field snapshot resumes with) |
 
 ## Reporting & observability
 

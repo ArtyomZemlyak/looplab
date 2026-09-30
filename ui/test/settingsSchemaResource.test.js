@@ -271,7 +271,9 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   budget and where the plan's endgame reserve begins. The Python half moved too.
   //   246 -> 247 (2026-09-30): `endgame_inject_recut` — the endgame reserve is cut from the budget
   //   the engine searches itself, the operator's injects left out. The Python half moved too.
-  assert.equal(Object.keys(schema.fieldByKey).length, 247)
+  //   247 -> 248 (2026-09-30): `lesson_prior_claim_decisions` — the cross-run prior withholds a
+  //   lesson whose claim the operator rejected. The Python half moved too.
+  assert.equal(Object.keys(schema.fieldByKey).length, 248)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

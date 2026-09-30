@@ -423,6 +423,11 @@ class EngineOptions:
     # divergence-table row — and a bare `Engine(...)` gains nothing: off, the Developer prior is the
     # run-wide text it always was.
     lesson_operator_scope: bool = False
+    # doc 69 69.21 (2026-09-30): the passive prior withholds a lesson whose claim the operator
+    # rejected (`Settings.lesson_prior_claim_decisions`). A divergence-table row on
+    # `node_budget_cue`'s ground: a prompt flag, OFF here so a bare `Engine(...)` keeps the historical
+    # prior byte for byte.
+    lesson_prior_claim_decisions: bool = False
     workdir_audit: bool = True           # 4.4: flag unexpected writes in the eval workdir
     # ADR-17: capture this run's bounded/redacted LLM I/O into its spans.jsonl. Bound to the run's OWN
     # Tracer (core/tracing.py) rather than the process-global flag, so two Engines in one process keep

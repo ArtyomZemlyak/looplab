@@ -311,6 +311,27 @@ class LessonPriorsMixin:
                 hit = totals.get(lesson_id(o))
                 if hit is not None:
                     o["utility"] = dict(hit)
+        # THE OPERATOR'S CLAIM DECISIONS (doc 69 69.21, `Settings.lesson_prior_claim_decisions`). An
+        # operator's `claim-decide --reject` was read by the claims surface and by nothing that writes
+        # a prompt, so the rejected lesson kept arriving in every proposal. Resolved through
+        # `claim_assessments`' own groups and decision lookup over the rows this scan kept
+        # (`operator_rejected_claim_uids`), so what is withheld here is exactly what the claims surface
+        # shows as `operator-rejected`. An unreadable ledger withholds nothing and SAYS so, in the
+        # prompt and the receipt: a guessed subset of an operator's decisions is not a decision.
+        claim_rejected: frozenset = frozenset()
+        decisions_unavailable = False
+        if getattr(self._e, "_lesson_prior_claim_decisions", False) and parsed:
+            try:
+                from looplab.engine.claims import (
+                    lesson_claim_uid, load_claim_decisions, operator_rejected_claim_uids)
+                rejected = operator_rejected_claim_uids(
+                    [o for _idx, o in parsed], load_claim_decisions(base))
+                claim_rejected = frozenset(
+                    idx for idx, o in parsed if rejected and lesson_claim_uid(o) in rejected)
+            except Exception as exc:  # noqa: BLE001 — an advisory filter: disclosed, never a failed prior
+                from looplab.core.containment import contain
+                contain("prior claim decisions", exc)
+                decisions_unavailable = True
         fp = [t for t in self._e._task_fingerprint(self._e._empty_state_for_fp())
               if not t.startswith("param:")]
         health = {
@@ -327,6 +348,10 @@ class LessonPriorsMixin:
             # Withheld for an unreadable/absent SCOPE, not for being invalid — a different fact
             # from `invalid`, and the one that explains an empty E4 tier on a legacy store.
             "scope_filtered": int(scope_filtered),
+            # The scan-window indices whose claim the operator rejected, and whether the decision
+            # ledger could be read at all (doc 69 69.21); both empty with the setting off.
+            "claim_rejected": claim_rejected,
+            "claim_decisions_unavailable": decisions_unavailable,
         }
         # The case store joins the health receipt on the SAME terms as the other two — an unreadable
         # or bounded case window must not read as "this task has no winning configuration".
@@ -445,7 +470,12 @@ class LessonPriorsMixin:
                    "retained priors are incomplete.]") if not health["complete"] else "")
                + (f"\n[MEMORY_SCOPE_WITHHELD: {health['scope_filtered']} exact-task note(s) record "
                   "no optimization direction, so their polarity cannot be established and they are "
-                  "not shown.]" if health.get("scope_filtered") else ""))
+                  "not shown.]" if health.get("scope_filtered") else "")
+               + ("\n[MEMORY_DECISIONS_UNAVAILABLE: the operator's claim decisions could not be "
+                  "read, so a lesson whose claim the operator rejected may still appear below.]"
+                  if health.get("claim_decisions_unavailable") else ""))
+        if health.get("claim_decisions_unavailable"):
+            receipt["claim_decisions_unavailable"] = True
         # (1) meta-notes — research-flavoured, so the Developer never sees them.
         # DE-DUPE FIRST, then take the last 3. These notes are a `write_reflection_note` f-string
         # ("best metric {m} via op '{op}' params {p}; N nodes, M evaluated"), and `meta_notes.jsonl`
@@ -519,6 +549,17 @@ class LessonPriorsMixin:
                     if hidx not in already and hidx in by_idx:
                         scored.append((hsim, hidx, by_idx[hidx]))
                         already.add(hidx)
+        # The operator's rejections (doc 69 69.21) leave the CANDIDATES — after the similarity gate and
+        # the harmonic splice, so a rejected row cannot come back through recall, and so the count is
+        # of lessons this prompt would otherwise have weighed, not of every rejected row in the store.
+        claim_rejected = health.get("claim_rejected") or frozenset()
+        if claim_rejected:
+            kept = [t for t in scored if t[1] not in claim_rejected]
+            if len(kept) < len(scored):
+                receipt["operator_rejected"] = len(scored) - len(kept)
+                out += (f"\n[MEMORY_OPERATOR_REJECTED: {receipt['operator_rejected']} lesson(s) whose "
+                        "claim the operator rejected are not shown.]")
+            scored = kept
         # D2 hygiene at read time: quarantine any lesson whose claim a NEWER run reversed
         # (an old "supported" vs a later "tested/abandoned" of the same statement) — the
         # misevolution guard: memory must not keep pushing a refuted correlation.

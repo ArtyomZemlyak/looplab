@@ -375,9 +375,19 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
         if not self._e.memory_dir:
             return None
         try:
-            return file_identity((Path(self._e.memory_dir) / "lessons.jsonl").stat())
+            stamp = file_identity((Path(self._e.memory_dir) / "lessons.jsonl").stat())
         except OSError:
             return None
+        if not getattr(self._e, "_lesson_prior_claim_decisions", False):
+            return stamp
+        # The prior also reads the operator's claim decisions (doc 69 69.21), so a `claim-decide`
+        # made mid-run must count as a change: without it a rejection waited for the next run to
+        # write a lesson. An absent/unreadable ledger is its own stamp, not a failed one.
+        try:
+            decided = file_identity((Path(self._e.memory_dir) / "claim_decisions.jsonl").stat())
+        except OSError:
+            decided = None
+        return (stamp, decided)
 
     def maybe_refresh_lessons(self, state: RunState) -> RunState:
         """M6 read side (doc 13 §7 item 5): every `lessons_refresh_every` NEW nodes, re-read the
