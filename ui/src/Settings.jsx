@@ -1339,7 +1339,7 @@ export default function Settings({ onBack, initialSection = '' }) {
             <strong ref={providerHeadingRef} id="settings-provider-check-heading" tabIndex={-1}>
               Saved LLM connection
             </strong>
-            <span>Optional connectivity check for the provider configuration used by new runs.</span>
+            <span>For Assistant: set Model and Base URL, Save, then Test active LLM. The test may bill; local endpoints may need no key.</span>
           </div>
           <CredentialState credential={credential} writeError={credentialWriteError}
             onRefresh={mutationUnknown ? reconcileUnknown : reloadSavedSettings}

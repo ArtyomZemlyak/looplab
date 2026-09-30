@@ -3454,8 +3454,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           : firstRun
             ? 'Describe a goal to get a launch proposal. The run starts only after you review and approve it.'
             : 'Describe a goal, ask about runs, or plan an experiment.'}</p>
-      {firstRun && !newRunDraft && <div className="asst-new-run-hint">
-        <span>Before your first message, check your model connection in Settings.</span>
+      {firstRun && <div className="asst-new-run-hint">
+        <span>Set and test your model. A test request may be billed.</span>
         <button type="button" className="btn sm" onClick={openAssistantModelSettings}>
           Model settings
         </button>
