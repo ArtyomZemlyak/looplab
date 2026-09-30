@@ -1510,6 +1510,24 @@ BENIGN_TERMINAL_REASONS: frozenset[str] = frozenset({
     "aborted", "card_dropped", "proxy_skipped", "superseded", "frozen",
 })
 
+
+def search_outcome(state, node) -> "Optional[bool]":
+    """Whether a node is an OUTCOME of the search, and which: True = a failure, False = an evaluated
+    node, None = not an outcome at all — deleted (`tombstoned`), aborted by the operator, a benign
+    terminal (`BENIGN_TERMINAL_REASONS`), or not finished. The failure half is exactly the fold's
+    failure-spike rule (`events/replay.py::_counts_as_current_failure`, pinned equal by
+    `tests/test_strategist_outcome_rule.py`); the Strategist's `failure_rate` and mean eval cost and
+    its stall signals read this one rule (critic 2026-09-30, crit_v52 F1/F6: a deleted node's
+    charge-only `failed` terminal read as a failed push on the champion and requested paid research)."""
+    if node.tombstoned or node.id in getattr(state, "aborted_nodes", ()):
+        return None
+    if node.status is NodeStatus.evaluated:
+        return False
+    if (node.status is NodeStatus.failed
+            and str(node.error_reason or "").strip().lower() not in BENIGN_TERMINAL_REASONS):
+        return True
+    return None
+
 # THE RUN-LEVEL STOP WORD (doc 52 §5.1 row 6). `run_finished.reason` / `RunState.stop_reason` was
 # decided at ELEVEN sites by `str(x or "").lower() == "error"` against a word no registry held —
 # the two registries above cover NODE terminals. One site WRITES it (`cli/run_cmds.py`'s guarded

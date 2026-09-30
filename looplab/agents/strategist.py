@@ -36,7 +36,7 @@ from looplab.core.config import (PARALLELISM_ALIASES, canonicalize_parallelism_s
                                  governed_eval_timeout)
 from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import LLM_LANES
-from looplab.core.models import Node, NodeStatus, RunState
+from looplab.core.models import Node, NodeStatus, RunState, search_outcome
 from looplab.core.prompts import PromptStore, render
 
 # The novelty-stance vocabulary (the Strategist-owned dial). Centralized so the write side
@@ -205,16 +205,16 @@ class Strategist(Protocol):
 # --------------------------------------------------------------------------- #
 
 def failure_rate(state: RunState) -> float:
-    # A node the operator DELETED (`tombstoned`) is not an outcome of the search: the delete
-    # abandons its lifecycle with a charge-only `failed` terminal (`_charge_abandoned_lifecycles`),
-    # which read here as a failure — driven, one deleted node moved the rate 0.0 -> 0.5 (critic
-    # 2026-09-30, crit_v46 L2). Selection already reads it as invisible (`RunState.feasible_nodes`).
-    live = [n for n in state.nodes.values() if not n.tombstoned]
-    total = sum(1 for n in live if n.status in (NodeStatus.evaluated, NodeStatus.failed))
-    if not total:
+    # Over the search's OUTCOMES only (`core/models.py::search_outcome`, the fold's own failure
+    # rule): a node the operator DELETED — its lifecycle closed by a charge-only `failed` terminal
+    # (`_charge_abandoned_lifecycles`) — or aborted, or a benign terminal (`proxy_skipped`,
+    # `superseded`, …) says nothing about the experiment. Driven: one deleted node moved the rate
+    # 0.0 -> 0.5 (crit_v46 L2); a proxy skip and an abort made 0.5 and "high failure rate" where the
+    # engine counted no failure at all (crit_v52 F6).
+    outcomes = [o for o in (search_outcome(state, n) for n in state.nodes.values()) if o is not None]
+    if not outcomes:
         return 0.0
-    failed = sum(1 for n in live if n.status is NodeStatus.failed)
-    return failed / total
+    return sum(outcomes) / len(outcomes)
 
 
 # The operator family a stall is counted over: nodes that TRIED to beat the leader. A `draft` is a
@@ -238,8 +238,11 @@ def improves_since_best(state: RunState) -> int:
     best_id = state.best_node_id
     if best_id is None:
         return 0
+    # A deleted or aborted node is no push on the leader (crit_v52 F1, driven: six deleted improves
+    # read as a hard stall — paid deep research and a stagnation endgame).
     return sum(1 for n in state.nodes.values()
-               if n.id > best_id and n.operator in STALL_OPERATORS)
+               if n.id > best_id and n.operator in STALL_OPERATORS
+               and not n.tombstoned and n.id not in state.aborted_nodes)
 
 
 def _descends_from_champion(state: RunState, champion: Node) -> set[int]:
@@ -310,8 +313,10 @@ def stall_rung(state: RunState, stall_window: int) -> tuple[int, int]:
     later or not at all.
 
     Deterministic over the folded DAG, like `improves_since_best` above (of which it is the windowed
-    reading; that count stays unfiltered because it is a prompt input); `(0, 0)` when there is no
-    leader yet or the window has not filled once.
+    reading; that count stays unfiltered by LINEAGE because it is a prompt input); `(0, 0)` when
+    there is no leader yet or the window has not filled once. Both skip a node the operator deleted
+    or aborted, which is no attempt of the search's (crit_v52 F1: six deleted improves were the hard
+    stall that requested paid deep research and cut a stagnation endgame).
     """
     window = max(1, int(stall_window or 0))
     best_id = state.best_node_id
@@ -323,6 +328,7 @@ def stall_rung(state: RunState, stall_window: int) -> tuple[int, int]:
     lineage = _descends_from_champion(state, champion)
     after = sorted(n.id for n in state.nodes.values()
                    if n.id > best_id and n.operator in STALL_OPERATORS
+                   and not n.tombstoned and n.id not in state.aborted_nodes   # crit_v52 F1
                    and (n.id in lineage or _scored_against_champion(state, n, champion)))
     rung = len(after) // window
     if rung == 0:
