@@ -530,3 +530,151 @@ def test_a_batch_roll_reads_its_own_receipt_not_the_shared_attribute(tmp_path, c
     warned = [r.getMessage() for r in caplog.records if "was cut short by its" in r.getMessage()]
     assert racing.last_budget_exhausted == "", "premise: the concurrent lane wrote last"
     assert out["proposal"].ideas and len(warned) == 1 and "turns" in warned[0], warned
+
+
+# ------------------------------------------ the panels and the gate pick; the receipt follows the pick
+
+class _NotedMembers:
+    """A base Researcher whose members note their OWN receipts, in order (`receipts`), proposing the
+    point x=2 first — which the warm history (`_warm_state`) predicts best — and x=9 after. Its
+    SHARED attribute is a decoy: another lane's propose rewrites it between each member's note and
+    any read of it, so only a receipt taken from the member's own scope is the member's."""
+
+    def __init__(self, receipts, client=None):
+        self.receipts = list(receipts)
+        self.calls = 0
+        self.client = client
+        self.bounds = None
+        self.last_budget_exhausted = ""
+
+    def propose(self, _state, _parent):
+        from looplab.agents.propose_receipts import note_propose_receipt
+        self.calls += 1
+        note_propose_receipt(self.receipts[self.calls - 1])
+        self.last_budget_exhausted = "time"          # another lane's propose, in between
+        x = 2.0 if self.calls == 1 else 9.0
+        return Idea(operator="draft", params={"x": x, "y": -x},
+                    rationale=f"member {self.calls}", hypothesis=f"hypothesis {self.calls}")
+
+
+@pytest.mark.parametrize("receipts", [["", "turns"], ["turns", ""]])
+def test_the_surrogate_panel_notes_its_PICK_s_receipt_last(receipts):
+    """crit_v58 L3, driven: the K members each noted into the CALLER's scope, so the engine read the
+    LAST member's receipt whichever was picked — a converged pick warned TRUNCATED off a later
+    member's cut, and a cut pick read converged off a later clean one. Each member now proposes in
+    its own scope and the pick's receipt is noted last. MUTATIONS, each red here: no note of the
+    pick's (the path before the fix, where the members' own notes came last); the last member's
+    receipt noted instead of the pick's; a member's receipt read off the shared attribute (its
+    scope dropped) — the decoy's "time"."""
+    from looplab.agents.propose_receipts import propose_receipt_scope, scoped_budget_exhausted
+    from looplab.search.panel import PanelResearcher
+
+    base = _NotedMembers(receipts)
+    panel = PanelResearcher(base, k=2, bounds=_TOY_BOUNDS, warmup=3)
+    with propose_receipt_scope() as box:
+        idea = panel.propose(_warm_state(), None)
+    assert base.calls == 2 and idea.rationale.startswith("member 1 "), "premise: member 1 is picked"
+    assert scoped_budget_exhausted(box, panel) == receipts[0], box
+
+
+@pytest.mark.parametrize("receipts", [["", "turns"], ["turns", ""]])
+def test_the_foresight_panel_notes_its_PICK_s_receipt_last_on_the_independent_path(receipts):
+    """crit_v58 L3, the foresight panel's independent fan-out (no `alternatives` session): the same
+    defect and the same rule as the surrogate panel's above. MUTATIONS, each red here: the members in
+    the caller's scope with `receipts=None` handed to `_pick` (the path before the fix) -> the last
+    member's; a member's scope dropped -> the decoy's "time"."""
+    from looplab.agents.propose_receipts import propose_receipt_scope, scoped_budget_exhausted
+    from looplab.search.foresight import ForesightPanelResearcher
+
+    class _RanksMemberOneFirst:
+        def complete_tool(self, _messages, _json_schema):
+            return {"order": [0, 1], "confidence": 0.9, "reason": "test"}
+
+        def complete_text(self, _messages):
+            return "not json"
+
+    base = _NotedMembers(receipts, client=_RanksMemberOneFirst())
+    panel = ForesightPanelResearcher(base, k=2)
+    with propose_receipt_scope() as box:
+        idea = panel.propose(_warm_state(), None)
+    assert base.calls == 2 and idea.rationale.startswith("member 1 "), "premise: member 1 is picked"
+    assert panel.last_foresight and panel.last_foresight["chosen"] == 0
+    assert scoped_budget_exhausted(box, panel) == receipts[0], box
+
+
+def test_the_surrogate_notes_every_receipt_into_the_caller_s_scope():
+    """crit_v58 L4, driven: past warm-up the surrogate proposes WITHOUT a call and noted nothing, so
+    the engine's read fell back to this SHARED wrapper's attribute — which a concurrent lane's
+    delegated, cut-short propose rewrites between this call's return and the read (that write is
+    made by hand below). Below warm-up the delegate's OWN receipt is forwarded — a delegate that
+    writes only its attribute included — and the random bootstrap notes "" too. MUTATIONS, each red
+    here: no note on the numeric path; the delegate's receipt left on the attribute alone."""
+    from looplab.agents.propose_receipts import propose_receipt_scope, scoped_budget_exhausted
+    from looplab.search.surrogate import SurrogateResearcher
+
+    cut = _CutEveryCall()
+    surrogate = SurrogateResearcher(_TOY_BOUNDS, fallback=cut)
+    with propose_receipt_scope() as box:
+        idea = surrogate.propose(_warm_state(), None)
+    assert "surrogate-guided" in idea.rationale and cut.calls == 0
+    surrogate.last_budget_exhausted = "turns"          # another lane's delegated propose, in between
+    assert box == [""] and scoped_budget_exhausted(box, surrogate) == ""
+    with propose_receipt_scope() as box:
+        surrogate.propose(RunState(goal="g", direction="min"), None)
+    assert cut.calls == 1 and box == ["turns"], "the delegate's own receipt, forwarded"
+    with propose_receipt_scope() as box:
+        idea = SurrogateResearcher(_TOY_BOUNDS).propose(RunState(goal="g", direction="min"), None)
+    assert "bootstrap" in idea.rationale and box == [""]
+
+
+def test_the_receipt_of_the_returned_proposal_is_found_by_identity():
+    """`node_build._receipt_of`'s truth table: the RETURNED proposal's own receipt by identity (the
+    gate may keep the original after asking for another, crit_v58 N3); a proposal no call returned
+    as-is (the gate's nudged copy) takes the latest receipt; nothing answered, ""."""
+    from looplab.engine.node_build import _receipt_of
+
+    first, again = Idea(operator="draft", params={}), Idea(operator="draft", params={})
+    answered = [(first, ""), (again, "turns")]
+    assert _receipt_of(first, answered) == "" and _receipt_of(again, answered) == "turns"
+    assert _receipt_of(first.model_copy(), answered) == "turns"
+    assert _receipt_of(first, []) == ""
+
+
+@pytest.mark.parametrize("kind", ["draft", "improve"])
+def test_a_proposal_the_gate_KEPT_carries_its_own_receipt_not_the_re_proposal_s(
+        tmp_path, monkeypatch, caplog, kind):
+    """crit_v58 N3, driven on both proposal paths: the gate asked for a second proposal — cut short by
+    its turn budget — and then KEPT the original, which had converged. The node is built from the
+    original, so it carries the original's receipt: the re-proposal is warned about once, at its
+    own link, and the kept original never. MUTATION: link the final candidate with the LAST
+    receipt (the reading before the fix) -> two warnings."""
+    from looplab.adapters.toytask import ToyTask
+    from looplab.events.replay import fold
+    from tests.factories import TOY_TASK, make_engine
+
+    researcher = _CleanThenCut()
+    engine = make_engine(tmp_path / kind, task=ToyTask.load(TOY_TASK), researcher=researcher)
+    engine.store.append("run_started", {
+        "run_id": engine.run_dir.name, "task_id": "toy", "goal": "g", "direction": "min"})
+    action: dict = {"kind": "draft"}
+    if kind == "improve":
+        engine.store.append("node_created", {
+            "node_id": 0, "parent_ids": [], "operator": "draft", "code": "print(1)",
+            "idea": {"operator": "draft", "params": {"x": 0.0, "y": 0.0}}})
+        engine.store.append("node_evaluated", {
+            "node_id": 0, "generation": 0, "metric": 1.0, "eval_seconds": 0.1})
+        action = {"kind": "improve", "parent_id": 0}
+
+    def _gate_keeps_the_original(_state, idea, *, repropose=None, **_kw):
+        again = repropose()
+        assert again is not None and again.rationale == "proposal 2"
+        return idea
+
+    monkeypatch.setattr(engine, "_apply_novelty_gate", _gate_keeps_the_original)
+    with caplog.at_level("WARNING", logger="looplab.engine.orchestrator"):
+        idea = engine._prepare_node_idea(action, fold(engine.store.read_all()),
+                                         researcher=engine.researcher, prospective_node_id=1,
+                                         source="researcher")
+    warned = [r.getMessage() for r in caplog.records if "cut short by its" in r.getMessage()]
+    assert idea is not None and idea.rationale == "proposal 1" and researcher.calls == 2
+    assert len(warned) == 1, "the re-proposal once, at its own link; the kept original never"

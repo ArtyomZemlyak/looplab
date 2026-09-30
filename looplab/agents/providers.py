@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from looplab.core.config import claim_decisions_enabled
 from looplab.core.evidence import envelope_enabled
 
 if TYPE_CHECKING:                      # `adapters.tasks` re-exports from `factory`, so a runtime
@@ -102,7 +103,7 @@ def _shared_providers(task: TaskAdapter, settings, run_dir=None, *, core_only: b
         # search (an unknown role deliberately sees all roles — tools/cross_run_tools.py::CrossRunTools).
         providers.append(CrossRunTools(
             settings.memory_dir, role=role, audience="run",
-            claim_decisions=getattr(settings, "lesson_prior_claim_decisions", False)))
+            claim_decisions=claim_decisions_enabled(settings)))
     if core_only:
         return providers
     cases_path = (str(Path(settings.memory_dir) / "cases.jsonl")
@@ -122,7 +123,7 @@ def _shared_providers(task: TaskAdapter, settings, run_dir=None, *, core_only: b
         # …and the operator's claim decisions, as the passive prior reads them (doc 69 69.21b).
         providers.append(MemoryTools(
             settings.memory_dir, role=role,
-            claim_decisions=getattr(settings, "lesson_prior_claim_decisions", False)))
+            claim_decisions=claim_decisions_enabled(settings)))
     # Skills: hand-written (skills_dir) + promoted M4 auto-distilled (<memory_dir>/skills) in ONE
     # SkillTools over BOTH dirs. Candidate auto-skills remain on disk for later promotion but the
     # library's production default hides them. Two separate providers would each register

@@ -498,10 +498,11 @@ class StrategyCadenceMixin:
         return coverage_signal(state, resolution=self.archive_resolution)
 
     def _plateau_key(self, state: RunState) -> tuple:
-        """The `(leader, rung)` identity of the plateau the run is on — rung 0 when it is not on one.
-        The in-process memo `_maybe_consult_strategist` keeps for `plateau_due`'s `seen` is built from
-        these (`cadence.plateau_consulted`: the highest rung consulted per leader), so the identity is
-        computed in exactly one place for the gate and for the memo."""
+        """The `(leader, rung)` identity of the plateau the run is on — rung 0 when it is not on one;
+        the leader named by its node id AND lifecycle (`_plateau_leader`). The in-process memo
+        `_maybe_consult_strategist` keeps for `plateau_due`'s `seen` is built from these
+        (`cadence.plateau_consulted`: the highest rung consulted per leader lifecycle), so the
+        identity is computed in exactly one place for the gate and for the memo."""
         rung, _started_at = stall_rung(
             state, strategist_stall_window(getattr(self, "strategist", None)))
         return _plateau_leader(state), rung
@@ -1028,9 +1029,10 @@ class StrategyCadenceMixin:
                       and self._should_consult(
                           state, marks=state.strategy_history,
                           # The plateau memo (doc 52 row 7): the highest rung this process consulted
-                          # on, per leader. Spent beside `_strategist_consulted_at` below, and for the
-                          # same reason — a stalled run whose Strategist agrees with itself records
-                          # nothing, and without this the plateau re-fires at every new node count.
+                          # on, per leader LIFECYCLE (`_plateau_leader`). Spent beside
+                          # `_strategist_consulted_at` below, and for the same reason — a stalled run
+                          # whose Strategist agrees with itself records nothing, and without this the
+                          # plateau re-fires at every new node count.
                           plateau_seen=getattr(self, "_strategist_plateau_seen", None))
                       and not self._autonomous_strategy_already_recorded_at(state, n)
                       # THE MONEY BOUND for the in-flight cadence (F1i). Both durable gates above close

@@ -361,6 +361,16 @@ def default_agent_control() -> dict[str, list[str]]:
     return {k: list(v) for k, v in DEFAULT_AGENT_CONTROL.items()}
 
 
+def claim_decisions_enabled(settings) -> bool:
+    """`Settings.lesson_prior_claim_decisions` as the `claim_decisions=` argument the two pull tools
+    take (`tools/memory_tools.py::MemoryTools`, `tools/cross_run_tools.py::CrossRunTools`; doc 69
+    69.21b). ONE reader, because the switch reaches the role builders, the Developer backends,
+    Genesis's two doors and the owner Assistant — three of which never passed it (critic crit_v58
+    N2), so an operator's rejected lesson still reached them. Absent (a duck-typed settings stub)
+    means OFF: the tools' historical results."""
+    return bool(getattr(settings, "lesson_prior_claim_decisions", False))
+
+
 def governed_eval_timeout(requested, ceiling) -> float | None:
     """An AGENT-requested eval timeout as it may be ACCEPTED: a finite positive number, clamped to the
     operator's `max_eval_timeout` — or None when the request is not a usable number at all.

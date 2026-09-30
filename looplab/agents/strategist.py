@@ -311,7 +311,8 @@ def stall_rung(state: RunState, stall_window: int) -> tuple[int, int]:
     mid-plateau the consult trigger (`engine/cadence.py::plateau_due`) may re-open one consult for
     the rung it re-derives; the endgame's stall trigger (`engine/plan.py::replan`) only ever fires
     later or not at all. Inside one process a delete or abort that LOWERS the rung re-opens nothing:
-    the trigger's memo keeps the highest rung consulted per leader (`plateau_consulted`, crit_v54 F1).
+    the trigger's memo keeps the highest rung consulted per leader LIFECYCLE (`plateau_consulted`,
+    crit_v54 F1; a reset leader is a new one, `engine/strategy.py::_plateau_leader`, crit_v56 F2).
 
     Deterministic over the folded DAG, like `improves_since_best` above (of which it is the windowed
     reading; that count stays unfiltered by LINEAGE because it is a prompt input); `(0, 0)` when

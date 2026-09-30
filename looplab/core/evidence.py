@@ -213,9 +213,9 @@ def neutralize_markers(text: str, label: str) -> str:
     """`text` with every spelling of `label`'s two fence markers the matcher reads folded inert — and
     nothing else, so a text holding no marker comes back byte for byte. What it reads is
     `_sub_through_format_chars`'s VIEW; what it does not is stated there and beside `_CONFUSABLE`: a
-    look-alike from a script outside that table, and a visible separator inside a word (a space of
-    any kind, the Ogham space mark U+1680), which splits the word for the matcher as it does for a
-    reader.
+    look-alike from a script outside that table, an ASCII look-alike (`l`, `1` or `|` for the `I`),
+    and a visible separator inside a word (a space of any kind, the Ogham space mark U+1680), which
+    splits the word for the matcher as it does for a reader.
 
     For a message that is evidence FROM ITS LABEL TO ITS END, where no marker inside it can be true:
     the Boss's (`serve/llm_context.py::boss_prompt_parts`). Its label is a bare prefix, so a block
@@ -362,19 +362,56 @@ _TAG_ASCII = (0xE0020, 0xE007E)
 
 # Look-alikes of the Latin letters: Cyrillic and Greek letters drawn like a Latin one, the Latin small
 # capitals, the dotless i and j (crit_v54 F4, driven: a close in Greek, Cyrillic or small-capital
-# letters read as live). Each reads as its Latin twin in the view — asked BEFORE NFKC, which moves the
-# lunate sigmas `Ϲ`/`ϲ` to `Σ`/`ς` and so made their rows dead (crit_v56 F1, driven); the matcher is
-# case-insensitive, so either case serves. The palochka reads as the `I` it stands in for in the one
-# label in use, and the izhitsa as its `V` (crit_v56 F1). A LIMIT, stated rather than hidden: a
-# look-alike from any other script (Cherokee, Armenian, Coptic, …) is not folded — the fold covers the
-# scripts a model most readily reads as Latin, and the fence's markers are one defence among several.
+# letters read as live), the eth and the African D, drawn as a `D` with a stroke (crit_v58 N1). Each
+# reads as its Latin twin in the view — asked BEFORE NFKC, which moves the lunate sigmas `Ϲ`/`ϲ` to
+# `Σ`/`ς` and so made their rows dead (crit_v56 F1, driven); the matcher is case-insensitive, so either
+# case serves. The palochka reads as the `I` it stands in for in the one label in use, and the izhitsa
+# as its `V` (crit_v56 F1). A Latin letter its Unicode NAME spells with a mark is not a row here but a
+# rule (`_latin_variants`). LIMITS, stated rather than hidden: a look-alike from any other script
+# (Cherokee, Armenian, Coptic, …) is not folded — the fold covers the scripts a model most readily
+# reads as Latin, and the fence's markers are one defence among several — and neither is an ASCII one:
+# ASCII is its own view (`_fold_char`), so `l`, `1` or `|` standing for the label's `I` keeps a close
+# live to the matcher. Folding those would rewrite the view of every honest ASCII text for a letter
+# the label spells once (crit_v58 N1).
 _CONFUSABLE = dict(zip(
     "АВЕКМНОРСТХУЅІЈԀԚԜҮҺӀѴаеорсухѕіјһԁԛԝүӏѵ"        # Cyrillic
     "ΑΒΕΖΗΙΚΜΝΟΡΤΥΧϹͿονικαυϲϳ"                         # Greek
-    "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘʀꜱᴛᴜᴠᴡʏᴢıȷ",                      # small capitals, dotless i and j
+    "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘʀꜱᴛᴜᴠᴡʏᴢıȷ"                       # small capitals, dotless i and j
+    "ÐðƉ",                                              # the eth, the African D
     "ABEKMHOPCTXYSIJDQWYHIVaeopcyxsijhdqwyIv"
     "ABEZHIKMNOPTYXCJovikaucj"
-    "ABCDEFGHIJKLMNOPRSTUVWYZij"))
+    "ABCDEFGHIJKLMNOPRSTUVWYZij"
+    "DdD"))
+
+# THE LATIN LETTERS A NAME SPELLS WITH A MARK (crit_v58 N1, driven: `ENĐ UNŦRUSŦEĐ_RUN_ɆVƗĐENCE` read
+# as live). A letter with a stroke, a bar, a hook, a tail or a curl has no decomposition, so NFKD kept
+# it; Unicode names it `LATIN <CAPITAL|SMALL> LETTER <X> WITH <mark>` (or `… <X> BAR`), and the view
+# reads it as that X. A name that adds a second LETTER (`… D WITH SMALL LETTER Z`, a digraph) names no
+# mark and is left to NFKD, which spells both. Derived from the names of the Latin blocks below
+# (~1,900 code points) once, on first use.
+_LATIN_BLOCKS = ((0x0080, 0x02AF), (0x1D00, 0x1DBF), (0x1E00, 0x1EFF), (0x2C60, 0x2C7F),
+                 (0xA720, 0xA7FF), (0xAB30, 0xAB6F), (0x10780, 0x107BF), (0x1DF00, 0x1DFFF))
+_LATIN_WITH_A_MARK = re.compile(r"LATIN (CAPITAL|SMALL) LETTER (?:DOTLESS )?([A-Z])"
+                                r"(?: WITH (?!SMALL LETTER|CAPITAL LETTER).+| BAR)")
+
+
+@functools.lru_cache(maxsize=1)
+def _latin_variants() -> dict:
+    """Every letter of the Latin blocks its NAME spells as a base letter with a mark, to that letter
+    in its case (see `_LATIN_WITH_A_MARK`)."""
+    table = {}
+    for low, high in _LATIN_BLOCKS:
+        for cp in range(low, high + 1):
+            named = _LATIN_WITH_A_MARK.fullmatch(unicodedata.name(chr(cp), ""))
+            if named:
+                table[chr(cp)] = named[2] if named[1] == "CAPITAL" else named[2].lower()
+    return table
+
+
+def _twin(ch: str):
+    """The Latin letter `ch` is drawn as — a look-alike's twin, or the base of a letter with a mark —
+    else None."""
+    return _CONFUSABLE.get(ch) or _latin_variants().get(ch)
 
 
 @functools.lru_cache(maxsize=1)
@@ -393,8 +430,8 @@ def _format_chars() -> dict:
 def _fold_char(cp: int):
     """What the character `cp` reads as in the matcher's VIEW: None (it renders as nothing, or only as
     a mark on the letter before it), the ASCII character a TAG character encodes, its Latin twin when
-    it is a look-alike (`_CONFUSABLE`), or else its NFKC compatibility form with its diacritics
-    dropped (`_MARKS`) and every look-alike in it read as its twin."""
+    it is a look-alike or a Latin letter with a mark (`_twin`), or else its NFKC compatibility form
+    with its diacritics dropped (`_MARKS`) and every such letter in it read as its twin."""
     if cp < 0x80:
         return cp                         # ASCII is its own view
     if _TAG_ASCII[0] <= cp <= _TAG_ASCII[1]:
@@ -403,13 +440,13 @@ def _fold_char(cp: int):
     if cp in ignorable:
         return None
     ch = chr(cp)
-    twin = _CONFUSABLE.get(ch)
+    twin = _twin(ch)
     if twin is not None:
         return twin                       # before NFKC, which moves `Ϲ` to `Σ` (crit_v56 F1)
     # A lone combining mark decomposes to itself and is dropped here, so it reads as nothing.
     bare = "".join(c for c in unicodedata.normalize("NFKD", ch)
                    if unicodedata.category(c) not in _MARKS and ord(c) not in ignorable)
-    folded = "".join(_CONFUSABLE.get(c, c) for c in unicodedata.normalize("NFKC", bare)
+    folded = "".join(_twin(c) or c for c in unicodedata.normalize("NFKC", bare)
                      if ord(c) not in ignorable)
     return folded if folded != ch else cp
 

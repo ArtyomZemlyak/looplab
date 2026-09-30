@@ -1596,10 +1596,11 @@ class EvalAttempt:
     # recover a number from a canary — and by APPLY_REPAIR, which must not reuse a stage the node's
     # workdir never ran.
     canary_failed: bool = False
-    # True when THIS attempt ran an eval canary in THIS process and went on to claim its full eval:
-    # bound by RUN_ATTEMPT (reset at its top) and stamped on the invocation's claim (`canary_ran`),
-    # the one row that can say whose canary an open window holds (`_durable_orphan_settle_seconds`,
-    # crit_v57 M1/L1).
+    # True once THIS attempt's eval canary PASSED in THIS process: bound by RUN_ATTEMPT (reset at its
+    # top, set as the canary passes — before the pause rule may still withhold the full eval, which
+    # then claims nothing) and stamped on the invocation's claim (`canary_ran`), the one row that can
+    # say whose canary an open window holds (`_durable_orphan_settle_seconds`, crit_v57 M1/L1). A
+    # canary skipped as passed by digest, or one that failed, leaves it False.
     canary_ran: bool = False
 
     def charged_eval_seconds(self, extra: float = 0.0) -> float:

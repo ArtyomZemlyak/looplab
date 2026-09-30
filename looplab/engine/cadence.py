@@ -335,8 +335,9 @@ def plateau_due(rung: int, started_at: int, last: int, *, seen, key) -> bool:
 
 def plateau_consulted(seen, key) -> dict:
     """`plateau_due`'s `seen` after a consult at `key = (leader, rung)`: the HIGHEST rung consulted
-    per leader. Per leader, not the last leader only: an operator who deletes the champion hands the
-    lead back to its predecessor, whose rungs were already consulted on."""
+    per leader — named by the consumer by node id AND lifecycle (`strategy.py::_plateau_leader`), so
+    a reset leader is a new one. Per leader, not the last leader only: an operator who deletes the
+    champion hands the lead back to its predecessor, whose rungs were already consulted on."""
     leader, rung = key
     memo = dict(seen or {})
     memo[leader] = max(memo.get(leader, 0), rung)

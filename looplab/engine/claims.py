@@ -18,6 +18,7 @@ import hashlib
 import json
 import math
 import re
+import threading
 import unicodedata
 from collections.abc import Callable
 from typing import Optional
@@ -498,6 +499,69 @@ def _global_key(legacy_key: str) -> str:
     return "\x00global\x00" + legacy_key
 
 
+# THE OPERATOR'S REJECTIONS, ONCE PER STORE STATE (crit_v58 L1, driven: with one rejection in the
+# ledger every `search_lessons` call cost ~1.1 s and every concept card up to 25 s at 20k rows — the
+# claims projection behind the rule digests and redacts every row it groups). The answer depends only
+# on the two files and the reader's scope, so it is kept per `(store identity, ledger identity,
+# scope)`: a new lesson or a new decision is a new key, and repeated calls pay nothing. Bounded, and
+# shared by the pull tools of the process (`tools/memory_tools.py`, `tools/cross_run_tools.py`). The
+# passive prior computes the same rule over the rows its own scan already holds
+# (`engine/lessons_priors.py`), because a second read of a store another run appends to could hold
+# a different window than the one it renders.
+_REJECTED_MEMO: dict = {}
+_REJECTED_MEMO_CAP = 16
+_REJECTED_MEMO_LOCK = threading.Lock()
+
+
+def _scope_key(scope) -> tuple:
+    """Every field of the reader's scope (`LessonScope.__slots__`) — the rows the rule groups."""
+    return tuple((name, getattr(scope, name)) for name in type(scope).__slots__)
+
+
+def operator_rejected_keys(memory_dir, scope) -> frozenset:
+    """The `claims_assessments.py::lesson_claim_key`s of the lessons the operator REJECTED
+    (`operator_rejected_lessons`), decided over the rows the passive prior's scan groups — the
+    bounded window of `lessons.jsonl` (`core/memory_window.py`), a statement, in `scope`, every
+    role — so every reader withholds the same rows of that window, whichever read of the store it
+    holds (doc 69 69.21b; crit_v58 L2, driven: the concept card grouped the whole file and disagreed
+    with the prior both ways). Raises what `load_claim_decisions` raises on an unhealthy ledger: the
+    caller discloses it. Memoized per store state (`_REJECTED_MEMO`)."""
+    from pathlib import Path
+
+    from looplab.core.atomicio import file_identity
+    from looplab.core.memory_window import read_memory_jsonl_window
+    base = Path(memory_dir)
+    try:
+        ledger = file_identity((base / "claim_decisions.jsonl").stat())
+    except FileNotFoundError:
+        return frozenset()                         # no ledger, no decision (the reader's own rule)
+    except OSError:
+        ledger = None                              # unreadable: the reader below says so
+    try:
+        store = file_identity((base / "lessons.jsonl").stat())
+    except OSError:
+        return frozenset()                         # no store, nothing to withhold
+    key = (str(base), store, ledger, _scope_key(scope))
+    if ledger is not None:
+        with _REJECTED_MEMO_LOCK:
+            if key in _REJECTED_MEMO:
+                return _REJECTED_MEMO[key]
+    decisions = load_claim_decisions(base)
+    decoded, _receipt = read_memory_jsonl_window(base / "lessons.jsonl")
+    rows = [row for _index, row in decoded
+            if isinstance(row, dict) and row.get("statement") and scope.allows(row)]
+    # A row that states no claim has no key, and `None` in the set would withhold every such row.
+    result = frozenset(key for key in (lesson_claim_key(rows[hit])
+                                       for hit in operator_rejected_lessons(rows, decisions))
+                       if key is not None)
+    if ledger is not None:
+        with _REJECTED_MEMO_LOCK:
+            if len(_REJECTED_MEMO) >= _REJECTED_MEMO_CAP:
+                _REJECTED_MEMO.clear()
+            _REJECTED_MEMO[key] = result
+    return result
+
+
 def load_claim_decisions(memory_dir) -> dict:
     """Replay current decisions into safe global and structured namespaces.
 
@@ -865,6 +929,7 @@ from looplab.engine.claims_assessments import (  # noqa: F401,E402
     _structured_assessments,
     claim_assessments,
     decision_for_claim,
+    lesson_claim_key,
     lesson_claim_uid,
     lesson_rejected,
     operator_rejected_claim_uids,

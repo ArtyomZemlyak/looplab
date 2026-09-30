@@ -171,24 +171,21 @@ class MemoryTools:
         return rows, receipt
 
     def _operator_rejected(self, rows: list[dict]) -> tuple[frozenset, bool]:
-        """`(indices of rows whose claim the operator REJECTED, decision ledger unreadable?)` — the
-        passive prior's own rule, one function for both (`engine/claims_assessments.py::
-        operator_rejected_lessons`), over the rows the prior's scan groups: a statement, in scope,
-        EVERY role (a claim group's representative spelling may be another role's row). An
-        unreadable ledger withholds nothing and says so: a guessed subset of an operator's
-        decisions is not a decision. With no candidate the ledger is not read at all."""
+        """`(claim keys of the rows the operator REJECTED, decision ledger unreadable?)` — the passive
+        prior's own rule, one function for both (`engine/claims_assessments.py::
+        operator_rejected_lessons`), over the rows the prior's scan groups: the same window, a
+        statement, in scope, EVERY role (a claim group's representative spelling may be another
+        role's row) — `operator_rejected_keys`, memoized per store state. An unreadable ledger
+        withholds nothing and says so: a guessed subset of an operator's decisions is not a
+        decision. With no candidate the ledger is not read at all."""
         if not self.claim_decisions or not self.dir:
             return frozenset(), False
-        candidates = [index for index, row in enumerate(rows)
-                      if row.get("statement") and self._scope.allows(row)]
-        if not candidates:
+        if not any(row.get("statement") and self._scope.allows(row) for row in rows):
             return frozenset(), False
         try:
             # DEFERRED: `tools` reaches `engine` at module level only through its leaves.
-            from looplab.engine.claims import load_claim_decisions, operator_rejected_lessons
-            hits = operator_rejected_lessons([rows[index] for index in candidates],
-                                             load_claim_decisions(self.dir))
-            return frozenset(candidates[hit] for hit in hits), False
+            from looplab.engine.claims import operator_rejected_keys
+            return operator_rejected_keys(self.dir, self._scope), False
         except Exception as exc:  # noqa: BLE001 — an advisory filter: disclosed, never a failed search
             from looplab.core.containment import contain
             contain("memory tool claim decisions", exc)
@@ -260,6 +257,8 @@ class MemoryTools:
         if name == "search_lessons":
             rows, source = self._load("lessons.jsonl")
             rejected, decisions_unavailable = self._operator_rejected(rows)
+            if rejected:
+                from looplab.engine.claims import lesson_claim_key   # DEFERRED: layering, as above
             withheld = 0
             ranked: list[tuple[int, int, dict]] = []
             for index, row in enumerate(rows):
@@ -293,7 +292,7 @@ class MemoryTools:
                 overlap = len(query_tokens & _toks(statement))
                 if query_tokens and not overlap:
                     continue
-                if index in rejected:                  # doc 69 69.21b — counted where it matched
+                if rejected and lesson_claim_key(row) in rejected:   # 69.21b — counted where it matched
                     withheld += 1
                     continue
                 ranked.append((overlap, index, row))

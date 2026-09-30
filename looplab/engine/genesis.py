@@ -187,7 +187,8 @@ def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str
                 kind: Optional[str] = None, draft: Optional[dict] = None,
                 parser: str = "tool_call", memory_dir=None,
                 cross_run_read_tools: bool = False,
-                evidence_envelope: bool = False) -> GenesisResult:
+                evidence_envelope: bool = False,
+                claim_decisions: bool = False) -> GenesisResult:
     """Ask the model to author an inline task from a plain goal. With `kind=None` it also CHOOSES the
     kind; with `kind` set it is CONSTRAINED to that kind and only fills the rest (the user pinned the
     type, Genesis does the rest within it). `draft` is an existing task dict (e.g. from a config file)
@@ -238,7 +239,10 @@ def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str
         from types import SimpleNamespace
         from looplab.agents.agent import CompositeTools
         from looplab.tools.cross_run_tools import CrossRunTools
-        crt = CrossRunTools(memory_dir, role="researcher", audience="run")
+        # …withholding what the operator rejected, as the run's own roles do (doc 69 69.21b; crit_v58
+        # N2: Genesis never passed the switch, so a rejected lesson still reached its cards).
+        crt = CrossRunTools(memory_dir, role="researcher", audience="run",
+                            claim_decisions=claim_decisions)
         # No task passport exists yet. Bind the provider to the operator's goal/direction; an empty or vague
         # scope fails closed rather than exposing the whole configured portfolio to an agent prompt.
         crt.bind_state(SimpleNamespace(task_id="", goal=goal, direction=direction or ""))

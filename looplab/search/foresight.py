@@ -38,7 +38,8 @@ from looplab.agents.roles import (
     BOARD_SEED_CHARS_MAX, WrapsResearcher, bind_idea_to_board_card, forward_hints,
     is_researcher_fallback, next_board_prompt_cards, researcher_budget_exhausted,
 )
-from looplab.agents.propose_receipts import note_propose_receipt
+from looplab.agents.propose_receipts import (note_propose_receipt, propose_receipt_scope,
+                                             scoped_budget_exhausted)
 from looplab.core.llm import BudgetExceeded
 from looplab.core.config import MAX_FORESIGHT_VERIFY_SAMPLES
 from looplab.core.models import NodeStatus
@@ -628,6 +629,15 @@ class ForesightPanelResearcher(WrapsResearcher):
         idea = self.base.propose(state, parent)
         return bind_idea_to_board_card(idea, self._base_board_window(state))
 
+    def _member(self, state, parent, receipts: list):
+        """One of the K independent members, its receipt read from its OWN scope into `receipts` —
+        the members note theirs as they run, so the caller's scope ended with the LAST member's
+        whichever was picked (crit_v58 L3); `_chosen` notes the pick's last."""
+        with propose_receipt_scope() as box:
+            idea = self._bind_base_proposal(state, parent)
+        receipts.append(scoped_budget_exhausted(box, self.base))
+        return idea
+
     def propose(self, state, parent):
         # Forward hints FIRST, even on the no-client pass-through: the engine setattrs them on THIS
         # wrapper (the active researcher), so skipping the mirror would shadow them (P2).
@@ -653,13 +663,14 @@ class ForesightPanelResearcher(WrapsResearcher):
         # halted run abstains exactly as `r is None` does below: the first member comes back, which
         # is the one proposal this method must return, and nothing is recorded as a foresight pick.
         # Outside a run `run_halted()` is always False, so every other call is byte-identical.
-        ideas = [self._bind_base_proposal(state, parent)]
+        receipts: list = []
+        ideas = [self._member(state, parent, receipts)]
         while len(ideas) < self.k and not run_halted():
-            ideas.append(self._bind_base_proposal(state, parent))
+            ideas.append(self._member(state, parent, receipts))
         if len(ideas) < self.k or run_halted():
             self.last_foresight = None
-            return ideas[0]
-        return self._pick(state, parent, ideas)
+            return self._chosen(ideas, 0, receipts)
+        return self._pick(state, parent, ideas, receipts=receipts)
 
     def _propose_alternatives(self, state, parent):
         """Candidate 1 as a session, candidates 2..K as alternatives continuing it (class docstring).
@@ -738,9 +749,10 @@ class ForesightPanelResearcher(WrapsResearcher):
     def _pick(self, state, parent, ideas, *, alternative=None, receipts=None, briefs=None):
         """Rank `ideas` with the world model, record the pick, return it (the first on abstain).
 
-        `alternative` / `receipts` / `briefs` come from `_propose_alternatives` and are None on the
-        historical path, whose telemetry and returned Idea are byte-identical to before they
-        existed."""
+        `alternative` / `briefs` come from `_propose_alternatives` and are None on the historical path,
+        whose telemetry and returned Idea are byte-identical to before they existed. `receipts` rides
+        both paths since crit_v58 L3: the pick's own receipt, noted into the caller's scope and
+        published on this panel's attribute — the returned Idea and the telemetry do not move."""
         # Slice 3: the Strategist's novelty stance biases the K->1 pick. "balanced" (default) leaves
         # the ranking a pure predicted-metric choice — byte-identical to today; "explore" appends a
         # directive so that when candidates are close the ranker PREFERS the more novel/divergent one

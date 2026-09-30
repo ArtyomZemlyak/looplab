@@ -419,23 +419,15 @@ class CrossRunTools:
                 ["slug"]),
         ]
 
-    def _scoped_lessons(self) -> list[dict]:
-        """Lessons in scope for the bound run's task (portfolio-wide when unbound), of EVERY role —
-        the rows the passive prior files claims over (its scan is role-agnostic; the role filter
-        comes after), so the operator-rejected rule reads the same kind of row set in both (doc 69
-        69.21b)."""
-        from looplab.engine.claims import load_claim_lessons
-        from looplab.engine.knowledge_views import filter_claim_source_rows
-        return filter_claim_source_rows(
-            load_claim_lessons(self.dir),
-            lambda lz: self._in_scope(lz, source="lesson"), research=False)
-
-    def _role_lessons(self, scoped: list[dict] | None = None) -> list[dict]:
+    def _role_lessons(self) -> list[dict]:
         """Lessons visible to this role AND in scope: the role's own + shared/untagged (mirrors the
         role-routed cross-run lesson priors), scoped to the bound run's task (portfolio-wide when unbound).
-        An unknown role sees every role. `scoped` is `_scoped_lessons()` when the caller holds it."""
+        An unknown role sees every role."""
+        from looplab.engine.claims import load_claim_lessons
         from looplab.engine.knowledge_views import filter_claim_source_rows
-        lessons = self._scoped_lessons() if scoped is None else scoped
+        lessons = filter_claim_source_rows(
+            load_claim_lessons(self.dir),
+            lambda lz: self._in_scope(lz, source="lesson"), research=False)
         if self.role not in ("researcher", "developer"):
             return lessons
         return filter_claim_source_rows(
@@ -1451,24 +1443,34 @@ class CrossRunTools:
 
         # Lessons that mention it (free-text pros/cons) — match the name token in the statement.
         name_terms = _toks(cname or canon)
-        scoped_lessons = self._scoped_lessons()
-        notes = [lz for lz in self._role_lessons(scoped_lessons)
+        notes = [lz for lz in self._role_lessons()
                  if name_terms and name_terms <= _toks(str(lz.get("statement") or ""))]
-        withheld_notes = 0
+        shown, withheld_notes = 3, 0
+        decisions = (_governance or {}).get("decisions")
         if notes and self.claim_decisions:
-            # The prior's own rule, over the rows the prior groups (in scope, every role — a claim
-            # group's representative spelling may be another role's row), doc 69 69.21b. The
-            # decisions are the governance snapshot's, so an unreadable ledger already failed the
-            # tool closed.
-            from looplab.engine.claims import operator_rejected_lessons
-            hits = operator_rejected_lessons(scoped_lessons, (_governance or {}).get("decisions"))
-            if hits:
-                rejected_rows = {id(scoped_lessons[hit]) for hit in hits}
-                kept = [lz for lz in notes if id(lz) not in rejected_rows]
-                withheld_notes, notes = len(notes) - len(kept), kept
+            # The prior's own rule (doc 69 69.21b), decided over the rows the prior GROUPS — its
+            # bounded window, in scope, every role (`engine/claims.py::operator_rejected_keys`,
+            # memoized per store state) — and, for a note older than that window, over the note's own
+            # claim, which is how the rule reads a row its grouping cannot see. The card reads the
+            # whole store, and grouping all of it disagreed with the prior both ways and cost 25 s at
+            # 20k rows (crit_v58 L1/L2, driven); only the notes it would SHOW are decided, and the
+            # count is of those. The decisions are the governance snapshot's, so an unreadable ledger
+            # already failed the tool closed.
+            from looplab.engine.claims import (lesson_claim_key, lesson_rejected,
+                                               operator_rejected_keys, rejects_anything)
+            if rejects_anything(decisions):
+                rejected, kept = operator_rejected_keys(self.dir, self._scope), []
+                for lz in notes:
+                    if len(kept) == shown:
+                        break
+                    if lesson_claim_key(lz) in rejected or lesson_rejected(lz, decisions):
+                        withheld_notes += 1
+                    else:
+                        kept.append(lz)
+                notes = kept
         if notes:
             lines.append("  what runs noted:")
-            for lz in notes[:3]:
+            for lz in notes[:shown]:
                 out = _safe_text(str(lz.get("outcome") or "noted"), 20)
                 # A retargeted run's lesson keeps the clause its cut would take (doc 68 68.2).
                 lines.append(f"    [{out}] UNTRUSTED_MEMORY="

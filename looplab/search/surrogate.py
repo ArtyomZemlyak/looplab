@@ -13,7 +13,9 @@ from __future__ import annotations
 import random
 from typing import Optional
 
-from looplab.agents.roles import WrapsResearcher, forward_hints, researcher_budget_exhausted
+from looplab.agents.propose_receipts import (note_propose_receipt, propose_receipt_scope,
+                                             scoped_budget_exhausted)
+from looplab.agents.roles import WrapsResearcher, forward_hints
 from looplab.core.models import Idea, Node, RunState
 # Module scope, like every other search module that needs the digest primitives
 # (`search/coverage.py`, `search/panel.py`). These three used to be function-local, annotated
@@ -142,8 +144,8 @@ class SurrogateResearcher(WrapsResearcher):
         # the other way: past warm-up this wrapper proposes WITHOUT calling the fallback, whose
         # receipt then describes an EARLIER proposal, and forwarding it would mark a numeric point
         # that made no call as TRUNCATED. So: "" on entry — which is also what a delegate that raises
-        # leaves — and the fallback's own receipt (both spellings, `researcher_budget_exhausted`)
-        # only after a DELEGATED call returns.
+        # leaves — and the fallback's own receipt (its scope's, else both spellings of its attribute,
+        # `scoped_budget_exhausted`) only after a DELEGATED call returns.
         self.last_budget_exhausted = ""
         # P2 delivery contract: the engine setattrs ephemeral hints on the OUTERMOST active
         # researcher — which may be THIS wrapper — so mirror them onto the fallback before any
@@ -154,10 +156,16 @@ class SurrogateResearcher(WrapsResearcher):
         hist = self._history(state, bounds)
         if not bounds or len(hist) < self.warmup:
             if self.fallback is not None:                 # bootstrap / non-numeric -> delegate
-                idea = self.fallback.propose(state, parent)
-                self.last_budget_exhausted = researcher_budget_exhausted(self.fallback)
+                # The delegate's receipt from its OWN scope, forwarded into the caller's — the
+                # fallback's attribute is a shared instance's last write (doc 69 69.37).
+                with propose_receipt_scope() as box:
+                    idea = self.fallback.propose(state, parent)
+                got = scoped_budget_exhausted(box, self.fallback)
+                self.last_budget_exhausted = got
+                note_propose_receipt(got)
                 return idea
             params = {k: round(self.rng.uniform(lo, hi), 4) for k, (lo, hi) in bounds.items()}
+            note_propose_receipt("")
             return Idea(operator="draft", params=params, rationale="surrogate bootstrap (random)")
         # Sample candidates over the bounds; score each by the acquisition (predicted metric adjusted
         # by an exploration bonus toward sparsely-sampled regions), and pick the optimum for the
@@ -172,5 +180,9 @@ class SurrogateResearcher(WrapsResearcher):
                 best_acq, best_params = acq, x
         params = {k: round(v, 4) for k, v in best_params.items()}
         op = "improve" if parent is not None else "draft"
+        # A numeric point made no call, so its receipt is "" — noted into the caller's scope, or the
+        # engine's read falls back to this SHARED wrapper's attribute, which a concurrent lane's
+        # delegated, cut-short propose may have written (crit_v58 L4, driven; doc 69 69.37).
+        note_propose_receipt("")
         return Idea(operator=op, params=params,
                     rationale=f"surrogate-guided (k-NN BO-lite, predicted={best_acq:.4g} over {len(hist)} obs)")

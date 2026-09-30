@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from looplab.serve.principal import portfolio_access, request_principal
 
-from looplab.core.config import Settings
+from looplab.core.config import Settings, claim_decisions_enabled
 from looplab.core.evidence import envelope_enabled, fence_kwargs
 from looplab.serve.assistant import safe_provider_failure
 from looplab.serve.http import json_object
@@ -336,7 +336,8 @@ def build_router(srv) -> APIRouter:
             _portfolio_ok, _portfolio_why = portfolio_access(request_principal(request), gset)
             if _portfolio_ok:
                 from looplab.tools.cross_run_tools import CrossRunTools
-                cross_run = CrossRunTools(gset.memory_dir, role="researcher", audience="run")
+                cross_run = CrossRunTools(gset.memory_dir, role="researcher", audience="run",
+                                          claim_decisions=claim_decisions_enabled(gset))
                 task = draft.get("task") if isinstance(draft, dict) else {}
                 direction = task.get("direction", "") if isinstance(task, dict) else ""
                 cross_run.bind_state(SimpleNamespace(task_id="", goal=instruction or convo,

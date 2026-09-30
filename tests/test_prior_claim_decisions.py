@@ -481,3 +481,131 @@ def test_the_pull_groups_only_the_rows_its_scope_shows(tmp_path):
     pulled = tools.execute("search_lessons", {"query": "tokenizer"})
     assert _RESPELLED_MARK in pulled and "OPERATOR_REJECTED" not in pulled, pulled
     assert "from the base checkpoint" not in pulled, "this run's own rows stay out of the pull"
+
+
+def test_the_pull_tools_decide_once_per_store_state(tmp_path, monkeypatch):
+    """crit_v58 L1, driven: with one rejection in the ledger every `search_lessons` call re-built the
+    claims projection over the window (~1.1 s at 1,000 rows). The answer is kept per (store, ledger,
+    scope) state and shared by every tool of the process; a new decision is a new state. MUTATION:
+    drop the memo -> one projection per call."""
+    import looplab.engine.claims as claims
+
+    calls = []
+    real = claims.operator_rejected_lessons
+    monkeypatch.setattr(claims, "operator_rejected_lessons",
+                        lambda *a, **k: calls.append(1) or real(*a, **k))
+    mem = _memory(tmp_path)
+    record_claim_decision(str(mem), statement=REJECTED, decision="rejected", scope=TASK)
+    for _ in range(3):
+        assert REJECTED not in _search(mem, on=True)          # a fresh MemoryTools each time
+    assert len(calls) == 1
+    record_claim_decision(str(mem), statement=KEPT, decision="rejected", scope=TASK)
+    both = _search(mem, on=True)
+    assert REJECTED not in both and KEPT not in both and len(calls) == 2
+
+
+# ------------------------------------------------ every builder hands the pull tools the switch (N2)
+
+def test_every_pull_tool_the_package_builds_is_handed_the_operator_s_switch():
+    """crit_v58 N2: three builders — Genesis's CLI door, its route, the owner Assistant — built a
+    `CrossRunTools` without `claim_decisions=`, so a lesson the operator rejected still reached them
+    while the switch (ON by default) withheld it everywhere else. AST over the package, so a fourth
+    builder cannot appear unguarded: every construction of a pull tool passes the keyword. EXEMPT:
+    the judgebench fixture world, whose tool results ARE the case (no run, so no operator's switch).
+    MUTATION: drop the keyword at any builder -> named here."""
+    import ast
+
+    from tests._source_scan import PKG, iter_trees
+
+    exempt = {("trajectory.py", "_provider_memory")}
+    built, offenders = [], []
+    for path, tree in iter_trees(PKG):
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for call in ast.walk(fn):
+                if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                        and call.func.id in {"CrossRunTools", "MemoryTools"}):
+                    continue
+                site = (path.name, fn.name)
+                built.append(site)
+                if site not in exempt and "claim_decisions" not in {k.arg for k in call.keywords}:
+                    offenders.append(f"{path.name}::{fn.name} builds {call.func.id}")
+    assert len(set(built)) >= 7 and set(exempt) <= set(built), "the scan saw the builders"
+    assert not offenders, offenders
+
+
+def test_genesis_and_the_owner_assistant_read_the_switch(tmp_path, monkeypatch):
+    """The three builders crit_v58 N2 named, driven: Genesis's author hands its `CrossRunTools` the
+    switch it is given, the CLI gives it the run's setting through the ONE reader, and the owner
+    Assistant's portfolio provider reads it too. MUTATIONS, each red here: drop the keyword at a
+    builder; the CLI passes no `claim_decisions`."""
+    from types import SimpleNamespace
+
+    import looplab.cli as cli
+    import looplab.engine.genesis as genesis
+    from looplab.cli import app
+    from looplab.core.config import claim_decisions_enabled
+    from looplab.serve.assistant import build_tools
+    from looplab.serve.principal import OWNER_PRINCIPAL
+    from looplab.tools.cross_run_tools import CrossRunTools
+    from typer.testing import CliRunner
+
+    assert claim_decisions_enabled(Settings()) is True, "the switch ships ON"
+    assert claim_decisions_enabled(SimpleNamespace()) is False, "a stub without the field: OFF"
+
+    captured = {}
+
+    def _stop(_client, tools, *_a, **_kw):
+        captured["tools"] = tools
+        raise RuntimeError("stop after assembling the tools")
+
+    monkeypatch.setattr(genesis, "agentic_struct", _stop)
+    for on in (True, False):
+        genesis.author_task("classify some text", client=object(), kinds=("dataset",),
+                            memory_dir=str(tmp_path), cross_run_read_tools=True, claim_decisions=on)
+        tools = captured.pop("tools")
+        crt = next(p for p in getattr(tools, "providers", [tools]) if isinstance(p, CrossRunTools))
+        assert crt.claim_decisions is on
+
+    seen = []
+    monkeypatch.setattr(cli, "make_llm_client", lambda settings, **k: object())
+
+    def _author(goal, **k):
+        seen.append(k.get("claim_decisions"))
+        return genesis.GenesisResult(
+            task={"kind": "quadratic", "goal": goal, "direction": "min",
+                  "bounds": {"x": [-10.0, 10.0], "y": [-10.0, 10.0]}}, rationale="r")
+
+    monkeypatch.setattr(genesis, "author_task", _author)
+    runner = CliRunner()
+    for flag, expected in (([], True), (["-s", "lesson_prior_claim_decisions=false"], False)):
+        result = runner.invoke(app, [
+            "run", "--kind", "quadratic", "--goal", "minimize x^2", "-s", "max_nodes=1",
+            "-s", "backend=toy", *flag, "--out", str(tmp_path / f"cli-{expected}")])
+        assert result.exit_code == 0, result.output
+        assert seen[-1] is expected, seen
+
+    for on in (True, False):
+        settings = SimpleNamespace(memory_dir=str(tmp_path / "mem"), cross_run_read_tools=True,
+                                   lesson_prior_claim_decisions=on)
+        tools = build_tools(tmp_path, mode="auto", settings=settings, principal=OWNER_PRINCIPAL)
+        crt = next(p for p in tools.providers if isinstance(p, CrossRunTools))
+        assert crt.claim_decisions is on
+
+
+def test_a_row_that_states_no_claim_is_never_withheld_by_key(tmp_path, monkeypatch):
+    """A lesson whose statement names no claim (`lesson_claim_uid` is None: punctuation, a stopword)
+    has no claim key, so no member of the rejected set may stand for it — a `None` there withholds
+    every such row at once. Driven by a rule that calls EVERY row of the window rejected: the two
+    claim rows are withheld, the claim-less one still answers the search. MUTATION: keep `None` in
+    `operator_rejected_keys`' set -> it is withheld too."""
+    import looplab.engine.claims as claims
+
+    mem = _memory(tmp_path, _lesson(REJECTED), _lesson(KEPT), _lesson("…"))
+    record_claim_decision(str(mem), statement=REJECTED, decision="rejected", scope=TASK)
+    monkeypatch.setattr(claims, "operator_rejected_lessons",
+                        lambda rows, _decisions: frozenset(range(len(rows))))
+    out = _search(mem, on=True, query="")
+    assert "[RESULT_SET: matched=1; returned=1;" in out, out
+    assert "[OPERATOR_REJECTED: 2 matching lesson(s)" in out, out

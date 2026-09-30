@@ -268,6 +268,18 @@ def stamp_proposal_span(span, idea, *, node_id=None) -> None:
 _OFFLOADED_BUILD = threading.local()
 
 
+def _receipt_of(final, answered) -> str:
+    """The propose receipt of the proposal the novelty gate RETURNED, from `answered`'s `(linked
+    idea, receipt)` pairs in proposal order — by identity, because the gate may keep the original
+    after asking for another, and the last receipt then named a re-proposal the node never built
+    (crit_v58 N3, driven: a converged original warned TRUNCATED). A proposal the gate DERIVED (a
+    nudged copy) takes the latest receipt, the reading before this; "" with none."""
+    for linked, receipt in answered:
+        if linked is final:
+            return receipt
+    return answered[-1][1] if answered else ""
+
+
 class NodeBuildMixin:
     """The engine's node-building helper cluster. See the module docstring for the mixin
     convention (`self` is the Engine)."""
@@ -1152,16 +1164,19 @@ class NodeBuildMixin:
                 stamp_proposal_span(_span, idea, node_id=prospective_node_id)
             if idea is None or _stopped_after_paying():
                 return None
-            # The receipt of the proposal the gate returns: the gate's re-proposal replaces it.
-            answered = [receipt]
+            # Each proposal's receipt beside it: the gate may keep the original after asking for
+            # another, so the one `_link` reports is the RETURNED proposal's (`_receipt_of`).
+            answered = [(idea, receipt)]
 
             def _repropose_draft():
                 if self._run_halted_now():
                     # The gate's second proposal is a NEW paid call (WP-STOP): a stop that landed
                     # during the adjudication starts none. `None` keeps the original idea.
                     return None
-                again, answered[0] = _propose(researcher, None)
-                return _link(self._canonicalize_draft_idea(again), receipt=answered[0])
+                again, got = _propose(researcher, None)
+                linked = _link(self._canonicalize_draft_idea(again), receipt=got)
+                answered.append((linked, got))
+                return linked
 
             with self._paid_progress(PROGRESS_STAGE_BUILD, "novelty",
                                      node_id=prospective_node_id, prospective=True, operator=kind):
@@ -1170,7 +1185,7 @@ class NodeBuildMixin:
                     repropose=_repropose_draft,
                     researcher=researcher, prospective_node_id=prospective_node_id,
                     drop_repeated_duplicate=drop_repeated_duplicate)
-            return _link(final, receipt=answered[0])
+            return _link(final, receipt=_receipt_of(final, answered))
 
         if kind == "merge":
             parents = list(action["parent_ids"])
@@ -1206,23 +1221,28 @@ class NodeBuildMixin:
         # receipt is "" for a numeric point; reading `researcher` there reported the Researcher's
         # LAST cut-short proposal against a point that made no call — driven: two "cut short"
         # warnings for a sweep node whose fallback was never called. The gate's re-proposal goes
-        # through `researcher` and its receipt replaces the first. Taken from the call's own scope
-        # since doc 69 69.37, not read off the handle afterwards.
-        answered = [""]
+        # through `researcher`, with its own receipt beside it, and the one `_link` reports at the
+        # end is the RETURNED proposal's (`_receipt_of`: the gate may keep the original after
+        # asking for another, crit_v58 N3). Taken from the call's own scope since doc 69 69.37, not
+        # read off the handle afterwards.
+        answered: list = []
 
         def _repropose(p=parent):
             if self._run_halted_now():
                 # The gate's second proposal is a NEW paid call (WP-STOP): a stop that landed during
                 # the adjudication starts none. `None` keeps the original, which the fences refuse.
                 return None
-            again, answered[0] = _propose(researcher, p)
-            return _link(self._canonicalize_idea_operator(again, authoritative_operator),
-                         receipt=answered[0])
+            again, got = _propose(researcher, p)
+            linked = _link(self._canonicalize_idea_operator(again, authoritative_operator),
+                           receipt=got)
+            answered.append((linked, got))
+            return linked
 
         with self.tracer.span("propose") as _span:
-            proposal, answered[0] = _propose(proposer, parent)
+            proposal, receipt = _propose(proposer, parent)
             idea = _link(self._canonicalize_idea_operator(proposal, authoritative_operator),
-                         receipt=answered[0])
+                         receipt=receipt)
+            answered.append((idea, receipt))
             stamp_proposal_span(_span, idea, node_id=prospective_node_id)
         if idea is None or _stopped_after_paying():
             return None
@@ -1232,7 +1252,7 @@ class NodeBuildMixin:
                 state, idea, repropose=_repropose,
                 researcher=researcher, prospective_node_id=prospective_node_id,
                 drop_repeated_duplicate=drop_repeated_duplicate)
-        return _link(final, receipt=answered[0])
+        return _link(final, receipt=_receipt_of(final, answered))
 
     @in_llm_lane("build")
     def _create_node(self, action: dict, roles=None, reserved=None, preproposed=None,
