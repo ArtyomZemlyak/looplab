@@ -20,7 +20,7 @@ except ModuleNotFoundError as e:  # allow importing pure action models/mappers w
     APIRouter = HTTPException = Request = Response = JSONResponse = None  # type: ignore[assignment,misc]
 
 from looplab.core.atomicio import best_effort_fsync
-from looplab.core.evidence import envelope_enabled, fence_kwargs
+from looplab.core.evidence import envelope_enabled, fence_kwargs, neutralize_markers
 from looplab.events.eventstore import EventStore, iter_jsonl
 from looplab.events.types import (
     EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_COMMENT_CREATED, EV_DEEP_RESEARCH,
@@ -32,7 +32,7 @@ from looplab.events.types import (
 from looplab.serve.assistant import safe_provider_failure
 from looplab.serve.http import generation_conflict, json_object
 from looplab.serve.llm_context import (
-    BOSS_EVIDENCE_GUARD, _client_tokens, _node_context, boss_prompt_parts)
+    BOSS_EVIDENCE_GUARD, BOSS_EVIDENCE_LABEL, _client_tokens, _node_context, boss_prompt_parts)
 from looplab.serve.paid_ledger import (
     FIRST_TERMINAL_WINS, PaidLedgerSpec, append_claim, confirm_terminal_receipt,
     fold_paid_ledger, record_terminal)
@@ -646,6 +646,12 @@ def build_router(srv) -> APIRouter:
         from looplab.agents.roles import _CONCEPT_AUTHORING_GUIDANCE
         generation, st, node_context = await _boss_prologue(
             rd, lambda state: _node_context(state, nid))
+        # The node context is a candidate's code and its failure accounts, some carrying a block
+        # fenced by the engine: its live `END` marker let whatever followed — the candidate's own
+        # text — read as outside the evidence (critic 2026-09-30, crit_v46 L5, driven). Folded inert
+        # exactly as the other Boss prompts do (`llm_context.py::boss_prompt_parts`); a context
+        # holding no marker keeps its bytes.
+        node_context = neutralize_markers(node_context, BOSS_EVIDENCE_LABEL)
         convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in history)
         prompt = ("Propose ONE next experiment as a structured Idea (operator one of "
                   "draft/improve/merge; numeric params; a short rationale — there is no `debug` operator, a failed node is repaired in place). "
