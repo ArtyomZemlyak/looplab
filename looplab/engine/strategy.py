@@ -240,18 +240,20 @@ class StrategyCadenceMixin:
     def _eval_width_operator_owned(self, state: RunState) -> bool:
         """Is `eval_parallel` the operator's — so a width the Strategist chooses is not applied?
 
-        Two routes, both the engine's own: an axis `_strategy_may` refuses the Strategist
-        (`_operator_width_axes` — launch-explicit settings and `budget_extend`), and a `set_strategy`
-        pin that names the width, which overwrites the Strategist's value when the strategy is recorded
-        (the critic, 2026-09-30: the line stayed silent for that route). The pin is read as the engine
-        will apply it: the fields already ACTIVE under `_pinned`, or a pending pin carrying an int."""
+        Three routes, each read the way the consult APPLIES it (critic 2026-09-30, crit_v45 L4,
+        driven — the line said "not applied" of widths that were, and was silent about one that was
+        not): an axis `_strategy_may` refuses the Strategist (`_operator_width_axes` — launch-explicit
+        settings and `budget_extend`); the CURRENT pending `set_strategy` pin naming a valid width,
+        which `_maybe_consult_strategist` overlays on the decision (its `raw_pin` reads canonical
+        names only, and a later pin REPLACES the pinned set, so an older `_pinned` and a legacy
+        `max_parallel` pin decide nothing); and `agent_control` revoking the Strategist's grant."""
         spellings = set(parallelism_aliases("eval_parallel"))
         if spellings & set(getattr(self, "_operator_width_axes", frozenset())):
             return True
-        if spellings & set((getattr(state, "active_strategy", None) or {}).get("_pinned") or []):
+        pin = (getattr(state, "pending_strategy", None) or {}).get("eval_parallel")
+        if type(pin) is int and 0 <= pin <= 1024:      # `validate_strategy`'s own bound
             return True
-        pending = getattr(state, "pending_strategy", None) or {}
-        return any(type(pending.get(name)) is int for name in spellings)
+        return not self._agent_may("strategist", "eval_parallel")
 
     def _node_budget_ctx(self, state: RunState) -> dict:
         """The node budget and the plan's endgame reserve the Strategist's brief states under

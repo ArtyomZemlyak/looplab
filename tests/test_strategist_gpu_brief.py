@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from looplab.agents.strategist import StrategyContext, _gpu_pool_note, _strategist_brief
 from looplab.core.config import LEGACY_CONFIG_SNAPSHOT_DEFAULTS, Settings
 from looplab.core.models import RunState
@@ -204,21 +206,81 @@ def test_a_non_int_width_is_dropped_before_the_sort(tmp_path):
 
 def test_the_operator_owns_the_width_through_a_set_strategy_pin_too(tmp_path):
     """The critic: a `set_strategy{eval_parallel}` pin overwrites the Strategist's width, and the line
-    stayed silent. Pending (an int) or already active under `_pinned`, either spelling."""
+    stayed silent. Read as the consult APPLIES it (crit_v45 L4): the CURRENT pending pin, canonical
+    name, a valid width — a legacy `max_parallel` pin and an older `_pinned` decide nothing there."""
     engine = _engine(tmp_path, on=True)
     state = RunState()
     assert engine._strategy_ctx(state).eval_parallel_operator_owned is False
     state.pending_strategy = {"eval_parallel": 3}
     assert engine._strategy_ctx(state).eval_parallel_operator_owned is True
-    state.pending_strategy = {"max_parallel": 3}
-    assert engine._strategy_ctx(state).eval_parallel_operator_owned is True
-    state.pending_strategy = {"eval_parallel": "four"}
-    assert engine._strategy_ctx(state).eval_parallel_operator_owned is False, "not a width"
-    state.pending_strategy = {}
+    for not_a_width in ({"max_parallel": 3}, {"eval_parallel": "four"}, {"eval_parallel": 2000},
+                        {"eval_parallel": True}):
+        state.pending_strategy = not_a_width
+        assert engine._strategy_ctx(state).eval_parallel_operator_owned is False, not_a_width
+    state.pending_strategy = {"developer": "default"}
     state.active_strategy = {"eval_parallel": 2, "_pinned": ["eval_parallel"]}
-    assert engine._strategy_ctx(state).eval_parallel_operator_owned is True
-    state.active_strategy = {"eval_parallel": 2, "_pinned": ["policy"]}
-    assert engine._strategy_ctx(state).eval_parallel_operator_owned is False
+    assert engine._strategy_ctx(state).eval_parallel_operator_owned is False, (
+        "a later pin REPLACED the pinned set: the next consult applies the Strategist's width")
+
+
+class _Widen:
+    def __init__(self):
+        self.ctxs = []
+
+    def decide(self, state, ctx):
+        self.ctxs.append(ctx)
+        return {"eval_parallel": 4, "source": "rule", "rationale": "widen"}
+
+
+def _consulted(tmp_path, pins=(), **engine_kwargs):
+    """One real consult by a Strategist that asks for width 4, after the operator's `pins`: what the
+    brief SAID about the width, and whether 4 was then APPLIED."""
+    from looplab.core.models import Idea, Node, NodeStatus
+    from looplab.events.replay import fold
+    from tests.factories import make_engine
+
+    stub = _Widen()
+    engine = make_engine(tmp_path / "run", strategist=stub, strategist_every=1, eval_parallel=1,
+                         strategist_gpu_brief=True, **engine_kwargs)
+    engine._gpu_ids, engine._task_gpu_capable = [0, 1, 2, 3], lambda: True
+    engine.store.append("run_started", {"run_id": "r", "task_id": "toy", "goal": "g",
+                                        "direction": "min"})
+    for count, pin in enumerate(pins, start=1):
+        engine.store.append("set_strategy", {"strategy": pin})
+        state = fold(engine.store.read_all())
+        state.nodes = {i: Node(id=i, operator="draft", idea=Idea(operator="draft"),
+                               status=NodeStatus.evaluated, metric=float(i)) for i in range(count)}
+        engine._strategist_consulted_at = None
+        engine._maybe_consult_strategist(state)
+    stub.ctxs.clear()
+    engine._strategist_consulted_at = None
+    state = fold(engine.store.read_all())
+    state.nodes = {i: Node(id=i, operator="draft", idea=Idea(operator="draft"),
+                           status=NodeStatus.evaluated, metric=float(i)) for i in range(9)}
+    engine._maybe_consult_strategist(state)
+    return stub.ctxs[-1].eval_parallel_operator_owned, engine._eval_parallel == 4
+
+
+@pytest.mark.parametrize("pins, engine_kwargs", [
+    ((), {}),
+    (({"eval_parallel": 1},), {}),
+    (({"max_parallel": 1},), {}),
+    (({"eval_parallel": 1}, {"developer": "default"}), {}),
+    ((), {"agent_control": "revoke"}),
+], ids=["open", "pinned", "legacy-pin", "pin-then-another-pin", "grant-revoked"])
+def test_the_brief_says_not_applied_exactly_when_the_width_is_not_applied(tmp_path, pins,
+                                                                           engine_kwargs):
+    """crit_v45 L4, driven through real consults: the line said "a width you choose is not applied"
+    of a legacy pin and of a pin a later `set_strategy` had replaced — both applied — and nothing
+    when `agent_control` revoked the grant, which applied nothing. MUTATIONS: read `_pinned` or the
+    legacy spelling again; drop the `agent_control` clause."""
+    if engine_kwargs.get("agent_control") == "revoke":
+        from looplab.core.config import default_agent_control
+        control = default_agent_control()
+        control["eval_parallel"] = []
+        engine_kwargs = {"agent_control": control}
+    said_not_applied, applied = _consulted(tmp_path, pins, **engine_kwargs)
+    assert said_not_applied is (not applied)
 
 
 def test_built_nodes_waiting_to_run_are_the_queue_a_width_admits_next(tmp_path):
