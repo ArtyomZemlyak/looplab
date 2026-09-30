@@ -117,3 +117,30 @@ def test_the_summary_row_carries_the_series_and_none_without_a_measured_node(tmp
         "version": TRAJECTORY_VERSION, "evaluated": 2, "complete": True,
         "points": [[0, 0.5, 1], [1, 0.8, 2]]}
     assert rows["bare"]["trajectory"] is None
+    assert rows["measured"]["result_summary"] == {
+        "first": {"node_id": 1, "attempt": 0, "value": 0.5, "confirmed": False, "seeds": None},
+        "selected": {"node_id": 2, "attempt": 0, "value": 0.8, "confirmed": False, "seeds": None},
+    }
+    assert rows["bare"]["result_summary"] is None
+
+
+def test_assistant_result_uses_the_engine_winner_and_skips_rejected_first_scores(tmp_path):
+    from looplab.serve.run_result_summary import run_result_summary
+
+    rd = _log(tmp_path, "r", nodes=[
+        {"id": 0, "metric": 0.99, "violations": [{"name": "latency", "value": 9}]},
+        {"id": 1, "metric": 0.5}, {"id": 2, "metric": 0.8}, {"id": 3, "metric": 0.9}])
+    store = EventStore(rd / "events.jsonl")
+    store.append("node_tombstoned", {"node_ids": [3]})
+    store.append("node_confirmed", {"node_id": 2, "generation": 0, "mean": 0.4, "std": 0.01, "seeds": 3})
+    st = _state(rd)
+    result = run_result_summary(st, running_best(st))
+    assert result["first"]["node_id"] == 1
+    assert result["selected"]["node_id"] == st.best_node_id
+    assert result["selected"]["value"] == 0.4, "show the selected mean, not raw 0.8"
+    store.append("node_confirmed", {"node_id": 2, "generation": 0, "mean": 0.6, "std": 0.01, "seeds": 3})
+    st = _state(rd)
+    result = run_result_summary(st, running_best(st))
+    assert result["selected"] == {
+        "node_id": 2, "attempt": 0, "value": 0.6, "confirmed": True, "seeds": 3}
+    assert set(result) == {"first", "selected"}, "a receipt of values is not a comparison verdict"

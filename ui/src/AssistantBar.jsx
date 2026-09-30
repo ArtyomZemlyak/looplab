@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Turn, PermCard } from './AssistantChat.jsx'
 import AssistantModePicker from './AssistantModePicker.jsx'
 import { OpIcon } from './icons.jsx'
@@ -12,7 +12,7 @@ import { useToast } from './useToast.js'
 import { getRunAccess } from './runMode.js'
 import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
 import { AttentionLauncher, openAttentionCenter, useAttentionIndicator } from './attentionIndicator.jsx'
-import { effectiveRunStatus, pendingApprovalTarget } from './runIndex.js'
+import { effectiveRunStatus, pendingApprovalTarget, terminalReady } from './runIndex.js'
 import { assistantErrorInfo, assistantPreview } from './assistantErrors.js'
 import { reconcilePendingPermissions } from './assistantPermission.js'
 import {
@@ -82,6 +82,7 @@ import { startTurnFallbackPolls } from './assistantTurnPolls.js'
 import { followClientRoute } from './accessibility.jsx'
 
 const FirstRunModelStatus = React.lazy(() => import('./FirstRunModelStatus.jsx'))
+const AssistantRunResult = React.lazy(() => import('./AssistantRunResult.jsx'))
 
 // ── ONE assistant, three flowing views: bar ⇄ side(right) ⇄ full ───────────────────────────────
 //
@@ -754,6 +755,12 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // Autoscroll ONLY when the user is already near the bottom — don't yank them back down while they've
   // scrolled up to read earlier turns during a streaming reply.
   const onFeedScroll = (e) => { const f = e.currentTarget; atBottomRef.current = f.scrollHeight - f.scrollTop - f.clientHeight < 80 }
+  const onResultReady = useCallback(() => {
+    if (atBottomRef.current) requestAnimationFrame(() => {
+      const feed = feedRef.current
+      if (feed) feed.scrollTop = feed.scrollHeight
+    })
+  }, [])
   // The frame runs AFTER the commit that scheduled it, and by then the feed may be gone — folded to
   // the bar, or the whole bar unmounted — so it scrolls only a feed that still exists. Unguarded,
   // that null was a TypeError thrown out of a bare frame (review 2026-09-22, UI-06 follow-up).
@@ -3090,6 +3097,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const selectedRun = runId ? runsById[runId] : null
   const selectedRunStatus = selectedRun ? effectiveRunStatus(selectedRun) : ''
   const selectedRunHasNoNodes = selectedRun?.nodes === 0
+  const showRunResult = !historical && terminalReady(selectedRun || {})
+    && !selectedRun?.finalization_incomplete
   const draftingNewRun = newRunDraft || /^\/(?:new|genesis|run)\b/i.test(input.trim())
   const firstRun = !runId && runsLoaded && runs.length === 0
   const welcomeHints = newRunDraft ? [] : runId
@@ -3447,11 +3456,13 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     {renderWatchStrip()}
     {msgs.length === 0 && <div className="asst-empty">
       <div className="asst-empty-eyebrow">LOOPLAB ASSISTANT</div>
-      <h2>{newRunDraft ? 'What should we investigate?' : runId ? 'Work through this run together' : 'What would you like to explore?'}</h2>
+      <h2>{newRunDraft ? 'What should we investigate?' : showRunResult ? 'What did this run achieve?'
+        : runId ? 'Work through this run together' : 'What would you like to explore?'}</h2>
       <p>{newRunDraft
         ? 'Describe the goal, server paths, and time limit. For example: improve accuracy on [dataset] in three experiments. Review the launch card before starting.'
         : runId
-          ? selectedRunHasNoNodes
+          ? showRunResult ? 'Read the recorded result, open its code, or prepare a question below.'
+            : selectedRunHasNoNodes
             ? 'No experiment has been measured yet. Ask what is due before the first one.'
             : 'Ask about results or the next experiment.'
           : firstRun
@@ -3460,7 +3471,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       {firstRun && <React.Suspense fallback={null}>
         <FirstRunModelStatus onSettings={openAssistantModelSettings} />
       </React.Suspense>}
-      {!input.trim() && welcomeHints.length > 0 && <div className="asst-hints">
+      {!showRunResult && !input.trim() && welcomeHints.length > 0 && <div className="asst-hints">
         {welcomeHints.map(h => <button key={h} className="asst-hint"
           disabled={historical || composerEditingPaused}
           onClick={() => {
@@ -3492,6 +3503,18 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         onLaunchDisclosure={retainTurnLaunchDisclosure}
         onLaunchStarted={settleTurnLaunchStarted} />
     </React.Fragment>)}
+    {showRunResult && <React.Suspense fallback={null}>
+      <AssistantRunResult run={selectedRun} onOpen={openRunFromAssistant} onReady={onResultReady}
+        askDisabled={composerEditingPaused || !!input.trim()}
+        askDisabledReason={input.trim() ? 'Finish or clear your current draft before preparing a result question'
+          : 'Wait for the current action before preparing a question'}
+        onAsk={() => {
+          if (openSessionPendingRef.current || composerEditingPaused || input.trim()) return
+          setNewRunDraft(false)
+          setInput('Explain this run’s result, compare it with the first eligible experiment, and show the caveats and solution artifacts. Do not start another experiment.')
+          inputRef.current?.focus()
+        }} />
+    </React.Suspense>}
     {!historical && pending.length > 0 && <div className="asst-perm-region" role="region"
       aria-label={`${pending.length} pending Assistant approval${pending.length === 1 ? '' : 's'}`}
       aria-live="assertive" aria-atomic="false">

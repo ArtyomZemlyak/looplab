@@ -921,6 +921,10 @@ export function comparabilityStatus(a, b) {
   return statusOfRecords(comparabilityRecord(a), comparabilityRecord(b))
 }
 
+export function nodeComparabilityStatus(a, b) {
+  return statusOfRecords(nodeComparabilityRecord(a), nodeComparabilityRecord(b))
+}
+
 // Does this set of RUNS contain a pair whose keys (or protocols) are provably different? The
 // cross-run refusal.
 export const comparabilityConflict = (runs = []) => anyKeyConflict(

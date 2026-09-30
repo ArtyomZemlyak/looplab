@@ -78,8 +78,11 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // reads saved settings and reuses only explicit health results; no provider probe is automatic.
     // 2026-09-30 plain launch decision: measured 583,762 B JS; +792 B buys the goal/score/edit
     // boundaries before Start, with the launch card still loaded through the Assistant route.
-    js: { gzip: 571 * KIB },
-    css: { gzip: 56 * KIB },
+    // 2026-09-30 result clarity: measured 587,246 B JS / 57,353 B CSS. Assistant's lazy
+    // summary reads the cached run list; Inspector explains scores and repeats separately.
+    // Initial shell remains 80.9 KiB JS / 35.8 KiB CSS, with no new provider/detail request.
+    js: { gzip: 574 * KIB },
+    css: { gzip: 57 * KIB },
   },
   individual: {
     js: { raw: 450 * KIB, gzip: 110 * KIB },
@@ -154,7 +157,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-09-30 plain launch decision: measured 398,906 B JS; the exact review stays visible.
       // 2026-09-30 Essential settings: measured 399,477 B JS (+272 B since permissions);
       // concise descriptions share the existing Config renderer. Lazy boundaries remain unchanged.
-      limits: { js: { gzip: 391 * KIB }, css: { gzip: 45 * KIB } },
+      // 2026-09-30 result clarity: measured 400,869 B JS / 46,371 B CSS; Inspector's
+      // recorded result, repeat checks and comparison qualifications share this route.
+      limits: { js: { gzip: 392 * KIB }, css: { gzip: 46 * KIB } },
     },
     {
       name: 'valid review DAG route',
@@ -187,7 +192,8 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-09-29 merge of master into the branch: measured 261,117 B JS (both sides' Concepts work).
       // 2026-09-30 first-run model status: measured 262,618 B JS in this closure.
       // 2026-09-30 plain launch decision: measured 263,369 B JS in this closure.
-      limits: { js: { gzip: 258 * KIB }, css: { gzip: 43 * KIB } },
+      // 2026-09-30 result clarity: measured 264,356 B JS; Assistant's result body stays lazy.
+      limits: { js: { gzip: 259 * KIB }, css: { gzip: 43 * KIB } },
     },
     {
       name: 'panel-hub increment',

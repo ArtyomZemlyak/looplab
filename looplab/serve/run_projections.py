@@ -38,6 +38,7 @@ from looplab.events.replay import fold
 from looplab.serve.deletion_transaction import (
     DELETE_IDENTITY_PREFIX, DELETE_QUARANTINE_PREFIX, DELETE_RECEIPT_PREFIX)
 from looplab.serve.run_commands import run_generation_token
+from looplab.serve.run_result_summary import run_result_summary
 
 
 def _listed_fence_holds(rd, fence_names: set) -> bool:
@@ -89,6 +90,7 @@ def _unreadable_log_row(rd, stt) -> dict:
         "best_metric": None, "best_confirmed": None, "best_metric_caveats": [],
         "mislead_gap": None, "trajectory": None, "best_metric_comparability": None,
         "headroom": None, "objective_key": None,
+        "result_summary": None,
         "stop_reason": None, "resume_pending": False, "seeded_from": [], "themes": {},
         "concepts": {}, "mtime": stt.st_mtime, "created": stt.st_ctime,
     }
@@ -199,6 +201,7 @@ def _run_row(srv, rd, fence_names: set, *, cache_key: str):
         finalize_incomplete = (
             incomplete_finalize_scope(events) is not None or st.finalization_pending())
         best = st.best()
+        trajectory = running_best(st)
         generation = run_generation_token(events)
         summary = {
             "run_id": rd.name, "task_id": st.task_id, "goal": st.goal,
@@ -251,7 +254,8 @@ def _run_row(srv, rd, fence_names: set, *, cache_key: str):
             # rides on the row rather than costing one state fold per run on the request thread,
             # and it is cached WITH the fold, so a poll pays nothing for it. `None` when no
             # feasible measured node exists. Additive; a legacy client ignores it.
-            "trajectory": running_best(st),
+            "trajectory": trajectory,
+            "result_summary": run_result_summary(st, trajectory),
             # WHAT THIS NUMBER MAY BE RANKED AGAINST (`engine/comparability.py`). The row's own
             # `task_id` + `direction` is what every cross-run surface currently partitions on,
             # and `ui/src/crossRunRank.js` says in its own words why that is not enough: "a

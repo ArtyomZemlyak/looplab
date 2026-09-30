@@ -21,6 +21,30 @@ agent's decision. The empty Lineage view links to **Agent cycle**, which lists c
 admission and finish requirements. A live UI or engine alone does not show whether an
 external agent is connected; see the [external harness guide](external-harness.md).
 
+### Read an experiment result
+
+When a run finishes, Assistant's **Run result** card shows its first eligible experiment
+and the result selected by the engine. It labels metric direction, confirmation and recorded
+caveats. Reading the card makes no model request. **Read Report**, **Open selected code** and
+**Find artifacts** open existing evidence; code navigation retains the exact run generation
+and experiment attempt. **Ask about this result** fills the composer without sending or
+overwriting a nonempty draft. Sending the prepared question may use a paid model.
+
+Select an experiment and open **Overview**. Its **Experiment result** block answers:
+
+- **Evaluation score:** the objective value, with lower/higher direction and its recorded source.
+- **Repeat checks:** a separate confirmation mean, successful seed count and standard deviation,
+  when recorded. Missing spread or insufficient repeats remain explicit.
+- **Eligibility:** feasibility or the reason the result was removed or excluded.
+- **Parent comparison:** parent evaluation scores and matching, differing or unknown evaluation
+  conditions. Parentage alone is not evidence of improvement. A base-evaluation receipt does
+  not certify matching confirmation conditions; retargeted objectives require source inspection.
+
+**All metrics & repeat checks** and **Review trust evidence** open the corresponding Inspector
+tabs. A root experiment is not automatically a task baseline. Repeat checks alone establish
+neither generalization nor statistical significance. Incomplete run sources suppress the
+Assistant card's numeric summary and explain why; ongoing finalization is not shown as finished.
+
 ## How the UI runs
 
 LoopLab ships a live React control plane. It's a **separate read/control process** — it tails each

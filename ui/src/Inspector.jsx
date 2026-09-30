@@ -10,6 +10,7 @@ import { mergeSummary, nodeChip } from './report.js'
 import { OpIcon } from './icons.jsx'
 import Markdown from './markdown.jsx'
 import CodeViewer from './CodeViewer.jsx'
+import ExperimentResult from './ExperimentResult.jsx'
 import { diffLines } from './lineDiff.js'
 import { nodeFeasibilityStatus, isSalvagedMetricViolation,
   OBJECTIVE_SOURCE_LABEL, objectiveMetricSource, objectiveSourceCaveated,
@@ -429,7 +430,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
 
         {activeTab === 'Overview' && <Overview n={n} state={state} runId={readOnly ? null : runId}
           onToast={onToast} draftStore={draftStore} expectedGeneration={expectedGeneration}
-          onOpenCard={onOpenCard} evalStages={evalStages} />}
+          onOpenCard={onOpenCard} evalStages={evalStages} onTab={setTab} />}
         {activeTab === 'Comments' && <CommentsThread runId={runId} nodeId={n.id}
           nodeGeneration={n.attempt} expectedGeneration={expectedGeneration} refreshKey={commentsRevision}
           readOnly={readOnly} reviewMode={readOnlyReason === 'review'} focusCommentId={focusCommentId}
@@ -1040,7 +1041,7 @@ function DerivedMemory({ n, state, runId }) {
 }
 
 function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, onOpenCard,
-  evalStages = null }) {
+  evalStages = null, onTab }) {
   const p = n.idea?.params || {}
   const uses = mergeSummary(n, state.nodes || {}, state)   // E3: for merges, which technique each parent fused
   const chg = nodeChip(n, state.nodes || {}, state)        // same chip as the card (sweep-aware; '' for merges)
@@ -1062,15 +1063,13 @@ function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, on
     return note ? <span className="muted idea-attribution"> — {note}</span> : ''
   }
   return <>
+    <ExperimentResult node={n} state={state} onTab={onTab} />
     <div className="kv">
       <KV k="node" v={`#${n.id}`} />
       <KV k="operator" v={n.operator} />
       <KV k="parents" v={(n.parent_ids || []).join(', ') || '—'} />
       <KV k="activity" v={activity.label} />
       <KV k="lifecycle" v={n.status + (n.id === state.best_node_id ? ' — champion' : '')} />
-      <KV k="metric" v={fmt(n.metric)} />
-      {n.confirmed_mean != null && <KV k="robust mean" v={`${fmt(n.confirmed_mean)} ± ${fmt(n.confirmed_std)} (${n.confirmed_seeds}×)`} />}
-      <KV k="feasible" v={String(n.feasible)} />
       <KV k="eval seconds" v={fmt(n.eval_seconds)} />
     </div>
     <CardLink link={cardLink} onOpenCard={onOpenCard} />
@@ -3002,7 +3001,7 @@ export function Metrics({ n, detail, state, runId, onToast = null, canRetarget =
       {/* Same rule as the `|| 'Multiple'` above: `||` falls through on a real 0 and would quietly
           substitute the sample length for a recorded count of zero — a different number presented as
           the recorded one. Only an ABSENT count may fall back. */}
-      <KV k="robust mean ± std" v={`${fmt(n.confirmed_mean)} ± ${fmt(n.confirmed_std)} over ${typeof n.confirmed_seeds === 'number' ? n.confirmed_seeds : vals.length} seeds`} /></div>}
+      <KV k="confirmation mean ± std" v={`${fmt(n.confirmed_mean)} ± ${fmt(n.confirmed_std)} over ${typeof n.confirmed_seeds === 'number' ? n.confirmed_seeds : vals.length} seeds`} /></div>}
     {vals.length > 0 && <>
       <div className="section-h">Per-seed confirmation</div>
       <DataTable caption="Per-seed confirmation metrics" card={false}><table className="tbl"><thead><tr><th>seed</th><th>metric</th></tr></thead>

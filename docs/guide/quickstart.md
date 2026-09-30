@@ -37,9 +37,14 @@ and LoopLab's internal research roles. For setup from a fresh checkout, use
    Chatting about a plan does not start a run. A live model or evaluator may incur cost;
    check the effective limits in the preview. Experiment and time limits alone do not cap
    model spending; set run model budgets in Settings if needed.
-5. Open the run's **Report** for the baseline, best measured result, caveats, and
-   solution artifacts. Ask Assistant to explain a failure or propose the next experiment.
-   A single-seed result is exploratory until the configured confirmation actually runs.
+5. When the run finishes, Assistant shows a free **Run result** summary: the first eligible
+   experiment, the engine's selected result, metric direction and confirmation caveats.
+   The first eligible experiment is not necessarily a task baseline. **Read Report** opens
+   the recorded evidence; **Open selected code** and **Find artifacts** locate the solution.
+   **Ask about this result** prepares a message for review; only **Send** contacts the model.
+   In an experiment's **Overview**, **Experiment result** separates its evaluation score
+   from repeat checks and explains whether parent evaluation conditions match.
+   An unconfirmed score remains exploratory; a confirmation mean alone does not prove reliability.
 
 ## Offline CLI walkthrough
 
