@@ -83,7 +83,8 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // Initial shell remains 80.9 KiB JS / 35.8 KiB CSS, with no new provider/detail request.
     // 2026-09-30 inline model check: measured 589,781 B JS. Settings and Assistant
     // reuse one health/recovery component; the inline panel loads only when opened.
-    js: { gzip: 576 * KIB },
+    // 2026-10-01 selected-result verdict and master integration: measured 590,319 B JS.
+    js: { gzip: 577 * KIB },
     css: { gzip: 57 * KIB },
   },
   individual: {
@@ -197,6 +198,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-09-30 first-run model status: measured 262,618 B JS in this closure.
       // 2026-09-30 plain launch decision: measured 263,369 B JS in this closure.
       // 2026-09-30 result clarity: measured 264,356 B JS; Assistant's result body stays lazy.
+      // 2026-10-01 final integrated build: measured 265,214 B JS; existing ceiling holds.
       limits: { js: { gzip: 259 * KIB }, css: { gzip: 43 * KIB } },
     },
     {

@@ -490,7 +490,7 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
   const modelCard = () => JSON.stringify(buildModelCard({ ...state, report: rep }, best, exportContext), null, 2)
   const reportSections = [
     ['report-section-summary', 'Summary'],
-    best && ['report-section-champion', 'Champion'],
+    best && ['report-section-champion', 'Selected'],
     a.steps.length > 0 && ['report-section-trajectory', 'Trajectory'],
     (memos.length || imp.length) && ['report-section-learnings', 'Learnings'],
     ['report-section-failures', 'Failures'],
@@ -553,7 +553,7 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
           : 'The report will add a champion, trajectory, and reproducible solution after the first successful evaluation.'}</p>
       </div>}
 
-      {best && <><h2 id="report-section-champion" tabIndex={-1} className="section-h">Champion — the answer</h2>
+      {best && <><h2 id="report-section-champion" tabIndex={-1} className="section-h">Selected experiment</h2>
         <ChampionCard best={best} state={state} /></>}
 
       {a.steps.length > 0 && <>
@@ -608,7 +608,7 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
         {!Object.keys(a.failures).length && !a.regressions.length && !a.infeasible.length && <div className="stat"><div className="n">0</div><div className="l">nothing notably failed</div></div>}
       </div>
 
-      {best && <><h2 id="report-section-solution" tabIndex={-1} className="section-h">Reproduce — winning solution</h2>
+      {best && <><h2 id="report-section-solution" tabIndex={-1} className="section-h">Reproduce — selected solution</h2>
         {bestCodeStatus === 'restricted' && <div className="report-inline-state report-code-state" role="status">
           Solution source was not included in this summary-only review link.
         </div>}

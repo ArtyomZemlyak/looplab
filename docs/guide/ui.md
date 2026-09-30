@@ -39,6 +39,15 @@ caveats. Reading the card makes no model request. **Read Report**, **Open select
 and experiment attempt. **Ask about this result** fills the composer without sending or
 overwriting a nonempty draft. Sending the prepared question may use a paid model.
 
+Report's first verdict follows the **engine-selected experiment**, which can differ from
+the numeric frontier in its charts. **Next step** names the evidence to inspect or collect.
+A better/worse score is reported only for eligible evaluation scores with matching recorded
+conditions and a known direction. Missing or different conditions leave comparison unestablished.
+Confirmation means are shown separately; repeated seeds do not receive a statistical reliability
+claim from a small spread alone. Markdown and Model card exports retain the same verdict and next step.
+**Recorded metric trajectory** describes numeric changes and may mix scores with confirmation means;
+it does not by itself establish a comparable improvement or a task baseline.
+
 Select an experiment and open **Overview**. Its **Experiment result** block answers:
 
 - **Evaluation score:** the objective value, with lower/higher direction and its recorded source.

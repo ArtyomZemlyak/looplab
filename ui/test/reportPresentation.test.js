@@ -125,7 +125,7 @@ test('Report uses semantic section headings and exposes an unambiguous operator/
       assert.equal(sections[1].textContent, 'Recorded metric trajectory')
       const jumps = [...dom.window.document.querySelectorAll('.report-sections button')]
       assert.deepEqual(jumps.map(button => button.textContent),
-        ['Summary', 'Champion', 'Trajectory', 'Failures', 'Solution'])
+        ['Summary', 'Selected', 'Trajectory', 'Failures', 'Solution'])
       assert.ok(sections.every(heading => heading.id && heading.tabIndex === -1))
       assert.equal(dom.window.document.querySelector('.report-steps-table').tagName, 'TABLE')
       assert.equal(dom.window.document.querySelector('.report-step-changes summary')?.textContent,
