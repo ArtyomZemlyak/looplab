@@ -401,6 +401,12 @@ def finalize_verified_evidence(claim: dict, verdict_row: dict,
     # no ruler — keeps its verdict across a retarget (critic 2026-09-30, driven: both were refused,
     # and each refusal flipped the run's D8 `producer_complete`; the lessons twin is
     # `engine/lessons_reconcile.py::_metric_on_ruler`).
+    # BOTH OR NEITHER (critic 2026-09-30, crit_v46 L6): the writer stamps the two keys together and
+    # a legacy receipt carries neither, so a receipt with ONE of them is not one this build wrote.
+    # The payload sanitizer drops such a pair, but a verdict row can reach this function without it —
+    # driven, an objective-only receipt ratified a claim whose cited number had moved.
+    if ("objective" in evidence) != ("outcomes" in evidence):
+        return None, "verification evidence identity is malformed"
     objective_now = getattr(state, "objective_key", None)
     if ("objective" in evidence and evidence.get("objective") != objective_now
             and any(_carries_number(final_nodes.get(ref["node_id"])) for ref in node_refs)):

@@ -253,3 +253,23 @@ def test_finalize_refuses_an_outcome_list_of_the_wrong_length_on_its_own():
     short = {**verdict, "evidence": {**verdict["evidence"], "outcomes": []}}
     assert finalize_verified_evidence(claim, short, state) == (
         None, "verification evidence identity is malformed")
+
+
+def test_finalize_refuses_a_half_binding_on_its_own():
+    """crit_v46 L6: the sanitizer refuses a receipt with one of the two keys; finalize did not, and
+    an objective-only receipt handed to it directly ratified a claim whose cited number had moved.
+    MUTATION: drop the pair test in `finalize_verified_evidence` -> the objective-only row ratifies."""
+    from looplab.core.models import RunState
+    from looplab.trust.memo_verify import finalize_verified_evidence
+    memo = _verified_memo(RunState(nodes={0: _node(1.0)}))
+    claim, verdict = memo["claims"][0], memo["verification"]["verdicts"][0]
+    moved = RunState(nodes={0: _node(2.0)})
+    for dropped in ("outcomes", "objective"):
+        half = {**verdict, "evidence": {k: v for k, v in verdict["evidence"].items()
+                                        if k != dropped}}
+        assert finalize_verified_evidence(claim, half, moved) == (
+            None, "verification evidence identity is malformed"), dropped
+    legacy = {**verdict, "evidence": {k: v for k, v in verdict["evidence"].items()
+                                      if k not in ("outcomes", "objective")}}
+    assert finalize_verified_evidence(claim, legacy, moved)[1] == "", \
+        "a receipt written before the binding is still checked by lifecycle alone"
