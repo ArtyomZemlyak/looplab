@@ -369,7 +369,8 @@ _TAG_ASCII = (0xE0020, 0xE007E)
 # as its `V` (crit_v56 F1). A Latin letter its Unicode NAME spells with a mark is not a row here but a
 # rule (`_latin_variants`). LIMITS, stated rather than hidden: a look-alike from any other script
 # (Cherokee, Armenian, Coptic, …) is not folded — the fold covers the scripts a model most readily
-# reads as Latin, and the fence's markers are one defence among several — and neither is an ASCII one:
+# reads as Latin, and the fence's markers are one defence among several — nor a turned, reversed or
+# inverted letter, nor a parenthesized one (NFKC keeps its parentheses), and neither is an ASCII one:
 # ASCII is its own view (`_fold_char`), so `l`, `1` or `|` standing for the label's `I` keeps a close
 # live to the matcher. Folding those would rewrite the view of every honest ASCII text for a letter
 # the label spells once (crit_v58 N1).
@@ -386,19 +387,29 @@ _CONFUSABLE = dict(zip(
 # THE LATIN LETTERS A NAME SPELLS WITH A MARK (crit_v58 N1, driven: `ENĐ UNŦRUSŦEĐ_RUN_ɆVƗĐENCE` read
 # as live). A letter with a stroke, a bar, a hook, a tail or a curl has no decomposition, so NFKD kept
 # it; Unicode names it `LATIN <CAPITAL|SMALL> LETTER <X> WITH <mark>` (or `… <X> BAR`), and the view
-# reads it as that X. A SMALL CAPITAL is drawn as its capital, with a mark or without, and Unicode
-# spells it three ways — `LATIN LETTER SMALL CAPITAL <X>`, `LATIN SMALL CAPITAL LETTER <X>`, `LATIN
-# CAPITAL LETTER SMALL CAPITAL <X>` (crit_v59 F3, driven: `ᵻ`, `ᵾ`, `Ɪ` and `ꭆ` kept a forged close
-# live); it reads as that capital. A name that adds a second LETTER (`… D WITH SMALL LETTER Z`, a
-# digraph) names no mark and is left to NFKD, which spells both. Derived from the names of the Latin
-# blocks below (~1,900 code points) once, on first use.
+# reads it as that X. A SHAPED letter puts its shape BEFORE the letter instead — `… LETTER BARRED E`,
+# `… BLACKLETTER E`, `… INSULAR D`, `… SCRIPT R`, `… OPEN E`, `… DOTLESS J` — with a mark or without
+# (crit_v61 L4, driven: a close in those letters read as live). A SMALL CAPITAL is drawn as its
+# capital, and Unicode spells it three ways — `LATIN LETTER SMALL CAPITAL <X>`, `LATIN SMALL CAPITAL
+# LETTER <X>`, `LATIN CAPITAL LETTER SMALL CAPITAL <X>` (crit_v59 F3); so is an ENCLOSED letter that
+# has no decomposition — `NEGATIVE CIRCLED|SQUARED LATIN CAPITAL LETTER <X>`, `REGIONAL INDICATOR
+# SYMBOL LETTER <X>` (crit_v61 L4); each reads as that capital. A name that adds a second LETTER
+# (`… D WITH SMALL LETTER Z`, a digraph) names no mark and is left to NFKD, which spells both; a
+# turned, reversed or inverted shape is not drawn as its letter and is not read as one. Derived from
+# the names of the blocks below — the Latin ones and the enclosed-letter supplement (~2,100 code
+# points) — once, on first use.
 _LATIN_BLOCKS = ((0x0080, 0x02AF), (0x1D00, 0x1DBF), (0x1E00, 0x1EFF), (0x2C60, 0x2C7F),
-                 (0xA720, 0xA7FF), (0xAB30, 0xAB6F), (0x10780, 0x107BF), (0x1DF00, 0x1DFFF))
+                 (0xA720, 0xA7FF), (0xAB30, 0xAB6F), (0x10780, 0x107BF), (0x1DF00, 0x1DFFF),
+                 (0x1F100, 0x1F1FF))
+_SHAPE = r"(?:(?:DOTLESS|BARRED|BLACKLETTER|INSULAR|SCRIPT|OPEN) )"
+_MARK = r"(?: WITH (?!SMALL LETTER|CAPITAL LETTER).+| BAR)"
 _LATIN_WITH_A_MARK = re.compile(
-    r"LATIN (?:(CAPITAL|SMALL) LETTER (?:DOTLESS )?([A-Z])"
-    r"(?: WITH (?!SMALL LETTER|CAPITAL LETTER).+| BAR)"
-    r"|(?:LETTER SMALL CAPITAL|SMALL CAPITAL LETTER|CAPITAL LETTER SMALL CAPITAL) ([A-Z])"
-    r"(?: WITH (?!SMALL LETTER|CAPITAL LETTER).+| BAR)?)")
+    r"LATIN (?P<case>CAPITAL|SMALL) LETTER (?:(?P<plain>[A-Z])" + _MARK
+    + r"|" + _SHAPE + r"(?P<shaped>[A-Z])" + _MARK + r"?)"
+    r"|LATIN (?:LETTER SMALL CAPITAL|SMALL CAPITAL LETTER|CAPITAL LETTER SMALL CAPITAL) "
+    + _SHAPE + r"?(?P<smallcap>[A-Z])" + _MARK + r"?"
+    r"|(?:NEGATIVE (?:CIRCLED|SQUARED) LATIN CAPITAL LETTER|REGIONAL INDICATOR SYMBOL LETTER) "
+    r"(?P<enclosed>[A-Z])")
 
 
 @functools.lru_cache(maxsize=1)
@@ -409,10 +420,14 @@ def _latin_variants() -> dict:
     for low, high in _LATIN_BLOCKS:
         for cp in range(low, high + 1):
             named = _LATIN_WITH_A_MARK.fullmatch(unicodedata.name(chr(cp), ""))
-            if named and named[3]:
-                table[chr(cp)] = named[3]              # a small capital reads as its capital
-            elif named:
-                table[chr(cp)] = named[2] if named[1] == "CAPITAL" else named[2].lower()
+            if named is None:
+                continue
+            capital = named["smallcap"] or named["enclosed"]
+            if capital:
+                table[chr(cp)] = capital       # a small capital or an enclosed letter: its capital
+            else:
+                letter = named["plain"] or named["shaped"]
+                table[chr(cp)] = letter if named["case"] == "CAPITAL" else letter.lower()
     return table
 
 

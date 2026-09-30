@@ -2133,12 +2133,9 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # `injected` (2026-09-30, doc 69 69.25, `Settings.endgame_inject_recut`): how many
         # operator-injected nodes the reserve was cut over, on any row whose count is not 0.
         # LOAD-BEARING: `replan` re-cuts an ordinary row whose count differs from the run's.
-        # `final_start` (2026-09-30, critic crit_v59 F1): on a row that bounds a stall episode, the
-        # ordinary cut's start under the same cut — where the FINAL reserve begins. LOAD-BEARING:
-        # `engine/plan.py::final_reserve_reached` (the rule Strategist's endgame switch) reads it.
-        optional=("at_node", "champion", "endgame_end", "endgame_start", "final_start", "injected",
-                  "max_nodes", "phases", "reason", "reopen_cause", "reserve", "reserve_frac",
-                  "source", "stall_champions"),
+        optional=("at_node", "champion", "endgame_end", "endgame_start", "injected", "max_nodes",
+                  "phases", "reason", "reopen_cause", "reserve", "reserve_frac", "source",
+                  "stall_champions"),
         stored_whole=True,
     ),
     "policy_decision": PayloadContract(
