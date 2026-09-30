@@ -13,7 +13,9 @@ and LoopLab's internal research roles. For setup from a fresh checkout, use
 2. In **LoopLab → Settings → LLM**, check the model and endpoint. **Test active LLM**
    makes one provider request and may be billed. The local defaults (`qwen3:8b` at
    `http://localhost:11434/v1`) require a running Ollama server with that model pulled;
-   saved values alone do not prove the model is reachable. Return to Runs after saving.
+   saved values alone do not prove the model is reachable. The first-run Assistant shows
+   the saved model and the last explicit test result on this page. Return to
+   Runs after saving.
 3. Select **Start a new run** in Assistant. For example:
 
    > Improve accuracy on my dataset. The code is at `/path/on/the/LoopLab/server/repo`

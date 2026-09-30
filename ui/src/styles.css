@@ -2751,6 +2751,9 @@ pre.code.event-json { max-height: 220px; }
 .asst-new-run-hint { display: flex; align-items: center; justify-content: space-between;
   gap: 12px; max-width: 980px; margin: 10px auto 2px; color: var(--fg-dim);
   font-size: 12px; line-height: 1.45; }
+.asst-new-run-hint .model-connection-ok { color: var(--ok-text); }
+.asst-new-run-hint .model-connection-warn { color: var(--working-text); }
+.asst-new-run-hint .btn { flex: none; }
 
 @media (min-width: 1600px) {
   body { font-size: 14px; }

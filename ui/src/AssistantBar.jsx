@@ -80,6 +80,8 @@ import { useAssistantFork } from './useAssistantFork.js'
 import { startTurnFallbackPolls } from './assistantTurnPolls.js'
 import { followClientRoute } from './accessibility.jsx'
 
+const FirstRunModelStatus = React.lazy(() => import('./FirstRunModelStatus.jsx'))
+
 // ── ONE assistant, three flowing views: bar ⇄ side(right) ⇄ full ───────────────────────────────
 //
 // A single component owns the whole conversation (session, messages, streaming) and renders it in one
@@ -3454,12 +3456,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           : firstRun
             ? 'Describe a goal to get a launch proposal. The run starts only after you review and approve it.'
             : 'Describe a goal, ask about runs, or plan an experiment.'}</p>
-      {firstRun && <div className="asst-new-run-hint">
-        <span>Set and test your model. A test request may be billed.</span>
-        <button type="button" className="btn sm" onClick={openAssistantModelSettings}>
-          Model settings
-        </button>
-      </div>}
+      {firstRun && <React.Suspense fallback={null}>
+        <FirstRunModelStatus onSettings={openAssistantModelSettings} />
+      </React.Suspense>}
       {!input.trim() && welcomeHints.length > 0 && <div className="asst-hints">
         {welcomeHints.map(h => <button key={h} className="asst-hint"
           disabled={historical || composerEditingPaused}

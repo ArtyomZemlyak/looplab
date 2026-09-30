@@ -26,6 +26,7 @@ import {
 } from './settingsLaunchGuard.js'
 import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
 import { useToast } from './useToast.js'
+import { publishModelCheck } from './modelConnection.js'
 
 const countLabel = (count, singular, plural = `${singular}s`) => `${count} ${count === 1 ? singular : plural}`
 const CREDENTIAL_SOURCE_LABELS = {
@@ -441,6 +442,10 @@ export function LlmHealth({
           secretRevision: active.requestSecretRevision, mode: 'terminal-unknown',
           createdAt: active.recoveryCreatedAt })
       } else clearHealthRecovery(operationId)
+      if (value.ok === true || terminalUnknown || providerAttempted) {
+        publishModelCheck(active.requestSettingsRevision, active.requestSecretRevision,
+          value.ok === true ? 'passed' : terminalUnknown ? 'unknown' : 'failed')
+      }
       setStatus({ contextVersion: requestedContext, value: value.ok === true
         ? { ok: true, previousConfiguration: active.previousConfiguration }
         : terminalUnknown
@@ -483,6 +488,10 @@ export function LlmHealth({
           secretRevision: active.requestSecretRevision, mode: 'terminal-unknown',
           createdAt: active.recoveryCreatedAt })
       } else if (!reconcilable) clearHealthRecovery(operationId)
+      if (unresolved || (attemptContractKnown && detail.provider_attempted && !configurationChanged)) {
+        publishModelCheck(active.requestSettingsRevision, active.requestSecretRevision,
+          unresolved ? 'unknown' : 'failed')
+      }
       setStatus({ contextVersion: requestedContext, value: {
         ok: false,
         configurationChanged,

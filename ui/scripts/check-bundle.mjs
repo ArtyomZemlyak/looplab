@@ -74,8 +74,10 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // 2026-09-30 merge of master (87cf8356) into the doc 69 branch: measured 580,772 B JS (+164 B
     // over 567 KiB) — the withheld-evaluation readers (69.12b) and the Card held overlay beside
     // master's Card-board copy; every closure and forbidden reachability proof still passes.
-    js: { gzip: 568 * KIB },
-    css: { gzip: 55 * KIB },
+    // 2026-09-30 first-run model status: measured 582,970 B JS / 56,354 B CSS. The lazy status
+    // reads saved settings and reuses only explicit health results; no provider probe is automatic.
+    js: { gzip: 570 * KIB },
+    css: { gzip: 56 * KIB },
   },
   individual: {
     js: { raw: 450 * KIB, gzip: 110 * KIB },
@@ -106,7 +108,8 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // the same features as the total above, through the shared OwnerChrome/RunList closure.
       // 2026-09-28 Windows build: 216,251 B; forbidden reachability still passes.
       // 2026-09-29 merge of master into the branch: measured 218,171 B JS.
-      limits: { js: { gzip: 214 * KIB }, css: { gzip: 40 * KIB } },
+      // 2026-09-30 model-status entry: measured 219,213 B JS; the status itself stays lazy.
+      limits: { js: { gzip: 215 * KIB }, css: { gzip: 40 * KIB } },
     },
     {
       name: 'Run compare increment',
@@ -143,7 +146,8 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-09-29 workspace UI: measured 393,283 B JS with Assistant handoff and inspector CTA.
       // 2026-09-29 merge of master into the branch: measured 396,112 B JS.
       // 2026-09-29 master's Card-board model (withheld-return copy): 396,291 B, 3 B over 387 KiB.
-      limits: { js: { gzip: 388 * KIB }, css: { gzip: 45 * KIB } },
+      // 2026-09-30 first-run model status: measured 398,146 B JS in this closure.
+      limits: { js: { gzip: 389 * KIB }, css: { gzip: 45 * KIB } },
     },
     {
       name: 'valid review DAG route',
@@ -154,7 +158,8 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // shared RunView half of the same features.
       // 2026-09-28 Windows build: 261,870 B; review still excludes owner panel code.
       // 2026-09-29 merge of master into the branch: measured 264,378 B JS.
-      limits: { js: { gzip: 259 * KIB }, css: { gzip: 41 * KIB } },
+      // 2026-09-30 first-run model status: measured 265,441 B JS in this closure.
+      limits: { js: { gzip: 260 * KIB }, css: { gzip: 41 * KIB } },
     },
     {
       name: 'owner Concepts route',
@@ -173,7 +178,8 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-09-29 Overview: 259,090 B on the shared RunView path; the panel remains lazy.
       // 2026-09-29 workspace UI: measured 43,377 B CSS with the Concepts empty and evidence rows.
       // 2026-09-29 merge of master into the branch: measured 261,117 B JS (both sides' Concepts work).
-      limits: { js: { gzip: 256 * KIB }, css: { gzip: 43 * KIB } },
+      // 2026-09-30 first-run model status: measured 262,618 B JS in this closure.
+      limits: { js: { gzip: 257 * KIB }, css: { gzip: 43 * KIB } },
     },
     {
       name: 'panel-hub increment',

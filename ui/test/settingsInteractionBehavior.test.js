@@ -7,6 +7,7 @@ import { createServer } from 'vite'
 import { JSDOM } from 'jsdom'
 
 import { installNavigationLossGuard } from '../src/navigationLossGuard.js'
+import { MODEL_CHECK_EVENT } from '../src/modelConnection.js'
 import { SETTINGS_SCHEMA } from './settingsSchemaFixture.js'
 
 const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
@@ -51,6 +52,8 @@ test('settings navigation, paid health, and invalid-field focus are real interac
     const healthTimer = {}
     let healthDeadline = null
     let healthCalls = 0
+    const modelCheckEvents = []
+    dom.window.addEventListener(MODEL_CHECK_EVENT, event => modelCheckEvents.push(event.detail))
     // Read the real deadline rather than restating it: this used to match a hardcoded 15_000, and
     // when the browser deadline was raised to outlive the server's 60s provider wall the intercept
     // stopped matching, so `healthDeadline` was never captured and the bounded half of this test
@@ -157,6 +160,9 @@ test('settings navigation, paid health, and invalid-field focus are real interac
       assert.match(chipTitle, /no verified result/i)
       assert.match(chipTitle, /without starting a new provider call/i)
       assert.equal(healthCalls, 1, 'a timed-out probe must not auto-retry against the provider')
+      assert.deepEqual(modelCheckEvents, [{
+        settingsRevision: 'settings-r1', secretRevision: 'secret-r1', outcome: 'unknown',
+      }], 'the first-run card must not present a timed-out paid probe as a failed connection')
 
       const form = Object.fromEntries(Object.values(SETTINGS_SCHEMA.fieldByKey).map(field => [
         field.key,
