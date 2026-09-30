@@ -379,14 +379,16 @@ The MCP adapter forwards JSON API requests and limits a response to 256 KiB and
 a request body to 1 MiB. Query narrow routes for larger outputs; binary uploads
 need their dedicated API or CLI flow. A dedicated harness token can read and
 control launched runs but cannot change operator defaults, launch new runs,
-drive the owner assistant, or reset/delete runs. The refusal of commands that start
-internal agent work (fork, forced ablation, deep research, a node reset from `propose`
-or `implement`, a code-less inject) applies only to runs launched with
-`external_harness`: on an INTERNAL run served by the same UI, the harness token can
-still queue them, and a live engine builds them with its own Researcher and
-Developer. It can also resume a paused internal run, which starts that run's engine
-and its own agent loop. Do not hand the harness token to an agent on a server that
-also drives internal runs (doc 70, item 70.8). Legacy configurations passing `LOOPLAB_UI_TOKEN` still give
+drive the owner assistant, or reset/delete runs. Commands that start internal agent
+work (fork, forced ablation, deep research, a node reset from `propose` or
+`implement`, a code-less inject) are refused on a run launched with `external_harness`
+for every credential, and on an INTERNAL run served by the same UI for the harness
+token (`agent_token_refused`, doc 70 item 70.8) — together with a resume, restart or
+reopen of the internal run, which would start its own Researcher/Developer loop. On
+an internal run the token keeps a ready-made inject (code or files), a remeasure, a
+pause or abort, a hint and the approvals; the operator, with the owner's token, keeps
+everything. A run whose snapshot cannot be read refuses the harness token those
+commands. Legacy configurations passing `LOOPLAB_UI_TOKEN` still give
 the agent full UI owner authority; keep that owner credential out of its environment
 when operator policy must remain separate. Agent reasoning and model token cost
 happen outside LoopLab's ledger; the event log records the submitted candidate,

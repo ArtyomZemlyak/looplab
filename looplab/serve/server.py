@@ -44,7 +44,8 @@ from looplab.serve.engine_proc import (  # noqa: F401 — _engine_alive/_kill_pr
     _engine_alive, _kill_process_tree, _on_shared_hub, install_reap_hooks,
     install_resume_reconcile_hooks, sweep_stale_lifecycle_locks)
 from looplab.serve.principal import (ANONYMOUS_PRINCIPAL, LOCAL_PRINCIPAL, OWNER_PRINCIPAL,
-                                     review_principal, stamp as _stamp_principal)
+                                     review_principal, stamp as _stamp_principal,
+                                     stamp_agent_token)
 from looplab.serve.owner_token import (
     log_owner_token_decision, on_shared_origin, resolve_owner_token)
 from looplab.serve.projects import ProjectStore
@@ -637,6 +638,10 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
             # on the small open surface that presented nothing is `anonymous` — never promoted.
             _stamp_principal(request, OWNER_PRINCIPAL if (_owner_authenticated(request) or harness_auth)
                              else ANONYMOUS_PRINCIPAL)
+            if harness_auth:
+                # …and WHICH credential made it the owner: the agent token may not queue an intent
+                # LoopLab's own model fulfils on an internal run (doc 70 70.8).
+                stamp_agent_token(request)
             response = await call_next(request)
             # Keep authenticated API responses out of shared/browser caches, but do not defeat the
             # immutable cache policy of Vite's content-hashed /assets.  The owner and review HTML

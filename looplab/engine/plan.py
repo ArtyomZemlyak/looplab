@@ -305,7 +305,7 @@ def final_reserve_reached(plan: Optional[dict], total_nodes: int) -> Optional[bo
     the search after its K nodes, and the endgame settings the rule would write (no ablation, the
     ensemble merge) would outlive it. None — a missing or unreadable row — leaves the caller's own
     reading in place."""
-    if not isinstance(plan, dict) or not plan:
+    if not isinstance(plan, dict):
         return None
     try:
         int(plan["endgame_start"])

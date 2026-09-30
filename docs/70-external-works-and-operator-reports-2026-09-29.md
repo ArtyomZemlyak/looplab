@@ -253,21 +253,17 @@ read-only*, источник *Process environment*. Это не ошибка д�
   лежит внутри записанного множества, с долей таких шагов (раздел 3). proof:missing:looplab/search/policy_replay.py
 - **70.7** OPEN[no-cluster-executor] исполнение — subprocess/Docker на одной машине; нет исполнителя
   для Slurm/PBS/облачного бэкенда, так что GPU-кластер недоступен без внешней обвязки (раздел 3). proof:absent:sbatch@looplab/runtime/sandbox.py
-- **70.8** OPEN[harness-token-is-owner-on-internal-runs] агентский токен `LOOPLAB_HARNESS_TOKEN`
-  штампуется принципалом `owner` (`serve/server.py`), а отказ «внутренним» интентам
-  (`serve/control_validation.py::external_intent_refusal`) действует только на ране с
-  `external_harness`. proof:`present:OWNER_PRINCIPAL if (_owner_authenticated(request) or harness_auth)@looplab/serve/server.py`
-  На ВНУТРЕННЕМ ране держатель агентского токена ставит `fork` через
-  `/commands` — принято и записано в журнал (прогнано 2026-09-29, критик), и живой движок строит его
-  платным Developer, хотя манифест обещает «scoped agent requests cannot … invoke LoopLab's owner
-  model workflows». Та же дыра у всех интентов, которые правило отказывает только внешнему рану:
-  `fork`, `force_ablate`, `deep_research`, `node_reset` со стадии `propose`/`implement` (узел
-  заново строит внутренний Developer), `inject_node` без готового кода или файлов (его строит
-  Developer), а также `resume` поставленного на паузу внутреннего рана — он запускает движок с его
-  собственным циклом Researcher/Developer (критик 2026-09-29). Закрывает пункт любое из двух:
-  собственный вид принципала для агентского токена или отказ этих интентов агентскому токену на
-  любом ране — решение владельца: принципал решает и доступ к портфелю
-  (`serve/principal.py::portfolio_access`).
+- **70.8** *Закрыто 2026-09-30: здесь стоял `harness-token-is-owner-on-internal-runs`. Агентский
+  токен остаётся принципалом `owner` (он читает ту же плоскость, портфель включительно), но мидлварь
+  помечает запрос, пришедший с ним (`serve/principal.py::stamp_agent_token`), и единственный вход
+  интентов — `POST /commands` — отказывает ему на ЛЮБОМ ране во всём, что исполняет собственная
+  модель LoopLab (`fork`, `force_ablate`, `deep_research`, `node_reset` с `propose`/`implement`,
+  `inject_node` без кода и файлов), а на ВНУТРЕННЕМ ране — ещё и в `resume`/`restart`/`run_reopened`,
+  которые запускают его цикл Researcher/Developer (`serve/control_validation.py::agent_token_refusal`,
+  код `agent_token_refused`, 403 на отклонённой записи команды). Внешнему рану его resume остаётся;
+  ран с нечитаемым снимком отказывает агентскому токену (fail closed), владельцу — как раньше. Выбран
+  второй из двух путей пункта: отдельный вид принципала менял бы и доступ к портфелю, а это решение
+  владельца (`tests/test_agent_token_scope.py`).*
 
 ## 9. Рекомендуемый порядок
 
@@ -278,5 +274,5 @@ read-only*, источник *Process environment*. Это не ошибка д�
 4. **70.4** — экономия бюджета на застрявших ранах; флаг по умолчанию выключен.
 5. **70.6** — инструмент для настройки политики.
 6. **70.7** — только по запросу владельца.
-7. **70.8** — после решения владельца о виде принципала агентского токена; до него агентский
-   токен не стоит выдавать на сервер с внутренними ранами.
+7. ~~**70.8**~~ — закрыт 2026-09-30 отказом интентов агентскому токену (без нового вида
+   принципала; отдельный вид остаётся решением владельца).

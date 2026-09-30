@@ -2822,7 +2822,8 @@ class RunCommandService:
                                 retryable=bool(refused["retryable"]))
 
     def submit(self, rd: Path, idempotency_key: str, event_type: str, data,
-               *, expected_generation: object = None, drain_only: object = None) -> dict:
+               *, expected_generation: object = None, drain_only: object = None,
+               agent_token: bool = False) -> dict:
         key = str(idempotency_key or "")
         if not key or len(key) > 512:
             raise HTTPException(400, "Idempotency-Key is required and must be at most 512 characters")
@@ -2903,7 +2904,7 @@ class RunCommandService:
                                if gate_field is not None else None)
                 try:
                     normalized_candidate = normalize_control(
-                        self.srv, rd, event_type, raw_data)
+                        self.srv, rd, event_type, raw_data, agent_token=agent_token)
                     if gate_field is not None:
                         gate_after = getattr(self.srv.state(rd), gate_field, None)
                         if (not isinstance(gate_before, int) or isinstance(gate_before, bool)

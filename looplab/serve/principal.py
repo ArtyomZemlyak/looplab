@@ -91,6 +91,27 @@ def stamp(request, principal: Principal) -> None:
     setattr(request.state, STATE_ATTR, principal)
 
 
+# THE CREDENTIAL AN OWNER REQUEST CAME WITH (doc 70 70.8). The agent token (`LOOPLAB_HARNESS_TOKEN`)
+# is the `owner` principal — it reads the owner's plane, portfolio included — but it may not queue an
+# intent whose fulfilment runs LoopLab's OWN model on an internal run, nor start that run's
+# Researcher/Developer loop (`serve/control_validation.py::agent_token_refusal`). The auth middleware
+# stamps this beside the principal; its absence — every other request — means the owner's token or
+# no token at all.
+AGENT_TOKEN_ATTR = "agent_token"
+
+
+def stamp_agent_token(request) -> None:
+    setattr(request.state, AGENT_TOKEN_ATTR, True)
+
+
+def request_agent_token(request) -> bool:
+    """Did this request authenticate with the AGENT token? False when nothing stamped it."""
+    try:
+        return getattr(request.state, AGENT_TOKEN_ATTR) is True
+    except AttributeError:
+        return False
+
+
 def request_principal(request) -> Principal:
     """The principal a middleware stamped, or `anonymous` when none did (fail closed)."""
     try:
