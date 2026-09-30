@@ -1283,7 +1283,8 @@ def _repair_forces_full_retrain(res, next_start, *, rolled_back: bool = False) -
     and a second counter would let a Developer alternate rollback / full-retrain and pay neither cap.
     It is checked FIRST because the existing three conditions cannot see it: a rollback leaves
     `next_start` set to the suspect's name, so `next_start is None` is False and the historical rule
-    reads an accepted rollback as free.
+    reads an accepted rollback as free. (A rollback whose repair also moved what precedes the
+    suspect re-runs from the first stage instead — `next_start` None — and is still ONE charge.)
     """
     # Count a full re-train against the cap ONLY when completed EARLIER-stage work is being
     # discarded: a LATER stage failed yet reuse was refused because the repair could
@@ -5599,11 +5600,14 @@ class EvaluateMixin:
                 # ignored, so this append is splice-neutral by construction (see the event's
                 # own note in events/types.py); on the main task under the write lock like
                 # every other append in this loop.
+                # An accepted row also says where the next eval STARTS: the suspect, or "" for the
+                # first stage when the repair also moved what precedes it (crit_v53 N4).
                 self.store.append(EV_STAGE_ROLLBACK, {
                     "node_id": a.node_id, "generation": a.generation, "attempt": a.attempt,
                     "stage": _rollback_ask, "failed_stage": str(a.res.failed_stage or ""),
                     "accepted": bool(_suspect),
-                    "refusal": str(_refusal or "")[:300]})
+                    "refusal": str(_refusal or "")[:300],
+                    **({"start": str(a.next_start or "")} if _suspect else {})})
         if a.canary_failed:
             # The failure was the CANARY's: the node's workdir ran no stage this attempt, so there
             # is nothing to reuse and nothing was discarded — the next attempt runs the full chain
@@ -5625,9 +5629,12 @@ class EvaluateMixin:
                 # cover both cases at once ("expensive re-run(s)") stranded both of them on a
                 # substring that no longer existed — a contract change dressed as a tidy-up.
                 # A new case gets a new sentence; it does not get to edit the old one.
+                # The SUSPECT, not `next_start`: a rollback that also re-runs what precedes it
+                # starts at the first stage, and the sentence read "back to stage None" (crit_v53 N1).
                 a.triage_outcome = ("abandon",
-                    (f"repair rolled the pipeline back to stage {a.next_start!r} — "
-                     f"{a.full_retrains} expensive re-run(s) already spent"
+                    (f"repair rolled the pipeline back to stage {_suspect!r}"
+                     + ("" if a.next_start == _suspect else " (re-run from the first stage)")
+                     + f" — {a.full_retrains} expensive re-run(s) already spent"
                      if _rolled_back else
                      "repair keeps changing earlier-stage (training) code — "
                      f"{a.full_retrains} full re-train(s) already spent")

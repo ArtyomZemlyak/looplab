@@ -2387,7 +2387,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         required=(
             "accepted", "attempt", "failed_stage", "generation", "node_id", "refusal", "stage"
         ),
-        optional=(),
+        optional=("start",),
     ),
     "strategy_decision": PayloadContract(
         "The Strategist's consult: the strategy it returned and the context it was given.",
