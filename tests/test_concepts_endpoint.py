@@ -280,6 +280,24 @@ def _lens_headers(key="concept-lens-test"):
     return {"Idempotency-Key": key}
 
 
+def _post_lens(client, body, key="concept-lens-test"):
+    """The lens POST's TERMINAL response. The route waits inline at most 0.5 s and otherwise answers
+    `{status: running, job_id}` — a loaded runner lost that race and a test indexing `["ok"]` raised
+    KeyError (Windows CI, 1103ba87; forced here by `LOOPLAB_JOB_INLINE_WAIT=0`). So wait for the job
+    and REPLAY the same request (same body, same Idempotency-Key): the durable ledger answers its
+    terminal frame verbatim, where the job receipt would stamp the frame's own `status` "done"."""
+    import time as _time
+    resp = client.post("/api/runs/demo/concepts/lens", json=body, headers=_lens_headers(key))
+    first = resp.json() if resp.status_code == 200 else {}
+    if first.get("status") == "running" and first.get("job_id"):
+        deadline = _time.monotonic() + 60.0
+        while client.get(f"/api/jobs/{first['job_id']}").json().get("status") == "running":
+            assert _time.monotonic() < deadline, "the lens job never settled"
+            _time.sleep(0.02)
+        resp = client.post("/api/runs/demo/concepts/lens", json=body, headers=_lens_headers(key))
+    return resp
+
+
 def _edge_run(root):
     rd = root / "demo"
     rd.mkdir(parents=True, exist_ok=True)
@@ -301,9 +319,7 @@ def test_derive_lens_endpoint_mints_and_projects(tmp_path, monkeypatch):
     monkeypatch.setattr(server_mod, "make_llm_client",
                         lambda *a, **k: _LensClient({"name": "Usage", "label": "By usage", "rels": ["uses"]}))
     client = TestClient(make_app(tmp_path))
-    r = client.post("/api/runs/demo/concepts/lens",
-                    json=_lens_body(client, "group by what uses what"),
-                    headers=_lens_headers())
+    r = _post_lens(client, _lens_body(client, "group by what uses what"))
     assert r.status_code == 200
     assert r.headers["cache-control"] == "no-store"
     data = r.json()
@@ -327,9 +343,7 @@ def test_derive_lens_endpoint_soft_fails_when_model_declines(tmp_path, monkeypat
     monkeypatch.setattr(server_mod, "make_llm_client",
                         lambda *a, **k: _LensClient({"rels": ["teleports_to"]}))
     client = TestClient(make_app(tmp_path))
-    data = client.post("/api/runs/demo/concepts/lens",
-                       json=_lens_body(client, "nonsense"),
-                       headers=_lens_headers()).json()
+    data = _post_lens(client, _lens_body(client, "nonsense")).json()
     assert data["ok"] is False and data["reason"] == "declined"
 
 
@@ -341,9 +355,7 @@ def test_derive_lens_endpoint_soft_fails_offline(tmp_path, monkeypatch):
         raise RuntimeError("no model configured")
     monkeypatch.setattr(server_mod, "make_llm_client", _boom)
     client = TestClient(make_app(tmp_path))
-    data = client.post("/api/runs/demo/concepts/lens",
-                       json=_lens_body(client, "group by usage"),
-                       headers=_lens_headers()).json()
+    data = _post_lens(client, _lens_body(client, "group by usage")).json()
     assert data["ok"] is False and data["reason"] == "no_model"
 
 
@@ -392,9 +404,7 @@ def test_derive_lens_endpoint_writes_only_diagnostic_receipts(tmp_path, monkeypa
     monkeypatch.setattr(server_mod, "make_llm_client",
                         lambda *a, **k: _LensClient({"name": "Usage", "label": "By usage", "rels": ["uses"]}))
     client = TestClient(make_app(tmp_path))
-    assert client.post("/api/runs/demo/concepts/lens",
-                       json=_lens_body(client, "group by usage"),
-                       headers=_lens_headers()).json()["ok"] is True
+    assert _post_lens(client, _lens_body(client, "group by usage")).json()["ok"] is True
     events = EventStore(log).read_all()
     assert log.read_text().count("\n") == before + 2
     assert [event.type for event in events[-2:]] == [
@@ -1109,8 +1119,7 @@ def test_derive_lens_mints_against_cap_truncated_partial_frame(tmp_path, monkeyp
     monkeypatch.setattr(frame_module, "MAX_MEMBERSHIPS", 1)  # force a monotone membership_cap
     client = TestClient(make_app(tmp_path))
     body = _lens_body(client, "group by usage")
-    resp = client.post("/api/runs/demo/concepts/lens", json=body,
-                       headers=_lens_headers("cap-truncated-mint"))
+    resp = _post_lens(client, body, "cap-truncated-mint")
     payload = resp.json()
     assert resp.status_code == 200 and resp.headers["cache-control"] == "no-store"
     assert payload["ok"] is True and payload["lens"] == "usage"       # minted, not refused
