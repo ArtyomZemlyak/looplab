@@ -269,17 +269,47 @@ _THREAD_TOKENS = threading.local()
 def note_committed_tokens(tokens) -> None:
     """Add one committed provider call's tokens to THIS thread's running total.
 
-    Called by `CostAccountant.add` after it commits, and by nothing else. Never raises: a counter
-    must not turn a paid call that succeeded into an exception."""
+    Called by `CostAccountant.add` after it commits, once per call, and by nothing else. A call that
+    committed NO tokens is counted apart (`thread_unreported_calls`): a provider that reports no
+    usage — a streamed call after `_stream_options_ok` went off, a gateway that drops the field —
+    would otherwise read as a session that used nothing, and the token ceiling as one that holds.
+    Never raises: a counter must not turn a paid call that succeeded into an exception."""
     try:
         n = int(tokens)
     except (TypeError, ValueError, OverflowError):
         return
     if n > 0:
         _THREAD_TOKENS.total = getattr(_THREAD_TOKENS, "total", 0) + n
+    else:
+        _THREAD_TOKENS.unreported = getattr(_THREAD_TOKENS, "unreported", 0) + 1
+
+
+def note_committed_cost(cost) -> None:
+    """Add one committed provider call's cost (USD) to THIS thread's running total — the money
+    ceiling's twin of `note_committed_tokens`, for the same reason: the accountant is the RUN's, so
+    "what the run spent since this session started" also counts every concurrent session (the
+    critic's driver, 2026-09-30: a session cut at "$2.0200 of $0.2500" whose own three calls cost
+    $0.03). Called by `CostAccountant.add` with the delta it committed. Never raises."""
+    try:
+        c = float(cost)
+    except (TypeError, ValueError, OverflowError):
+        return
+    if math.isfinite(c) and c > 0:
+        _THREAD_TOKENS.usd = getattr(_THREAD_TOKENS, "usd", 0.0) + c
 
 
 def thread_committed_tokens() -> int:
     """Every provider token committed on this thread so far. Read twice, the difference is what
     one session committed in between (`agents/tool_loop.py::drive_tool_loop(token_budget=)`)."""
     return getattr(_THREAD_TOKENS, "total", 0)
+
+
+def thread_committed_usd() -> float:
+    """Every provider dollar committed on this thread so far — read twice, one session's spend
+    (`agents/tool_loop.py::drive_tool_loop(cost_budget_usd=)`)."""
+    return getattr(_THREAD_TOKENS, "usd", 0.0)
+
+
+def thread_unreported_calls() -> int:
+    """How many committed calls on this thread reported no tokens (see `note_committed_tokens`)."""
+    return getattr(_THREAD_TOKENS, "unreported", 0)

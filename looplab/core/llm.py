@@ -50,7 +50,8 @@ from looplab.core import tracing
 from looplab.core.llm_broker import llm_request_permit
 # ONE derivation of the run's USD ceiling, shared with the reserve half (`core/llm_budget.py`):
 # this module owns the COMMIT half, and the two used to read different `Settings` fields.
-from looplab.core.llm_budget import DEFAULT_COST_KNOB, note_committed_tokens, run_usd_ceiling
+from looplab.core.llm_budget import (DEFAULT_COST_KNOB, note_committed_cost,
+                                     note_committed_tokens, run_usd_ceiling)
 # Re-exported for backward compatibility: dozens of importers (and tests) do
 # `from looplab.core.llm import LLMError / BudgetExceeded`. The definitions live in
 # `looplab.core.errors` so `parse` can import them without importing this module.
@@ -2636,6 +2637,7 @@ class CostAccountant:
         # reads its own calls and never a concurrent session's (doc 69 69.2; see
         # `llm_budget.py::note_committed_tokens`). Before the ceiling below can raise, as the span.
         note_committed_tokens(delta["total_tokens"])
+        note_committed_cost(safe_cost)
 
         if sink is not None:
             try:

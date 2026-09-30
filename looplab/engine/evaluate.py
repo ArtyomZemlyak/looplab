@@ -166,9 +166,10 @@ from looplab.engine.failure_diagnosis import (REASON_SOURCE_ENGINE, coerce_diagn
 # than re-derived, because the same verdict has to be written to the durable row, read back off the
 # log by `_durable_repair_ledger` and rendered by `_format_repair_log`, and a second spelling of
 # `REPAIR_VERDICTS` would let those three disagree silently.
-from looplab.engine.repair_verify import (INERT_REPAIR_LIMIT, PARAM_OVERRIDE_CAP, REPAIR_VERDICTS,
-                                          changed_region, declared_param_overrides, inert_streak,
-                                          repair_attribution, verify_repair)
+from looplab.engine.repair_verify import (INERT_REPAIR_LIMIT, PARAM_OVERRIDE_CAP, REPAIR_INERT,
+                                          REPAIR_VERDICTS, changed_region,
+                                          declared_param_overrides, inert_exempt_paths,
+                                          inert_streak, repair_attribution, verify_repair)
 
 # Bounds on the repair history handed to the stop judge. Measured live (deepseek-v4-flash, the
 # recorded six-migration chain): the history costs ~66 extra prompt tokens per row and ZERO extra
@@ -1181,6 +1182,30 @@ def _workdir_manifest_digest(node) -> str:
     return hashlib.sha256(orjson.dumps(
         {"attempt": node.attempt, "code": node.code,
          "files": node.files or {}, "deleted": sorted(node.deleted or [])},
+        option=orjson.OPT_SORT_KEYS)).hexdigest()
+
+
+def _canary_code_digest(node) -> str:
+    """The eval canary's `code_digest`: `_workdir_manifest_digest` less the activation manifest.
+
+    doc 69 69.10a, the critic's cost half: a repair that rewrote only `looplab_activation.json` is
+    `inert` — the manifest is read only by the marker check after an otherwise successful full
+    evaluation, which the canary never runs — but keyed on the whole manifest the canary's "already
+    passed" answer (`eval_canary.py::canary_already_passed`) was NO, and the node bought a second
+    canary over code it had already proven. The workdir's reuse stamp keeps
+    `_workdir_manifest_digest`: the new manifest still has to be written to disk. A node that holds
+    no activation manifest digests byte for byte as before, so every canary row it wrote still
+    matches.
+    """
+    from looplab.engine.activation import ACTIVATION_MANIFEST_NAME
+    files = node.files or {}
+    deleted = node.deleted or []
+    if ACTIVATION_MANIFEST_NAME in files or ACTIVATION_MANIFEST_NAME in deleted:
+        files = {p: b for p, b in files.items() if p != ACTIVATION_MANIFEST_NAME}
+        deleted = [d for d in deleted if d != ACTIVATION_MANIFEST_NAME]
+    return hashlib.sha256(orjson.dumps(
+        {"attempt": node.attempt, "code": node.code,
+         "files": files, "deleted": sorted(deleted)},
         option=orjson.OPT_SORT_KEYS)).hexdigest()
 
 
@@ -3190,7 +3215,7 @@ class EvaluateMixin:
         if canary_spec(self._eval_spec) is None:
             return False
         return not canary_already_passed(self.store.read_all(), a.node_id, a.generation,
-                                         _workdir_manifest_digest(a.node))
+                                         _canary_code_digest(a.node))
 
     def _run_canary_in_scratch(self, a: "EvalAttempt", spec: dict, scratch, cancel):
         """The canary's blocking half, in a worker thread: a FRESH scratch tree from the node's own
@@ -3246,7 +3271,7 @@ class EvaluateMixin:
         fold then holds a paused node pending or settles a stopping one.
         """
         spec = canary_spec(self._eval_spec)
-        digest = _workdir_manifest_digest(a.node)
+        digest = _canary_code_digest(a.node)
         scratch = self._canary_scratch(a.node_id)
         res, clocked, fault, passed, detail = await self._eval_canary_round(
             a, spec, digest, scratch, cancel, retry=0)
@@ -5398,10 +5423,11 @@ class EvaluateMixin:
         # own rationale says what it INTENDED to change, `changed` says what it did.
         a.repair_log.append(repair_ledger_row(repair_payload, attempts=a.attempt))
         # AN INERT CHAIN CANNOT MAKE PROGRESS, AND THE ENGINE CAN PROVE IT. `REPAIR_INERT`
-        # means the engine compared the bytes and nothing moved: the files this loop is about
-        # to re-materialize are the ones already on disk, `_safe_reuse_start` will reuse
-        # every completed stage because the change set is empty, and the eval it is about to
-        # pay for is the eval that just failed. Repeating that is not a retry, it is a
+        # means the engine compared the bytes and nothing the evaluation runs moved: the files
+        # this loop is about to re-materialize are the ones already on disk (bar the activation
+        # manifest, 69.10a), `_safe_reuse_start` below will reuse every completed stage because
+        # the change set it is asked about is empty, and the eval it is about to pay for is the
+        # eval that just failed. Repeating that is not a retry, it is a
         # transcription error with a GPU attached — rubertlite-dr-unified-v4 node 6 spent two
         # in a row at ~2.7 h each, and rubertlite-dense-retrieval node 57 three.
         #
@@ -5418,14 +5444,18 @@ class EvaluateMixin:
             # The historical sentence is kept byte for byte for a streak of true no-ops; a streak
             # in which a row moved only the activation manifest (69.10a) says so, because
             # "byte-identical" would be false of it.
+            #
+            # Under 300 characters, like `repair_judgment.repair_redone_work_stop`: the terminal's
+            # `triage_rationale` is cut there, and the first cut of this sentence (432) lost its
+            # "abandoning" clause. And said of what the ENGINE reads, which it knows, never of what
+            # the candidate's own code reads, which it does not (`inert_exempt_paths`).
             if any(r.get("changed") for r in a.repair_log[-_inert:]):
                 a.triage_outcome = ("abandon", (
-                    f"the last {_inert} repair attempts changed nothing the evaluation runs — "
-                    "the engine compared the repaired files against the ones already on disk, "
-                    "and the only file that moved is the activation manifest, which nothing the "
-                    "evaluation executes reads, so re-evaluating would re-run code this node has "
-                    "already run; abandoning in-node repair — the node ends here, and the loop's "
-                    "next proposal is fresh work rather than another attempt at this one"))
+                    f"the last {_inert} repair attempts changed nothing the evaluation runs — only "
+                    "the activation manifest moved, which the engine reads only for its marker "
+                    "check, so re-evaluating would re-run code this node already ran; abandoning "
+                    "in-node repair — the node ends here, and the loop's next proposal is fresh "
+                    "work"))
                 return PHASE_SETTLED
             a.triage_outcome = ("abandon", (
                 f"the last {_inert} repair attempts changed nothing at all — the engine "
@@ -5447,9 +5477,20 @@ class EvaluateMixin:
         # the workdir instead would hand that decision to a stage that can rewrite its own
         # manifest while it runs. `params` expands `%params%` on both sides through the same
         # rule `_resolve_stages` used, and a repair never writes `idea.params`.
+        # AN INERT REPAIR IS CHARGED AS WHAT IT IS (doc 69 69.10a, the critic's cost half). The
+        # paths `inert_exempt_paths` set aside — the activation manifest, which nothing the
+        # evaluation executes reads — are left out of the reuse question too, so a manifest-only
+        # repair reuses what a true no-op reuses instead of forfeiting every completed stage to the
+        # predicate's non-`.py` clause and being charged a full re-train for code it never touched.
+        # A repair that moved anything else is asked about its whole change set, as before.
+        _reuse_changed, _reuse_deleted = changed, new_deleted
+        if _verification.verdict == REPAIR_INERT:
+            _exempt = inert_exempt_paths(a._engine_reason)
+            _reuse_changed = [p for p in changed if p not in _exempt]
+            _reuse_deleted = [p for p in new_deleted if p not in _exempt]
         a.next_start = self._safe_reuse_start(
-            _stages, a.res.failed_stage, changed, a.workdir,
-            deleted=new_deleted, cwd=_cwd,
+            _stages, a.res.failed_stage, _reuse_changed, a.workdir,
+            deleted=_reuse_deleted, cwd=_cwd,
             prev_manifest=prev_files.get(STAGE_MANIFEST_NAME),
             params=a.node.idea.params)
         # ROLLBACK, asked only when the Developer named a suspect. It OVERRIDES `next_start`

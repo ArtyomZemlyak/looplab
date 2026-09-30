@@ -2453,6 +2453,7 @@ bound. That still left one word covering two different failures with opposite re
 | never reached for the write surface | `[]` | **0** | not a clock problem — more time buys more reading |
 | tried, and every attempt was refused | `[]` | **> 0** | the refusal path (#92's territory) |
 | wrote, and the bytes were identical | `[]` | > 0 | a proposal that was a no-op |
+| rewrote only the activation manifest | `[looplab_activation.json]` | any | not a clock problem either: it re-declared its markers and moved nothing the evaluation runs, so the failure was not a missing marker (doc 69 69.10a; `inert_path` keeps it a change) |
 
 MEASURED over every inert repair that still has spans (v11 ×2, v13 ×2 — v12's are gone because that
 run pinned pre-fix tracing code, the loss #149 closed): **0, 0, 0, 0** edit-like tool calls, in

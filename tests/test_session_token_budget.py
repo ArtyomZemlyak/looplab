@@ -267,6 +267,8 @@ def test_the_operator_is_told_which_knob_helps():
                           "detail": "1,250 of 1,000 tokens for this session"})
     assert "reached the token ceiling for this session" in text
     assert "1,250 of 1,000 tokens" in text and "raise `agent_token_budget`" in text
+    # ...and that the knob is not the chat's alone (the critic, 2026-09-30).
+    assert "shared with every engine role's sessions" in text
     assert "assistant_time_budget_s" not in text
 
 
@@ -276,3 +278,200 @@ def test_the_repair_judge_reads_a_token_cut_as_a_cut():
     row = dict(attempt=1, error="boom", fix="f", changed=[], verified="inert",
                budget_exhausted="tokens")
     assert "THE SESSION RAN OUT OF ITS TOKEN BUDGET" in _format_repair_log([row])
+
+
+# ------------------------------------------------------------------ the critic's gaps (2026-09-30)
+class _KindClient:
+    """A client that ends its loop by one chosen route: reads distinct files (`read`), repeats one
+    read (`same`), or answers in prose (`prose`); `force_ok=False` refuses the forced emit too."""
+
+    def __init__(self, mode="read", usd=0.0, per=100, force_ok=True):
+        self.accountant = CostAccountant()
+        self.mode, self.usd, self.per, self.force_ok, self.turn = mode, usd, per, force_ok, 0
+
+    def bill(self):
+        self.accountant.add(self.usd, usage={"prompt_tokens": self.per - 1, "completion_tokens": 1,
+                                             "total_tokens": self.per})
+
+    def chat(self, messages, tools=None, tool_choice="auto"):
+        self.bill()
+        self.turn += 1
+        if self.mode == "prose":
+            return {"content": "I think I am done", "tool_calls": []}
+        path = "a.py" if self.mode == "same" else f"f{self.turn}.py"
+        return {"content": "", "tool_calls": [{"id": f"r{self.turn}", "function": {
+            "name": "read_file", "arguments": json.dumps({"path": path})}}]}
+
+    def complete_tool(self, messages, schema=None, **_kw):
+        self.bill()
+        if not self.force_ok:
+            raise KeyError("no tool_calls in response")
+        return {"answer": "salvaged"}
+
+
+class _Clock:
+    """`time` for the loop, advancing 50 ms per read, so a wall-clock cut is deterministic."""
+
+    def __init__(self):
+        import time as _real
+        self._real, self.t = _real, 1000.0
+
+    def monotonic(self):
+        self.t += 0.05
+        return self.t
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def _row(client, **kw):
+    rows, budget = [], []
+    with phase_sink_scope(lambda t, d: rows.append((t, d))):
+        drive_tool_loop(client, _Tools(), [{"role": "user", "content": "go"}], _EMIT,
+                        finalize=lambda a: a.get("answer"), fallback=lambda m: "fb",
+                        self_plan=False, on_budget=budget.append, **kw)
+    return [d for t, d in rows if t == PHASE_COMPLETED][-1], budget
+
+
+@pytest.mark.parametrize("kind,client,kw", [
+    ("time", lambda: _KindClient(), {"time_budget_s": 0.3}),
+    ("cost", lambda: _KindClient(usd=0.5), {"cost_budget_usd": 0.9}),
+    ("tokens", lambda: _KindClient(), {"token_budget": 250}),
+    ("turns", lambda: _KindClient(), {"max_turns": 3}),
+    ("stuck", lambda: _KindClient(mode="same"), {"stuck_repeat": 3}),
+    ("stalled", lambda: _KindClient(mode="prose", force_ok=False), {}),
+    ("emit_force", lambda: _KindClient(), {"emit_force": 3}),
+])
+def test_every_cutoff_kind_is_stamped_on_the_row_it_ended(kind, client, kw, monkeypatch):
+    """The commit claimed every kind is stamped through `_cut`; two were tested. MUTATIONS: any exit
+    reporting through `_note_budget` instead of `_cut`; stamping only some kinds -> red."""
+    from looplab.agents import tool_loop
+    monkeypatch.setattr(tool_loop, "time", _Clock())
+    row, budget = _row(client(), **kw)
+    assert row.get("cutoff") == kind, row
+    assert budget and budget[0]["kind"] == kind, budget
+
+
+def test_an_emitted_session_carries_no_cutoff_and_counts_zero_tokens_as_zero():
+    """A client with an accountant that committed nothing reads `tokens: 0`, not an absent key.
+    MUTATION: `if _tk:` -> the key vanishes."""
+
+    class _Quiet:
+        accountant = CostAccountant()
+
+        def chat(self, messages, tools=None, tool_choice="auto"):
+            return {"content": "", "tool_calls": [{"id": "e", "function": {
+                "name": "emit", "arguments": json.dumps({"answer": "x"})}}]}
+
+    row, _ = _row(_Quiet())
+    assert row["exit"] == "emitted" and "cutoff" not in row and row["tokens"] == 0, row
+
+
+def test_the_tokens_cut_reports_its_turns_and_its_seconds(monkeypatch):
+    """MUTATIONS: `turns=turn_idx + 1`; `seconds=0.0` -> red."""
+    from looplab.agents import tool_loop
+    monkeypatch.setattr(tool_loop, "time", _Clock())
+    _, budget = _row(_KindClient(), token_budget=250)
+    (cut,) = budget
+    assert cut["kind"] == "tokens" and cut["turns"] == 3, cut   # 3 turns x 100 > 250
+    assert cut["seconds"] > 0, cut
+
+
+def test_the_row_counts_what_finalize_and_the_fallback_spend(monkeypatch):
+    """The critic: `_done` ran before `finalize`/`fallback`, so their paid calls were not in
+    `tokens`. MUTATION: move `_done` back above either call -> red."""
+    client = _KindClient(mode="prose", force_ok=False)
+    rows = []
+
+    def paid_fallback(_messages):
+        client.accountant.add(0.0, usage={"prompt_tokens": 4999, "completion_tokens": 1,
+                                          "total_tokens": 5000})
+        return "fb"
+
+    with phase_sink_scope(lambda t, d: rows.append((t, d))):
+        drive_tool_loop(client, _Tools(), [{"role": "user", "content": "go"}], _EMIT,
+                        finalize=lambda a: a.get("answer"), fallback=paid_fallback,
+                        self_plan=False)
+    row = [d for t, d in rows if t == PHASE_COMPLETED][-1]
+    assert row["exit"] == "fallback" and row["tokens"] >= 5000, row
+
+    class _PaidFinalize(_KindClient):
+        def chat(self, messages, tools=None, tool_choice="auto"):
+            self.bill()
+            return {"content": "", "tool_calls": [{"id": "e", "function": {
+                "name": "emit", "arguments": json.dumps({"answer": "x"})}}]}
+
+    emitter, rows = _PaidFinalize(), []
+
+    def paid_finalize(args):
+        emitter.accountant.add(0.0, usage={"prompt_tokens": 2999, "completion_tokens": 1,
+                                           "total_tokens": 3000})
+        return args.get("answer")
+
+    with phase_sink_scope(lambda t, d: rows.append((t, d))):
+        drive_tool_loop(emitter, _Tools(), [{"role": "user", "content": "go"}], _EMIT,
+                        finalize=paid_finalize, fallback=lambda m: "fb", self_plan=False)
+    row = [d for t, d in rows if t == PHASE_COMPLETED][-1]
+    assert row["exit"] == "emitted" and row["tokens"] == 3100, row
+
+
+def test_calls_that_report_no_tokens_are_counted_apart():
+    """A provider that reports no usage made the ceiling blind and the row read `tokens: 0`; the row
+    now says how many calls it could not see. MUTATION: `if n > 0` -> `if n > 1` (a one-token call
+    is a reported call)."""
+    from looplab.core.llm_budget import thread_unreported_calls
+    before_total, before_un = thread_committed_tokens(), thread_unreported_calls()
+    note_committed_tokens(1)
+    assert (thread_committed_tokens(), thread_unreported_calls()) == (before_total + 1, before_un)
+    note_committed_tokens(0)
+    assert thread_unreported_calls() == before_un + 1
+
+    class _Blind(_KindClient):
+        def bill(self):
+            self.accountant.add(0.0, usage={})
+
+    row, _ = _row(_Blind(), max_turns=3)
+    assert row["tokens"] == 0 and row["tokens_unreported"] >= 3, row
+    quiet, _ = _row(_KindClient(), max_turns=3)
+    assert "tokens_unreported" not in quiet, "a provider that reports usage writes the old row"
+
+
+def test_the_budget_is_stamped_only_where_it_can_act():
+    """No accountant, no ceiling: the started row does not claim one."""
+    rows = []
+
+    class _NoAcct(_KindClient):
+        def __init__(self):
+            super().__init__()
+            self.accountant = None
+
+        def bill(self):
+            pass
+
+    with phase_sink_scope(lambda t, d: rows.append((t, d))):
+        drive_tool_loop(_NoAcct(), _Tools(), [{"role": "user", "content": "go"}], _EMIT,
+                        finalize=lambda a: a.get("answer"), fallback=lambda m: "fb",
+                        self_plan=False, token_budget=500, max_turns=2)
+    started = [d for t, d in rows if t == PHASE_STARTED][-1]
+    assert "token_budget" not in started, started
+
+
+def test_a_one_token_budget_reaches_the_bundle_and_a_negative_one_is_refused():
+    """MUTATIONS: `if tb > 0` -> `if tb > 1`; drop `ge=0` -> red."""
+    assert loop_opts_from_settings(Settings(agent_token_budget=1)).token_budget == 1
+    with pytest.raises(Exception):
+        Settings(agent_token_budget=-1)
+
+
+def test_the_salvage_after_a_token_cut_says_tokens():
+    """A new exit gets its own words; every historical exit keeps "turn/time"."""
+    sent = []
+
+    class _Watch(_KindClient):
+        def complete_tool(self, messages, schema=None, **_kw):
+            sent.append(messages[-1]["content"])
+            return super().complete_tool(messages, schema)
+
+    _row(_Watch(), token_budget=250)
+    _row(_Watch(), max_turns=2)
+    assert sent[0].startswith("Out of token budget.") and sent[1].startswith("Out of turn/time")

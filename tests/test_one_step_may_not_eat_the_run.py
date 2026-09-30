@@ -23,7 +23,24 @@ from looplab.agents.loop_options import LOOP_OPTION_FIELDS
 from looplab.adapters.repo_developer import LLMRepoDeveloper
 
 
-class _Acct:
+class _ThreadSpend:
+    """A stub accountant whose spend is COMMITTED ON THE CALLING THREAD, as `CostAccountant.add`
+    commits it (`core/llm_budget.py::note_committed_cost`): the loop's money ceiling reads the
+    thread, never the run's accountant (the critic, 2026-09-30)."""
+    _spent = 0.0
+
+    @property
+    def spent(self):
+        return self._spent
+
+    @spent.setter
+    def spent(self, value):
+        from looplab.core.llm_budget import note_committed_cost
+        note_committed_cost(float(value) - self._spent)
+        self._spent = float(value)
+
+
+class _Acct(_ThreadSpend):
     def __init__(self, limit, spent):
         self.limit, self.spent = limit, spent
 
@@ -91,14 +108,27 @@ def test_the_loop_declares_a_money_cutoff():
     )
 
 
-def test_session_spend_is_measured_from_the_session_start_not_the_run_total():
-    """The accountant is the RUN's; a session ceiling must not inherit what earlier phases spent."""
-    client = type("C", (), {"accountant": _Acct(1.0, 0.60)})()
-    at_start = tool_loop._accountant_spend(client)
-    assert at_start == 0.60
-    client.accountant.spent = 0.75
+def test_session_spend_is_this_threads_own_not_the_run_total():
+    """The accountant is the RUN's: a session ceiling must neither inherit what earlier phases spent
+    nor count what a CONCURRENT session spends on another thread — pooled builds share one
+    accountant, and the critic (2026-09-30) watched a plan step cut at "$2.0200 of $0.2500 for this
+    session" whose own calls cost $0.03. MUTATION: read the accountant's delta -> 2.15, not 0.15."""
+    import threading
+
+    from looplab.core.llm import CostAccountant
+    from looplab.core.llm_budget import thread_committed_usd
+    acct = CostAccountant()
+    usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+    acct.add(0.60, usage)                                   # an earlier phase, this thread
+    client = type("C", (), {"accountant": acct})()
+    at_start = thread_committed_usd()
+    acct.add(0.15, usage)                                   # this session
+    other = threading.Thread(target=lambda: acct.add(2.0, usage))   # a concurrent session
+    other.start()
+    other.join()
+    assert acct.spent == pytest.approx(2.75), "the run's accountant saw all three"
     assert tool_loop._session_spend(client, at_start) == pytest.approx(0.15), (
-        "this session spent $0.15; reading the run total would cut it immediately"
+        "this session spent $0.15; the run total or the concurrent session would cut it"
     )
 
 

@@ -58,7 +58,9 @@ the very text an extractor would read; a model asked to grade a rationale agains
 grading its own text, and it would be graded on a run where BOTH inputs came from it. So:
 
   * `REPAIR_INERT` is decided on FILE BYTES ONLY. The rationale is not consulted, cannot be
-    consulted, and no wording can evade it: either the repair's change set is empty or it is not.
+    consulted, and no wording can evade it: either the repair's change set is empty — bar the
+    paths `inert_exempt_paths` sets aside for the failure the engine named (69.10a: the
+    activation manifest) — or it is not.
     That verdict is the only one this module lets the loop ACT on.
   * `REPAIR_UNMET` is decided by a pure token extractor over the rationale. It is EVIDENCE, never a
     stop: a model can dodge it by writing vaguely, and dodging it lands on `REPAIR_UNSTATED`, which
@@ -484,8 +486,8 @@ REPAIR_VERDICTS = (REPAIR_VERIFIED, REPAIR_INERT, REPAIR_UNMET, REPAIR_UNSTATED)
 # How many CONSECUTIVE inert repairs a node may make before the loop stops repairing it. NOT
 # operator-settable, and deliberately smaller than `_UNPARSEABLE_REPAIR_LIMIT` (3), because the
 # evidence is stronger: an unparseable answer might be one truncated generation, while an empty
-# change set is the engine's own byte comparison saying the next eval re-runs inputs it has already
-# run. One is allowed because a developer can genuinely spend a turn budget reading before it edits;
+# change set (bar the activation manifest, `inert_exempt_paths`) is the engine's own byte
+# comparison saying the next eval re-runs code it has already run. One is allowed because a developer can genuinely spend a turn budget reading before it edits;
 # a second in a row is a chain that cannot make progress, and every link costs a whole evaluation
 # (rubertlite-dr-unified-v4 node 6: 2.7 h of GPU per link).
 INERT_REPAIR_LIMIT = 2

@@ -180,13 +180,16 @@ def _format_repair_log(repair_log) -> str:
         note = ""
         if r.get("verified") == REPAIR_INERT and r.get("changed"):
             # A row no log carried before doc 69 69.10a: inert, yet a file moved — the activation
-            # manifest, which nothing the evaluation runs reads (`repair_verify.
+            # manifest, which the engine reads only for its marker check (`repair_verify.
             # inert_exempt_paths`). Its own sentence, so the one below stays byte for byte and
-            # never says "no file at all" of a row that names one.
+            # never says "no file at all" of a row that names one. Said of what the ENGINE reads:
+            # a candidate whose own code reads that file is the exemption's stated cost, and the
+            # judge is told so rather than told it cannot happen.
             note = ("\n    THE ENGINE COMPARED THE BYTES: this attempt changed only the activation "
-                    "manifest, which nothing the evaluation runs reads, and the failure was not "
-                    "a missing activation marker — so the evaluation after it re-ran the same "
-                    "code.")
+                    "manifest, which the engine reads only for its marker check after an "
+                    "evaluation that otherwise succeeded, and the failure was not a missing "
+                    "activation marker — so unless the candidate's own code reads that file, the "
+                    "evaluation after it re-ran the same code.")
         elif r.get("verified") == REPAIR_INERT:
             note = ("\n    THE ENGINE COMPARED THE BYTES: this attempt changed no file at all, so "
                     "the evaluation after it re-ran inputs identical to the one before it.")

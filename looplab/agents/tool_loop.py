@@ -32,7 +32,8 @@ from looplab.core.phase_events import (PHASE_CHECKPOINTED, PHASE_COMPLETED, PHAS
 from looplab.tools.clock import LoopClock, set_current_clock
 from looplab.core.errors import LLMCancelled
 from looplab.core.llm import BudgetExceeded, cancel_check_scope
-from looplab.core.llm_budget import thread_committed_tokens
+from looplab.core.llm_budget import (thread_committed_tokens, thread_committed_usd,
+                                     thread_unreported_calls)
 from looplab.tools._base import (RESULT_CAP, ToolCapability, ToolResult, collect_inventory,
                                  capability_manifest)
 from looplab.core.redact import redact_secrets
@@ -970,13 +971,16 @@ def _accountant_spend(client) -> float | None:
 
 
 def _session_spend(client, at_start: float | None) -> float | None:
-    """What THIS session has spent, or None when it cannot be known."""
-    if at_start is None:
+    """What THIS session has spent, or None when it cannot be known.
+
+    Read off the THREAD (`core/llm_budget.py::note_committed_cost`), not the accountant: the
+    accountant is the RUN's, so its delta also counted every CONCURRENT session — the critic's
+    driver (2026-09-30) cut a plan step at "$2.0200 of $0.2500 for this session" whose own three
+    calls cost $0.03, because pooled builds share one accountant. `at_start` is the thread's figure
+    when the session began, None when the client keeps no accountant (see `_accountant_spend`)."""
+    if at_start is None or _accountant_spend(client) is None:
         return None
-    now = _accountant_spend(client)
-    if now is None:
-        return None
-    return max(0.0, now - at_start)
+    return max(0.0, thread_committed_usd() - at_start)
 
 
 def _session_tokens(client, at_start: int) -> int | None:
@@ -1244,7 +1248,9 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     _started = {"label": _label, "emit": str(emit_name or "")[:80],
                 "tools": len(tool_specs), "max_turns": int(max_turns or 0),
                 "time_budget_s": float(time_budget_s or 0.0)}
-    if token_budget:                    # only when set, so an unbounded phase writes its old bytes
+    # Only when set, so an unbounded phase writes its old bytes — and only when the client keeps an
+    # accountant, the one case in which the ceiling can act (`_session_tokens`).
+    if token_budget and getattr(client, "accountant", None) is not None:
         _started["token_budget"] = int(token_budget)
     emit_phase_event(PHASE_STARTED, _started)
 
@@ -1265,6 +1271,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     # Read once, before the first turn, like `_spend_at_start` below: what this THREAD had
     # committed before the session began, so every later read is the session's own volume.
     _tokens_at_start = thread_committed_tokens()
+    _unreported_at_start = thread_unreported_calls()
 
     def _done(exit_kind: str) -> None:
         payload = {"label": _label, "exit": exit_kind, "turns": clock.turn + 1,
@@ -1280,6 +1287,13 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         _tk = _session_tokens(client, _tokens_at_start)
         if _tk is not None:
             payload["tokens"] = _tk
+            # ...and how many of its calls reported NO tokens (the critic, 2026-09-30: a streamed
+            # call after the endpoint refused `stream_options` carries no usage, so a session of
+            # thirty such calls read `tokens: 0` and its ceiling never fired). Only when non-zero,
+            # so a session whose provider reports usage writes the row it always wrote.
+            _un = thread_unreported_calls() - _unreported_at_start
+            if _un > 0:
+                payload["tokens_unreported"] = _un
         emit_phase_event(PHASE_COMPLETED, payload)
     # D11: history compression runs on the dedicated cheap compressor when configured, else the
     # loop's own client. A configured compressor that failed validation/construction is different:
@@ -1355,9 +1369,10 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         another turn, so only it can honour a bounce; see `_accept_forced`."""
         return _accept_forced(_force_emit(client, messages, emit_spec), may_retry=may_retry)
 
-    # Read once, before the first turn: the ceiling is for THIS session, and the accountant it
-    # reads is the RUN's, already carrying whatever earlier phases spent.
-    _spend_at_start = _accountant_spend(client)
+    # Read once, before the first turn: the ceiling is for THIS session, so it is measured from what
+    # this THREAD had committed when the session began (`_session_spend`); None — no ceiling — when
+    # the client keeps no accountant.
+    _spend_at_start = thread_committed_usd() if _accountant_spend(client) is not None else None
     turns = itertools.count() if max_turns is None or max_turns <= 0 else range(max_turns)
     for turn_idx in turns:
         if _cancelled():                # user hit stop -> finalize from what we have, promptly
@@ -1560,8 +1575,11 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 # transcript to a provider must first strip unanswered tool_call_ids, or a strict
                 # OpenAI-compatible backend 400s on it — `answered_transcript` below is the ONE
                 # spelling of that, used by `serve/assistant.py` and the two `agentic_*` wrappers.
+                # The row AFTER `finalize`, so its `tokens` count the calls `finalize` makes (a
+                # re-parse of a malformed emit, a forced re-ask) — the salvaged exits already did.
+                result = finalize(args)
                 _done("emitted")
-                return finalize(args)
+                return result
             from_a_tool = False
             if _cancelled():
                 # Stop pressed while this turn's calls were executing: do NOT run the remaining
@@ -1710,15 +1728,23 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         # whole investigation — the Developer's STAGES phase read a big repo for its full 30-turn
         # budget, never got to `declare_stages`, and silently degraded to "no stages declared".
         # Salvage ONE forced structured emit from everything gathered; only then fall back.
+        # A TOKEN cut says so (doc 69 69.2): a new exit, so its words are new; every historical
+        # exit keeps "turn/time" byte for byte.
         messages.append({"role": "user",
-                         "content": f"Out of turn/time budget. Call `{emit_name}` NOW with your "
-                                    "best answer from everything you have gathered."})
+                         "content": (f"Out of token budget. Call `{emit_name}` NOW with your "
+                                     "best answer from everything you have gathered."
+                                     if _cutoff.get("kind") == "tokens" else
+                                     f"Out of turn/time budget. Call `{emit_name}` NOW with your "
+                                     "best answer from everything you have gathered.")})
         ok, result, _ = _salvage_emit()
         if ok:
             _done("salvaged")
             return result
+    # The row AFTER the fallback, like the emitted exit: `tokens` then counts the fallback's own
+    # calls (`agentic_struct`'s `parse_structured`, `agentic_text`'s `complete_text`).
+    result = fallback(messages)
     _done("fallback")
-    return fallback(messages)
+    return result
 
 
 def answered_transcript(messages: list) -> list:

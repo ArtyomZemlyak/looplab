@@ -21,7 +21,24 @@ import pytest
 from looplab.agents.tool_loop import _note_budget, _spend_detail
 
 
-class _Acct:
+class _ThreadSpend:
+    """A stub accountant whose spend is COMMITTED ON THE CALLING THREAD, as `CostAccountant.add`
+    commits it (`core/llm_budget.py::note_committed_cost`): the loop's money ceiling reads the
+    thread, never the run's accountant (the critic, 2026-09-30)."""
+    _spent = 0.0
+
+    @property
+    def spent(self):
+        return self._spent
+
+    @spent.setter
+    def spent(self, value):
+        from looplab.core.llm_budget import note_committed_cost
+        note_committed_cost(float(value) - self._spent)
+        self._spent = float(value)
+
+
+class _Acct(_ThreadSpend):
     def __init__(self, spent):
         self.spent = spent
 
@@ -32,16 +49,27 @@ class _Client:
             self.accountant = _Acct(spent)
 
 
+def _session(earlier: float, spent: float):
+    """A client whose run had spent `earlier` before this session began and `spent` during it, both
+    committed on THIS thread — and the thread's figure at the session's start (what the loop reads,
+    `_session_spend`)."""
+    from looplab.core.llm_budget import thread_committed_usd
+    client = _Client(earlier)
+    start = thread_committed_usd()
+    client.accountant.spent = earlier + spent
+    return client, start
+
+
 def test_the_detail_names_both_the_spend_and_the_ceiling():
-    d = _spend_detail(_Client(0.37), 0.05, 0.25)
-    assert "$0.3200" in d, d          # 0.37 - 0.05, the spend of THIS session
+    d = _spend_detail(*_session(0.05, 0.32), 0.25)
+    assert "$0.3200" in d, d          # the spend of THIS session, not the run's 0.37
     assert "$0.2500" in d, d
 
 
 def test_a_wall_cut_with_no_money_ceiling_still_reports_the_spend():
     """`cost_budget_usd` is 0 for every session except the plan step, and those sessions hit the
     wall too. Reporting nothing there would leave the commonest cut as silent as before."""
-    d = _spend_detail(_Client(0.90), 0.10, 0.0)
+    d = _spend_detail(*_session(0.10, 0.80), 0.0)
     assert "$0.8000" in d, d
     assert "no money ceiling" in d, d
 
@@ -56,7 +84,7 @@ def test_an_unknowable_spend_is_reported_as_nothing_rather_than_zero():
 def test_the_payload_carries_the_detail_through_to_the_observer():
     seen = []
     _note_budget(seen.append, "time", turns=7, seconds=1200.4,
-                 detail=_spend_detail(_Client(0.42), 0.02, 0.25))
+                 detail=_spend_detail(*_session(0.02, 0.40), 0.25))
     assert len(seen) == 1
     p = seen[0]
     assert p["kind"] == "time"
@@ -91,7 +119,7 @@ def test_the_developer_keeps_the_numbers_and_not_only_the_word():
 # broke nothing, because nothing asserted that the wall branch calls the helper at all. Mutation is
 # what found that; unit tests on both ends of a wire do not test the wire.
 
-class _SpendingAcct:
+class _SpendingAcct(_ThreadSpend):
     def __init__(self):
         self.spent = 0.0
 

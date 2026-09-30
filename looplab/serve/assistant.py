@@ -2269,7 +2269,10 @@ _CUTOFF_SENTENCES = {
     "cost": "reached the spend ceiling for this session",
     # Added with the loop's token ceiling (doc 69 69.2). Kept out of _CUTOFF_BUDGET_KINDS for the
     # money ceiling's reason -- seconds do not buy tokens -- but unlike `llm_budget_usd` the knob
-    # that helps IS the operator's, `agent_token_budget`, so the notice names it.
+    # that helps IS the operator's, `agent_token_budget`, so the notice names it -- and says it is
+    # SHARED (the critic, 2026-09-30): the chat reads the UI's settings, so raising it also raises
+    # every engine role's ceiling in the runs launched with them. `assistant_time_budget_s` was
+    # split out of `agent_time_budget_s` for exactly that reason; the token knob has no twin yet.
     "tokens": "reached the token ceiling for this session",
 }
 # Only the two clock/counter kinds are raised by raising the budget; telling an operator to raise
@@ -2293,7 +2296,9 @@ def cutoff_notice(budget: dict) -> str:
     because = f" ({detail})" if detail else ""
     raise_it = ("Ask me to continue, or raise `assistant_time_budget_s`."
                 if kind in _CUTOFF_BUDGET_KINDS
-                else "Ask me to continue, or raise `agent_token_budget`." if kind == "tokens"
+                else ("Ask me to continue, or raise `agent_token_budget` — shared with every "
+                      "engine role's sessions in the runs launched with these settings.")
+                if kind == "tokens"
                 else "Ask me to continue, or narrow the question.")
     return (f"\n\n---\n_This turn {what}{because} after {budget.get('turns')} tool turns "
             f"({budget.get('seconds')}s) and was cut short — the answer above is the best I could "

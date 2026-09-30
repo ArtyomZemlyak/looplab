@@ -53,6 +53,7 @@ from __future__ import annotations
 from typing import Optional
 
 from looplab.engine.failure_diagnosis import signature_text
+from looplab.engine.repair_verify import REPAIR_INERT
 
 # --- The critic's verdict contract --------------------------------------------------------------
 # A duck-typed seam exactly like `triage.py::TRIAGE_ACTIONS` — the agent's emit schema
@@ -490,6 +491,11 @@ def format_repair_trajectory(rows) -> str:
         changed = ("(not recorded — this attempt predates the change-set column)"
                    if "changed" not in r
                    else ", ".join(str(c) for c in (r.get("changed") or [])) or "nothing")
+        # An inert row that names a file — only the activation manifest (doc 69 69.10a), a shape no
+        # log carried before — says so, or "it changed: looplab_activation.json" reads as a fix that
+        # moved something. Every other row renders byte for byte as it always has.
+        if r.get("verified") == REPAIR_INERT and r.get("changed"):
+            changed += " (graded inert: nothing the evaluation runs moved)"
         cause = authenticated_cause(r) or "(not recorded — this attempt predates the cause column)"
         # A DEFERRED row's rationale is the judge's HELD rejection, not a prescription the repair
         # claimed (`eval_attempt_rules.deferred_triage_verdict`): labelled as such, so the critic
