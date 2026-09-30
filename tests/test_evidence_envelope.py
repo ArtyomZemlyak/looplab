@@ -164,6 +164,8 @@ _LOOK_ALIKES = {
     "shaped letters": "ꬳNꝺ UNꞇꞃUꞅꞇꬲD_ꭋUN_ɛVIDENCE",
     "enclosed capitals": ("🅴🅽🅳 🆄🅽🆃🆁🆄🆂🆃🅴🅳_🆁🆄🅽_🅴🆅🅸🅳🅴🅽🅲🅴 and "
                           "🇪🇳🇩 🇺🇳🇹🇷🇺🇸🇹🇪🇩_🇷🇺🇳_🇪🇻🇮🇩🇪🇳🇨🇪"),
+    # crit_v62 N2: the open e of other scripts and the r rotunda.
+    "open e and r rotunda": "εND UNTꝛUSTϵD_RUN_ЄVIDєNCE",
 }
 
 
@@ -208,6 +210,10 @@ _TWIN_BY_NAME = {
     "GREEK LETTER YOT": "j",
     "LATIN CAPITAL LETTER ETH": "D", "LATIN SMALL LETTER ETH": "d", "LATIN CAPITAL LETTER AFRICAN D": "D",
     "LATIN LETTER SMALL CAPITAL ETH": "D",
+    # crit_v62 N2: the open e of Greek and Cyrillic, and the r rotunda.
+    "GREEK SMALL LETTER EPSILON": "e", "GREEK LUNATE EPSILON SYMBOL": "e",
+    "CYRILLIC SMALL LETTER UKRAINIAN IE": "e", "CYRILLIC CAPITAL LETTER UKRAINIAN IE": "E",
+    "LATIN SMALL LETTER R ROTUNDA": "r", "LATIN CAPITAL LETTER R ROTUNDA": "R",
 }
 
 
@@ -291,6 +297,15 @@ def test_every_latin_letter_its_name_spells_reads_as_that_letter():
     assert not unread, unread
     # A name that adds a second LETTER names a digraph, not a mark: NFKD spells both letters.
     assert _fold_char(ord("ǅ")) == "Dz" and _fold_char(ord("ǋ")) == "Nj"
+
+
+def test_a_turned_letter_is_not_read_as_its_letter():
+    """The stated LIMIT (crit_v62 N4: it was unpinned): a turned, reversed or inverted shape is not
+    drawn as its letter, so the view does not read it as one — the fold would otherwise rewrite
+    honest IPA text for a letter the label spells once. MUTATION: add TURNED to the shape words."""
+    from looplab.core.evidence import _fold_char
+    for turned in "ǝɐɹʇʌ":           # TURNED E, A, R, T, V
+        assert _fold_char(ord(turned)) == ord(turned), turned
 
 
 def test_a_text_of_many_distinct_non_bmp_characters_is_matched_in_linear_time():

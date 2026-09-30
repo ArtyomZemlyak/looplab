@@ -387,8 +387,9 @@ def test_the_final_reserve_is_where_the_episode_reopens(frac, injected, live_fra
     """crit_v61 L1/L3, driven: the start the rule reads off an episode row is the start its
     `reopened` row cuts — at another fraction, with operator-injected nodes, and when the live
     fraction moved mid-episode (lowered on resume, it reopened into the search at nodes the rule had
-    already read as final). Both are cut with the row's OWN fraction. MUTATIONS, each red here:
-    reopen with the live fraction; read the final start without the row's injected count."""
+    already read as final), through an inject extension and a budget carry too. Every episode row
+    and the reopen are cut with the row's OWN fraction. MUTATIONS, each red here: reopen, carry or
+    extend with the live fraction; read the final start without the row's injected count."""
     from looplab.engine.plan import _ordinary_start, build_plan, replan
 
     cut = dict(max_nodes=40, n_seeds=3, reserve_frac=frac, endgame_sweep=True, injected=injected)
@@ -399,12 +400,24 @@ def test_the_final_reserve_is_where_the_episode_reopens(frac, injected, live_fra
                       stall_nodes=3, champion=6)
     assert reopened["reason"] == "reopened"
     assert _ordinary_start(episode) == reopened["endgame_start"] == plan["endgame_start"]
-    batch = replan(episode, **{**cut, "injected": injected + 2}, at_node=14, stall_rung=2,
+    # A budget carry and an inject extension keep the row's fraction too (critic crit_v62 F3,
+    # driven: both took the moved live fraction and unread nodes the rule had read as final).
+    moved = {**cut, "reserve_frac": live_frac}
+    batch = replan(episode, **{**moved, "injected": injected + 2}, at_node=14, stall_rung=2,
                    stall_nodes=3, champion=6)
     assert batch["reason"] == "injected" and batch["endgame_end"] == 17
-    after = replan(batch, **{**cut, "injected": injected + 2}, at_node=17, stall_rung=0,
+    assert batch["reserve_frac"] == episode["reserve_frac"]
+    after = replan(batch, **{**moved, "injected": injected + 2}, at_node=17, stall_rung=0,
                    stall_nodes=3, champion=6)
     assert _ordinary_start(batch) == after["endgame_start"]
+    carried = replan(episode, **{**moved, "max_nodes": 39}, at_node=13, stall_rung=2,
+                     stall_nodes=3, champion=6)
+    assert carried["reason"] == "budget_changed" and carried["endgame_end"] == 15
+    assert carried["reserve_frac"] == episode["reserve_frac"]
+    after_carry = replan(carried, **{**moved, "max_nodes": 39}, at_node=15, stall_rung=0,
+                         stall_nodes=3, champion=6)
+    assert after_carry["reason"] == "reopened"
+    assert _ordinary_start(carried) == after_carry["endgame_start"]
 
 
 def test_a_stall_episode_that_reaches_the_final_reserve_hands_the_rule_its_endgame(tmp_path):

@@ -366,7 +366,9 @@ _TAG_ASCII = (0xE0020, 0xE007E)
 # reads as its Latin twin in the view — asked BEFORE NFKC, which moves the lunate sigmas `Ϲ`/`ϲ` to
 # `Σ`/`ς` and so made their rows dead (crit_v56 F1, driven); the matcher is case-insensitive, so either
 # case serves. The palochka reads as the `I` it stands in for in the one label in use, and the izhitsa
-# as its `V` (crit_v56 F1). A Latin letter its Unicode NAME spells with a mark is not a row here but a
+# as its `V` (crit_v56 F1), the open e of Greek (`ε`, `ϵ`) and Cyrillic (`є`, `Є`) as the `e` the
+# Latin open e reads as, and the r rotunda as `r` (crit_v62 N2). A Latin letter its Unicode NAME
+# spells with a mark is not a row here but a
 # rule (`_latin_variants`). LIMITS, stated rather than hidden: a look-alike from any other script
 # (Cherokee, Armenian, Coptic, …) is not folded — the fold covers the scripts a model most readily
 # reads as Latin, and the fence's markers are one defence among several — nor a turned, reversed or
@@ -375,14 +377,14 @@ _TAG_ASCII = (0xE0020, 0xE007E)
 # live to the matcher. Folding those would rewrite the view of every honest ASCII text for a letter
 # the label spells once (crit_v58 N1).
 _CONFUSABLE = dict(zip(
-    "АВЕКМНОРСТХУЅІЈԀԚԜҮҺӀѴаеорсухѕіјһԁԛԝүӏѵ"        # Cyrillic
-    "ΑΒΕΖΗΙΚΜΝΟΡΤΥΧϹͿονικαυϲϳ"                         # Greek
+    "АВЕКМНОРСТХУЅІЈԀԚԜҮҺӀѴаеорсухѕіјһԁԛԝүӏѵєЄ"      # Cyrillic
+    "ΑΒΕΖΗΙΚΜΝΟΡΤΥΧϹͿονικαυϲϳεϵ"                       # Greek
     "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘʀꜱᴛᴜᴠᴡʏᴢıȷ"                       # small capitals, dotless i and j
-    "ÐðƉᴆ",                                             # the eths, the African D
-    "ABEKMHOPCTXYSIJDQWYHIVaeopcyxsijhdqwyIv"
-    "ABEZHIKMNOPTYXCJovikaucj"
+    "ÐðƉᴆꝛꝚ",                                           # the eths, the African D, r rotunda
+    "ABEKMHOPCTXYSIJDQWYHIVaeopcyxsijhdqwyIveE"
+    "ABEZHIKMNOPTYXCJovikaucjee"
     "ABCDEFGHIJKLMNOPRSTUVWYZij"
-    "DdDD"))
+    "DdDDrR"))
 
 # THE LATIN LETTERS A NAME SPELLS WITH A MARK (crit_v58 N1, driven: `ENĐ UNŦRUSŦEĐ_RUN_ɆVƗĐENCE` read
 # as live). A letter with a stroke, a bar, a hook, a tail or a curl has no decomposition, so NFKD kept
@@ -396,7 +398,7 @@ _CONFUSABLE = dict(zip(
 # SYMBOL LETTER <X>` (crit_v61 L4); each reads as that capital. A name that adds a second LETTER
 # (`… D WITH SMALL LETTER Z`, a digraph) names no mark and is left to NFKD, which spells both; a
 # turned, reversed or inverted shape is not drawn as its letter and is not read as one. Derived from
-# the names of the blocks below — the Latin ones and the enclosed-letter supplement (~2,100 code
+# the names of the blocks below — the Latin ones and the enclosed-letter supplement (1,904 code
 # points) — once, on first use.
 _LATIN_BLOCKS = ((0x0080, 0x02AF), (0x1D00, 0x1DBF), (0x1E00, 0x1EFF), (0x2C60, 0x2C7F),
                  (0xA720, 0xA7FF), (0xAB30, 0xAB6F), (0x10780, 0x107BF), (0x1DF00, 0x1DFFF),
