@@ -159,7 +159,8 @@ def _card_resource_envelope() -> tuple[int, tuple[int, ...]]:
             return 0, ()
     try:
         # detect_gpus() is process-cached — fine for the static identity/count, but its mem_free_mib is
-        # frozen at server start, so as the current admission envelope it would accept a pin after memory
+        # frozen at the first probe that answered (doc 69 69.23a: a failed probe is retried, not
+        # cached), so as the current admission envelope it would accept a pin after memory
         # was consumed (or reject one after it was freed). Take the count/identity from the cache but
         # source the FREE-memory envelope ONLY from a fresh, UNCACHED nvidia-smi query at admission time.
         # This is a serve control path (not a fold path) and resource pins are rare operator actions, so

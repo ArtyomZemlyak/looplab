@@ -28,15 +28,25 @@ function markerFor(state, node) {
   }) || null
 }
 
+// The server's generation-scoped activity for this node, or null when the node carries none for its
+// CURRENT lifecycle (an older server, or a stale row from a reset). One reading, shared by
+// `nodeActivityStatus` and by every surface that has a fallback of its own and must not let that
+// fallback overrule the server: the Dock's log scan called a withheld evaluation "training /
+// evaluating" beside a node card that said it waits (critic 2026-09-30, doc 69 69.12b).
+export function recordedNodeActivity(node) {
+  const activity = node?.activity
+  const recorded = activity && ACTIVITY_VALUES.has(activity.status) ? activity.status : null
+  const sameGeneration = recorded && integer(activity?.generation) && integer(node.attempt)
+    && Number(activity.generation) === Number(node.attempt)
+  return recorded && sameGeneration ? recorded : null
+}
+
 export function nodeActivityStatus(node, state = null) {
   if (!node) return NODE_ACTIVITY.PENDING
   if (markerFor(state, node)) return NODE_ACTIVITY.BUILDING
 
-  const activity = node.activity
-  const recorded = activity && ACTIVITY_VALUES.has(activity.status) ? activity.status : null
-  const sameGeneration = recorded && integer(activity?.generation) && integer(node.attempt)
-    && Number(activity.generation) === Number(node.attempt)
-  if (recorded && sameGeneration) return recorded
+  const recorded = recordedNodeActivity(node)
+  if (recorded) return recorded
 
   // Compatibility with older servers and synthetic build nodes. Crucially, an old `pending` node
   // stays UNKNOWN: without the creator's boundary promise, silence is not evidence that it is queued.

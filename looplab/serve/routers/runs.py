@@ -1498,7 +1498,10 @@ def build_router(srv) -> APIRouter:
         request_generation = (_assert_historical_generation(rd, expected_generation)
                               if seq is not None or expected_generation is not None else None)
         historical_generation = request_generation if seq is not None else None
-        st = fold(srv.events(rd, seq)) if seq is not None else srv.state(rd)
+        # A historical prefix is read ONCE and kept: the withheld-lifecycle scan below reads the
+        # same rows rather than parsing the whole log a second time.
+        prefix_events = srv.events(rd, seq) if seq is not None else None
+        st = fold(prefix_events) if prefix_events is not None else srv.state(rd)
         if request_generation is not None:
             # The expensive fold runs without the exclusive command sequencer. A reset may win while
             # it is assembled, but a mixed-generation payload is rejected before any field is returned.
@@ -1537,10 +1540,15 @@ def build_router(srv) -> APIRouter:
         out = n.model_dump(mode="json")
         # A lifecycle a pause WITHHELD reads `queued`, not `evaluating` (doc 69 69.12b) — its row is
         # diagnostic, so the log is read for it, and only for the one state it can change: a pending
-        # lifecycle the current owner admitted.
-        withheld = (withheld_lifecycles(srv.events(rd, seq))
-                    if n.status is NodeStatus.pending and n.eval_activity_started is True
-                    else frozenset())
+        # lifecycle the current owner admitted. Off the prefix already read on a historical view;
+        # through the run's REUSED store on the live one, which parses only the bytes appended
+        # since its previous read — `srv.events` re-parsed the whole log on every 4 s Inspector
+        # poll of an evaluating node (critic 2026-09-30: 654 -> 1207 ms on a 30,900-event log).
+        # The store may have read a row or two past the fold above; the next poll settles that.
+        withheld = frozenset()
+        if n.status is NodeStatus.pending and n.eval_activity_started is True:
+            withheld = withheld_lifecycles(prefix_events if prefix_events is not None
+                                           else srv.event_store(rd).read_all())
         out["activity"] = public_node_activity(st, nid, withheld=withheld)
         out["annotations"] = st.annotations.get(nid, [])
         out["confirm_seeds_detail"] = st.confirm_seed_results.get(nid, {})

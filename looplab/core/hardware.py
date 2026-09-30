@@ -14,9 +14,9 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 
-_GPU_CACHE: "tuple[bool, str | None] | None" = None
 _GPUS_CACHE: "list[dict] | None" = None
 # A FAILED inventory probe is not an answer (doc 69 69.23a). `nvidia-smi` present but erroring,
 # timing out or printing nothing left `detect_gpus` caching `[]` for the whole process, and every
@@ -24,9 +24,15 @@ _GPUS_CACHE: "list[dict] | None" = None
 # Strategist set `eval_parallel=2` "without oversubscribing 192 CPU-only cores" on four H200s, and
 # the 4-GPU nodes then ran on one card each. So only a real inventory, or a box with no
 # `nvidia-smi` at all, is cached; a failed probe is retried once this long has passed (monotonic),
-# and reads as no GPUs until then.
+# and reads as no GPUs until then. The driver's own "No devices were found" (exit 6) is an ANSWER
+# too — a GPU-less box with the tooling installed — so it is cached, not re-probed every window
+# (critic 2026-09-30). One probe at a time (`_GPU_PROBE_LOCK`): concurrent callers after a window
+# expires wait for the one `nvidia-smi` instead of each paying up to its 5 s timeout.
 _GPUS_FAILED_AT: "float | None" = None
 _GPU_PROBE_RETRY_S = 60.0
+_GPU_PROBE_LOCK = threading.Lock()
+# `nvidia-smi`'s exit status for "No devices were found": the driver answered, and there are none.
+NVIDIA_SMI_NO_DEVICES = 6
 
 
 def detect_gpus() -> list[dict]:
@@ -39,28 +45,38 @@ def detect_gpus() -> list[dict]:
     global _GPUS_CACHE, _GPUS_FAILED_AT
     if _GPUS_CACHE is not None:
         return _GPUS_CACHE
-    if (_GPUS_FAILED_AT is not None
-            and time.monotonic() - _GPUS_FAILED_AT < _GPU_PROBE_RETRY_S):
-        return []
-    gpus: list[dict] = []
-    try:
-        from looplab.core.parse import to_int
-        for parts in (query_nvidia_smi("index,name,memory.total,memory.free") or []):
-            if len(parts) >= 4:
-                # A GPU name may itself contain a comma (the sibling detect_gpu documents + handles
-                # this) — the CSV split then yields >4 fields and fixed positions parts[2]/parts[3]
-                # read a name fragment / the wrong column. `index` is the FIRST field and the two
-                # memory numbers are the LAST two, so parse from the ends and rejoin the middle as name.
-                gpus.append({"index": to_int(parts[0]), "name": ",".join(parts[1:-2]).strip(),
-                             "mem_total_mib": to_int(parts[-2]), "mem_free_mib": to_int(parts[-1])})
-    except (OSError, ValueError, subprocess.SubprocessError):
-        gpus = []
-    if gpus or not shutil.which("nvidia-smi"):
-        _GPUS_CACHE = gpus
-        _GPUS_FAILED_AT = None
-    else:
-        _GPUS_FAILED_AT = time.monotonic()
-    return gpus
+    with _GPU_PROBE_LOCK:
+        # Re-checked under the lock: the caller that waited here behind a probe reads its answer.
+        if _GPUS_CACHE is not None:
+            return _GPUS_CACHE
+        if (_GPUS_FAILED_AT is not None
+                and time.monotonic() - _GPUS_FAILED_AT < _GPU_PROBE_RETRY_S):
+            return []
+        gpus: list[dict] = []
+        rows = None
+        try:
+            from looplab.core.parse import to_int
+            rows = query_nvidia_smi("index,name,memory.total,memory.free", no_devices_empty=True)
+            for parts in (rows or []):
+                if len(parts) >= 4:
+                    # A GPU name may itself contain a comma — the CSV split then yields >4 fields
+                    # and fixed positions parts[2]/parts[3] read a name fragment / the wrong column.
+                    # `index` is the FIRST field and the two memory numbers are the LAST two, so
+                    # parse from the ends and rejoin the middle as the name.
+                    gpus.append({"index": to_int(parts[0]), "name": ",".join(parts[1:-2]).strip(),
+                                 "mem_total_mib": to_int(parts[-2]),
+                                 "mem_free_mib": to_int(parts[-1])})
+        except (OSError, ValueError, subprocess.SubprocessError):
+            gpus, rows = [], None
+        # AN ANSWER is cached: an inventory, the driver's "no devices" (`rows == []`), or no
+        # tooling at all. Anything else — an error, a timeout, output nothing could parse — is a
+        # failed probe, retried after the window.
+        if gpus or rows == [] or not shutil.which("nvidia-smi"):
+            _GPUS_CACHE = gpus
+            _GPUS_FAILED_AT = None
+        else:
+            _GPUS_FAILED_AT = time.monotonic()
+        return gpus
 
 
 def gpu_free_mib_uncached() -> "dict[int, int]":
@@ -285,18 +301,25 @@ def effective_gpu_inventory(*, _cuda_api=None, _driver_version_query=None) -> li
         return []
 
 
-def query_nvidia_smi(fields: str, *, timeout: float = 5.0, nounits: bool = True):
+def query_nvidia_smi(fields: str, *, timeout: float = 5.0, nounits: bool = True,
+                     no_devices_empty: bool = False):
     """Run `nvidia-smi --query-gpu=<fields>` and return the comma-split, stripped rows, or None
     when there is no usable GPU signal (no binary / non-zero exit / empty output). The ONE
     launcher+CSV-splitter shared by the inventory here, the name probe below, and the live
     monitor in serve/routers/misc — callers keep their own field lists, timeouts, row shapes
-    and exception posture (this raises subprocess/OS errors; callers catch per their contract)."""
+    and exception posture (this raises subprocess/OS errors; callers catch per their contract).
+
+    `no_devices_empty` answers the driver's "No devices were found" (`NVIDIA_SMI_NO_DEVICES`) with
+    `[]` rather than None — an answer, not a missing signal — for the inventory, which caches an
+    answer and retries a failure. Off for every other caller, whose None contract is unchanged."""
     exe = shutil.which("nvidia-smi")
     if not exe:
         return None
     fmt = "csv,noheader,nounits" if nounits else "csv,noheader"
     out = subprocess.run([exe, f"--query-gpu={fields}", f"--format={fmt}"],
                          capture_output=True, text=True, timeout=timeout)
+    if no_devices_empty and out.returncode == NVIDIA_SMI_NO_DEVICES:
+        return []
     if out.returncode != 0 or not (out.stdout or "").strip():
         return None
     return [[c.strip() for c in line.split(",")] for line in out.stdout.strip().splitlines()]
@@ -566,23 +589,16 @@ def operational_attention_points(*, include_env: bool = True) -> str:
 
 
 def detect_gpu() -> str | None:
-    """The first GPU's name via `nvidia-smi`, or None if none/undetectable. Cached for the process.
-    Deliberately NO torch dependency — torch may not be installed yet (it's auto-installed on demand),
-    so importing it here would either fail or trigger a heavy import just to probe the device."""
-    global _GPU_CACHE
-    if _GPU_CACHE is not None:
-        return _GPU_CACHE[1]
-    name: str | None = None
-    try:
-        # nounits=False: matches the pre-extraction call (`--format=csv,noheader` — a name-only
-        # query has no unit columns to strip).
-        rows = query_nvidia_smi("name", nounits=False)
-        if rows and rows[0] and rows[0][0]:
-            name = ",".join(rows[0]).strip() or None   # a GPU name may contain a comma — rejoin
-    except (OSError, ValueError, subprocess.SubprocessError):
-        name = None
-    _GPU_CACHE = (True, name)
-    return name
+    """The first GPU's name, or None if none/undetectable — `detect_gpus()`'s first row, so the
+    two probes share ONE answer-versus-failure rule (doc 69 69.23a). It had its own name-only probe
+    that cached a FAILED one for the process: after a transient `nvidia-smi` timeout the runtime
+    capabilities sentence said "no GPU detected, so assume CPU" for the rest of the run while the
+    environment brief, built from `detect_gpus`, named four H200s — two sentences of one prompt
+    disagreeing (critic 2026-09-30). The name is parsed the same way (a comma inside it rejoined).
+    Deliberately NO torch dependency — torch may not be installed yet (it's auto-installed on
+    demand), so importing it here would either fail or trigger a heavy import just to probe."""
+    gpus = detect_gpus()
+    return (str(gpus[0].get("name") or "").strip() or None) if gpus else None
 
 
 #: The promise `runtime_capabilities_brief(auto_install=True)` makes, named ONCE so a brief that must

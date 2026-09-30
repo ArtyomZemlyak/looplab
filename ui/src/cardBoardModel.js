@@ -260,6 +260,25 @@ export function cardAuthoring(state) {
   return out
 }
 
+// A `running` card whose every status node the SERVER says is waiting on a WITHHELD evaluation
+// (doc 69 69.12b): the fold keeps the lifecycle admitted — the withhold row is diagnostic and never
+// folded — so the card read "Running · evaluation is in flight" beside nodes that said "Waiting for
+// evaluation slot" in the same frame (critic 2026-09-30). Only the server's own generation-matched
+// evidence moves it, and only to `coded` ("built and waiting to run"), the lane `running` splits
+// into; a card with any node the server does not say this of stays `running`.
+function withheldRunning(card, state) {
+  if (cardStatus(card) !== 'running') return false
+  const ids = Array.isArray(card.status_nodes) ? card.status_nodes : []
+  return ids.length > 0 && ids.every(nodeId => {
+    const node = state?.nodes?.[nodeId]
+    const activity = node?.activity
+    return isRecord(activity) && activity.status === 'queued'
+      && activity.evidence === 'eval_attempt_withheld'
+      && Number.isInteger(Number(activity.generation)) && Number.isInteger(Number(node.attempt))
+      && Number(activity.generation) === Number(node.attempt)
+  })
+}
+
 export function cardRows(state) {
   if (!isRecord(state?.cards)) return []
   const authoring = cardAuthoring(state)
@@ -272,7 +291,11 @@ export function cardRows(state) {
       // THE FOLD WINS whenever it has anything to say. The overlay may only move a card OUT of
       // `proposed` — the one lane that is a lie while a Developer is writing the card's code. It must
       // never pull a card back out of building/running/evaluated/gated/dropped, because those are
-      // replay facts and this one is a statement about a process that is running right now.
+      // replay facts and this one is a statement about a process that is running right now. The ONE
+      // exception is the server's own statement that nothing runs: see `withheldRunning`.
+      if (withheldRunning(card, state)) {
+        return { ...card, id, status: 'coded', withheld: { folded_status: cardStatus(card) } }
+      }
       if (!live || cardStatus(card) !== 'proposed') return { ...card, id }
       // `status` is overlaid, `selection_ready` is NOT: it stays true on purpose while the head is
       // open (see `card_ledger.py::_card_building_ids` — the servicer of that very head re-folds and

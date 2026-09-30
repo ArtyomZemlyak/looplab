@@ -19,6 +19,7 @@ from pydantic import ValidationError
 
 from looplab.core.atomicio import atomic_write_text
 from looplab.core.latebind import late_bound
+from looplab.events.eval_occupancy import withheld_lifecycles
 from looplab.events.eventstore import EventStore, EventStoreConcurrencyError
 from looplab.events.types import (EV_APPROVAL_GRANTED, EV_INJECT_NODE, EV_PAUSE, EV_RESUME,
                                   EV_RESUME_SERVED, EV_RUN_ABORT, EV_RUN_FINISHED, EV_RUN_REOPENED,
@@ -1386,13 +1387,18 @@ _STOP_WAIT_SETTLE_S = 1.0
 _COMMAND_RECORD_MAX_BYTES = 32 << 20
 
 
-def _in_flight_node_ids(state) -> list[int]:
+def _in_flight_node_ids(state, withheld=frozenset()) -> list[int]:
     """The nodes an engine owner admitted to the sandbox and has not closed — what a stop WAITS for,
     and meaningful only while an engine is alive: `eval_activity_started` is cleared by the NEXT
-    owner (`events/replay.py::_on_node_eval_started`), so a crashed engine's receipts outlive it."""
+    owner (`events/replay.py::_on_node_eval_started`), so a crashed engine's receipts outlive it.
+
+    Less the lifecycles a pause WITHHELD (`withheld`, `events/eval_occupancy.py::
+    withheld_lifecycles`, doc 69 69.12b): admitted, then returned with no terminal, so nothing is
+    running for them — "waiting for 1 evaluation already running (node 0)" was false of one."""
     return sorted(n.id for n in state.nodes.values()
                   if n.status is NodeStatus.pending and n.eval_activity_started
-                  and not getattr(n, "tombstoned", False))
+                  and not getattr(n, "tombstoned", False)
+                  and (n.id, n.attempt) not in withheld)
 
 
 def _open_build_card_ids(state) -> list[str]:
@@ -1677,6 +1683,7 @@ class _TailFold:
 
     def __init__(self, store):
         self._store, self._key, self._state = store, None, None
+        self.withheld: frozenset = frozenset()
 
     def __call__(self):
         events = self._store.read_all()
@@ -1684,6 +1691,9 @@ class _TailFold:
         if (self._state is None or self._key is None or key[0] != self._key[0]
                 or key[1] is not self._key[1] or key[2] is not self._key[2]):
             self._key, self._state = key, fold(events)
+            # …and the lifecycles a pause withheld, off the SAME events under the same key: their
+            # rows are diagnostic, so the fold alone calls each of them running (doc 69 69.12b).
+            self.withheld = withheld_lifecycles(events)
         return self._state
 
 
@@ -1790,7 +1800,7 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
     # same holds for the Card builds a drain waits to commit (`_open_build_card_ids`): an open request
     # outlives the engine that elected it.
     at_stop = current() if first is not False else None
-    running = _in_flight_node_ids(at_stop) if at_stop is not None else []
+    running = _in_flight_node_ids(at_stop, current.withheld) if at_stop is not None else []
     building = _open_build_card_ids(at_stop) if at_stop is not None and draining else []
     node_floor = max(at_stop.nodes, default=-1) if at_stop is not None else -1
     if running and first is True:
@@ -1803,7 +1813,7 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
 
     def _describe() -> str:
         now = current()
-        still = _in_flight_node_ids(now)
+        still = _in_flight_node_ids(now, current.withheld)
         builds = _open_build_card_ids(now) if draining else []
         parts = ([f"node {', '.join(map(str, still))} evaluating"] if still else []) + (
             [f"build(s) {', '.join(builds)} still running"] if builds else [])

@@ -197,6 +197,10 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   const detailMatchesNode = value => value != null && typeof value === 'object' && !Array.isArray(value)
     && String(value.id) === String(nodeId) && typeof value.status === 'string'
   const [traceClearedScopes, setTraceClearedScopes] = useState(() => new Set())
+  // The summary's generation-scoped ACTIVITY, as one comparable key for the detail's `deps` below.
+  const summaryActivity = state?.nodes?.[nodeId]?.activity
+  const summaryActivityKey = summaryActivity && typeof summaryActivity === 'object'
+    ? `${summaryActivity.status}:${summaryActivity.generation}:${summaryActivity.evidence}` : ''
   const detailQuery = []
   if (readOnly && historySeq != null) detailQuery.push(`seq=${historySeq}`)
   if (expectedGeneration) detailQuery.push(`expected_generation=${encodeURIComponent(expectedGeneration)}`)
@@ -244,7 +248,11 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
       }),
       // The node's own status is deliberately NOT part of detailScope — a status change must
       // re-read the SAME scope (that is what fills the Trace tab in place) rather than reset it.
-      deps: [state?.nodes?.[nodeId]?.status],
+      // Its ACTIVITY likewise: the detail is re-polled only while the node works, so a pause that
+      // WITHHELD its evaluation left the Inspector on the `evaluating` of its last fetch after the
+      // resume, with polling stopped and nothing to re-read it (doc 69 69.12b; critic
+      // 2026-09-30). A change of the summary's activity re-reads the same scope once.
+      deps: [state?.nodes?.[nodeId]?.status, summaryActivityKey],
     })
   const detail = detailResource.data
   const detailStatus = detailResource.status

@@ -141,3 +141,24 @@ test('the status clock reads the SAME build filter as the label', async () => {
     assert.equal(liveStatusStartedAt(evalLive, [log[1]]), 500)
   })
 })
+
+test('a withheld evaluation waits in the strip too, whatever the log still says', async () => {
+  // Doc 69 69.12b: a pause WITHHELD node 0's evaluation, so the server projects it `queued` — but
+  // its start row is still inside the Dock's window after the resume, and the scan used to overrule
+  // the server with "training / evaluating" beside a node card that said it waits (critic
+  // 2026-09-30). The scan is the OLD server's fallback: it speaks only when no generation-matched
+  // activity does. MUTATION: drop the `recordedNodeActivity` gate -> started [0].
+  await withNarration(({ pendingWork, pendingWorkLabel }) => {
+    const live = { nodes: { 0: { id: 0, attempt: 0, status: 'pending',
+      activity: { schema: 1, status: 'queued', generation: 0, evidence: 'eval_attempt_withheld' } } } }
+    const log = [{ type: 'node_eval_started', data: { node_id: 0, generation: 0 } }]
+    const split = pendingWork(live, log)
+    assert.deepEqual(split.started, [])
+    assert.deepEqual(split.queued.map(n => n.id), [0])
+    assert.equal(pendingWorkLabel(live, log), 'Experiment #0 waiting for an evaluation slot…')
+    // …and a STALE activity (a reset's previous lifecycle) is no answer: the scan still speaks.
+    live.nodes[0].attempt = 1
+    const current = [{ type: 'node_eval_started', data: { node_id: 0, generation: 1 } }]
+    assert.deepEqual(pendingWork(live, current).started.map(n => n.id), [0])
+  })
+})

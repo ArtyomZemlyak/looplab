@@ -1,4 +1,5 @@
-import { durationLabel, fmt, fmtCost, NODE_ACTIVITY, nodeActivityStatus } from './util.js'
+import { durationLabel, fmt, fmtCost, NODE_ACTIVITY, nodeActivityStatus,
+  recordedNodeActivity } from './util.js'
 import { stripMd } from './markdown.jsx'
 import { crossRunPriorNarration } from './crossRunPrior.js'
 import { evalStageFor, evalStageLabel, evalStageShortLabel, evalStages, livePhase } from './buildingModel.js'
@@ -634,6 +635,9 @@ export function pendingWork(live, log = []) {
   // The API projection is authoritative and survives the Dock's bounded timeline window. The scan
   // remains only as compatibility for an older server; unlike the old implementation it is keyed by
   // BOTH node id and generation, so a reset can never inherit the abandoned lifecycle's start row.
+  // And it is consulted ONLY for a node the server says nothing about for its current lifecycle:
+  // a start row is still in the log after a pause WITHHELD that evaluation, and the scan overruled
+  // the server's `queued` with "training / evaluating" (critic 2026-09-30, doc 69 69.12b).
   const pending = Object.values(live?.nodes || {}).filter(n => n?.status === 'pending'
     && nodeActivityStatus(n, live) !== NODE_ACTIVITY.BUILDING)
   const announced = new Set()
@@ -651,8 +655,9 @@ export function pendingWork(live, log = []) {
   for (const node of pending) {
     const status = nodeActivityStatus(node, live)
     const generation = Number.isInteger(Number(node.attempt)) ? Number(node.attempt) : 0
-    if (status === NODE_ACTIVITY.EVALUATING
-        || announced.has(`${Number(node.id)}:${generation}`)) started.push(node)
+    const announcedHere = !recordedNodeActivity(node)
+      && announced.has(`${Number(node.id)}:${generation}`)
+    if (status === NODE_ACTIVITY.EVALUATING || announcedHere) started.push(node)
     else if (status === NODE_ACTIVITY.QUEUED) queued.push(node)
     else unknown.push(node)
   }

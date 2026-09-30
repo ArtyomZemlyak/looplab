@@ -9,6 +9,17 @@ import looplab.core.hardware as hw
 from looplab.core.hardware import runtime_capabilities_brief, task_runtime_caps
 
 
+@pytest.fixture(autouse=True)
+def _fresh_gpu_probe_state(monkeypatch):
+    """Every test here starts from an unprobed process. The inventory cache and the failed-probe
+    window are module state any Engine built earlier in the session may have set — a real probe
+    that failed on a box whose `nvidia-smi` errors put the next test inside its 60 s window, where
+    `detect_gpus()` answered `[]` without calling the probe a test had patched in (critic
+    2026-09-30: `test_detect_gpus_handles_comma_in_gpu_name` raised IndexError after one)."""
+    monkeypatch.setattr(hw, "_GPUS_CACHE", None)
+    monkeypatch.setattr(hw, "_GPUS_FAILED_AT", None)
+
+
 def test_caps_off_is_conservative():
     out = runtime_capabilities_brief(auto_install=False, gpu="RTX 5090")
     assert "scikit-learn" in out and "CPU only, no GPU/network" in out
@@ -400,3 +411,110 @@ def test_a_box_without_nvidia_smi_is_an_answer_and_is_cached(monkeypatch):
     probe = _Probe(None, _H200)
     _fresh(monkeypatch, hw, probe, binary=False, retry_s=0.0)
     assert hw.detect_gpus() == [] and hw.detect_gpus() == [] and probe.calls == 1
+
+
+def test_the_drivers_no_devices_answer_is_cached(monkeypatch):
+    """`nvidia-smi` exit 6 ("No devices were found") is the driver ANSWERING, on a GPU-less box
+    with the tooling installed; before, it was a failed probe re-run every window, forever
+    (critic 2026-09-30: 10 spawns over ten simulated minutes). MUTATION: drop `rows == []`."""
+    import looplab.core.hardware as hw
+
+    probe = _Probe([], _H200)
+    _fresh(monkeypatch, hw, probe, retry_s=0.0)
+    assert hw.detect_gpus() == [] and hw.detect_gpus() == [] and probe.calls == 1
+
+
+def test_the_inventory_reads_a_real_exit_6_as_that_answer(monkeypatch):
+    """The same answer through the REAL launcher, with only `nvidia-smi` itself scripted: the
+    inventory must ASK for the exit-6 reading, or the launcher's None is a failure re-probed every
+    window. MUTATION: drop `no_devices_empty=True` from `detect_gpus` -> probed twice."""
+    import subprocess
+
+    import looplab.core.hardware as hw
+
+    spawned: list = []
+
+    def _run(argv, **_kwargs):
+        spawned.append(argv)
+        return subprocess.CompletedProcess(argv, hw.NVIDIA_SMI_NO_DEVICES,
+                                           stdout="No devices were found\n", stderr="")
+
+    monkeypatch.setattr(hw, "_GPUS_CACHE", None)
+    monkeypatch.setattr(hw, "_GPUS_FAILED_AT", None)
+    monkeypatch.setattr(hw, "_GPU_PROBE_RETRY_S", 0.0)
+    monkeypatch.setattr(hw.shutil, "which", lambda name: "/usr/bin/nvidia-smi")
+    monkeypatch.setattr(hw.subprocess, "run", _run)
+    assert hw.detect_gpus() == [] and hw.detect_gpus() == [] and len(spawned) == 1
+
+
+def test_only_the_inventory_asks_for_the_no_devices_answer(monkeypatch):
+    """The exit-6 answer is opt-in: the live GPU monitor keeps reading None as "unavailable"."""
+    import subprocess
+
+    import looplab.core.hardware as hw
+
+    monkeypatch.setattr(hw.shutil, "which", lambda name: "/usr/bin/nvidia-smi")
+    monkeypatch.setattr(hw.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
+        a[0], hw.NVIDIA_SMI_NO_DEVICES, stdout="No devices were found\n", stderr=""))
+    assert hw.query_nvidia_smi("name") is None
+    assert hw.query_nvidia_smi("name", no_devices_empty=True) == []
+
+
+def test_the_retry_window_runs_on_the_monotonic_clock(monkeypatch):
+    """A wall-clock step (NTP, a suspended VM) must neither pin a failure nor skip the window.
+    MUTATION: read `time.time()` -> the patched monotonic clock moves and nothing re-probes."""
+    import looplab.core.hardware as hw
+
+    now = [1_000.0]
+    monkeypatch.setattr(hw.time, "monotonic", lambda: now[0])
+    probe = _Probe(None, _H200)
+    _fresh(monkeypatch, hw, probe, retry_s=60.0)
+    assert hw.detect_gpus() == [] and probe.calls == 1
+    now[0] = 1_059.0
+    assert hw.detect_gpus() == [] and probe.calls == 1, "inside the window: no probe"
+    now[0] = 1_061.0
+    assert len(hw.detect_gpus()) == 2 and probe.calls == 2, "past it: probed again, and answered"
+
+
+def test_concurrent_callers_share_one_probe(monkeypatch):
+    """After a window expires, every prompt build racing for the inventory used to spawn its own
+    `nvidia-smi` (up to 5 s each). MUTATION: drop the lock -> several probes."""
+    import threading
+    import time
+
+    import looplab.core.hardware as hw
+
+    gate = threading.Event()
+
+    class _Slow(_Probe):
+        def __call__(self, *args, **kwargs):
+            gate.wait(5)
+            time.sleep(0.05)
+            return super().__call__(*args, **kwargs)
+
+    probe = _Slow(_H200)
+    _fresh(monkeypatch, hw, probe)
+    seen: list = []
+    threads = [threading.Thread(target=lambda: seen.append(len(hw.detect_gpus())))
+               for _ in range(6)]
+    for t in threads:
+        t.start()
+    gate.set()
+    for t in threads:
+        t.join(10)
+    assert seen == [2] * 6 and probe.calls == 1
+
+
+def test_the_name_probe_shares_the_inventorys_answer_and_its_retry(monkeypatch):
+    """`detect_gpu` cached a failed name probe for the process, so one prompt said "no GPU detected"
+    beside an environment brief naming the GPUs (critic 2026-09-30). It is the inventory's first
+    row now. MUTATION: cache the first answer in `detect_gpu` -> None forever."""
+    import subprocess
+
+    import looplab.core.hardware as hw
+
+    probe = _Probe(subprocess.TimeoutExpired("nvidia-smi", 5.0), _H200)
+    _fresh(monkeypatch, hw, probe, retry_s=0.0)
+    assert hw.detect_gpu() is None
+    assert hw.detect_gpu() == "NVIDIA H200"
+    assert hw.gpu_summary().startswith("2 GPU(s): NVIDIA H200")

@@ -135,3 +135,110 @@ def test_the_withhold_is_the_lifecycle_s_not_the_node_s(tmp_path):
     client = TestClient(make_app(tmp_path))
     now = _activity(client)
     assert (now["status"], now["generation"]) == ("evaluating", 1), now
+
+
+def test_after_an_owner_boundary_the_node_waits_for_admission_not_for_its_withhold(tmp_path):
+    """The next owner has not admitted the lifecycle yet, and THAT is what the evidence names; the
+    withhold is history. MUTATION: ask the withheld set before the admission check -> evidence
+    `eval_attempt_withheld` for a lifecycle no current owner holds (critic 2026-09-30, N4)."""
+    rd, store = _run(tmp_path)
+    store.append("eval_attempt_withheld", {"node_id": 0, "generation": 0, "attempt": 0,
+                                           "at": "after_canary", "reason": "paused",
+                                           "eval_seconds": 1.0})
+    store.append("resume_served", {"engine_owner_boundary": True})
+    client = TestClient(make_app(tmp_path))
+    assert _activity(client) == {"schema": 1, "status": "queued", "generation": 0,
+                                 "evidence": "node_created_boundary"}
+
+
+def test_the_node_detail_reads_the_log_once_for_the_withheld_scan(tmp_path, monkeypatch):
+    """The Inspector polls this route every 4 s while a node evaluates, and the scan re-parsed the
+    whole log on each poll beside the fold that had just read it (critic 2026-09-30: 654 -> 1207 ms
+    on 30,900 events). The live path reads through the run's incremental store and a historical
+    one reuses its prefix, so the scan adds no `events()` read to a detail that needs no scan.
+    MUTATION: scan `srv.events(rd, seq)` again -> one read more than the baseline, both paths."""
+    from looplab.serve import appstate
+    from tests.factories import log_run_generation
+
+    rd, store = _run(tmp_path)
+    store.append("node_created", {
+        "node_id": 1, "generation": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+    store.append("node_evaluated", {"node_id": 1, "generation": 0, "metric": 0.3})
+    store.append("eval_attempt_withheld", {"node_id": 0, "generation": 0, "attempt": 0,
+                                           "at": "after_canary", "reason": "paused",
+                                           "eval_seconds": 1.0})
+    reads: list = []
+    real = appstate.AppState.events
+
+    def _counting(self, rd_, upto_seq=None):
+        reads.append(upto_seq)
+        return real(self, rd_, upto_seq)
+
+    monkeypatch.setattr(appstate.AppState, "events", _counting)
+    client = TestClient(make_app(tmp_path))
+    seq = store.read_all()[-1].seq
+    historical = f"?seq={seq}&expected_generation={log_run_generation(rd)}"
+    for suffix in ("", historical):
+        reads.clear()
+        client.get(f"/api/runs/withheld/nodes/1{suffix}").raise_for_status()
+        baseline = len(reads)
+        reads.clear()
+        body = client.get(f"/api/runs/withheld/nodes/0{suffix}").json()
+        assert body["activity"]["evidence"] == "eval_attempt_withheld", suffix
+        assert len(reads) == baseline, (suffix or "live", reads, baseline)
+
+
+def test_stop_wait_does_not_call_a_withheld_evaluation_running(tmp_path):
+    """`looplab stop --wait` printed "waiting for the engine to finish 1 evaluation(s) already
+    running (node 0)" while the public activity said the node waits (critic 2026-09-30). The tail
+    fold carries the withheld set off the same events it folds; a relaunch makes it run again.
+    MUTATION: drop the subtraction -> [0] while withheld."""
+    from looplab.cli.run_cmds import _in_flight_node_ids, _TailFold
+
+    rd, store = _run(tmp_path)
+    current = _TailFold(store)
+    assert _in_flight_node_ids(current(), current.withheld) == [0]
+    store.append("eval_attempt_withheld", {"node_id": 0, "generation": 0, "attempt": 0,
+                                           "at": "after_canary", "reason": "paused",
+                                           "eval_seconds": 1.0})
+    assert _in_flight_node_ids(current(), current.withheld) == []
+    store.append("eval_invocation_claimed", {"node_id": 0, "generation": 0})
+    assert _in_flight_node_ids(current(), current.withheld) == [0]
+
+
+def test_stop_wait_prints_neither_line_about_a_withheld_evaluation(tmp_path, monkeypatch):
+    """Driven through the CLI: the line `stop --wait` prints at the stop and the line it repeats
+    while it waits both read the same withheld set, and the control — no withhold — still names the
+    running node in both. MUTATION: drop `current.withheld` at either site -> "node 0"."""
+    from typer.testing import CliRunner
+
+    from looplab.cli import app, run_cmds
+    from looplab.engine import run_lifecycle
+
+    def _stop(rd):
+        said: list = []
+
+        def _await(target, *, describe, **_kw):
+            said.append(describe())
+            return "exited", ""
+
+        monkeypatch.setattr(run_lifecycle, "engine_liveness", lambda _rd: True)
+        monkeypatch.setattr(run_cmds, "await_engine_exit", _await)
+        out = CliRunner().invoke(app, ["stop", str(rd), "--wait"])
+        assert out.exit_code == 0, out.output
+        return out.output, said
+
+    (tmp_path / "running").mkdir()
+    rd, _store = _run(tmp_path / "running")
+    output, said = _stop(rd)
+    assert "already running (node 0)" in output and said == ["still waiting: node 0 evaluating"]
+
+    (tmp_path / "withheld").mkdir()
+    rd, store = _run(tmp_path / "withheld")
+    store.append("eval_attempt_withheld", {"node_id": 0, "generation": 0, "attempt": 0,
+                                           "at": "after_canary", "reason": "paused",
+                                           "eval_seconds": 1.0})
+    output, said = _stop(rd)
+    assert "already running" not in output, output
+    assert said == ["still waiting: no evaluation running, the engine is finishing its turn"]
