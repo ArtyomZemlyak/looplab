@@ -1018,6 +1018,17 @@ its ensemble paired the champion with the champion's own child, twice. Four rule
   (`stall_champions`), and a live-budget re-cut carries the episode instead of dropping its start. A
   legacy unbounded stall row is re-evaluated on the first turn with the setting on.
 
+**The operator's nodes are not the engine's search (2026-09-30, doc 69 69.25).** On
+`minionerec-backbones-v10` the plan was cut once and the operator's inject batches never re-cut it:
+a batch carried the run past the reserve's start, and the engine's one node after the operator's
+"main axis is the BACKBONE" directive was the reserve's ensemble on the budget's last slot. Under
+`endgame_inject_recut` (product `true`; `false` in the bare library and for a pre-field snapshot)
+the reserve is `endgame_reserve_frac` of `max_nodes` LESS the nodes an operator inject created
+(`engine/plan.py::operator_injected`), and a batch that moves that cut's start writes an `injected`
+plan row. It is the cut the same injects would have got before the run began: the endgame never
+starts earlier than without them, a stall row is not re-cut by a batch, and a run with no injected
+node writes the historical rows byte for byte.
+
 **An ensemble merge sees both parents.** `merge_mode=ensemble` used to seed the Developer with
 ONE parent's files and describe the other in 120 characters of rationale — a recombination that
 reads one lineage is an improve with a longer prompt. Since 2026-09-06 the Developer's

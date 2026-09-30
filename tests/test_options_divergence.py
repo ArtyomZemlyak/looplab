@@ -58,6 +58,11 @@ EXPECTED = {
     # stall-triggered endgame to 3 nodes and then reopens the plan; the bare library keeps 0 = the
     # permanent stall endgame, the historical dispatch, on the row above's ground.
     "endgame_stall_nodes": (3, 0),
+    # The reserve is cut from the ENGINE's share of the budget, the operator's injected nodes left
+    # out, and an inject batch that moves it re-cuts the plan (doc 69 69.25, 2026-09-30): ON in the
+    # product surface, OFF in the bare library on the rows above' ground — it changes what the
+    # dispatcher builds, and a direct `Engine(...)` gains no dispatch it did not ask for.
+    "endgame_inject_recut": (True, False),
     "reflection_priors": (True, False),
     "report_every": (3, 0),
     "watchdog_reflection": (True, False),

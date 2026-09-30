@@ -247,6 +247,13 @@
           "help": "How many nodes an endgame started by a hard stall (two stall windows without a new champion) spends on the ensemble and champion sweeps before the plan reopens to ordinary search. One episode per champion; a new champion ends it early. 0 = the stall endgame lasts to the end of the budget (the historical rule). Needs an endgame reserve above 0."
         },
         {
+          "key": "endgame_inject_recut",
+          "label": "Reserve leaves your injects out",
+          "type": "bool",
+          "default": true,
+          "help": "The endgame reserve is a fraction of the budget the engine searches itself: nodes you inject are left out of it, and a batch of injects that moves the reserve's start re-plans it. Without it a batch that pushed the run past the reserve's start left the engine only the ensemble and champion sweeps. The endgame never starts earlier than it would without your injects. Off = the reserve is a fraction of the whole budget (the historical rule). Needs an endgame reserve above 0."
+        },
+        {
           "key": "complexity_cue",
           "label": "Complexity cue",
           "type": "bool",

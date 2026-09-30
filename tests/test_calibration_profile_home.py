@@ -397,7 +397,14 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               added and `[]` removed; `_EXPECTED_FIELD_COUNT` goes 277 -> 278 and both pins are
 #               re-set (the pre-change tree re-derives d451dc82…). INERT for a calibration
 #               replicate: the profile ships `strategist_backend: off`, so no brief is rendered.
-_EXPECTED_DIGEST = "sha256:96c2004edd0ac18730db3eefeb3c5150c2855a86241fe79f8fc5e1aeab3043ec"
+#   2026-09-30  + endgame_inject_recut (the endgame reserve is cut from the engine's share of the
+#               budget, doc 69 69.25). The 'field set changed too' branch: exactly
+#               `['endgame_inject_recut']` added and `[]` removed; `_EXPECTED_FIELD_COUNT` goes
+#               278 -> 279 and both pins are re-set (the pre-change tree re-derives 96c2004e…).
+#               INERT for a calibration replicate: it runs under `EngineOptions`, whose reserve is
+#               0.0 (no plan is written) and whose `endgame_inject_recut` is False, and the toy
+#               workload injects nothing.
+_EXPECTED_DIGEST = "sha256:e2d334bf36ffc1d04a54bc06f83908acd0ca5a1b3e25aec149a630493bca3afd"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -910,7 +917,8 @@ _EXPECTED_DIGEST = "sha256:96c2004edd0ac18730db3eefeb3c5150c2855a86241fe79f8fc5e
 #   2026-09-30  + strategist_gpu_brief (doc 69 69.23): 275 -> 276.
 #   2026-09-30  + developer_scorer_status (doc 69 69.5): 276 -> 277; see the digest history.
 #   2026-09-30  + strategist_budget_brief (doc 69 69.25): 277 -> 278; see the digest history.
-_EXPECTED_FIELD_COUNT = 278
+#   2026-09-30  + endgame_inject_recut (doc 69 69.25): 278 -> 279; see the digest history.
+_EXPECTED_FIELD_COUNT = 279
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

@@ -3585,10 +3585,17 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         max_nodes = int(getattr(self.policy, "max_nodes", 0) or 0)
         if max_nodes <= 0:
             return False
+        # The operator's injected nodes are cut out of the reserve's base (doc 69 69.25,
+        # `Settings.endgame_inject_recut`; 0 = the historical cut, byte for byte). Counted over the
+        # nodes THIS fold holds, so a concurrent inject build's row not yet folded is not counted.
+        injected = 0
+        if self._endgame_inject_recut:
+            from looplab.engine.plan import operator_injected
+            injected = operator_injected(self.store.read_all(), state.nodes)
         if state.plan is None:
             row = build_plan(max_nodes=max_nodes, n_seeds=n_seeds,
                              reserve_frac=self._endgame_reserve_frac, at_node=len(state.nodes),
-                             endgame_sweep=self._endgame_sweep)
+                             endgame_sweep=self._endgame_sweep, injected=injected)
         else:
             from looplab.agents.strategist import stall_rung, strategist_stall_window
             rung, _started = stall_rung(
@@ -3599,7 +3606,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             row = replan(state.plan, max_nodes=max_nodes, n_seeds=n_seeds,
                          reserve_frac=self._endgame_reserve_frac, at_node=len(state.nodes),
                          stall_rung=rung, endgame_sweep=self._endgame_sweep,
-                         stall_nodes=self._endgame_stall_nodes, champion=state.best_node_id)
+                         stall_nodes=self._endgame_stall_nodes, champion=state.best_node_id,
+                         injected=injected)
         if row is None:
             return False
         self.store.append(EV_PLAN, row)

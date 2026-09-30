@@ -100,7 +100,7 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 246
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 247
     # 238 -> 239 on 2026-09-29: `foresight_alternatives` -- whether the foresight panel's
     # candidates 2..K continue candidate 1's research session. Verified by INTERSECTION: 238
     # keys common to the previous keyset plus exactly that one.
@@ -136,6 +136,9 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # 245 -> 246 on 2026-09-30: `strategist_budget_brief` -- the Strategist's brief states the node
     # budget (doc 69 69.25). Verified by INTERSECTION: 245 keys common to the previous keyset plus
     # exactly that one.
+    # 246 -> 247 on 2026-09-30: `endgame_inject_recut` -- the endgame reserve is cut from the
+    # engine's share of the budget, the operator's injects left out (doc 69 69.25). Verified by
+    # INTERSECTION: 246 keys common to the previous keyset plus exactly that one.
     # 232 -> 233 on 2026-09-27: `card_select_k` -- the operator's Card lane width. Verified by
     # INTERSECTION: 232 keys common to the previous keyset plus exactly that one.
     # 231 -> 232 on 2026-09-26: `host_scorer_account` (a curated row beside the two below). Verified
@@ -528,7 +531,8 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # `agent_token_budget`, `strategist_gpu_brief` (the branch counted them 272 -> 277).
     # 279 -> 280 on 2026-09-30: `developer_scorer_status` (a curated row, so both counts move).
     # 280 -> 281 on 2026-09-30: `strategist_budget_brief` (a curated row, so both counts move).
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 281
+    # 281 -> 282 on 2026-09-30: `endgame_inject_recut` (a curated row, so both counts move).
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 282
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

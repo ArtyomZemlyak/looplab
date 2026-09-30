@@ -69,6 +69,21 @@ the endgame at the current node and owe the one-time merge again. A legacy stall
 `K = 0`, no `endgame_end`) is re-evaluated on the first turn with `K > 0`: reopened if the corrected
 stall rung is under two or the champion was crowned inside it, else bounded from its own start.
 
+THE OPERATOR'S NODES ARE NOT THE ENGINE'S SEARCH (doc 69 69.25, `Settings.endgame_inject_recut`). On
+`minionerec-backbones-v10` the plan was cut once, on 24.09, and the operator's inject batches never
+re-cut it — `PLAN_REASONS` had no reason to. Of nodes 0-17, twelve were the operator's (0-3, and the
+batch 9-16 that carried the count past the reserve start) and six the engine's, so the engine's one
+node after the operator's "main axis is the BACKBONE" directive was the reserve's ensemble, node 17,
+on the budget's last slot. With the setting on, the reserve is `reserve_frac` of the ENGINE's share
+of the budget — `max_nodes` less the nodes an operator inject created (`operator_injected`, off the
+`source: "manual"` stamp `engine/node_build.py::_create_injected_node` writes) — and `replan` writes
+an `injected` row when a batch moves the ordinary cut's start. It is the cut an operator who had
+injected the same nodes before the run began would have got: timing-free, and never an endgame that
+starts EARLIER than the cut without the batch. A stall row is not re-cut by a batch (a live episode
+closes by its own terms and its `reopened` row cuts over the engine's share; the permanent
+`stagnation` row of `endgame_stall_nodes` 0 stands). A run with no injected node, and every run with
+the setting off, writes the historical rows byte for byte (no `injected` key).
+
 Every function here is pure over folded state and the settings; the engine writes the row and
 reads it back through the fold, so a resume honours the same plan.
 """
@@ -77,7 +92,7 @@ from __future__ import annotations
 from typing import Optional
 
 ENDGAME_KINDS = ("merge", "sweep")
-PLAN_REASONS = ("initial", "budget_changed", "stagnation", "reopened")
+PLAN_REASONS = ("initial", "budget_changed", "stagnation", "reopened", "injected")
 # WHY a bounded stall episode closed — the `reopen_cause` of a `reopened` row. `stall_retracted` is
 # the migration's own: a legacy (unbounded) stall row whose stall does not hold under the corrected
 # `agents/strategist.py::stall_rung` (the attempts on the champion, not every id after it).
@@ -88,18 +103,24 @@ HARD_STALL_RUNGS = 2
 
 def build_plan(*, max_nodes: int, n_seeds: int, reserve_frac: float, at_node: int,
                reason: str = "initial", endgame_sweep: bool = True,
-               endgame_start: Optional[int] = None) -> Optional[dict]:
+               endgame_start: Optional[int] = None, injected: int = 0) -> Optional[dict]:
     """The plan row, or None when no reserve is configured (a 0 fraction, or a budget too small to
-    hold a seed phase AND at least one reserved slot)."""
+    hold a seed phase AND at least one reserved slot).
+
+    `injected` is how many of the run's nodes an operator inject created (`operator_injected`; 0
+    with `Settings.endgame_inject_recut` off): the reserve is `reserve_frac` of the budget less
+    those — the engine's own share — and the row carries the count it was cut over, omitted at 0 so
+    a run with no injected node writes the historical row byte for byte."""
     try:
         max_nodes = int(max_nodes)
         n_seeds = max(0, int(n_seeds))
         frac = float(reserve_frac or 0.0)
+        injected = max(0, int(injected or 0))
     except (TypeError, ValueError):
         return None
     if max_nodes <= 0 or frac <= 0.0:
         return None
-    reserve = max(1, round(max_nodes * min(frac, 0.9)))
+    reserve = max(1, round(max(0, max_nodes - injected) * min(frac, 0.9)))
     if endgame_start is None:
         endgame_start = max_nodes - reserve
     endgame_start = max(min(n_seeds, max_nodes - 1), min(int(endgame_start), max_nodes - 1))
@@ -107,7 +128,7 @@ def build_plan(*, max_nodes: int, n_seeds: int, reserve_frac: float, at_node: in
         return None                       # no room for a search AND a reserve
     reserve = max_nodes - endgame_start
     kinds = list(ENDGAME_KINDS) if endgame_sweep else ["merge"]
-    return {
+    row = {
         "at_node": max(0, int(at_node)),
         "reason": reason if reason in PLAN_REASONS else "initial",
         "max_nodes": max_nodes,
@@ -121,6 +142,27 @@ def build_plan(*, max_nodes: int, n_seeds: int, reserve_frac: float, at_node: in
         ],
         "source": "rule",
     }
+    if injected:
+        row["injected"] = injected
+    return row
+
+
+def operator_injected(events, nodes) -> int:
+    """How many of the run's nodes an operator INJECT created: the ids whose `node_created` carries
+    the `source: "manual"` stamp `engine/node_build.py::_create_injected_node` writes, keyed by the
+    fold's own coercion (`core/models.py::coerce_node_id`), each counted once (a reset rebuild keeps
+    the id the operator's) and only while the fold holds it — the same set `len(state.nodes)` counts
+    toward the plan's `at_node`."""
+    from looplab.core.models import coerce_node_id
+    from looplab.events.types import EV_NODE_CREATED
+    ids: set[int] = set()
+    for event in events:
+        data = event.data if event.type == EV_NODE_CREATED else None
+        if isinstance(data, dict) and data.get("source") == "manual":
+            node_id = coerce_node_id(data)
+            if node_id is not None:
+                ids.add(node_id)
+    return sum(1 for node_id in ids if node_id in nodes)
 
 
 def in_endgame(plan: Optional[dict], total_nodes: int) -> bool:
@@ -190,6 +232,24 @@ def _episode_row(cut: dict, *, start: int, end: int, champion: Optional[int], sp
     return row
 
 
+def _injected_recut(plan: dict, cut: dict, planned_start: int,
+                    spent: list[int]) -> Optional[dict]:
+    """An `injected` row when the operator's nodes moved the ordinary cut's start, else None (the
+    module docstring has the account). The count the row was cut over is its `injected` (absent =
+    0); a `stagnation` row — the permanent stall endgame of `stall_nodes` 0, the only stall row that
+    reaches here — is not re-cut by a batch."""
+    if plan.get("reason") == "stagnation":
+        return None
+    recorded = plan.get("injected")
+    recorded = recorded if type(recorded) is int and recorded > 0 else 0
+    if cut["injected"] == recorded:
+        return None
+    row = build_plan(**cut, reason="injected")
+    if row is None or row["endgame_start"] == planned_start:
+        return None
+    return _with_spent(row, spent)
+
+
 def _reopened(cut: dict, spent: list[int], cause: str) -> Optional[dict]:
     row = build_plan(**cut, reason="reopened")
     if row is None:
@@ -200,7 +260,7 @@ def _reopened(cut: dict, spent: list[int], cause: str) -> Optional[dict]:
 
 def replan(plan: Optional[dict], *, max_nodes: int, n_seeds: int, reserve_frac: float,
            at_node: int, stall_rung: int, endgame_sweep: bool = True, stall_nodes: int = 0,
-           champion: Optional[int] = None) -> Optional[dict]:
+           champion: Optional[int] = None, injected: int = 0) -> Optional[dict]:
     """A re-cut plan when one is due, else None.
 
     `stall_nodes` 0 (the bare-library and legacy-snapshot value) is the historical rule byte for
@@ -221,6 +281,10 @@ def replan(plan: Optional[dict], *, max_nodes: int, n_seeds: int, reserve_frac: 
     3. the budget re-cut, carrying the spent-champion memory;
     4. a hard stall before the reserve starts ONE episode `[at_node, at_node + K)` for a champion
        that has not had one.
+
+    `injected` (doc 69 69.25; 0 = the rules above byte for byte) is the operator-injected node
+    count every cut here is taken over, and — last, in either branch — an ordinary row whose
+    recorded count differs is re-cut as `injected` when that moves its start (`_injected_recut`).
     """
     if not isinstance(plan, dict):
         return None
@@ -234,8 +298,12 @@ def replan(plan: Optional[dict], *, max_nodes: int, n_seeds: int, reserve_frac: 
     except (TypeError, ValueError):
         stall_nodes = 0
     champion = _int_or_none(champion)
+    try:
+        injected = max(0, int(injected or 0))
+    except (TypeError, ValueError):
+        injected = 0
     cut = {"max_nodes": max_nodes, "n_seeds": n_seeds, "reserve_frac": reserve_frac,
-           "at_node": at_node, "endgame_sweep": endgame_sweep}
+           "at_node": at_node, "endgame_sweep": endgame_sweep, "injected": injected}
     spent = _stall_champions(plan)
     episode = _episode(plan)
     if episode is not None:
@@ -251,12 +319,13 @@ def replan(plan: Optional[dict], *, max_nodes: int, n_seeds: int, reserve_frac: 
     if stall_nodes <= 0:
         if int(max_nodes) != planned_budget:
             return build_plan(max_nodes=max_nodes, n_seeds=n_seeds, reserve_frac=reserve_frac,
-                              at_node=at_node, reason="budget_changed", endgame_sweep=endgame_sweep)
+                              at_node=at_node, reason="budget_changed", endgame_sweep=endgame_sweep,
+                              injected=injected)
         if stall_rung >= HARD_STALL_RUNGS and at_node < planned_start and at_node > n_seeds:
             return build_plan(max_nodes=max_nodes, n_seeds=n_seeds, reserve_frac=reserve_frac,
                               at_node=at_node, reason="stagnation", endgame_sweep=endgame_sweep,
-                              endgame_start=at_node)
-        return None
+                              endgame_start=at_node, injected=injected)
+        return _injected_recut(plan, cut, planned_start, [])
     if plan.get("reason") == "stagnation":
         # THE MIGRATION: an unbounded stall row this setting did not write (inf13's, at node 12).
         # Nothing on it names the champion the stall was measured against, so the stall is measured
@@ -279,7 +348,7 @@ def replan(plan: Optional[dict], *, max_nodes: int, n_seeds: int, reserve_frac: 
             and champion is not None and champion not in spent):
         return _episode_row(cut, start=at_node, end=at_node + stall_nodes, champion=champion,
                             spent=spent + [champion], reason="stagnation")
-    return None
+    return _injected_recut(plan, cut, planned_start, spent)
 
 
 # ----------------------------------------------------------------------------- the reserve's rule

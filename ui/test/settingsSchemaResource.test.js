@@ -269,7 +269,9 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   scoring command runs is one the Developer could edit. The Python half moved too.
   //   245 -> 246 (2026-09-30): `strategist_budget_brief` — each Strategist consult is told the node
   //   budget and where the plan's endgame reserve begins. The Python half moved too.
-  assert.equal(Object.keys(schema.fieldByKey).length, 246)
+  //   246 -> 247 (2026-09-30): `endgame_inject_recut` — the endgame reserve is cut from the budget
+  //   the engine searches itself, the operator's injects left out. The Python half moved too.
+  assert.equal(Object.keys(schema.fieldByKey).length, 247)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

@@ -240,6 +240,12 @@ class EngineOptions:
     # divergence-table row (`tests/test_options_divergence.py`): a bare `Engine(...)` gains no new
     # dispatch it did not ask for.
     endgame_stall_nodes: int = 0
+    # doc 69 69.25 (2026-09-30): the reserve is cut from the ENGINE's share of the budget, the
+    # operator's injected nodes left out, and an inject batch that moves the cut re-cuts the plan
+    # (`engine/plan.py::replan`). False = the historical cut; the product ships True — a
+    # divergence-table row on `endgame_stall_nodes`' ground: a bare `Engine(...)` gains no new
+    # dispatch it did not ask for.
+    endgame_inject_recut: bool = False
     model_arms: dict = field(default_factory=dict)   # doc 52 row 19: {arm: "model[@cost]"} the bandit may route a build to
     complexity_cue: bool = False         # A0d: breadth-keyed prompt hint
     budget_aware: bool = False           # A5: surface remaining eval budget into the prompt

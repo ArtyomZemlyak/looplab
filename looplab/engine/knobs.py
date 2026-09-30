@@ -150,6 +150,9 @@ class EngineKnobs:
     _endgame_reserve_frac = Knob("endgame_reserve_frac", lambda v: float(v or 0.0))
     # The stall episode's length (`engine/plan.py::replan`); 0 = the permanent stall endgame.
     _endgame_stall_nodes = Knob("endgame_stall_nodes", lambda v: max(0, int(v or 0)))
+    # doc 69 69.25: the reserve is cut from the engine's share of the budget — the operator's
+    # injected nodes left out (`engine/plan.py::operator_injected`, read by `_ensure_plan`).
+    _endgame_inject_recut = Knob("endgame_inject_recut", bool)
     # doc 52 row 19: the model ARMS the bandit may route a build to — `{arm: (model, cost)}`;
     # the configured Developer model is the implicit `default` arm. Inert without
     # `operator_bandit`, which is the policy's knob, and without a declared arm.

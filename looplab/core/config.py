@@ -996,6 +996,16 @@ class Settings(BaseSettings):
     # (`EngineOptions` and a pre-field snapshot: `LEGACY_CONFIG_SNAPSHOT_DEFAULTS`). With it on, a
     # legacy unbounded stall row is re-evaluated once. Inert without a plan (`endgame_reserve_frac` 0).
     endgame_stall_nodes: int = Field(default=3, ge=0, le=1_000_000)
+    # THE OPERATOR'S NODES ARE NOT THE ENGINE'S SEARCH (doc 69 69.25): the reserve is
+    # `endgame_reserve_frac` of the budget LESS the nodes an operator inject created, and an inject
+    # batch that moves that cut re-cuts the plan (`engine/plan.py::replan`, reason `injected`). On
+    # `minionerec-backbones-v10` the plan was cut once and never re-cut; twelve of nodes 0-17 were
+    # the operator's, and the engine's one node after its "main axis is the BACKBONE" directive was
+    # the reserve's ensemble on the budget's last slot. The endgame never starts earlier than
+    # without the batch; a stall row is not re-cut by one. `False` = the historical cut, byte for
+    # byte (`EngineOptions` and a pre-field snapshot: `LEGACY_CONFIG_SNAPSHOT_DEFAULTS`). Inert
+    # without a plan (`endgame_reserve_frac` 0) and in a run with no injected node.
+    endgame_inject_recut: bool = True
     # A0d (AIRA): inject a dynamic complexity hint into the draft/improve prompt keyed on the
     # node's child count (few children -> keep minimal; many -> escalate to ensembling/HPO).
     complexity_cue: bool = False
@@ -3927,6 +3937,12 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # permanent endgame, pointable at every commit before this one. An operator opts a run in by
     # setting it in that run's `config.snapshot.json` (or `PUT /api/runs/{id}/config`) and resuming.
     "endgame_stall_nodes": 0,
+    # THE RESERVE OVER THE ENGINE'S SHARE, added 2026-09-30 defaulting ON (doc 69 69.25). (a) holds.
+    # (b): it changes what the dispatcher builds — a reserve the operator's injects pushed a run
+    # into moves out again, so breadth buys proposals and builds the first half of the run never
+    # bought. (c) is `False`, the cut over the whole budget, pointable at every commit before this
+    # one. An operator opts a run in the same way as `endgame_stall_nodes` above.
+    "endgame_inject_recut": False,
     # THE FORESIGHT PANEL'S ALTERNATIVES, added 2026-09-29 defaulting ON. (a) holds. (b) is both
     # grounds at once: a NEW PROMPT TURN (`tool_researcher_alternative`) and different paid calls —
     # candidates 2..K become a bounded continuation of candidate 1's session instead of K-1 full

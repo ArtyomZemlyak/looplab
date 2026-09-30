@@ -2128,8 +2128,12 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # every row after the first episode; `reopen_cause` on a `reopened` row. All LOAD-BEARING:
         # `replan` reads each back off the folded `state.plan`. A run that never enables the setting
         # writes none of them.
-        optional=("at_node", "champion", "endgame_end", "endgame_start", "max_nodes", "phases",
-                  "reason", "reopen_cause", "reserve", "reserve_frac", "source", "stall_champions"),
+        # `injected` (2026-09-30, doc 69 69.25, `Settings.endgame_inject_recut`): how many
+        # operator-injected nodes the reserve was cut over, on any row whose count is not 0.
+        # LOAD-BEARING: `replan` re-cuts an ordinary row whose count differs from the run's.
+        optional=("at_node", "champion", "endgame_end", "endgame_start", "injected", "max_nodes",
+                  "phases", "reason", "reopen_cause", "reserve", "reserve_frac", "source",
+                  "stall_champions"),
         stored_whole=True,
     ),
     "policy_decision": PayloadContract(
