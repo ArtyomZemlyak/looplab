@@ -9,6 +9,29 @@
 
 📖 **[Documentation site](https://artyomzemlyak.github.io/looplab/)** · 🗺️ **[Architecture infographic](https://artyomzemlyak.github.io/looplab/guide/architecture/)** — the whole agent, every component and stage, in one picture.
 
+## Start with Assistant
+
+The main way to use LoopLab is to describe your ML goal in the web UI. From a checkout,
+install the UI extra and start the local server:
+
+```bash
+python -m pip install -e ".[ui]"
+looplab ui                       # open http://127.0.0.1:8765
+```
+
+Source checkouts need Node/npm to build the UI on first launch; see
+[Installation](docs/guide/installation.md) for the exact versions and Windows commands.
+In the UI, open **Settings → LLM** to configure your model, then use **Start a new run**
+in Assistant. Describe the goal, where the code or data live, and any time or compute limit.
+Review the proposed task, evaluation, and effective settings; **Validate** and then **Start run**.
+The Assistant can discuss a plan without starting an experiment.
+
+For a no-model demonstration, follow the [offline CLI recipe](docs/guide/quickstart.md#offline-cli-walkthrough).
+To keep working in Codex or Claude Code while LoopLab evaluates your candidates, follow the
+[external-agent quickstart](docs/guide/external-harness.md#first-external-run).
+These are different modes: the external agent proposes candidates; the built-in Assistant
+drives LoopLab's own research loop.
+
 LoopLab runs a closed research loop: a **Researcher** proposes ideas, a **Developer** writes the
 code, a sandbox runs it, an evaluator scores it, and the loop refines and **merges** the best
 candidates — repeating until the budget runs out. On a fresh repo node the Developer works in three
@@ -59,7 +82,7 @@ Requires **Python ≥ 3.11**. The core dependency set is small and ships prebuil
 platforms (`pydantic`, `orjson`, `anyio`, `typer`). Installing exposes a `looplab` command; you can
 also run `python -m looplab.cli`.
 
-## Quick start
+## CLI quick start
 
 ```bash
 # 1. Run a toy optimization task offline (no LLM, no network) — no file needed.

@@ -1,10 +1,8 @@
 # LoopLab — User Guide
 
-LoopLab is an **autonomous ML/DS research engine**. You give it a goal; it runs a closed loop —
-**invent → implement → test → improve → merge** — and returns the best *verified* result. Every
-domain decision is appended to an event log that is authoritative for replayable `RunState`, so runs
-are reproducible and crash-resumable by replay. Task/config, tracing, chat, command and cross-run
-sidecars retain their own documented authority.
+LoopLab evaluates ML experiments and returns the best measured result. Most people start by
+describing a goal to **Assistant in the web UI**. A coding agent can instead propose candidates
+through the external harness while LoopLab runs and scores them.
 
 This guide is the practical, how-to-use documentation. For the design rationale (architecture,
 decision records, roadmap), see [`../00-INDEX.md`](../00-INDEX.md).
@@ -13,9 +11,11 @@ decision records, roadmap), see [`../00-INDEX.md`](../00-INDEX.md).
 
 | Guide | What it covers |
 |---|---|
-| **[Installation](installation.md)** | Requirements, install extras, optional backends |
-| **[JupyterHub onboarding](jupyterhub-onboarding.md)** | Nine ordered steps to a working LoopLab inside a hub single-user server, and the two settings people lose an afternoon to |
-| **[Quickstart](quickstart.md)** | Your first run (`--backend toy` for the offline path) → LLM-driven, reading results |
+| **[Assistant quickstart](quickstart.md#assistant-in-the-web-ui)** | Set up the UI, describe a goal, review and start the run, read the result |
+| **[External-agent quickstart](external-harness.md#first-external-run)** | Let Codex or Claude Code propose candidates; LoopLab evaluates them |
+| **[Installation](installation.md)** | Requirements, source install on Windows/POSIX, optional extras |
+| **[Offline CLI walkthrough](quickstart.md#offline-cli-walkthrough)** | Prove the engine works without a model |
+| **[JupyterHub onboarding](jupyterhub-onboarding.md)** | Setup inside a hub single-user server, then work through Assistant |
 
 ## Reference
 
@@ -34,13 +34,13 @@ decision records, roadmap), see [`../00-INDEX.md`](../00-INDEX.md).
 | **[Concepts](concepts.md)** | Event log & replay, sandbox & trust tiers, operators, gates, confirmation, cross-run memory, search policies |
 | **[Memory & knowledge](memory.md)** | Every memory type (cases, lessons, meta-notes, skills, KB, belief cards, research), what each is for, the methodologies, and agentic retrieval |
 | **[LLM & coding agents](llm-and-agents.md)** | OpenAI-compatible backends, external coding agents, per-role models, reasoning, knowledge & skills |
-| **[External coding agents](external-harness.md)** | Codex/Claude Developer integration, capability discovery and the external-harness migration |
+| **[External harness reference](external-harness.md)** | Agent capabilities, obligations, reconnect, and the separate delegated Developer mode |
 
 ## Operating it
 
 | Guide | What it covers |
 |---|---|
-| **[Web UI](ui.md)** | The live React control plane |
+| **[Web UI](ui.md)** | Assistant, live run views and detailed controls |
 | **[Deployment](deployment.md)** | Docker Compose stack, the untrusted sandbox tier |
 | **[MLE-bench runbook](../MLEBENCH.md)** | Running real Kaggle competitions end-to-end |
 | **[Live scenarios](live-scenarios.md)** | Situational end-to-end tests of the main features (stagnation, novelty, trust gate, repair, …) — a returnable collection |

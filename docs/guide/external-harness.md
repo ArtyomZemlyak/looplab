@@ -15,6 +15,43 @@ LoopLab still owns admission, lineage, protected files, execution, measured resu
 budgets, pause/finalize, event history and replay. The agent must stay connected (or
 reconnect later) to choose further work: an idle external run waits for commands.
 
+## First external run
+
+Use a **separate run root and UI server for external runs**. A harness token can control
+the launched runs on its server; it is not a token limited to a single run. The
+operator starts the server and run, while the coding agent proposes candidates.
+
+1. From a source checkout, install `pip install -e ".[ui,harness]"`. Start the UI with
+   an owner credential and a distinct `LOOPLAB_HARNESS_TOKEN`, using the commands in
+   [External harness setup](#external-harness-setup). Keep the owner credential out
+   of the coding agent's environment. Open the UI to watch the same run root.
+2. Start a small task in a second terminal with
+   `looplab run task.json --out runs/my-run --backend toy -s external_harness=true`.
+   Keep this process running. The external agent, not LoopLab's built-in Researcher,
+   chooses the next candidate; the task's evaluator still runs inside LoopLab.
+3. Configure the coding client's stdio MCP server as `looplab harness-mcp`, passing
+   only `LOOPLAB_HARNESS_TOKEN` and the UI URL. Client-specific examples are below.
+   Give the agent this instruction, replacing the run ID:
+
+   > Start with `looplab harness`. Through MCP, read the current state, task,
+   > config, harness-contract and harness-progress for `my-run`.
+   > Use `phases` and `phase_info` for the next required decision. Submit a
+   > ready-made candidate through a durable command, inspect its measured
+   > result and checkpoints, then decide what to do next. Explicitly pause or
+   > finalize when done. Do not claim a score before LoopLab evaluates it.
+
+4. Watch the run in the UI. Before its first candidate, **Lineage → Agent cycle**
+   shows what the external agent owes. A live server or engine does not prove
+   that the agent is connected. If the agent stops, reconnect it to the **same**
+   run, read current generation and receipts, and continue; do not blindly
+   resubmit the last candidate. See [Reconnect and recovery](#reconnect-and-recovery).
+
+For a quick offline evaluator, `examples/toy_task.json` can replace `task.json`.
+The coding agent's own model calls can still cost money; they are outside
+LoopLab's provider-cost ledger. The scoped token cannot launch a run or change
+global settings. The full `harness` contract and the live progress endpoint
+remain authoritative if enabled obligations require more steps than this sketch.
+
 ## External harness setup
 
 Install the optional UI and MCP packages. Start the UI against the run root you want
@@ -22,7 +59,7 @@ to control. Set a distinct harness token for the coding agent; keep the owner to
 in the UI server/operator session.
 
 ```sh
-pip install 'looplab[ui,harness]'
+pip install -e ".[ui,harness]"
 export LOOPLAB_UI_TOKEN='choose-a-private-token'
 export LOOPLAB_HARNESS_TOKEN='choose-a-different-agent-token'
 looplab ui --run-root runs --host 127.0.0.1 --port 8765
@@ -354,6 +391,31 @@ can remeasure unchanged code. In external mode,
 failed evaluations become terminal evidence for the external agent; inline repair,
 training-log judges, ASHA judges and inter-stage model checks do not run. The
 operator's declared artifact checks and score reader continue to apply.
+
+## Reconnect and recovery
+
+The UI server, run engine, and coding agent are separate processes. If the agent
+exits, the server can still show the run and an evaluation already in flight can
+finish. No new candidate is invented by LoopLab in external mode. Reconnect the
+agent to the existing MCP server and run rather than starting over.
+
+1. Read `/state` for the current run generation and whether the engine is live,
+   paused, or finished. If the engine was stopped, the operator must resume it;
+   reconnecting MCP by itself does not restart search.
+2. Read `harness-progress` using that generation. Inspect `source_health` before
+   interpreting a missing decision or receipt. Check pending checkpoints and
+   candidate/finish requirements. **Agent cycle** in the UI shows the same
+   obligations and links to the event timeline.
+3. For a command whose response was lost, inspect its durable command identity
+   and node state before retrying. The last request may already have been applied.
+   Read measured results from LoopLab, not from the agent's prior message.
+4. Continue the outstanding decision, or explicitly pause/finalize. A checkpoint
+   may remain open after the evaluator command has finished; answer it before
+   treating the node as terminal. Finalization can owe a report or reviews.
+
+The UI does not currently prove whether a remote agent process is connected.
+It reports the known engine and run obligations; a quiet event log alone is not
+evidence that the agent has died.
 
 ## Delegating only code editing
 

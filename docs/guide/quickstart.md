@@ -1,6 +1,43 @@
 # Quickstart
 
-This walks through your first run — offline first, then driven by a real LLM.
+## Assistant in the web UI
+
+This is the usual path: describe a task in chat, check the experiment before it starts,
+then read the measured result in the same workspace. It uses a live model for the chat
+and LoopLab's internal research roles. For setup from a fresh checkout, use
+[Installation](installation.md#source-install-for-the-web-ui).
+
+1. Start the UI from the checkout with `looplab ui`, then open `http://127.0.0.1:8765`.
+   On JupyterHub, use the LoopLab Launcher tile instead; see
+   [JupyterHub onboarding](jupyterhub-onboarding.md).
+2. In **LoopLab → Settings → LLM**, check the model and endpoint. **Test active LLM**
+   makes one provider request and may be billed. Return to Runs after saving.
+3. Select **Start a new run** in Assistant. For example:
+
+   > Improve accuracy on my dataset. The code is at `/path/on/the/LoopLab/server/repo`
+   > and the data is at `/path/on/the/LoopLab/server/data`. Start with at most three
+   > experiments. Show me the evaluation command and editable files before launch.
+
+   Give the goal, accessible paths, and constraints. The Assistant can inspect a repo
+   and ask for missing information. The paths must exist on the **LoopLab server**,
+   which may be a different machine from your browser.
+4. Review the launch card: task, scorer/metric and direction, paths, edit surface,
+   backend, and limits. Choose **Validate**, inspect the effective preview, then
+   **Start run**. Changing the proposal invalidates its validation, so validate again.
+   Chatting about a plan does not start a run. A live model or evaluator may incur cost;
+   the preview names the backend and current limits but does not impose a monetary cap.
+5. Open the run's **Report** for the baseline, best measured result, caveats, and
+   solution artifacts. Ask Assistant to explain a failure or propose the next experiment.
+   A single-seed result is exploratory until the configured confirmation actually runs.
+
+For a quick proof of the engine without a model, use the recipe below. It is an
+offline CLI demonstration; the web Assistant needs a configured model.
+To drive LoopLab directly from Codex or Claude Code, use the
+[external-agent quickstart](external-harness.md#first-external-run).
+
+## Offline CLI walkthrough
+
+The following steps run offline first, then use a real LLM when you configure one.
 
 ## 1. Run a task offline
 

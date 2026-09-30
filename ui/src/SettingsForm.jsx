@@ -197,13 +197,13 @@ function GroupPanel({ group, idPrefix, form, onChange, dirty, unsaved, errors, a
 
 export default function SettingsForm({ form, onChange, dirty, unsaved, errors, only, agentControl, onToggleAgent,
                                        secretState, credential, onClearSecret, secretActionDisabled, readOnlyKeys, hideSecret,
-                                       mode = 'all', query = '', schema,
+                                       mode = 'all', query = '', schema, initialGroup = '',
                                        focusKey = '', focusRequest = 0, interactionDisabled = false }) {
   const groups = filterSettingsGroups(schema.groups, { mode, query, only, hideSecret })
   const rolePills = schema.agentRolePills
   // Keep the selected section by stable identity. The Essential catalogue is a sparse subset of
   // All, so retaining a numeric index silently selected a different section when modes changed.
-  const [activeGroup, setActiveGroup] = useState('')
+  const [activeGroup, setActiveGroup] = useState(initialGroup)
   const reactId = useId()
   const idPrefix = `sf-${safeId(reactId)}`
   const searching = !!normalizeSettingsQuery(query)

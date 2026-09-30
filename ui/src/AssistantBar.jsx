@@ -157,6 +157,7 @@ const RUN_HINTS = [
   'Summarize this run', 'Explain its best result',
   'Review open work in this run', 'Choose the next experiment',
 ]
+const EMPTY_RUN_HINTS = ['Review open work in this run', 'What is needed before the first experiment?']
 const STALLED_HINT = 'Why did this run stop?'
 
 const ASSISTANT_OVERLAY_MAX_PX = 1199
@@ -291,6 +292,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const [suggestionIndex, setSuggestionIndex] = useState(0)
   const [suggestionsDismissed, setSuggestionsDismissed] = useState(false)
   const [runs, setRuns] = useState([])
+  const [runsLoaded, setRunsLoaded] = useState(false)
   const [pending, setPending] = useState([])      // live HITL confirm requests
   // Standing watches (§F4). A LIST the browser reads — never the thing doing the watching,
   // which is server-side and durable; closing this tab costs the monitoring nothing.
@@ -667,7 +669,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // list's own poll. A failed read keeps the last list — these are labels, not a decision.
   usePoll((alive) => {
     const request = deadlineGet('/api/runs')
-    request.promise.then(r => { if (alive()) setRuns(r || []) }).catch(() => {})
+    request.promise.then(r => {
+      if (alive()) { setRuns(r || []); setRunsLoaded(true) }
+    }).catch(() => {})
     return request
   }, 6000, [feedOpen], { enabled: feedOpen, pauseHidden: true })
   const runsById = React.useMemo(() => Object.fromEntries(runs.map(r => [r.run_id, r])), [runs])
@@ -2694,6 +2698,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const openAssistantSettings = useLatestHandler(() => {
     handoffAssistantRoute('#/settings', { collapse: true })
   })
+  const openAssistantModelSettings = useLatestHandler(() => {
+    handoffAssistantRoute('#/settings/llm', { collapse: true })
+  })
 
   const currentComposerRunKey = composerRunKey(runId)
   // A goal entered through New run is intentionally independent of whichever run the user opens
@@ -3079,11 +3086,13 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     : null
   const selectedRun = runId ? runsById[runId] : null
   const selectedRunStatus = selectedRun ? effectiveRunStatus(selectedRun) : ''
+  const selectedRunHasNoNodes = selectedRun?.nodes === 0
   const draftingNewRun = newRunDraft || /^\/(?:new|genesis|run)\b/i.test(input.trim())
+  const firstRun = !runId && runsLoaded && runs.length === 0
   const welcomeHints = newRunDraft ? [] : runId
-    ? selectedRunStatus === 'stalled'
+    ? selectedRunHasNoNodes ? EMPTY_RUN_HINTS : selectedRunStatus === 'stalled'
       ? [RUN_HINTS[0], STALLED_HINT, RUN_HINTS[1], RUN_HINTS[3]] : RUN_HINTS
-    : OVERVIEW_HINTS
+    : firstRun || !runsLoaded ? [NEW_RUN_HINT] : OVERVIEW_HINTS
   const proposalContext = !historical && draftingNewRun
   const runContextBanner = (runId || proposalContext) && <div className={`asst-run-context${!proposalContext && selectedRunStatus === 'stalled' ? ' stalled' : ''}`}>
     <span className="asst-run-context-label">{proposalContext ? 'Drafting' : historical ? 'Viewing run' : 'Next message to run'}</span>
@@ -3437,10 +3446,20 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       <div className="asst-empty-eyebrow">LOOPLAB ASSISTANT</div>
       <h2>{newRunDraft ? 'What should we investigate?' : runId ? 'Work through this run together' : 'What would you like to explore?'}</h2>
       <p>{newRunDraft
-        ? 'Describe the goal. Review the launch card before starting.'
+        ? 'Describe the goal, server paths, and time limit. For example: improve accuracy on [dataset] in three experiments. Review the launch card before starting.'
         : runId
-          ? 'Ask about results or the next experiment.'
-          : 'Describe a goal, ask about runs, or plan an experiment.'}</p>
+          ? selectedRunHasNoNodes
+            ? 'No experiment has been measured yet. Ask what is due before the first one.'
+            : 'Ask about results or the next experiment.'
+          : firstRun
+            ? 'Describe a goal to get a launch proposal. The run starts only after you review and approve it.'
+            : 'Describe a goal, ask about runs, or plan an experiment.'}</p>
+      {firstRun && !newRunDraft && <div className="asst-new-run-hint">
+        <span>Before your first message, check your model connection in Settings.</span>
+        <button type="button" className="btn sm" onClick={openAssistantModelSettings}>
+          Model settings
+        </button>
+      </div>}
       {!input.trim() && welcomeHints.length > 0 && <div className="asst-hints">
         {welcomeHints.map(h => <button key={h} className="asst-hint"
           disabled={historical || composerEditingPaused}

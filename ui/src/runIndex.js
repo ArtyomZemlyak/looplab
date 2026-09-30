@@ -333,7 +333,7 @@ export function authoringElapsed(head, nowMs = Date.now()) {
 export function dagEmptyPresentation({
   displayed = {}, live = null, resourceStatus = 'ready', connected = true,
   historyActive = false, reviewMode = false, sequence = null, runId = '',
-  nowMs = Date.now(),
+  nowMs = Date.now(), externalMode = false,
 } = {}) {
   // Tombstoned/aborted rows remain in replay state for audit, but Dag renders only
   // active nodes. Base the empty-state decision on the same projection or the canvas goes blank
@@ -432,6 +432,13 @@ export function dagEmptyPresentation({
     'finished', 'neutral', 'Run finished without producing an experiment',
     'Open the report for the terminal explanation, or resume the run to continue searching.',
     [action('report', 'View report', 'primary'), action('resume', 'Resume run')],
+  )
+  if (externalMode === true && state.engine_running === true) return result(
+    'awaiting-agent', 'attention', 'External agent controls the next experiment',
+    'LoopLab evaluates candidates submitted by the external agent. The agent must check the current '
+      + 'requirements and submit the next decision or candidate. Open Agent cycle to see what is due. '
+      + 'The agent connection is not verified here.',
+    [action('agent', 'Open Agent cycle', 'primary'), action('events', 'Show events')],
   )
   if (state.engine_running === true) {
     // WHAT THE CANVAS OWES DURING A SPECULATIVE BUILD. This branch used to print one sentence —

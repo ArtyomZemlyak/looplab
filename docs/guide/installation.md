@@ -6,6 +6,38 @@
 - A POSIX or Windows shell. The local engine needs **no Docker**. It needs **no network either — but
   only with `--backend toy`**: since 2026-08-04 `backend` defaults to `llm` (operator decision,
   `core/config.py::Settings.backend`), so a plain `looplab run` expects a reachable LLM endpoint.
+- A source checkout needs Node and npm for the first UI build. `ui/package.json` accepts Node
+  `^20.19.0`, `^22.13.0`, or `>=24.0.0`. The UI server builds a missing/stale bundle on launch.
+
+## Source install for the web UI
+
+Clone the repository and run these commands from its root. On Linux/macOS:
+
+```bash
+git clone https://github.com/ArtyomZemlyak/looplab.git
+cd looplab
+python3 -m venv .venv
+.venv/bin/python -m pip install -e ".[ui]"
+.venv/bin/looplab ui
+```
+
+On Windows PowerShell:
+
+```powershell
+git clone https://github.com/ArtyomZemlyak/looplab.git
+Set-Location looplab
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[ui]"
+.\.venv\Scripts\looplab.exe ui
+```
+
+Use any installed Python version ≥3.11 for the venv; `py -3.11` selects one common
+Windows installation. Open `http://127.0.0.1:8765`. The server uses `./runs` by default.
+For the first model-backed chat, open **LoopLab → Settings → LLM** in the UI,
+save the endpoint/model and explicitly test the active connection. The test makes one
+provider request and may be billed. Then follow the [Assistant quickstart](quickstart.md#assistant-in-the-web-ui).
+If you have no model yet, the [offline CLI walkthrough](quickstart.md#offline-cli-walkthrough)
+can verify evaluation without a provider.
 
 ## Install
 
@@ -35,6 +67,7 @@ Install only what you need:
 
 ```bash
 pip install -e ".[ui]"      # live React web UI       → adds fastapi, uvicorn
+pip install -e ".[ui,harness]" # web UI + stdio MCP for an external coding agent
 pip install -e ".[otel]"    # OpenTelemetry export      → adds opentelemetry-*
 pip install -e ".[proc]"    # robust process tree-kill  → adds psutil
 pip install -e ".[jupyterhub]" # JupyterHub app tile      → adds UI + jupyter-server-proxy + psutil
@@ -46,6 +79,7 @@ You can combine them: `pip install -e ".[ui,otel,dev]"`.
 | Extra | Unlocks | Without it |
 |---|---|---|
 | `ui` | `looplab ui` and local auto-start for `looplab tui` — the live control planes | Core CLI + static `tree.html` still work; TUI can target an existing server with `--server URL` |
+| `harness` | `looplab harness-mcp` for Codex, Claude Code and other MCP clients | Use the UI/CLI without external agent control |
 | `otel` | Sends spans to any OTLP collector (Jaeger/Tempo/Honeycomb) | Spans still written to `spans.jsonl` (files-as-truth) |
 | `proc` | Cross-platform process-tree termination on timeout | Falls back to best-effort kill |
 | `jupyterhub` | JupyterHub launcher tile and proxied UI server | Run the CLI/UI directly instead |

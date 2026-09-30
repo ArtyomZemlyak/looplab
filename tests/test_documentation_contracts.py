@@ -17,7 +17,9 @@ ROOT = Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs"
 
 _MARKDOWN_LINK = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
-_LOOPLAB_COMMAND = re.compile(r"\blooplab\s+([a-z][a-z0-9-]*)")
+# Commands are written on one line. \s would cross a code block's line break after
+# `cd looplab` and misread the next `python3`/`py` command as a LoopLab subcommand.
+_LOOPLAB_COMMAND = re.compile(r"\blooplab[ \t]+([a-z][a-z0-9-]*)")
 _FINDING = re.compile(
     r"^#### ([A-Z]{2}-\d{2})\b.* — \*\*"
     r"((?:PARTIALLY )?RESOLVED|DEFERRED|DECLINED|OPEN) \([^)]*\)\*\*$",
@@ -162,7 +164,9 @@ def test_index_mentions_every_numbered_document():
     #   68 -> 69 (2026-09-29): doc 70, Hyperresearch/RRSI/Dream-RSI/OpenScience and three operator
     #   reports. No collision — 70 was claimed by checking the glob, the index table and the mkdocs
     #   nav together; all four move in this one change.
-    assert len(numbered) == 69, "the derived numbered-document inventory changed"
+    #   69 -> 70 (2026-09-30): doc 71, the Assistant/external-agent onboarding audit.
+    #   The numbered inventory, index and MkDocs nav were checked and updated together.
+    assert len(numbered) == 70, "the derived numbered-document inventory changed"
     #   51 -> 52 (2026-09-05): the development plan (doc 52). No collision — the number was
     #   claimed by checking the glob AND the index table together.
     #   52 -> 53 (2026-09-06): the agent guide's narratives, archived verbatim when `CLAUDE.md`

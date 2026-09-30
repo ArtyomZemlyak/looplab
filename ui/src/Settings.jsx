@@ -670,7 +670,7 @@ function ResetDefaultsDialog({ hasSecretDraft, onCancel, onConfirm }) {
 
 // Full-page editor for the engine defaults used by every new run. Per-run overrides remain in each
 // run's Settings panel; this page deliberately starts with the small set most people need.
-export default function Settings({ onBack }) {
+export default function Settings({ onBack, initialSection = '' }) {
   const settingsLaunchSnapshot = useSyncExternalStore(
     subscribeSettingsLaunchGuard, getSettingsLaunchGuard, getSettingsLaunchGuard)
   const [defaults, setDefaults] = useState(null)
@@ -1412,7 +1412,7 @@ export default function Settings({ onBack }) {
                       secretActionDisabled={!!mutationBusy || !!mutationUnknown || healthRecoveryBlocked
                         || settingsActionRecoveryBlocked}
                       interactionDisabled={mutationBusy === 'reloading settings' || settingsActionRecoveryBlocked}
-                      mode={mode} query={query} schema={schema}
+                      mode={mode} query={query} schema={schema} initialGroup={initialSection}
                       focusKey={invalidFocus.key} focusRequest={invalidFocus.request} />
       </>}
     </main>

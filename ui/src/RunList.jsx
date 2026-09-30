@@ -1602,6 +1602,12 @@ export default function RunList({ onOpen, onGlobalNavigate,
   const metricSortAvailable = !metricSortOff
   const hasActiveFilters = !!query.trim() || taskFilterExact
     || statusFilter !== 'all' || stFilter !== ALL
+  const firstRunLanding = runsState === 'ready' && runs?.length === 0
+    && projectsState === 'ready' && proj.projects.length === 0
+    && superdata.supertasks.length === 0
+    && savedViews.length === 0 && !activeSavedView && !hasActiveFilters
+    && sel === ALL && view === 'list' && !projectsOpen && compareIds.size === 0
+    && missingStartOverRecoveries.length === 0 && missingDeletionRecoveries.length === 0
   const listCriteriaKey = JSON.stringify([
     sel, query, taskFilter, taskFilterExact, statusFilter, stFilter, sortKey, sortDir,
   ])
@@ -2444,10 +2450,10 @@ export default function RunList({ onOpen, onGlobalNavigate,
         <GlobalMenu current="list" disabled={navigationBusy}
           buttonRef={globalMenuButtonRef} onNavigate={openGlobal} />
         <span className="muted home-subtitle">autonomous R&D — live runs</span>
-        <button ref={projectsToggleRef} className="btn sm ghost projects-toggle" disabled={navigationBusy} onClick={() => setProjectsOpen(true)}
+        {!firstRunLanding && <button ref={projectsToggleRef} className="btn sm ghost projects-toggle" disabled={navigationBusy} onClick={() => setProjectsOpen(true)}
                 aria-expanded={projectsOpen} aria-controls="projects-drawer">
           <OpIcon name="folder" className="t-ic" /> Projects
-        </button>
+        </button>}
         <button className="btn sm primary new-run-cta" disabled={navigationBusy}
                 onClick={() => window.dispatchEvent(new CustomEvent('ll:new-run', { cancelable: true }))}>
           ＋ New run
@@ -2457,7 +2463,7 @@ export default function RunList({ onOpen, onGlobalNavigate,
             run workspace's DAG. The workspace toggle is a `role="toolbar" aria-label="Run workspace
             controls"`, so a screen reader announces its scope; this group announced a bare
             "Lineage, button" with nothing to tell the two apart. */}
-        <div className="seg" role="group" aria-label="Run list views">
+        {!firstRunLanding && <div className="seg" role="group" aria-label="Run list views">
           {/* LINEAGE, not "Map", and CONCEPTS beside it — because the two answer different questions
               and calling one of them "the map" is why the second one was missing for so long. This
               view draws which run descends from which, inside which project: ancestry, i.e. lineage.
@@ -2483,12 +2489,12 @@ export default function RunList({ onOpen, onGlobalNavigate,
             title={projectScopeBlocked ? 'Restore the saved project or use All runs first'
               : compareRuns.length < 2 ? 'Select at least two runs from List' : 'Compare selected runs'}
             onClick={event => openComparison(event.currentTarget)}>Compare · {compareRuns.length}</button>
-        </div>
+        </div>}
         <span className="spacer" style={{ flex: 1 }} />
         <div className="home-actions">
-          <DensityToggle />
+          {!firstRunLanding && <DensityToggle />}
           <ThemeSwitcher />
-          <EnergyToggle />
+          {!firstRunLanding && <EnergyToggle />}
         </div>
       </div>
       {missingStartOverRecoveries.map(item => <div key={item.runId}
@@ -2536,10 +2542,10 @@ export default function RunList({ onOpen, onGlobalNavigate,
       })}
 
       <div className={'runlayout' + (projectsOpen ? ' projects-open' : '')}>
-        {projectsOpen && <button className="project-backdrop" disabled={projectBusy} aria-disabled={navigationBusy || undefined}
+        {!firstRunLanding && projectsOpen && <button className="project-backdrop" disabled={projectBusy} aria-disabled={navigationBusy || undefined}
                                  onClick={() => { if (!navigationBusy) setProjectsOpen(false) }}
                                  aria-label="Close projects" />}
-        <aside ref={projectsDialogRef} className="psidebar" id="projects-drawer" aria-label="Projects"
+        {!firstRunLanding && <aside ref={projectsDialogRef} className="psidebar" id="projects-drawer" aria-label="Projects"
                role={compactNav && projectsOpen && !projModal ? 'dialog' : undefined}
                aria-modal={compactNav && projectsOpen && !projModal ? 'true' : undefined}
                tabIndex={compactNav ? -1 : undefined}
@@ -2567,14 +2573,14 @@ export default function RunList({ onOpen, onGlobalNavigate,
               {projectsState === 'ready' && !proj.projects.length && <div className="muted" style={{ padding: 10, fontSize: 12 }}>No projects yet. Create one to organize runs.</div>}
             </nav>
           </div>
-        </aside>
+        </aside>}
 
         <div ref={runListRef} className={'runlist' + (view === 'map' ? ' map-list-shell' : '')}
           onScroll={event => {
             listScrollTopRef.current = event.currentTarget.scrollTop
             publishNavigationState({ persist: false })
           }}>
-          <div className="crumbs">
+          {!firstRunLanding && <div className="crumbs">
             <button type="button" className="crumb" disabled={navigationBusy} onClick={() => chooseProject(ALL)}>All runs</button>
             {breadcrumb.map(p => <React.Fragment key={p.id}><span className="sep">/</span>
               <button type="button" className="crumb" disabled={navigationBusy} onClick={() => chooseProject(p.id)}>{p.name}</button></React.Fragment>)}
@@ -2588,8 +2594,8 @@ export default function RunList({ onOpen, onGlobalNavigate,
               <button className={'vt report' + (showReport ? ' on' : '')} disabled={navigationBusy} title={`cross-run report for ${scope.label}`}
                 onClick={() => setShowReport(true)}><OpIcon name="doc" size={12} /> Report<span className="vt-scope"> · {scope.label}</span></button>
             </div>}
-          </div>
-          {runs && <div className="portfolio-viewbar">
+          </div>}
+          {runs && !firstRunLanding && <div className="portfolio-viewbar">
             <label>Saved view
               <select ref={savedViewSelectRef} className="sel" aria-label="Saved portfolio view" value={activeSavedView}
                 onChange={event => event.target.value
@@ -2610,7 +2616,7 @@ export default function RunList({ onOpen, onGlobalNavigate,
           {viewMessage && <div className="notice resource-warning portfolio-message" role="alert">
             {viewMessage} <button className="btn xs" onClick={() => setViewMessage('')}>Dismiss</button>
           </div>}
-          {runs && !projectScopeBlocked && view !== 'compare' && <div className="runbar">
+          {runs && !firstRunLanding && !projectScopeBlocked && view !== 'compare' && <div className="runbar">
             <OpIcon name="search" className="t-ic" />
             <input ref={filterInputRef} className="text runbar-q" aria-label="Filter runs" placeholder="filter runs…" value={query}
                    maxLength={MAX_PORTFOLIO_QUERY_LENGTH} onChange={e => setQuery(e.target.value)} />
@@ -2721,12 +2727,18 @@ export default function RunList({ onOpen, onGlobalNavigate,
           </div>}
           {(!compactNav || !projectsOpen) && mutationNotice}
           {!projectScopeBlocked && ['ready', 'stale'].includes(runsState) && runs && !scoped.length
-            && <div className="notice resource-empty">
-            {runsState === 'stale' ? 'No runs in the last loaded data here.' : 'No runs here.'}
+            && <div className="notice resource-empty"
+              style={firstRunLanding ? { maxWidth: 640, margin: '12vh auto', padding: 28, textAlign: 'center' } : undefined}>
+            {firstRunLanding
+              ? <><h2>Start with a goal</h2>
+                  <p>Tell Assistant what to improve, where code or data live, and your time limit. Review its proposal before starting.</p></>
+              : runsState === 'stale' ? 'No runs in the last loaded data here.'
+              : runs.length === 0 && sel === ALL && !hasActiveFilters
+                ? 'No experiments yet. Describe a goal in Assistant to start.' : 'No runs here.'}
             {sel === ALL
               ? <button className="btn sm primary" disabled={navigationBusy}
                   onClick={() => window.dispatchEvent(new CustomEvent('ll:new-run', { cancelable: true }))}>
-                  Start a new run
+                  {runs.length === 0 && !hasActiveFilters ? 'Describe a goal in Assistant' : 'Start a new run'}
                 </button>
               : <span>Drag a run onto this project, or use its <b>Move</b> menu.</span>}</div>}
           {runs && !!scoped.length && !visible.length

@@ -2140,6 +2140,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const emptyPresentation = dagEmptyPresentation({
     displayed: state, live, resourceStatus: runStatus, connected,
     historyActive, reviewMode, sequence: history.resolvedSeq ?? viewSeq, runId,
+    externalMode: configResource.data?.external_harness === true,
   })
   const approvalCommand = approvalCommandFor(live)
   const revealEvents = () => {
@@ -2148,6 +2149,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   }
   const onEmptyAction = (action) => {
     if (action === 'events') { revealEvents(); return }
+    if (action === 'agent') { if (panelAllowed('agent')) setPanel('agent'); return }
     // The empty canvas offers this while a speculative card build is the only work in flight: the
     // Cards board is the surface that actually shows that build, so the button goes there.
     if (action === 'cards') { setView('cards'); return }

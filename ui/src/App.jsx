@@ -38,6 +38,7 @@ function parseHash() {
   if (/\/review\/?$/.test(location.pathname)) return { view: 'review', token: reviewTokenFromLocation() }
   const h = routeHashPath(location.hash)
   if (h === '#/settings') return { view: 'settings' }
+  if (h === '#/settings/llm') return { view: 'settings', initialSection: 'LLM' }
   if (h === '#/research-atlas' || h === '#/atlas') {
     return { view: 'claims', canonicalHash: '#/claims' }
   }
@@ -334,7 +335,7 @@ export default function App() {
     <RunView key={route.id} runId={route.id} onBack={back} />
   </LazyBoundary>
   else if (route.view === 'settings') content = <LazyBoundary label="settings" mode="route" focusOnReady resetKey={routeKey}>
-    <Settings onBack={back} />
+    <Settings onBack={back} initialSection={route.initialSection} />
   </LazyBoundary>
   // Portfolio evidence is owner-only, so this experimental preview stays in the
   // authenticated owner plane and never mounts beside the public review/shared early returns above.

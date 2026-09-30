@@ -174,6 +174,21 @@ test('zero-node DAG presentation is lifecycle-aware and read-only contexts win',
   })
 })
 
+test('external run with no candidate names the agent as next actor', () => {
+  const live = { nodes: {}, phase: 'search', engine_running: true }
+  const external = dagEmptyPresentation({ displayed: live, externalMode: true })
+  assert.equal(external.kind, 'awaiting-agent')
+  assert.equal(external.tone, 'attention')
+  assert.match(external.title, /External agent/)
+  assert.match(external.body, /connection is not verified/)
+  assert.deepEqual(external.actions.map(item => item.id), ['agent', 'events'])
+  assert.equal(dagEmptyPresentation({ displayed: live }).kind, 'preparing')
+  assert.equal(dagEmptyPresentation({ displayed: live, externalMode: true,
+    historyActive: true }).kind, 'history')
+  assert.equal(dagEmptyPresentation({ displayed: live, externalMode: true,
+    reviewMode: true }).kind, 'review')
+})
+
 // The projection `GET /api/runs/live-deps4/state` really returns for the shape that broke this —
 // `run_finished` + an open finalize scope + no `finalization_finished` + no `run_abort`, engine gone.
 // Pinned against the live server by `tests/test_stalled_finalization_affordance.py::

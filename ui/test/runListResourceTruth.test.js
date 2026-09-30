@@ -78,8 +78,10 @@ test('run empties and filtered recovery preserve current resource truth', async 
   // Both settled states now render an empty notice, with DIFFERENT copy — pin the distinction rather
   // than the old "only `ready` renders one" spelling, because collapsing the two is exactly how a
   // stale snapshot starts reading as a current empty workspace.
-  assert.match(text, /\['ready', 'stale'\]\.includes\(runsState\) && runs && !scoped\.length[\s\S]*?runsState === 'stale' \? 'No runs in the last loaded data here\.' : 'No runs here\.'/,
+  assert.match(text, /\['ready', 'stale'\]\.includes\(runsState\) && runs && !scoped\.length[\s\S]*?runsState === 'stale' \? 'No runs in the last loaded data here\.'/,
     'a stale empty snapshot must not be presented as a current empty workspace')
+  assert.match(text, /runs\.length === 0 && sel === ALL && !hasActiveFilters[\s\S]*?'No experiments yet\. Describe a goal in Assistant to start\.'/,
+    'the empty installation leads to Assistant only when the full current scope is empty')
   assert.match(text, /!projectScopeBlocked && \['ready', 'stale'\]\.includes\(runsState\)/,
     'a blocked project scope is not evidence that the workspace is empty')
   assert.match(text, /runsState === 'stale' \? 'No runs in the last loaded data match the filters\.'/)

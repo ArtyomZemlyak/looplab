@@ -7,11 +7,8 @@ hide:
 
 # LoopLab
 
-**An autonomous ML/DS research engine.** Give it a goal; it **invents → implements → tests → improves**
-candidate solutions in a loop and returns the best *verified* result. Domain decisions are lines in an
-append-only event log that is authoritative for replayable `RunState`, so the search is reproducible and
-crash-resumable by replay. Task/config, tracing, chat, command and cross-run sidecars keep their own
-explicit contracts.
+**Describe an ML goal in Assistant, review the experiment, and get an evaluated result.**
+LoopLab can also evaluate candidates proposed by Codex, Claude Code, or another external agent.
 
 <div class="ll-verbs">
   <span>● Invent →</span><span>● Implement →</span><span>● Test →</span><span>● Improve ↺</span><span>● Champion</span>
@@ -19,8 +16,12 @@ explicit contracts.
 
 </div>
 
-[Explore the architecture infographic :material-arrow-right:](guide/architecture.md){ .md-button .md-button--primary }
-[Quickstart :material-rocket-launch:](guide/quickstart.md){ .md-button }
+[Start with Assistant :material-arrow-right:](guide/quickstart.md#assistant-in-the-web-ui){ .md-button .md-button--primary }
+[Use an external agent :material-robot:](guide/external-harness.md#first-external-run){ .md-button }
+
+The usual path is **describe → review → launch → inspect measured results**. For external
+control, your coding agent proposes the next candidate; LoopLab validates, executes, and records it.
+The [full architecture](guide/architecture.md) explains the internal loop and replay model.
 
 ## The loop in one picture
 

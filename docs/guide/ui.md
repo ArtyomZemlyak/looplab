@@ -1,5 +1,26 @@
 # Web UI
 
+## Start in Assistant
+
+Install and launch the UI using the [source-install steps](installation.md#source-install-for-the-web-ui).
+Open **Runs**; Assistant is already visible on a desktop screen. Select **Start a new run**,
+describe your goal and where the code or data live, then review its launch card.
+**Validate** shows the effective task and settings; **Start run** begins the experiment.
+The run opens with its current status, and **Report** shows the measured result and caveats.
+For a complete first-run example, see the [Assistant quickstart](quickstart.md#assistant-in-the-web-ui).
+
+The chat needs a configured model. Open **LoopLab → Settings → LLM** to check the saved
+model and endpoint. **Test active LLM** makes one provider request and may be billed.
+An offline engine demonstration is available through the
+[CLI walkthrough](quickstart.md#offline-cli-walkthrough).
+
+For a run controlled by Codex or Claude Code, the first experiment can wait for that
+agent's decision. The empty Lineage view links to **Agent cycle**, which lists current
+admission and finish requirements. A live UI or engine alone does not show whether an
+external agent is connected; see the [external harness guide](external-harness.md).
+
+## How the UI runs
+
 LoopLab ships a live React control plane. It's a **separate read/control process** — it tails each
 run's `events.jsonl`, folds it with `replay.fold`, streams the state to the browser over SSE (a full frame per connection, then deltas keyed on the seq the tab last saw; a run whose state outgrows the stream's 64 MiB frame bound is followed by the small `/lifecycle` probe instead and re-read when it moves, under a visible "Live updates paused" banner), serves
 the built React app, and submits interactive controls through the server-owned durable command
