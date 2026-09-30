@@ -1955,8 +1955,8 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
     if commands["unreadable"]:
         typer.echo(f"note: command record(s) {', '.join(commands['unreadable'])} cannot be read by "
                    "any LoopLab server, so none can start an engine — but each blocks every later "
-                   "command on this run until it is quarantined through `POST /api/runs/<run>/"
-                   "resolve-activity-claims`")
+                   "command on this run until the operator quarantines it through `POST /api/runs/"
+                   "<run>/resolve-activity-claims` (the owner's token; a harness token is refused)")
 
 
 @app.command()

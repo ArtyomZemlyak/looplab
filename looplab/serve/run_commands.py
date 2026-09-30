@@ -2142,7 +2142,7 @@ class RunCommandService:
                 "remediation": (
                     f"GET /commands/{command_id} to a terminal status first; if that record cannot "
                     f"be read at all, POST /api/runs/{{run}}/resolve-activity-claims with its "
-                    f"confirmation phrase."),
+                    f"confirmation phrase (the owner's token: a harness agent asks the operator)."),
             })
         unresolved_path, unresolved = self._unresolved_terminal_record(rd)
         if unresolved is not None:
@@ -2992,7 +2992,7 @@ class RunCommandService:
                                     f"GET /commands/{existing_id} to a terminal status before submitting "
                                     "the next command; if that record cannot be read at all, POST "
                                     "/api/runs/{run}/resolve-activity-claims with its confirmation "
-                                    "phrase."),
+                                    "phrase (the owner's token: a harness agent asks the operator)."),
                             })
                     now = time.time()
                     record = {

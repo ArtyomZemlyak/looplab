@@ -145,17 +145,18 @@ def test_the_agent_token_keeps_only_the_no_spawn_intents_on_an_internal_run(tmp_
         response = post_command(client, kind, {}, key=f"agent-start-{i}", headers=AGENT)
         assert _refused(response), (kind, response.json())
     # What stays open to the agent: the allow-list — and its records say who asked.
-    hint = post_command(client, "hint", {"text": "try a smaller learning rate"},
-                        key="agent-hint", headers=AGENT)
-    assert not _refused(hint) and hint.json().get("status") != "rejected", hint.json()
-    assert hint.json().get("submitted_by") == "agent_token", hint.json()
     note = post_command(client, "annotation", {"node_id": 0, "text": "looks promising"},
                         key="agent-note", headers=AGENT)
-    assert not _refused(note), note.json()
-    # …but a hint that REPLACES the owner's standing ones is not additive (critic crit_v62 F4).
-    replacing = post_command(client, "hint", {"text": "only mine now", "replace": True},
-                             key="agent-hint-replace", headers=AGENT)
-    assert _refused(replacing), replacing.json()
+    assert not _refused(note) and note.json().get("status") != "rejected", note.json()
+    assert note.json().get("submitted_by") == "agent_token", note.json()
+    # …but not a hint, even one that only ADDS: it reads to every role as the operator's directive,
+    # the newest first (critic crit_v63 L1, driven — six agent hints pushed the owner's out of every
+    # prompt); a `replace` erased the owner's standing ones outright (critic crit_v62 F4).
+    for i, data in enumerate(({"text": "try a smaller learning rate"},
+                              {"text": "only mine now", "replace": True})):
+        hint = post_command(client, "hint", data, key=f"agent-hint-{i}", headers=AGENT)
+        assert _refused(hint), hint.json()
+        assert "hint" in hint.json()["error"]["message"], hint.json()
     assert _no_spawn_after(client) == []
     # The OWNER keeps every one of them.
     owner = post_command(client, "fork", {"from_node_id": 0}, key="owner-fork", headers=OWNER)
@@ -381,6 +382,25 @@ def test_the_phase_index_s_write_access_is_what_the_middleware_enforces(tmp_path
             denied = response.status_code == 403 and _MIDDLEWARE_DENIAL in response.text
             assert denied is (who == "operator") is (ref in OPERATOR_WRITES), (ref, response.text)
     assert "PUT /api/{kind}/{name}/operations/{operation_id}" in seen
+    # The authoring phase names what is left to the agent beside the write it may not make (critic
+    # crit_v63 N4: dropping the skill-candidate entry went unnoticed, another phase lists the route).
+    knowledge = next(p for p in PHASES if p.id == "agent_knowledge").public()["write_access"]
+    assert knowledge == {"PUT /api/{kind}/{name}/operations/{operation_id}": "operator",
+                         "POST /api/runs/{run_id}/skill-candidates": "external_agent"}, knowledge
+
+
+@pytest.mark.parametrize("path", ["/api/runs/demo/reviews/link-1", "/api/projects/p-1",
+                                  "/api/supertasks/s-1"])
+def test_the_agent_token_may_not_revoke_a_share_link_or_delete_a_project(
+        tmp_path, monkeypatch, path):
+    """Critic crit_v63 (incidental): revoking the owner's review link and deleting a project or a
+    super-task were open to the harness token. Refused at the middleware; the owner's is not.
+    MUTATION: drop any of the three from the harness deny list's DELETE clause."""
+    client = _client(tmp_path, monkeypatch, external=False)
+    refused = client.delete(path, headers=AGENT)
+    assert refused.status_code == 403 and _MIDDLEWARE_DENIAL in refused.text, (path, refused.text)
+    owner = client.delete(path, headers=OWNER)
+    assert _MIDDLEWARE_DENIAL not in owner.text, (path, owner.text)
 
 
 @pytest.mark.parametrize("kind", ["prompts", "skills", "knowledge"])
@@ -413,9 +433,8 @@ def test_the_agent_token_may_not_rewrite_the_owner_s_prompts_skills_or_knowledge
     ("card_reopened", {}, True), ("run_concepts", {}, True),
     ("node_abort", {}, True), ("comment_edited", {}, True), ("comment_resolution_changed", {}, True),
     ("hint", {"text": "t", "replace": True}, True), ("hint", {"text": "t", "replace": "yes"}, True),
-    ("pause", {}, False), ("hint", {"text": "t"}, False),
-    ("hint", {"text": "t", "replace": False}, False),
-    ("annotation", {}, False), ("comment_created", {}, False),
+    ("hint", {"text": "t"}, True), ("hint", {"text": "t", "replace": False}, True),
+    ("pause", {}, False), ("annotation", {}, False), ("comment_created", {}, False),
 ])
 def test_the_agent_token_rule_s_truth_table(kind, data, refused):
     got = agent_token_refusal(kind, data)
@@ -440,8 +459,7 @@ def test_the_allow_list_starts_nothing_and_is_all_the_token_keeps():
 
 # The words the manifest and the guide use for each intent the agent token keeps (crit_v61 M1: the
 # docs named five while the rule kept twenty).
-_KEPT_WORDS = {"pause": "pause", "hint": "add a hint", "annotation": "annotate",
-               "comment_created": "add a comment"}
+_KEPT_WORDS = {"pause": "pause", "annotation": "annotate", "comment_created": "add a comment"}
 
 
 def test_the_manifest_and_the_guide_name_what_the_token_keeps():

@@ -418,6 +418,24 @@ def test_the_final_reserve_is_where_the_episode_reopens(frac, injected, live_fra
                          stall_nodes=3, champion=6)
     assert after_carry["reason"] == "reopened"
     assert _ordinary_start(carried) == after_carry["endgame_start"]
+    # The episode's START keeps the row's fraction, and so does the migration of an unbounded stall
+    # row written with the setting off (critic crit_v63 N1: reverting either to the live fraction
+    # kept every assertion above green) — the reserve reopens where the plan put it, as a run with
+    # no stall keeps it: a fraction moved on resume re-cuts nothing until the budget moves.
+    started = replan(plan, **moved, at_node=12, stall_rung=2, stall_nodes=3, champion=6)
+    assert started["reason"] == "stagnation" and started["endgame_end"] == 15
+    assert started["reserve_frac"] == plan["reserve_frac"]
+    back = replan(started, **moved, at_node=15, stall_rung=0, stall_nodes=3, champion=6)
+    assert back["reason"] == "reopened"
+    assert _ordinary_start(started) == back["endgame_start"] == plan["endgame_start"]
+    legacy = replan(plan, **cut, at_node=12, stall_rung=2, stall_nodes=0, champion=6)
+    assert legacy["reason"] == "stagnation" and legacy.get("endgame_end") is None
+    migrated = replan(legacy, **moved, at_node=13, stall_rung=2, stall_nodes=3, champion=6)
+    assert migrated["reason"] == "stagnation" and migrated["endgame_end"] == 15
+    assert migrated["reserve_frac"] == plan["reserve_frac"]
+    home = replan(migrated, **moved, at_node=15, stall_rung=0, stall_nodes=3, champion=6)
+    assert home["reason"] == "reopened"
+    assert _ordinary_start(migrated) == home["endgame_start"] == plan["endgame_start"]
 
 
 def test_a_stall_episode_that_reaches_the_final_reserve_hands_the_rule_its_endgame(tmp_path):

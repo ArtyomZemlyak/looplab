@@ -645,8 +645,12 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
                          # The owner's prompts, skills and knowledge: every live internal run
                          # re-reads them (critic crit_v61 M2, driven: a PUT answered 200).
                          or re.fullmatch(r"/api/(prompts|skills|knowledge)/.+", p)
-                         or (request.method == "DELETE" and re.fullmatch(r"/api/runs/[^/]+", p)))):
-                return JSONResponse({"detail": "harness token cannot change operator defaults (settings, prompts, skills, knowledge), launch, reset, purge or delete a run, or invoke an internal model workflow"},
+                         # Deleting a run, revoking the owner's share link, deleting a project or
+                         # a super-task (the last three: critic crit_v63, incidental).
+                         or (request.method == "DELETE"
+                             and re.fullmatch(r"/api/(runs/[^/]+|runs/[^/]+/reviews/[^/]+"
+                                              r"|projects/[^/]+|supertasks/[^/]+)", p)))):
+                return JSONResponse({"detail": "harness token cannot change operator defaults (settings, prompts, skills, knowledge), launch, reset, purge or delete a run, write a run's chat log, clear or abandon the owner's work (a trace, an activity claim, a lens, a scope action, a share link, a project or super-task), or invoke an internal model workflow; ask the operator"},
                                     status_code=403)
             # WHO THIS IS (`serve/principal.py`): the token holder is the `owner` principal; a request
             # on the small open surface that presented nothing is `anonymous` — never promoted.

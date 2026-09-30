@@ -2221,14 +2221,18 @@ def external_intent_refusal(event_type: str, data: dict) -> Optional[HTTPExcepti
 # `metric_retarget` replaced the run's goal and discarded paid confirmation evals, a `promote` moved
 # the exported champion, a dropped Card cancelled an in-flight evaluation, a memo, a report and a
 # hypothesis spoke as the owner's (critic crit_v61 M1, driven). So on an internal run (or one with
-# no snapshot) the token keeps an explicit ALLOW-LIST — a pause, a hint that ADDS (a `replace` erased
-# the owner's standing directives), an annotation and a new comment, each of which only adds or stops
-# — asserted below to be `NO_SPAWN` intents; anything added later is refused to it until it is added
-# here. A node abort (it moved the champion and cancels an in-flight eval, as a dropped Card does) and
-# an edit or resolution of a comment (the owner's included, attributed to the owner) are not additive
-# and were taken off it (critic crit_v62 F4, driven). On an external run it meets the external rule.
+# no snapshot) the token keeps an explicit ALLOW-LIST — a pause, an annotation and a new comment, each
+# of which only adds or stops and none of which any agent or engine prompt reads — asserted below to
+# be `NO_SPAWN` intents; anything added later is refused to it until it is added here. A node abort (it
+# moved the champion and cancels an in-flight eval, as a dropped Card does) and an edit or resolution
+# of a comment (the owner's included, attributed to the owner) are not additive and were taken off it
+# (critic crit_v62 F4, driven). So was a HINT, even one that only adds (critic crit_v63 L1, driven): a
+# hint event names no author, every role reads the last six as "Operator directives" with the newest
+# marked "MOST RECENT, follow this when they conflict" (`agents/hints.py::render_hint_directives`),
+# so one agent hint outranked the owner's and six pushed it out of every prompt — refusing `replace`
+# refused the word, not the effect. On an external run it meets the external rule.
 AGENT_TOKEN_REFUSED_STARTS = frozenset({EV_RESUME, EV_RESTART, EV_RUN_REOPENED})
-AGENT_TOKEN_INTERNAL_INTENTS = frozenset({EV_PAUSE, EV_HINT, EV_ANNOTATION, EV_COMMENT_CREATED})
+AGENT_TOKEN_INTERNAL_INTENTS = frozenset({EV_PAUSE, EV_ANNOTATION, EV_COMMENT_CREATED})
 assert all(CONTROL_SPECS[kind].engine_policy is EnginePolicy.NO_SPAWN
            for kind in AGENT_TOKEN_INTERNAL_INTENTS), "an agent intent must never start the engine"
 
@@ -2240,15 +2244,15 @@ def agent_token_refusal(event_type: str, data: dict) -> Optional[HTTPException]:
     question (`_external_mode_restriction`). Admitted: exactly `AGENT_TOKEN_INTERNAL_INTENTS`; an
     unknown type is refused (fail closed). A 403 with its own code — this credential may not,
     whoever else may — which the command service records on the REJECTED command as it is."""
-    if event_type == EV_HINT and data.get("replace") not in (None, False):
-        return agent_token_refused("the agent token may add a hint to an internal run, not replace "
-                                   "the owner's standing hints")
     if event_type in AGENT_TOKEN_INTERNAL_INTENTS:
         return None
     external = external_intent_refusal(event_type, data)
     if event_type in AGENT_TOKEN_REFUSED_STARTS:
         message = ("the agent token cannot start an internal run's own Researcher/Developer loop "
                    "(resume, restart or reopen)")
+    elif event_type == EV_HINT:
+        message = ("the agent token cannot add a hint to an internal run: every role reads the run's "
+                   "hints as the operator's directives, the newest first")
     elif external is not None:
         message = ("the agent token cannot queue an intent LoopLab's own model fulfils on an "
                    "internal run: " + str(external.detail))
@@ -2262,9 +2266,9 @@ def agent_token_refused(message: str) -> HTTPException:
     """The agent token's one refusal shape (`agent_token_refused`, 403, not retryable)."""
     return HTTPException(403, {
         "code": "agent_token_refused", "message": message, "retryable": False,
-        "remediation": ("on an internal run the agent token may only pause it, add a hint, "
-                        "annotate or add a comment; ask the operator to act with the owner's "
-                        "token, or drive a run launched with external_harness")})
+        "remediation": ("on an internal run the agent token may only pause it, annotate a node "
+                        "or add a comment; ask the operator to act with the owner's token, or "
+                        "drive a run launched with external_harness")})
 
 
 def run_is_external(rd: Path) -> bool:

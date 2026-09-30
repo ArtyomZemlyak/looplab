@@ -366,7 +366,8 @@ _TAG_ASCII = (0xE0020, 0xE007E)
 # reads as its Latin twin in the view — asked BEFORE NFKC, which moves the lunate sigmas `Ϲ`/`ϲ` to
 # `Σ`/`ς` and so made their rows dead (crit_v56 F1, driven); the matcher is case-insensitive, so either
 # case serves. The palochka reads as the `I` it stands in for in the one label in use, and the izhitsa
-# as its `V` (crit_v56 F1), the open e of Greek (`ε`, `ϵ`) and Cyrillic (`є`, `Є`) as the `e` the
+# as its `V` (crit_v56 F1), the open e of Greek (`ε`, `ϵ`) and Cyrillic (`є`, `Є`, and the reversed
+# ze `ԑ`, `Ԑ` drawn exactly as `ε`, crit_v63 N2) and the Abkhasian che (`ҽ`, `Ҽ`) as the `e` the
 # Latin open e reads as, and the r rotunda as `r` (crit_v62 N2). A Latin letter its Unicode NAME
 # spells with a mark is not a row here but a
 # rule (`_latin_variants`). LIMITS, stated rather than hidden: a look-alike from any other script
@@ -377,11 +378,11 @@ _TAG_ASCII = (0xE0020, 0xE007E)
 # live to the matcher. Folding those would rewrite the view of every honest ASCII text for a letter
 # the label spells once (crit_v58 N1).
 _CONFUSABLE = dict(zip(
-    "АВЕКМНОРСТХУЅІЈԀԚԜҮҺӀѴаеорсухѕіјһԁԛԝүӏѵєЄ"      # Cyrillic
+    "АВЕКМНОРСТХУЅІЈԀԚԜҮҺӀѴаеорсухѕіјһԁԛԝүӏѵєЄԑԐҽҼ"  # Cyrillic
     "ΑΒΕΖΗΙΚΜΝΟΡΤΥΧϹͿονικαυϲϳεϵ"                       # Greek
     "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘʀꜱᴛᴜᴠᴡʏᴢıȷ"                       # small capitals, dotless i and j
     "ÐðƉᴆꝛꝚ",                                           # the eths, the African D, r rotunda
-    "ABEKMHOPCTXYSIJDQWYHIVaeopcyxsijhdqwyIveE"
+    "ABEKMHOPCTXYSIJDQWYHIVaeopcyxsijhdqwyIveEeEeE"
     "ABEZHIKMNOPTYXCJovikaucjee"
     "ABCDEFGHIJKLMNOPRSTUVWYZij"
     "DdDDrR"))

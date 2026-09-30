@@ -431,13 +431,17 @@ def _injected_recut(plan: dict, cut: dict, planned_start: int,
 
 
 def _own_fraction(plan: dict, cut: dict) -> dict:
-    """`cut` with the row's OWN `reserve_frac` when it records a usable one. Only an ordinary budget
-    re-cut takes the live fraction (the historical rule); an episode's rows — its start, a budget
-    carry, an inject extension — and its `reopened` row keep the fraction the row was cut with, so
-    the start `final_reserve_reached` reads off an episode row is the one its reopen cuts (critic
-    crit_v62 F3, driven: a carry and an extension took a fraction lowered on resume and unread
-    nodes the rule had read as final). A stored fraction is rounded to 4 places; a fraction the row
-    rounded to 0 is no usable one, and the live cut stands."""
+    """`cut` with the row's OWN `reserve_frac` when it records a usable one. Only a row cut FRESH from
+    the configuration takes the live fraction — an ordinary budget re-cut (the historical rule) and
+    the unbounded stall row of `stall_nodes` 0; an episode's rows — its start, the migration of that
+    unbounded row, a budget carry, an inject extension — and its `reopened` row keep the fraction
+    the row was cut with, so the start `final_reserve_reached` reads off an episode row is the one
+    its reopen cuts (critic crit_v62 F3, driven: a carry and an extension took a fraction lowered on
+    resume and unread nodes the rule had read as final). One corner stays (critic crit_v63 N1): a
+    stall while `stall_nodes` was 0 records the fraction live THEN, so a fraction lowered on resume
+    before it reopens later than the same history with the setting on at the stall. A stored
+    fraction is rounded to 4 places; a fraction the row rounded to 0 is no usable one, and the live
+    cut stands."""
     frac = plan.get("reserve_frac")
     if isinstance(frac, (int, float)) and not isinstance(frac, bool) and frac > 0:
         return {**cut, "reserve_frac": frac}
