@@ -1037,3 +1037,19 @@ def test_a_proposal_s_tools_answer_about_its_own_state(monkeypatch):
     answers = [m["content"] for m in session.messages if m.get("role") == "tool"
                and "goal of the bound run" in str(m.get("content"))]
     assert len(answers) == 2 and all("A: minimise latency" in a for a in answers), answers
+
+
+@pytest.mark.parametrize("order", [(0, 1), (1, 0)])
+def test_the_panel_publishes_the_chosen_candidate_s_own_receipt(monkeypatch, order):
+    """crit_v51 F3: the panel read each candidate's receipt off the base's SHARED attribute, so a
+    concurrent proposal cut by its ceiling made a converged pick read `tokens` (the engine then
+    logged it truncated). It reads the session's own cutoff now — candidate 1's and the
+    continuation's alike (both picks). MUTATION: read `researcher_budget_exhausted(self.base)` at
+    either site -> 'tokens'."""
+    model, researcher, _base, panel = _chain(
+        [_turn(_read("r1")), _turn(_emit("e1", "cache the per-depth scorer")),
+         _turn(_emit("e2", "batch the shared prompt pages", x=2.0))], order=order)
+    _another_call_writes(monkeypatch, researcher, "tokens")
+    panel.propose(_state(), None)
+    assert panel.last_foresight is not None, "premise: two candidates were ranked"
+    assert panel.last_propose_budget_exhausted == ""

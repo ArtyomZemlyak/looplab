@@ -671,7 +671,15 @@ class ForesightPanelResearcher(WrapsResearcher):
         cards = getattr(session, "visible_board_cards", None)
         window = list(cards) if isinstance(cards, list) else self._base_board_window(state)
         ideas = [bind_idea_to_board_card(first, window)]
-        alternative, receipts = [False], [researcher_budget_exhausted(self.base)]
+        def _receipt() -> str:
+            # THE CANDIDATE'S OWN CUTOFF when the base held a session (critic 2026-09-30, crit_v51
+            # F3, driven): the base's attribute is the SHARED instance's last write — a proposal on
+            # another thread cut by its ceiling made a converged pick here read `tokens`. The
+            # session holds each candidate's own (`agents/agent.py::ProposalSession.hold`).
+            cutoff = getattr(session, "cutoff", None) if session is not None else None
+            return cutoff if isinstance(cutoff, str) else researcher_budget_exhausted(self.base)
+
+        alternative, receipts = [False], [_receipt()]
         # The session's handoff brief, DEFERRED by `propose` to the candidate chosen here: candidate
         # `i` of the session is summarized from the transcript up to its own end, once, after the
         # pick (`agents/agent.py::ProposalSession.publish_brief`). None where there is no session.
@@ -693,7 +701,7 @@ class ForesightPanelResearcher(WrapsResearcher):
                 briefs.append(functools.partial(publish, len(ideas)) if callable(publish) else None)
                 ideas.append(bind_idea_to_board_card(alt, window))
                 alternative.append(True)
-            receipts.append(researcher_budget_exhausted(self.base))
+            receipts.append(_receipt())
         # A degraded candidate is the ABSENCE of a proposal: ranked first it would pause the run
         # (`orchestrator.py::_refuse_degraded_proposal`). Only when nothing else is left is it
         # returned — so a dead provider still reaches that circuit breaker.
