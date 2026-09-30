@@ -17,6 +17,7 @@ from collections.abc import Collection, Mapping
 import json
 import math
 import os
+import posixpath
 from pathlib import Path
 import random
 import re
@@ -2158,7 +2159,9 @@ class RepoTask(BaseModel):
         pre = "" if cwd in (".", "") else cwd + "/"
         out: dict[str, list[str]] = {}
         for cand in cands:
-            ws = self._normp(pre + cand)
+            # NORMALIZED: `python sub/./score.py` protected `sub/./score.py`, a name no write
+            # reaches, while `sub/score.py` stayed editable (critic 2026-09-30).
+            ws = self._normp(posixpath.normpath(self._normp(pre + cand)))
             # Named mounts first: a named editable owns `name/...` outright, and only what no named
             # mount claims can belong to the root repo (the same ownership rule `_in_surface` uses).
             for ed in sorted(mounts, key=lambda m: m["name"] in (".", "")):

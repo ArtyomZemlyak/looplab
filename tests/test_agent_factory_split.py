@@ -107,7 +107,7 @@ def test_neither_module_is_a_god_module_again():
     file down. A cap is only a decision if it can move either way for a stated reason.
     """
     for rel, cap in (("adapters/tasks.py", 233), ("agents/factory.py", 402),
-                     ("agents/developer_backends.py", 198),
+                     ("agents/developer_backends.py", 199),
                      ("adapters/task_schema.py", 231)):
     #
     # 2026-08-29, MERGE with master: master's 530 is KEPT and not raised. The merged file is 529
@@ -206,6 +206,12 @@ def test_neither_module_is_a_god_module_again():
     # keyword on the `LLMRepoDeveloper` construction, `phase_context=phase_context_enabled(settings)`,
     # and the function-local import of that reader from `adapters/repo_developer.py`. 195 -> 197
     # measured; the raise pays for exactly those two lines and keeps one line of headroom.
+    #
+    # 198 -> 199, 2026-09-30, doc 69 69.5 (the STAGES turn says whether the scorer is frozen): ONE
+    # keyword on the `LLMRepoDeveloper` construction, `scorer_status=scorer_status_enabled(settings)`,
+    # its reader joining the existing function-local import on the same line. 197 -> 198 measured;
+    # the raise pays for exactly that line and keeps one line of headroom (critic 2026-09-30: the
+    # commit landed the line without the raise, and this test went red).
     #
     # 399 -> 402, 2026-09-23, review 2026-09-23 Q-2 (the script Developer starts from its parent):
     # `Settings.developer_parent_code` reaches the one LLM script Developer `make_roles` builds — the

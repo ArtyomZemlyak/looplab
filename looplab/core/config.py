@@ -2999,8 +2999,9 @@ class Settings(BaseSettings):
     # inside `score` — `adapters/repo_developer.py::scorer_frozen` / `scorer_status_note`. A frozen
     # scorer's turn is unchanged. It changes a PROMPT and buys no call, so `false` is the historical
     # turn byte for byte, the constructor defaults it OFF, and a pre-field snapshot resumes OFF (its
-    # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row). One reader: `adapters/repo_developer.py::
-    # scorer_status_enabled`.
+    # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row). The system body's sentence about the scorer's CODE and
+    # the implement note follow the same answer, and an EMPTY stage declaration is accepted.
+    # One reader: `adapters/repo_developer.py::scorer_status_enabled`.
     developer_scorer_status: bool = True
     # A5 (docs/60 §60.9): seed every chain root (Researcher propose, Developer stages/plan/step/
     # implement/repair) with a small block carrying what EARLIER phases of this run already read —

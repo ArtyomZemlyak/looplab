@@ -24,6 +24,8 @@ exporting them, and this module needs nothing from `repo_task` at import time (n
 from __future__ import annotations
 
 import math as _math
+import posixpath
+import re
 import threading
 
 from typing import Optional
@@ -629,42 +631,37 @@ def scorer_status_enabled(settings) -> bool:
     return bool(getattr(settings, "developer_scorer_status", False))
 
 
-# The shells whose `<shell> [options] <script> [args]` argv names the script it runs, and the
-# options that consume the NEXT token (so it is not read as the script). A short-option cluster
-# holding `c` (`-c`, `-ec`) or `s` runs inline text or stdin: there is no script file at all.
+# The shells whose `<shell> [options] <script> [args]` argv names the script it runs, and the LONG
+# options that consume the NEXT token (so it is not read as the script). In a short-option cluster
+# (`-e`, `-euo`, `+O`) every `o`/`O` consumes one next token too — `bash -euo pipefail run.sh` runs
+# `run.sh`, and `pipefail` is the option's value (critic 2026-09-30: it was read as the script); a
+# `-` cluster holding `c` (`-c`, `-ec`) or `s` runs inline text or stdin: there is no script file.
 _SCRIPT_SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
-_SHELL_VALUE_OPTIONS = frozenset({"-o", "+o", "-O", "+O", "--rcfile", "--init-file"})
+_SHELL_VALUE_OPTIONS = frozenset({"--rcfile", "--init-file"})
+# `env NAME=value … <program> …` runs `<program>`: read through the assignments, as
+# `repo_task.py::entrypoint_candidates` reads `env FOO=1 python …`. An `env` option ends the reading.
+_ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
-def _shell_script(argv) -> Optional[str]:
-    """The script a `bash|sh|zsh|dash|ksh [options] <script> [args]` argv runs, or None.
-
-    Narrow on purpose, like `repo_task.py::entrypoint_candidates`, which reads only the Python
-    forms and answers [] for a shell wrapper: None for any other head, for inline text (`-c`) or
-    stdin (`-s`), and for a relative path that escapes the workdir or an absolute one. What it
-    returns is only ever TOLD to the Developer (`scorer_frozen`); nothing is frozen or refused by it.
-    """
-    argv = [t for t in (argv or []) if isinstance(t, str)]
-    if not argv or argv[0].replace("\\", "/").rsplit("/", 1)[-1] not in _SCRIPT_SHELLS:
-        return None
-    i = 1
-    while i < len(argv):
-        tok = argv[i]
-        if tok == "--":
+def _argv_after_env(argv: list) -> Optional[list]:
+    """`argv` with a leading `env NAME=value …` read through; None when `env` takes an option."""
+    if argv and _program_name(argv[0]) == "env":
+        i = 1
+        while i < len(argv) and _ENV_ASSIGNMENT.match(argv[i]):
             i += 1
-            break
-        if tok in _SHELL_VALUE_OPTIONS:
-            i += 2
-            continue
-        if tok.startswith("-") and not tok.startswith("--") and ({"c", "s"} & set(tok[1:])):
-            return None
-        if tok.startswith(("-", "+")):
-            i += 1
-            continue
-        break
-    if i >= len(argv):
-        return None
-    script = argv[i].replace("\\", "/").strip()
+        return None if i < len(argv) and argv[i].startswith("-") else argv[i:]
+    return argv
+
+
+def _program_name(token: str) -> str:
+    """The program an argv head names: its last path component, without a Windows `.exe`."""
+    name = str(token).replace("\\", "/").rsplit("/", 1)[-1]
+    return name[:-4] if name.lower().endswith(".exe") else name
+
+
+def _relative_script(token: str) -> Optional[str]:
+    """`token` as a workdir-relative path, or None for an absolute one or one that escapes."""
+    script = str(token).replace("\\", "/").strip()
     while script.startswith("./"):
         script = script[2:]
     if (not script or script.startswith(("/", "~")) or script == ".."
@@ -673,7 +670,53 @@ def _shell_script(argv) -> Optional[str]:
     return script
 
 
-def scorer_frozen(ev: dict, surface, protected, prefixes) -> tuple[Optional[bool], tuple]:
+def _exec_path(argv) -> Optional[str]:
+    """The file an argv whose head is itself a RELATIVE PATH executes (`./run.sh`, `bin/score`):
+    `exec` runs that file from the cwd — the kernel's rule, not a guess. None for a bare name, which
+    is looked up on PATH (critic 2026-09-30: `./run.sh` was answered "names no file")."""
+    argv = _argv_after_env([t for t in (argv or []) if isinstance(t, str)]) or []
+    head = argv[0].replace("\\", "/").strip() if argv else ""
+    return _relative_script(head) if "/" in head else None
+
+
+def _shell_script(argv) -> Optional[str]:
+    """The script a `bash|sh|zsh|dash|ksh [options] <script> [args]` argv runs, or None.
+
+    Narrow on purpose, like `repo_task.py::entrypoint_candidates`, which reads only the Python
+    forms and answers [] for a shell wrapper: None for any other head, for inline text (`-c`) or
+    stdin (`-s`, or no operand at all), and for a relative path that escapes the workdir or an
+    absolute one. What it returns is only ever TOLD to the Developer (`scorer_frozen`); nothing is
+    frozen or refused by it.
+    """
+    argv = _argv_after_env([t for t in (argv or []) if isinstance(t, str)]) or []
+    if not argv or _program_name(argv[0]) not in _SCRIPT_SHELLS:
+        return None
+    i = 1
+    while i < len(argv):
+        tok = argv[i]
+        if tok in ("--", "-"):
+            # A lone `-` ends the options as `--` does — `bash - run.sh` runs `run.sh`, and `bash -`
+            # with no operand after it reads stdin (the `None` below). A lone `+` is an empty cluster
+            # and the options go on (`bash + -c …` runs inline text). Measured with bash and dash.
+            i += 1
+            break
+        if tok in _SHELL_VALUE_OPTIONS:
+            i += 2
+            continue
+        if tok.startswith("--"):
+            i += 1
+            continue
+        if tok.startswith(("-", "+")):
+            if tok[0] == "-" and ({"c", "s"} & set(tok[1:])):
+                return None
+            i += 1 + sum(ch in "oO" for ch in tok[1:])
+            continue
+        break
+    return _relative_script(argv[i]) if i < len(argv) else None
+
+
+def scorer_frozen(ev: dict, surface, protected, prefixes, *,
+                  exists=None) -> tuple[Optional[bool], tuple]:
     """Is the code the operator's score command runs FROZEN — refused by the Developer's write tools?
 
     doc 69 §3.4 (item 69.5): on `minionerec-backbones-v10` the command was `bash MiniOneRec/looplab/
@@ -689,27 +732,45 @@ def scorer_frozen(ev: dict, surface, protected, prefixes) -> tuple[Optional[bool
       (False, files)  the argv names file(s) and the write tools would accept an edit to each: the
                       scorer is part of what the Developer can change.
       (None, ())      the argv names no file this rule reads (a console script, `python -c`, a
-                      launcher `entrypoint_candidates` refuses): nobody can say what it runs.
+                      launcher `entrypoint_candidates` refuses), the eval `cwd` is absolute (the
+                      sandbox remaps it; this rule cannot), or an `-m` target no file of the repo
+                      holds (`python -m torch.distributed.run … score.py`: an INSTALLED program
+                      running a file this rule cannot name): nobody can say what it runs.
 
     The files are what the argv EXECUTES — the Python forms `entrypoint_candidates` reads, else the
-    script of a plain shell invocation (`_shell_script`) — joined to the eval `cwd` the way
-    `RepoTask._entrypoint_protect` joins them, so the name is the one the protect list holds. A
-    config the scorer reads is not a file it executes and is not examined.
+    script of a plain shell invocation (`_shell_script`), else a relative-path head (`_exec_path`) —
+    joined to the eval `cwd` the way `RepoTask._entrypoint_protect` joins them and normalized
+    (`sub/./score.py` is `sub/score.py`, the name a write reaches), so the name is the one the
+    protect list holds. With `exists` (the build's `RepoWriteTools.exists`) only the spellings that
+    exist decide — `-m` names two and Python runs the one that is there — and none existing is a
+    script this build AUTHORS (`(False, ())`: nothing to tell) or, for `-m`, an installed module
+    (`(None, ())`). A config the scorer reads is not a file it executes and is not examined.
     """
     from looplab.adapters.repo_task import entrypoint_candidates
+
+    from pathlib import PureWindowsPath
 
     if (ev or {}).get("host_scorer"):
         return True, ()
     argv = [t for t in ((ev or {}).get("command") or []) if isinstance(t, str)]
-    names = list(entrypoint_candidates(argv)) or [s for s in (_shell_script(argv),) if s]
+    names = list(entrypoint_candidates(argv))
+    module = any(n.endswith("/__main__.py") for n in names)
+    names = names or [s for s in (_shell_script(argv) or _exec_path(argv),) if s]
     cwd = str((ev or {}).get("cwd") or ".").replace("\\", "/").strip()
+    if cwd.startswith(("/", "~")) or PureWindowsPath(cwd).drive:
+        return None, ()
     while cwd.startswith("./"):
         cwd = cwd[2:]
     cwd = cwd.strip("/")
     pre = "" if cwd in (".", "") else cwd + "/"
-    files = tuple(p for p in (RepoWriteTools._safe_rel(pre + n) for n in names) if p)
+    files = tuple(dict.fromkeys(
+        p for p in (RepoWriteTools._safe_rel(posixpath.normpath(pre + n)) for n in names) if p))
     if not files:
         return None, ()
+    if exists is not None:
+        files = tuple(f for f in files if exists(f))
+        if not files:
+            return (None, ()) if module else (False, ())
     policy = SurfacePolicy(surface, protected, prefixes, protected_exact=True, check_escapes=False)
     if any(policy.check(f) is not None for f in files):
         return True, files
@@ -721,23 +782,60 @@ def scorer_status_note(state: Optional[bool], files) -> str:
 
     "" when the scorer is frozen, where the turn's "FIXED … protected" already holds, and when it is
     editable but none of `files` exists yet: that is the file this build AUTHORS — the designed flow
-    the system prompt describes ("Author the eval entrypoint") — with nothing in it to repeat. The
-    caller passes only the named files that exist (`RepoWriteTools.exists`)."""
+    the system prompt describes ("Author the eval entrypoint") — with nothing in it to repeat
+    (`scorer_frozen(exists=…)` answers `(False, ())` there). The measurement an edit moves is THIS
+    node's number, never a sibling lineage's, and the hedge says what the engine cannot tell rather
+    than that no file is named (critic 2026-09-30: both read false). The last sentence is one the
+    STAGES phase can follow: under the same flag an EMPTY declaration is accepted
+    (`_declare_stages_phase`), which "possibly none" was not."""
     if state is True or (state is False and not files):
         return ""
     if state is False:
         named = " or ".join(f"`{f}`" for f in files)
         head = (f" THE CODE IT RUNS IS NOT FROZEN: {named} is inside your editable surface, so an "
-                "edit to it changes the MEASUREMENT itself — how every node is scored — not only "
-                "the work before it.")
+                "edit to it changes the MEASUREMENT itself — what this node's number means — not "
+                "only the work before it.")
     else:
-        head = (" THE CODE IT RUNS MAY NOT BE FROZEN: its argv names no file the engine can "
-                "protect, so what it ends up running may be inside your editable surface, and an "
-                "edit to that changes the MEASUREMENT itself — how every node is scored.")
+        head = (" THE CODE IT RUNS MAY NOT BE FROZEN: the engine cannot tell from its argv which "
+                "file it runs, so that file may be inside your editable surface, and an edit to it "
+                "would change the MEASUREMENT itself — what this node's number means.")
     return (head + " READ what the command runs before you declare anything: work it already does "
             "itself (preparing data, training a model) runs AGAIN inside the `score` stage, so a "
             "stage of yours that repeats it pays for it twice. Declare only the work it does not "
-            "already do — possibly none.")
+            "already do — and when it does all of it, declare an EMPTY list (`stages: []`): the "
+            "command alone is then this node's whole pipeline, and a pipeline carried over from "
+            "the parent is dropped.")
+
+
+# The system body's one sentence about the CODE the score stage runs (`_REPO_DEV_SYSTEM_BODY_TAIL`),
+# true only when that code is frozen — and every phase read it, the ones that can rewrite the scorer
+# included, while the STAGES turn said the opposite (critic 2026-09-30, driven: a step session told
+# "PROTECTED" wrote `run_experiment.sh`). `scorer_system_clause` swaps it under the flag.
+_SCORER_CODE_PROTECTED = (
+    "That covers the stage AND the code it runs: when the operator's cmd names a script or module "
+    "the repo already ships, that file is PROTECTED and your write/edit tools will refuse it.")
+
+
+def scorer_unfrozen(answer) -> bool:
+    """Does `scorer_frozen`'s answer say the score stage's code is NOT known to be frozen — editable
+    and already there, or unnameable? False for None (the flag off, or no operator command), a frozen
+    scorer and one this build is about to author."""
+    return answer is not None and (answer[0] is None or (answer[0] is False and bool(answer[1])))
+
+
+def scorer_system_clause(answer) -> str:
+    """The system body's sentence about the score stage's CODE for `scorer_frozen`'s answer: the
+    historical one unless `scorer_unfrozen`, else what holds."""
+    if not scorer_unfrozen(answer):
+        return _SCORER_CODE_PROTECTED
+    state, files = answer
+    if state is False:
+        named = " or ".join(f"`{f}`" for f in files)
+        return ("That covers the stage, NOT the code it runs here: " + named + " is inside your "
+                "editable surface, so an edit to it changes what the `score` stage measures — read "
+                "it before you change it.")
+    return ("That covers the stage; whether it covers the code the stage runs, the engine cannot "
+            "tell from the cmd's argv — read what it runs before you assume either.")
 
 
 _REPO_DEV_REPAIR_BLOCK = (
@@ -1443,7 +1541,7 @@ class LLMRepoDeveloper:
             return body
         return body[:start] + body[end:]
 
-    def _system_body(self, render) -> str:
+    def _system_body(self, render, scorer=None) -> str:
         """The system body, with the one clause that depends on whether the PROBE is wired.
 
         SAME PromptStore key either way (`repo_developer_system_body`), different DEFAULT — so an
@@ -1452,7 +1550,11 @@ class LLMRepoDeveloper:
         found. The clause is spliced at its original position rather than appended, because the text
         it replaces asserts the opposite ("you CANNOT execute anything yourself") and two paragraphs
         contradicting each other is worse than either one alone: that assertion is what the observed
-        failure quoted back at itself before writing a fake loguru."""
+        failure quoted back at itself before writing a fake loguru.
+
+        `scorer` (`_scorer_answer`) swaps the sentence about the score stage's CODE the same way, at
+        its own position, under `developer_scorer_status` (doc 69 69.5): None — the flag off — and a
+        frozen scorer keep the default byte for byte."""
         if getattr(self, "_dev_commands", None):
             clause = (_REPO_DEV_PINNED_AND_PROBE_EXECUTION if getattr(self, "_probe", False)
                       else _REPO_DEV_PINNED_EXECUTION)
@@ -1460,6 +1562,8 @@ class LLMRepoDeveloper:
         else:
             default = (_REPO_DEV_SYSTEM_BODY_WITH_PROBE if getattr(self, "_probe", False)
                        else _REPO_DEV_SYSTEM_BODY)
+        if scorer_unfrozen(scorer):
+            default = default.replace(_SCORER_CODE_PROTECTED, scorer_system_clause(scorer))
         # The context-before-tools rule is deliberately NOT appended here, unlike on the Researcher
         # side. Two contracts this role has and that one does not forbid it, and the rule has no
         # evidence to weigh against them: A/B'd over three models it moved NOTHING, while the same
@@ -2454,7 +2558,8 @@ class LLMRepoDeveloper:
         # ignore (M7 — this reader and `_resolve_stages` must accept the same thing).
         return validate_stages(ev["stages"], allow_env=True)[0] or []
 
-    def _stage_note(self, operator_stages, declared, carried_over, manifest_protected) -> str:
+    def _stage_note(self, operator_stages, declared, carried_over, manifest_protected,
+                    scorer=None) -> str:
         """The three-way pipeline note the implement sessions read (doc 25 RA-07).
 
         Moved VERBATIM out of `_run`'s middle. This is PROMPT TEXT, so the bytes are the contract:
@@ -2463,6 +2568,11 @@ class LLMRepoDeveloper:
         unconditionally, and after an empty STAGES phase the model wrote a score-only entrypoint that
         scored a stale checkpoint. `tests/test_repo_stage_note.py` pins all three variants byte-for-
         byte, so a "tidy-up" of this wording is a red test rather than a silently different agent.
+
+        `scorer` (`_scorer_answer`, doc 69 69.5): when the score stage's code is not known to be
+        frozen, "the eval entrypoint only SCORES" is not a fact about it — the incident's scorer
+        prepared, trained AND scored (critic 2026-09-30) — so that clause says what is known instead.
+        None keeps every variant byte for byte.
         """
         # Tell the implement sessions what pipeline ACTUALLY exists. The old prompt asserted
         # "your STAGES phase already declared a train stage" unconditionally — after a failed/
@@ -2475,9 +2585,12 @@ class LLMRepoDeveloper:
         if declared:
             _src = ("carried over from the parent solution — your STAGES phase declared "
                     "nothing new this node" if carried_over else "declared by your STAGES phase")
+            _then = ("the operator's cmd then runs as `score`, and the code it runs is not frozen: "
+                     "it does whatever that code does, so do not assume it only scores."
+                     if scorer_unfrozen(scorer) else
+                     "the eval entrypoint only SCORES the artifacts the earlier stages produce.")
             return (f"\nPIPELINE for this node ({_src}): {_chain} "
-                    "→ score (operator cmd). Implement the code those stages run; the "
-                    "eval entrypoint only SCORES the artifacts the earlier stages produce.")
+                    "→ score (operator cmd). Implement the code those stages run; " + _then)
         return ("\nNO pipeline stages are declared for this node"
                 + (" (the operator protected looplab_stages.json)"
                    if manifest_protected else "")
@@ -2523,6 +2636,17 @@ class LLMRepoDeveloper:
         # SAME pipeline the eval will run (M7) — they can no longer drift.
         return materialized_stages(obj) or []
 
+    def _scorer_answer(self, write):
+        """`scorer_frozen`'s answer for this build's working set (the build's own existence test), or
+        None when `developer_scorer_status` is off or no operator command scores the node — the two
+        cases every prompt keeps byte for byte (doc 69 69.5)."""
+        if not getattr(self, "_scorer_status", False):
+            return None
+        ev, has_cmd = self._cmd_context()
+        if not has_cmd:
+            return None
+        return scorer_frozen(ev, self._surface, self._protected, self._prefixes, exists=write.exists)
+
     def _stages_user(self, idea: Idea, ev: dict, has_cmd: bool, write=None) -> str:
         import json as _json
         params = ", ".join(f"{k}={v}" for k, v in (idea.params or {}).items()) or "(bake sensible values)"
@@ -2538,10 +2662,9 @@ class LLMRepoDeveloper:
             # it runs only when the write tools refuse that code. When they would not (or nobody can
             # name it), say so — appended, so a frozen scorer's turn is byte for byte the old one.
             if self._scorer_status:
-                state, files = scorer_frozen(ev, self._surface, self._protected, self._prefixes)
-                if state is False and write is not None:
-                    files = tuple(f for f in files if write.exists(f))
-                contract += scorer_status_note(state, files)
+                contract += scorer_status_note(*scorer_frozen(
+                    ev, self._surface, self._protected, self._prefixes,
+                    exists=None if write is None else write.exists))
         else:
             contract = (
                 "There is NO operator scoring command — declare the FULL pipeline, INCLUDING a final stage "
@@ -2651,7 +2774,9 @@ class LLMRepoDeveloper:
         """Stages phase (MANDATORY, FIRST): a READ-ONLY phase where the Developer studies the repo + the
         operator's cmd and emits `declare_stages` — the ordered pipeline (prep → train → …) that runs
         before the protected `score` step. Writes `looplab_stages.json`. Returns the clean stage list ([]
-        on failure — the eval then falls back to just the operator cmd)."""
+        on failure — the eval then falls back to just the operator cmd — and for an accepted EMPTY
+        declaration (doc 69 69.5), which has dropped the working set's manifest first, so the M7
+        recompute in `_fresh_stage_note` finds none and the note says the command runs alone)."""
         from looplab.agents.agent import run_phase, CompositeTools
         from looplab.tools.env_inspect import EnvInspectTools
         from looplab.runtime.command_eval import validate_stages
@@ -2666,6 +2791,16 @@ class LLMRepoDeveloper:
             system = read_only_intro(system)
         ev, has_cmd = self._cmd_context()
         reserved = ("score",)   # `score` is ALWAYS the engine-appended final stage — consume-side reserves it too
+        # AN EMPTY DECLARATION, under the scorer-status flag and with an operator command (doc 69
+        # 69.5): the sentence tells this phase to declare nothing when the command already does all
+        # the work, and `validate_stages` refuses an empty list — driven, the obedient model was
+        # bounced twice and the parent's `train` stage then ran again in the child (critic
+        # 2026-09-30). Accepted here only; `validate_stages` stays the definition of a manifest.
+        allow_none = bool(has_cmd and getattr(self, "_scorer_status", False))
+
+        def _declared_none(args) -> bool:
+            stages = (args or {}).get("stages")
+            return allow_none and isinstance(stages, list) and not stages
         # scouts read the LIVE overlay (the parent solution on improve/merge), not the pristine repo.
         # Composed first so the user turn can name what it already holds — see the plan phase above.
         # NO `answered_by_context` HERE, deliberately. It was spliced in and measured INERT: the
@@ -2680,6 +2815,8 @@ class LLMRepoDeveloper:
                     {"role": "user", "content": self._stages_user(idea, ev, has_cmd, write)}]
 
         def _validate(args):                      # bounce a malformed manifest back to the model
+            if _declared_none(args):
+                return None
             stages = (args or {}).get("stages")
             _, err = validate_stages(stages, reserved=reserved)
             if err:
@@ -2712,6 +2849,13 @@ class LLMRepoDeveloper:
             return write.manifest_collision_refusal(stages)
 
         def _finalize(args):
+            if _declared_none(args):
+                # The command alone is the pipeline: drop a manifest carried over from the parent (or
+                # shipped unprotected), by the write tool's own gate. A refused delete leaves it, and
+                # the node degrades as a failed phase does — the M7 note then names what runs.
+                if write.exists("looplab_stages.json"):
+                    write._delete("looplab_stages.json")
+                return []
             clean, _ = validate_stages((args or {}).get("stages"), reserved=reserved)
             # PERSIST a well-formed manifest even if a path still looks missing. The missing-path guard
             # is a RETRYABLE bounce on the `_validate` path (where the model can re-declare a real path);
@@ -2836,10 +2980,14 @@ class LLMRepoDeveloper:
         params = ", ".join(f"{k}={v}" for k, v in (idea.params or {}).items()) or "(choose sensible values)"
         from looplab.core.hardware import operational_attention_points
         from looplab.core.prompts import render
+        # Whether the score stage's CODE is frozen, asked ONCE per build of this working set: the
+        # system body every phase reads, the STAGES turn and the implement note must not disagree
+        # about it (doc 69 69.5; critic 2026-09-30). None unless `developer_scorer_status`.
+        scorer = self._scorer_answer(write)
         system = (
             render(self.prompts, "repo_developer_system_intro", _REPO_DEV_SYSTEM_INTRO)
             + self.brief + "\n\n"
-            + self._system_body(render)
+            + self._system_body(render, scorer)
             + operational_attention_points() + "\n\n"
             + self._environment_block()
             # CONDITIONAL LIKE THE RESULTS HEADER BELOW once `prompt_truths` is on (review
@@ -2923,7 +3071,8 @@ class LLMRepoDeveloper:
                 # exactly this on the first draft of the extraction). The `""` above makes that
                 # unrepresentable rather than merely absent — the name is bound on both paths and
                 # only the fresh one ever reads it.
-                stage_note = self._fresh_stage_note(idea, write, system, op_stages)
+                stage_note = self._fresh_stage_note(idea, write, system, op_stages,
+                                                    scorer=scorer)
                 user += stage_note
             # LAST, because the block is a snapshot of what THIS workspace has established and the
             # `stages` phase above has just read the manifest and the config into it. Rendered where
@@ -3172,7 +3321,8 @@ class LLMRepoDeveloper:
             return refusal
         return ""
 
-    def _fresh_stage_note(self, idea: Idea, write, system: str, op_stages: list) -> str:
+    def _fresh_stage_note(self, idea: Idea, write, system: str, op_stages: list, *,
+                          scorer=None) -> str:
         """The STAGES phase of a FRESH repo build, and the note it puts in the user message.
 
         Extracted from `_run` (doc 25 RA-07): the tree below is the only reader of
@@ -3224,7 +3374,7 @@ class LLMRepoDeveloper:
         # empty stages phase the model then wrote a score-only entrypoint that scored a stale
         # checkpoint (or crashed on a missing one) instead of training.
         return self._stage_note(operator_stages, declared, carried_over,
-                                manifest_protected)
+                                manifest_protected, scorer)
 
     def _phase_extras(self, idea: Idea, write, *, stage_note: str, co_parents=(),
                       base: Optional[dict] = None) -> tuple:

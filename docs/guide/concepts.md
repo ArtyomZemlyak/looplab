@@ -1278,7 +1278,11 @@ A **repair** (an error to fix) stays a single focused session — no stages, no 
 
 The **cmd-context rule** governs the stages phase: the operator's `cmd` is passed in as context. If
 it is **present**, it is shown as **immutable** — the Developer declares only the *preceding*
-stages. If it is **absent**, the Developer must declare the **full** pipeline, including a final
+stages. The command and its `score` stage are immutable; the CODE it runs is frozen only when the
+write tools refuse it (the operator's `protect`, the derived entrypoint protection, or a file outside
+the edit surface). Under `developer_scorer_status` every phase is told which (`scorer_frozen`), and
+the STAGES phase may declare an EMPTY list when that code already does all the work — the command
+then runs alone. If it is **absent**, the Developer must declare the **full** pipeline, including a final
 stage that runs the evaluation and prints the metric. Either way the stage name `score` is
 **reserved** (it always denotes the engine-appended operator step) — with no `cmd`, name the
 scorer e.g. `evaluate`.
