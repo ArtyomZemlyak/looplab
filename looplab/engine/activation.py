@@ -84,17 +84,10 @@ def read_markers(workdir) -> list:
     return normalize_markers(data.get("markers") if isinstance(data, dict) else None)
 
 
-def _fresh_logs(workdir, since: Optional[float], reused: frozenset = frozenset()) -> list:
+def _fresh_logs(workdir, since: Optional[float]) -> list:
     """The tails of the eval's own `*.log` files in `workdir`, newest first. `since` is the attempt's
     start: a log left by an EARLIER attempt in the deliberately reused workdir may hold a marker the
-    failing attempt never printed, and must not vouch for it.
-
-    `reused` names the `<stage>.log` files of the stages THIS attempt reused (the engine's own
-    stage-scoped re-run: the stage did not run again, its earlier run's artifacts are what this
-    attempt scores). Their log is that run's own account, older than `since` by construction, so the
-    floor does not apply to it (critic 2026-09-30, crit_v45 M1: a manifest-only repair or a fix of a
-    later stage reused `train`, the markers `train` had printed were read as missing, and a real
-    result was withheld as `inert_path`). Only a file the glob found in `workdir` itself is credited."""
+    failing attempt never printed, and must not vouch for it."""
     out = []
     try:
         entries = sorted(Path(workdir).glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -103,7 +96,7 @@ def _fresh_logs(workdir, since: Optional[float], reused: frozenset = frozenset()
     for path in entries:
         try:
             st = path.stat()
-            if since is not None and path.name not in reused and st.st_mtime + 1.0 < float(since):
+            if since is not None and st.st_mtime + 1.0 < float(since):
                 continue
             # The candidate's own file: no link, no FIFO — `x.log` as a FIFO blocked this read on
             # the event loop (critic 2026-09-26, driven) — and the size bound read off the SAME entry.
@@ -118,20 +111,17 @@ def _fresh_logs(workdir, since: Optional[float], reused: frozenset = frozenset()
 
 
 def missing_markers(markers: Iterable[str], *, texts: Iterable[str] = (), workdir=None,
-                    since: Optional[float] = None, reused_stages: Iterable[str] = ()) -> list:
+                    since: Optional[float] = None) -> list:
     """The declared markers that appear NOWHERE the evaluation printed: the captured streams in
-    `texts`, then the fresh stage logs in `workdir` — and the logs of the stages this attempt
-    `reused_stages` (see `_fresh_logs`). Exact substring, case-sensitive -- the node wrote the line
-    and named it, so there is nothing to interpret."""
+    `texts`, then the fresh stage logs in `workdir`. Exact substring, case-sensitive -- the node wrote
+    the line and named it, so there is nothing to interpret."""
     markers = [m for m in markers if m]
     if not markers:
         return []
     haystacks = [t for t in texts if isinstance(t, str) and t]
     missing = [m for m in markers if not any(m in h for h in haystacks)]
     if missing and workdir is not None and os.path.isdir(str(workdir)):
-        reused = frozenset(f"{name}.log" for name in reused_stages
-                           if isinstance(name, str) and name)
-        logs = _fresh_logs(workdir, since, reused)
+        logs = _fresh_logs(workdir, since)
         missing = [m for m in missing if not any(m in h for h in logs)]
     return missing
 
