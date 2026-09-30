@@ -628,7 +628,9 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
                          or p in ("/api/research", "/api/llm/health",
                                   "/api/cross-run/concept-steward",
                                   "/api/cross-run/claim-steward")
-                         or re.fullmatch(r"/api/runs/[^/]+/(chat|suggest|command|report_refresh)", p)
+                         # The concept lens is a paid `derive_lens` call (critic crit_v60 F2).
+                         or re.fullmatch(r"/api/runs/[^/]+/(chat|suggest|command|report_refresh"
+                                         r"|concepts/lens)", p)
                          or (p.startswith("/api/scope-report/") and p.endswith("/generate"))
                          or re.fullmatch(r"/api/runs/[^/]+/(reset|deletions)", p)
                          or (request.method == "DELETE" and re.fullmatch(r"/api/runs/[^/]+", p)))):

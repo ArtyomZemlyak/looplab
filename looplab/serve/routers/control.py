@@ -218,9 +218,10 @@ def build_router(srv) -> APIRouter:
         "/api/runs/{run_id}/commands/{command_id}/retry",
         responses=_command_responses("Retried durable command record"),
     )
-    def retry_command(run_id: str, command_id: str, response: Response):
+    def retry_command(run_id: str, command_id: str, request: Request, response: Response):
         _command_response_headers(response)
-        return srv.commands.retry(_run_dir(run_id), command_id)
+        return srv.commands.retry(_run_dir(run_id), command_id,
+                                  agent_token=request_agent_token(request))
 
     @router.post("/api/runs/{run_id}/resolve-activity-claims")
     async def resolve_activity_claims(run_id: str, request: Request, response: Response):

@@ -55,7 +55,7 @@ from looplab.serve import engine_proc as _engine_proc   # `_PENDING_RECHECK_S`, 
 from looplab.serve.command_observation import CommandObservation, CommandObservationIndex
 from looplab.serve.control_validation import (
     CONTROL_SPECS, EnginePolicy, _error, _normalize_finalize_data, normalize_control,
-    task_file_for)
+    refuse_agent_token_intent, task_file_for)
 from looplab.serve.durable_op import refuse_unless_quiescent
 from looplab.serve.engine_proc import (
     EngineSpawnOutcomeUnknown, _claim_and_spawn_resume, _engine_alive, _engine_liveness,
@@ -3104,12 +3104,16 @@ class RunCommandService:
             raise HTTPException(503, detail)
         return result
 
-    def retry(self, rd: Path, command_id: str) -> dict:
+    def retry(self, rd: Path, command_id: str, *, agent_token: bool = False) -> dict:
         path = self._path(rd, command_id)
         with self.sequence(rd):
             record = self._read_existing(path)
             if record is None:
                 raise HTTPException(404, "no such command")
+            if agent_token:
+                # A retry re-drives a record someone ELSE may have submitted: the AGENT token meets
+                # the submit rule for its intent first (doc 70 70.8, critic crit_v60 F5).
+                refuse_agent_token_intent(rd, record.get("event_type"), record.get("data"))
             generation_match, current_generation = self._record_generation_match(rd, record)
             if generation_match is not True:
                 detail = self._record_generation_error(record, generation_match, current_generation)

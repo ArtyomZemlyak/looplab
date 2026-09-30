@@ -81,6 +81,8 @@ from looplab.serve.public_cards import PublicCardsProjectionMetadata
 # Re-exported for `tests/test_concepts_endpoint.py`, which imports it from THIS module to
 # prove the endpoint's edge-collapse mirrors the fold's tiebreak.
 from looplab.serve.concept_frame import folded_concepts as _folded_concepts  # noqa: F401
+from looplab.serve.control_validation import agent_token_refused, run_is_external
+from looplab.serve.principal import request_agent_token
 from looplab.serve.run_commands import run_generation_token
 from looplab.serve.run_files import run_config_thread_lock as _shared_run_config_thread_lock
 from looplab.serve.reset_transaction import (
@@ -3382,6 +3384,14 @@ def build_router(srv) -> APIRouter:
         snap = rd / "config.snapshot.json"
         if not await anyio.to_thread.run_sync(snap.exists):
             raise HTTPException(404, "run has no config.snapshot.json (it predates self-describing runs)")
+        if (request_agent_token(request)
+                and not await anyio.to_thread.run_sync(run_is_external, rd)):
+            # The snapshot IS the next resume's settings, and an internal run's resume is the
+            # owner's loop: the agent token may not choose its model, budgets or roles (doc 70
+            # 70.8, critic crit_v60 F4). On a run launched with `external_harness` it keeps its edit.
+            raise agent_token_refused(
+                "the agent token cannot edit an internal run's configuration: the owner's next "
+                "resume would run the run's own Researcher/Developer loop with it")
         body = await json_object(request)
         has_expected_revision = "expected_revision" in body
         expected_revision = body.get("expected_revision")

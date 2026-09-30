@@ -22,7 +22,7 @@ def harness_manifest(*, include_settings: bool = False) -> dict:
         "mode": "external_harness_or_delegated_developer",
         "external_run_mode": {
             "launch": "looplab run CONFIG --out RUN_DIR --backend toy -s external_harness=true",
-            "credential": "Use distinct LOOPLAB_HARNESS_TOKEN; scoped agent requests cannot edit /api/settings, launch runs, reset/delete runs, or invoke LoopLab's owner model workflows. Legacy LOOPLAB_UI_TOKEN is full owner authority.",
+            "credential": "Use distinct LOOPLAB_HARNESS_TOKEN; scoped agent requests cannot edit /api/settings, launch runs, reset/delete runs, or invoke LoopLab's owner model workflows. On a run not launched with external_harness it may only pause, abort a node, hint, annotate or comment; every command that starts or drives that run's engine, a retry of one and a config edit are refused with agent_token_refused. Legacy LOOPLAB_UI_TOKEN is full owner authority.",
             "reasoning_owner": "Codex, Claude Code or another MCP client: proposal, novelty, stages, plan, implementation, repair, lesson writing and concept curation are agent decisions.",
             "engine_owner": "LoopLab: candidate admission, source snapshot, evaluation, metrics, budgets, durable control commands and replay.",
             "submission": "Submit ready-made code/files using inject_node through /api/runs/{run_id}/commands; set parent_id for a branch. A code-less proposal is refused in this mode.",

@@ -2212,11 +2212,17 @@ def external_intent_refusal(event_type: str, data: dict) -> Optional[HTTPExcepti
 # is the `owner` principal (`serve/server.py`), and the refusal below held only on an EXTERNALLY
 # driven run, so on an internal run its holder queued a `fork` the live engine then built with the
 # owner's paid Developer — though the harness manifest promises "scoped agent requests cannot …
-# invoke LoopLab's owner model workflows". The token is now refused, on ANY run, every intent the
-# external rule refuses (`external_intent_refusal`: each is fulfilled by LoopLab's own
-# Researcher/Developer), and on an INTERNAL run the three that START its loop — a resume, a restart,
-# a reopen — which on an external run are the harness's own to drive. What stays open to it: a
-# ready-made inject, a remeasure, a pause or abort, a hint, an annotation, the approvals and budget.
+# invoke LoopLab's owner model workflows". An internal run's own loop IS that workflow, and every
+# control intent whose engine policy is not `NO_SPAWN` STARTS it — the command worker spawns a plain
+# `looplab resume` for it when no engine is alive (`run_commands.py::RunCommandService._admit`) — or
+# DRIVES it on a live engine: a fork, a budget extension, a strategy, an approval, an inject whose
+# crash the run's Developer repairs. Refusing a hand list of those (the external rule's five and the
+# three starts) left the rest open (critic crit_v60 F1, driven: an agent-token `node_reset` of a
+# paused run, a ready-made inject into one whose engine had died and a `budget_extend` of a finished
+# one each spawned the run's loop, which built nodes with the owner's Developer). So on an internal
+# run the token keeps exactly the `NO_SPAWN` intents — a pause, a node abort, a hint, annotations,
+# comments, … — read off the policy table, never a hand list, so an intent added later is refused to
+# it until its policy says it starts nothing. On an external run it meets the external rule only.
 AGENT_TOKEN_REFUSED_STARTS = frozenset({EV_RESUME, EV_RESTART, EV_RUN_REOPENED})
 
 
@@ -2224,8 +2230,13 @@ def agent_token_refusal(event_type: str, data: dict) -> Optional[HTTPException]:
     """The refusal the AGENT token gets for this intent on an INTERNAL run, or None to admit it.
 
     PURE, like `external_intent_refusal` beside it: whether the run is internal is the caller's
-    question (`_external_mode_restriction`). A 403 with its own code — this credential may not,
-    whoever else may — which the command service records on the REJECTED command as it is."""
+    question (`_external_mode_restriction`). Admitted: exactly the intents whose engine policy is
+    `NO_SPAWN` (`_CONTROL_POLICIES`); an unknown type is refused (fail closed). A 403 with its own
+    code — this credential may not, whoever else may — which the command service records on the
+    REJECTED command as it is."""
+    spec = CONTROL_SPECS.get(event_type)
+    if spec is not None and spec.engine_policy is EnginePolicy.NO_SPAWN:
+        return None
     if event_type in AGENT_TOKEN_REFUSED_STARTS:
         message = ("the agent token cannot start an internal run's own Researcher/Developer loop "
                    "(resume, restart or reopen)")
@@ -2233,11 +2244,42 @@ def agent_token_refusal(event_type: str, data: dict) -> Optional[HTTPException]:
         message = ("the agent token cannot queue an intent LoopLab's own model fulfils on an "
                    "internal run: " + str(external_intent_refusal(event_type, data).detail))
     else:
-        return None
+        message = (f"the agent token cannot submit {event_type!r} on an internal run: it starts or "
+                   "drives the run's own engine, whose Researcher and Developer are the owner's")
+    return agent_token_refused(message)
+
+
+def agent_token_refused(message: str) -> HTTPException:
+    """The agent token's one refusal shape (`agent_token_refused`, 403, not retryable)."""
     return HTTPException(403, {
         "code": "agent_token_refused", "message": message, "retryable": False,
-        "remediation": ("submit a ready-made inject_node with code or files, or ask the operator "
-                        "to act with the owner's token")})
+        "remediation": ("on an internal run the agent token may only pause, abort a node, hint, "
+                        "annotate or comment; ask the operator to act with the owner's token, or "
+                        "drive a run launched with external_harness")})
+
+
+def run_is_external(rd: Path) -> bool:
+    """Whether `rd` was launched with `external_harness`, read off ITS snapshot, not the server's
+    ambient config — one UI serves many run modes. No snapshot reads internal (for the agent token
+    that FAILS CLOSED); an unreadable one is refused with the one coded answer every serve reader
+    gives it (`serve/http.py::REFUSALS`), never its parse error."""
+    snapshot = Path(rd) / "config.snapshot.json"
+    if not snapshot.is_file():
+        return False
+    from looplab.core.config import read_config_snapshot
+    try:
+        return bool(read_config_snapshot(snapshot).external_harness)
+    except (OSError, ValueError) as exc:
+        raise refusal("config_snapshot_unreadable") from exc
+
+
+def refuse_agent_token_intent(rd: Path, event_type, data) -> None:
+    """Raise the refusal the AGENT token gets for `event_type` on run `rd` — the submit rule, for a
+    caller that holds an intent it did not submit through `normalize_control`: the retry of a
+    durable record (critic crit_v60 F5, driven: the agent token re-drove the owner's failed
+    `resume`, which spawned the run's loop)."""
+    _external_mode_restriction(rd, str(event_type or ""),
+                               dict(data) if isinstance(data, dict) else {}, agent_token=True)
 
 
 def _external_mode_restriction(rd: Path, event_type: str, data: dict, *,
@@ -2258,17 +2300,8 @@ def _external_mode_restriction(rd: Path, event_type: str, data: dict, *,
     agent_refused = agent_token_refusal(event_type, data) if agent_token else None
     if refused is None and agent_refused is None:
         return
-    snapshot = Path(rd) / "config.snapshot.json"
-    external = False
-    if snapshot.is_file():
-        from looplab.core.config import read_config_snapshot
-        try:
-            external = read_config_snapshot(snapshot).external_harness
-        except (OSError, ValueError) as exc:
-            # The run mode is unknowable: refused, with the one coded answer every serve reader gives
-            # an unreadable snapshot (`serve/http.py::REFUSALS`), never its parse error.
-            raise refusal("config_snapshot_unreadable") from exc
-    if external:
+    # The run mode is unknowable from an unreadable snapshot: refused (`run_is_external`).
+    if run_is_external(rd):
         if refused is not None:
             raise refused
         return                  # a resume of an external run is the harness's own to drive
@@ -2300,6 +2333,11 @@ def normalize_control(srv, rd: Path, event_type: str, data, *, agent_token: bool
 
     if spec.normalize is not None:
         data = spec.normalize(_ControlIntake(srv, rd, event_type, data))
+        # …and AGAIN over what the normalizer made of it (critic crit_v60 F3, driven): an import's
+        # `{source_run, source_node}` reads as ready-made above, and the import then resolves it into
+        # the node it WILL carry — for a source node reset from `implement`, no code and no files,
+        # which the run's Developer would build. The rule judges that payload, not the reference.
+        _external_mode_restriction(rd, event_type, data, agent_token=agent_token)
 
     try:
         # Encode INSIDE the guard: json.dumps(ensure_ascii=False) accepts a lone surrogate (valid
