@@ -141,3 +141,29 @@ def test_a_history_with_no_numeric_params_is_no_warmup_and_buys_one_proposal():
                              metric=0.01, status=NodeStatus.evaluated, feasible=True)
     assert mixed.propose(st_mixed, None).params == {"x": 3.0, "y": -1.0}
     assert base_mixed.i == 2
+
+
+def test_a_halted_run_starts_no_further_panel_member():
+    """WP-STOP: members 2..K are each a NEW paid call. Once the run's stop is published and answers
+    True (`core/phase_events.py::run_halt_scope`), the panel ranks what it already has; outside a
+    run it is the historical K-way fan-out."""
+    from looplab.core.phase_events import run_halt_scope
+
+    cand_a = Idea(operator="improve", params={"x": 3.0, "y": -1.0})
+    cand_b = Idea(operator="improve", params={"x": -4.0, "y": 4.0})
+    st = _state([(3.0, -1.0, 0.1), (-4.0, 4.0, 50.0), (2.0, 0.0, 5.0)])
+    halted = {"now": False}
+
+    class _HaltsDuringFirst(_SeqResearcher):
+        def propose(self, state, parent):
+            halted["now"] = True
+            return super().propose(state, parent)
+
+    base = _HaltsDuringFirst([cand_a, cand_b])
+    with run_halt_scope(lambda: halted["now"]):
+        PanelResearcher(base, k=3, warmup=2).propose(st, None)
+    assert base.i == 1
+
+    control = _SeqResearcher([cand_a, cand_b])
+    PanelResearcher(control, k=3, warmup=2).propose(st, None)
+    assert control.i == 3

@@ -269,3 +269,62 @@ def test_no_lane_ever_holds_the_PRIMARY_role_pair(tmp_path):
         for pair in pairs:
             assert pair[0] is not engine.researcher and pair[1] is not engine.developer, (
                 "the primary pair reached the lane's leasable set")
+
+
+def test_a_stop_during_a_lane_proposal_starts_no_further_lane(tmp_path):
+    """WP-STOP: the lane proposes again as soon as a lane frees, and each proposal is a paid call. A
+    stop landing in the first one refuses its idea before any folded audit row or reservation is
+    written (counted once on the DIAGNOSTIC `discarded` beacon), and no further lane proposes or
+    builds. Without the checks every free lane re-proposed and the reservation refused each one."""
+    engine, timeline = _timed_engine(tmp_path / "stopped", steady=True, slow_first=0.0)
+    real = engine._await_batch_proposal
+    proposals: list[int] = []
+
+    async def _stop_lands_in_the_first(state, width):
+        proposals.append(width)
+        out = await real(state, width)
+        if len(proposals) == 1:
+            engine.store.append("pause", {"reason": "operator stop (`looplab stop`)"})
+        return out
+
+    engine._await_batch_proposal = _stop_lands_in_the_first
+    reservations: list[int] = []
+    real_reserve = engine._reserve_node_build
+
+    def _counting_reserve(*args, **kwargs):
+        reservations.append(1)
+        return real_reserve(*args, **kwargs)
+
+    engine._reserve_node_build = _counting_reserve
+    anyio.run(engine.run)
+    events = engine.store.read_all()
+
+    assert proposals == [1], f"{len(proposals)} lane proposals paid for after one stop"
+    assert reservations == [], "the refused idea reached the reservation after the stop"
+    assert timeline == [], "a build started after the stop"
+    assert not [e for e in events if e.type in ("card_added", "node_building", "policy_decision")]
+    discarded = [(e.data["status"], e.data.get("reason")) for e in events
+                 if e.type == "phase_progress" and e.data.get("phase") == "discarded"]
+    assert discarded == [("started", "run_is_stopping"), ("finished", "run_is_stopping")]
+
+
+def test_a_lane_that_opens_on_a_halted_fold_proposes_nothing(tmp_path):
+    """The lane re-folds before EVERY proposal; a stop that is already folded there — landed between
+    the loop head and the lane — starts no paid proposal at all."""
+    engine, timeline = _timed_engine(tmp_path / "halted-lane", steady=True, slow_first=0.0)
+    real_lane = engine._steady_state_build_lane
+    proposals: list[int] = []
+    real = engine._await_batch_proposal
+
+    async def _counting(state, width):
+        proposals.append(width)
+        return await real(state, width)
+
+    async def _stop_then_lane(creates, state, pairs):
+        engine.store.append("pause", {"reason": "operator stop (`looplab stop`)"})
+        return await real_lane(creates, state, pairs)
+
+    engine._await_batch_proposal = _counting
+    engine._steady_state_build_lane = _stop_then_lane
+    anyio.run(engine.run)
+    assert proposals == [] and timeline == []

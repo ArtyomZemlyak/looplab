@@ -7,10 +7,11 @@ inside the class — several are exercised on bare `Engine.__new__(Engine)` inst
 which a mixin preserves.
 
 The cluster: the per-node audit-event emitters (`_emit_agent_report` / `_emit_role_telemetry` /
-`_emit_hypothesis_ranked` / `_emit_foresight_selected`), the protected-file tamper audit
-(`_audit_workdir_writes`), output redaction (`_redact`), the crash-injection test hook
-(`_maybe_crash`), the leakage detector set (`_leakage_blocks`) and the advisory distribution-shift
-record beside it (`_record_distribution_shift`)."""
+`_emit_hypothesis_ranked` / `_emit_foresight_selected`, and the card-staging lane's rankings held
+for the Card's node, `_record_staged_card_ranking` / `_emit_staged_card_ranking`), the
+protected-file tamper audit (`_audit_workdir_writes`), output redaction (`_redact`), the
+crash-injection test hook (`_maybe_crash`), the leakage detector set (`_leakage_blocks`) and the
+advisory distribution-shift record beside it (`_record_distribution_shift`)."""
 from __future__ import annotations
 
 import os
@@ -22,9 +23,9 @@ from looplab.core.containment import contain
 from looplab.core.node_evidence import (normalized_newlines, open_untrusted_regular,
                                         read_bounded_regular_file)
 from looplab.core.pathsafe import is_reparse
-from looplab.events.types import (EV_AGENT_VALIDATED, EV_CARD_RANKED, EV_DATA_LEAKAGE,
-                                  EV_DATA_SHIFT, EV_FORESIGHT_SELECTED, EV_HYPOTHESIS_RANKED,
-                                  EV_NODE_EVALUATED)
+from looplab.events.types import (EV_AGENT_VALIDATED, EV_CARD_RANKED, EV_CARD_RANKING_STAGED,
+                                  EV_DATA_LEAKAGE, EV_DATA_SHIFT, EV_FORESIGHT_SELECTED,
+                                  EV_HYPOTHESIS_RANKED, EV_NODE_CREATED, EV_NODE_EVALUATED)
 from looplab.trust.drift import distribution_shift, rows_to_columns
 from looplab.trust.leakage import target_leakage, temporal_leakage, train_test_contamination
 
@@ -156,15 +157,23 @@ class AuditMixin:
             setattr(role, attr, None)
 
     def _emit_hypothesis_ranked(self, node_id: int, generation: int | None = None,
-                                researcher=None) -> None:
+                                researcher=None, pick=_REPORT_OMITTED) -> None:
         """Persist one FOREAGENT board-prioritization decision. If the active Researcher
         (a `ForesightPanelResearcher`)
         predicted an order over the OPEN-hypothesis board while proposing THIS node, record it as a
         `hypothesis_ranked` event — the analysis + selection trace the UI surfaces (kanban order + the
         model's `reason`). `researcher=` (Variant-1): read THIS build's pooled researcher so a
-        concurrent sibling's prediction is not cross-wired onto this node."""
-        role = researcher if researcher is not None else self.researcher
-        pick = getattr(role, "last_hyp_priority", None)
+        concurrent sibling's prediction is not cross-wired onto this node.
+
+        `pick=` IS THE CALLER'S OWN COPY (2026-09-29): a ranking snapshotted where it was MADE — the
+        card-staging lane's, published when the Card's node is created
+        (`_emit_staged_card_ranking`). It is emitted as given and consumes NO role: by then the
+        primary researcher may hold another proposal's ranking, and clearing that is not this
+        call's business. Omitted (not None) selects the historical instance read + consume."""
+        role = ((researcher if researcher is not None else self.researcher)
+                if pick is self._REPORT_OMITTED else None)
+        if pick is self._REPORT_OMITTED:
+            pick = getattr(role, "last_hyp_priority", None)
         if not isinstance(pick, dict):
             return
         # `card_ranked`/`hypothesis_ranked` are BOARD-WIDE, last-write-wins registers (NOT in
@@ -185,7 +194,8 @@ class AuditMixin:
         _on_loop_thread = (threading.get_ident() == _loop_ident if _loop_ident is not None
                            else threading.current_thread() is threading.main_thread())
         if not _on_loop_thread:
-            setattr(role, "last_hyp_priority", None)
+            if role is not None:
+                setattr(role, "last_hyp_priority", None)
             return
         pick = dict(pick)
         tid, sid = pick.pop("_trace_id", None), pick.pop("_span_id", None)
@@ -262,7 +272,8 @@ class AuditMixin:
             # priority on replay.
             return
         finally:
-            setattr(role, "last_hyp_priority", None)
+            if role is not None:
+                setattr(role, "last_hyp_priority", None)
 
     def _emit_foresight_selected(self, node_id: int, generation: int | None = None,
                                  researcher=None, developer=None,
@@ -286,6 +297,100 @@ class AuditMixin:
         self._emit_role_telemetry(
             researcher if researcher is not None else self.researcher,
             "last_foresight", EV_FORESIGHT_SELECTED, node_id, generation)
+
+    # ------------------------------------------------ the card-staging lane's rankings (2026-09-29)
+    #
+    # MiniOneRec inf13 ran 20 `foresight_rank` spans and wrote 2 `foresight_selected` rows and no
+    # `hypothesis_ranked` / `card_ranked` row at all. 17 of the 20 ran in the CARD-STAGING lane
+    # (`card_reservation.py::_stage_card_creates`), which proposes through the primary Researcher —
+    # the foresight panel — before any node exists, and whose `finally` therefore discarded the
+    # panel's telemetry (it cannot truthfully name a node there); the node built from the Card later
+    # (`speculation.py::_create_precoded_node`, or the serial Card claim) had nothing left to publish.
+    # The rankings are now SNAPSHOTTED where they are made (the batch lane's per-roll discipline,
+    # `novelty.py::_snapshot_role_telemetry`), recorded against the staged `card_id` as a DIAGNOSTIC
+    # `card_ranking_staged` row, and published when the Card's node is created, with that node's id.
+
+    def _record_staged_card_ranking(self, card_id, at_node, ranking) -> None:
+        """Append the rankings the proposal that STAGED `card_id` made, if it made any.
+
+        `ranking` is `{"last_hyp_priority": …, "last_foresight": …}`, each a snapshot copied off the
+        primary researcher before anything else could overwrite it. MAIN task only (the staging
+        loop), and DIAGNOSTIC, so the row moves no fence and folds nothing — see
+        `events/types.py::EV_CARD_RANKING_STAGED`."""
+        ranking = ranking if isinstance(ranking, dict) else {}
+        foresight = ranking.get("last_foresight")
+        board = ranking.get("last_hyp_priority")
+        if not (isinstance(card_id, str) and card_id) or not (
+                isinstance(foresight, dict) or isinstance(board, dict)):
+            return
+        data = {"card_id": card_id, "at_node": at_node}
+        if isinstance(foresight, dict):
+            data["foresight"] = dict(foresight)
+        if isinstance(board, dict):
+            data["hyp_priority"] = dict(board)
+        self.store.append(EV_CARD_RANKING_STAGED, data)
+
+    def _staged_card_ranking(self, card_id, node_id: int, events=None):
+        """`(row, board_is_latest)` for the `card_ranking_staged` row node `node_id` publishes, or
+        None.
+
+        The rankings belong to the Card's FIRST node created after its latest staging row — the
+        build of that proposal. A later node of the same Card (a rebuild, a re-election after a
+        failed producer) made no ranking, and a node created BEFORE the row was built from an older
+        proposal. A pure reading of the log, so a resumed process decides exactly as the original
+        would have; nothing is cached on the engine.
+
+        `board_is_latest` is False once a NEWER board decision follows the row — another staged
+        row carrying a board order, or a `hypothesis_ranked` already published — because the board
+        pair folds into last-write-wins registers (`Card.priority`, the Card selector's priority
+        signal): published in BUILD order, an older ranking would overwrite a newer one."""
+        if not (isinstance(card_id, str) and card_id):
+            return None
+        row, created, taken, superseded = None, False, False, False
+        for event in (events if events is not None else self.store.read_all()):
+            data = event.data if isinstance(event.data, dict) else {}
+            if event.type == EV_CARD_RANKING_STAGED:
+                if data.get("card_id") == card_id:
+                    row, created, taken, superseded = data, False, False, False
+                elif row is not None and isinstance(data.get("hyp_priority"), dict):
+                    superseded = True      # a newer board order was staged after this one
+            elif event.type == EV_HYPOTHESIS_RANKED and row is not None:
+                superseded = True          # a newer board order was already published
+            elif event.type == EV_NODE_CREATED and row is not None:
+                idea = data.get("idea")
+                if isinstance(idea, dict) and idea.get("card_id") == card_id:
+                    if data.get("node_id") == node_id:
+                        created = True
+                    elif not created:
+                        taken = True       # another node of this Card came first: the row was its
+        if row is None or not created or taken:
+            return None
+        return row, not superseded
+
+    def _emit_staged_card_ranking(self, card_id, node_id: int, generation: int | None = 0) -> None:
+        """Publish the Card's staged rankings against the node it was just built into.
+
+        Called ON THE MAIN TASK by both creation paths — `speculation.py::_create_precoded_node` and
+        the serial Card claim in `orchestrator.py`, after its offloaded build returns — because the
+        board rows are run-global registers `_emit_hypothesis_ranked` refuses to append from a build
+        worker. The idea pick becomes `foresight_selected` carrying `card_id` (so a reader can tell a
+        staged pick from one made during the build); the board order becomes `hypothesis_ranked`
+        + `card_ranked`, the same pair a serial build writes — but ONLY while it is still the
+        latest board decision in the log (`_staged_card_ranking`). Cards are built in selection
+        order, not staging order, and the pair is a last-write-wins register the Card selector
+        reads, so an older order published after a newer one would change which Card is built
+        next. No role is read or consumed: the snapshot is the only copy this node owns."""
+        staged = self._staged_card_ranking(card_id, node_id)
+        if staged is None:
+            return
+        row, board_is_latest = staged
+        foresight = row.get("foresight")
+        if isinstance(foresight, dict):
+            self._emit_role_telemetry(None, "last_foresight", EV_FORESIGHT_SELECTED, node_id,
+                                      generation, value={**foresight, "card_id": card_id})
+        board = row.get("hyp_priority")
+        if isinstance(board, dict) and board_is_latest:
+            self._emit_hypothesis_ranked(node_id, generation, pick=board)
 
     def _discard_node_build_telemetry(self, researcher=None, developer=None) -> None:
         """Consume per-build role state when a reset/abort supersedes the build before node_created.

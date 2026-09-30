@@ -641,3 +641,61 @@ def test_code_block_mode_signs_each_block_by_the_direction(tmp_path, monkeypatch
     assert row["mode"] == "code_blocks"
     assert row["impacts"] == {"0": pytest.approx(0.2), "1": pytest.approx(0.5), "2": None}
     assert row["signed_impacts"] == {"0": pytest.approx(0.2), "1": pytest.approx(-0.5), "2": None}
+
+
+# --- the run's STOP (WP-STOP) ---------------------------------------------------------------------
+def _counting_roles(engine):
+    """Count the probe Developer's implements and the Researcher's (refine) proposals."""
+    calls = {"probe": 0, "propose": 0}
+    probe, researcher = engine._probe_developer, engine.researcher
+    real_implement, real_propose = probe.implement, researcher.propose
+
+    def _implement(*args, **kwargs):
+        calls["probe"] += 1
+        return real_implement(*args, **kwargs)
+
+    def _propose(*args, **kwargs):
+        calls["propose"] += 1
+        return real_propose(*args, **kwargs)
+
+    probe.implement, researcher.propose = _implement, _propose
+    return calls
+
+
+def test_a_halted_run_starts_no_probe_pass_and_its_forced_ablation_stays_queued(tmp_path):
+    """Each probe is a Developer call, so a pass is not started on a halted run: nothing is paid,
+    no `ablate` row is written, and an operator's forced ablation — which ANY row for its lifecycle
+    acknowledges — stays queued for `looplab resume`."""
+    engine = _crafted(tmp_path / "halted", metric=0.5)
+    engine.store.append("force_ablate", {"node_id": 0, "generation": 0})
+    engine.store.append("pause", {"reason": "operator stop (`looplab stop`)"})
+    calls = _counting_roles(engine)
+    anyio.run(engine._ablate, 0)
+    assert calls == {"probe": 0, "propose": 0}, calls
+    events = engine.store.read_all()
+    assert not [e for e in events if e.type == "ablate"]
+    from looplab.events.replay import fold
+    assert engine._pending_forced_ablation(fold(events)) is not None
+
+
+def test_a_stop_during_the_probe_pass_lets_it_finish_but_buys_no_refinement(tmp_path, monkeypatch):
+    """A pass already running finishes — its measurements are ONE row, and a partial row would close
+    an operator's forced ablation with half its probes — but the refine proposal after it is a NEW
+    paid call and does not start (its child would be refused by the reservation anyway)."""
+    engine = _crafted(tmp_path / "mid-pass", metric=0.5)
+    calls = _counting_roles(engine)
+    counting_implement = engine._probe_developer.implement
+
+    def _stop_in_the_first_probe(*args, **kwargs):
+        if calls["probe"] == 0:
+            engine.store.append("pause", {"reason": "operator stop (`looplab stop`)"})
+        return counting_implement(*args, **kwargs)
+
+    engine._probe_developer.implement = _stop_in_the_first_probe
+    built = []
+    monkeypatch.setattr(engine, "_build_refine_block_child",
+                        lambda parent, parent_id, generation, idea, state: built.append(idea))
+    anyio.run(engine._ablate, 0)
+    row = next(e.data for e in engine.store.read_all() if e.type == "ablate")
+    assert calls["probe"] == 2 and set(row["impacts"]) == {"x", "y"}, (calls, row)
+    assert calls["propose"] == 0 and built == [], "the refinement was paid for after the stop"

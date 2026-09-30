@@ -120,6 +120,12 @@ PROMPT_REGISTRY: tuple[PromptDefinition, ...] = (
                      "the single-shot Researcher's system prompt (no tool surface)"),
     PromptDefinition("tool_researcher_system", "researcher",
                      "the agentic Researcher's system prompt (reads the run before proposing)"),
+    # The foresight panel's continuation turn (2026-09-29, `Settings.foresight_alternatives`): one
+    # more user turn on candidate 1's research session asking for a DIFFERENT bet. Its own key, not
+    # a part of `tool_researcher_system`: it is a turn of its own, rendered only when the switch
+    # continues a session, and `$candidates` is the list of what was already proposed.
+    PromptDefinition("tool_researcher_alternative", "researcher",
+                     "the agentic Researcher's turn asking for ONE alternative to its candidates"),
     PromptDefinition("developer_system", "developer",
                      "the script Developer's system prompt — one fenced program per node"),
     PromptDefinition("developer_repair_prefix", "developer",

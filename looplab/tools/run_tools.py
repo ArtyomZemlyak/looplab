@@ -156,6 +156,12 @@ class RunTools:
     _MAX_ANALOGOUS_ITEMS = 32
     _MAX_THEME_ITEMS = 64
     _MAX_LINE_CHARS = 700
+    # `read_code` of a REPO node names its files and nothing else — a repo node's code IS its
+    # recorded `files` — so 301 inf13 `read_code` calls in propose / deep research / repropose read
+    # a list of names. True only on the RunTools composed beside a node-following repo reader
+    # (`agents/repo_reader.py::repo_reader_provider`, WP-TOOLS T3), whose `repo_read(node_id=N)`
+    # reads them; every other toolset (Strategist, pilot, foresight) has no such call to name.
+    repo_read_node_view = False
 
     def __init__(self, max_chars: int = 3500):
         self.max_chars = max_chars
@@ -553,6 +559,9 @@ class RunTools:
         if not n.code and not n.files:
             return f"(experiment #{nid} has no code recorded)"
         files = (f"\nother files: {list(n.files)}" if n.files else "")
+        if n.files and self.repo_read_node_view:
+            files += (f"\n(these are NAMES only — read a file as experiment #{nid} left it with "
+                      f"repo_read(node_id={nid}, path=\"{next(iter(n.files))}\"))")
         # The cut is SAID (review 2026-09-22, TAT-12; `tools/_base.py::clip`, the one marker every
         # bounded reader uses): `n.code[:max_chars]` returned the first 3,500 characters of a longer
         # file as if they were the whole of it, so a model building on the code never learned the

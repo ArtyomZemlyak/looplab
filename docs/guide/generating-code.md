@@ -438,6 +438,12 @@ argparse / `--help` and which `--model resnet|vit`, `--optimizer …` exist), th
 try different combinations. Each node is a new combination; your protected `test.py` measures it. You
 write zero arguments — the agent does, just through a file instead of the command line.
 
+What it reads is the code it is about to change: with `researcher_repo_view_follows_node` (on for new
+runs) a proposal that improves node N reads node N's tree — your repo with the files node N recorded
+over it — not the untouched starting code, and every reply's first line names the tree it shows.
+`node_id` reads any other node's tree (a merge partner, say) and `-1` the starting code. A grep's
+`glob` may be a path (`service/*.py`), and the Developer's `grep` takes a single file as its `root`.
+
 The same logic explains the [trust boundary](#how-the-commands-run-and-whats-safe): the agent can't
 append flags to your *command* because the command is the anti-cheat boundary — its freedom lives in
 the files it writes.

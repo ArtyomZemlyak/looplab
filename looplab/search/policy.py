@@ -1199,6 +1199,11 @@ def legal_actions(state: RunState, policy: SearchPolicy, *, max_nodes: int) -> l
 # already flipped once, with three it is a ranking. Still not a knob -- an arm that could move the
 # floor as well as the quantile would be measuring two things at once.
 EXPLOIT_MIN_NODES = 3
+# The mark on the gate's action: this turn was decided by B1, not by any selector. The engine reads
+# it where a turn's decision must agree with a lane that re-derives the POLICY's action — the Card
+# raw-staging lane (`engine/orchestrator.py::Engine._handle_create_actions`), which must not buy a
+# Card for a turn the gate took (the endgame gate's twin is `engine/plan.py::endgame_admitted`).
+META_EXPLOIT = "_exploit"
 
 
 def exploit_forced_action(state: RunState, policy: SearchPolicy, *, max_nodes: int,
@@ -1250,7 +1255,8 @@ def exploit_forced_action(state: RunState, policy: SearchPolicy, *, max_nodes: i
     return [{"kind": KIND_IMPROVE, "parent_id": latest.id,
              META_REASON: f"exploit: node {latest.id} is in the top {1.0 - quantile:.0%} of this "
                           f"run's {len(pool)} evaluated nodes, so the next node is a variant of it "
-                          f"(docs/60 B1)"}]
+                          f"(docs/60 B1)",
+             META_EXPLOIT: True}]
 
 
 # Per-policy factories for the registry below. Uniform signature: the explicit make_policy

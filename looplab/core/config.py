@@ -2223,6 +2223,21 @@ class Settings(BaseSettings):
     # surrogate (researcher_panel) is blind to, primed with the data profile + memory (the synergy).
     # >1 enables it (LLM backend only; needs `foresight` on); 2 = on by default at modest cost, 1 = off.
     foresight_panel: int = 2
+    # THE PANEL'S CANDIDATES 2..K AS ALTERNATIVES (2026-09-29). ON: candidate 1 is a full research
+    # session as before, and each further candidate CONTINUES that session — one more turn asking for
+    # a different mechanism, at most 8 tool turns
+    # (`agents/agent.py::ToolUsingResearcher.propose_alternative`) — instead of a fresh session from
+    # the identical prompt. Measured on MiniOneRec inf13: one proposal cost 86 + 100 min for two
+    # candidates the ranker called "effectively the same bet", and `Researcher·propose` was 21.6 h of
+    # an 82 h run against 1.66 h of GPU evaluation. Only a base that holds a session continues (the
+    # tool-using Researcher, directly or behind the unified facade); a one-shot Researcher and a
+    # surrogate still sample independently, and a failed alternative is ranked without, never
+    # replaced by a full propose. Under the Strategist's `explore` stance the ranker prefers the MORE
+    # DIVERGENT candidate, now the less-researched alternative; the board's rotating tail slot
+    # advances once per proposal, not K times. OFF = K independent sessions, the historical calls
+    # byte for byte, and what a pre-field snapshot resumes with (`LEGACY_CONFIG_SNAPSHOT_DEFAULTS`).
+    # Read once, by `search/researcher_stack.py::with_foresight_panel`.
+    foresight_alternatives: bool = True
     # AGENTIC foresight: run the ranking (hypothesis-board prioritization + K-idea pick) as a TOOL-USING
     # loop that can pull actual experiment results / data facts before deciding, instead of a one-shot
     # prediction from a pre-baked report. ON by default (needs foresight + a client; falls back to the
@@ -3057,6 +3072,19 @@ class Settings(BaseSettings):
     # the task data (schema/profile/asset) mid-loop, instead of seeing only best+parent. Advisory —
     # never changes best-selection. Off = the legacy single-shot Researcher (richer digest still added).
     researcher_tools: bool = True
+    # THE RESEARCHER READS THE CODE IT IS IMPROVING (WP-TOOLS T3, 2026-09-29). The Researcher's
+    # `repo_read`/`repo_grep`/`repo_list` always showed the run's STARTING code: on MiniOneRec inf13
+    # the proposal improving node 15 read the 1,410-line base `service/latency_engine.py` believing
+    # it was the champion's 1,563-line one, and 234 reads of files that exist only in node trees
+    # failed, while `read_code` of a repo node names its files and nothing more. ON, the reader shows
+    # the PARENT's tree — the starting code with the files `node_created` recorded for it over it and
+    # its deletions hidden, from the event log — deep research the incumbent best's, a draft the
+    # starting code; every reply opens with `[view: …]`, `node_id` reads any node's tree (-1 the
+    # starting code), and `read_code` points at that call. It changes what a paid role is SHOWN and
+    # buys no call, so the constructors default OFF, `false` is the historical tools byte for byte,
+    # and a run launched before the field resumes OFF (its `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row).
+    # One reader: `agents/repo_reader.py::repo_view_follows_node`.
+    researcher_repo_view_follows_node: bool = True
     # Cross-run introspection: give the agentic Researcher / pilot read-only tools to look at
     # SIBLING runs (same task_id, same run-root) — list them, read an experiment / its code, and
     # find analogous configs across runs — so a run can build on what neighbouring runs already
@@ -3869,6 +3897,13 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # permanent endgame, pointable at every commit before this one. An operator opts a run in by
     # setting it in that run's `config.snapshot.json` (or `PUT /api/runs/{id}/config`) and resuming.
     "endgame_stall_nodes": 0,
+    # THE FORESIGHT PANEL'S ALTERNATIVES, added 2026-09-29 defaulting ON. (a) holds. (b) is both
+    # grounds at once: a NEW PROMPT TURN (`tool_researcher_alternative`) and different paid calls —
+    # candidates 2..K become a bounded continuation of candidate 1's session instead of K-1 full
+    # research sessions — so a resumed run would change how its proposals are made mid-log. (c) is
+    # `False`, pointable at every commit before this one: K independent `propose` calls, which
+    # `search/foresight.py::ForesightPanelResearcher`'s constructor default reproduces byte for byte.
+    "foresight_alternatives": False,
     # THE UNTRUSTED-EVIDENCE ENVELOPE, added 2026-09-06 defaulting ON (doc 52 row 13). (a) holds.
     # (b) is `developer_probe`'s DIFFERENT-PROMPT ground exactly: the Strategist, triage and critic
     # system prompts gain a guard sentence and their user turns gain a fence around the candidate's
@@ -4010,6 +4045,14 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # `tests/test_script_developer_parent_code.py` holds that `false` is `implement`'s request byte
     # for byte.
     "developer_parent_code": False,
+    # THE RESEARCHER'S NODE-FOLLOWING REPO VIEW, added 2026-09-29 defaulting ON (WP-TOOLS T3). (a)
+    # holds. (b) is the rows above's DIFFERENT-PROMPT ground: ON, the Researcher's and deep
+    # research's repo tools gain a `node_id` argument and a `[view: …]` line, read the parent's (or
+    # the incumbent best's) tree instead of the starting code, and `read_code` names the call — so a
+    # resumed run would change what its Researcher is shown mid-log. (c) is `False`, pointable at
+    # every commit before this one; `tests/test_researcher_reads_the_code_it_improves.py` holds that
+    # `false` is the historical specs and replies byte for byte.
+    "researcher_repo_view_follows_node": False,
     # THE PROBE'S KERNEL READ CONFINEMENT, added 2026-08-21 defaulting to True. (a) holds — a
     # pre-2026-08-21 snapshot names no such field. (b) is not paid work, but it is the strongest
     # column there is on a RESUME: the rung fails CLOSED. On a box whose kernel offers no Landlock,

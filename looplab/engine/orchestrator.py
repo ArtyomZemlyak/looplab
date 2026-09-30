@@ -125,7 +125,7 @@ from looplab.core.models import BENIGN_TERMINAL_REASONS, Event, NodeStatus, RunS
 from looplab.engine.run_boundary import DRAIN_LEFT_FOR_THE_SEARCH, DRAIN_SERVED_INTENTS, drain_owed
 from looplab.core.errors import ConfigRefusal, EnvironmentRefusal
 from looplab.core.llm_budget import RunBudget
-from looplab.core.phase_events import phase_sink_scope
+from looplab.core.phase_events import phase_sink_scope, run_halt_scope
 from looplab.core.llm_broker import (LLMConcurrencyBroker,
                                      default_llm_lane_limits, in_llm_lane, llm_broker_scope,
                                      llm_lane_scope)
@@ -144,7 +144,7 @@ from looplab.search.speculation_calibration import (
     SPECULATION_CALIBRATION_PROFILE_VARIANT_FIELDS,
     SPECULATION_POLICY_SCOPE,
 )
-from looplab.search.policy import SearchPolicy, exploit_forced_action
+from looplab.search.policy import META_EXPLOIT, SearchPolicy, exploit_forced_action
 # The strategist-cadence cluster (StrategyContext / make_policy / validate_strategy / coverage_signal
 # / run_phase / operator_yields / NOVELTY_STANCES …) moved to engine/strategy.py (StrategyCadenceMixin),
 # which imports those symbols from their canonical sources — so they are no longer imported here.
@@ -1516,8 +1516,13 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             broker = self._llm_broker = LLMConcurrencyBroker(
                 budget=getattr(self, "_llm_budget", None))
         try:
+            # The run's STOP, published for the role wrappers the engine cannot reach
+            # (`core/phase_events.py::run_halt_scope`): a panel inside one `propose` starts no further
+            # member, ranking or verifier once the run has halted. Looked up defensively, like the
+            # control watch below: `Engine.run` is borrowed by host stubs that are not Engines.
             with llm_broker_scope(broker), llm_lane_scope("engine"), \
-                    phase_sink_scope(self._append_phase_event):
+                    phase_sink_scope(self._append_phase_event), \
+                    run_halt_scope(getattr(self, "_run_halted_now", None)):
                 # THE RUN-SCOPED EVAL TASK GROUP (backlog F1f, doc 33 option 1 — "adopting
                 # sessions").  Evaluation children used to belong to whichever `_run_card_session`
                 # admitted them, and that session could not return until the LAST of them drained.
@@ -2741,6 +2746,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                     limiter.release()
                     break
                 state = fold(self.store.read_all())
+                if state.halted:
+                    # The run's STOP starts no new lane (WP-STOP): the next proposal is itself a
+                    # paid call, and the lanes already building still join below.
+                    limiter.release()
+                    break
                 ideas, telemetry, dropped = await self._await_batch_proposal(state, 1)
                 if not ideas:
                     self._record_dropped_batch_cards(dropped)
@@ -2757,17 +2767,28 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                     self._record_dropped_batch_cards(dropped)
                     limiter.release()
                     break
+                if self._run_halted_now():
+                    # …and a STOP that landed while this proposal was paid for (WP-STOP) refuses it
+                    # before the folded audit rows below are written for a node that will never
+                    # exist. The loss is counted on the DIAGNOSTIC beacon; no new lane starts.
+                    self._beacon_discarded_proposal(
+                        "run_is_stopping", operator=str(action.get("kind") or ""))
+                    self._record_dropped_batch_cards(dropped)
+                    limiter.release()
+                    break
                 if "_scores" in action:
                     self.store.append(EV_POLICY_DECISION,
                                       {"scores": action["_scores"], "chosen": action.get("_chosen"),
                                        "reason": action.get("_reason")})
                 self._append_rung_promotion(action)
                 anchor_id, anchor_attempt = scored_anchor(state)
+                refused: list = []
                 reservation = self._reserve_node_build(
                     action, idea, scored_against=anchor_id,
                     scored_against_attempt=anchor_attempt, source="researcher",
                     steering_context=((telemetry_row or {}).get("_steering_context", [])
-                                      if isinstance(telemetry_row, dict) else []))
+                                      if isinstance(telemetry_row, dict) else []),
+                    refusal=refused)
                 # THE REJECTS GET THEIR NODE-LESS CARDS HERE, on the SUCCESS path too — exactly as
                 # the chunked path does after its reservations are durable. Without this a lane
                 # that proposed one idea and rejected three recorded only the one: the three drops
@@ -2778,6 +2799,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 # iteration as a live gate bypass, because nothing of this proposal outlives it.
                 self._record_dropped_batch_cards(dropped)
                 if reservation is None:
+                    if refused == ["halted"]:
+                        # The same stop, landing between that check and the CAS (the operator's is
+                        # another process): counted too, and the next iteration's fold ends the lane.
+                        self._beacon_discarded_proposal(
+                            "run_is_stopping", operator=str(action.get("kind") or ""))
                     limiter.release()
                     continue
                 pair = free_pairs.pop()
@@ -2917,7 +2943,19 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 # a refused lane is empty and the turn falls through to the serial path below,
                 # which builds the gate's own action; outside a reserve it is the lane unchanged.
                 from looplab.engine.plan import endgame_admitted, endgame_refused_card_ids
-                stageable = endgame_admitted(state, speculative_raw_actions(
+                #
+                # …AND A TURN THE EXPLOIT GATE DECIDED STAGES NOTHING (docs/60 B1). The gate forces
+                # a variant of the node that just finished and consults no selector, while this lane
+                # still re-derives the POLICY's action: it staged that as a paid Card, the gate
+                # forced the same turn again, the lane — now owned by that Card — answered empty, and
+                # the serial path below paid a SECOND proposal, often for the very same action.
+                # Driven on a toy Card run at `exploit_strong_node_quantile=0.5`: card-4 (improve of
+                # node 3) staged, then card-5 (improve of node 3) built serially, and 4 of 12 Cards
+                # never built. The same shape as MiniOneRec inf13's nodes 25 and 29 (card-26/card-30
+                # staged, the endgame gate's sweep then built serially), which `endgame_admitted`
+                # closed for the reserve. The gate's own action is built by the serial path below.
+                gate_decided = any(action.get(META_EXPLOIT) for action in creates)
+                stageable = [] if gate_decided else endgame_admitted(state, speculative_raw_actions(
                     state,
                     self.policy,
                     self.policy.max_nodes,
@@ -2949,11 +2987,19 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                     lane = stageable if not self._speculation_enabled() else stageable[:1]
                     if await self._stage_card_creates(lane, state):
                         return "continue", state, _no_mint_turns
-                    if self._create_paused:
+                    if self._create_paused or self._run_halted_now():
                         # …but a staging attempt that GATED the run is not a "rejected" one. The
                         # serial compatibility try below would propose again against the same dead
                         # provider and pay for a second identical refusal. Hand the loop back so it
                         # re-folds, sees `paused`, and stops.
+                        #
+                        # …and neither is one the RUN'S STOP refused (WP-STOP). `_create_paused` is
+                        # set only by the engine's own breakers, never by an operator `pause`, a
+                        # drain pause or a finish, so on MiniOneRec inf13 a `run_stopping` refusal at
+                        # 14:21:21 fell through to the try below and started another paid proposal
+                        # two seconds later — which the reservation fence then refused as well, after
+                        # paying. A FRESH fold, because this turn's own fold predates the paid propose
+                        # the stop landed in; nothing is recorded here, since the try is never paid.
                         return "continue", state, _no_mint_turns
                     # A rejected staging attempt gets one ordinary serial compatibility try;
                     # it must not poll the same paid proposal outside the runaway accounting.
@@ -3093,8 +3139,14 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 # built in multiple chunks; earlier chunks' nodes are now in the log, so re-folding
                 # lets THIS chunk's vs-history novelty gate see them and not re-propose their ideas
                 # (the serial path gets this for free — each node lands before the next proposes).
+                # …and the SAME fresh fold is where a STOP ends the batch (WP-STOP): the chunk's paid
+                # batch proposal must not start once the run has halted — the first chunk included,
+                # since this turn's own fold was read before the build that preceded it.
+                _fresh = fold(self.store.read_all())
+                if _fresh.halted:
+                    break
                 if _i:
-                    state = fold(self.store.read_all())
+                    state = _fresh
                 # MAIN TASK, before the paid batch proposal and before any reservation: the
                 # node-OPEN floor for this whole chunk (`_refuse_node_open_below_floor`).
                 self._refuse_node_open_below_floor(f"a build chunk of {len(_chunk)} node(s)")
@@ -3115,6 +3167,16 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                     self._record_dropped_batch_cards(_dropped_batch)
                     break
                 _chunk = _chunk[:len(_ideas)]
+                # A STOP THAT LANDED WHILE THE BATCH WAS PROPOSING refuses its ideas here, before the
+                # folded audit rows below are written for nodes that will never exist — the
+                # reservation fence would refuse each of them `halted` anyway. They were paid for,
+                # so each is counted on the DIAGNOSTIC `discarded` beacon (WP-STOP).
+                if self._run_halted_now():
+                    for _a in _chunk:
+                        self._beacon_discarded_proposal(
+                            "run_is_stopping", operator=str(_a.get("kind") or ""))
+                    self._record_dropped_batch_cards(_dropped_batch)
+                    break
                 for _a in _chunk:               # surface the audit events only for what we build
                     if "_scores" in _a:
                         self.store.append(EV_POLICY_DECISION,
@@ -3131,6 +3193,10 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 # case the generation is in the receipt to catch. The stale ID is not the defect and
                 # is deliberately kept: see `scored_anchor`.
                 _anchor_id, _anchor_attempt = scored_anchor(state)
+                # WHY each reservation was refused, one list per idea (`RESERVATION_REFUSALS`): a
+                # stop landing between the check above and the CAS is the operator's other process,
+                # and a paid idea it refuses is counted like the ones above.
+                _refusals: list[list] = [[] for _ in _chunk]
                 _reserved = [
                     # `retry_attach` stays off (default): these Ideas came from the shared batch
                     # proposal and never crossed `_prepare_node_idea._link`, so no earlier pass
@@ -3152,9 +3218,14 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                         steering_context=(
                             (_tel or {}).get("_steering_context", [])
                             if isinstance(_tel, dict) else []),
+                        refusal=_refused,
                     )
-                    for _a, _idea, _tel in zip(_chunk, _ideas, _telem)
+                    for _a, _idea, _tel, _refused in zip(_chunk, _ideas, _telem, _refusals)
                 ]
+                for _a, _refused in zip(_chunk, _refusals):
+                    if _refused == ["halted"]:
+                        self._beacon_discarded_proposal(
+                            "run_is_stopping", operator=str(_a.get("kind") or ""))
                 # Accepted preplanned ids are durable first. Node-less rejects then receive fresh
                 # closed Card ids without shifting any reservation the workers are about to use.
                 self._record_dropped_batch_cards(_dropped_batch)
@@ -3228,6 +3299,12 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                             reason="build_batch_cancelled",
                         )
                     raise
+                # The rankings the proposal that STAGED this Card made (2026-09-29), published
+                # against the node just built. HERE, on the main task, not in the build worker:
+                # the board rows are run-global registers a worker may not append
+                # (`audit.py::AuditMixin._emit_staged_card_ranking`). A build that minted no node
+                # publishes nothing.
+                self._emit_staged_card_ranking(reservation.card_id, reservation.node_id, 0)
             else:
                 # One node per iteration on this path, so the floor is asked per node — the
                 # decision `Settings.node_open_budget_floor_usd` is about, on the main task.
@@ -3249,6 +3326,26 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 # retry/backoff on each — honouring the "PAUSE on the FIRST developer_crash"
                 # guarantee the crash branch documents. The loop re-folds paused=True at the top
                 # and finalizes; a plain `resume` continues once the cause is fixed.
+                break
+            # THE RUN'S STOP ends a RAW batch too (WP-STOP): a build is minutes to hours, so a stop
+            # lands inside one far more often than between two, and the next raw action's paid
+            # proposal must not start. Asked only while a build remains.
+            #
+            # A CLAIMED Card lane is NOT cut, under a plain stop or a drain, and that is the rule
+            # rather than an exception to it. Its reservations were appended as one tail-CAS group
+            # before the first build (`_claim_existing_card_builds`), so every node slot of the lane
+            # is ALREADY charged: `_node_reservation_slots_remaining` charges the highest id ever
+            # reserved, ids are never reused, and a reservation closed without a node is refunded
+            # by nothing (`search/card_selection.py::refunded_card_budget_node_ids`, by design).
+            # Closing the rest of the lane on a stop — the first cut of this fix — burned one of
+            # `max_nodes` per unbuilt Card for good, and `looplab resume` then claimed the same Card
+            # under a NEW id: two nodes for three slots (critic 2026-09-29, driven). And under
+            # `--drain-builds` it cancelled builds the drain exists to commit. So a reservation is
+            # built — as every other lane's is, whose build starts the moment it reserves — and a
+            # stop cuts only work that holds no reservation yet (the claim itself refuses a halted
+            # run). The nodes land pending; `looplab resume` evaluates them.
+            if (_create_index + 1 < len(creates) and not _card_reservations
+                    and self._run_halted_now()):
                 break
         return "continue", state, _no_mint_turns
 

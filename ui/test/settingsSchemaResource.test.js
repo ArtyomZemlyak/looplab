@@ -247,18 +247,25 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   236 -> 237 (2026-09-29): `endgame_stall_nodes` — how many nodes a stall-triggered endgame
   //   spends before the plan reopens. A row because it decides what a stalled run builds; the
   //   Python half moved too.
-  //   237 -> 238 (2026-09-29): `agent_stuck_stale_streak` — the stuck detector's long-cycle rule,
-  //   calls in a row that each re-ran an already-seen call+result. A row like its two siblings;
-  //   the Python half moved too.
-  //   238 -> 239 (2026-09-29): `canary_failure_account` — a failed canary's own account (its header
-  //   and both stream tails) is what the judge and the repair read. The Python half moved too.
-  //   239 -> 240 (2026-09-29): `card_full_rationale` — a Card's builds run the Researcher's whole
-  //   rationale instead of the board's 400 characters. The Python half moved too.
-  //   240 -> 241 (2026-09-30): `agent_token_budget` — the session's token ceiling, the one that
-  //   holds on a provider that prices nothing. The Python half moved too.
-  //   241 -> 242 (2026-09-30): `strategist_gpu_brief` — the Strategist's brief names the GPU pool
-  //   and what one experiment may claim at each width. The Python half moved too.
-  assert.equal(Object.keys(schema.fieldByKey).length, 242)
+  //   237 -> 238 (2026-09-29): `researcher_repo_view_follows_node` (WP-TOOLS T3) — the
+  //   Researcher's repo tools show the tree of the node a proposal improves. A row because it
+  //   changes what a paid role is shown and OFF is the historical tools; the Python half moved too.
+  //   238 -> 239 (2026-09-29): `foresight_alternatives` — whether the foresight panel's candidates
+  //   2..K continue candidate 1's research session instead of K fresh ones. The Python half
+  //   moved too.
+  //   239 -> 244 (2026-09-30, the merge of the doc 69 branch): its five rows, each added over the
+  //   same 237-key base and re-numbered onto the merged keyset; the Python half moved too.
+  //   239 -> 240: `agent_stuck_stale_streak` — the stuck detector's long-cycle rule, calls in a
+  //   row that each re-ran an already-seen call+result. A row like its two siblings.
+  //   240 -> 241: `canary_failure_account` — a failed canary's own account (its header and both
+  //   stream tails) is what the judge and the repair read.
+  //   241 -> 242: `card_full_rationale` — a Card's builds run the Researcher's whole rationale
+  //   instead of the board's 400 characters.
+  //   242 -> 243: `agent_token_budget` — the session's token ceiling, the one that holds on a
+  //   provider that prices nothing.
+  //   243 -> 244: `strategist_gpu_brief` — the Strategist's brief names the GPU pool and what one
+  //   experiment may claim at each width.
+  assert.equal(Object.keys(schema.fieldByKey).length, 244)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

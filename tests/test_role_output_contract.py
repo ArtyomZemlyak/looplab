@@ -26,10 +26,14 @@ _ALL = set(DEVELOPER_OUTPUT_ATTRS) | set(RESEARCHER_ACTION_ATTRS) | set(RESEARCH
 # ONE capturing group across both alternatives on purpose: `_source_scan.scan` uses `findall`,
 # which returns TUPLES the moment a pattern has two groups, and every captured name would then be
 # an unusable key. Driven — the two-group first cut did exactly that.
+# `propose_with_session` / `propose_alternative` (2026-09-29) are the two ACTION methods the foresight
+# panel probes on its base (`search/foresight.py::ForesightPanelResearcher.propose`). Matched by those
+# stems plus a suffix, NOT a bare `propose_`: `getattr(<researcher>, "propose_batch")` is an optional
+# capability no role defines, and it is not this registry's.
 _CONSUMER = re.compile(
     r'(?:getattr\([A-Za-z_][\w.]*,\s*'
     r'|_(?:emit|snapshot)_role_telemetry\([^)]*?)'
-    r'"((?:last_|choose_)[a-z_]+)"')
+    r'"((?:last_|choose_)[a-z_]+|propose_(?:with_session|alternative)[a-z_]*)"')
 # Producer writes: `self.last_files = …` / `obj.last_files = …` (also catches `last_filez =`
 # style renames as long as the prefix survives — the near-miss check below covers the rest).
 #

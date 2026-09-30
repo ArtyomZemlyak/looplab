@@ -1426,6 +1426,13 @@
           "help": "Generate K candidate ideas per proposal and keep the one predicted best pre-execution (ranks structural/text ideas the numeric surrogate is blind to). >1 enables it (LLM backend); 1 = off."
         },
         {
+          "key": "foresight_alternatives",
+          "label": "↳ panel alternatives",
+          "type": "bool",
+          "default": true,
+          "help": "Candidates 2..K CONTINUE candidate 1's research session — one more turn asking for a different mechanism (at most 8 tool turns) — instead of K fresh sessions that re-read the same files. Only the tool-using Researcher continues; a one-shot Researcher still samples independently. Off = K independent sessions (the historical calls)."
+        },
+        {
           "key": "foresight_agentic",
           "label": "↳ agentic foresight",
           "type": "bool",
@@ -1656,6 +1663,13 @@
           "type": "bool",
           "default": true,
           "help": "On (default): the agentic Researcher, Deep Research, agentic Strategist, and unified pilot can read the run's own experiments (list/read/find-analogous/themes/code) and task data (schema/profile) mid-loop. Off: the Researcher uses its legacy single-shot proposal path (the richer default digest is still added), while the other shared-provider roles likewise lose these pull tools."
+        },
+        {
+          "key": "researcher_repo_view_follows_node",
+          "label": "Researcher reads the code it improves",
+          "type": "bool",
+          "default": true,
+          "help": "On a repo task, the Researcher's repo_read / repo_grep / repo_list show the tree of the node a proposal improves — the run's starting code with the files that node recorded over it — instead of always the starting code; deep research sees the current best's tree, a fresh draft the starting code. Every reply names the tree it shows, node_id reads any other node's tree (-1 the starting code), and read_code points at that call. No extra call. Off = the pre-2026-09-29 tools, byte for byte."
         },
         {
           "key": "cross_run_tools",

@@ -340,34 +340,54 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               `Engine._ensure_plan` writes no plan under the calibration gate, and without a plan
 #               the field is never read. The product lane's authority token does not bind the
 #               settings map, so a product-lane run already underway resumes unchanged.
+#   2026-09-29  + researcher_repo_view_follows_node (WP-TOOLS T3: the Researcher's repo tools show the
+#               tree of the node a proposal improves). The 'field set changed too' branch: a diff of
+#               `Settings.model_fields` against the pre-change tree reports exactly
+#               `['researcher_repo_view_follows_node']` added and `[]` removed;
+#               `_EXPECTED_FIELD_COUNT` goes 269 -> 270 and both pins are re-set (the pre-change tree
+#               re-derives 888f3370…). INERT for a calibration replicate: the profile ships
+#               `researcher_tools: false` on the toy backend, which builds no Researcher and no repo
+#               reader; re-pinned on the COMPLETE-envelope rule.
+#   2026-09-29  + foresight_alternatives (the foresight panel's candidates 2..K continue candidate 1's
+#               research session instead of K fresh ones, `search/foresight.py`). The 'field set
+#               changed too' branch: a diff of `Settings.model_fields` against the pre-change tree
+#               reports exactly `['foresight_alternatives']` added and `[]` removed;
+#               `_EXPECTED_FIELD_COUNT` goes 270 -> 271 and both pins are re-set (the pre-change tree
+#               re-derives ad9450fc…, WP-TOOLS' pin). INERT for a calibration replicate: the profile
+#               ships it False beside `foresight: False` / `foresight_panel: 1`, so no panel is ever
+#               built; re-pinned on the COMPLETE-envelope rule.
+#   2026-09-30  MERGE of the doc 69 branch (the five rows below, each added over the same 269-field
+#               base as the two above) onto that master: both pins RE-DERIVED on the merged tree,
+#               276 fields and 286dde9c…; each row's own count is re-numbered onto the merged
+#               sequence, and the pre-change digest it quotes is the branch's own tree.
 #   2026-09-29  + agent_stuck_stale_streak (the StuckDetector's long-cycle rule, doc 69 69.3). The
 #               'field set changed too' branch: a diff of `Settings.model_fields` against the
 #               pre-change tree reports exactly `['agent_stuck_stale_streak']` added and `[]`
-#               removed; `_EXPECTED_FIELD_COUNT` goes 269 -> 270 and both pins are re-set (the
+#               removed; `_EXPECTED_FIELD_COUNT` goes 271 -> 272 (269 -> 270 on the branch, whose
 #               pre-change tree re-derives 888f3370…). NOT inert in principle: a replicate's agent
 #               loops run under the rule, so an earlier receipt SHOULD stop verifying — which is
 #               what this branch of the gate is for.
 #   2026-09-29  + canary_failure_account (a failed canary's own account, doc 69 69.7). The 'field
 #               set changed too' branch: exactly `['canary_failure_account']` added and `[]`
-#               removed; `_EXPECTED_FIELD_COUNT` goes 270 -> 271 and both pins are re-set (the
+#               removed; `_EXPECTED_FIELD_COUNT` goes 272 -> 273 (270 -> 271 on the branch, whose
 #               pre-change tree re-derives d65707b2…). INERT for a calibration replicate unless it
 #               runs the eval canary: it changes only a failed canary's failure text.
 #   2026-09-29  + card_full_rationale (a Card's builds run the whole rationale, doc 69 69.4). The
 #               'field set changed too' branch: exactly `['card_full_rationale']` added and `[]`
-#               removed; `_EXPECTED_FIELD_COUNT` goes 271 -> 272 and both pins are re-set (the
+#               removed; `_EXPECTED_FIELD_COUNT` goes 273 -> 274 (271 -> 272 on the branch, whose
 #               pre-change tree re-derives 1514ffe4…). NOT inert in principle: a Card-driven
 #               replicate's builds read the Researcher's rationale.
 #   2026-09-30  + agent_token_budget (the session's token ceiling, doc 69 69.2). The 'field set
 #               changed too' branch: exactly `['agent_token_budget']` added and `[]` removed;
-#               `_EXPECTED_FIELD_COUNT` goes 272 -> 273 and both pins are re-set (the pre-change
-#               tree re-derives 6b06df4d…). INERT for a replicate at its default 0, which is the
-#               loop's historical "no ceiling"; a positive value ends its loops sooner.
+#               `_EXPECTED_FIELD_COUNT` goes 274 -> 275 (272 -> 273 on the branch, whose
+#               pre-change tree re-derives 6b06df4d…). INERT for a replicate at its default 0,
+#               which is the loop's historical "no ceiling"; a positive value ends its loops sooner.
 #   2026-09-30  + strategist_gpu_brief (the Strategist's brief names the GPU pool, doc 69 69.23).
 #               The 'field set changed too' branch: exactly `['strategist_gpu_brief']` added and
-#               `[]` removed; `_EXPECTED_FIELD_COUNT` goes 273 -> 274 and both pins are re-set (the
-#               pre-change tree re-derives fc43af6d…). NOT inert in principle: a replicate whose
-#               Strategist is an LLM reads its brief.
-_EXPECTED_DIGEST = "sha256:2a8d014ea3c04c94c6ed547bd7405feabdb8a19d487603e362e92b331f48fa03"
+#               `[]` removed; `_EXPECTED_FIELD_COUNT` goes 275 -> 276 (273 -> 274 on the branch,
+#               whose pre-change tree re-derives fc43af6d…). NOT inert in principle: a replicate
+#               whose Strategist is an LLM reads its brief.
+_EXPECTED_DIGEST = "sha256:286dde9c5627753a0c7f9abe666b3e4d4ca051240bae26a5ceb586ac3e648dc7"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -868,12 +888,17 @@ _EXPECTED_DIGEST = "sha256:2a8d014ea3c04c94c6ed547bd7405feabdb8a19d487603e362e92
 #   2026-09-27  + ablation_simplify (doc 67 67.5): 266 -> 267; see the digest history above.
 #   2026-09-29  + endgame_stall_nodes (the stall endgame's length), with origin's unpinned
 #               `external_harness`: 267 -> 269; see the digest history.
-#   2026-09-29  + agent_stuck_stale_streak (doc 69 69.3): 269 -> 270; see the digest history.
-#   2026-09-29  + canary_failure_account (doc 69 69.7): 270 -> 271; see the digest history.
-#   2026-09-29  + card_full_rationale (doc 69 69.4): 271 -> 272; see the digest history.
-#   2026-09-30  + agent_token_budget (doc 69 69.2): 272 -> 273; see the digest history.
-#   2026-09-30  + strategist_gpu_brief (doc 69 69.23): 273 -> 274; see the digest history.
-_EXPECTED_FIELD_COUNT = 274
+#   2026-09-29  + researcher_repo_view_follows_node (WP-TOOLS T3): 269 -> 270; see the digest history.
+#   2026-09-29  + foresight_alternatives (the panel's alternatives): 270 -> 271; see the digest
+#               history.
+#   2026-09-30  the doc 69 branch merged onto that master (its five rows re-numbered; see the
+#               digest history):
+#   2026-09-29  + agent_stuck_stale_streak (doc 69 69.3): 271 -> 272.
+#   2026-09-29  + canary_failure_account (doc 69 69.7): 272 -> 273.
+#   2026-09-29  + card_full_rationale (doc 69 69.4): 273 -> 274.
+#   2026-09-30  + agent_token_budget (doc 69 69.2): 274 -> 275.
+#   2026-09-30  + strategist_gpu_brief (doc 69 69.23): 275 -> 276.
+_EXPECTED_FIELD_COUNT = 276
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

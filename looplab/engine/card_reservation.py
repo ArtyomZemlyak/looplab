@@ -1763,13 +1763,23 @@ class CardReservationMixin:
                if isinstance(action, dict) and META_CARD_ID not in action]
         if not raw:
             return []
+        proposal_events = self.store.read_all()
+        proposal_state = _fold(proposal_events)
+        if proposal_state.halted:
+            # NO PAID PROPOSAL ON A HALTED FOLD (WP-STOP). `_stage_prepared_card` refuses a halted
+            # run `run_stopping` — AFTER the proposal it stages was paid for, which on MiniOneRec
+            # inf13 was a 3.2 h foresight propose. Asked on the proposal's own fold, before the
+            # floor below: a stopped run opens no node, so it has no node-open question to ask.
+            return []
         # MAIN TASK, before the paid proposal(s) and before any Card receipt: the node-OPEN floor
         # (`_refuse_node_open_below_floor`) — a Card staged here is the run's next node cycle.
         self._refuse_node_open_below_floor(f"{len(raw)} Card proposal(s)")
-        proposal_events = self.store.read_all()
-        proposal_state = _fold(proposal_events)
         proposal_node_ceiling = self._node_id_ceiling(proposal_events, proposal_state)
-        prepared: list[tuple[dict, Idea, str, int, list, dict]] = []
+        # The seventh member is the proposal's own RANKINGS (`last_hyp_priority` / `last_foresight`),
+        # snapshotted where they are made — the `finally` below discards the primary researcher's
+        # copy, and a Card staged here is built into a node only later (`audit.py::
+        # AuditMixin._record_staged_card_ranking` holds them for it; MiniOneRec inf13 lost 17 of 20).
+        prepared: list[tuple[dict, Idea, str, int, list, dict, dict]] = []
         dropped_batch: list[dict] = []
         try:
             if len(raw) > 1 and all(action.get("kind") == "draft" for action in raw):
@@ -1806,12 +1816,22 @@ class CardReservationMixin:
                         (record or {}).get("_cross_run_advisory_receipt", {})
                         if isinstance(record, dict) else {}
                     )
+                    # `_propose_batch` snapshotted each roll's rankings before the next roll could
+                    # overwrite them (`novelty.py::_snapshot_role_telemetry`); carry THIS idea's.
+                    ranking = {attr: (record or {}).get(attr) if isinstance(record, dict) else None
+                               for attr in ("last_hyp_priority", "last_foresight")}
                     prepared.append((
                         action, idea, "researcher",
-                        proposal_node_ceiling + offset, steering, advisory_receipt,
+                        proposal_node_ceiling + offset, steering, advisory_receipt, ranking,
                     ))
             else:
                 for offset, action in enumerate(raw):
+                    if offset and self._run_halted_now():
+                        # The next action's proposal is a NEW paid call, and each of these runs for
+                        # minutes: a stop that landed inside the previous one ends the lane here
+                        # (WP-STOP). The one already paid is refused `run_stopping` below; the ones
+                        # never proposed cost nothing and are not counted.
+                        break
                     source = "engine" if action.get("kind") == "merge" else "researcher"
                     # The per-action lane of `_stage_card_creates` (the batch lane's sibling — see
                     # the note below on why the two do not share `_link`). One paid Researcher call
@@ -1882,6 +1902,17 @@ class CardReservationMixin:
                                 source=source,
                                 proposal_events=proposal_events,
                             ))
+                    # THIS action's rankings, copied off the primary researcher and then cleared
+                    # on it, so the next action's propose cannot inherit them (a k=1 or client-less
+                    # panel does not reset `last_foresight` itself) and the `finally` below has
+                    # nothing of this action's left to discard. Taken whether or not an idea formed.
+                    ranking = {attr: self._snapshot_role_telemetry(attr)
+                               for attr in ("last_hyp_priority", "last_foresight")}
+                    for _attr in ranking:
+                        try:
+                            setattr(self.researcher, _attr, None)
+                        except (AttributeError, TypeError):
+                            pass        # a read-only forwarding wrapper: the `finally` walks it
                     if idea is None:
                         continue
                     prepared.append((
@@ -1892,12 +1923,13 @@ class CardReservationMixin:
                         list(getattr(self.researcher, "_steering_context", []) or []),
                         bounded_cross_run_advisory_receipt(getattr(
                             self.researcher, "_cross_run_advisory_receipt", {}) or {}),
+                        ranking,
                     ))
 
             staged: list[str] = []
             refused: collections.Counter = collections.Counter()
             attached = 0
-            for action, idea, source, at_node, steering, advisory_receipt in prepared:
+            for action, idea, source, at_node, steering, advisory_receipt, ranking in prepared:
                 # The BATCH lane reaches here without passing `_prepare_node_idea`'s `_link` funnel
                 # (`_consume_batch_proposal` hands its Ideas straight to the stager), so the proposal
                 # circuit breaker is repeated for it. MAIN TASK: both callers of `_stage_card_creates`
@@ -1918,6 +1950,9 @@ class CardReservationMixin:
                 )
                 if card_id is not None:
                     staged.append(card_id)
+                    # MAIN TASK, right after the Card's receipt: the rankings this proposal made,
+                    # held (diagnostic, fence-neutral) for the node the Card is built into.
+                    self._record_staged_card_ranking(card_id, at_node, ranking)
                 elif getattr(self, "_card_stage_attached_to", None) is not None:
                     # An attach is a HANDOFF, not a loss: the proposal repairs a question a live
                     # Card already owns, staging can never publish it as inventory, and the serial
@@ -1926,7 +1961,16 @@ class CardReservationMixin:
                     # race that never happened, on a refusal that is permanent by design.
                     attached += 1
                 else:
-                    refused[getattr(self, "_card_stage_refusal", None) or "unnamed"] += 1
+                    slug = getattr(self, "_card_stage_refusal", None) or "unnamed"
+                    refused[slug] += 1
+                    if slug == "run_stopping":
+                        # A PAID proposal the run's STOP refused (WP-STOP): the one loss here that is
+                        # not a moved receipt, so it gets the durable count the warning below does
+                        # not — ONE DIAGNOSTIC `discarded` beacon, which moves no fence (see the
+                        # note below on why a folded row here is refused).
+                        self._beacon_discarded_proposal(
+                            "run_is_stopping", node_id=at_node, prospective=True,
+                            operator=str(action.get("kind") or ""))
 
             # THE LOSS IS COUNTED AND SAID, since 2026-08-31. Every refusal above returned a bare
             # `None` and this loop dropped it, so a batch whose fence moved during the minutes-long
@@ -1940,6 +1984,11 @@ class CardReservationMixin:
             # already the DESIGNED answer to moved authority; what was missing was only that nobody
             # could count it. `_admissible_beliefs`' "Not silent" logging is the precedent one
             # cadence over.
+            #
+            # `run_stopping` is the one exception, and the argument above is why it may be: it does
+            # not REPEAT — the stop that refused the proposal also ends the run's loop at its next
+            # head — and it is a DIAGNOSTIC beacon, which no fence reads. Without it the engine log's
+            # WARNING was the only trace of a paid proposal the operator's own stop threw away.
             if refused:
                 _LOG.warning(
                     "card staging refused %d of %d prepared proposal(s): %s (a named slug is the "
@@ -2138,6 +2187,12 @@ class CardReservationMixin:
         with self._id_lock:
             events = self.store.read_all()
             state = _fold(events)
+            if state.halted:
+                # The claim's Developer work is the next PAID call, and `_reserve_node_build` — the
+                # other writer of `node_building` — refuses a halted run the same way (WP-STOP).
+                return self._refuse_card_claim(
+                    "the run is stopping (paused, finished or a stop requested) — no Card build "
+                    "is claimed")
             self._refresh_speculation_budget(state, events=events)
             if self._node_reservation_slots_remaining(state, events=events) < len(actions):
                 return self._refuse_card_claim(

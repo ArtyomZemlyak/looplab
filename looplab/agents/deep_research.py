@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 from looplab.agents.answered_by_context import answered_by_context
 from looplab.agents.roles import _CONTEXT_BEFORE_TOOLS_RULE
 from looplab.agents.loop_options import LoopOptions
+from looplab.agents.repo_reader import researcher_workspace_token
 from looplab.core.advisory_payloads import MAX_RESEARCH_SOURCES, sanitize_research_memo_payload
 from looplab.core.costs_text import budget_line
 from looplab.core.evidence import fence_kwargs
@@ -910,6 +911,14 @@ class DeepResearcher:
         memo = ResearchMemo(at_node=len(state.nodes), trigger=trigger)
         if self.tools is not None and hasattr(self.tools, "bind_state"):
             self.tools.bind_state(state)     # let run-aware tools read the current search
+        # A5 PER VIEW (WP-TOOLS T3): a reader that follows nodes shows this stage the incumbent
+        # best's tree, so it enters THAT view's workspace — the one a propose over the same node
+        # enters (`agents/repo_reader.py::researcher_workspace_token`) — rather than inheriting
+        # whatever workspace a build last entered on this thread. None (the reader shows the
+        # starting code, the flag off) enters nothing: the historical bytes.
+        _view_token = researcher_workspace_token(self.tools)
+        if _view_token is not None and getattr(self, "_established", None) is not None:
+            self._established.enter_workspace(_view_token)
         messages = [
             {"role": "system", "content":
                 render(self.prompts, "deep_research_system", _SYSTEM)
@@ -1173,7 +1182,10 @@ def make_deep_researcher(settings, *, client=None, task=None, run_dir=None) -> O
     # is empty by construction, so without this the stage that mints the run's first hypotheses is
     # handed a surface whose every row reads zero and cannot open the one thing on disk that answers
     # the task. It said so itself in 70% of the memos it wrote. See `repo_reader_provider`.
-    _repo_reader = repo_reader_provider(task)
+    # With no parent to improve, this stage's reader shows the INCUMBENT BEST's tree when it follows
+    # nodes at all (WP-TOOLS T3) — chosen here, because `bind_state(state, None)` below is also
+    # exactly what a Researcher draft sends, and a draft reads the starting code.
+    _repo_reader = repo_reader_provider(task, settings, no_parent_view="best", beside=providers)
     if _repo_reader is not None:
         providers.append(_repo_reader)
     if getattr(settings, "web_search", False):

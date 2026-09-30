@@ -1401,6 +1401,32 @@ def _in_flight_node_ids(state, withheld=frozenset()) -> list[int]:
                   and (n.id, n.attempt) not in withheld)
 
 
+def _what_the_engine_is_finishing(state, events) -> str:
+    """What a stopped engine that still holds its lock is finishing, named from the log alone.
+
+    WP-STOP (MiniOneRec inf13, 2026-09-29): `stop --wait` gave up saying the engine "exits once its
+    running evaluation(s) finish" while no evaluation was running — the engine was inside a paid
+    proposal, which a stop lets finish (and then refuses the result of) rather than interrupts. The
+    sentence now names the running nodes when there are any, else the newest OPEN phase beacon of the
+    current engine (a proposal, a novelty check, a build — `events/stop_account.py::open_phase_line`,
+    which ignores the steps a dead or exited engine left open), else says that the log shows none."""
+    from looplab.events.stop_account import open_phase_line
+
+    running = _in_flight_node_ids(state)
+    if running:
+        return (f"the engine exits once its running evaluation(s) finish "
+                f"(node {', '.join(map(str, running))})")
+    # Worded as what the LOG shows, not as a fact about the process: `open_phase_line` scopes to
+    # the current engine's rows, and a kill that left no boundary row can still leak a dead step.
+    phase = open_phase_line(events)
+    if phase is not None:
+        return (f"no evaluation is running — the newest step the log shows open is {phase}, a "
+                "step a stop lets finish (its result is then refused); the engine exits once it "
+                "returns")
+    return ("no evaluation is running and the log shows no build or proposal step open — the "
+            "engine exits once it finishes its current turn")
+
+
 def _open_build_card_ids(state) -> list[str]:
     """The Cards whose durable build request is still open — what `--drain-builds` waits to commit.
     Read off the same queue the engine serves (`card_build_requests` past the cursor, less the
@@ -1817,8 +1843,14 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
         builds = _open_build_card_ids(now) if draining else []
         parts = ([f"node {', '.join(map(str, still))} evaluating"] if still else []) + (
             [f"build(s) {', '.join(builds)} still running"] if builds else [])
-        return ("still waiting: " + "; ".join(parts) if parts
-                else "still waiting: no evaluation running, the engine is finishing its turn")
+        if parts:
+            return "still waiting: " + "; ".join(parts)
+        # The step it is finishing, when the log names one (WP-STOP: a paid proposal the stop lets
+        # finish can run for hours, and "finishing its turn" alone reads as a hang).
+        from looplab.events.stop_account import open_phase_line
+        phase = open_phase_line(store.read_all())
+        return ("still waiting: no evaluation running, the engine is finishing its turn"
+                + (f" (the newest step the log shows open: {phase})" if phase else ""))
 
     outcome, why = await_engine_exit(target, timeout_s=limit, liveness=_probe,
                                      standing=lambda: stop_lifted(current()),
@@ -1853,9 +1885,12 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
         # THE BUILDS TOO (critic review 2026-09-27): under a drain they are what the engine is most
         # likely still waiting on, and a line naming only evaluations sent the operator looking for a
         # node that was not running.
-        open_builds = _open_build_card_ids(current()) if draining else []
+        # …AND WHAT IS REALLY IN FLIGHT (WP-STOP): the line said "its running evaluation(s)" with
+        # none running — see `_what_the_engine_is_finishing`.
+        now = current()
+        open_builds = _open_build_card_ids(now) if draining else []
         typer.echo(f"gave up after {limit:g}s: the engine on {run_dir} still holds its lock. The stop "
-                   "is recorded; the engine exits once its running evaluation(s) finish"
+                   "is recorded; " + _what_the_engine_is_finishing(now, store.read_all())
                    + (" and the Card build(s) it is draining commit or close"
                       + (f" (still open: {', '.join(open_builds)})" if open_builds else "")
                       if draining else ""))

@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-163 event types — 113 folded into `RunState`, 50 diagnostic; 1047 declared payload keys; 22 types whose whole payload is stored by the fold.
+164 event types — 113 folded into `RunState`, 51 diagnostic; 1063 declared payload keys; 22 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -53,6 +53,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `card_enriched` | folded | A Card's novelty / cross-run / footprint delta (last write by seq wins). | — | `claim_refs`, `concept_tags`, `confidence`, `cross_run_prior`, `footprint`, `foresight_rank`, `generation`, `id`, `lesson_refs`, `node_id`, `novelty_verdict`, `proposal_ref`, `research_origin`, `steering_context` |
 | `card_merged` | folded | Alias Cards folded into a canonical one, with the seq that decided the edge. | `aliases`, `canonical`, `merged_by`, `source_event_seq` | `statement` |
 | `card_ranked` | folded | The board's priority order over the Cards, with per-Card confidence and reason. | — | `at_node`, `confidence`, `order`, `ranked`, `reason` |
+| `card_ranking_staged` | diagnostic | The foresight rankings a staged Card's proposal made, held for the node the Card becomes. | `at_node`, `card_id` | `foresight`, `hyp_priority` |
 | `card_reopened` | folded | The operator resumed a dropped Card (server-stamped). | `id` | `by`, `dropped_by`, `reason` |
 | `card_reprioritized` | folded | The operator moved one Card's priority. | `id` | `pinned`, `priority`, `source` |
 | `card_resource_pinned` | folded | The operator pinned one Card's GPU footprint. | `id` | `gpu_mem_mib`, `gpus`, `pinned`, `source` |
@@ -94,7 +95,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `finalize_step` | diagnostic | One replay-safe step gate inside a single logical finalization. | — | `after_seq`, `finish_data`, `finish_report_planned`, `outcome`, `scope`, `step` |
 | `force_ablate` | folded | The operator asked for an ablation of one node. | `node_id` | `attempt`, `generation` |
 | `force_confirm` | folded | The operator asked for a confirmation re-evaluation of one node. | `node_id` | `attempt`, `generation` |
-| `foresight_selected` | folded | The pre-execution foresight pick among candidate actions, with its confidence. | — | `attempt`, `confidence`, `generation`, `node_id` |
+| `foresight_selected` | folded | The pre-execution foresight pick among candidate actions, with its confidence. | — | `alternatives`, `attempt`, `candidates`, `card_id`, `chosen`, `confidence`, `confidence_source`, `generation`, `k`, `kind`, `method`, `n`, `node_id`, `novelty_stance`, `order`, `reason` |
 | `fork` | folded · whole | The operator asked to branch a new node from an existing one. | `from_node_id` | `attempt`, `generation` |
 | `fork_done` | folded | The fulfillment receipt for one `fork` request, indexed into the request queue. | `from_node_id`, `generation`, `idx` | `skipped` |
 | `fork_unfulfilled` | diagnostic | A `fork` request the engine could not serve — recorded instead of silently dropped. | `from_node_id`, `generation`, `idx` | — |

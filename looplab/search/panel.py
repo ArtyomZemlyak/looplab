@@ -13,6 +13,7 @@ from typing import Optional
 from looplab.agents.roles import WrapsResearcher, forward_hints
 from looplab.core.models import Idea, Node, RunState
 from looplab.core.numeric import euclidean, knn_idw, numeric_params
+from looplab.core.phase_events import run_halted
 
 
 def _predict_with_distance(params: dict, hist: list[tuple[dict, float]], bounds,
@@ -111,7 +112,12 @@ class PanelResearcher(WrapsResearcher):
                 if p]
         if len(hist) < self.warmup:
             return self.base.propose(state, parent)   # not enough signal to rank -> one proposal
-        ideas = [self.base.propose(state, parent) for _ in range(self.k)]
+        # Members 2..K are each a NEW paid call: a run that halted while one was proposing starts
+        # no further member (WP-STOP, `core/phase_events.py::run_halted` — always False outside a
+        # run, so this is the historical fan-out there) and ranks what it already has.
+        ideas = [self.base.propose(state, parent)]
+        while len(ideas) < self.k and not run_halted():
+            ideas.append(self.base.propose(state, parent))
         best, best_pred = None, None
         for idea in ideas:
             res = _predict_with_distance(idea.params, hist, self.bounds)

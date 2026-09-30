@@ -221,6 +221,61 @@ def test_one_dead_provider_writes_exactly_one_pause(tmp_path):
     assert fold(engine.store.read_all()).paused is True
 
 
+class _StoppedMidProposeResearcher:
+    """A HEALTHY Researcher whose paid propose is in flight when the operator stops the run.
+
+    It appends the exact row `looplab stop` writes, then returns a real proposal — the shape of
+    MiniOneRec inf13 (2026-09-29): the pause landed at 13:09:29 inside a 3.2 h foresight propose,
+    staging refused the idea `run_stopping` at 14:21:21, and at 14:21:23 the create branch started
+    ANOTHER paid proposal for the same prospective node through its serial compatibility try."""
+
+    def __init__(self):
+        self.calls = 0
+        self.store = None
+        self.saw_the_stop: list[bool] = []
+
+    def propose(self, _state, _parent) -> Idea:
+        from looplab.core.phase_events import run_halted
+
+        self.calls += 1
+        self.store.append(EV_PAUSE, {"reason": "operator stop (`looplab stop`)"})
+        # What a role wrapper inside this call (a foresight panel's next member) now sees: the run's
+        # stop, published by `Engine.run` for everything the run executes, worker threads included.
+        self.saw_the_stop.append(run_halted())
+        return Idea(operator="draft", params={"x": 0.5, "y": 0.5},
+                    rationale="a real proposal", hypothesis="x=0.5 improves the objective")
+
+
+def test_a_stop_during_a_paid_proposal_buys_no_second_one(tmp_path):
+    """The twin of `test_one_dead_provider_writes_exactly_one_pause`, for the OPERATOR's pause.
+
+    The dead-provider breaker sets `_create_paused`, which is why that turn never reached the serial
+    try; an operator stop sets nothing in memory, so a `run_stopping` staging refusal fell through to
+    it and paid a second full proposal the reservation fence then refused. `n_seeds=1` keeps the
+    per-action staging lane (two seeds take the batch lane). The paid call the stop refused is
+    counted once, on a DIAGNOSTIC beacon: nothing folded is written for it."""
+    researcher = _StoppedMidProposeResearcher()
+    engine = make_engine(tmp_path / "stop-mid-propose", researcher=researcher,
+                         card_driven_selection=True, max_nodes=4, n_seeds=1)
+    researcher.store = engine.store
+    anyio.run(engine.run)
+    events = engine.store.read_all()
+
+    assert researcher.calls == 1, f"{researcher.calls} paid proposals for one stopped turn"
+    assert researcher.saw_the_stop == [True], "the run's stop never reached the Researcher stack"
+    beacons = [e.data for e in events if e.type == "phase_progress"]
+    proposes = [b for b in beacons if b.get("phase") == "propose" and b.get("status") == "started"]
+    assert len(proposes) == 1, proposes
+    state = fold(events)
+    assert state.paused is True and state.finished is False
+    assert [e for e in events if e.type == "run_loop_exited"]
+    assert not [e for e in events if e.type in (EV_CARD_ADDED, "node_building", EV_NODE_CREATED)]
+    discarded = [b for b in beacons if b.get("phase") == "discarded"]
+    assert [(b.get("status"), b.get("reason")) for b in discarded] == [
+        ("started", "run_is_stopping"), ("finished", "run_is_stopping")], discarded
+    assert len([e for e in events if e.type == EV_PAUSE]) == 1, "the stop is the only pause"
+
+
 def test_a_mechanical_operator_over_a_legacy_fallback_node_does_not_raise_a_false_pause(tmp_path):
     """A MECHANICAL operator reuses an existing Idea instead of proposing a fresh one.
 

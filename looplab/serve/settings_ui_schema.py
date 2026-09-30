@@ -29,7 +29,7 @@ SETTINGS_UI_SCHEMA_VERSION = 2
 # here reading as if 207 were derived while it is typed, which is the drift it warns about. The
 # unforgeable gate is `SETTINGS_UI_SCHEMA_KEYSET_REVISION` further down; this integer is the
 # human-readable half the docs sentence quotes, and `_load_schema` refuses when the two disagree.
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 242
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 244
 # On the KEYSET REVISION below: DERIVED, and deliberately no longer a hand-pinned review gate: a
 # bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
@@ -354,31 +354,40 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # what the dispatcher builds for the rest of a stalled run, and it is the per-run lever an
 # operator sets to let a run out of a permanent endgame. RE-DERIVED by INTERSECTION over the
 # merged keyset: the 236 previous keys plus exactly that one, none removed.
-# 237 -> 238 on 2026-09-29: `agent_stuck_stale_streak`, beside `agent_stuck_alternate` — the
+# 237 -> 238 on 2026-09-29: `researcher_repo_view_follows_node` (WP-TOOLS T3), beside
+# `researcher_tools` — whether the Researcher's repo tools show the tree of the node a proposal
+# improves instead of always the run's starting code. A row on the different-PROMPT ground (it
+# changes what a paid role is shown) and OFF is the historical tools. Re-derived by INTERSECTION:
+# the 237 previous keys (digest `3ddaa2cd…`) plus exactly that one, none removed.
+# 238 -> 239 on 2026-09-29: `foresight_alternatives`, beside `foresight_panel` — whether the
+# panel's candidates 2..K continue candidate 1's research session instead of K fresh sessions
+# (`search/foresight.py::ForesightPanelResearcher`). A row on the different-prompt ground (a new
+# continuation turn) and the spend ground (it changes which paid calls a proposal makes), ON by
+# default. Re-derived by INTERSECTION: the 238 previous keys (digest `4b786388…`, which already hold `researcher_repo_view_follows_node`) plus exactly that
+# one, none removed.
+# The five rows below were added on the doc 69 branch over the same 237-key base and are
+# RE-NUMBERED onto the merged keyset (2026-09-30, that branch merged with the two rows above);
+# each is re-derived by INTERSECTION: the previous count plus exactly that one, none removed.
+# 239 -> 240 (2026-09-29): `agent_stuck_stale_streak`, beside `agent_stuck_alternate` — the
 # StuckDetector's long-cycle rule (doc 69 69.3), calls in a row that each re-ran an already-seen
 # call+result. A row for the reason its two siblings are: it decides when an agent's loop is ended
-# for it, and 0 is the operator's off switch. Verified by INTERSECTION: the 237 previous keys plus
-# exactly that one, none removed.
-# 238 -> 239 on 2026-09-29: `canary_failure_account`, beside `eval_canary` — whether a failed
+# for it, and 0 is the operator's off switch.
+# 240 -> 241 (2026-09-29): `canary_failure_account`, beside `eval_canary` — whether a failed
 # canary's text is its own account (the header and both stream tails) instead of the 500-character
 # stderr tail (doc 69 69.7). A row because it decides what the triage judge and the repair are told
-# about a failed canary, and it is ON in the product surface. Verified by INTERSECTION: the 238
-# previous keys plus exactly that one, none removed.
-# 239 -> 240 on 2026-09-29: `card_full_rationale`, beside `card_verdict_support` — whether a
+# about a failed canary, and it is ON in the product surface.
+# 241 -> 242 (2026-09-29): `card_full_rationale`, beside `card_verdict_support` — whether a
 # Card's builds run the Researcher's whole rationale instead of the 400 characters the board keeps
 # (doc 69 69.4). A row because it decides what the Developer is told on every Card-built node, and
-# it is ON in the product surface. Verified by INTERSECTION: the 239 previous keys plus exactly that
-# one, none removed.
-# 240 -> 241 on 2026-09-30: `agent_token_budget`, beside `agent_time_budget_s` — the session's
+# it is ON in the product surface.
+# 242 -> 243 (2026-09-30): `agent_token_budget`, beside `agent_time_budget_s` — the session's
 # token ceiling (doc 69 69.2). A row because it is the one tool-loop ceiling that still holds on a
-# provider that prices nothing, and an operator sizes it by hand. Verified by INTERSECTION: the 240
-# previous keys plus exactly that one, none removed.
-# 241 -> 242 on 2026-09-30: `strategist_gpu_brief`, beside `strategist_every` — whether each
+# provider that prices nothing, and an operator sizes it by hand.
+# 243 -> 244 (2026-09-30): `strategist_gpu_brief`, beside `strategist_every` — whether each
 # Strategist consult is told the GPU pool, the per-experiment GPU budget at each width, what the open
 # proposals declare and whether the operator owns the width (doc 69 69.23). A row because it decides
-# what the Strategist is told before it sets a width, and it is ON in the product surface. Verified
-# by INTERSECTION: the 241 previous keys plus exactly that one, none removed.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "f5de387e60c33e97ef5c7f6371febb71ce4b7cb5e087ec1da9ce6b2ce712607a"
+# what the Strategist is told before it sets a width, and it is ON in the product surface.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "8945cd05c6445d992bd22d18358cbfc611c7300e46a798d983632c580a229782"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

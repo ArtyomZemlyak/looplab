@@ -1945,9 +1945,9 @@ class SpeculationMixin:
                 retry_tail_cas(self.store, _plan_terminal, on_exhaust=lambda: None)
         try:
             self._emit_agent_report(node_id, developer=developer)
-            # THE DEVELOPER HALF ONLY (review 2026-09-22, SCJ-02). This used to call
-            # `_emit_hypothesis_ranked` and both halves of `_emit_foresight_selected` on the pooled
-            # researcher, which cannot hold THIS node's ranking: the build producer implements a
+            # THE DEVELOPER HALF ONLY, off the pooled pair (review 2026-09-22, SCJ-02). This used to
+            # call `_emit_hypothesis_ranked` and both halves of `_emit_foresight_selected` on the
+            # pooled researcher, which cannot hold THIS node's ranking: the build producer implements a
             # Card an earlier proposal minted and never proposes (it clears the pair's telemetry
             # first), and the pooled researcher carries no panel that could rank (see
             # `_producer_role_pair`). The reads were dead on every real pair — and on the leased pair
@@ -1955,6 +1955,11 @@ class SpeculationMixin:
             # pick on the pooled Developer is this build's own, so it is still published.
             self._emit_role_telemetry(
                 developer, "last_foresight_pick", EV_FORESIGHT_SELECTED, node_id, 0)
+            # …and the rankings the proposal that STAGED this Card made (2026-09-29): the card
+            # lane snapshotted them against `result.card_id`, because the pooled pair above never
+            # held them. MAIN task, so the board rows are allowed here (`audit.py::
+            # AuditMixin._emit_staged_card_ranking`).
+            self._emit_staged_card_ranking(result.card_id, node_id, created.attempt)
         finally:
             # `_emit_agent_report` does not consume `last_report`; make pair reuse explicit.
             self._discard_node_build_telemetry(researcher=researcher, developer=developer)
@@ -2869,6 +2874,9 @@ class SpeculationMixin:
                                      node_id=proposal_node_ceiling, prospective=True,
                                      speculative=True, operator=raw_action.get("kind")), \
                     self._capture_proposal_events() as captured:
+                # WHY a `None` came back, when it was the run's STOP (WP-STOP): the serve below
+                # must not report a proposal the stop refused as a novelty/degraded refusal.
+                stopped: list = []
                 idea = self._prepare_node_idea(
                     raw_action,
                     proposal_state,
@@ -2877,6 +2885,7 @@ class SpeculationMixin:
                     source=source,
                     proposal_events=proposal_events,
                     drop_repeated_duplicate=True,
+                    stopped=stopped,
                 )
                 audit_events.extend(captured)
             steering = tuple(getattr(researcher, "_steering_context", []) or [])
@@ -2902,7 +2911,8 @@ class SpeculationMixin:
                 steering_context=steering,
                 cross_run_receipt=receipt,
                 audit_events=tuple(audit_events),
-                error="proposal rejected" if idea is None else "",
+                error=("" if idea is not None else
+                       "run_is_stopping" if stopped else "proposal rejected"),
             )
         except Exception as exc:  # noqa: BLE001 — one raw proposal fault yields a consumed, non-staged result rather than tearing down the task group
             # The run's spend ceiling is not "one raw proposal fault" (review 2026-09-22, the census'
@@ -2978,7 +2988,9 @@ class SpeculationMixin:
         The third member says WHY a consumed result staged nothing, from the path that knows:
         `RAW_STAGE_PRE_STAGING_REASONS` for the two paths that never reach the stager, the staging
         fence's own `CARD_STAGE_REFUSALS` slug (or `unrecorded`) when `_stage_prepared_card`
-        refused, and `None` both for a staged Card and for the attach HANDOFF — which is not an
+        refused — and that fence's `run_stopping` too when the funnel refused the paid proposal for
+        the run's stop before the stager (WP-STOP: one fact, one word) — and `None` both for a
+        staged Card and for the attach HANDOFF — which is not an
         abandonment: the serial boundary builds that node (see the attach branch below). The
         caller used to re-derive this by reading `self._card_stage_refusal`, which only
         `_stage_prepared_card` writes — so on the pre-staging paths the attribute still held
@@ -3009,6 +3021,12 @@ class SpeculationMixin:
             # returning None IS the novelty gate or the card planner refusing a paid proposal, and
             # the receipt explaining which is in `audit_events`.
             self._publish_proposal_events(result.audit_events)
+            # …OR the run's STOP refusing it after it was paid for (WP-STOP), which the funnel has
+            # already counted on the `discarded` beacon. That is said with the fence's own word for
+            # a stop — the `run_stopping` `_stage_prepared_card` gives the same fact one step later
+            # — never with the novelty/degraded word, so the counter and the beacon agree.
+            if result.error == "run_is_stopping":
+                return True, False, "run_stopping"
             return True, False, "proposal_refused"
         card_id = self._stage_prepared_card(
             result.action,
@@ -3040,6 +3058,13 @@ class SpeculationMixin:
                 # reason: handed-on work is not abandoned work.
                 self._publish_proposal_events(result.audit_events)
                 return True, False, None
+            if getattr(self, "_card_stage_refusal", None) == "run_stopping":
+                # A PAID proposal the run's STOP refused at the stager (WP-STOP): counted once on
+                # the DIAGNOSTIC `discarded` beacon, as the create lane's stager counts its own. The
+                # audit prefix is still dropped below, exactly as for every other fence refusal.
+                self._beacon_discarded_proposal(
+                    "run_is_stopping", node_id=result.at_node, prospective=True, speculative=True,
+                    operator=str((result.action or {}).get("kind") or ""))
             return True, False, str(getattr(self, "_card_stage_refusal", "") or "unrecorded")
         # OPEN[raw-stage-card-and-audit-are-separate-appends] the Card commit above
         # (`card_reservation.py::_stage_prepared_card`: one `card_added`, alone, under its own tail

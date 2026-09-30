@@ -26,7 +26,8 @@ layer's own rule (which `wrap_researcher`, the mid-run switch and the pool all s
 WHICH LAYERS A POOLED PAIR CARRIES: the FREE ones, never the PAID ones.
 
 * The two PANELS are paid, and wrapping a pooled researcher in either is a SPEND change no flag has
-  authorised. The foresight panel asks the wrapped researcher `foresight_panel` (2) times and adds
+  authorised. The foresight panel asks the wrapped researcher `foresight_panel` (2) times (under
+  `foresight_alternatives`, once plus a bounded continuation per further candidate) and adds
   an idea-ranking call, plus a board-prioritisation call once two beliefs are open — at least three
   paid calls where the producer pays one — and the k-NN panel multiplies the proposal by
   `researcher_panel`. The producer's product is a PREFETCH the freshness gate discards whenever the
@@ -187,7 +188,12 @@ def with_foresight_panel(researcher, settings, tools):
         verify_samples=getattr(settings, "foresight_verify_samples", 3),
         # The agentic ranker's run tools return the candidates' own code: fenced when the run's
         # envelope is on (review 2026-09-22, TAT-02), through the ONE Settings reader.
-        evidence_envelope=envelope_enabled(settings))
+        evidence_envelope=envelope_enabled(settings),
+        # Candidates 2..K CONTINUE candidate 1's research session instead of K fresh ones (the
+        # panel's class docstring). The ONE reader of `Settings.foresight_alternatives`; its
+        # getattr default is the constructor's (independent), so a stub settings object and a
+        # pre-field snapshot (`LEGACY_CONFIG_SNAPSHOT_DEFAULTS`) keep the historical calls.
+        alternatives=getattr(settings, "foresight_alternatives", False))
 
 
 def wrap_researcher(researcher, developer, *, settings, tools=None):

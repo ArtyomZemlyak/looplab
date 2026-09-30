@@ -471,6 +471,49 @@ def _canonical_read_path(name: str, args: dict) -> str | None:
     return path or None
 
 
+# The readers whose call can name WHICH TREE it reads (WP-TOOLS T3, 2026-09-29): with
+# `Settings.researcher_repo_view_follows_node` on, `repo_read(node_id=N, path=…)` reads node N's tree
+# (-1: the run's starting code) instead of the view the reader is bound to. Two reads of one path
+# under two node_ids are two FILES, so they are two ledger rows here and in `agents/established.py`,
+# and the call a note names must carry the same node_id — a remedy that re-reads the bound view's
+# copy is a different file, not the one being walked. ONLY where the reader OFFERS the argument
+# (`_view_readers`): with the flag off `repo_read` ignores a `node_id` a model invents, so counting
+# it would split one file's rows and name a call that reads something else than it says.
+_READ_TOOL_VIEW_SLOTS: dict[str, str] = {"repo_read": "node_id"}
+
+
+def _view_readers(tool_specs) -> frozenset:
+    """The registered readers whose OFFERED spec declares their view argument (`_READ_TOOL_VIEW_SLOTS`)
+    — the gate `_read_node_id` asks, computed once per loop from the specs the model is shown."""
+    offered = set()
+    for spec in tool_specs or ():
+        fn = (spec or {}).get("function") or {}
+        slot = _READ_TOOL_VIEW_SLOTS.get(fn.get("name"))
+        if slot and slot in (((fn.get("parameters") or {}).get("properties")) or {}):
+            offered.add(fn["name"])
+    return frozenset(offered)
+
+
+def _read_node_id(name: str, args: dict, views=frozenset()) -> int | None:
+    """The explicit tree a registered reader's call names (`node_id`), or None — for its bound view,
+    and for every reader not in `views`, the readers that offer the argument at all."""
+    slot = _READ_TOOL_VIEW_SLOTS.get(name) if name in views else None
+    raw = (args or {}).get(slot) if slot else None
+    if raw is None or raw == "" or isinstance(raw, bool):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _read_ledger_key(name: str, args: dict, views=frozenset()):
+    """The read ledger's row for a call: its path, or `(path, node_id)` when it names a tree."""
+    path = _canonical_read_path(name, args)
+    node_id = _read_node_id(name, args, views)
+    return path if path is None or node_id is None else (path, node_id)
+
+
 def _read_loop_fit(entry: dict) -> str:
     """The `{fit}` sentence: the file's total length and about how many widest pages it is, derived
     ONLY from what the reader's own headers said (`(lines a-b of T)` gives T; the windows seen give
@@ -488,7 +531,7 @@ def _read_loop_fit(entry: dict) -> str:
 
 
 def _note_path_read(read_state: dict, name: str, args: dict, result: str,
-                    nudge_after: int) -> tuple[int, str]:
+                    nudge_after: int, *, views=frozenset()) -> tuple[int, str]:
     """Charge one read of `(name, args)`'s path to the caller's ledger and return
     `(reads_of_this_path, note)` — the note is "" below `nudge_after` (or when it is <= 0, the OFF
     switch), and `_READ_LOOP_NOTE`/`_READ_LOOP_NOTE_UNPAGED` on the threshold read and every read
@@ -496,8 +539,9 @@ def _note_path_read(read_state: dict, name: str, args: dict, result: str,
     path = _canonical_read_path(name, args)
     if path is None:
         return 0, ""
-    entry = read_state.setdefault(path, {"reads": 0, "lines_total": None,
-                                         "lines_seen": 0, "chars_seen": 0})
+    entry = read_state.setdefault(_read_ledger_key(name, args, views),
+                                  {"reads": 0, "lines_total": None, "lines_seen": 0,
+                                   "chars_seen": 0})
     entry["reads"] += 1
     header = _LINES_OF_RE.search(result[:400])
     if header is not None:
@@ -510,6 +554,12 @@ def _note_path_read(read_state: dict, name: str, args: dict, result: str,
         return entry["reads"], ""
     slot, paged = _READ_TOOL_PATH_SLOTS[name]
     template = _READ_LOOP_NOTE if paged else _READ_LOOP_NOTE_UNPAGED
+    node_id = _read_node_id(name, args, views)
+    if node_id is not None:
+        # The named call must re-read the SAME tree (`_READ_TOOL_VIEW_SLOTS`): the node_id rides
+        # ahead of the path argument, `repo_read(node_id=7, path="x.py")`; without one the call is
+        # spelled exactly as it always was.
+        slot = f"node_id={node_id}, {slot}"
     return entry["reads"], template.format(path=path, n=entry["reads"], tool=name, slot=slot,
                                            fit=_read_loop_fit(entry), page=_READ_PAGE_CHARS)
 
@@ -526,13 +576,14 @@ def _note_path_read(read_state: dict, name: str, args: dict, result: str,
 _READ_LOOP_FORCE_FACTOR = 4
 
 
-def _read_loop_stuck(read_state: dict | None, name: str, args: dict, nudge_after: int) -> str | None:
+def _read_loop_stuck(read_state: dict | None, name: str, args: dict, nudge_after: int, *,
+                     views=frozenset()) -> str | None:
     """The stuck reason for a read that pushed one path past `_READ_LOOP_FORCE_FACTOR` × the nudge
     threshold, else None. Reads the ledger `_note_path_read` already charged; never mutates it."""
     if read_state is None or nudge_after <= 0:
         return None
     path = _canonical_read_path(name, args)
-    entry = read_state.get(path) if path is not None else None
+    entry = read_state.get(_read_ledger_key(name, args, views)) if path is not None else None
     if not entry or entry.get("reads", 0) < _READ_LOOP_FORCE_FACTOR * nudge_after:
         return None
     return (f"`{path}` read {entry['reads']}× this phase, still piecemeal after the re-read note — "
@@ -764,7 +815,7 @@ def _tool_call_args(tc: dict) -> tuple[str, dict]:
 
 def _run_tool_call(tools, name: str, args: dict, *, repeat_state: dict,
                    on_tool_result=None, cancel_check=None, read_state: dict | None = None,
-                   read_loop_nudge_after: int = 25) -> tuple[str, str]:
+                   read_loop_nudge_after: int = 25, view_readers=frozenset()) -> tuple[str, str]:
     """Execute ONE retrieval tool call and return `(capped_result, note)`, where `note` is the
     identical-result repeat note (`_REPEAT_NOTE`) followed by the path-keyed read-loop nudge
     (`_READ_LOOP_NOTE`), each "" when it did not fire.
@@ -871,7 +922,7 @@ def _run_tool_call(tools, name: str, args: dict, *, repeat_state: dict,
         path_note = ""
         if read_state is not None:
             path_reads, path_note = _note_path_read(read_state, name, args, result,
-                                                    read_loop_nudge_after)
+                                                    read_loop_nudge_after, views=view_readers)
             if path_reads:
                 _tool_obs.set("path_reads", path_reads)
             if path_note:
@@ -1175,6 +1226,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
     request = next((m for m in reversed(messages)
                     if isinstance(m, dict) and m.get("role") == "user"), None)
     tool_specs = _compose_loop_tool_specs(tools, emit_spec, self_plan=self_plan)
+    view_readers = _view_readers(tool_specs)     # whose `node_id` the read ledger may count
     current_plan = ""
     started = time.monotonic()
     # The loop's own clock, published before every tool execution so `remaining_time` (tools/clock.py)
@@ -1550,7 +1602,8 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                                                      on_tool_result=on_tool_result,
                                                      cancel_check=_cancelled,
                                                      read_state=read_state,
-                                                     read_loop_nudge_after=read_loop_nudge_after)
+                                                     read_loop_nudge_after=read_loop_nudge_after,
+                                                     view_readers=view_readers)
                 if not deadline_warned:
                     _note = _deadline_note(clock, emit_name)
                     if _note:
@@ -1570,7 +1623,8 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     stuck_reason, stuck_rule = pushed, stuck.last_rule
                 # The read-loop nudge's ESCALATION (see `_READ_LOOP_FORCE_FACTOR`): a model that
                 # keeps walking one file long after the note told it how to stop is stuck too.
-                walked = _read_loop_stuck(read_state, name, args, read_loop_nudge_after)
+                walked = _read_loop_stuck(read_state, name, args, read_loop_nudge_after,
+                                          views=view_readers)
                 if walked:
                     stuck_reason, stuck_rule = walked, "read_loop"
         # G: soft convergence. A model that keeps issuing DIFFERENT tool calls never trips the

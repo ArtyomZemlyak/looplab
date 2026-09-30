@@ -167,7 +167,7 @@ DEVELOPER_OUTPUT_ATTRS: tuple[str, ...] = (
     # reached for the write surface". Measured over every inert repair with spans (v11 x2, v13 x2):
     # ZERO edit calls in sessions of 22.5-27.3 minutes, which is why the budget lever was refused.
     "last_edit_calls")
-RESEARCHER_ACTION_ATTRS: tuple[str, ...] = ("choose_action",)
+RESEARCHER_ACTION_ATTRS: tuple[str, ...] = ("choose_action", "propose_with_session", "propose_alternative")
 
 
 @dataclass(frozen=True)

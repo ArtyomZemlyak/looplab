@@ -13,15 +13,19 @@ through this module holds. `run_phase` stays HERE (see the note above it).
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Optional
 
 from looplab.core import tracing
+from looplab.core.cards import idea_proposal_digest
+from looplab.core.containment import contain
 from looplab.core.evidence import fence_kwargs, fence_untrusted
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import Idea, IdeaEmission, Node, RunState
 from looplab.core.parse import ParseError, parse_structured
 from looplab.core.prompts import PromptStore, render
 from looplab.agents.answered_by_context import answered_by_context, offers_tool
+from looplab.agents.repo_reader import researcher_workspace_token
 from looplab.agents.roles import (
     _CONCEPT_AUTHORING_GUIDANCE, _CONTEXT_BEFORE_TOOLS_RULE, _OPERATOR_NOTE,
     _UNTRUSTED_MEMORY_RULE,
@@ -80,7 +84,7 @@ _IDEA_SPACE_TOOL = ("Your idea space is the WHOLE experiment, not just hyperpara
 # internal `drive_tool_loop(...)` call resolving through THIS module's (patched) global at call
 # time. Defined in tool_loop, that call would resolve tool_loop's UNPATCHED binding and the seam
 # would silently break — behavior seams beat file size.
-def _researcher_workspace(store):
+def _researcher_workspace(store, tools=None):
     """Declare the Researcher's own working set before its block is rendered, and return the store.
 
     The Developer's scouts answer through `write.files`, its per-NODE staged overlay, and the store
@@ -89,9 +93,16 @@ def _researcher_workspace(store):
     N's staged `solver.py` as "carried verbatim … do not re-fetch". The Researcher reads the source,
     not any node's overlay, so it belongs to a workspace of its own: one stable token, which keeps
     its pages carried across its own phases and out of every node's.
+
+    PER VIEW once its repo reader follows the node (WP-TOOLS T3,
+    `Settings.researcher_repo_view_follows_node`): the Researcher then DOES read a node's tree — the
+    parent's — so "the source" is no longer one tree, and a page read over parent 29 must not be
+    carried into a propose over parent 7. The token names the view the reader in `tools` is bound
+    to (`agents/repo_reader.py::researcher_workspace_token`); with the flag off there is no such
+    view and the token is the one stable `"researcher"`, byte for byte.
     """
     if store is not None:
-        store.enter_workspace("researcher")
+        store.enter_workspace(researcher_workspace_token(tools) or "researcher")
     return store
 
 
@@ -126,7 +137,7 @@ def _fenced_notes(ledger, evidence_label: str) -> str:
 
 
 def run_phase(client, tools, messages, emit_spec, *, label: str, next_label: str = "the next phase",
-              handoff: bool = True, finalize, fallback, **loop_kwargs):
+              handoff: bool = True, inject_notes: bool = True, finalize, fallback, **loop_kwargs):
     """`drive_tool_loop` + cross-phase handoff summaries. When a `handoff_scope` is active it (1)
     injects the briefs accumulated by earlier phases of this node into `messages` — so this phase
     (even a different ROLE) trusts what's already been explored instead of re-reading the repo/data —
@@ -134,6 +145,12 @@ def run_phase(client, tools, messages, emit_spec, *, label: str, next_label: str
     call) for the next phase. Pass `handoff=False` for a TERMINAL phase (nothing downstream reads its
     brief — the single-session implement, the last plan step, a repair) so it doesn't spend a wasted
     summary call. A drop-in for drive_tool_loop: with no active scope it just forwards.
+
+    `inject_notes=False` skips (1) only, for a phase that CONTINUES a transcript an earlier phase
+    of this node already produced (`ToolUsingResearcher.propose_alternative`, 2026-09-29): the
+    transcript IS what the notes summarize, so splicing them in at index 1 would put the earlier
+    phase's own brief inside its own prefix — a second copy of what it read, and a changed prefix
+    that re-bills the whole cached transcript. The cancel scope below applies either way.
 
     Inside a `phase_cancel_scope` (doc 68 68.7 — the owner's cancel token for the whole build) a
     phase whose token has fired never starts, a running one ends at its next turn boundary, and one
@@ -163,7 +180,7 @@ def run_phase(client, tools, messages, emit_spec, *, label: str, next_label: str
 
         loop_kwargs["cancel_check"] = _owner_or_caller_cancelled
     ledger = _handoff_ctx.get()
-    if ledger:                              # earlier phases produced briefs → inject them up front
+    if ledger and inject_notes:             # earlier phases produced briefs → inject them up front
         ins = 1 if (messages and messages[0].get("role") == "system") else 0
         # PROVENANCE, NOT AUTHORITY. Each brief is a model's summary of a transcript full of
         # repository and tool output the CANDIDATE controls, so "TRUST it" was laundering untrusted
@@ -201,14 +218,176 @@ def run_phase(client, tools, messages, emit_spec, *, label: str, next_label: str
         raise PhaseCancelled(
             f"{label} ended at a turn boundary: the work it belongs to was cancelled")
     if handoff and ledger is not None:      # non-terminal phase in an active scope → contribute a brief
-        # Wrap the summary call in its OWN operation span so it's a distinct, clearly-labeled band in
-        # the UI trace ("handoff-summary") instead of an anonymous complete_text generation buried in
-        # the phase — the summarization is visible/auditable, not a silent extra call.
-        with tracing.operation("handoff-summary", handoff_from=label, handoff_to=next_label):
-            s = summarize_phase(client, messages, phase=label, next_phase=next_label)
-        if s:
-            ledger.append(f"[{label}]\n{s}")
+        _contribute_brief(client, messages, label=label, next_label=next_label, ledger=ledger)
     return result
+
+
+def _contribute_brief(client, messages, *, label: str, next_label: str, ledger: list) -> None:
+    """Distill a finished phase's transcript into the node's handoff ledger — ONE call.
+
+    Shared by `run_phase` and a proposal session's DEFERRED brief (`ProposalSession.publish_brief`)."""
+    # Wrap the summary call in its OWN operation span so it's a distinct, clearly-labeled band in
+    # the UI trace ("handoff-summary") instead of an anonymous complete_text generation buried in
+    # the phase — the summarization is visible/auditable, not a silent extra call.
+    with tracing.operation("handoff-summary", handoff_from=label, handoff_to=next_label):
+        s = summarize_phase(client, messages, phase=label, next_phase=next_label)
+    if s:
+        ledger.append(f"[{label}]\n{s}")
+
+
+# ------------------------------------------------ the foresight panel's ALTERNATIVES (2026-09-29)
+#
+# `search/foresight.py::ForesightPanelResearcher` asks for K candidates per proposal and a world
+# model picks one. Each candidate used to be a full independent research session: on MiniOneRec
+# inf13 one proposal cost 86 + 100 minutes (46 + 45 turns) for two candidates the second of which
+# re-read the same memo, experiments and source windows from the identical prompt — and the ranker
+# itself wrote that the two were "effectively the same bet". Under `Settings.foresight_alternatives`
+# candidates 2..K CONTINUE candidate 1's session instead: one more user turn on the transcript that
+# already holds every read, asking for a different bet. What that needs, and where it lives:
+#
+# * THE SESSION IS PER CALL (`ProposalSession`): the Researcher is the shared primary the card lane
+#   and the offloaded serial build both propose through, so the transcript travels in a handle the
+#   CALL returns (`propose_with_session`), never on the instance. It holds the messages, the board
+#   window the model was shown, and how the loop ended; only an emitted or salvaged session is
+#   continued — a fallback or a raise is the end of it.
+# * THE TRANSCRIPT MUST BE CONTINUABLE: the loop returns AT an accepted emit, leaving that call's
+#   `tool_call_id` (and any later sibling's) unanswered, which a strict OpenAI-compatible endpoint
+#   refuses with a 400. `_answer_open_calls` answers the emit with a record of it and stubs the
+#   siblings — never `tool_loop.py::answered_transcript`, which DELETES the model's own emission. A
+#   SALVAGED emission was forced on a copy (`tool_loop.py::_force_emit`) and is not in the
+#   transcript at all, so the new turn restates every candidate so far.
+# * NO NOTES, AND ONE SUMMARY OF THE CHOSEN CANDIDATE: `run_phase(handoff=False,
+#   inject_notes=False)` for a continuation, and candidate 1's own handoff summary is DEFERRED
+#   (`ProposalSession.publish_brief`) until the panel has picked — summarized right after candidate
+#   1, the node's only brief described candidate 1's decisions even when the alternative won and the
+#   Developer then built it.
+# * A BOUNDED TURN: `ALTERNATIVE_MAX_TURNS` through `LoopOptions.replace` — never ABOVE an
+#   operator's own smaller `agent_max_turns` — and an emit whose idea digest equals an earlier
+#   candidate's is bounced — a copy is not an alternative.
+
+ALTERNATIVE_MAX_TURNS = 8
+"""Tool turns an alternative may spend — or the operator's own `agent_max_turns` when that is
+smaller, never more. It starts from a transcript that already holds the investigation, so it should
+read little — "read more only if the alternative needs a file you have not read" — and a cap is what
+keeps a model that re-researches from buying a second full session. The turn it ends on is
+announced like every cutoff (`last_budget_exhausted`)."""
+
+# The continuation turn — a PROMPT, so a contract, overridable as `tool_researcher_alternative.md`.
+# `$candidates` is every candidate proposed so far, one numbered line each; it doubles as the
+# restatement of a SALVAGED emission, which the transcript does not contain.
+_ALTERNATIVE_TURN = (
+    "Your proposal is recorded. Now propose ONE ALTERNATIVE experiment for the same next node: a "
+    "different bet that tests a DIFFERENT mechanism than every candidate already proposed — not a "
+    "variation of one:\n$candidates\n\n"
+    "You have already read what you need in this conversation; read more only if the alternative "
+    "needs something you have not read yet. Then call `emit` with the alternative.")
+# The answer a continued transcript gives the accepted emit, and the stub for any call listed after
+# it in the same turn (the loop returned before executing those).
+_EMIT_RECORDED = "(recorded: this proposal is one of the candidates for the next experiment)"
+_NOT_EXECUTED = "(not executed: your emit ended that turn)"
+
+
+@dataclass
+class ProposalSession:
+    """ONE proposal's research session, as the call that ran it hands it back.
+
+    `messages` is the loop's own transcript (the list `drive_tool_loop` mutated in place, compaction
+    included), `visible_board_cards` the board window the model was shown — the one a continuation's
+    Card claim must bind against — and `exit` how the loop ended: `emitted` (the accepted emit call
+    is the transcript's last turn), `salvaged` (a forced emit, made on a copy), `fallback` (no emit),
+    `error` (the call raised), or "" (never ran). `ends[i]` is the transcript's length when
+    candidate `i` of the session (0 = the proposal itself) was finished, and `pending_brief` the
+    handoff summary `propose` DEFERRED to the candidate the caller chooses (`publish_brief`)."""
+
+    messages: list = field(default_factory=list)
+    visible_board_cards: list = field(default_factory=list)
+    exit: str = ""
+    ends: list = field(default_factory=list)
+    pending_brief: Optional[tuple] = field(default=None, repr=False)
+
+    @property
+    def continuable(self) -> bool:
+        return self.exit in ("emitted", "salvaged")
+
+    def hold(self, messages: list, cards, exit_kind: str, *, emit_name: str = "emit") -> None:
+        """Record a finished loop. `finalized` (the loop called `finalize`) is split into
+        `emitted` / `salvaged` by whether the accepted emit call is in the transcript."""
+        self.messages = messages
+        self.visible_board_cards = list(cards or [])
+        if exit_kind == "finalized":
+            turn, open_ids = _open_calls(messages)
+            exit_kind = ("emitted" if turn is not None and any(
+                (call.get("function") or {}).get("name") == emit_name
+                and call.get("id", "") in open_ids for call in turn["tool_calls"])
+                else "salvaged")
+        self.exit = exit_kind
+        self.ends.append(len(messages))
+
+    def publish_brief(self, candidate: int) -> None:
+        """Contribute the handoff brief `propose` deferred, distilled from the session UP TO the end
+        of the CHOSEN candidate — once, whatever is asked after. The Developer builds the chosen
+        candidate, so the brief it reads must be about that one's investigation: summarized when
+        candidate 1 finished (as `run_phase` would have), the brief described the loser whenever an
+        alternative won. Choosing candidate 1 gives exactly the brief it always had."""
+        pending, self.pending_brief = self.pending_brief, None
+        if pending is None or not 0 <= candidate < len(self.ends):
+            return
+        client, label, next_label, ledger = pending
+        _contribute_brief(client, self.messages[:self.ends[candidate]], label=label,
+                          next_label=next_label, ledger=ledger)
+
+
+def _open_calls(messages: list) -> tuple[Optional[dict], set]:
+    """The transcript's last tool-calling assistant turn and the ids of its calls nobody answered."""
+    answered = {m.get("tool_call_id") for m in messages
+                if isinstance(m, dict) and m.get("role") == "tool"}
+    turn = next((m for m in reversed(messages) if isinstance(m, dict)
+                 and m.get("role") == "assistant" and m.get("tool_calls")), None)
+    if turn is None:
+        return None, set()
+    return turn, {c.get("id", "") for c in turn["tool_calls"] if c.get("id", "") not in answered}
+
+
+def _answer_open_calls(messages: list, emit_name: str) -> None:
+    """Answer, in place and in call order, every call of the last tool-calling turn that has no
+    `role: "tool"` answer: the FIRST open emit — the one the loop accepted — with `_EMIT_RECORDED`,
+    every other open call with `_NOT_EXECUTED`.
+
+    ONLY THE FIRST open emit was accepted. The loop walks a turn's calls in order and returns at
+    the first emit it accepts (`tool_loop.py::drive_tool_loop`), so a second emit in the same turn
+    was never looked at; recording it too would tell the model a proposal it never had accepted is
+    a candidate. (An emit the validator BOUNCED is already answered with the refusal, so it is not
+    open.) The answers go directly after that turn's existing answers, which on every exit the loop
+    has is the END of the transcript — so the prefix a provider cached is left byte for byte."""
+    turn, open_ids = _open_calls(messages)
+    if turn is None or not open_ids:
+        return
+    at = next(i for i in range(len(messages) - 1, -1, -1) if messages[i] is turn) + 1
+    while at < len(messages) and isinstance(messages[at], dict) and messages[at].get("role") == "tool":
+        at += 1
+    answers, recorded = [], False
+    for call in turn["tool_calls"]:
+        if call.get("id", "") not in open_ids:
+            continue
+        name = (call.get("function") or {}).get("name", "")
+        accepted = name == emit_name and not recorded
+        recorded = recorded or accepted
+        answers.append({"role": "tool", "tool_call_id": call.get("id", ""), "name": name,
+                        "content": _EMIT_RECORDED if accepted else _NOT_EXECUTED})
+    messages[at:at] = answers
+
+
+def _alternative_candidates(ideas) -> str:
+    """Every candidate proposed so far, one numbered line each: operator, what it tests, params."""
+    lines = []
+    for number, idea in enumerate(ideas, 1):
+        what = " — ".join(part for part in (
+            " ".join(str(getattr(idea, "hypothesis", "") or "").split()),
+            " ".join(str(getattr(idea, "rationale", "") or "").split())) if part)
+        params = ", ".join(f"{k}={v}" for k, v in (getattr(idea, "params", None) or {}).items())
+        lines.append(f"{number}. [{getattr(idea, 'operator', '') or 'idea'}] {what[:400]}"
+                     + (f" (params: {params[:200]})" if params else ""))
+    return "\n".join(lines)
 
 
 class ToolUsingResearcher:
@@ -332,13 +511,16 @@ class ToolUsingResearcher:
                     "structural change)")
         return None
 
-    def _finalize(self, args: dict) -> Idea:
+    def _finalize(self, args: dict, cards: Optional[list] = None) -> Idea:
         # Never let a malformed emit (non-numeric params, bad shape) crash the loop — sanitize,
         # then fall back to a rationale-preserving draft if validation still fails.
+        # `cards`: the board window to bind a Card claim against, when it is not this instance's
+        # last-published one — an alternative binds against its SESSION's (`ProposalSession`).
         try:
             emitted = IdeaEmission.model_validate(self._sanitize(args))
             idea = bind_idea_to_board_card(
-                emitted.to_idea(), getattr(self, "_visible_board_cards", []))
+                emitted.to_idea(),
+                getattr(self, "_visible_board_cards", []) if cards is None else cards)
             return _clamp_fill(idea, self.bounds)
         except Exception:  # noqa: BLE001 - resilience: the run must survive a junk proposal
             rationale = str((args or {}).get("rationale", "") or "")[:500]
@@ -378,7 +560,11 @@ class ToolUsingResearcher:
             nudge="Emit the Idea now.", then=lambda out: out.to_idea(), on_fail=_degraded)
         return _clamp_fill(idea, self.bounds)
 
-    def propose(self, state: RunState, parent: Optional[Node]) -> Idea:
+    def propose(self, state: RunState, parent: Optional[Node], *,
+                session: Optional[ProposalSession] = None) -> Idea:
+        # `session`: a per-CALL handle `propose_with_session` passes to get this call's transcript
+        # back (the foresight panel's alternatives continue it). None — every other caller — changes
+        # nothing about the call.
         if hasattr(self.tools, "bind_state"):    # let run-aware tools see the current search
             self.tools.bind_state(state, parent)
         from looplab.agents.hints import render_hint_directives
@@ -393,7 +579,10 @@ class ToolUsingResearcher:
         hyp = _hypothesis_system_suffix(getattr(self, "track_hypotheses", True))
         prompt_attempt = int(getattr(self, "_board_prompt_attempt", 0))
         self._board_prompt_attempt = prompt_attempt + 1
-        self._visible_board_cards = next_board_prompt_cards(
+        # THIS call's window, kept in a local as well as published: the instance is the shared
+        # primary, so the attribute may already name another call's window by the time this one's
+        # emit is bound or its session recorded.
+        visible = self._visible_board_cards = next_board_prompt_cards(
             state, getattr(self, "_hyp_order", None), attempt=prompt_attempt)
         # Whether this request offers `list_experiments`: the fitted digest's cut receipt names that
         # call only when it does (`events/digest.py::_fit_receipt`).
@@ -426,7 +615,8 @@ class ToolUsingResearcher:
                                                      verdict_support=bool(getattr(
                                                          self, "_verdict_support", False)))
                 + answered_by_context(self.tools)
-                + _established_block(_researcher_workspace(getattr(self, "_established", None)))
+                + _established_block(_researcher_workspace(getattr(self, "_established", None),
+                                                           self.tools))
                 + hint_block + cue +
                 "\nDecide the next experiment — a parameter change OR a structural one (architecture, "
                 "loss, data, training) if that's the stronger move. Consult knowledge if useful, then emit."},
@@ -445,6 +635,20 @@ class ToolUsingResearcher:
             kind = (payload or {}).get("kind") if isinstance(payload, dict) else None
             self.last_budget_exhausted = str(kind or "")[:32]
 
+        # HOW THE LOOP ENDED, for a caller holding a `session`: `finalize` runs on an accepted emit
+        # (in-loop or salvaged), `fallback` when none came. Pass-throughs, so the call is unchanged.
+        exit_kind = [""]
+
+        def _finalize_seen(args):
+            exit_kind[0] = "finalized"
+            return self._finalize(args, visible)
+
+        def _fallback_seen(msgs):
+            exit_kind[0] = "fallback"
+            return self._fallback(msgs)
+
+        next_label = ("the Developer (stages → plan → implement)" if getattr(self, "handoff", True)
+                      else "the Developer (single-shot implement)")
         try:
             # Every loop OPTION (the turn/time/context budgets included) is folded into
             # self.loop_opts once in __init__ (see there) — pass the merged bundle straight through,
@@ -454,21 +658,27 @@ class ToolUsingResearcher:
             # P25: `handoff` is True only when a run_phase-based (repo) Developer follows — its
             # stages/plan/implement phases read the brief; the single-shot developers never do,
             # so no summary call is spent there and the label names the developer that ACTUALLY runs.
+            # A SESSION'S SUMMARY IS DEFERRED: the caller holding it may continue it into
+            # alternatives, and the brief must describe the candidate it CHOOSES
+            # (`ProposalSession.publish_brief`) — still one summary call.
             result = run_phase(
                 self.client, self.tools, messages, self._emit_spec(),
                 label="Researcher·propose",
-                next_label=("the Developer (stages → plan → implement)"
-                            if getattr(self, "handoff", True)
-                            else "the Developer (single-shot implement)"),
-                handoff=getattr(self, "handoff", True),
-                finalize=self._finalize, fallback=self._fallback,
+                next_label=next_label,
+                handoff=getattr(self, "handoff", True) and session is None,
+                finalize=_finalize_seen, fallback=_fallback_seen,
                 validate=self._validate_emit, on_budget=_note_cutoff,
                 on_tool_result=_established_hook(getattr(self, "_established", None), "propose"),
                 # The evidence fence: EXPLICIT (`tool_result_label` is never a bundle field, so it
                 # cannot collide with the spread below) and ABSENT when the envelope is off.
                 **fence_kwargs(self.evidence_envelope),
                 **self.loop_opts)
-            return bind_idea_to_board_card(result, self._visible_board_cards)
+            if session is not None:
+                session.hold(messages, visible, exit_kind[0])
+                ledger = _handoff_ctx.get()
+                if getattr(self, "handoff", True) and ledger is not None:
+                    session.pending_brief = (self.client, "Researcher·propose", next_label, ledger)
+            return bind_idea_to_board_card(result, visible)
         except BudgetExceeded:      # hard budget stop -> propagate and end the run
             raise
         except Exception as e:  # noqa: BLE001 - a transport/endpoint failure (LLMError after retries)
@@ -477,4 +687,111 @@ class ToolUsingResearcher:
             # (parse_structured swallows LLMError -> draft Idea), so it can't re-raise the transport error.
             # Hand it the CAUSE, though: the degraded node is the only record that this happened, and a
             # rationale that just says "parse failed" is indistinguishable from a weak model's bad JSON.
+            if session is not None:     # a session that raised is never continued
+                session.hold(messages, visible, "error")
             return self._fallback(messages, e)
+
+    def propose_with_session(self, state: RunState,
+                             parent: Optional[Node]) -> tuple[Idea, ProposalSession]:
+        """`propose`, plus the research session that produced the Idea — THIS call's, in a handle
+        the caller owns, so a shared Researcher never carries one call's transcript into another's
+        (the card lane and the offloaded serial build both propose through the primary). The panel
+        continues it with `propose_alternative`; see the section comment above `ProposalSession`."""
+        session = ProposalSession()
+        return self.propose(state, parent, session=session), session
+
+    def propose_alternative(self, state: RunState, parent: Optional[Node],
+                            session: ProposalSession, prior_ideas) -> Optional[Idea]:
+        """ONE alternative to `prior_ideas`, by CONTINUING `session` — or None.
+
+        One more user turn on the transcript that already holds the investigation, run through the
+        SAME emit spec, validator (plus a bounce of a copy of an earlier candidate), finalize,
+        evidence fence and loop options as `propose`, with the turn cap `ALTERNATIVE_MAX_TURNS`
+        (lowered, never raised, to an operator's smaller one). The session is continued IN PLACE,
+        so a third candidate sees the second, and it runs no handoff summary of its own: the one
+        summary is the chosen candidate's (`ProposalSession.publish_brief`).
+
+        None is every failure and never a degraded Idea: a session that is not continuable, a
+        transport error, a loop that ended without an emit (its fallback makes NO forced call), or
+        an emit that only copied an earlier candidate. The caller then ranks fewer candidates —
+        `_fallback` here would turn a 400 into a `fallback (…)` Idea the ranker could pick, and the
+        engine pauses the run on one (`orchestrator.py::_refuse_degraded_proposal`). The spend
+        ceiling and a cancelled phase PROPAGATE: neither is a failure to degrade around."""
+        if not isinstance(session, ProposalSession) or not session.continuable:
+            return None
+        if hasattr(self.tools, "bind_state"):    # same binding `propose` made for this proposal
+            self.tools.bind_state(state, parent)
+        # Reset per call and announced exactly as `propose` does (`RESEARCHER_OUTPUT_ATTRS`): with
+        # a turn cap, "cut short" is a real possibility, and the panel publishes the receipt of the
+        # candidate it CHOOSES, not of whichever call ran last.
+        self.last_budget_exhausted = ""
+
+        def _note_cutoff(payload) -> None:
+            kind = (payload or {}).get("kind") if isinstance(payload, dict) else None
+            self.last_budget_exhausted = str(kind or "")[:32]
+
+        emit_spec = self._emit_spec()
+        emit_name = emit_spec["function"]["name"]
+        priors = [idea for idea in (prior_ideas or ()) if idea is not None]
+        seen = {digest for digest in map(idea_proposal_digest, priors) if digest}
+        cards = list(session.visible_board_cards)
+        messages = session.messages
+        _answer_open_calls(messages, emit_name)
+        # The candidate lines are the model's own emissions, written from what its tools returned:
+        # inside the run's evidence fence when the envelope is on, as the phase notes are.
+        label = fence_kwargs(self.evidence_envelope).get("tool_result_label", "")
+        listed = _alternative_candidates(priors)
+        messages.append({"role": "user", "content": render(
+            self.prompts, "tool_researcher_alternative", _ALTERNATIVE_TURN,
+            candidates=fence_untrusted(listed, label) if label else listed)})
+        exit_kind = [""]
+
+        def _finalize_alternative(args):
+            exit_kind[0] = "finalized"
+            return self._finalize(args, cards)
+
+        def _no_alternative(_messages):
+            exit_kind[0] = "fallback"
+            return None
+
+        def _validate_alternative(args):
+            refusal = self._validate_emit(args)
+            if refusal:
+                return refusal
+            digest = idea_proposal_digest(self._finalize(args, cards))
+            if digest is not None and digest in seen:
+                return ("it is the SAME experiment as a candidate already proposed above — an "
+                        "alternative must test a DIFFERENT mechanism, not repeat one")
+            return None
+
+        # The cap may only LOWER the operator's own turn limit: `agent_max_turns` 3 means an
+        # alternative gets 3, never 8. 0 / unset is "unlimited", which the cap then bounds.
+        configured = getattr(getattr(self, "loop_opts", None), "max_turns", None)
+        cap = (min(int(configured), ALTERNATIVE_MAX_TURNS) if configured and int(configured) > 0
+               else ALTERNATIVE_MAX_TURNS)
+        try:
+            result = run_phase(
+                self.client, self.tools, messages, emit_spec,
+                label="Researcher·alternative", handoff=False, inject_notes=False,
+                finalize=_finalize_alternative, fallback=_no_alternative,
+                validate=_validate_alternative, on_budget=_note_cutoff,
+                on_tool_result=_established_hook(getattr(self, "_established", None), "propose"),
+                **fence_kwargs(self.evidence_envelope),
+                **self.loop_opts.replace(max_turns=cap))
+        except (BudgetExceeded, PhaseCancelled):
+            session.exit = "error"
+            raise
+        except Exception as exc:  # noqa: BLE001 — an alternative is optional: None ends the continuation
+            # A transport/endpoint failure (an LLMError after retries, a strict endpoint's 400) ends
+            # THIS continuation and the panel ranks the candidates it has. `contain` stamps the span
+            # and re-raises the spend ceiling, wrapped or bare.
+            session.exit = "error"
+            contain("researcher alternative", exc)
+            return None
+        session.hold(messages, cards, exit_kind[0] or "fallback", emit_name=emit_name)
+        if result is None:
+            return None
+        digest = idea_proposal_digest(result)
+        if digest is not None and digest in seen:
+            return None     # past the bounce budget the loop accepts anything; a copy still is none
+        return bind_idea_to_board_card(result, cards)
