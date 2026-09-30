@@ -953,3 +953,18 @@ def test_a_session_cut_short_stays_cut_when_another_call_resets_the_attribute(mo
     _another_call_writes(monkeypatch, researcher, "")
     _idea, session = researcher.propose_with_session(_state(), None)
     assert (session.exit, session.cutoff) == ("salvaged", "turns")
+
+
+def test_a_continuation_cut_short_holds_its_own_cutoff():
+    """crit_v51 survivor B4: `propose_alternative`'s own cutoff must reach the session it holds, not
+    only the shared attribute. Candidate 1 and the continuation both hit a one-turn cap; the session's
+    cutoff is cleared between them so only the continuation's write can set it. MUTATION: drop
+    `cutoff[0] = ...` from the continuation's `_note_cutoff` -> ""."""
+    model = _Model(lambda messages: _turn(_read(f"r{len(messages)}")),
+                   forced=[_emission("first at the cap"), _emission("second at the cap", x=2.0)])
+    researcher = ToolUsingResearcher(model, _Tools(), loop_opts=LoopOptions(max_turns=1))
+    idea, session = researcher.propose_with_session(_state(), None)
+    assert session.cutoff == "turns" and session.continuable, "premise: a turn cut may continue"
+    session.cutoff = ""
+    assert researcher.propose_alternative(_state(), None, session, [idea]) is not None
+    assert session.cutoff == "turns"

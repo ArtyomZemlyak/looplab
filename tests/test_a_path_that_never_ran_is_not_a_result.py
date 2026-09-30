@@ -69,6 +69,25 @@ def test_a_log_left_by_an_earlier_attempt_does_not_vouch_for_this_one(tmp_path):
                                       since=time.time()) == ["prefix cache: ON"]
 
 
+def test_one_unreadable_log_entry_does_not_drop_every_log(tmp_path, monkeypatch):
+    """crit_v51 F7: the sort key stat-ed every entry inside the listing's one `try`, so a dangling
+    `latest.log` link emptied the listing and a marker `score.log` printed read as missing — a false
+    `inert_path`. (A failing `stat` stands in for the link: creating one needs privileges on
+    Windows.) MUTATION: the listing-wide key -> the marker is missing."""
+    (tmp_path / "score.log").write_text("MARK fast path on\n")
+    (tmp_path / "latest.log").write_text("")
+    real_stat = Path.stat
+
+    def stat(self, *args, **kwargs):
+        if self.name == "latest.log":
+            raise FileNotFoundError(str(self))
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    assert activation.missing_markers(["MARK fast path on"], texts=(), workdir=tmp_path,
+                                      since=time.time() - 60) == []
+
+
 def test_the_match_is_exact_and_case_sensitive():
     assert activation.missing_markers(["Cache: ON"], texts=("cache: on",)) == ["Cache: ON"]
 

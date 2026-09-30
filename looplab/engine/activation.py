@@ -89,8 +89,19 @@ def _fresh_logs(workdir, since: Optional[float]) -> list:
     start: a log left by an EARLIER attempt in the deliberately reused workdir may hold a marker the
     failing attempt never printed, and must not vouch for it."""
     out = []
+
+    def _mtime(path) -> float:
+        # PER ENTRY (critic 2026-09-30, crit_v51 F7): the key stat-ed every entry inside the
+        # listing's one `try`, so a single dangling `latest.log` link emptied the whole listing and
+        # every declared marker read as missing. An entry that cannot be stat-ed sorts last and is
+        # skipped by the loop's own `stat` below.
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return float("-inf")
+
     try:
-        entries = sorted(Path(workdir).glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+        entries = sorted(Path(workdir).glob("*.log"), key=_mtime, reverse=True)
     except OSError:
         return out
     for path in entries:
