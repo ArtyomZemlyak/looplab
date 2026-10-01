@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import quote, unquote, urlencode, urlsplit
 
 import httpx
 
@@ -36,10 +36,10 @@ MCP_INSTRUCTIONS = (
     "MCP Connected proves stdio only; use connection_check for live run reads. "
     "Client tool approval may still be required. Inspect isError/is_error, permission_denials and HTTP status; exit 0 is not an applied command receipt. "
     "Transport loss returns status=null. A write acknowledgement can also be unknown after 5xx, oversized or invalid JSON responses, even with HTTP 200. Inspect outcome/code and original receipts before any exact retry, never recover by inventing a new key. "
-    "Typed progress/receipt reads verify the returned generation and receipt command ID; response_context_mismatch is unavailable evidence even at HTTP 200. Refresh state/original receipts before acting. "
+    "Typed progress/result/command reads verify the returned generation and command receipt ID; response_context_mismatch is unavailable evidence even at HTTP 200. Refresh state/original receipts before acting. "
     "Live operations/operation_schema discovery can also be unavailable. Check code/outcome before choosing routes; a failed catalog read is not an empty capability list. "
     "Follow enabled admission/finish obligations. A trainer exit is not terminal evaluation. "
-    "After each terminal node and finalized run, read generation-fenced result-notices and POST "
+    "After each terminal node and finalized run, call result_notices with the current generation and POST "
     "a brief interpretation in the user's language with receipt_id, evidence_token and a stable "
     "action_id; retry a lost response with the exact body. Scores come from LoopLab, not prose. "
     "On reconnect, follow result-notices.next_cursor for older receipts, preserving expected_generation; only publish missing current commentary. A changed cursor requires refreshing the latest page. "
@@ -227,6 +227,21 @@ class HarnessAPI:
         self._run_identity(run_id, expected_generation)
         return self._checked_generation(self.request("GET", f"/api/runs/{quote(run_id, safe='')}/harness-progress"
                             f"?expected_generation={expected_generation}&brief=true"), expected_generation)
+
+    def result_notices(self, run_id: str, expected_generation: str,
+                       limit: int = 50, cursor: str | None = None) -> dict:
+        self._run_identity(run_id, expected_generation)
+        if type(limit) is not int or not 1 <= limit <= 200:
+            raise ValueError("limit must be an integer from 1 to 200")
+        if cursor is not None and (not isinstance(cursor, str) or not 1 <= len(cursor) <= 256):
+            raise ValueError("cursor must be the unchanged next_cursor, at most 256 characters")
+        # Cursor is opaque client-side. The server binds its scope and anchor;
+        # encoding a single query avoids hand-built URLs and follows no page itself.
+        query = {"expected_generation": expected_generation, "limit": limit}
+        if cursor is not None:
+            query["cursor"] = cursor
+        path = f"/api/runs/{quote(run_id, safe='')}/result-notices?{urlencode(query)}"
+        return self._checked_generation(self.request("GET", path), expected_generation)
 
     def connection_check(self, run_id: str, expected_generation: str = "") -> dict:
         """Explicit, read-only bootstrap check; never resumes a worker or probes a model.
@@ -471,6 +486,23 @@ def build_server(api: HarnessAPI):
         when the reply is over cap, not a JSON object or lacks matching generation.
         A different generation returns response_context_mismatch without its body."""
         return api.run_progress(run_id, expected_generation)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
+                                        idempotentHint=True, openWorldHint=False))
+    def result_notices(run_id: str, expected_generation: str,
+                       limit: int = 50, cursor: str | None = None) -> dict:
+        """Read current terminal node/run evidence and existing chat interpretations.
+
+        One generation-fenced GET; no automatic paging, retry, submit or resume.
+        Pass next_cursor unchanged for older receipts; refresh the latest page after
+        draining or changed cursor evidence. Limit 1..200, default 50; reduce it if
+        the response exceeds the byte cap. Check status/code/outcome before body:
+        malformed or mismatched-generation HTTP 200 is unavailable, not zero results.
+        POST missing interpretations via api_request using current receipt_id and
+        evidence_token, a stable action_id and exact body for lost-response retries.
+        Commentary never replaces checkpoints/reports or adds an engine wait.
+        """
+        return api.result_notices(run_id, expected_generation, limit, cursor)
 
     @mcp.tool()
     def api_request(method: str, path: str, body: dict | None = None,

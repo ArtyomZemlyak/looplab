@@ -84,6 +84,8 @@ When the evidence supports a reusable conclusion, publish it through `/lessons`
 with terminal node IDs; never include a claimed score in place of evaluation.
 
 After each terminal node and finalized run, read generation-fenced `/result-notices`.
+MCP `result_notices(run_id, expected_generation, limit, cursor)` performs this read
+and verifies the returned generation. Check status/code/outcome before using body.
 Follow `next_cursor` with the same generation to recover older current receipts.
 Refresh the latest page if cursor evidence changed, and after draining for new completions.
 For results without current commentary, POST a brief interpretation in the user's language

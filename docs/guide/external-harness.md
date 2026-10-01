@@ -79,8 +79,10 @@ Metrics. Recovered metrics are explicitly labelled and caveats are explained.
 
 External agents should add a short interpretation after each completion:
 
-1. Read `GET /api/runs/{run_id}/result-notices?expected_generation=TOKEN` through
-   MCP `api_request`. The current run generation comes from `/state`.
+1. Call MCP `result_notices(run_id, expected_generation)` with the current run
+   generation from `/state`. Check `status`, `code` and `outcome` before using `body`.
+   This reads `GET /api/runs/{run_id}/result-notices?expected_generation=TOKEN`;
+   direct HTTP/MCP `api_request` is also available.
 2. Copy the item's `id` and `evidence_token`. Submit through MCP `api_request`:
 
    ```json
@@ -118,6 +120,14 @@ Start with the latest page. Its `items` are chronological within the page;
 `next_cursor` reads the next **older** page with the same `expected_generation`
 and chosen `limit`. Pass the cursor unchanged until `next_cursor` is null
 (`has_more=false`). Even more than 200 receipts can be drained in bounded pages.
+MCP `result_notices(run_id, expected_generation, limit=50, cursor=null)` builds this
+query and verifies the returned generation. Pass the previous `body.next_cursor`
+as `cursor`, using the same generation; omit cursor for the latest page. Each call
+does one GET and never follows another page or retries automatically. HTTP errors,
+including cursor refresh advice, pass through. A malformed, over-cap or different
+generation HTTP-200 response is unavailable evidence with no usable body, not an
+empty result list. The tool checks the generation envelope, not the complete
+receipt domain schema; server evidence tokens and POST validation still apply.
 If an MCP reply exceeds its byte cap, start again with a smaller page limit.
 For each current receipt with `commentary=null`, publish an evidence-bound summary
 with a stable action ID for that evidence version. Keep the exact body for retries;
@@ -218,7 +228,7 @@ remain necessary; the diagnostic never completes that reset itself.
 
 The result distinguishes unreachable UI/API, refused credentials/access, a missing
 run, changed context, missing server harness credential and incomplete responses.
-For `api_request`, `run_progress` and `command_receipt`, an HTTP transport failure
+For `api_request`, `run_progress`, `result_notices` and `command_receipt`, an HTTP transport failure
 returns `status: null` with fixed diagnostics. A GET has `code: api_unreachable`,
 `outcome: unavailable`; this is unavailable evidence, not proof of a missing receipt.
 A mutation has `code: request_outcome_unknown`, `outcome: unknown`: the server may
@@ -235,7 +245,7 @@ or invalid JSON **2xx** acknowledgements. The original HTTP status survives; ins
 `response_too_large` or `invalid_json`. A bounded 5xx body remains available; oversized
 and malformed success bodies are not presented as receipts. A read over the 256 KiB
 cap returns `response_incomplete`/`unavailable` with narrower-query advice; the cap
-does not suggest resubmitting a write. Typed `run_progress`/`command_receipt` also
+does not suggest resubmitting a write. Typed `run_progress`/`result_notices`/`command_receipt` also
 refuse HTTP-200 non-object bodies. This is envelope validation, not a substitute for
 domain schemas or source health. These typed reads also verify that the returned
 generation matches the requested digest (either hex case). `command_receipt` checks
@@ -328,9 +338,9 @@ Keep that run process open while the coding agent sends commands from another te
 
 Configure your coding agent's MCP client to launch `looplab harness-mcp` over stdio,
 with **only** `LOOPLAB_HARNESS_TOKEN` and, if the server is elsewhere,
-`LOOPLAB_HARNESS_URL=http://127.0.0.1:8765`. The process offers eleven tools:
+`LOOPLAB_HARNESS_URL=http://127.0.0.1:8765`. The process offers twelve tools:
 `capabilities`, `connection_check`, `phases`, `phase_info`, `settings_keys`, `setting_info`, `operations`,
-`operation_schema`, `run_progress`, `command_receipt` and `api_request`. The latter
+`operation_schema`, `run_progress`, `result_notices`, `command_receipt` and `api_request`. The latter
 forwards to the same authenticated HTTP API as the UI. It never writes directly to
 the event log. Use the live `operations` catalog to discover read, settings,
 task, evidence, artifact and control routes, and `operation_schema` for a route's
@@ -1059,11 +1069,15 @@ interpreter. Uvicorn may be present as an MCP dependency; it must not be importe
 by the stdio path. Combine this option with the discovery/response faults above.
 Use `--result-backlog --case all` in a fresh output directory to defer the two
 node interpretations across MCP death/UI restart, then recover them using one-item
-pages. Each summary is posted and exactly retried while its next cursor stays valid;
+pages through typed MCP `result_notices`. Each summary is posted and exactly retried while its next cursor stays valid;
 finalized run/node receipts are paged too. This covers both agent loss and engine
 loss with an explicit resume. It can use `--mcp-python`; response-loss proxy options
 are separate probes. The fixture waits for the engine's existing post-evaluation
 `trust_scan` before asserting that commentary/page reads append no events.
+`--case agent_loss --drop-command-response --read-fault stale_result_generation`
+instead replaces a successful result page's generation at the owned proxy. The
+typed tool must return unavailable context without those receipts; the next explicit
+read recovers. This fault is synthetic transport evidence, never an ML result.
 
 ## Delegating only code editing
 

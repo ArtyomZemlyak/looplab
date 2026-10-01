@@ -19,7 +19,6 @@ import subprocess
 import sys
 import threading
 import time
-from urllib.parse import urlencode
 
 import anyio
 from mcp import ClientSession
@@ -177,17 +176,23 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
             args = {"run_id": "demo", "expected_generation": generation}
             if read_fault == "wrong_receipt":
                 args["idempotency_key"] = "idle:candidate:0"
-            lost = await client.call("command_receipt" if read_fault == "wrong_receipt" else "run_progress", args)
+            tool = {"wrong_receipt": "command_receipt", "stale_result_generation": "result_notices"}.get(read_fault, "run_progress")
+            lost = await client.call(tool, args)
             assert lost["status"] == (None if read_fault == "disconnect" else 200)
             assert lost["code"] == ("api_unreachable" if read_fault == "disconnect" else "response_context_mismatch")
             assert lost["outcome"] == "unavailable"
             if read_fault != "disconnect":
                 assert "body" not in lost
                 assert lost["reason"] == ("command_mismatch" if read_fault == "wrong_receipt" else "generation_mismatch")
+            if tool == "result_notices":
+                recovered_page = await client.notices()
+                assert recovered_page["generation"] == generation
+                assert any(row["id"] == "node:0:0" for row in recovered_page["items"])
+                proof["result_page_recovered_explicitly"] = True
             assert (await client.receipt("idle:candidate:0"))["command"]["id"] == proof["original_receipt"]
             assert (await client.progress())["complete"]
             assert (runs / "demo" / "events.jsonl").read_bytes() == before
-            proof.update(lost_read=lost, failed_read_changed_no_work=True)
+            proof.update(lost_read=lost, failed_read_changed_no_work=True, failed_read_tool=tool)
 
     async def recovered(client):
         rd = runs / "demo"
@@ -234,10 +239,7 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
             await client.call("phases", {"query": "result_summary"})
             await client.call("phase_info", {"phase_id": "result_summary"})
             while True:
-                query = {"expected_generation": generation, "limit": 1}
-                if cursor:
-                    query["cursor"] = cursor
-                page = await client.request("GET", "result-notices?" + urlencode(query))
+                page = await client.notices(limit=1, cursor=cursor)
                 row, = page["items"]
                 assert row["kind"] == "node" and row["commentary"] is None
                 seen.append(row["node_id"])
@@ -253,7 +255,8 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
             assert seen == [1, 0], seen
             after = (rd / "events.jsonl").read_bytes()
             assert after == before, after[len(before):].decode("utf8")
-            proof.update(backlog_node_order=seen, backlog_commentary_changed_no_work=True)
+            proof.update(backlog_node_order=seen, backlog_commentary_changed_no_work=True,
+                         typed_result_notices=True)
         await client.call("phases", {"query": "recovery"})
         await client.call("phase_info", {"phase_id": "recovery"})
         await client.command("run_abort", {"reason": "Completed disposable idle recovery acceptance."}, "idle:finish")
@@ -262,10 +265,7 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
         if result_backlog:
             cursor, seen = None, []
             while True:
-                query = {"expected_generation": generation, "limit": 1}
-                if cursor:
-                    query["cursor"] = cursor
-                page = await client.request("GET", "result-notices?" + urlencode(query))
+                page = await client.notices(limit=1, cursor=cursor)
                 row, = page["items"]
                 assert row["commentary"]
                 seen.append(row["id"])
@@ -322,7 +322,8 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
 
     try:
         if drop_command_response:
-            proxy = ResponseLossProxy(url, response_fault, read_fault)
+            proxy = ResponseLossProxy(url, response_fault,
+                "stale_generation" if read_fault == "stale_result_generation" else read_fault)
         server, thread = start_ui()
         flags = {"external_harness": True, "deep_research_every": -1, "report_every": 0, "novelty_mode": "off",
             "foresight": False, "track_hypotheses": False, "concept_pivot": False, "concept_run_base": False,
@@ -403,7 +404,7 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
                              if discovery_fault != "none" else [])
             assert proxy.dropped == catalog_reads + [{"method": "POST", "route": "commands", "upstream_status": 200},
                                      {"method": "POST", "route": "result-notices", "upstream_status": 200},
-                                     {"method": "GET", "route": "command-receipt" if read_fault == "wrong_receipt" else "harness-progress", "upstream_status": 200}]
+                                     {"method": "GET", "route": {"wrong_receipt": "command-receipt", "stale_result_generation": "result-notices"}.get(read_fault, "harness-progress"), "upstream_status": 200}]
             assert proof["exact_retry_receipt"] == proof["original_receipt"]
             assert len((rd / "result_commentary.jsonl").read_text(encoding="utf8").splitlines()) == 3
             proof["commentary_count"] = 3
@@ -435,7 +436,7 @@ def main():
                         help="Lose accepted command/commentary replies and one read reply through an owned TCP proxy.")
     parser.add_argument("--response-fault", choices=["disconnect", "invalid_json", "oversized", "server_error"],
                         default="disconnect", help="Replace accepted write replies instead of disconnecting; requires --drop-command-response.")
-    parser.add_argument("--read-fault", choices=["disconnect", "stale_generation", "wrong_receipt"],
+    parser.add_argument("--read-fault", choices=["disconnect", "stale_generation", "wrong_receipt", "stale_result_generation"],
                         default="disconnect", help="Replace one successful read with mismatched identity; requires --drop-command-response.")
     parser.add_argument("--discovery-fault", choices=["none", "disconnect", "invalid_json", "invalid_catalog"],
                         default="none", help="Fault both live discovery tools before the first candidate; requires --drop-command-response.")

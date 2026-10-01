@@ -12,7 +12,7 @@ def test_mcp_advertises_run_controls_and_full_settings_discovery():
         lambda request: pytest.fail("listing local tools contacted the UI")))
     tools = anyio.run(build_server(api).list_tools)
     assert {"capabilities", "phases", "phase_info", "settings_keys", "setting_info", "operations",
-            "operation_schema", "api_request", "run_progress", "command_receipt", "connection_check"} == {tool.name for tool in tools}
+            "operation_schema", "api_request", "run_progress", "result_notices", "command_receipt", "connection_check"} == {tool.name for tool in tools}
     connection = next(tool for tool in tools if tool.name == "connection_check")
     hints = connection.annotations.model_dump(by_alias=True)
     assert hints["readOnlyHint"] and hints["idempotentHint"] and not hints["destructiveHint"]
@@ -23,6 +23,12 @@ def test_mcp_advertises_run_controls_and_full_settings_discovery():
     receipt = next(tool for tool in tools if tool.name == "command_receipt")
     hints = receipt.annotations.model_dump(by_alias=True)
     assert hints["readOnlyHint"] and not hints["destructiveHint"]
+    results = next(tool for tool in tools if tool.name == "result_notices")
+    hints = results.annotations.model_dump(by_alias=True)
+    assert hints["readOnlyHint"] and hints["idempotentHint"] and not hints["destructiveHint"]
+    schema = results.model_dump(by_alias=True)["inputSchema"]
+    assert schema["required"] == ["run_id", "expected_generation"]
+    assert schema["properties"]["limit"]["default"] == 50
     assert build_server(api).instructions == MCP_INSTRUCTIONS
     assert "current generation" in MCP_INSTRUCTIONS[:512]
     assert "command_receipt" in MCP_INSTRUCTIONS[:512]

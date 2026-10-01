@@ -97,6 +97,14 @@ class Client:
         assert result["status"] == 200, result
         return result["body"]
 
+    async def notices(self, limit=50, cursor=None):
+        args = {"run_id": "demo", "expected_generation": self.generation, "limit": limit}
+        if cursor is not None:
+            args["cursor"] = cursor
+        result = await self.call("result_notices", args)
+        assert result["status"] == 200 and not result.get("code"), result
+        return result["body"]
+
     async def command(self, kind, data, key):
         await self.request("POST", "commands", {"expected_generation": self.generation,
             "type": kind, "data": data}, key)
@@ -146,7 +154,7 @@ class Client:
         await self.progress()
         await self.call("phases", {"query": "result_summary"})
         await self.call("phase_info", {"phase_id": "result_summary"})
-        rows = await until(lambda: self.read("result-notices"), lambda value: any(
+        rows = await until(self.notices, lambda value: any(
             row["kind"] == kind and (nid is None or row.get("node_id") == nid) for row in value["items"]))
         row = next(row for row in rows["items"] if row["kind"] == kind and (nid is None or row.get("node_id") == nid))
         body = {"expected_generation": self.generation, "receipt_id": row["id"],
