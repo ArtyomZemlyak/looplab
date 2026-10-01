@@ -345,6 +345,12 @@ no extra verdict or early-stop authority. Recorded pause/finish/stop requests
 direct the agent to live state and command receipts; they do not prove that an
 engine or external agent process is alive. Submitted experiments remain visible
 as unsettled even when their evaluator has exited.
+Even when every node is terminal and no pause was recorded, an absent engine owner
+directs the agent to `recovery` before another candidate. An inconclusive lock probe
+has its own unknown-status explanation and does not prove engine death. These hints
+offer no automatic `resume`: inspect original receipts, then explicitly choose
+recovery or finalization. When a live engine is merely idle, `choose_direction`
+remains available. Neither branch claims that the external agent is connected.
 The next-step explanation lists the same verdict vocabulary the server validates:
 stage checks use `proceed`, `inconclusive`, `fail`; monitors use `continue`, `watch`
 and `abort` only when that question grants kill authority; deadline review uses
@@ -713,6 +719,9 @@ normal; it does not create a new research run. Search `phases("recovery")` and r
    interpreting a missing decision or receipt. Check pending checkpoints and
    candidate/finish requirements. **Agent cycle** in the UI shows the same
    obligations and links to the event timeline.
+   Check the engine probe even if there are no pending nodes: a process can die
+   between experiments without recording pause. Stopped or unknown idle engines
+   point to `phase_info("recovery")`; reconnection and repeated reads start no work.
 3. For a lost command response, call MCP `command_receipt(run_id,
    expected_generation, idempotency_key=ORIGINAL_KEY)`, or supply `command_id`
    instead of the key if known. It performs one GET of `/command-receipt`; the key
@@ -794,6 +803,8 @@ python -m benchmarks.external_deadline_smoke --out .tmp/deadline-proof
 python -m benchmarks.external_live_monitor_smoke --out .tmp/live-monitor-proof
 # Compare measured ASHA rungs, recover a stop question, and test objective retarget.
 python -m benchmarks.external_asha_smoke --out .tmp/asha-proof
+# Recover between experiments: MCP loss with a live engine or an explicitly resumed engine.
+python -m benchmarks.external_idle_recovery_smoke --out .tmp/idle-proof
 ```
 
 The offline scenario runs three real CPU training configurations with a protected
@@ -877,6 +888,16 @@ interpretation, protected scorer bytes stay unchanged, and `inspect`/`replay` pa
 Use `--case same_resource_stop`, `missing_resource`, `unmatched_rung`, `retarget`
 or `retarget_open` to select one case in a new output directory. This is protocol
 acceptance with real short SGD, not a claim that ASHA or the agent makes good ML decisions.
+
+The idle recovery probe finishes a protected real SGD evaluation before killing
+its own MCP and restarting its private UI. With only MCP loss, the same engine
+waits for another explicit candidate. With engine loss too, `run_progress` directs
+the new session to recovery despite having no pending nodes or recorded pause.
+Three repeated reads leave the event log unchanged; a durable explicit `resume`
+creates one replacement engine, and an exact retry creates none. Both cases
+measure a second candidate, publish result interpretations, finalize explicitly
+and pass `inspect`/`replay`. Select `--case agent_loss` or `--case engine_loss`.
+This short protocol test observes engine ownership, not remote agent availability.
 
 ## Delegating only code editing
 

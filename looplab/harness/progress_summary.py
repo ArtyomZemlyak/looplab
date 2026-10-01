@@ -89,8 +89,22 @@ def _next_step(progress: dict) -> dict:
                      detail + " Finalization waits for settlement or explicit cancellation; further proposals have separate gates.",
                      [f"GET {_RUN}/state?observe_only=true", f"GET {_RUN}/harness-checkpoints?expected_generation=TOKEN",
                       f"GET {_RUN}/command-receipt?expected_generation=TOKEN&command_id={{command_id}}"])
+    # A dead owner between candidates leaves no pending node or recorded pause.
+    # That absence cannot make the next proposal actionable. Keep an inconclusive
+    # probe distinct from death and let recovery choose resume explicitly.
+    alive = progress["execution"]["engine_running"]
+    if alive is not True:
+        title = ("Engine stopped · inspect idle run" if alive is False else
+                 "Engine status unknown · inspect idle run")
+        detail = ("No live engine owner was observed." if alive is False else
+                  "The engine lock probe is inconclusive; this does not prove engine death.")
+        return _step("inspect_lifecycle", title,
+                     detail + " No unsettled experiment is recorded. Inspect state and original command receipts before submitting another candidate or choosing explicit resume or finalization. Reading or reconnecting starts no work; no internal agent takeover is automatic.",
+                     [f"GET {_RUN}/state?observe_only=true", f"GET {_RUN}/events",
+                      f"GET {_RUN}/command-receipt?expected_generation=TOKEN&command_id={{command_id}}"],
+                     phase_id="recovery")
     return _step("choose_direction", "Choose the next experiment or finish",
-                 "Use measured evidence to choose. The two paths below have different obligations; policy advice does not submit a candidate.",
+                 "LoopLab waits for an explicit external decision between experiments; MCP disconnection does not trigger an internal agent takeover. Use measured evidence to choose. The two paths below have different obligations; policy advice does not submit a candidate.",
                  [f"GET {_RUN}/state?observe_only=true", f"GET {_RUN}/harness-contract"])
 
 

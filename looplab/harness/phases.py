@@ -58,7 +58,7 @@ OPERATOR_WRITES = frozenset({"PUT /api/settings", "POST /api/start",
 # evaluator and its recorded metrics are never replaced by an agent's judgement.
 PHASES: tuple[Phase, ...] = (
     Phase("recovery", "Run/CommandReceipt", "serve/command_receipt.py; serve/run_commands.py",
-          "Reconnect to the same run; observe a saved receipt before explicitly choosing recovery. Agent liveness is not measured.",
+          "Reconnect to the same run; observe a saved receipt before explicitly choosing recovery. An idle run still needs engine ownership before another candidate. An inconclusive lock probe does not prove death; reads never resume. Agent liveness is not measured.",
           ("GET /api/runs/{run_id}/state", "GET /api/runs/{run_id}/command-receipt",
            "GET /api/runs/{run_id}/harness-progress", "GET /api/runs/{run_id}/harness-checkpoints"),
           ("command:pause", "command:resume", "command:run_abort",

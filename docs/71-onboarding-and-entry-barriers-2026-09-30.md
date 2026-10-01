@@ -594,9 +594,9 @@ External run здесь намеренно не получал кандидат�
 | OB-07 | Частично | Composer показывает активные права и понятное пояснение; четыре варианта раскрываются по запросу, выбор возвращает фокус на видимый переключатель. | Проверить понимание режимов с новым пользователем. |
 | OB-08 | Частично | Essential открывается с модели, показывает 13 полей ресурсов и лимитов с короткими пояснениями; технические детали и runtime permissions раскрываются отдельно. | Проверить подключение модели и понимание лимитов с новым пользователем. |
 | OB-09 | Частично | Run workspace и Agent cycle показывают next step; списки различают внешний режим и engine, attention открывает текущие вопросы (§34–36). Гибель MCP и pause/resume проверены (§37–38). | Подключение самого агента не измеряется; многочасовой сценарий OB-10 ещё открыт. |
-| OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–45 проверяют MCP/UI recovery, pause/resume, engine loss, obligations, monitor, deadline и ASHA. §44–45 добавляют реальные live curves, явный stop и снятие stop authority после retarget. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
+| OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–46 проверяют MCP/UI recovery, pause/resume, engine loss, obligations, monitor, deadline и ASHA. §44–45 добавляют live curves и retarget; §46 — recovery между экспериментами без pending nodes. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
 | OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. §39/41 исправляют ссылки checkpoint и concept base на реальные MCP-фазы. | Проверены контракт, subprocess-кандидаты, desktop и discovery из серверной подсказки; подключение нового клиента относится к OB-10. |
-| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–45: source health, lifecycle verdict, engine recovery, obligations, deadline, training/ASHA monitor и retarget при открытом вопросе. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. Живость внешнего агента остаётся явно неизмеряемой. |
+| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–46: source health, lifecycle verdict, engine recovery, obligations, deadline, training/ASHA monitor, retarget и idle recovery без pending nodes. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. Живость внешнего агента остаётся явно неизмеряемой. |
 | OB-14 | Частично | Начало сайта показывает два основных входа. | Большая архитектурная схема всё ещё нуждается в упрощении для первого знакомства. |
 
 Остальные пункты §3 и соответствующие сценарии §11 остаются открытыми. Изменения первого
@@ -2071,3 +2071,61 @@ OpenAPI reference регенерирован, список маршрутов н
 тестами; live матрица отдельно проверяет настоящие curves, два MCP recovery и
 operator retarget. Многочасовой сеанс, модельные решения, интерактивные разрешения
 клиентов и обнаружение гибели remote agent остаются открытыми в OB-10.
+
+## 46. OB-10/11/12: recovery между экспериментами без pending nodes
+
+**2026-10-01.** Проверен следующий пробел: engine может умереть после terminal
+результата, когда нет ни pending nodes, ни открытого checkpoint, ни записанного
+pause. В этом состоянии `harness-progress.next_step` всё ещё предлагал
+`choose_direction`, хотя наблюдаемый engine owner отсутствовал. При неопределённом
+lock probe выдавалась та же подсказка. Три регрессионных случая сначала упали.
+
+Теперь такой idle run возвращает `inspect_lifecycle` и настоящую MCP-фазу
+`recovery`. Stopped и unknown имеют разные объяснения: неопределённый probe не
+доказывает гибель процесса. Подсказка ведёт к state и сохранённым command receipts
+перед новым кандидатом или явным resume/finalization; `action=null`, автоматического
+resume нет. Неполные источники и pending checkpoints сохраняют прежний приоритет.
+Когда engine owner жив, доступен `choose_direction` с явным объяснением ожидания
+внешнего решения и отсутствия автоматического internal takeover после MCP loss.
+Это read advice, не новый admission gate и не изменение control command semantics.
+
+### Реальная проверка двух процессов после measured результата
+
+Добавлен `benchmarks.external_idle_recovery_smoke`. На каждом приватном run
+реальный защищённый CPU SGD command обучает и измеряет held-out MSE. Editable
+только `config.json`. Первый кандидат имеет 16 steps, второй — 32; scorer не
+изменяется и не вызывается второй раз для получения того же node score.
+Исследовательские, monitor, ASHA и deadline obligations здесь явно выключены,
+чтобы проверить ожидание между экспериментами, а не очередной checkpoint.
+
+| Случай | Проверенный результат |
+| --- | --- |
+| `agent_loss` | После measured node fixture завершает свой MCP и перезапускает свой UI. Тот же engine жив, pending nodes нет. Новая сессия читает исходную квитанцию и трижды получает `choose_direction`; дополнительные кандидаты или результаты не появляются. Второй кандидат отправлен явно; всего один engine process |
+| `engine_loss` | В том же idle состоянии fixture завершает также свой engine. Новая сессия получает `inspect_lifecycle`/`recovery`, хотя pause не записан. Три повторных чтения не меняют event log и не запускают child. Явный durable `resume` создаёт один replacement engine; exact retry не создаёт другого. После него новый кандидат оценивается нормально |
+
+В обоих случаях generation сохраняется, original receipt ID совпадает, protected
+scorer bytes неизменны. Ровно **два** score executions и **два** node terminal
+events; measured MSE **0.13721179500378475** и **0.01337676906957059**. Каждый terminal
+node и явно завершённый run получают русскую result interpretation со stable
+action ID и evidence token. CLI `inspect`/`replay` проходят.
+
+Proof: `.tmp/external-idle-proof-2/acceptance.json`. Первая попытка fixture
+исправлена: compact command receipt использует поле `id`, не `command_id`;
+это ошибка probe, не production API. Приватные процессы очищены; пользовательский
+UI/server не перезапускался.
+
+UI использует существующий код `inspect_lifecycle`: mounted test проверяет
+обновление idle recovery-подсказки без нового события и скрытие старой подсказки
+при failed refresh. Обновлены recovery phase purpose, external guide и full B/E
+architecture diagram. Новые endpoints, настройки, фоновые таймеры и события
+не добавлены; OpenAPI reference регенерирован без смены маршрутов.
+
+Перед изменением прошли **193 replay** проверки. После исправления — **131**
+backend/contract/layering и **110** MCP/handoff/connection/receipt/liveness
+проверок, **5 mounted UI**, **32 docs/architecture**; `mkdocs build --strict`
+успешен. Три исходно падавшие idle recovery-регрессии входят в backend набор.
+
+Граница: живость внешнего агента по-прежнему **не измеряется**. Успешное MCP чтение
+подтверждает только этот запрос; тихий run не доказывает гибель агента. Два коротких
+scripted-прогона не закрывают многочасовую работу, model judgments или интерактивные
+разрешения клиентов. Этот пункт закрывает неверный recovery hint для idle engine.

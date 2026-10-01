@@ -82,7 +82,8 @@ def test_concept_base_blocker_resolves_to_the_actual_mcp_phase(tmp_path):
     assert (rd / "events.jsonl").read_bytes() == before
 
 
-def test_progress_restores_decisions_reviews_and_checkpoint_answers(tmp_path):
+def test_progress_restores_decisions_reviews_and_checkpoint_answers(tmp_path, monkeypatch):
+    monkeypatch.setattr("looplab.engine.run_lifecycle.engine_liveness", lambda _: True)
     rd, store, client = _run(tmp_path)
     generation = run_generation_token(store.read_all())
     path = "/api/runs/demo/harness-progress"
@@ -164,7 +165,8 @@ def test_progress_restores_decisions_reviews_and_checkpoint_answers(tmp_path):
     assert hidden_tail["source_health"]["events"]["complete"] is False
 
 
-def test_compact_progress_preserves_gates_health_counts_and_history_location(tmp_path):
+def test_compact_progress_preserves_gates_health_counts_and_history_location(tmp_path, monkeypatch):
+    monkeypatch.setattr("looplab.engine.run_lifecycle.engine_liveness", lambda _: True)
     rd, store, client = _run(tmp_path)
     config = json.loads((rd / "config.snapshot.json").read_text())
     config.update(deep_research_every=1, report_every=1)

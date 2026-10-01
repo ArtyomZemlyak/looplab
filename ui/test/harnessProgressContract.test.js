@@ -40,9 +40,14 @@ test('main status refreshes engine observations without events and withdraws fai
     assert.equal(requests[0].url.searchParams.get('expected_generation'), generation)
     assert.equal(requests[0].init.cache, 'no-store')
     payload = { ...payload, execution: { engine_running: false }, next_step: { ...next_step,
-      title: 'Engine stopped', detail: 'Recorded starts do not prove training continues.' } }
+      code: 'inspect_lifecycle', phase_id: 'recovery',
+      title: 'Engine stopped · inspect idle run',
+      detail: 'No unsettled experiment is recorded. Inspect state and original command receipts before submitting another candidate or choosing explicit resume or finalization. Agent connection: not measured.' } }
     await React.act(async () => { t.mock.timers.tick(10_000) })
     await until(() => view.container.textContent.includes('Engine stopped'), 'same-event engine probe')
+    assert.match(view.container.textContent, /inspect idle run/)
+    assert.match(view.container.textContent, /before submitting another candidate/)
+    assert.match(view.container.textContent, /Agent connection: not measured/)
     assert.ok(!view.container.textContent.includes('Engine last observed: running'))
     failure = true
     await React.act(async () => { t.mock.timers.tick(10_000) })
