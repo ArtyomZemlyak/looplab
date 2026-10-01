@@ -95,12 +95,16 @@ def test_cli_reports_missing_credential_before_opening_stdio(monkeypatch):
 @pytest.mark.parametrize("by_key", [True, False])
 def test_command_receipt_is_one_get_with_original_key_in_header_only(status, by_key):
     seen = []
+    from looplab.serve.command_identity import command_identity
+    payload = ({"generation": "b" * 64, "command": {"id": command_identity("original-key")[0]
+        if by_key else "cmd_" + "a" * 32, "status": "succeeded"}, "terminal": True}
+        if status == 200 else {"unchanged": True})
     def handler(request):
         seen.append(request)
-        return httpx.Response(status, json={"unchanged": True})
+        return httpx.Response(status, json=payload)
     api = HarnessAPI("http://127.0.0.1:8765/proxy", "scoped", transport=httpx.MockTransport(handler))
     args = {"idempotency_key": "original-key"} if by_key else {"command_id": "cmd_" + "a" * 32}
-    assert api.command_receipt("demo # %2F", "b" * 64, **args) == {"status": status, "body": {"unchanged": True}}
+    assert api.command_receipt("demo # %2F", "b" * 64, **args) == {"status": status, "body": payload}
     assert len(seen) == 1 and seen[0].method == "GET"
     assert seen[0].url.path == "/proxy/api/runs/demo # %2F/command-receipt"
     assert seen[0].url.params["expected_generation"] == "b" * 64
@@ -165,15 +169,16 @@ def test_api_refuses_redirect_to_avoid_forwarding_owner_token():
 @pytest.mark.parametrize("run_id", ["demo space", "mnist # %2F"])
 def test_compact_progress_is_one_fenced_authenticated_read(status, run_id):
     seen = []
+    payload = {"generation": "a" * 64, "receipt": "unchanged"} if status == 200 else {"receipt": "unchanged"}
 
     def handler(request):
         seen.append(request)
-        return httpx.Response(status, json={"receipt": "unchanged"})
+        return httpx.Response(status, json=payload)
 
     api = HarnessAPI("http://127.0.0.1:8765", "scoped-token",
                      transport=httpx.MockTransport(handler))
     assert api.run_progress(run_id, "a" * 64) == {
-        "status": status, "body": {"receipt": "unchanged"}}
+        "status": status, "body": payload}
     assert len(seen) == 1 and seen[0].method == "GET"
     assert seen[0].url.path == f"/api/runs/{run_id}/harness-progress"
     assert dict(seen[0].url.params) == {"expected_generation": "a" * 64, "brief": "true"}

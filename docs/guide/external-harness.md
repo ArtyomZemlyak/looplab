@@ -184,6 +184,9 @@ the current generation; use that only when you intend to inspect the current run
 Generation is a hexadecimal digest: `connection_check` accepts either hex case and
 uses its canonical lowercase spelling for subsequent fenced reads. This does not
 accept a different digest or reinterpret a run ID, key or action ID.
+The returned handoff must match the run ID, generation and external mode, with
+configured credential and valid server paths/engine observation. A malformed or
+mismatched handoff stops this check before progress is read.
 Observation bypasses the ordinary state route's reconciliation of a pending
 operator reset. It can see an unfinished reset, so the subsequent generation fences
 remain necessary; the diagnostic never completes that reset itself.
@@ -209,7 +212,16 @@ and malformed success bodies are not presented as receipts. A read over the 256 
 cap returns `response_incomplete`/`unavailable` with narrower-query advice; the cap
 does not suggest resubmitting a write. Typed `run_progress`/`command_receipt` also
 refuse HTTP-200 non-object bodies. This is envelope validation, not a substitute for
-domain schemas, generation fences or source health. Generic text GETs and empty
+domain schemas or source health. These typed reads also verify that the returned
+generation matches the requested digest (either hex case). `command_receipt` checks
+the returned command ID against the requested ID or the original key's durable ID,
+using the server's identity derivation. A valid but different generation/command
+returns `response_context_mismatch`, `outcome: unavailable`, with reason
+`generation_mismatch` or `command_mismatch`. Missing/malformed identity fields return
+`response_incomplete`, reason `invalid_response`. Both retain HTTP 200 but omit the
+unbound body. Refresh state and original receipts before acting; there is no extra
+request, retry or worker restart. This verifies identity, not full response schemas
+or terminal evaluation. Generic text GETs and empty
 204/205 mutation responses remain supported; validation 4xx responses keep their
 original status/body. Never infer whether a server error occurred before or after
 acceptance without reading durable evidence.
@@ -978,6 +990,12 @@ two accepted write replies with malformed HTTP 200, over-cap HTTP 200 or HTTP 50
 The proxy first receives upstream 200 in every case. The GET reply still disconnects.
 Each independent case must preserve the same receipts, two actual score executions
 and three commentary rows; fault payloads never supply a metric.
+Add `--read-fault stale_generation` or `wrong_receipt` to replace the GET reply
+with a JSON object carrying another generation or command ID. The latter targets
+the original command receipt; the former targets progress. MCP must return
+`response_context_mismatch` despite HTTP 200, omit the body and leave work unchanged.
+Explicit fresh reads then recover the correct evidence. Each case needs a new out
+directory; write faults and read faults are independent fixture options.
 
 ## Delegating only code editing
 

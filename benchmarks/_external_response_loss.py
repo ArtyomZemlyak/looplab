@@ -6,6 +6,8 @@ Used by the real SGD/MCP acceptance fixture, never by LoopLab at runtime.
 """
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import gzip
+import json
 import socket
 import threading
 from urllib.parse import urlsplit
@@ -13,8 +15,9 @@ from looplab.harness.mcp_server import MAX_RESPONSE_BYTES
 
 
 class ResponseLossProxy:
-    def __init__(self, upstream, mode="disconnect"):
+    def __init__(self, upstream, mode="disconnect", read_mode="disconnect"):
         assert mode in ("disconnect", "invalid_json", "oversized", "server_error")
+        assert read_mode in ("disconnect", "stale_generation", "wrong_receipt")
         target = urlsplit(upstream)
         assert target.hostname == "127.0.0.1"
         self.drop_next_read = False
@@ -46,6 +49,21 @@ class ResponseLossProxy:
                             fixture.dropped.append({"method": self.command, "route": self.path.rsplit("/", 1)[-1].split("?", 1)[0],
                                                     "upstream_status": response.status})
                             self.close_connection = True
+                            if lose_read and read_mode != "disconnect":
+                                if response.getheader("Content-Encoding", "").lower() == "gzip":
+                                    payload = gzip.decompress(payload)
+                                value = json.loads(payload)
+                                if read_mode == "stale_generation":
+                                    value["generation"] = "f" * 64
+                                else:
+                                    value["command"]["id"] = "cmd_" + "f" * 32
+                                payload = json.dumps(value).encode("utf8")
+                                self.send_response(response.status)
+                                self.send_header("Content-Length", str(len(payload)))
+                                self.send_header("Content-Type", "application/json")
+                                self.end_headers()
+                                self.wfile.write(payload)
+                                return
                             if lose_write and mode != "disconnect":
                                 if mode == "invalid_json":
                                     payload = b"<html>Disposable invalid acknowledgement</html>"

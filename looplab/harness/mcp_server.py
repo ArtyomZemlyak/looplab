@@ -36,6 +36,7 @@ MCP_INSTRUCTIONS = (
     "MCP Connected proves stdio only; use connection_check for live run reads. "
     "Client tool approval may still be required. Inspect isError/is_error, permission_denials and HTTP status; exit 0 is not an applied command receipt. "
     "Transport loss returns status=null. A write acknowledgement can also be unknown after 5xx, oversized or invalid JSON responses, even with HTTP 200. Inspect outcome/code and original receipts before any exact retry, never recover by inventing a new key. "
+    "Typed progress/receipt reads verify the returned generation and receipt command ID; response_context_mismatch is unavailable evidence even at HTTP 200. Refresh state/original receipts before acting. "
     "Follow enabled admission/finish obligations. A trainer exit is not terminal evaluation. "
     "After each terminal node and finalized run, read generation-fenced result-notices and POST "
     "a brief interpretation in the user's language with receipt_id, evidence_token and a stable "
@@ -85,6 +86,23 @@ class HarnessAPI:
             return {"status": 200, "code": "response_incomplete", "outcome": "unavailable",
                     "reason": "invalid_response",
                     "message": "API read did not return a JSON object. Inspect the server and refresh this read; do not act on incomplete evidence."}
+        return result
+
+    @staticmethod
+    def _read_refusal(reason: str, *, mismatch: bool = False) -> dict:
+        return {"status": 200, "code": "response_context_mismatch" if mismatch else "response_incomplete",
+                "outcome": "unavailable", "reason": reason,
+                "message": "Run/command response did not match the requested identity. Refresh state and original receipts before acting; no retry or worker restart was made."}
+
+    def _checked_generation(self, result: dict, expected: str) -> dict:
+        result = self._checked_read(result)
+        if result["status"] != 200 or result.get("code"):
+            return result
+        generation = result["body"].get("generation")
+        if not isinstance(generation, str) or re.fullmatch(r"[a-fA-F0-9]{64}", generation) is None:
+            return self._read_refusal("invalid_response")
+        if generation.lower() != expected.lower():
+            return self._read_refusal("generation_mismatch", mismatch=True)
         return result
 
     def _result(self, response: httpx.Response, *, method: str = "GET") -> dict:
@@ -174,8 +192,8 @@ class HarnessAPI:
 
     def run_progress(self, run_id: str, expected_generation: str) -> dict:
         self._run_identity(run_id, expected_generation)
-        return self._checked_read(self.request("GET", f"/api/runs/{quote(run_id, safe='')}/harness-progress"
-                            f"?expected_generation={expected_generation}&brief=true"))
+        return self._checked_generation(self.request("GET", f"/api/runs/{quote(run_id, safe='')}/harness-progress"
+                            f"?expected_generation={expected_generation}&brief=true"), expected_generation)
 
     def connection_check(self, run_id: str, expected_generation: str = "") -> dict:
         """Explicit, read-only bootstrap check; never resumes a worker or probes a model.
@@ -231,21 +249,22 @@ class HarnessAPI:
         if handoff.get("credential_configured") is False:
             return {"ok": False, "status": 200, "code": "harness_credential_missing", "at": "handoff",
                     "message": "This server has no harness credential configured. Ask the operator to configure it and restart the UI."}
+        paths = handoff.get("server_paths")
+        if (handoff.get("run_id") != run_id or handoff.get("generation") != generation
+                or handoff.get("mode") != "external_harness" or handoff.get("credential_configured") is not True
+                or not isinstance(paths, dict)
+                or any(not isinstance(paths.get(key), str) or not paths[key] for key in ("run_root", "run_dir"))
+                or (handoff.get("engine_running") is not None and type(handoff["engine_running"]) is not bool)):
+            return {"ok": False, "status": 200, "code": "invalid_response", "at": "handoff",
+                    "message": "Handoff does not match this external run. Request fresh context before reading progress."}
         progress = read(f"/harness-progress?expected_generation={generation}&brief=true", "progress")
         if progress.get("ok") is False:
             return progress
         progress = progress["body"]
-        paths = handoff.get("server_paths")
-        if (handoff.get("run_id") != run_id or handoff.get("generation") != generation
-                or handoff.get("mode") != "external_harness" or progress.get("generation") != generation
-                or handoff.get("credential_configured") is not True
+        if (progress.get("generation") != generation
                 or not isinstance(progress.get("source_health"), dict)
                 or not isinstance(progress.get("next_step"), dict)
-                or type(progress.get("complete")) is not bool
-                or not isinstance(paths, dict)
-                or any(not isinstance(paths.get(key), str) or not paths[key]
-                       for key in ("run_root", "run_dir"))
-                or (handoff.get("engine_running") is not None and type(handoff["engine_running"]) is not bool)):
+                or type(progress.get("complete")) is not bool):
             return {"ok": False, "status": 200, "code": "invalid_response", "at": "context",
                     "message": "Connection evidence does not match this external run. Request fresh context."}
         return {"ok": True, "status": 200, "code": "run_reads_succeeded", "run_id": run_id,
@@ -276,7 +295,21 @@ class HarnessAPI:
         path = f"/api/runs/{quote(run_id, safe='')}/command-receipt?expected_generation={expected_generation}"
         if command_id:
             path += f"&command_id={command_id}"
-        return self._checked_read(self.request("GET", path, idempotency_key=idempotency_key))
+        result = self._checked_generation(self.request("GET", path, idempotency_key=idempotency_key), expected_generation)
+        if result["status"] != 200 or result.get("code"):
+            return result
+        command = result["body"].get("command")
+        if not isinstance(command, dict) or not isinstance(command.get("id"), str) or re.fullmatch(r"cmd_[0-9a-f]{32}", command["id"]) is None:
+            return self._read_refusal("invalid_response")
+        if idempotency_key:
+            # Same pure derivation as server submission/observation, not a second hash rule.
+            # Valid keys require no FastAPI import, so a remote MCP client needs no UI extra.
+            from looplab.serve.command_identity import command_identity
+
+            command_id = command_identity(idempotency_key)[0]
+        if command["id"] != command_id:
+            return self._read_refusal("command_mismatch", mismatch=True)
+        return result
 
 
 def build_server(api: HarnessAPI):
@@ -393,7 +426,8 @@ def build_server(api: HarnessAPI):
         before deciding; refresh after events or answers. This performs one GET only,
         returns HTTP failures unchanged, and never retries or submits a candidate.
         Check code/outcome before body: even HTTP 200 can carry unavailable evidence
-        when the reply is over cap or not a JSON object."""
+        when the reply is over cap, not a JSON object or lacks matching generation.
+        A different generation returns response_context_mismatch without its body."""
         return api.run_progress(run_id, expected_generation)
 
     @mcp.tool()
@@ -420,6 +454,8 @@ def build_server(api: HarnessAPI):
         occurred; read state, events and checkpoints before choosing recovery.
         Check code/outcome before body: a malformed/over-cap HTTP 200 reply is
         unavailable evidence, never proof that a receipt is absent.
+        The returned generation and command ID must match the request, including
+        the original key's durable ID; response_context_mismatch omits that body.
         """
         return api.command_receipt(run_id, expected_generation, command_id, idempotency_key)
 

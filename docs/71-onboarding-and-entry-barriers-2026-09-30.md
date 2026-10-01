@@ -594,9 +594,9 @@ External run здесь намеренно не получал кандидат�
 | OB-07 | Частично | Composer показывает активные права и понятное пояснение; четыре варианта раскрываются по запросу, выбор возвращает фокус на видимый переключатель. | Проверить понимание режимов с новым пользователем. |
 | OB-08 | Частично | Essential открывается с модели, показывает 13 полей ресурсов и лимитов с короткими пояснениями; технические детали и runtime permissions раскрываются отдельно. | Проверить подключение модели и понимание лимитов с новым пользователем. |
 | OB-09 | Частично | Run workspace и Agent cycle показывают next step; списки различают внешний режим и engine, attention открывает текущие вопросы (§34–36). Гибель MCP и pause/resume проверены (§37–38). §47 показывает последнее успешное scoped progress чтение. | Активность запросов не доказывает живость агента; многочасовой сценарий OB-10 ещё открыт. |
-| OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–50 проверяют MCP/UI recovery, pause/resume, engine loss, obligations, monitor, deadline и ASHA. §47–50 — request activity, auth configuration, потерянные/неполные ответы и canonical generation. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
+| OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–51 проверяют MCP/UI recovery, pause/resume, engine loss, obligations, monitor, deadline и ASHA. §47–51 — request activity, auth configuration, потерянные/неполные ответы, canonical generation и соответствие typed reads запросу. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
 | OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. §39/41 исправляют ссылки checkpoint и concept base на реальные MCP-фазы. | Проверены контракт, subprocess-кандидаты, desktop и discovery из серверной подсказки; подключение нового клиента относится к OB-10. |
-| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–50: source health, lifecycle verdict, engine recovery, obligations, monitor, retarget, idle recovery, request activity и unknown acknowledgement. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. §49–50 повреждают реальные replies после принятия command/commentary. Наблюдение запросов не измеряет живость агента. |
+| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–51: source health, lifecycle verdict, engine recovery, obligations, monitor, retarget, idle recovery, request activity, unknown acknowledgement и проверка identity полученной квитанции. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. §49–51 повреждают реальные replies после принятия command/commentary. Наблюдение запросов не измеряет живость агента. |
 | OB-14 | Частично | Начало сайта показывает два основных входа. | Большая архитектурная схема всё ещё нуждается в упрощении для первого знакомства. |
 
 Остальные пункты §3 и соответствующие сценарии §11 остаются открытыми. Изменения первого
@@ -2339,3 +2339,61 @@ OpenAPI reference регенерирован без изменения марш�
 маршруты, settings, response cap и engine gates не менялись. Граница: эти короткие
 scripted probes не закрывают многочасовую работу, model judgments или интерактивные
 разрешения клиентов.
+
+## 51. OB-10/12: полученный JSON должен относиться к запрошенному run/command
+
+**2026-10-01.** После §50 проверен следующий пробел: typed MCP reads принимали
+HTTP-200 JSON object с чужой generation или квитанцией другой команды. Проверка
+handoff обнаруживала неверный context только после чтения progress. До исправления
+**18** направленных regression checks упали, **1** compatibility check прошёл.
+
+Теперь `run_progress` и `command_receipt` проверяют generation из ответа против
+запрошенного digest с учётом обеих hex форм. Receipt также проверяет command ID
+против указанного ID или durable ID исходного Idempotency-Key. Derivation общая
+с server submission/observation; ключ не переименовывается и не нормализуется.
+Valid key path не импортирует FastAPI/uvicorn: subprocess с запрещёнными UI imports
+проверяет, что remote MCP client не требует локального UI extra.
+
+| Ответ с HTTP 200 | Диагностика typed read |
+| --- | --- |
+| Нет корректной generation или command identity | `response_incomplete`, `outcome=unavailable`, `reason=invalid_response` |
+| Другая generation | `response_context_mismatch`, `outcome=unavailable`, `reason=generation_mismatch` |
+| Другой command ID при той же generation | `response_context_mismatch`, `outcome=unavailable`, `reason=command_mismatch` |
+
+Status сохраняется, чужой body не возвращается. Агенту надо явно обновить state
+и original receipts до решения. Дополнительных requests, retries, нового key,
+worker restart или engine gate нет. Generic `api_request` остаётся route-general;
+это identity validation typed reads, не полная проверка domain schemas или
+доказательство terminal evaluation. HTTP failures и прежние incomplete diagnostics
+сохраняются. `connection_check` проверяет run ID, generation, mode, credential,
+paths и engine observation handoff **до** progress; malformed handoff останавливает
+проверку после двух GETs. Missing credential сохраняет собственную диагностику.
+
+### Два настоящих MCP/SGD прогона с подменой identity
+
+Owned loopback proxy получает настоящий upstream **200**, затем заменяет JSON
+progress generation (`--read-fault stale_generation`) или ID original command
+receipt (`--read-fault wrong_receipt`). MCP отказывает с указанным выше кодом,
+без body. Следующие явные reads получают настоящую квитанцию и progress;
+event log не изменяется. В обоих runs также теряются accepted command/commentary
+replies, выполняются exact retries, MCP завершается и собственный UI перезапускается.
+Reconnect ничего не запускает; второй candidate подаётся и run завершается явно.
+
+В каждом proof ровно **два** protected CPU SGD score executions, **один** engine
+process и **три** русских commentary rows. MSE **0.13721179500378475** и
+**0.01337676906957059**, scorer bytes неизменны; CLI `inspect`/`replay` проходят.
+Fault identity не считается ML evidence. Пользовательский server не затронут.
+Proofs: `.tmp/external-read-stale_generation-proof-2/acceptance.json` и
+`.tmp/external-read-wrong_receipt-proof-1/acceptance.json`.
+Первый stale-generation probe упал в fixture: proxy пытался прочитать gzip как
+JSON. Исправлено распаковывание перед подменой; повторный run прошёл. Это не
+production exception. Owned процессы закрываются через fixture cleanup.
+
+Перед изменением прошли **193 replay** проверки. Финальный backend/MCP набор —
+**214 passed**. Четыре прежних synthetic HTTP-200 fixtures были unbound objects;
+они обновлены реальными generation/command fields, error passthrough assertions
+сохранены. Ещё **31 docs/diagram** и **20 identity** checks прошли; строгая сборка
+MkDocs прошла, API reference регенерирован без изменения маршрутов. Обновлены
+manifest, MCP instructions/help, guide и full B/E diagram. Settings и runtime
+gates не менялись. Model judgments, интерактивные разрешения клиентов и
+многочасовые сеансы остаются открытыми в OB-10.

@@ -37,7 +37,7 @@ from looplab.serve.server import make_app
 CASES = ("agent_loss", "engine_loss")
 
 
-def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, response_fault="disconnect"):
+def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, response_fault="disconnect", read_fault="disconnect"):
     root.mkdir(parents=True, exist_ok=False)
     runs = root / "runs"; runs.mkdir()
     source = root / "source"; source.mkdir()
@@ -67,6 +67,7 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
              "metrics": [], "read_steps": []}
     if drop_command_response:
         proof["response_fault"] = response_fault
+        proof["read_fault"] = read_fault
     log = (root / "engine.log").open("w", encoding="utf8")
 
     def start_ui():
@@ -142,9 +143,17 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
         if proxy is not None:
             before = (runs / "demo" / "events.jsonl").read_bytes()
             proxy.drop_next_read = True
-            lost = await client.call("run_progress", {"run_id": "demo", "expected_generation": generation})
-            assert lost["status"] is None and lost["code"] == "api_unreachable"
+            args = {"run_id": "demo", "expected_generation": generation}
+            if read_fault == "wrong_receipt":
+                args["idempotency_key"] = "idle:candidate:0"
+            lost = await client.call("command_receipt" if read_fault == "wrong_receipt" else "run_progress", args)
+            assert lost["status"] == (None if read_fault == "disconnect" else 200)
+            assert lost["code"] == ("api_unreachable" if read_fault == "disconnect" else "response_context_mismatch")
             assert lost["outcome"] == "unavailable"
+            if read_fault != "disconnect":
+                assert "body" not in lost
+                assert lost["reason"] == ("command_mismatch" if read_fault == "wrong_receipt" else "generation_mismatch")
+            assert (await client.receipt("idle:candidate:0"))["command"]["id"] == proof["original_receipt"]
             assert (await client.progress())["complete"]
             assert (runs / "demo" / "events.jsonl").read_bytes() == before
             proof.update(lost_read=lost, failed_read_changed_no_work=True)
@@ -213,7 +222,7 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
 
     try:
         if drop_command_response:
-            proxy = ResponseLossProxy(url, response_fault)
+            proxy = ResponseLossProxy(url, response_fault, read_fault)
         server, thread = start_ui()
         flags = {"external_harness": True, "deep_research_every": -1, "report_every": 0, "novelty_mode": "off",
             "foresight": False, "track_hypotheses": False, "concept_pivot": False, "concept_run_base": False,
@@ -289,7 +298,7 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
         if proxy is not None:
             assert proxy.dropped == [{"method": "POST", "route": "commands", "upstream_status": 200},
                                      {"method": "POST", "route": "result-notices", "upstream_status": 200},
-                                     {"method": "GET", "route": "harness-progress", "upstream_status": 200}]
+                                     {"method": "GET", "route": "command-receipt" if read_fault == "wrong_receipt" else "harness-progress", "upstream_status": 200}]
             assert proof["exact_retry_receipt"] == proof["original_receipt"]
             assert len((rd / "result_commentary.jsonl").read_text(encoding="utf8").splitlines()) == 3
             proof["commentary_count"] = 3
@@ -321,6 +330,8 @@ def main():
                         help="Lose accepted command/commentary replies and one read reply through an owned TCP proxy.")
     parser.add_argument("--response-fault", choices=["disconnect", "invalid_json", "oversized", "server_error"],
                         default="disconnect", help="Replace accepted write replies instead of disconnecting; requires --drop-command-response.")
+    parser.add_argument("--read-fault", choices=["disconnect", "stale_generation", "wrong_receipt"],
+                        default="disconnect", help="Replace one successful read with mismatched identity; requires --drop-command-response.")
     args = parser.parse_args()
     if not 0 <= args.quiet_hold_seconds <= 14400:
         parser.error("quiet hold must be between zero and four hours")
@@ -328,8 +339,10 @@ def main():
         parser.error("response-loss acceptance requires --case agent_loss")
     if args.response_fault != "disconnect" and not args.drop_command_response:
         parser.error("response fault requires --drop-command-response")
+    if args.read_fault != "disconnect" and not args.drop_command_response:
+        parser.error("read fault requires --drop-command-response")
     root = args.out.resolve(); root.mkdir(parents=True, exist_ok=False)
-    proof = [run_case(root / name, name, args.quiet_hold_seconds, args.drop_command_response, args.response_fault)
+    proof = [run_case(root / name, name, args.quiet_hold_seconds, args.drop_command_response, args.response_fault, args.read_fault)
              for name in CASES if args.case in ("all", name)]
     (root / "acceptance.json").write_text(json.dumps(proof, ensure_ascii=False, indent=2), encoding="utf8")
 
