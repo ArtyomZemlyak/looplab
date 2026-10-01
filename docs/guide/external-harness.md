@@ -336,6 +336,24 @@ direct the agent to live state and command receipts; they do not prove that an
 engine or external agent process is alive. Submitted experiments remain visible
 as unsettled even when their evaluator has exited.
 
+Both full and compact progress include `execution`: a last-read `engine_running`
+lock probe (`true`, `false`, or `null`), `agent_connection: "not_measured"`, and
+`recorded_node_counts` for unsettled `building`, `queued`, `evaluating`, and
+legacy/untracked `pending` nodes. Counts use the same event prefix and public
+activity rules as the node inspector: a pause-withheld evaluation is queued,
+and a replacement engine owner must admit it again. A recorded start on a
+stopped engine is interrupted work, not a claim that training continues.
+The engine probe is independent of the journal prefix; refresh even when no
+new event arrives. The UI polls this read every ten seconds and displays the
+observation in its next step. A failed refresh withdraws that advice.
+
+Checkpoint headings distinguish a completed-stage review, training monitor,
+and deadline-extension decision. Questions and incomplete sources retain their
+priority even if the engine stops. Follow the full question's allowed verdicts;
+answering a checkpoint does not itself restart an engine. Suggested state reads
+use `observe_only=true`, and original command receipts are read without worker
+reconciliation. These reads create no admission or finish requirement.
+
 Once these immediate issues are clear, choose **continue** or **finish**.
 `candidate_blockers_if_expanding`, per-Idea reviews and concept/hypothesis fields
 apply to continuation; they do not force a finalizing agent to propose again.

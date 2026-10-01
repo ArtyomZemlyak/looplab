@@ -1,8 +1,9 @@
 """Small discovery view derived from the same obligations as the full progress read.
 
-This is an observed prefix, never a candidate permit or a claim that an engine or
-agent is alive. Continue and finish are separate choices; an expansion-only gate
-must not force research on an agent that is trying to finish.
+This is an observed prefix with an independent last-read engine lock probe,
+never a candidate permit or proof of agent connection. Continue and finish are
+separate choices; an expansion-only gate must not force research on an agent
+that is trying to finish.
 """
 from __future__ import annotations
 
@@ -16,15 +17,33 @@ def _step(code, title, detail, reads, *, action=None, phase_id=None):
 
 
 def next_step(progress: dict) -> dict:
+    step = _next_step(progress)
+    execution = progress["execution"]
+    alive = execution["engine_running"]
+    label = "running" if alive is True else "stopped" if alive is False else "unknown"
+    step["detail"] += f" Engine last observed: {label}. Agent connection: not measured."
+    if progress["complete"] and progress["finish_pending_nodes"]:
+        counts = execution["recorded_node_counts"]
+        step["detail"] += (f" Recorded activity: {counts['evaluating']} admitted, "
+                           f"{counts['queued']} queued, {counts['building']} building, "
+                           f"{counts['pending']} untracked.")
+    return step
+
+
+def _next_step(progress: dict) -> dict:
     if not progress["complete"]:
         return _step("inspect_sources", "Check incomplete sources",
                      "A missing receipt is not proof that no action occurred. Inspect source_health and ask the operator to recover damaged journals before trusting missing receipts.",
-                     [f"GET {_RUN}/harness-progress", f"GET {_RUN}/events"])
+                     [f"GET {_RUN}/harness-progress?expected_generation=TOKEN", f"GET {_RUN}/events"])
     if progress["pending_checkpoint_count"]:
         q = progress["pending_checkpoints"][0]["question"]
-        return _step("answer_checkpoint", "Answer the evaluation question",
+        title = {"stage_check": "Review the completed stage",
+                 "train_monitor": "Answer the training monitor",
+                 "deadline_grace": "Decide whether to extend the deadline"}.get(
+                     q["phase_id"], "Answer the evaluation question")
+        return _step("answer_checkpoint", title,
                      "Evaluation has an unanswered checkpoint. Read live state, the full question and its allowed verdicts; evaluator completion alone does not settle the node.",
-                     [f"GET {_RUN}/state", f"GET {_RUN}/harness-checkpoints"],
+                     [f"GET {_RUN}/state?observe_only=true", f"GET {_RUN}/harness-checkpoints?expected_generation=TOKEN"],
                      action=f"POST {_RUN}/harness-checkpoints", phase_id=q["phase_id"])
     lifecycle = progress["recorded_lifecycle"]
     if any(lifecycle.values()):
@@ -32,15 +51,30 @@ def next_step(progress: dict) -> dict:
                  "Inspect stop request" if lifecycle["stop_requested"] else "Run is paused")
         return _step("inspect_lifecycle", title,
                      "Read live state and command receipts before deciding to resume or complete finalization. Journal state does not certify engine or agent liveness.",
-                     [f"GET {_RUN}/state", f"GET {_RUN}/events",
+                     [f"GET {_RUN}/state?observe_only=true", f"GET {_RUN}/events",
                       f"GET {_RUN}/command-receipt?expected_generation=TOKEN&command_id={{command_id}}"])
     if progress["finish_pending_nodes"]:
-        return _step("inspect_pending", "Inspect submitted experiments",
-                     "Submitted nodes remain unsettled. Read live state and checkpoints; finalization must wait for settlement or explicit cancellation. Further proposals have their own gates below.",
-                     [f"GET {_RUN}/state", f"GET {_RUN}/harness-checkpoints"])
+        execution = progress["execution"]
+        counts = execution["recorded_node_counts"]
+        alive = execution["engine_running"]
+        if alive is False:
+            title = "Engine stopped · inspect submitted experiments"
+            detail = "No live engine owner was observed. Recorded evaluation starts do not mean training continues. Inspect state, checkpoints and original command receipts before choosing explicit recovery."
+        elif alive is None:
+            title = "Engine status unknown · inspect submitted experiments"
+            detail = "The engine lock probe is inconclusive. Recorded node activity does not prove live training. Inspect state and checkpoints before choosing recovery."
+        else:
+            title = ("Inspect evaluations already started" if counts["evaluating"] else
+                     "Submitted experiments are awaiting evaluation" if counts["queued"] else
+                     "Inspect submitted experiments")
+            detail = "LoopLab owns evaluation; poll checkpoints for questions and results. A live engine does not prove the agent is connected."
+        return _step("inspect_pending", title,
+                     detail + " Finalization waits for settlement or explicit cancellation; further proposals have separate gates.",
+                     [f"GET {_RUN}/state?observe_only=true", f"GET {_RUN}/harness-checkpoints?expected_generation=TOKEN",
+                      f"GET {_RUN}/command-receipt?expected_generation=TOKEN&command_id={{command_id}}"])
     return _step("choose_direction", "Choose the next experiment or finish",
                  "Use measured evidence to choose. The two paths below have different obligations; policy advice does not submit a candidate.",
-                 [f"GET {_RUN}/state", f"GET {_RUN}/harness-contract"])
+                 [f"GET {_RUN}/state?observe_only=true", f"GET {_RUN}/harness-contract"])
 
 
 def brief(progress: dict) -> dict:
@@ -50,7 +84,7 @@ def brief(progress: dict) -> dict:
     full endpoint for history and checkpoints for authoritative verdict authority.
     """
     keys = ("generation", "run_uid", "event_seq", "at_node", "evidence_revision",
-            "complete", "source_health", "recorded_lifecycle", "next_step",
+            "complete", "source_health", "recorded_lifecycle", "execution", "next_step",
             "candidate_blockers_if_expanding", "candidate_decisions_per_idea",
             "candidate_requirements", "finish_reviews_due", "finish_report_due",
             "pending_checkpoint_count")

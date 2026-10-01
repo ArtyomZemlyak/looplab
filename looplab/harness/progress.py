@@ -8,6 +8,7 @@ of several files; clients refresh when ``event_seq`` moves.
 """
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -15,6 +16,7 @@ from fastapi import HTTPException
 from looplab.core.config import read_config_snapshot
 from looplab.core.jsonlio import read_jsonl_lenient_with_health
 from looplab.events.eventstore import EventStore, log_integrity
+from looplab.events.eval_occupancy import withheld_lifecycles
 from looplab.events.replay import fold
 from looplab.harness.decisions import decision_file, required_decisions
 from looplab.harness.hypotheses import merge_due
@@ -87,8 +89,8 @@ def _validate_rows(rows: list[dict], health: dict, fields: dict[str, type]) -> l
     return valid
 
 
-def snapshot(rd: Path, expected_generation: str, *, offset: int = 0,
-             limit: int = 20) -> dict:
+def snapshot(rd: Path, expected_generation: str, *, activity_reader,
+             offset: int = 0, limit: int = 20) -> dict:
     store = EventStore(rd / "events.jsonl")
     events = store.read_all()
     generation = run_generation_token(events)
@@ -197,6 +199,17 @@ def snapshot(rd: Path, expected_generation: str, *, offset: int = 0,
               "checkpoints": checkpoint_health}
     pending = [row for row in checkpoint_rows if row["status"] == "pending"]
     finish_due = external_finish_due(rd, settings, state, events)
+    # Reuse the server's public node projection on THIS event prefix, including
+    # pause-withheld evaluations. Keep the dependency downward: the route supplies
+    # its reader rather than importing serve into the harness.
+    withheld = withheld_lifecycles(events)
+    activity = Counter(activity_reader(state, nid, withheld=withheld)["status"]
+                       for nid in finish_due["pending_nodes"])
+    from looplab.engine.run_lifecycle import engine_liveness
+    execution = {"engine_running": engine_liveness(rd),
+                 "agent_connection": "not_measured",
+                 "recorded_node_counts": {kind: activity[kind] for kind in
+                     ("building", "queued", "evaluating", "pending")}}
     result = {"generation": generation, "run_uid": uid,
             "recorded_lifecycle": {"paused": bool(state.paused),
                                    "finished": bool(state.finished),
@@ -215,6 +228,7 @@ def snapshot(rd: Path, expected_generation: str, *, offset: int = 0,
             "finish_reviews_due": finish_due["reviews"],
             "finish_report_due": finish_due["report"],
             "finish_pending_nodes": finish_due["pending_nodes"],
+            "execution": execution,
             "pending_checkpoint_count": len(pending),
             "pending_checkpoints": pending[:100],
             "pending_checkpoints_truncated": len(pending) > 100,

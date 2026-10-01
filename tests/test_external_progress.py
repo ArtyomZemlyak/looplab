@@ -2,6 +2,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 from looplab.core.config import Settings
@@ -150,6 +152,7 @@ def test_compact_progress_preserves_gates_health_counts_and_history_location(tmp
     compact = client.get(path, params={**args, "brief": True}).json()
     assert store.read_all() == before  # discovery never drives the engine
     assert compact["next_step"] == full["next_step"]
+    assert compact["execution"] == full["execution"]
     # Expansion research is a choice-specific gate, not an unconditional instruction.
     assert compact["next_step"]["code"] == "choose_direction"
     assert compact["candidate_blockers_if_expanding"][0]["phase_id"] == "research"
@@ -198,3 +201,65 @@ def test_progress_distinguishes_recorded_pause_and_finish_from_liveness(tmp_path
         assert any("/command-receipt?expected_generation=" in ref for ref in compact["next_step"]["reads"])
         assert not any("/commands/{command_id}" in ref for ref in compact["next_step"]["reads"]), (
             "a discovery read must not silently restart a nonterminal command worker")
+
+
+@pytest.mark.parametrize("alive, title", [(True, "evaluations already started"),
+    (False, "Engine stopped"), (None, "Engine status unknown")])
+def test_execution_combines_same_prefix_activity_with_independent_lock_probe(tmp_path, monkeypatch,
+                                                                          alive, title):
+    rd, store, client = _run(tmp_path)
+    monkeypatch.setattr("looplab.engine.run_lifecycle.engine_liveness", lambda _: alive)
+    for nid in range(2, 6):
+        store.append("node_created", {"node_id": nid, "parent_ids": [], "operator": "draft",
+                                      "idea": {"operator": "draft"},
+                                      "eval_start_boundary": nid != 5})
+    for nid in (2, 3):
+        store.append("node_eval_started", {"node_id": nid, "generation": 0})
+    store.append("eval_attempt_withheld", {"node_id": 3, "generation": 0})
+    args = {"expected_generation": run_generation_token(store.read_all()), "brief": True}
+    before = {path.name: path.read_bytes() for path in rd.iterdir() if path.is_file()}
+    response = client.get("/api/runs/demo/harness-progress", params=args)
+    body = response.json()
+    assert response.headers["Cache-Control"] == "no-store"
+    assert "Authorization" in response.headers["Vary"]
+    assert body["execution"] == {"engine_running": alive, "agent_connection": "not_measured",
+        "recorded_node_counts": {"building": 0, "queued": 2, "evaluating": 1, "pending": 1}}
+    assert title in body["next_step"]["title"]
+    assert body["next_step"]["code"] == "inspect_pending"
+    assert {path.name: path.read_bytes() for path in rd.iterdir() if path.is_file()} == before
+
+    # New ownership must not reuse the old admission. A stale generation start
+    # cannot put this attempt in training either; a matching re-admission can.
+    store.append("resume_served", {"engine_owner_boundary": True})
+    store.append("node_eval_started", {"node_id": 2, "generation": 99})
+    body = client.get("/api/runs/demo/harness-progress", params=args).json()
+    assert body["execution"]["recorded_node_counts"] == {
+        "building": 0, "queued": 3, "evaluating": 0, "pending": 1}
+    if alive is True:
+        assert body["next_step"]["title"] == "Submitted experiments are awaiting evaluation"
+    store.append("node_eval_started", {"node_id": 2, "generation": 0})
+    store.append("node_evaluated", {"node_id": 2, "generation": 0, "metric": .5})
+    body = client.get("/api/runs/demo/harness-progress", params=args).json()
+    assert body["execution"]["recorded_node_counts"]["evaluating"] == 0
+    assert body["finish_pending_node_count"] == 3
+
+
+@pytest.mark.parametrize("phase, title", [("stage_check", "Review the completed stage"),
+    ("train_monitor", "Answer the training monitor"),
+    ("deadline_grace", "Decide whether to extend the deadline")])
+def test_checkpoint_names_the_required_decision_even_after_engine_stops(tmp_path, phase, title):
+    rd, store, client = _run(tmp_path)
+    store.append("node_created", {"node_id": 2, "parent_ids": [], "operator": "draft",
+                                  "idea": {"operator": "draft"}, "eval_start_boundary": True})
+    store.append("node_eval_started", {"node_id": 2, "generation": 0})
+    ask(rd, 2, 0, phase, observation="training log")
+    args = {"expected_generation": run_generation_token(store.read_all()), "brief": True}
+    body = client.get("/api/runs/demo/harness-progress", params=args).json()
+    assert body["execution"]["engine_running"] is False
+    assert body["next_step"]["code"] == "answer_checkpoint"
+    assert body["next_step"]["title"] == title
+    assert body["next_step"]["phase_id"] == phase
+    (rd / "harness_reviews.jsonl").write_text("invalid\n")
+    damaged = client.get("/api/runs/demo/harness-progress", params=args).json()
+    assert damaged["next_step"]["code"] == "inspect_sources"
+    assert damaged["pending_checkpoint_count"] == 1

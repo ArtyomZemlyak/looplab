@@ -1081,7 +1081,8 @@ def build_router(srv) -> APIRouter:
             raise refusal("event_log_unreadable") from exc
 
     @router.get("/api/runs/{run_id}/harness-progress")
-    def get_harness_progress(run_id: str, expected_generation: str = Query(...),
+    def get_harness_progress(run_id: str, response: Response,
+                             expected_generation: str = Query(...),
                              offset: int = Query(0, ge=0, le=1_000_000),
                              limit: int = Query(20, ge=1, le=100),
                              brief: bool = Query(False)):
@@ -1092,11 +1093,16 @@ def build_router(srv) -> APIRouter:
         measured prefix used to mark old reviews as superseded.
         brief=true omits history bodies and checkpoint observations while retaining
         the shared next step, source health, counts and detail read references.
+        execution separates recorded node activity from the last-read engine lock
+        probe; agent connection is not measured. This read starts no work.
         """
         from looplab.harness.progress import snapshot
         if _RUN_GENERATION_RE.fullmatch(expected_generation) is None:
             raise HTTPException(400, "expected_generation must be a SHA-256 token")
-        result = snapshot(_run_dir(run_id), expected_generation, offset=offset, limit=limit)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Vary"] = "X-LoopLab-Token, Authorization"
+        result = snapshot(_run_dir(run_id), expected_generation,
+                          activity_reader=public_node_activity, offset=offset, limit=limit)
         if brief:
             from looplab.harness.progress_summary import brief as compact_progress
             return compact_progress(result)

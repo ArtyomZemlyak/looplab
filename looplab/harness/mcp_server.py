@@ -342,6 +342,8 @@ def build_server(api: HarnessAPI):
                                         idempotentHint=True, openWorldHint=False))
     def run_progress(run_id: str, expected_generation: str) -> dict:
         """Read the compact next step, continue/finish gates and source health.
+        execution separates recorded node activity from the last-read engine lock
+        probe; agent connection is unmeasured. Refresh even without new events.
         Use the current generation from /state. Read detail references and phase_info
         before deciding; refresh after events or answers. This performs one GET only,
         returns HTTP failures unchanged, and never retries or submits a candidate."""

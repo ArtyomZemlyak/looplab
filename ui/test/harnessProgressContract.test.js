@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import React from 'react'
 
 import { fetchStub, jsonResponse, mountLive, until } from './_mount.js'
 
@@ -77,5 +78,34 @@ test('malformed next step cannot become a successful read', async () => {
       expectedGeneration: generation, externalMode: true, configStatus: 'ready' })
     await until(() => view.container.textContent.includes('Agent cycle: Unavailable'), 'invalid payload')
     assert.ok(!view.container.textContent.includes('Everything is ready'))
+  } finally { await harness.close() }
+})
+
+test('external cycle shows changing engine observations without implying agent connection', async t => {
+  const harness = await mountLive({ visible: true })
+  try {
+    const { HarnessProgressPanel } = await harness.load('/src/panels.jsx')
+    const next_step = { code: 'inspect_pending', owner: 'external_agent',
+      title: 'Inspect evaluations already started',
+      detail: 'Engine last observed: running. Agent connection: not measured. Recorded activity: 1 admitted, 1 queued, 0 building, 0 untracked.',
+      reads: ['GET /api/runs/{run_id}/state?observe_only=true'], action: null, phase_id: null }
+    let payload = { ...progress, next_step }
+    globalThis.fetch = fetchStub({ '/api/runs/mnist/harness-progress': () => jsonResponse(payload) })
+    const props = { runId: 'mnist', expectedGeneration: generation, seq: 12,
+      externalMode: true, configStatus: 'ready' }
+    t.mock.timers.enable({ apis: ['setInterval'] })
+    const view = await harness.mount(HarnessProgressPanel, props)
+    await until(() => view.container.textContent.includes('Next step · Inspect evaluations'), 'admitted evaluation')
+    assert.match(view.container.textContent, /1 admitted, 1 queued/)
+    payload = { ...payload, next_step: { ...next_step,
+      title: 'Engine stopped · inspect submitted experiments',
+      detail: 'Recorded evaluation starts do not mean training continues. Engine last observed: stopped. Agent connection: not measured.' } }
+    // A lock change has no event_seq. The panel's periodic refresh must still
+    // withdraw its old running label, without needing a new event.
+    await React.act(async () => { t.mock.timers.tick(10_000) })
+    await until(() => view.container.textContent.includes('Next step · Engine stopped'), 'engine lock observation')
+    assert.ok(!view.container.textContent.includes('Engine last observed: running'))
+    assert.match(view.container.textContent, /Agent connection: not measured/)
+    assert.ok(globalThis.fetch.calls.every(call => call.method === 'GET'))
   } finally { await harness.close() }
 })
