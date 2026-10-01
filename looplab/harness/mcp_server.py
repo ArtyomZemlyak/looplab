@@ -21,11 +21,12 @@ MAX_RESPONSE_BYTES = 256 * 1024
 MAX_REQUEST_BYTES = 1024 * 1024
 MCP_INSTRUCTIONS = (
     "LoopLab evaluates ready-made experiments; the external agent proposes candidates. "
-    "Start with capabilities, then read /state, task, config and harness-contract. "
+    "Start with capabilities and connection_check, then read /state?observe_only=true, task, config and harness-contract. "
     "Call run_progress with the current generation; inspect source_health and checkpoints. "
     "Search phases and read phase_info before decisions. On reconnect, read command_receipt "
     "before retrying; preserve the exact payload and original key. Explicitly pause or finalize. "
     "Quiet logs do not prove agent or engine liveness. "
+    "MCP Connected proves stdio only; use connection_check for live run reads. "
     "Follow enabled admission/finish obligations. A trainer exit is not terminal evaluation. "
     "After each terminal node and finalized run, read generation-fenced result-notices and POST "
     "a brief interpretation in the user's language with receipt_id, evidence_token and a stable "
@@ -37,14 +38,20 @@ MCP_INSTRUCTIONS = (
 
 class HarnessAPI:
     def __init__(self, url: str, token: str = "", *, transport=None):
-        parsed = urlsplit(url)
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            raise ValueError("LOOPLAB_HARNESS_URL must be a valid HTTP(S) server URL") from None
         if parsed.scheme not in ("http", "https") or not parsed.netloc or parsed.username or parsed.password:
             raise ValueError("LOOPLAB_HARNESS_URL must be an HTTP(S) server URL without credentials")
         if parsed.query or parsed.fragment:
             raise ValueError("LOOPLAB_HARNESS_URL cannot contain query or fragment")
-        self.client = httpx.Client(base_url=url.rstrip("/") + "/", timeout=30,
-                                   follow_redirects=False, trust_env=False, transport=transport,
-                                   headers={"X-LoopLab-Token": token} if token else {})
+        try:
+            self.client = httpx.Client(base_url=url.rstrip("/") + "/", timeout=30,
+                                      follow_redirects=False, trust_env=False, transport=transport,
+                                      headers={"X-LoopLab-Token": token} if token else {})
+        except httpx.InvalidURL:
+            raise ValueError("LOOPLAB_HARNESS_URL must be a valid HTTP(S) server URL") from None
 
     @staticmethod
     def _path(path: str) -> str:
@@ -127,6 +134,81 @@ class HarnessAPI:
         return self.request("GET", f"/api/runs/{quote(run_id, safe='')}/harness-progress"
                             f"?expected_generation={expected_generation}&brief=true")
 
+    def connection_check(self, run_id: str, expected_generation: str = "") -> dict:
+        """Explicit, read-only bootstrap check; never resumes a worker or probes a model.
+
+        Successful MCP initialization alone does not test this API or credential. The
+        state read discovers the generation; handoff/progress fence subsequent reads.
+        An operator-supplied generation must match before reading the new incarnation.
+        Errors use fixed messages rather than HTTP exception text, URLs or raw bodies.
+        Success proves these reads, not agent liveness, credential scope or admission.
+        """
+        self._run_identity(run_id, expected_generation or "0" * 64)
+        base = f"/api/runs/{quote(run_id, safe='')}"
+
+        def read(suffix, phase):
+            try:
+                result = self.request("GET", base + suffix)
+            except (httpx.HTTPError, httpx.InvalidURL):
+                return {"ok": False, "status": None, "code": "api_unreachable", "at": phase,
+                        "message": "UI/API request failed. Check the server URL, network and running UI."}
+            status = result["status"]
+            if status != 200:
+                code, message = {
+                    401: ("credential_refused", "API rejected the credential. Ask the operator for the scoped token."),
+                    403: ("access_refused", "API refused this read. Check the credential and launched run mode."),
+                    404: ("run_not_found", "Run not found on this server. Check the URL, run root and literal run ID."),
+                    409: ("run_context_changed", "Run context changed or is unavailable. Read state and request fresh handoff."),
+                    503: ("source_unavailable", "Run sources are unavailable. Inspect source health before acting."),
+                }.get(status, ("api_read_failed", "API read failed. Inspect the server before acting."))
+                return {"ok": False, "status": status, "code": code, "at": phase, "message": message}
+            if result.get("truncated") or not isinstance(result.get("body"), dict):
+                return {"ok": False, "status": status, "code": "invalid_response", "at": phase,
+                        "message": "API returned incomplete connection evidence. Do not act on this check."}
+            return {"ok": True, "body": result["body"]}
+
+        state = read("/state?observe_only=true", "state")
+        if state.get("ok") is False:
+            return state
+        state = state["body"]
+        generation = state.get("generation")
+        if not isinstance(generation, str) or re.fullmatch(r"[a-fA-F0-9]{64}", generation) is None:
+            return {"ok": False, "status": 200, "code": "invalid_response", "at": "state",
+                    "message": "State did not supply a valid generation. Request fresh connection context."}
+        if expected_generation and expected_generation != generation:
+            return {"ok": False, "status": 409, "code": "generation_mismatch", "at": "state",
+                    "message": "This handoff belongs to another run generation. Request fresh context."}
+        handoff = read(f"/harness-handoff?expected_generation={generation}", "handoff")
+        if handoff.get("ok") is False:
+            return handoff
+        handoff = handoff["body"]
+        if handoff.get("credential_configured") is False:
+            return {"ok": False, "status": 200, "code": "harness_credential_missing", "at": "handoff",
+                    "message": "This server has no harness credential configured. Ask the operator to configure it and restart the UI."}
+        progress = read(f"/harness-progress?expected_generation={generation}&brief=true", "progress")
+        if progress.get("ok") is False:
+            return progress
+        progress = progress["body"]
+        paths = handoff.get("server_paths")
+        if (handoff.get("run_id") != run_id or handoff.get("generation") != generation
+                or handoff.get("mode") != "external_harness" or progress.get("generation") != generation
+                or handoff.get("credential_configured") is not True
+                or not isinstance(progress.get("source_health"), dict)
+                or not isinstance(progress.get("next_step"), dict)
+                or type(progress.get("complete")) is not bool
+                or not isinstance(paths, dict)
+                or any(not isinstance(paths.get(key), str) or not paths[key]
+                       for key in ("run_root", "run_dir"))
+                or (handoff.get("engine_running") is not None and type(handoff["engine_running"]) is not bool)):
+            return {"ok": False, "status": 200, "code": "invalid_response", "at": "context",
+                    "message": "Connection evidence does not match this external run. Request fresh context."}
+        return {"ok": True, "status": 200, "code": "run_reads_succeeded", "run_id": run_id,
+                "generation": generation, "server_paths": {key: paths[key] for key in ("run_root", "run_dir")},
+                "engine_running": handoff.get("engine_running"), "agent_connection": "not_measured",
+                "evidence_complete": progress["complete"],
+                "source_health": progress.get("source_health"), "next_step": progress.get("next_step"),
+                "message": "Live run reads succeeded. Check source health, obligations and engine status before decisions; this check starts no work."}
+
     @staticmethod
     def _run_identity(run_id: str, expected_generation: str):
         if (not run_id or run_id in (".", "..")
@@ -164,6 +246,18 @@ def build_server(api: HarnessAPI):
     def capabilities() -> dict:
         """Discover LoopLab phases, backend support, limits and control interfaces."""
         return harness_manifest()
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True,
+                                         destructiveHint=False, openWorldHint=True))
+    def connection_check(run_id: str, expected_generation: str = "") -> dict:
+        """Check UI/API access to one launched external run, beyond MCP Connected status.
+
+        Performs GET state, generation-fenced handoff and compact progress only. Pass
+        the copied handoff generation to refuse a replaced run; otherwise discover it.
+        Reports fixed diagnostics for refused access, missing run, stale context or
+        unavailable API. Does not resume, submit, probe a model or certify agent liveness.
+        """
+        return api.connection_check(run_id, expected_generation)
 
     @mcp.tool()
     def phases(query: str = "") -> list[dict]:
@@ -282,6 +376,8 @@ def run_stdio(url: str | None = None, token: str | None = None) -> None:
         raise ValueError("Set LOOPLAB_HARNESS_TOKEN in the MCP process environment. "
                          "LOOPLAB_UI_TOKEN is never used by harness-mcp; ask the operator "
                          "for a distinct scoped credential.")
+    if any(ord(char) < 32 or ord(char) > 126 for char in credential):
+        raise ValueError("LOOPLAB_HARNESS_TOKEN must be printable ASCII without control characters.")
     if credential == os.environ.get("LOOPLAB_UI_TOKEN", ""):
         raise ValueError("The harness credential must differ from LOOPLAB_UI_TOKEN.")
     api = HarnessAPI(url or os.environ.get("LOOPLAB_HARNESS_URL", "http://127.0.0.1:8765"),

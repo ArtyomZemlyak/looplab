@@ -134,3 +134,17 @@ def test_handoff_unreadable_event_log_is_a_coded_refusal(tmp_path, monkeypatch):
     assert response.status_code == 503
     assert response.json()["detail"]["code"] == "event_log_unreadable"
     assert "operator-secret-1234" not in response.text
+
+
+def test_observe_only_state_skips_pending_reset_reconciliation(tmp_path, monkeypatch):
+    rd, store, client = _run(tmp_path, monkeypatch)
+    before = {p.name: p.read_bytes() for p in rd.iterdir() if p.is_file()}
+    monkeypatch.setattr("looplab.serve.routers.runs.load_run_reset_marker",
+                        lambda *_: pytest.fail("diagnostic read entered reset reconciliation"))
+    monkeypatch.setattr("looplab.serve.routers.runs.reconcile_run_reset_observation",
+                        lambda *_: pytest.fail("diagnostic read completed an operator reset"))
+    response = client.get("/api/runs/demo/state", params={"observe_only": "true"},
+                          headers={"X-LoopLab-Token": "agent-secret-1234"})
+    assert response.status_code == 200
+    assert response.json()["generation"] == run_generation_token(store.read_all())
+    assert {p.name: p.read_bytes() for p in rd.iterdir() if p.is_file()} == before

@@ -594,7 +594,7 @@ External run здесь намеренно не получал кандидат�
 | OB-07 | Частично | Composer показывает активные права и понятное пояснение; четыре варианта раскрываются по запросу, выбор возвращает фокус на видимый переключатель. | Проверить понимание режимов с новым пользователем. |
 | OB-08 | Частично | Essential открывается с модели, показывает 13 полей ресурсов и лимитов с короткими пояснениями; технические детали и runtime permissions раскрываются отдельно. | Проверить подключение модели и понимание лимитов с новым пользователем. |
 | OB-09 | Частично | Живой внешний run без узлов показывает роль агента и ссылку на Agent cycle без спиннера подготовки. | Показать точное ожидание и состояние агента в других фазах. |
-| OB-10 | Частично | UI готовит проверенный handoff для existing external run; stdio descriptor и инструкция без credential, workspace и reconnect reads. | См. §26: проверен реальный MCP stdio. Клиентская установка, secret storage и матрица версий Codex/Claude остаются ручной настройкой и требуют отдельной приёмки. |
+| OB-10 | Частично | UI готовит handoff и конфигурации клиентов без credential; `connection_check` проверяет доступ к live run. | См. §32: настоящий Codex MCP выполнил measured candidates, Claude проверен для approval/stdio/token. Модельные решения и полный tool cycle Claude ещё не проверены. |
 | OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. | См. §25: проверены контракт, реальные subprocess-кандидаты и desktop; подключение нового клиента относится к OB-10. |
 | OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; чтение original receipt без worker restart, поиск по ID/key и generation fence. | См. §27: проверены disconnect, новая MCP-сессия и отсутствие дубля. Живость внешнего агента остаётся явно неизмеряемой. |
 | OB-14 | Частично | Начало сайта показывает два основных входа. | Большая архитектурная схема всё ещё нуждается в упрощении для первого знакомства. |
@@ -1165,3 +1165,69 @@ JS gzip **605428 B** (+457 B), CSS gzip **58445 B** (+43 B), initial **82977 B**
 OB-10 остаётся открытым для реального Claude-клиента и полного Codex-сеанса.
 
 ![Подключение внешнего агента: конфигурация Codex](assets/71-onboarding/25-client-bootstrap.jpg)
+
+## 32. OB-10: настоящий Codex MCP и ожидание разрешения Claude
+
+Два уровня подключения теперь названы отдельно: **Connected** подтверждает stdio-процесс,
+а доступ к UI/API и правильному run проверяет новый MCP `connection_check`.
+Этот tool делает только GET state с `observe_only=true` → generation-fenced handoff → compact progress.
+Можно передать generation из handoff: при несовпадении проверка останавливается до
+чтения контекста заменённого run. Без неё tool явно проверяет текущую generation.
+Обычный GET state может согласовать уже начатый операторский reset. Для диагностики
+добавлен режим наблюдения, обходящий это согласование; он не завершает reset и не
+создаёт нового ожидания. Последующие чтения по-прежнему защищены generation fence.
+
+Короткие diagnostics различают недоступный API, отклонённый credential/access,
+неверный run ID/root, изменившийся контекст, отсутствие server harness token и неполный
+ответ. Ошибки не копируют HTTP body, URL или текст исключения. Успех означает успешные
+чтения: `evidence_complete`, source health, обязательства и last-read engine status
+остаются видимыми. Tool не подтверждает agent liveness, scope произвольного секрета
+или admission кандидата; не выполняет POST, resume, запуск модели или эксперимента.
+Непечатные и не-ASCII символы в MCP credential теперь отклоняются до transport,
+с фиксированным сообщением без значения секрета.
+Некорректный URL сервера также отклоняется с фиксированным сообщением без его значения.
+
+В UI и копируемой инструкции появился явный следующий шаг подключения. Для Claude
+указано открывать проект интерактивно и рассмотреть MCP approval prompt: **Pending
+approval** означает, что процесс ещё не подключён. Для Codex указаны trusted project
+и `/mcp`. После подключения агент проверяет `connection_check`, затем читает полный
+contract/task/config. Это клиентское разрешение, отдельное от checkpoint LoopLab.
+
+### Приёмочная матрица на Windows
+
+| Клиент | Что проверено | Что ещё не проверено |
+|---|---|---|
+| Codex 0.159.2 | Настоящий App Server MCP client: initialize, ephemeral сеанс, tools discovery, capabilities/phases, connection_check, task/config/contract/progress; ready-made кандидаты, защищённое обучение, receipts/retry, commentary, finish | Решения модели и интерактивный approval flow; model turns не запускались |
+| Claude Code 2.1.286 | Закреплённый официальный npm package в отдельном `.tmp`, generated `.mcp.json` с заменой command полным путём; Pending approval, разрешение только looplab через временные settings, Connected, отказ без токена | Полный вызов инструментов и обучение через Claude, модельный диалог |
+
+Codex запущен отдельным stdio-процессом с временной конфигурацией одного MCP сервера.
+Сеанс `ephemeral: true`, без сохранённого чата и без model turn; пользовательская
+конфигурация не менялась. Все рабочие вызовы прошли через `mcpServer/tool/call`, включая
+`run_progress`, `command_receipt` и новый `connection_check`. После refresh MCP повтор
+исходной команды с тем же payload/key сохранил command ID и число узлов.
+Protected scorer линейной регрессии измерил MSE **0,78074087** и **0,0000126094**;
+третий конфиг завершился failed без метрики. Русские комментарии с receipt/evidence
+записаны после каждого результата и явного завершения; inspect/replay прошли.
+
+Claude получил отдельный configuration directory. Проверка project config без разрешения
+вернула Pending approval; с временным разрешением только looplab — Connected; без
+harness token — Failed to connect. Во всех трёх случаях CLI exit code был **0**:
+сам exit code не доказывает соединение. Connected получен при выключенном UI/API,
+что подтверждает необходимость отдельной проверки live reads. Значение токена в
+выводе клиента отсутствовало. Форматы и границы соответствуют официальным
+[Codex App Server](https://learn.chatgpt.com/docs/app-server) и
+[Claude MCP](https://code.claude.com/docs/en/mcp) описаниям; результаты относятся
+только к указанным версиям, а не ко всем клиентам и платформам.
+
+Проверки: **1800 UI passed**, **193 replay passed**, **188 targeted backend passed**;
+после проверок credential/connection/docs — **109 passed**; после добавления observation
+mode — **117 passed**, после финальной инструкции — **3 focused UI passed**
+(наборы пересекаются).
+Финальные URL/connection/MCP/API/config-doc проверки — **94 passed**;
+doc budgets — **8 passed**, геометрия схемы — **3 passed**; strict MkDocs build прошёл.
+Production build и все bundle/reachability gates проходят без повышения ceilings:
+JS gzip **605667 B** (+239 B), CSS **58445 B** (без роста), initial **82970 B**.
+
+Визуальная проверка нового абзаца в этой итерации не выполнена: встроенный браузер
+отказал в открытии тестового localhost (`ERR_BLOCKED_BY_CLIENT`). Проверки поведения
+UI и production build прошли; предыдущая проверка Full HD/2K относится к §31.

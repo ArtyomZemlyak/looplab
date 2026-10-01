@@ -1030,13 +1030,17 @@ def build_router(srv) -> APIRouter:
 
     # ------------------------------------------------------------------ state + time-travel
     @router.get("/api/runs/{run_id}/state", response_model=PublicRunStateResponse)
-    def get_state(run_id: str, seq: Optional[int] = None):
+    def get_state(run_id: str, seq: Optional[int] = None, observe_only: bool = False):
         """Return the bounded public run state.
 
         ``state.cards`` remains the backwards-compatible mapping; ``state.cards_projection`` carries
         its collection and per-card completeness receipts. Historical ``seq`` reads use the same wire
         projection as the live state, SSE, and review surfaces.
+        ``observe_only`` bypasses reconciliation of an operator's pending reset for diagnostic reads.
+        It may observe an unfinished reset; subsequent evidence reads still need the generation fence.
         """
+        if observe_only:
+            return _base_state_payload(_run_dir(run_id), seq)
         return _state_payload(_run_dir(run_id), seq)
 
     @router.get("/api/runs/{run_id}/harness-contract")

@@ -62,6 +62,9 @@ export default function HarnessHandoff({ runId, generation, seq }) {
           : client === 'claude' ? 'Place this in your project .mcp.json. The token placeholder reads the scoped credential from the Claude process environment.'
             : "This is a generic stdio descriptor; configure scoped credential forwarding in your client's environment settings."} The token value is not included.</p>
         <p>If LoopLab is installed in a virtual environment, replace command with the full path to its looplab executable on the client machine. Restart the client after supplying the credential. No scoped token means harness-mcp refuses to connect; it never falls back to owner access.</p>
+        <p>{client === 'claude' ? 'Open Claude interactively in that project and review its project MCP approval prompt. Pending approval means the MCP process has not connected yet.'
+          : client === 'codex' ? 'Open Codex in a trusted project and inspect /mcp to confirm that looplab loaded.'
+            : 'Inspect the MCP server status in your client.'} Connected confirms the stdio process only. Ask the agent to call connection_check for this run before continuing; it checks the live UI/API without starting work.</p>
         <h4>2. Supply the scoped credential separately</h4>
         <p role="status">{value.credential_configured ? 'A harness credential is configured on this server.'
           : 'Operator setup required: this server has no scoped harness credential configured.'}</p>

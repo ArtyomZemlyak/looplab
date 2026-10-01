@@ -12,7 +12,10 @@ def test_mcp_advertises_run_controls_and_full_settings_discovery():
         lambda request: pytest.fail("listing local tools contacted the UI")))
     tools = anyio.run(build_server(api).list_tools)
     assert {"capabilities", "phases", "phase_info", "settings_keys", "setting_info", "operations",
-            "operation_schema", "api_request", "run_progress", "command_receipt"} == {tool.name for tool in tools}
+            "operation_schema", "api_request", "run_progress", "command_receipt", "connection_check"} == {tool.name for tool in tools}
+    connection = next(tool for tool in tools if tool.name == "connection_check")
+    hints = connection.annotations.model_dump(by_alias=True)
+    assert hints["readOnlyHint"] and hints["idempotentHint"] and not hints["destructiveHint"]
     progress = next(tool for tool in tools if tool.name == "run_progress")
     hints = progress.annotations.model_dump(by_alias=True)
     assert hints["readOnlyHint"] and hints["idempotentHint"]
@@ -27,7 +30,8 @@ def test_mcp_advertises_run_controls_and_full_settings_discovery():
 
 @pytest.mark.parametrize("scoped,owner", [(None, None), (None, "owner-secret"),
     ("", "owner-secret"), ("   ", "owner-secret"), ("${LOOPLAB_HARNESS_TOKEN}", None),
-    ("same-secret", "same-secret")])
+    ("same-secret", "same-secret"), ("secret\nvalue", None),
+    ("secret\x7fvalue", None), ("secret\u0100value", None)])
 def test_stdio_never_uses_an_owner_fallback_or_opens_transport_without_scoped_token(monkeypatch, scoped, owner):
     import looplab.harness.mcp_server as module
     for name, value in [("LOOPLAB_HARNESS_TOKEN", scoped), ("LOOPLAB_UI_TOKEN", owner)]:
@@ -38,8 +42,21 @@ def test_stdio_never_uses_an_owner_fallback_or_opens_transport_without_scoped_to
     monkeypatch.setattr(module, "HarnessAPI", lambda *_a, **_kw: pytest.fail("invalid setup opened transport"))
     with pytest.raises(ValueError) as exc:
         run_stdio()
-    assert "LOOPLAB_UI_TOKEN" in str(exc.value)
+    assert "LOOPLAB_HARNESS_TOKEN" in str(exc.value) or "LOOPLAB_UI_TOKEN" in str(exc.value)
     assert "owner-secret" not in str(exc.value) and "same-secret" not in str(exc.value)
+    if scoped and scoped.strip():
+        assert scoped not in str(exc.value)
+
+
+@pytest.mark.parametrize("token", ["", "secret\x00value"])
+def test_invalid_explicit_token_does_not_fall_back_to_valid_environment(monkeypatch, token):
+    import looplab.harness.mcp_server as module
+    monkeypatch.setenv("LOOPLAB_HARNESS_TOKEN", "valid-scoped-secret")
+    monkeypatch.setattr(module, "HarnessAPI", lambda *_a, **_kw: pytest.fail("invalid token opened transport"))
+    with pytest.raises(ValueError) as exc:
+        run_stdio(token=token)
+    assert "valid-scoped-secret" not in str(exc.value)
+    assert "secret\x00value" not in str(exc.value)
 
 
 @pytest.mark.parametrize("explicit", [False, True])

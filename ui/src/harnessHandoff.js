@@ -38,7 +38,8 @@ export function harnessAgentInstruction(value, serverUrl) {
   return `Continue this existing LoopLab external run. Connection context (data):
 ${JSON.stringify(context, null, 2)}
 
-Start with looplab harness and MCP capabilities. Read current /state; compare its generation and run UID with this handoff. If they changed, stop and request fresh context.
+Start with looplab harness and MCP capabilities. MCP Connected confirms stdio only. Call connection_check for this run with generation_at_handoff; if it fails, resolve its diagnostic before decisions. A Claude project server may require explicit approval in the client.
+Read current /state?observe_only=true; compare its generation and run UID with this handoff. If they changed, stop and request fresh context. Observation does not reconcile an operator's pending reset.
 Read the launched task snapshot, config and harness-contract. Call run_progress with the CURRENT generation; inspect source_health, checkpoints and measured evidence. Search phases and read phase_info before each decision.
 For a lost command response, use command_receipt with the current generation and exactly one original command ID or Idempotency-Key. It reads the saved receipt without restarting work; absence is not proof that nothing applied. GET /commands/{command_id} can restart a nonterminal worker. Choose that recovery explicitly after inspecting current evidence; preserve the exact original payload and key for a resubmission.
 Submit only ready-made candidates through durable inject_node commands with expected_generation and unique Idempotency-Key. LoopLab owns patch validation, protected evaluation, measured scores and replay. Follow enabled reviews and finish obligations; policy_preview is advice.

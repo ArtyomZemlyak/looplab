@@ -30,6 +30,7 @@ test('handoff strips URL credentials/query/fragment, retains proxy and excludes 
   assert.ok(!instruction.includes('private'))
   assert.match(instruction, /score.py/)
   assert.match(instruction, /CURRENT generation/)
+  assert.match(instruction, /connection_check.*generation_at_handoff/)
   assert.match(instruction, /command receipts|receipts and checkpoints/)
   const descriptor = JSON.parse(harnessMcpDescriptor(href))
   assert.deepEqual(descriptor, { command: 'looplab', args: ['harness-mcp'],
@@ -68,12 +69,15 @@ test('handoff opens on demand, copies verified context and withdraws stale conte
       picker.value = 'claude'; picker.dispatchEvent(new window.Event('change', { bubbles: true }))
     })
     assert.match(view.container.querySelector('pre').textContent, /mcpServers/)
+    assert.match(view.container.textContent, /Pending approval means/)
+    assert.match(view.container.textContent, /Connected confirms the stdio process only/)
     assert.doesNotMatch(view.container.textContent, /MCP configuration copied/)
     await React.act(async () => {
       [...view.container.querySelectorAll('button')].find(b => b.textContent === 'Copy agent instruction').click()
     })
     assert.equal(writes.length, 2)
     assert.match(writes[1], /harness-contract/)
+    assert.match(writes[1], /connection_check/)
     assert.match(view.container.textContent, /instruction copied/)
     const identity = view.container.querySelector('.harness-recovery input')
     await React.act(async () => {

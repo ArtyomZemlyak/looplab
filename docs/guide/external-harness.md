@@ -33,10 +33,15 @@ operator starts the server and run, while the coding agent proposes candidates.
    and copy the instruction for this run. Configure the coding client's stdio MCP
    server as `looplab harness-mcp`, passing only `LOOPLAB_HARNESS_TOKEN` and the UI
    URL. Supply the credential separately; client-specific examples are below.
+   In Claude, review the project MCP approval prompt; **Pending approval** means
+   the process has not connected. In Codex, use a trusted project and inspect `/mcp`.
+   **Connected** only proves the stdio process, even when the UI/API is unreachable.
+   Ask the agent to call MCP `connection_check` for this run before continuing.
    Without the UI handoff, give the agent this instruction, replacing the run ID:
 
-   > Start with `looplab harness`. Through MCP, read the current state, task,
-   > config, harness-contract and harness-progress for `my-run`.
+   > Start with `looplab harness` and MCP capabilities. Call `connection_check`
+   > for `my-run` to check live API reads, not only stdio. Read the current
+   > `/state?observe_only=true`, task, config, harness-contract and harness-progress.
    > Use `phases` and `phase_info` for the next required decision. Submit a
    > ready-made candidate through a durable command, inspect its measured
    > result and checkpoints, then decide what to do next. Explicitly pause or
@@ -140,6 +145,8 @@ to start without a nonempty scoped credential or when it matches the inherited
 owner token; it never falls back to `LOOPLAB_UI_TOKEN`. An unexpanded token
 placeholder also fails locally. Claude's empty default makes an unset variable
 fail at startup instead of sending placeholder text to the API.
+The token must contain printable ASCII without control characters; invalid header
+values fail before transport with a fixed message that omits the secret.
 The block reports only whether a scoped credential was configured when this
 server started; it cannot tell whether your client has the right secret or is
 connected. If none is configured, the operator must configure one and restart the
@@ -155,14 +162,39 @@ filesystem commands. If clipboard access fails, select the instruction in
 observed event withdraws the copy action until fresh context arrives.
 
 Copying does not launch/resume a run or change a client configuration. After
-connecting, read current state and compare generation/run UID before acting;
+connecting, read `/state?observe_only=true` and compare generation/run UID before acting;
 reconnect to the same run using current command receipts and checkpoints.
-Engine liveness does not measure agent liveness. This handoff has been exercised
-with the Python MCP SDK over real stdio. Generated Codex TOML has also been parsed
-by installed Codex CLI 0.159.2 using temporary overrides, without writing its
-configuration. That verifies parsing, not a model-driven Codex session. Claude
-CLI was unavailable; its runtime, client approval flow and credential storage
-still require acceptance checks. See doc 71 section 31 for the tested boundary.
+Engine liveness does not measure agent liveness. The handoff has been exercised
+with Python MCP SDK 2.2.0 and Codex 0.159.2's real MCP client: discovery, live reads,
+ready-made candidates, measured evaluations, receipts, retries and result commentary.
+Claude Code 2.1.286's actual project configuration was checked for pending approval,
+approved stdio connection and missing-token failure. No model turns were started;
+Claude tool execution, model decisions and interactive approvals still need their
+own acceptance checks. See doc 71 sections 31–32 for the tested boundary.
+
+### Check the live connection
+
+MCP `connection_check` is an explicit read. It takes the literal `run_id` and an
+optional `expected_generation` from the copied handoff. It reads `/state?observe_only=true`, then
+generation-fenced handoff and compact progress. If the supplied generation differs,
+it stops before reading the replacement run's context. Without it, the tool discovers
+the current generation; use that only when you intend to inspect the current run.
+Observation bypasses the ordinary state route's reconciliation of a pending
+operator reset. It can see an unfinished reset, so the subsequent generation fences
+remain necessary; the diagnostic never completes that reset itself.
+
+The result distinguishes unreachable UI/API, refused credentials/access, a missing
+run, changed context, missing server harness credential and incomplete responses.
+Errors omit raw HTTP bodies, exception details and URLs. On success it returns server
+paths, last-read engine status, source health, `evidence_complete` and the next step.
+`ok: true` means these reads succeeded; incomplete journals remain explicit, and
+admission/checkpoint/report obligations still apply. It does not prove credential
+scope or external-agent liveness and never submits, resumes or calls a model.
+
+For Claude, open the project interactively and review the MCP approval prompt before
+expecting a project server to connect. `/mcp` shows its status. This is client approval,
+not a LoopLab checkpoint. Neither **Pending approval** nor **Connected** proves that
+LoopLab has received a candidate. Resolve connection diagnostics before decisions.
 
 ## External harness setup
 
