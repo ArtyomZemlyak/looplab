@@ -8,6 +8,8 @@ with HTTP 503, one owned MCP process is killed, the UI server is restarted, and 
 checkpoint tail is damaged then restored from this fixture's known valid bytes.
 It also pauses the engine, reconnects without resuming it, explicitly resumes via
 the production command spawner, and re-evaluates a node behind a fresh checkpoint.
+Use --checkpoint-hold-seconds to observe a paused open checkpoint over a real
+wall-clock interval; waiting never answers the checkpoint or resumes the run.
 """
 from __future__ import annotations
 
@@ -31,6 +33,7 @@ from starlette.responses import JSONResponse
 import uvicorn
 
 from benchmarks.claude_harness_smoke import SCORER, wait_for
+from looplab.events.eventstore import EventStore
 from looplab.harness.mcp_server import HarnessAPI
 from looplab.serve.protocol import COMMAND_TERMINAL_STATUSES
 from looplab.serve.server import make_app
@@ -103,10 +106,13 @@ class Client:
         return await self.request("POST", "commands", body, key, status)
 
     async def question(self):
-        await self.call("phases", {"query": "stage"})
-        await self.call("phase_info", {"phase_id": "evaluation"})
         payload = await until(lambda: self.read("harness-checkpoints"), lambda value: bool(value["pending"]))
         question, = payload["pending"]
+        step = (await self.progress())["next_step"]
+        assert step["code"] == "answer_checkpoint"
+        await self.call("phases", {"query": step["phase_id"]})
+        phase = await self.call("phase_info", {"phase_id": step["phase_id"]})
+        assert phase["write_access"][step["action"]] == "external_agent"
         assert question["phase_id"] == "stage_check"
         observed = json.loads(question["observation"].strip().splitlines()[-1])
         assert 0 < observed["metric"] < 1
@@ -132,7 +138,11 @@ class Client:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", required=True, type=Path, help="New disposable output directory")
+    parser.add_argument("--checkpoint-hold-seconds", type=float, default=0,
+                        help="Observe the paused open checkpoint for 0..86400 real seconds")
     args = parser.parse_args()
+    if not 0 <= args.checkpoint_hold_seconds <= 86400:
+        parser.error("--checkpoint-hold-seconds must be finite and between 0 and 86400")
     root = args.out.resolve()
     root.mkdir(parents=True, exist_ok=False)
     runs = root / "runs"; runs.mkdir()
@@ -223,6 +233,21 @@ def main():
         proof["checkpoint"] = q["checkpoint_id"]
         receipt = await client.receipt("session:candidate:0")
         proof["command_id"] = receipt["command"]["id"]
+        await client.call("phases", {"query": "recovery"})
+        await client.call("phase_info", {"phase_id": "recovery"})
+        await client.progress()
+        pause = await client.command("pause", {}, "session:pause:open")
+        # Fixture observation only: receipt settlement can precede the engine ACK.
+        # Fence that legitimate background append before checking read-only bytes.
+        async def pause_ack():
+            return any(row.type == "command_ack" and row.data.get("command_id") == pause["command"]["id"]
+                       for row in EventStore(runs / "demo" / "events.jsonl").read_all())
+        await until(pause_ack, bool)
+        paused = await client.progress()
+        assert paused["recorded_lifecycle"]["paused"] and paused["execution"]["engine_running"] is True
+        assert paused["next_step"]["phase_id"] == "evaluation"
+        assert "does not resume" in paused["next_step"]["detail"]
+        proof["observations"].append("pause preserved the open checkpoint; engine stayed live awaiting its verdict")
         proof["observations"].append("command ack lost; natural checkpoint opened; owned MCP process killed")
 
     async def recovered(client):
@@ -237,6 +262,22 @@ def main():
         q = await client.question()
         assert q["checkpoint_id"] == proof["checkpoint"]
         assert all(path.read_bytes() == content for path, content in before.items())
+        start = time.monotonic()
+        deadline = start + args.checkpoint_hold_seconds
+        samples = 0
+        while time.monotonic() < deadline:
+            waiting = await client.progress()
+            assert waiting["complete"] and waiting["recorded_lifecycle"]["paused"]
+            assert waiting["execution"]["engine_running"] is True and waiting["pending_checkpoint_count"] == 1
+            assert waiting["next_step"]["phase_id"] == "evaluation"
+            assert (await client.read("harness-checkpoints"))["pending"][0]["checkpoint_id"] == q["checkpoint_id"]
+            node = (await client.state())["state"]["nodes"]["0"]
+            assert node["status"] == "pending" and node["metric"] is None
+            assert all(path.read_bytes() == content for path, content in before.items())
+            samples += 1
+            await anyio.sleep(max(0, min(5, deadline - time.monotonic())))
+        proof["checkpoint_hold"] = {"requested_seconds": args.checkpoint_hold_seconds,
+            "observed_seconds": round(time.monotonic() - start, 3), "samples": samples}
         # The second candidate is not submitted until measured evidence from the first is terminal.
         answer = {"expected_generation": client.generation, "checkpoint_id": q["checkpoint_id"],
                   "action_id": "session:stage:0", "verdict": "proceed", "reason": "Inspected actual finite training output."}
@@ -255,6 +296,14 @@ def main():
         journal.write_bytes(valid)
         assert (await client.question())["checkpoint_id"] == q["checkpoint_id"]
         proof["observations"].append("damaged checkpoint tail refused reads/answers; engine stayed pending; fixture bytes explicitly restored")
+        await client.call("phases", {"query": "recovery"})
+        await client.call("phase_info", {"phase_id": "recovery"})
+        await client.progress()
+        await client.command("resume", {}, "session:resume:inflight")
+        assert len(owned_engines) == 1 and engine.poll() is None
+        assert (await client.question())["checkpoint_id"] == q["checkpoint_id"]
+        assert not (await client.state())["state"]["paused"]
+        proof["observations"].append("explicit resume reused the live engine and original checkpoint without another score stage")
         await client.request("POST", "harness-checkpoints", answer, status=503)
         first_node = await client.terminal(0)
         assert (await client.request("POST", "harness-checkpoints", answer))["replayed"]
@@ -353,6 +402,12 @@ def main():
         for proc in owned_engines:
             proc.wait(timeout=10)
         assert faults == {"command": True, "answer": True}
+        events = EventStore(runs / "demo" / "events.jsonl").read_all()
+        first_stages = [row for row in events if row.type == "phase_progress"
+            and row.data.get("node_id") == 0 and row.data.get("generation") == 0
+            and row.data.get("phase") == "stage" and row.data.get("status") == "finished"]
+        assert len(first_stages) == 1 and first_stages[0].data["name"] == "score"
+        proof["initial_score_stage_completions"] = len(first_stages)
         for path in [source / "score.py", *((runs / "demo" / "nodes" / f"node_{nid}" / "score.py") for nid in range(3))]:
             assert hashlib.sha256(path.read_bytes()).hexdigest() == scorer_hash
         for operation in ("inspect", "replay"):

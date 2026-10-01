@@ -7,6 +7,8 @@ that is trying to finish.
 """
 from __future__ import annotations
 
+from looplab.harness.phases import CHECKPOINT_DECISION_PHASES
+
 _RUN = "/api/runs/{run_id}"
 
 
@@ -41,10 +43,13 @@ def _next_step(progress: dict) -> dict:
                  "train_monitor": "Answer the training monitor",
                  "deadline_grace": "Decide whether to extend the deadline"}.get(
                      q["phase_id"], "Answer the evaluation question")
-        return _step("answer_checkpoint", title,
-                     "Evaluation has an unanswered checkpoint. Read live state, the full question and its allowed verdicts; evaluator completion alone does not settle the node.",
+        detail = "Evaluation has an unanswered checkpoint. Read live state, the full question and its allowed verdicts; evaluator completion alone does not settle the node."
+        if progress["recorded_lifecycle"]["paused"]:
+            detail = "Run is paused for new work; its recorded in-flight evaluation still has this checkpoint. Answering does not resume search. " + detail
+        return _step("answer_checkpoint", title, detail,
                      [f"GET {_RUN}/state?observe_only=true", f"GET {_RUN}/harness-checkpoints?expected_generation=TOKEN"],
-                     action=f"POST {_RUN}/harness-checkpoints", phase_id=q["phase_id"])
+                     action=f"POST {_RUN}/harness-checkpoints",
+                     phase_id=CHECKPOINT_DECISION_PHASES.get(q["phase_id"]))
     lifecycle = progress["recorded_lifecycle"]
     if any(lifecycle.values()):
         title = ("Inspect recorded finish" if lifecycle["finished"] else

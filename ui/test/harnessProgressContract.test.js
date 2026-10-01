@@ -91,7 +91,7 @@ test('next step follows server advice, refreshes on events and hides after a fai
     const step = { code: 'answer_checkpoint', owner: 'external_agent',
       title: 'Answer the evaluation question', detail: 'Waiting for an explicit verdict.',
       reads: ['GET /api/runs/{run_id}/harness-checkpoints'],
-      action: 'POST /api/runs/{run_id}/harness-checkpoints', phase_id: 'stage_check' }
+      action: 'POST /api/runs/{run_id}/harness-checkpoints', phase_id: 'evaluation' }
     let payload = { ...progress, next_step: step }
     globalThis.fetch = fetchStub({ '/api/runs/mnist/harness-progress': () => jsonResponse(payload) })
     const props = { runId: 'mnist', expectedGeneration: generation, seq: 12,
@@ -99,7 +99,7 @@ test('next step follows server advice, refreshes on events and hides after a fai
     const view = await harness.mount(HarnessProgressPanel, props)
     await until(() => view.container.textContent.includes('Next step · Answer'), 'server next step')
     assert.match(view.container.textContent, /GET \/api\/runs\/mnist\/harness-checkpoints/)
-    assert.match(view.container.textContent, /phase_info: stage_check/)
+    assert.match(view.container.textContent, /phase_info: evaluation/)
     payload = { ...payload, event_seq: 13, next_step: { ...step, code: 'choose_direction',
       title: 'Choose the next experiment or finish', action: null, phase_id: null } }
     await view.rerender({ ...props, seq: 13 })

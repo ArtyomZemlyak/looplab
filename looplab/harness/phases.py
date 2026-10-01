@@ -229,5 +229,12 @@ def phase_catalog(query: str = "") -> list[dict]:
             if not needle or needle in (phase.id + " " + phase.entity + " " + phase.purpose).casefold()]
 
 
+# Checkpoint kinds describe runtime verdicts; MCP phases describe decisions.
+# Keep this bridge beside the catalog so discovery never advertises a phantom phase.
+CHECKPOINT_DECISION_PHASES = {"stage_check": "evaluation", "train_monitor": "monitor",
+                             "asha_live": "monitor", "deadline_grace": "deadline_grace"}
+assert set(CHECKPOINT_DECISION_PHASES.values()) <= {phase.id for phase in PHASES}
+
+
 def phase_detail(phase_id: str) -> dict | None:
     return next((phase.public() for phase in PHASES if phase.id == phase_id), None)

@@ -331,7 +331,11 @@ a compact status above its views; expand its title for the explanation or open
 **Agent cycle** for the full requirements. History and review omit live advice.
 
 The summary prioritizes incomplete sources, then unanswered evaluation questions.
-It names the responsible external agent, detail reads, response route and phase.
+It names the responsible external agent, detail reads, response route and MCP phase.
+`next_step.phase_id` resolves through `phase_info`: `evaluation` for a stage check,
+`monitor` for train/ASHA questions, and `deadline_grace` for a deadline extension.
+The question's own `phase_id` remains its runtime kind (`stage_check`,
+`train_monitor`, `asha_live` or `deadline_grace`) and governs allowed verdicts.
 Read the full checkpoint and `phase_info` before answering: the summary grants
 no extra verdict or early-stop authority. Recorded pause/finish/stop requests
 direct the agent to live state and command receipts; they do not prove that an
@@ -697,8 +701,10 @@ That receipt proves prior acceptance. The engine consumes a verdict only while i
 run generation/UID, node attempt and latest evaluator claim are still current and
 the node is pending. Reset or evaluator reclaim requires a fresh question and answer.
 Pause itself does not supersede an in-flight question: an evaluation draining after
-pause can still require its answer. Reconnecting to a stopped, paused run leaves it
-paused until an explicit durable `resume` succeeds.
+pause can still require its answer. Progress names that remaining checkpoint;
+answering it does not resume search. An explicit `resume` while the engine is
+still waiting retains that engine and question. Reconnecting to a stopped,
+paused run leaves it paused until an explicit durable `resume` succeeds.
 
 In the UI, open **Agent cycle → Connect external agent → Reconnect or recover a
 lost response**. Read by original key or command ID. Typing submits nothing;
@@ -726,6 +732,8 @@ From a source checkout with `[ui,harness]` installed, use a **new** output direc
 
 ```sh
 python -m benchmarks.external_session_smoke --out .tmp/new-session-proof
+# Observe a paused open checkpoint for two minutes; use another new directory.
+python -m benchmarks.external_session_smoke --out .tmp/held-proof --checkpoint-hold-seconds 120
 ```
 
 The offline scenario runs three real CPU training configurations with a protected
@@ -733,7 +741,12 @@ scorer. It kills its own MCP process, restarts its private UI server, withholds 
 committed acknowledgements as HTTP 503, and damages a disposable checkpoint tail.
 It checks original receipt recovery without duplicate candidates, read-only history,
 source refusal, answer replay after terminal, result summaries, and `inspect`/`replay`.
-It then pauses, reconnects in a third MCP session, resumes through the production
+It pauses with an open stage checkpoint and reconnects without answering or
+resuming; phase discovery follows the server's actual next step. The optional
+hold samples the same question, pending node and unchanged journals over real
+time. It settles the pause's recorded engine acknowledgement before comparing
+journal bytes, then explicitly resumes that same engine without repeating score.
+It later pauses, reconnects in a third MCP session, resumes through the production
 command spawner and resets a measured node. The old verdict remains replayable;
 the new attempt stays pending until its own checkpoint is answered.
 Only this fixture restores its known valid bytes; that is not a production repair

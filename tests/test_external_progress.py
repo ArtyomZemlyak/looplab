@@ -104,7 +104,7 @@ def test_progress_restores_decisions_reviews_and_checkpoint_answers(tmp_path):
     assert after["history"]["reviews"]["items"][0]["validity"] == "superseded"
     assert after["pending_checkpoint_count"] == 1
     assert after["next_step"]["code"] == "answer_checkpoint"
-    assert after["next_step"]["phase_id"] == "stage_check"
+    assert after["next_step"]["phase_id"] == "evaluation"
     assert after["history"]["checkpoints"]["items"][0]["status"] == "pending"
     answer = {"expected_generation": generation, "checkpoint_id": q["checkpoint_id"],
               "action_id": "check-1", "verdict": "proceed", "reason": "Loss decreased"}
@@ -258,7 +258,8 @@ def test_checkpoint_names_the_required_decision_even_after_engine_stops(tmp_path
     assert body["execution"]["engine_running"] is False
     assert body["next_step"]["code"] == "answer_checkpoint"
     assert body["next_step"]["title"] == title
-    assert body["next_step"]["phase_id"] == phase
+    assert body["next_step"]["phase_id"] == {"stage_check": "evaluation",
+        "train_monitor": "monitor", "deadline_grace": "deadline_grace"}[phase]
     (rd / "harness_reviews.jsonl").write_text("invalid\n")
     damaged = client.get("/api/runs/demo/harness-progress", params=args).json()
     assert damaged["next_step"]["code"] == "inspect_sources"
