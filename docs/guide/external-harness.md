@@ -33,6 +33,8 @@ operator starts the server and run, while the coding agent proposes candidates.
    and copy the instruction for this run. Configure the coding client's stdio MCP
    server as `looplab harness-mcp`, passing only `LOOPLAB_HARNESS_TOKEN` and the UI
    URL. Supply the credential separately; client-specific examples are below.
+   If the MCP client runs on another machine, install `pip install -e ".[harness]"`
+   there from a matching LoopLab checkout; the client does not need `[ui]` or FastAPI.
    In Claude, review the project MCP approval prompt; **Pending approval** means
    the process has not connected. In Codex, use a trusted project and inspect `/mcp`.
    **Connected** only proves the stdio process, even when the UI/API is unreachable.
@@ -325,6 +327,16 @@ not establish absence of capabilities. Repeat discovery explicitly after recover
 A valid empty matches list remains distinct from failure. The full catalog is
 read before local selection, so the individual API-reply 256 KiB cap does not apply
 to it. This checks catalog structure, not every OpenAPI/domain schema constraint.
+
+For a remote client, `[harness]` is sufficient for all local metadata tools,
+including every `phase_info`, entity schemas and curated `setting_info`.
+Command request/server-derived fields live in the UI-free protocol; server
+validation imports and re-exports the same objects. Metadata discovery does not
+load the server validator or start a local UI. The MCP SDK may install Uvicorn
+transitively; stdio does not import/run it. Keep client/server LoopLab versions
+aligned because local phases/settings come from the client's package. Read live
+`operation_schema` and this run's contract before writing; metadata grants no
+authority and server validation remains definitive.
 
 Read the launched task snapshot through `GET /api/runs/{run_id}/artifact` with
 `root=run`, `path=task.snapshot.json`, and `expected_generation=TOKEN` from
@@ -1015,6 +1027,13 @@ both live discovery tools before the first candidate. The proxy receives upstrea
 must return unavailable evidence without claiming an empty catalog; its next
 explicit read must recover the real command route/schema. Discovery changes no
 events or work. The remaining protected SGD/reconnect checks still apply.
+For the minimal remote-client installation, create a separate environment with
+`pip install -e ".[harness]"` and pass its Python executable using `--mcp-python`.
+The fixture requires FastAPI absent and blocks both FastAPI and Uvicorn imports
+inside its stdio process. It reads every phase and the setting metadata before
+and after reconnect, while its server, engine and protected scorer use the normal
+interpreter. Uvicorn may be present as an MCP dependency; it must not be imported
+by the stdio path. Combine this option with the discovery/response faults above.
 
 ## Delegating only code editing
 

@@ -37,7 +37,7 @@ from looplab.serve.server import make_app
 CASES = ("agent_loss", "engine_loss")
 
 
-def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, response_fault="disconnect", read_fault="disconnect", discovery_fault="none"):
+def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, response_fault="disconnect", read_fault="disconnect", discovery_fault="none", mcp_python=None):
     root.mkdir(parents=True, exist_ok=False)
     runs = root / "runs"; runs.mkdir()
     source = root / "source"; source.mkdir()
@@ -65,6 +65,12 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
     owned_engines = []
     proof = {"case": name, "model_judgment_tested": False, "agent_connection": "not_measured",
              "metrics": [], "read_steps": []}
+    if mcp_python:
+        probe = subprocess.run([mcp_python, "-c", "import importlib.util,json;v={n:bool(importlib.util.find_spec(n)) for n in ('fastapi','uvicorn')};assert not v['fastapi'];print(json.dumps(v))"],
+                               capture_output=True, text=True, timeout=20)
+        assert probe.returncode == 0, "The separate MCP interpreter must have no FastAPI package"
+        proof["mcp_client_ui_packages"] = json.loads(probe.stdout)
+        proof["mcp_ui_imports_blocked"] = True
     if drop_command_response:
         proof["response_fault"] = response_fault
         proof["read_fault"] = read_fault
@@ -221,7 +227,14 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
         pid_file = root / f"{label}.pid"
         wrapper = "import os;from pathlib import Path;from looplab.harness.mcp_server import run_stdio;" + \
             f"Path({str(pid_file)!r}).write_text(str(os.getpid()));run_stdio()"
-        params = StdioServerParameters(command=sys.executable, args=["-c", wrapper],
+        if mcp_python:
+            # MCP may install uvicorn transitively; stdio must not import/run it.
+            wrapper = ("import builtins\noriginal = builtins.__import__\n"
+                       "def without_ui(name, *args, **kwargs):\n"
+                       "    if name.split('.')[0] in {'fastapi','uvicorn'}: raise ModuleNotFoundError(name)\n"
+                       "    return original(name, *args, **kwargs)\n"
+                       "builtins.__import__ = without_ui\n") + wrapper
+        params = StdioServerParameters(command=mcp_python or sys.executable, args=["-c", wrapper],
             env={**child_env, "LOOPLAB_HARNESS_URL": proxy.url if proxy else url, "LOOPLAB_HARNESS_TOKEN": token})
         async with stdio_client(params) as (reader, writer), ClientSession(reader, writer) as mcp:
             await mcp.initialize()
@@ -233,6 +246,21 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
             if response_fault == "invalid_json":
                 proof["uppercase_handoff_canonicalized"] = True
             await client.call("capabilities", {})
+            if mcp_python:
+                # Every local metadata tool is available on a harness-only client.
+                listed = await mcp.call_tool("phases", {})
+                assert not listed.is_error
+                catalog = [json.loads(item.text) for item in listed.content]
+                # List-returning tools emit one content block per item in this SDK.
+                assert len(catalog) > 5 and all(isinstance(row, dict) for row in catalog)
+                for phase in catalog:
+                    info = await client.call("phase_info", {"phase_id": phase["id"]})
+                    assert "commands" in info and "write_access" in info
+                assert "external_harness" in (await client.call("settings_keys", {"query": "external_harness"}))["matches"]
+                assert (await client.call("setting_info", {"name": "external_harness"}))["schema"]
+                assert (await client.call("operations", {"query": "commands"}))["total"]
+                assert "post" in (await client.call("operation_schema", {"path": "/api/runs/{run_id}/commands"}))["operations"]
+                proof["remote_metadata_before_and_after_reconnect"] = True
             for suffix in ("config", "harness-contract",
                            "artifact?root=run&path=task.snapshot.json&expected_generation=" + generation):
                 await client.request("GET", suffix)
@@ -356,6 +384,8 @@ def main():
                         default="disconnect", help="Replace one successful read with mismatched identity; requires --drop-command-response.")
     parser.add_argument("--discovery-fault", choices=["none", "disconnect", "invalid_json", "invalid_catalog"],
                         default="none", help="Fault both live discovery tools before the first candidate; requires --drop-command-response.")
+    parser.add_argument("--mcp-python", type=Path,
+                        help="Use a separate harness-only interpreter with FastAPI absent and UI imports blocked; server/engine stay on this interpreter.")
     args = parser.parse_args()
     if not 0 <= args.quiet_hold_seconds <= 14400:
         parser.error("quiet hold must be between zero and four hours")
@@ -368,7 +398,10 @@ def main():
     if args.discovery_fault != "none" and not args.drop_command_response:
         parser.error("discovery fault requires --drop-command-response")
     root = args.out.resolve(); root.mkdir(parents=True, exist_ok=False)
-    proof = [run_case(root / name, name, args.quiet_hold_seconds, args.drop_command_response, args.response_fault, args.read_fault, args.discovery_fault)
+    mcp_python = str(args.mcp_python.resolve()) if args.mcp_python else None
+    if mcp_python and not Path(mcp_python).is_file():
+        parser.error("MCP interpreter does not exist")
+    proof = [run_case(root / name, name, args.quiet_hold_seconds, args.drop_command_response, args.response_fault, args.read_fault, args.discovery_fault, mcp_python)
              for name in CASES if args.case in ("all", name)]
     (root / "acceptance.json").write_text(json.dumps(proof, ensure_ascii=False, indent=2), encoding="utf8")
 

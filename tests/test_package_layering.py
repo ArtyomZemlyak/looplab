@@ -116,7 +116,7 @@ DEFERRED: dict[tuple[str, str], str] = {
     ("harness", "search"): "`progress` builds the run's policy to say what it would select, "
                            "per progress read",
     ("harness", "serve"): "`mcp_server.phase_info` describes a phase's command fields from the "
-                          "live control tables, per MCP call",
+                          "UI-free protocol's canonical wire tables, per MCP call",
     ("judgebench", "adapters"): "`bait` reads the MLE-bench extras at audit time",
     ("judgebench", "agents"): "the agent-trajectory ladder drives the real `drive_tool_loop` "
                               "inside one bench case (doc 27 §4 rungs 2/4/5); deferred so the "

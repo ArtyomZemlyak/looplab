@@ -594,9 +594,9 @@ External run здесь намеренно не получал кандидат�
 | OB-07 | Частично | Composer показывает активные права и понятное пояснение; четыре варианта раскрываются по запросу, выбор возвращает фокус на видимый переключатель. | Проверить понимание режимов с новым пользователем. |
 | OB-08 | Частично | Essential открывается с модели, показывает 13 полей ресурсов и лимитов с короткими пояснениями; технические детали и runtime permissions раскрываются отдельно. | Проверить подключение модели и понимание лимитов с новым пользователем. |
 | OB-09 | Частично | Run workspace и Agent cycle показывают next step; списки различают внешний режим и engine, attention открывает текущие вопросы (§34–36). Гибель MCP и pause/resume проверены (§37–38). §47 показывает последнее успешное scoped progress чтение. | Активность запросов не доказывает живость агента; многочасовой сценарий OB-10 ещё открыт. |
-| OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–52 проверяют MCP/UI recovery, pause/resume, engine loss, obligations, monitor, deadline и ASHA. §47–52 — request activity, auth configuration, потерянные/неполные ответы, canonical generation, соответствие typed reads запросу и live discovery recovery. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
-| OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. §39/41 исправляют ссылки checkpoint и concept base на реальные MCP-фазы; §52 различает unavailable discovery и пустой catalog. | Проверены контракт, subprocess-кандидаты, desktop и discovery из серверной подсказки; подключение нового клиента относится к OB-10. |
-| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–52: source health, lifecycle verdict, engine recovery, obligations, monitor, retarget, idle recovery, request activity, unknown acknowledgement, identity полученной квитанции и live catalog recovery. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. §49–52 повреждают реальные replies, включая discovery. Наблюдение запросов не измеряет живость агента. |
+| OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–53 проверяют MCP/UI recovery, pause/resume, engine loss, obligations, monitor, deadline и ASHA. §47–53 — request activity, auth, потерянные/неполные ответы, identity/discovery recovery и отдельный клиент с установкой только `[harness]`. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
+| OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. §39/41 исправляют ссылки checkpoint/concept base на реальные MCP-фазы; §52 различает unavailable discovery и пустой catalog; §53 убирает FastAPI dependency из `phase_info`. | Проверены контракт, subprocess-кандидаты, desktop и discovery из серверной подсказки; подключение нового клиента относится к OB-10. |
+| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–53: source health, lifecycle verdict, engine recovery, obligations, monitor, retarget, idle recovery, activity, unknown acknowledgement, identity квитанции и discovery/reconnect отдельного minimal client. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. §49–53 повреждают реальные replies, включая discovery. Наблюдение запросов не измеряет живость агента. |
 | OB-14 | Частично | Начало сайта показывает два основных входа. | Большая архитектурная схема всё ещё нуждается в упрощении для первого знакомства. |
 
 Остальные пункты §3 и соответствующие сценарии §11 остаются открытыми. Изменения первого
@@ -2458,3 +2458,64 @@ checks и `mkdocs build --strict` прошли; API reference регенерир
 исправлен список **11** MCP tools, включая `connection_check`. Настройки,
 endpoints, engine gates и индивидуальный reply cap не менялись. Model judgments,
 интерактивные разрешения клиентов и многочасовые сеансы остаются открытыми в OB-10.
+
+## 53. OB-10/11/12: отдельному MCP-клиенту достаточно установки `[harness]`
+
+**2026-10-01.** Проверен обещанный remote-client install без локального UI.
+`phase_info` импортировал `serve/control_validation.py`, который требует FastAPI
+и server helpers. Даже фазы без durable commands не работали на клиенте с одним
+`[harness]`. Все **5** subprocess probes с запрещёнными FastAPI/Uvicorn imports
+сначала упали: implementation, research, report, recovery и genesis.
+
+Canonical `CONTROL_DATA_FIELDS` и `CONTROL_SERVER_DERIVED_FIELDS` перенесены в
+существующий UI-free `serve/protocol.py`. MCP читает этот protocol; server validator
+импортирует и re-exports **те же объекты**, затем по-прежнему соединяет пять таблиц
+в `ControlSpec`. Состав полей не менялся. Validation, normalization, provenance,
+owner/scoped authority, generation fences и engine decisions остаются серверными.
+Отдельный endpoint, новая копия allow-list или UI dependency в `[harness]` не добавлены.
+
+Mutation tests сохранены: missing row отказывается в самом protocol; validator
+сохраняет свою completeness assertion. Five-table mutation ladder inlines настоящий
+protocol literal только в test variant, затем по одному добавляет fake event во
+все пять таблиц. Отдельные assertions проверяют object identity таблиц и каждой
+`ControlSpec.data_fields`. Это поддерживает прежние missing-handler и append-time
+precondition guards после переноса canonical declaration.
+
+### Настоящий отдельный minimal environment
+
+Создан новый private venv, установлен editable `.[harness]`. MCP SDK **2.2.0**;
+FastAPI отсутствует. Uvicorn **0.54.0** установлен транзитивно самим MCP SDK —
+это не LoopLab UI install и не запуск HTTP server на клиенте. В обоих stdio
+sessions дополнительно запрещены imports FastAPI **и** Uvicorn. Server/engine/scorer
+работают на исходном interpreter. Installed `looplab harness` и
+`looplab harness-mcp --help` также проходят в новом окружении.
+
+`external_idle_recovery_smoke --case agent_loss --drop-command-response
+--discovery-fault invalid_catalog --mcp-python PATH_TO_NEW_PYTHON` читает все **32**
+фазы и `phase_info`, entity schemas, settings keys/help и live command route/schema
+до и после reconnect. Затем проверяет malformed live catalog, потерянные accepted
+candidate/commentary replies, exact retries, недоступный progress, гибель своего
+MCP и restart своего UI. После явного второго candidate run явно завершается.
+
+Ровно **два** protected CPU SGD score executions, **один** engine process и
+**три** русских commentary rows. MSE **0.13721179500378475** и
+**0.01337676906957059**, scorer bytes неизменны; CLI `inspect`/`replay` проходят.
+Proof: `.tmp/external-remote-harness-proof-3/acceptance.json`,
+`mcp_client_ui_packages.fastapi=false`, `mcp_ui_imports_blocked=true`,
+`remote_metadata_before_and_after_reconnect=true`. Пользовательский server не затронут.
+
+Две ранние ошибки fixture исправлены: первый probe ошибочно требовал физического
+отсутствия транзитивного Uvicorn; второй читал только первый content block
+list-returning `phases`. Теперь проверяется FastAPI absence, import guard и все
+phase content blocks SDK. Оба refusal произошли до scoring; успешный третий probe
+прошёл полностью. Owned процессы закрываются cleanup.
+
+Перед изменением прошли **193 replay** проверки; первый targeted набор после
+переноса — **110 passed**. Финальный backend/MCP/control набор — **256 passed**;
+**31 docs/diagram** проверка и `mkdocs build --strict` прошли. API reference
+регенерирован без изменения маршрутов. Обновлены guide, manifest, MCP help,
+package-map/layering пояснение и full B/E diagram. Новых settings, engine waits
+или retries нет. Local phases/settings зависят от версии клиента: client/server
+LoopLab versions должны совпадать; live route schema и server validation обязательны.
+Реальный перенос между физическими машинами, model judgments, interactive client
+approvals и многочасовые сеансы ещё не закрыты.

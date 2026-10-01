@@ -67,7 +67,8 @@ from looplab.serve.http import refusal
 # its values are persisted on every durable command record (`engine_policy`), and `looplab stop
 # --wait` reads those records to tell whether a command will start an engine after the current one
 # exits — from the CLI, which cannot import this module without the `[ui]` extra (fastapi).
-from looplab.serve.protocol import COLLABORATION_EVENTS, CONTROL_EVENTS, EnginePolicy
+from looplab.serve.protocol import (COLLABORATION_EVENTS, CONTROL_EVENTS, EnginePolicy,
+                                   CONTROL_DATA_FIELDS, CONTROL_SERVER_DERIVED_FIELDS)
 
 
 @dataclass(frozen=True)
@@ -1912,64 +1913,8 @@ def _decide_spec_approved(service, rd: Path, event_type: str, state, alive: bool
 # `CONTROL_SPECS`.  The completeness assertions are the mechanism: a new control event cannot ship
 # with a missing handler, because the module refuses to import.
 
-# HTTP control payloads are strict contracts, not arbitrary event bags. Unknown keys are dangerous:
-# replay ignores many of them, so a caller could persist `{secret: ...}` and receive false success.
-CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
-    EV_RUN_ABORT: frozenset({"reason"}),
-    EV_PAUSE: frozenset(),
-    EV_RESTART: frozenset(),
-    EV_RESUME: frozenset(),
-    EV_RUN_REOPENED: frozenset(),
-    EV_NODE_ABORT: frozenset({"node_id", "generation", "reason"}),
-    EV_NODE_RESET: frozenset({"node_id", "generation", "from_stage"}),
-    EV_BUDGET_EXTEND: frozenset(
-        {"add_nodes", "max_seconds", "max_eval_seconds", "timeout", "eval_timeout",
-         "eval_parallel", "llm_parallel", "max_parallel", "parallel_build"}),
-    EV_HINT: frozenset({"text", "replace"}),
-    EV_SET_STRATEGY: frozenset({"strategy"}),
-    EV_METRIC_RETARGET: frozenset({"key", "direction", "goal"}),
-    EV_FORCE_CONFIRM: frozenset({"node_id", "generation"}),
-    EV_FORCE_ABLATE: frozenset({"node_id", "generation"}),
-    EV_FORK: frozenset({"from_node_id", "generation"}),
-    EV_INJECT_NODE: frozenset({
-        "idea", "parent_id", "parent_ids", "parent_generations", "code", "files", "deleted", "origin",
-        # The operator's fork-from-a-snapshot receipt (`_normalize_fork_receipt`): which node this
-        # idea was branched FROM, at which lifecycle generation, from which observed seq — plus the
-        # two SERVER-STAMPED fields that make "what the operator changed" checkable.
-        "forked_from",
-        "source_run", "source_node"}),
-    EV_DEEP_RESEARCH: frozenset(),
-    EV_RESEARCH_COMPLETED: frozenset({"memo"}),
-    EV_REPORT_GENERATED: frozenset({"content"}),
-    EV_APPROVAL_GRANTED: frozenset({"node_id", "generation"}),
-    EV_SPEC_APPROVED: frozenset(),
-    EV_ANNOTATION: frozenset({"node_id", "text"}),
-    EV_COMMENT_CREATED: frozenset({"node_id", "node_generation", "text"}),
-    EV_COMMENT_EDITED: frozenset(
-        {"comment_id", "node_id", "node_generation", "expected_version", "text"}),
-    EV_COMMENT_RESOLUTION_CHANGED: frozenset(
-        {"comment_id", "node_id", "node_generation", "expected_version", "resolved"}),
-    EV_CONCEPT_TAG_EDITED: frozenset({"node_id", "node_generation", "concepts"}),
-    EV_RUN_CONCEPTS: frozenset({"concepts"}),
-    EV_PROMOTE: frozenset({"node_id", "generation", "alias"}),
-    EV_HYPOTHESIS_ADDED: frozenset({"id", "statement", "source"}),
-    EV_HYPOTHESIS_UPDATED: frozenset({"id", "status"}),
-    # Provenance is deliberately absent: normalize_control stamps operator authority after validating
-    # the exact current Card and rejects attempts to forge source/dropped_by/pinned.
-    EV_CARD_REPRIORITIZED: frozenset({"id", "priority"}),
-    EV_CARD_EDITED: frozenset({"id", "statement"}),
-    EV_CARD_RESOURCE_PINNED: frozenset({"id", "gpus", "gpu_mem_mib"}),
-    EV_CARD_DROPPED: frozenset({"id", "reason"}),
-    EV_CARD_REOPENED: frozenset({"id", "reason"}),
-}
 assert set(CONTROL_DATA_FIELDS) == set(CONTROL_EVENTS), "every control event needs a data allowlist"
-# These keys are required on the EVENT but deliberately absent from the REQUEST. The command
-# normalizers derive them from the folded run; accepting them from an agent would let it forge
-# a paid internal research attempt or a report's publication trigger.
-CONTROL_SERVER_DERIVED_FIELDS: dict[str, frozenset[str]] = {
-    EV_RESEARCH_COMPLETED: frozenset({"at_node", "served_manual", "trigger"}),
-    EV_REPORT_GENERATED: frozenset({"at_node", "trigger"}),
-}
+# Protocol owns the wire field metadata; this module owns validation/normalization.
 assert _INJECT_IMPORT_FIELDS <= CONTROL_DATA_FIELDS[EV_INJECT_NODE], (
     "the cross-run import fields must be accepted by inject_node's payload allowlist")
 

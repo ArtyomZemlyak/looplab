@@ -380,12 +380,15 @@ def build_server(api: HarnessAPI):
 
     @mcp.tool()
     def phase_info(phase_id: str) -> dict:
-        """Read a phase's entity, evidence, output actions and command field contracts."""
+        """Read a phase's entity, evidence, output actions and command field contracts.
+        Local metadata uses the UI-free protocol shared with server validation;
+        the remote client needs only [harness], not a local FastAPI server. Use
+        matching client/server LoopLab versions and live operation_schema too."""
         phase = phase_detail(phase_id)
         if phase is None:
             return {"error": "unknown phase", "phase_id": phase_id}
-        from looplab.serve.control_validation import (CONTROL_DATA_FIELDS,
-                                                      CONTROL_SERVER_DERIVED_FIELDS)
+        from looplab.serve.protocol import (CONTROL_DATA_FIELDS,
+                                           CONTROL_SERVER_DERIVED_FIELDS)
         phase["commands"] = {
             name: {"request_fields": sorted(CONTROL_DATA_FIELDS[name]),
                    "server_derived": sorted(CONTROL_SERVER_DERIVED_FIELDS.get(name, ())) }

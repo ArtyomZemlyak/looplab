@@ -17,7 +17,9 @@ The tables and `normalize_control` moved out of `run_commands.py` into `serve/co
 (doc 25 SC-01). These tests read that module DIRECTLY rather than through `run_commands`'
 re-exports: `_exec_source` needs the file whose top level carries the five assertions, and a
 `getsource`/`_CONTROL_*` scan aimed at the barrel would be scanning a file that no longer contains
-the thing under test — and would go green by finding nothing.
+the thing under test — and would go green by finding nothing. Wire field literals now live
+in UI-free `protocol.py`; the test variant inlines that actual literal for the five-table
+mutation ladder. Object identity and the protocol's own missing-row assertion are checked too.
 """
 from __future__ import annotations
 
@@ -37,7 +39,7 @@ from looplab.events.eventstore import EventStore  # noqa: E402
 from looplab.events.replay import fold  # noqa: E402
 from looplab.events.types import (  # noqa: E402
     EV_BUDGET_EXTEND, EV_CARD_EDITED, EV_INJECT_NODE, EV_PAUSE)
-from looplab.serve import control_validation  # noqa: E402
+from looplab.serve import control_validation, protocol  # noqa: E402
 from looplab.serve.control_validation import (  # noqa: E402
     CONTROL_DATA_FIELDS, CONTROL_SPECS, normalize_control)
 from looplab.serve.protocol import COLLABORATION_EVENTS, CONTROL_EVENTS  # noqa: E402
@@ -104,6 +106,23 @@ def _exec_source(source: str):
     return module
 
 
+def _registry_source():
+    """Inline the protocol-owned field literal in the TEST variant only.
+
+    The validator still asserts all five joined tables. Mutation probes must edit
+    the actual canonical field declaration, rather than scan its import and go
+    green without removing a row. The other four tables remain in the validator.
+    """
+    wire = inspect.getsource(protocol)
+    node = next(node for node in ast.parse(wire).body if isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name) and node.target.id == "CONTROL_DATA_FIELDS")
+    declaration = ast.get_source_segment(wire, node)
+    source = inspect.getsource(control_validation)
+    anchor = 'assert set(CONTROL_DATA_FIELDS) == set(CONTROL_EVENTS), "every control event needs a data allowlist"'
+    assert source.count(anchor) == 1
+    return source.replace(anchor, declaration + "\n" + anchor)
+
+
 def _add_entry(source: str, declaration: str, entry: str) -> str:
     assert source.count(declaration) == 1, f"table anchor {declaration!r} is not unique"
     index = source.index(declaration) + len(declaration)
@@ -129,6 +148,8 @@ def test_every_control_event_declares_all_five_behaviours():
     """Key-set completeness, and that `CONTROL_SPECS` really joins the tables rather than
     re-deriving them: a spec pointing at the wrong event's handler is the mismatch this shape
     exists to prevent."""
+    assert CONTROL_DATA_FIELDS is protocol.CONTROL_DATA_FIELDS
+    assert control_validation.CONTROL_SERVER_DERIVED_FIELDS is protocol.CONTROL_SERVER_DERIVED_FIELDS
     assert set(CONTROL_SPECS) == set(CONTROL_EVENTS)
     for event_type, spec in CONTROL_SPECS.items():
         assert spec.event_type == event_type
@@ -138,11 +159,18 @@ def test_every_control_event_declares_all_five_behaviours():
         assert spec.decide is control_validation._CONTROL_DECISIONS[event_type]
 
 
+def test_wire_field_metadata_refuses_a_missing_row_at_its_own_import():
+    source = inspect.getsource(protocol)
+    broken = _drop_entry(source, TABLES[0][0], "EV_DEEP_RESEARCH")
+    with pytest.raises(AssertionError, match="data allowlist"):
+        exec(compile(broken, protocol.__file__, "exec"), {"__name__": "protocol_registry_probe"})
+
+
 @pytest.mark.parametrize("declaration,_entry,words", TABLES)
 def test_dropping_one_row_from_any_table_refuses_the_import(declaration, _entry, words):
     """Each table's assertion has to bite on its OWN table. A single shared assertion, or one
     written against the wrong table, would let three of these mutations through."""
-    source = inspect.getsource(control_validation)
+    source = _registry_source()
     broken = _drop_entry(source, declaration, "EV_DEEP_RESEARCH")
     assert broken != source
     with pytest.raises(AssertionError) as failure:
@@ -160,7 +188,7 @@ def test_a_new_control_event_cannot_ship_with_a_missing_handler(monkeypatch):
     import looplab.serve.protocol as protocol
 
     monkeypatch.setattr(protocol, "CONTROL_EVENTS", frozenset({*CONTROL_EVENTS, FAKE}))
-    source = inspect.getsource(control_validation)
+    source = _registry_source()
     for declaration, entry, words in TABLES:
         with pytest.raises(AssertionError) as failure:
             _exec_source(source)
@@ -181,7 +209,7 @@ def test_a_precondition_for_a_non_collaboration_event_is_refused(monkeypatch):
     import looplab.serve.protocol as protocol
 
     monkeypatch.setattr(protocol, "CONTROL_EVENTS", frozenset({*CONTROL_EVENTS, FAKE}))
-    source = inspect.getsource(control_validation)
+    source = _registry_source()
     for declaration, entry, _words in TABLES:
         if declaration.startswith("_CONTROL_PRECONDITIONS"):
             entry = f'    "{FAKE}": _precondition_card,'
