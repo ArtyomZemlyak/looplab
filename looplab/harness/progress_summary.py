@@ -23,6 +23,10 @@ def next_step(progress: dict) -> dict:
     execution = progress["execution"]
     alive = execution["engine_running"]
     label = "running" if alive is True else "stopped" if alive is False else "unknown"
+    if step["code"] == "answer_checkpoint" and alive is False:
+        step["detail"] = ("This is a recorded question from a stopped engine. Inspect state and saved command receipts before choosing explicit recovery or cancellation. Resume may re-evaluate the interrupted attempt and supersede this question; refresh after resume before answering. "
+                          + step["detail"])
+        step["reads"].append(f"GET {_RUN}/command-receipt?expected_generation=TOKEN&command_id={{command_id}}")
     step["detail"] += f" Engine last observed: {label}. Agent connection: not measured."
     if progress["complete"] and progress["finish_pending_nodes"]:
         counts = execution["recorded_node_counts"]

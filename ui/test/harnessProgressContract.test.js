@@ -89,7 +89,7 @@ test('next step follows server advice, refreshes on events and hides after a fai
   try {
     const { HarnessProgressPanel } = await harness.load('/src/panels.jsx')
     const step = { code: 'answer_checkpoint', owner: 'external_agent',
-      title: 'Answer the evaluation question', detail: 'Waiting for an explicit verdict.',
+      title: 'Answer the evaluation question', detail: 'This is a recorded question from a stopped engine. Resume may supersede this question; refresh after resume before answering.',
       reads: ['GET /api/runs/{run_id}/harness-checkpoints'],
       action: 'POST /api/runs/{run_id}/harness-checkpoints', phase_id: 'evaluation' }
     let payload = { ...progress, next_step: step }
@@ -100,6 +100,8 @@ test('next step follows server advice, refreshes on events and hides after a fai
     await until(() => view.container.textContent.includes('Next step · Answer'), 'server next step')
     assert.match(view.container.textContent, /GET \/api\/runs\/mnist\/harness-checkpoints/)
     assert.match(view.container.textContent, /phase_info: evaluation/)
+    assert.match(view.container.textContent, /recorded question from a stopped engine/)
+    assert.match(view.container.textContent, /refresh after resume before answering/)
     payload = { ...payload, event_seq: 13, next_step: { ...step, code: 'choose_direction',
       title: 'Choose the next experiment or finish', action: null, phase_id: null } }
     await view.rerender({ ...props, seq: 13 })

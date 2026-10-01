@@ -256,6 +256,8 @@ def test_checkpoint_names_the_required_decision_even_after_engine_stops(tmp_path
     args = {"expected_generation": run_generation_token(store.read_all()), "brief": True}
     body = client.get("/api/runs/demo/harness-progress", params=args).json()
     assert body["execution"]["engine_running"] is False
+    assert "recorded question" in body["next_step"]["detail"]
+    assert "refresh after resume" in body["next_step"]["detail"]
     assert body["next_step"]["code"] == "answer_checkpoint"
     assert body["next_step"]["title"] == title
     assert body["next_step"]["phase_id"] == {"stage_check": "evaluation",

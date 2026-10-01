@@ -10,6 +10,8 @@ It also pauses the engine, reconnects without resuming it, explicitly resumes vi
 the production command spawner, and re-evaluates a node behind a fresh checkpoint.
 Use --checkpoint-hold-seconds to observe a paused open checkpoint over a real
 wall-clock interval; waiting never answers the checkpoint or resumes the run.
+Use --engine-loss to terminate this fixture's engine at that checkpoint and
+check explicit recovery with a fresh evaluator question.
 """
 from __future__ import annotations
 
@@ -140,6 +142,8 @@ def main():
     parser.add_argument("--out", required=True, type=Path, help="New disposable output directory")
     parser.add_argument("--checkpoint-hold-seconds", type=float, default=0,
                         help="Observe the paused open checkpoint for 0..86400 real seconds")
+    parser.add_argument("--engine-loss", action="store_true",
+                        help="Terminate the owned engine at its open checkpoint before reconnect")
     args = parser.parse_args()
     if not 0 <= args.checkpoint_hold_seconds <= 86400:
         parser.error("--checkpoint-hold-seconds must be finite and between 0 and 86400")
@@ -170,7 +174,8 @@ def main():
     server = thread = engine = None
     owned_engines = []
     faults = {"command": False, "answer": False}
-    proof = {"agent_connection": "not_measured", "model_judgment_tested": False, "observations": []}
+    proof = {"agent_connection": "not_measured", "model_judgment_tested": False,
+             "engine_loss": args.engine_loss, "observations": []}
     log = (root / "engine.log").open("w", encoding="utf8")
 
     def start_ui():
@@ -248,6 +253,11 @@ def main():
         assert paused["next_step"]["phase_id"] == "evaluation"
         assert "does not resume" in paused["next_step"]["detail"]
         proof["observations"].append("pause preserved the open checkpoint; engine stayed live awaiting its verdict")
+        if args.engine_loss:
+            engine.terminate()
+            await anyio.to_thread.run_sync(lambda: engine.wait(timeout=10))
+            assert (await client.progress())["execution"]["engine_running"] is False
+            proof["observations"].append("owned engine terminated at the open checkpoint; node remained nonterminal")
         proof["observations"].append("command ack lost; natural checkpoint opened; owned MCP process killed")
 
     async def recovered(client):
@@ -258,7 +268,10 @@ def main():
         receipt = await client.receipt("session:candidate:0")
         assert receipt["command"]["id"] == proof["command_id"]
         progress = await client.progress()
-        assert progress["execution"]["engine_running"] is True and progress["pending_checkpoint_count"] == 1
+        assert progress["execution"]["engine_running"] is (not args.engine_loss)
+        assert progress["pending_checkpoint_count"] == 1
+        if args.engine_loss:
+            assert "refresh after resume" in progress["next_step"]["detail"]
         q = await client.question()
         assert q["checkpoint_id"] == proof["checkpoint"]
         assert all(path.read_bytes() == content for path, content in before.items())
@@ -268,7 +281,8 @@ def main():
         while time.monotonic() < deadline:
             waiting = await client.progress()
             assert waiting["complete"] and waiting["recorded_lifecycle"]["paused"]
-            assert waiting["execution"]["engine_running"] is True and waiting["pending_checkpoint_count"] == 1
+            assert waiting["execution"]["engine_running"] is (not args.engine_loss)
+            assert waiting["pending_checkpoint_count"] == 1
             assert waiting["next_step"]["phase_id"] == "evaluation"
             assert (await client.read("harness-checkpoints"))["pending"][0]["checkpoint_id"] == q["checkpoint_id"]
             node = (await client.state())["state"]["nodes"]["0"]
@@ -300,14 +314,35 @@ def main():
         await client.call("phase_info", {"phase_id": "recovery"})
         await client.progress()
         await client.command("resume", {}, "session:resume:inflight")
-        assert len(owned_engines) == 1 and engine.poll() is None
-        assert (await client.question())["checkpoint_id"] == q["checkpoint_id"]
+        if args.engine_loss:
+            assert len(owned_engines) == 2 and engine.poll() is not None
+            new_questions = await until(lambda: client.read("harness-checkpoints"), lambda row:
+                len(row["pending"]) == 1 and row["pending"][0]["checkpoint_id"] != q["checkpoint_id"])
+            fresh, = new_questions["pending"]
+            assert fresh["node_generation"] == q["node_generation"]
+            assert fresh["claim_seq"] > q["claim_seq"]
+            before_stale_answer = journal.read_bytes()
+            await client.request("POST", "harness-checkpoints", answer, status=409)
+            assert journal.read_bytes() == before_stale_answer
+            assert (await client.question())["checkpoint_id"] == fresh["checkpoint_id"]
+            history = (await client.read("harness-progress"))["history"]["checkpoints"]["items"]
+            old = next(row for row in history if row["question"]["checkpoint_id"] == q["checkpoint_id"])
+            assert old["lifecycle"] == old["status"] == "superseded" and old["answer"] is None
+            proof["engine_recovery"] = {"previous_claim_seq": q["claim_seq"],
+                "current_claim_seq": fresh["claim_seq"], "same_node_attempt": True}
+            answer = {**answer, "checkpoint_id": fresh["checkpoint_id"], "action_id": "session:stage:0:recovered"}
+            proof["observations"].append("explicit resume replaced the dead engine; fresh evaluator claim rejected the old answer")
+        else:
+            assert len(owned_engines) == 1 and engine.poll() is None
+            assert (await client.question())["checkpoint_id"] == q["checkpoint_id"]
+            proof["observations"].append("explicit resume reused the live engine and original checkpoint without another score stage")
         assert not (await client.state())["state"]["paused"]
-        proof["observations"].append("explicit resume reused the live engine and original checkpoint without another score stage")
         await client.request("POST", "harness-checkpoints", answer, status=503)
         first_node = await client.terminal(0)
         assert (await client.request("POST", "harness-checkpoints", answer))["replayed"]
-        await client.commentary("node", "session:summary:0", "Обучение завершено после восстановления MCP. Исходную команду нашли по ключу; кандидат не дублировали. Один результат требует проверки повторяемости.", 0)
+        summary = ("После остановки engine незавершённую оценку выполнили заново. Кандидат сохранился; новый evaluator потребовал свежий checkpoint, старый ответ отклонён. Получен один terminal-результат; повторяемость ещё не проверена."
+                   if args.engine_loss else "Обучение завершено после восстановления MCP. Исходную команду нашли по ключу; кандидат не дублировали. Один результат требует проверки повторяемости.")
+        await client.commentary("node", "session:summary:0", summary, 0)
         proof["observations"].append("new UI/MCP reads left history unchanged; lost answer replayed after terminal")
 
         await client.inject(80, "session:candidate:1")
@@ -324,9 +359,9 @@ def main():
         await client.progress()
         await client.command("pause", {}, "session:pause")
         await until(client.state, lambda row: row["state"]["paused"])
-        await anyio.to_thread.run_sync(lambda: engine.wait(timeout=10))
+        await anyio.to_thread.run_sync(lambda: owned_engines[-1].wait(timeout=10))
         assert (await client.progress())["execution"]["engine_running"] is False
-        proof["observations"].append("explicit pause stopped the original engine after measured work")
+        proof["observations"].append("explicit pause stopped the active engine after measured work")
 
     async def resumed(client):
         rd = runs / "demo"
@@ -341,7 +376,7 @@ def main():
         await client.command("resume", {}, "session:resume")
         await until(client.state, lambda row: not row["state"]["paused"])
         await until(client.progress, lambda row: row["execution"]["engine_running"] is True)
-        assert len(owned_engines) == 2
+        assert len(owned_engines) == 2 + int(args.engine_loss)
         proof["observations"].append("third MCP session did not resume on reads; durable resume spawned one replacement engine")
 
         await client.call("phases", {"query": "evaluation"})
@@ -372,7 +407,9 @@ def main():
         await client.call("phase_info", {"phase_id": "recovery"})
         assert (await client.progress())["complete"]
         await client.command("run_abort", {"reason": "Completed disposable multi-session recovery acceptance."}, "session:finish")
-        await client.commentary("run", "session:summary:run", "Запуск явно завершён: два успешных узла, один повторно оценён после resume; третья конфигурация неуспешна. Разрыв MCP сохранил результаты, продолжение выбрано явно. Для исследовательского вывода нужны другие seeds.")
+        summary = ("Запуск явно завершён: два успешных узла, третий failed без метрики. После остановки engine незавершённая оценка повторена с новым checkpoint; готовый узел позже переизмерен через reset. Все продолжения были явными. Для исследовательского вывода нужны другие seeds."
+                   if args.engine_loss else "Запуск явно завершён: два успешных узла, один повторно оценён после resume; третья конфигурация неуспешна. Разрыв MCP сохранил результаты, продолжение выбрано явно. Для исследовательского вывода нужны другие seeds.")
+        await client.commentary("run", "session:summary:run", summary)
         assert len((await client.state())["state"]["nodes"]) == 3
 
     try:
@@ -393,7 +430,7 @@ def main():
                 lambda row: row.status_code == 200 and row.json()["state"].get("setup_done")).json()
         generation = current["generation"]; proof["generation"] = generation
         anyio.run(session, "first", generation, first)
-        assert engine.poll() is None
+        assert (engine.poll() is not None) == args.engine_loss
         server.should_exit = True; thread.join(timeout=5)
         assert not thread.is_alive()
         server, thread = start_ui()
@@ -406,7 +443,8 @@ def main():
         first_stages = [row for row in events if row.type == "phase_progress"
             and row.data.get("node_id") == 0 and row.data.get("generation") == 0
             and row.data.get("phase") == "stage" and row.data.get("status") == "finished"]
-        assert len(first_stages) == 1 and first_stages[0].data["name"] == "score"
+        assert len(first_stages) == 1 + int(args.engine_loss)
+        assert all(row.data["name"] == "score" for row in first_stages)
         proof["initial_score_stage_completions"] = len(first_stages)
         for path in [source / "score.py", *((runs / "demo" / "nodes" / f"node_{nid}" / "score.py") for nid in range(3))]:
             assert hashlib.sha256(path.read_bytes()).hexdigest() == scorer_hash

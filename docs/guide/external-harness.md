@@ -336,6 +336,10 @@ It names the responsible external agent, detail reads, response route and MCP ph
 `monitor` for train/ASHA questions, and `deadline_grace` for a deadline extension.
 The question's own `phase_id` remains its runtime kind (`stage_check`,
 `train_monitor`, `asha_live` or `deadline_grace`) and governs allowed verdicts.
+When the engine is stopped, a listed question is recorded state, not a live
+training wait. Inspect state and saved command receipts before choosing recovery;
+resume may re-evaluate the interrupted attempt and replace its evaluator/question.
+Refresh progress and checkpoints after resume before submitting a verdict.
 Read the full checkpoint and `phase_info` before answering: the summary grants
 no extra verdict or early-stop authority. Recorded pause/finish/stop requests
 direct the agent to live state and command receipts; they do not prove that an
@@ -705,6 +709,12 @@ pause can still require its answer. Progress names that remaining checkpoint;
 answering it does not resume search. An explicit `resume` while the engine is
 still waiting retains that engine and question. Reconnecting to a stopped,
 paused run leaves it paused until an explicit durable `resume` succeeds.
+If the engine died before the evaluation settled, explicit resume can claim that
+same node attempt with a new evaluator and run the protected command again.
+Its old unanswered checkpoint becomes superseded; an answer to it is refused
+with 409. Answer the freshly observed question. This differs from reconnecting
+to a live waiting engine, where the original question remains current. A score
+command's completion alone does not make its interrupted attempt a terminal result.
 
 In the UI, open **Agent cycle → Connect external agent → Reconnect or recover a
 lost response**. Read by original key or command ID. Typing submits nothing;
@@ -734,6 +744,8 @@ From a source checkout with `[ui,harness]` installed, use a **new** output direc
 python -m benchmarks.external_session_smoke --out .tmp/new-session-proof
 # Observe a paused open checkpoint for two minutes; use another new directory.
 python -m benchmarks.external_session_smoke --out .tmp/held-proof --checkpoint-hold-seconds 120
+# Kill only the fixture's engine at an open checkpoint and explicitly recover it.
+python -m benchmarks.external_session_smoke --out .tmp/engine-loss-proof --engine-loss
 ```
 
 The offline scenario runs three real CPU training configurations with a protected
@@ -749,6 +761,12 @@ journal bytes, then explicitly resumes that same engine without repeating score.
 It later pauses, reconnects in a third MCP session, resumes through the production
 command spawner and resets a measured node. The old verdict remains replayable;
 the new attempt stays pending until its own checkpoint is answered.
+With `--engine-loss`, the fixture terminates its owned engine after score has
+completed but before the checkpoint is answered. Read-only reconnect leaves it
+stopped; explicit resume spawns a replacement, re-evaluates the same node attempt
+and opens a question bound to its fresh claim. The old answer receives 409 without
+changing the journal. The history retains that question as superseded. The proof
+counts both score executions and distinguishes them from the single terminal result.
 Only this fixture restores its known valid bytes; that is not a production repair
 procedure. `acceptance.json`, engine logs and inspection output are saved under the
 output directory. This checks protocol recovery, not model judgments or interactive

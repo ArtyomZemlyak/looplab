@@ -596,7 +596,7 @@ External run здесь намеренно не получал кандидат�
 | OB-09 | Частично | Run workspace и Agent cycle показывают next step; списки различают внешний режим и engine, attention открывает текущие вопросы (§34–36). Гибель MCP и pause/resume проверены (§37–38). | Подключение самого агента не измеряется; многочасовой сценарий OB-10 ещё открыт. |
 | OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–38 проверяют три MCP-сессии, restart UI, pause/resume и повторную оценку. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
 | OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. §39 исправляет ссылки checkpoint на реальные MCP-фазы. | Проверены контракт, subprocess-кандидаты, desktop и discovery из серверной подсказки; подключение нового клиента относится к OB-10. |
-| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–38: source health и проверка generation/UID, node attempt и evaluator claim при употреблении verdict. | Проверены гибель MCP, restart UI, потерянные подтверждения, pause/resume и reset без дубля. Живость внешнего агента остаётся явно неизмеряемой. |
+| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–40: source health, lifecycle verdict и восстановление после аварийной остановки engine. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. Живость внешнего агента остаётся явно неизмеряемой. |
 | OB-14 | Частично | Начало сайта показывает два основных входа. | Большая архитектурная схема всё ещё нуждается в упрощении для первого знакомства. |
 
 Остальные пункты §3 и соответствующие сценарии §11 остаются открытыми. Изменения первого
@@ -1650,3 +1650,56 @@ Codex/Claude остаются открытыми в OB-10; соединение 
 attention, MCP, доступа, границ пакетов и containment; **5 mounted UI** проверок;
 **32 docs/architecture** проверки и `mkdocs build --strict`. Перед изменением
 прошли **193 replay** проверки. Новые фазы, настройки и engine gates не добавлены.
+
+## 40. OB-10/12: аварийная остановка engine до terminal-результата
+
+### Новый воспроизводимый сценарий
+
+Добавлен `benchmarks.external_session_smoke --engine-loss` с отдельным новым
+output directory. Это остановка собственного subprocess через `terminate`,
+а не штатный pause/drain; trainer уже завершён, но stage checkpoint ещё открыт.
+Engine не успел записать `eval_invocation_settled` и terminal узла. Затем убивается
+собственный MCP-процесс и перезапускается частный UI, как в предыдущем сценарии.
+
+Новая MCP-сессия только читает state/progress/question/receipt. Engine остаётся
+остановленным, узел pending без метрики, история побайтно неизменна. Старый вопрос
+виден как записанное обязательство прежнего evaluator. Это не доказательство
+того, что обучение продолжается.
+
+Явный durable `resume` создаёт один replacement engine. Он повторяет незавершённую
+оценку того же узла и attempt, записывает новый evaluator claim и открывает новый
+checkpoint. Старый verdict POST получает **409**, checkpoint journal не меняется;
+старый вопрос виден в полной истории как `superseded`, без ответа. Свежий verdict
+завершает оценку. Три node ID сохраняются до finish; новый кандидат не создаётся.
+
+Первый score command здесь исполняется **дважды**, а terminal-результат получается
+один. Это ожидаемое восстановление ещё не settled попытки, а не два успешных
+эксперимента. В обычном сценарии с живым waiting engine тот же command по-прежнему
+выполняется один раз. Protected scorer во всех узлах неизменён. Проверена настоящая
+production-логика resume; cleanup охватывает только Popen этого disposable server.
+
+### Подсказки и понятность результата
+
+Compact/full progress и UI теперь объясняют stopped engine с checkpoint:
+это recorded question; перед решением нужны state и original receipt, после
+resume нужно заново прочитать progress/checkpoints, поскольку evaluator может
+заменить вопрос и повторить незавершённую оценку. Response route и допустимые
+verdict не изменены; автоматическое восстановление не добавлено. Существующие
+три проверки stopped checkpoint падали до уточнения и проходят после него.
+Mounted UI проверяет отображение серверной подсказки.
+
+Русская интерпретация первого terminal-узла в crash-сценарии прямо сообщает
+о повторной оценке после остановки engine и отказе старого verdict. Итог run
+различает это восстановление и последующее явное переизмерение через reset.
+Result-notices по-прежнему используют измеренную evidence-квитанцию и exact retry.
+
+Пройденный proof: `.tmp/external-engine-loss-proof-2/acceptance.json`.
+Он также включает повреждённый checkpoint tail, потерянные HTTP acknowledgements,
+ещё один штатный pause/resume, reset и неуспешную конфигурацию. CLI `inspect` и
+`replay` проходят. Никаких provider/model вызовов нет; многочасовая работа,
+модельные решения и интерактивные разрешения клиентов остаются открытыми в OB-10.
+
+Регрессия: **263 backend**, **5 mounted UI**, **32 docs/architecture** проверки;
+**193 replay** перед изменением. Контрольный live-прогон без `--engine-loss` тоже
+прошёл: `.tmp/external-engine-loss-control-1/acceptance.json`, один первый score
+stage и тот же checkpoint после resume живого engine.
