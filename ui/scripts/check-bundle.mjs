@@ -102,8 +102,12 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // All additions stay in lazy result chunks; owner route/reachability ceilings unchanged.
     // 2026-10-01 client bootstrap: measured 605,428 B JS (+457 B), initial 82,977 B.
     // Codex/Claude configs and copy action stay in the lazy Agent cycle; closures unchanged.
-    js: { gzip: 591.5 * KIB },
-    css: { gzip: 57.25 * KIB },
+    // 2026-10-01 main external status: HEAD 605,642 B JS / 58,445 B CSS; now
+    // 606,794 B / 58,684 B. +1,152 B JS buys brief polling, generation/event fences
+    // and the main-screen next step. The cycle/notice extraction keeps other panels lazy;
+    // initial shell and all route, cycle and forbidden-reachability limits remain unchanged.
+    js: { gzip: 593 * KIB },
+    css: { gzip: 57.5 * KIB },
   },
   individual: {
     js: { raw: 450 * KIB, gzip: 110 * KIB },

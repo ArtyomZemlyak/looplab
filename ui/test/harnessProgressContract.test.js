@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import React from 'react'
 
-import { fetchStub, jsonResponse, mountLive, until } from './_mount.js'
+import { click, fetchStub, jsonResponse, mountLive, until } from './_mount.js'
 
 const generation = 'a'.repeat(64)
 const progress = {
@@ -16,6 +16,52 @@ const progress = {
   pending_checkpoint_count: 0, pending_checkpoints: [],
   finish_pending_nodes: [2], finish_report_due: false, finish_reviews_due: [],
 }
+
+test('main status refreshes engine observations without events and withdraws failed or old reads', async t => {
+  const harness = await mountLive({ visible: true })
+  try {
+    const { HarnessProgressPanel } = await harness.load('/src/HarnessProgressPanel.jsx')
+    const next_step = { code: 'inspect_pending', owner: 'external_agent', title: 'Inspect evaluations',
+      detail: 'Engine last observed: running. Agent connection: not measured.', reads: [], action: null, phase_id: null }
+    let payload = { generation, event_seq: 12, next_step, execution: { engine_running: true } }
+    let failure = false
+    const requests = []
+    globalThis.fetch = fetchStub({ '/api/runs/mnist/harness-progress': request => {
+      requests.push(request)
+      return jsonResponse(payload, failure ? 503 : 200)
+    } })
+    let opened = 0
+    const props = { compact: true, runId: 'mnist', expectedGeneration: generation, seq: 12,
+      externalMode: true, engineRunning: true, onOpen: () => opened++ }
+    t.mock.timers.enable({ apis: ['setInterval'] })
+    const view = await harness.mount(HarnessProgressPanel, props)
+    await until(() => view.container.textContent.includes('Inspect evaluations'), 'main status')
+    assert.equal(requests[0].url.searchParams.get('brief'), 'true')
+    assert.equal(requests[0].url.searchParams.get('expected_generation'), generation)
+    assert.equal(requests[0].init.cache, 'no-store')
+    payload = { ...payload, execution: { engine_running: false }, next_step: { ...next_step,
+      title: 'Engine stopped', detail: 'Recorded starts do not prove training continues.' } }
+    await React.act(async () => { t.mock.timers.tick(10_000) })
+    await until(() => view.container.textContent.includes('Engine stopped'), 'same-event engine probe')
+    assert.ok(!view.container.textContent.includes('Engine last observed: running'))
+    failure = true
+    await React.act(async () => { t.mock.timers.tick(10_000) })
+    await until(() => view.container.textContent.includes('Next step unavailable'), 'failed probe')
+    assert.ok(!view.container.textContent.includes('Engine stopped'))
+    failure = false
+    await click([...view.container.querySelectorAll('button')].find(x => x.textContent === 'Retry'))
+    await until(() => view.container.textContent.includes('Engine stopped'), 'explicit read retry')
+    await click([...view.container.querySelectorAll('button')].find(x => x.textContent === 'Agent cycle'))
+    assert.equal(opened, 1)
+    await view.rerender({ ...props, seq: 13 })
+    await until(() => requests.length >= 4, 'new event read')
+    assert.ok(!view.container.textContent.includes('Engine stopped'), 'older event cannot advise the current run')
+    await view.rerender({ ...props, expectedGeneration: 'b'.repeat(64) })
+    await until(() => requests.at(-1).url.searchParams.get('expected_generation') === 'b'.repeat(64), 'new generation read')
+    assert.ok(!view.container.textContent.includes('Engine stopped'))
+    assert.ok(requests.every(request => request.init.method === 'GET' || request.init.method == null))
+  } finally { await harness.close() }
+})
 
 test('external cycle renders candidate and finalization obligations from progress', async () => {
   const harness = await mountLive({ visible: true })

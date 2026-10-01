@@ -76,7 +76,7 @@ const SUSPICIOUS_WIN = {
 // The server. Everything the workspace reads is answered; the owner stream is a live body the test
 // writes frame by frame, recorded with the cursor its request carried (`Last-Event-ID`, absent on a
 // fresh connection). `holdProbe` keeps the `/state` probe unanswered until the test releases it.
-function runServer({ holdProbe = false } = {}) {
+function runServer({ holdProbe = false, external = false } = {}) {
   const streams = []
   let releaseProbe = () => {}
   const probe = holdProbe ? new Promise(resolve => { releaseProbe = resolve }) : null
@@ -87,7 +87,12 @@ function runServer({ holdProbe = false } = {}) {
       streams.push({ stream, cursor: init.headers?.['Last-Event-ID'] ?? null })
       return stream.response()
     },
-    [`GET /api/runs/${RUN}/config`]: { max_eval_seconds: 600 },
+    [`GET /api/runs/${RUN}/config`]: { max_eval_seconds: 600, external_harness: external },
+    [`GET /api/runs/${RUN}/harness-progress`]: {
+      generation: GENERATION, event_seq: 3, execution: { engine_running: true },
+      next_step: { code: 'choose_direction', owner: 'external_agent', title: 'Choose direction',
+        detail: 'Agent connection: not measured.', reads: [], action: null, phase_id: null },
+    },
     [`GET /api/runs/${RUN}/log-page`]: {
       events: [], generation: GENERATION, cursors: { older: null, newer: null },
       has_more: { older: false, newer: false }, torn_tail: false, total_events: 0,
@@ -143,6 +148,32 @@ async function openWorkspace(server) {
   localStorage.clear()
   return harness.mount(RunView, { runId: RUN, onBack() {} })
 }
+
+test('external main status is visible on the workspace and disappears in history and review', async () => {
+  const server = runServer({ external: true })
+  const view = await openWorkspace(server)
+  try {
+    await until(() => read(view, '[aria-label="External agent status"]')?.includes('Choose direction'), 'external main status')
+    const before = server.reads('/harness-progress')
+    await React.act(async () => {
+      history.replaceState(history.state, '', `#/run/${RUN}?gen=${GENERATION}&seq=3`)
+      window.dispatchEvent(new window.PopStateEvent('popstate'))
+    })
+    await until(() => view.container.textContent.includes('Historical snapshot'), 'history route')
+    assert.equal(read(view, '[aria-label="External agent status"]'), null)
+    assert.equal(server.reads('/harness-progress'), before, 'history does not read live agent advice')
+    await React.act(async () => {
+      history.replaceState(history.state, '', `#/run/${RUN}`)
+      window.dispatchEvent(new window.PopStateEvent('popstate'))
+    })
+    await until(() => read(view, '[aria-label="External agent status"]') != null, 'return to live')
+    await view.rerender({ runId: RUN, onBack() {}, reviewMode: true })
+    assert.equal(read(view, '[aria-label="External agent status"]'), null)
+  } finally {
+    await view.unmount()
+    history.replaceState(null, '', '/')
+  }
+})
 
 test('the workspace follows a live run: the probe paints it and a delta frame moves it in place',
   async () => {

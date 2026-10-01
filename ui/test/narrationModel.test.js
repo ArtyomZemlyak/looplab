@@ -179,6 +179,18 @@ const withDock = async (body) => {
   try { await body(await vite.ssrLoadModule('/src/Dock.jsx')) } finally { await vite.close() }
 }
 
+test('external idle status cannot invent internal planning from the last log row', async () => {
+  await withDock(({ agentStatus }) => {
+    assert.equal(agentStatus({ engine_running: true, nodes: {} }, [], null, null), 'Waiting for run settings…')
+    for (const type of ['research_completed', 'strategy_decision', 'node_evaluated']) {
+      assert.equal(agentStatus({ engine_running: true, nodes: {} }, [{ type, data: {} }], null, true),
+        'External agent controls the next experiment')
+    }
+    assert.match(agentStatus({ engine_running: true, nodes: { 5: evaluatingNode(5) } }, [], null, true), /#5/)
+    assert.ok(!agentStatus({ engine_running: false, nodes: {} }, [], null, true).includes('Planning'))
+  })
+})
+
 const evaluatingNode = (id) => ({
   id, status: 'pending', attempt: 0,
   activity: { schema: 1, status: 'evaluating', generation: 0, evidence: 'node_eval_started' },

@@ -118,7 +118,7 @@ const OverviewPanel = lazyNamed(loadPanels, 'OverviewPanel')
 const ResearchPanel = lazyNamed(loadPanels, 'ResearchPanel')
 const ArtifactsPanel = lazyNamed(loadPanels, 'ArtifactsPanel')
 const QueuePanel = lazyNamed(loadPanels, 'QueuePanel')
-const HarnessProgressPanel = lazyNamed(loadPanels, 'HarnessProgressPanel')
+const HarnessProgressPanel = lazyNamed(() => import('./HarnessProgressPanel.jsx'), 'HarnessProgressPanel')
 
 // The panel bar, grouped by importance then process order (Report is the [Search|Report] toggle, and
 // the deep-research/policy/strategist "why" cards now live in the chat — so those panels are gone).
@@ -2519,6 +2519,16 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         </div>
       </div>
 
+      {!mutationReadOnlyMode && configResource.data?.external_harness === true &&
+        <LazyBoundary label="external agent status" resetKey={`${runId}:${generation}`}>
+          <HarnessProgressPanel compact runId={runId} expectedGeneration={generation} seq={seq}
+            externalMode configStatus="ready"
+            engineRunning={live.engine_running} onOpen={event => {
+              if (!panelAllowed('agent')) return
+              panelReturnFocusRef.current = event.currentTarget; setPanel('agent')
+            }} />
+        </LazyBoundary>}
+
       {mergeFrom != null && !mutationReadOnlyMode && <form className="merge-destination-bar"
         aria-label={`Choose a merge destination for experiment ${mergeFrom}`} onSubmit={submitMergeTarget}>
         <label htmlFor="merge-destination-select">Merge <b>#{mergeFrom}</b> with</label>
@@ -2748,6 +2758,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         aria-valuemin={MIN_DOCK_HEIGHT} aria-valuemax={Math.max(MIN_DOCK_HEIGHT, window.innerHeight - 470)} aria-valuenow={Math.round(dockH)} title="Drag or use arrow keys to resize" />}
       {!reviewMode && !timelineDeferred && <LazyBoundary label="timeline" resetKey={`${runId}:${generation || 'pending'}`}>
         <Dock runId={runId} live={live} liveSeq={seq} expectedGeneration={generation}
+          externalMode={configResource.status === 'ready' ? configResource.data?.external_harness === true : null}
           timeline={timeline} evalStages={liveEvalStages}
           viewSeq={viewSeq} setViewSeq={changeViewSeq} onReturnToLive={returnToLive} onFocus={focusNode}
           filter={routeState.timelineFilter}

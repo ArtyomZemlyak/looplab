@@ -226,7 +226,7 @@ export function LiveTrace({ runId, generation, active }) {
 // because the status CLOCK reads the same filter: the label and its age must never be able to
 // describe different moments.
 
-export function agentStatus(live, log, evalStages = null) {
+export function agentStatus(live, log, evalStages = null, externalMode = false) {
   if (!live) return null
   const lifecycle = runLifecycle(live)
   if (lifecycle.mode === 'finished') return null
@@ -289,6 +289,10 @@ export function agentStatus(live, log, evalStages = null) {
   if (buildLabel && pendingLabel) return `${buildLabel} · ${pendingLabel}`
   if (buildLabel) return buildLabel
   if (pendingLabel) return pendingLabel
+  // Missing settings cannot certify who proposes. Real setup/build/evaluation labels above
+  // still describe recorded work; only a known built-in cycle can infer planning from logs.
+  if (externalMode !== false) return externalMode === true
+    ? 'External agent controls the next experiment' : 'Waiting for run settings…'
   // Between experiments: infer from the last MEANINGFUL event (skip the bookkeeping noise above), so the
   // label stays put on "Planning…" instead of blinking every time a coverage/cost event lands.
   let last = null
@@ -687,7 +691,8 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   onReturnToLive, onFocus, collapsed, onToggleCollapse, height = 230, onToast, readOnly = false,
   publishTransport = null, filter = '', onFilterChange = null, kindFilters = [],
   onKindFiltersChange = null, focusOnMount = false, onInitialFocus = null,
-  collapseControlRef = null, startOverState = null, onStartOver = null, evalStages = null }) {
+  collapseControlRef = null, startOverState = null, onStartOver = null, evalStages = null,
+  externalMode = false }) {
   const log = timeline.rows
   const collapseButtonRef = useRef(null)
   const startOverDialogRef = useRef(null)
@@ -1329,18 +1334,18 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
                   })} />
               }} />}
         {!showControls && (() => {
-          const pipeline = atLiveView ? agentStatus(live, log, evalStages) : null
+          const pipeline = atLiveView ? agentStatus(live, log, evalStages, externalMode) : null
           if (!pipeline) return null
           // HOW LONG. The label named the phase but never its age, so a build silent for forty
           // minutes looked exactly like one that started two seconds ago — the operator's "it hangs
           // for a very long time with no logs". Suppressed under 20 s, where a ticking number is
           // churn rather than information.
-          const age = liveStatusAgeLabel(live, log)
+          const age = externalMode === false ? liveStatusAgeLabel(live, log) : ''
           return <div className="agent-status dock-agent-status">
-            <div className="as-line"><span className="as-dot" /><span className="as-seg">{pipeline}</span>
+            <div className="as-line">{externalMode === false && <span className="as-dot" />}<span className="as-seg">{pipeline}</span>
               {age && <span className="muted as-age" title="how long this phase has been running">
                 {age}</span>}</div>
-            <LiveTrace runId={runId} generation={timeline.generation} active={atLiveView} />
+            {externalMode === false && <LiveTrace runId={runId} generation={timeline.generation} active={atLiveView} />}
           </div>
         })()}
         <div className="dock-foot">

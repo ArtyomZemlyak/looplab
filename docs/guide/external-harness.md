@@ -326,7 +326,9 @@ After reading the current `/state` generation and the run contract, call MCP
 `run_progress(run_id, expected_generation)`. It performs one read of
 `harness-progress?expected_generation=TOKEN&brief=true`; HTTP failures retain
 their original status, with no hidden retry or resume. The UI **Agent cycle**
-shows the same server-authored `next_step`.
+shows the same server-authored `next_step`. The owner run workspace also shows
+a compact status above its views; expand its title for the explanation or open
+**Agent cycle** for the full requirements. History and review omit live advice.
 
 The summary prioritizes incomplete sources, then unanswered evaluation questions.
 It names the responsible external agent, detail reads, response route and phase.
