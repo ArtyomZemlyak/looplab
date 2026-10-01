@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-164 event types — 113 folded into `RunState`, 51 diagnostic; 1071 declared payload keys; 22 types whose whole payload is stored by the fold.
+164 event types — 113 folded into `RunState`, 51 diagnostic; 1072 declared payload keys; 22 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -37,7 +37,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `applied_params_backfilled` | folded | What the configuration that actually RAN assigned to the declared params, read back off the workdir. | `applied_params`, `generation`, `node_id`, `read_at`, `unrecoverable`, `workdir_digest` | `attempt` |
 | `approval_granted` | folded | The operator ratified the node the run paused on (HITL). | `generation`, `node_id` | `attempt` |
 | `approval_requested` | folded | The run paused for a human decision about one node, at a named log position. | `after_seq`, `generation`, `metric`, `node_id` | `attempt` |
-| `asha_rank` | diagnostic | One ASHA tick's ranking of a running node against its comparable population. | `comparable_population`, `direction`, `endpoint_underperforming`, `generation`, `intermediate`, `kill_comparable`, `node_id`, `population`, `quantile`, `resource_underperforming`, `underperforming` | `checkpoint_id`, `resource`, `resource_key`, `source` |
+| `asha_rank` | diagnostic | One ASHA tick's ranking of a running node against its comparable population. | `comparable_population`, `direction`, `endpoint_underperforming`, `generation`, `intermediate`, `kill_comparable`, `node_id`, `population`, `quantile`, `resource_underperforming`, `underperforming` | `checkpoint_id`, `resource`, `resource_key`, `source`, `stop_refusal` |
 | `asha_verdict` | diagnostic | The ASHA judge's call on a persistently underperforming node: stop or spare, with confidence. | `comparable_population`, `confidence`, `direction`, `generation`, `intermediate`, `kill`, `node_id`, `quantile`, `reason`, `status`, `stop_decided`, `under_streak` | `confidence_valid`, `kill_superseded_by`, `resource`, `resource_key`, `train_monitor_status` |
 | `belief_admission` | diagnostic | How many researcher-proposed beliefs one proposal turn offered and how many the board admitted. | `admitted`, `blank`, `board_read`, `capped`, `proposed`, `repeated`, `restated`, `shape` | — |
 | `best_confirmed` | folded | The champion the run confirmed by re-evaluation, and whether that confirmation was significant. | `generations`, `node_id`, `search_epoch`, `significant` | `attempt`, `generation`, `objective_key` |

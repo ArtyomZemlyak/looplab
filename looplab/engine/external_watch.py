@@ -43,7 +43,7 @@ async def observe_external_eval(engine, a, cancel, phase: str, *, final_pass: bo
             return
 
         def observe():
-            nonlocal under_streak
+            nonlocal under_streak, watched_stage, watching
             resolved = resolve_stage_log(a.workdir, a._log_plan)
             if resolved is None or resolved.role in _NON_TRAINING_ROLES:
                 return None
@@ -52,6 +52,10 @@ async def observe_external_eval(engine, a, cancel, phase: str, *, final_pass: bo
             if not tail:
                 return None
             stage = str(getattr(resolved, "stage", "") or getattr(resolved, "name", ""))
+            if stage != watched_stage:
+                watching = False
+                under_streak = 0
+                watched_stage = stage
             if phase == "train_monitor":
                 eligible = (resolved.role == LOG_ROLE_TRAINING
                             and not training_authority_spent(a.workdir, a._log_plan))
@@ -81,7 +85,10 @@ async def observe_external_eval(engine, a, cancel, phase: str, *, final_pass: bo
                       f"same-resource underperforming={under}; "
                       f"consecutive underperforming ticks={under_streak}; "
                       f"minimum before stop={_ASHA_GRACE_TICKS + 1}.")
-            return stage, tail, under_streak > _ASHA_GRACE_TICKS, detail, {
+            retargeted = getattr(state, "objective_key", None) is not None
+            if retargeted:
+                detail += " Stop disabled: the active objective was retargeted; this curve remains on the task scale."
+            return stage, tail, under_streak > _ASHA_GRACE_TICKS and not retargeted, detail, {
                 "intermediate": round(sample.value, 6),
                 "population": len(endpoints), "comparable_population": len(comparable),
                 "direction": str(state.direction), "quantile": engine._asha_live_quantile,
@@ -107,19 +114,20 @@ async def observe_external_eval(engine, a, cancel, phase: str, *, final_pass: bo
             digest = hashlib.sha256(tail.encode("utf-8", "replace")).hexdigest()
             if (stage, digest) == last_digest and not watching:
                 continue
-            if stage != watched_stage:
-                watching = False
-                watched_stage = stage
             last_digest = stage, digest
             redactor = getattr(engine, "_redact", None)
             text = redactor(tail) if callable(redactor) else tail
+            # Keep the evidence-bound comparison ahead of a bounded, recent log tail.
+            # Truncating the combined string from the end erased ASHA's stop conditions.
+            prefix = details[:3000] + "\n" if details else ""
+            observation = prefix + text[-(6000 - len(prefix)):]
             # The evaluator can finish while ask() is in the worker thread. Keep the durable
             # question and its in-process tracking together: cancellation between them would
             # otherwise commit a node whose newly opened question was never answered.
             with anyio.CancelScope(shield=True):
                 question = await anyio.to_thread.run_sync(
                     lambda: ask(engine.run_dir, a.node_id, a.generation, phase,
-                                stage=stage, observation=f"{details}\n{text}"[-6000:],
+                                stage=stage, observation=observation,
                                 kill_enabled=(eligible and watching and bool(
                                     engine._train_monitor_kill if phase == "train_monitor"
                                     else engine._asha_live_kill))), limiter=_watch_limiter())
@@ -133,6 +141,13 @@ async def observe_external_eval(engine, a, cancel, phase: str, *, final_pass: bo
                     limiter=_watch_limiter())
                 if answer is not None:
                     watching = answer["verdict"] == "watch"
+                    stop_refused = False
+                    if phase == "asha_live" and answer["verdict"] == "abort":
+                        # The operator can retarget AFTER POST accepted this answer.
+                        # Consuming its old receipt cannot override the current safety veto.
+                        stop_refused = await anyio.to_thread.run_sync(
+                            lambda: getattr(fold(engine.store.read_all()), "objective_key", None) is not None,
+                            limiter=_watch_limiter())
                     # Existing attention/audit readers consume these diagnostic
                     # events. The decision ledger remains the authoritative answer.
                     try:
@@ -152,17 +167,20 @@ async def observe_external_eval(engine, a, cancel, phase: str, *, final_pass: bo
                             await append_watchdog_row(EV_ASHA_RANK, {
                                 "node_id": a.node_id, "generation": a.generation,
                                 **facts,
+                                **({"stop_refusal": "objective_retargeted"} if stop_refused else {}),
                                 "source": "external_agent",
                                 "checkpoint_id": question["checkpoint_id"]},
                                 engine, shield=answer["verdict"] == "abort")
                     except Exception:  # noqa: BLE001 — diagnostic failure cannot lose the answered stop
                         pass
-                    if answer["verdict"] == "abort":
+                    if answer["verdict"] == "abort" and not stop_refused:
                         a.kill_signal.update(kill=True, reason=answer["reason"][:400],
                                              terminal_reason=("monitor_broken" if phase == "train_monitor"
                                                               else "asha_underperforming"))
                         cancel.set()
                         return
+                    if stop_refused:
+                        last_digest = None  # make the changed objective visible in a fresh advisory question
                     break
                 await anyio.sleep(0.3)
             if final_pass:

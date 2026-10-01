@@ -7,6 +7,18 @@ receipt is updated for invalid records; no side effect or connection claim occur
 CHECKPOINT_PHASES = frozenset({"stage_check", "train_monitor", "asha_live", "deadline_grace"})
 
 
+def current_question_authority(question, state):
+    """A pending ASHA question cannot stop compute on a retargeted objective.
+
+    The immutable journal retains its original grant; reads/validation expose the
+    current deterministic veto without rewriting a receipt or answering the question.
+    """
+    if question["phase_id"] == "asha_live" and getattr(state, "objective_key", None) is not None:
+        return {**question, "recorded_kill_enabled": question["kill_enabled"],
+                "kill_enabled": False, "stop_refusal": "objective_retargeted"}
+    return question
+
+
 def allowed_verdicts(question):
     """Response vocabulary derived from the validated question's actual authority."""
     phase = question["phase_id"]
@@ -73,7 +85,8 @@ def project_checkpoints(rows, health, events, state, generation):
         same_attempt = (node is not None and node.attempt == q.get("node_generation")
                         and q.get("claim_seq") ==
                         claim_seqs.get((q["node_id"], q["node_generation"]), -1))
-        checkpoint_rows.append({"question": q, "answer": answer,
+        current = same_attempt and node.status == "pending" and answer is None
+        checkpoint_rows.append({"question": current_question_authority(q, state) if current else q, "answer": answer,
                                 "lifecycle": "same_node_attempt" if same_attempt else "superseded",
                                 "status": "answered" if answer else
                                 "pending" if same_attempt and node.status == "pending"

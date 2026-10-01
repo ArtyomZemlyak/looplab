@@ -126,12 +126,20 @@ test('next step follows server advice, refreshes on events and hides after a fai
     assert.match(view.container.textContent, /no automatic timeout/)
     assert.match(view.container.textContent, /after extend is consumed/)
     assert.ok(!view.container.textContent.includes('does not grant abort authority'))
-    payload = { ...payload, event_seq: 15, next_step: { ...step, code: 'choose_direction',
-      title: 'Choose the next experiment or finish', action: null, phase_id: null } }
+    payload = { ...payload, event_seq: 15, next_step: { ...step, phase_id: 'monitor',
+      title: 'Answer the evaluation question',
+      detail: 'Allowed verdicts: continue, watch. This checkpoint does not grant abort authority. The objective was retargeted; this ASHA curve remains on the task scale.' } }
     await view.rerender({ ...props, seq: 15 })
+    await until(() => view.container.textContent.includes('objective was retargeted'), 'ASHA current authority')
+    assert.match(view.container.textContent, /phase_info: monitor/)
+    assert.match(view.container.textContent, /Allowed verdicts: continue, watch\./)
+    assert.ok(!view.container.textContent.includes('after extend is consumed'))
+    payload = { ...payload, event_seq: 16, next_step: { ...step, code: 'choose_direction',
+      title: 'Choose the next experiment or finish', action: null, phase_id: null } }
+    await view.rerender({ ...props, seq: 16 })
     await until(() => view.container.textContent.includes('Next step · Choose'), 'event-driven refresh')
     globalThis.fetch = fetchStub({ '/api/runs/mnist/harness-progress': () => jsonResponse({}, 503) })
-    await view.rerender({ ...props, seq: 16 })
+    await view.rerender({ ...props, seq: 17 })
     await until(() => view.container.textContent.includes('refresh failed'), 'failed refresh')
     assert.ok(!view.container.textContent.includes('Next step · Choose'))
     assert.match(view.container.textContent, /Next step unavailable/)

@@ -52,6 +52,8 @@ def _next_step(progress: dict) -> dict:
         detail += " Allowed verdicts: " + ", ".join(allowed_verdicts(q)) + "."
         if q["phase_id"] in ("train_monitor", "asha_live") and not q["kill_enabled"]:
             detail += " This checkpoint does not grant abort authority."
+        if q.get("stop_refusal") == "objective_retargeted":
+            detail += " The objective was retargeted; this ASHA curve remains on the task scale."
         if q["phase_id"] == "deadline_grace":
             detail += " While waiting for a verdict, the command may keep running; this wait has no automatic timeout. The runtime caps one extension starting after extend is consumed."
         if progress["recorded_lifecycle"]["paused"]:

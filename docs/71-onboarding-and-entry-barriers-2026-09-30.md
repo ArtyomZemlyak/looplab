@@ -594,9 +594,9 @@ External run здесь намеренно не получал кандидат�
 | OB-07 | Частично | Composer показывает активные права и понятное пояснение; четыре варианта раскрываются по запросу, выбор возвращает фокус на видимый переключатель. | Проверить понимание режимов с новым пользователем. |
 | OB-08 | Частично | Essential открывается с модели, показывает 13 полей ресурсов и лимитов с короткими пояснениями; технические детали и runtime permissions раскрываются отдельно. | Проверить подключение модели и понимание лимитов с новым пользователем. |
 | OB-09 | Частично | Run workspace и Agent cycle показывают next step; списки различают внешний режим и engine, attention открывает текущие вопросы (§34–36). Гибель MCP и pause/resume проверены (§37–38). | Подключение самого агента не измеряется; многочасовой сценарий OB-10 ещё открыт. |
-| OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–44 проверяют MCP/UI recovery, pause/resume, engine loss, obligations, monitor и deadline. §44 добавляет реальную live loss curve и явный stop. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
+| OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–45 проверяют MCP/UI recovery, pause/resume, engine loss, obligations, monitor, deadline и ASHA. §44–45 добавляют реальные live curves, явный stop и снятие stop authority после retarget. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
 | OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. §39/41 исправляют ссылки checkpoint и concept base на реальные MCP-фазы. | Проверены контракт, subprocess-кандидаты, desktop и discovery из серверной подсказки; подключение нового клиента относится к OB-10. |
-| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–42: source health, lifecycle verdict, engine recovery, report/review и открытый training monitor. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. Живость внешнего агента остаётся явно неизмеряемой. |
+| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–45: source health, lifecycle verdict, engine recovery, obligations, deadline, training/ASHA monitor и retarget при открытом вопросе. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. Живость внешнего агента остаётся явно неизмеряемой. |
 | OB-14 | Частично | Начало сайта показывает два основных входа. | Большая архитектурная схема всё ещё нуждается в упрощении для первого знакомства. |
 
 Остальные пункты §3 и соответствующие сценарии §11 остаются открытыми. Изменения первого
@@ -1971,7 +1971,7 @@ harness-contract и B/E architecture diagram поясняют, что watch за
 Границы: смешение старой и новой кривой воспроизведено направленными backend
 тестами; live-прогон отдельно проверяет настоящую текущую кривую, stop и recovery.
 Это не multi-hour session и не оценка научных решений модели. ASHA same-resource
-recovery, интерактивные разрешения клиентов и обнаружение гибели remote agent
+recovery проверен следующим шагом, в §45. Интерактивные разрешения клиентов и обнаружение гибели remote agent
 остаются открытыми сценариями.
 
 Перед изменением прошли **193 replay** проверки; после исправления — **216 backend**,
@@ -1981,3 +1981,93 @@ checkpoint lifecycle и границы пакетов.
 После уточнения discovery повторно прошли **10** проверок harness manifest/phase
 contract. Также прошли **32 docs/architecture** и `mkdocs build --strict`;
 OpenAPI reference регенерирован, список маршрутов не изменился.
+
+## 45. OB-10/11/12: ASHA same-rung recovery и отмена stop после retarget
+
+**2026-10-01.** Следующий проверенный сценарий — внешний ASHA review по реальным
+промежуточным измерениям. На каждый приватный run сначала оцениваются два базовых
+SGD-кандидата; их measured resource curves сохраняет engine. Третий кандидат —
+контроль с `lr=0`. Protected opaque command сам обучает и считает held-out MSE
+на каждом шаге, поэтому тренировка и score не дублируются внешним агентом.
+Editable только `config.json`; метрику агент не публикует как собственное число.
+
+### Пять найденных дефектов
+
+Сначала воспроизведены **три** сбоя в `tests/test_external_asha_guards.py`:
+
+1. После `metric_retarget` внешний ASHA мог разрешать abort по прежней task curve,
+   хотя built-in watchdog в такой ситуации остаётся advisory.
+2. При переходе между stages накопленный `under_streak` переносился на новый
+   stage: stop становился доступен раньше его собственного grace-окна.
+3. Ограничение объединённого observation через `[-6000:]` вытесняло ASHA comparison
+   prefix длинным log. Агент терял resource, peer measurements и правило stop.
+
+Исправлены текущая objective guard, reset watch/streak при смене stage и bounded
+observation с сохранением comparison prefix перед недавним хвостом лога. Порог
+остался прежним: **три** consecutive same-rung underperforming checks, достаточно
+eligible peers и prior watch. Новые verdicts или автоматические решения не вводились.
+
+Ещё **два** сбоя воспроизведены для retarget на уже открытом вопросе и между
+принятием `abort` API и его употреблением engine. Теперь pending projection и POST
+validator снимают abort authority при активном retarget. Они возвращают текущий
+`kill_enabled=false`, `recorded_kill_enabled` и `stop_refusal=objective_retargeted`.
+Journal сохраняет исходную immutable question; история отвеченных вопросов сохраняет
+исходную authority, а reads ничего не переписывают. UI next step называет причину
+veto и разрешает только continue/watch. Недопустимый abort получает **400**.
+
+Engine дополнительно читает текущую objective перед применением принятого ASHA abort.
+Если оператор уже retargeted run, остановка не применяется; диагностическое событие
+`asha_rank` содержит optional `stop_refusal`. Старый ответ остаётся квитанцией своего
+принятия, exact replay не выдаётся за новое permission. Observer может открыть новый
+advisory вопрос, включая при неизменном log digest. Ответ continue/watch за агента
+не подставляется. Этот race проверен управляемой backend-инъекцией в точке consumption.
+
+### Реальные CPU/MCP-прогоны
+
+Добавлен `benchmarks.external_asha_smoke`. На всех случаях настоящий CLI engine,
+реальный stdio MCP, generation-fenced reads и durable commands. Оператор явно
+задал `asha_live_min_siblings=2`, cadence **0.4 секунды**, kill enabled; training
+monitor и deadline review выключены. Canonical rung — наибольшая степень двойки
+не больше resource. Сравниваются сохранённые **start-of-rung** измерения, не
+готовый endpoint вместо неизвестного промежуточного значения.
+
+| Случай | Проверенный результат |
+| --- | --- |
+| `same_resource_stop` | Два peers с 16/32 steps; два advisory вопроса отвечены watch. Третий разрешает abort. MCP завершается, UI перезапускается; тот же вопрос, journal и живой engine сохранены. Явный abort даёт `asha_underperforming`, без итоговой метрики или weights |
+| `missing_resource` | Operator metric не объявляет resource key. ASHA видит objective и endpoints, но peers несопоставимы. Даже после watch abort запрещён; command завершён, MSE **2.3913043478260874** |
+| `unmatched_rung` | Peers обучены 2/3 steps; текущий command быстро проходит первые 20 steps. Для его rung нет двух сохранённых peer measurements. Abort запрещён; итоговый MSE **2.3913043478260874** |
+| `retarget` | Private operator меняет objective на declared measured weight norm до третьего кандидата. ASHA task curve остаётся advisory. Итог weight norm **0**, task MSE **2.3913043478260874** сохранён отдельно |
+| `retarget_open` | Третий stop-вопрос уже открыт, MCP завершается. Оператор retargets run; после restart UI новая сессия читает тот же ID, неизменный journal и снятое разрешение abort. Continue позволяет завершить score: weight norm **0**, task MSE **2.3913043478260874** |
+
+Retarget делает только operator fixture с приватным owner credential, который не
+передаётся MCP. Это проверка смены измеряемой цели, не рекомендация минимизировать
+weight norm: нулевая норма здесь сопровождается плохим MSE. Две обычные baseline
+метрики — **0.13721179500378475** и **0.01337676906957059**; short-peer control —
+**1.4503680139130435** и **1.1623042552333913**.
+
+Полная матрица получила **3/8/7/10/8** вопросов соответственно. Exact retries не
+дублируют ответы. Каждый run имеет ровно три opaque score executions и три terminal
+events, по одному на node. Protected scorer bytes неизменны в source и workspace.
+Partial measurement остановленного command не становится terminal metric. На все
+terminal nodes и явно завершённые run отправлены русские result-notices с evidence
+token и стабильными action IDs. Все пять run проходят CLI `inspect`/`replay`.
+
+Proof: `.tmp/external-asha-final-proof-1/acceptance.json`. Предварительная матрица
+из четырёх случаев: `.tmp/external-asha-proof-2/acceptance.json`. Первая попытка
+fixture исправлена: `resource_curve` намеренно исключён из compact node dump;
+provenance assertion читает private event ledger, а agent decision читает реальные
+checkpoint comparisons через MCP. Public `task_metric` читается из измеренного state.
+
+Обновлены [external guide](guide/external-harness.md), MCP phase purpose, contract,
+UI next step и full B/E architecture diagram. Event reference регенерирован для
+optional stop refusal; маршруты и настройки не добавлены. Перед изменением прошли
+**193 replay** проверки; после — **331 backend** и **5 mounted UI**.
+
+После финального уточнения discovery повторно прошли **10 manifest/phase**
+проверок. Прошли **32 docs/architecture** и `mkdocs build --strict`;
+OpenAPI reference регенерирован, список маршрутов не изменился.
+
+Границы: новое stage grace и accepted-answer race проверены направленными backend
+тестами; live матрица отдельно проверяет настоящие curves, два MCP recovery и
+operator retarget. Многочасовой сеанс, модельные решения, интерактивные разрешения
+клиентов и обнаружение гибели remote agent остаются открытыми в OB-10.

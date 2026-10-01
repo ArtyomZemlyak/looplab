@@ -1392,7 +1392,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "resource_underperforming", "underperforming"
         ),
         # The conditional `.update()` in `asha_monitor.py`, invisible to a target-only scan.
-        optional=("checkpoint_id", "resource", "resource_key", "source"),
+        optional=("checkpoint_id", "resource", "resource_key", "source", "stop_refusal"),
     ),
     "asha_verdict": PayloadContract(
         "The ASHA judge's call on a persistently underperforming node: stop or spare, with confidence.",

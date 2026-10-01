@@ -494,6 +494,17 @@ The normal control cycle is:
    spends that authority, even if checkpoint validation still logs in the same
    command. Read the new question's `kill_enabled` instead of carrying permission
    from an earlier question. Flat loss alone is not proof that training is broken.
+   ASHA compares the declared resource on canonical geometric rungs (the largest
+   power of two at or below it), using persisted sibling start-of-rung measurements.
+   Final endpoints alone never grant stop authority. After `watch`, at least three
+   consecutive underperforming checks with enough same-rung peers are required in
+   the current stage; a new stage starts a fresh grace window. Missing resource key
+   or peer rung leaves ASHA advisory. Objective retarget disables task-curve abort,
+   including an already open question: its current `kill_enabled` becomes false,
+   with `recorded_kill_enabled` and `stop_refusal` explaining the prior grant and veto.
+   The journal stays unchanged. An exact retry remains a receipt of prior acceptance;
+   if retarget occurs before an accepted abort is consumed, the engine vetoes that
+   stop, records `asha_rank.stop_refusal`, and can open a fresh advisory question.
    An opened observation holds the node terminal until answered. Inspect measured
    metrics, stage logs and failures, then submit a corrected candidate if useful.
    The metric is measured by LoopLab's evaluator; never submit a claimed score.
@@ -514,8 +525,9 @@ The normal control cycle is:
    The train observer checks at the configured adaptive cadence during a command
    evaluation. If an evaluation finishes before its first tick, LoopLab checks
    its final attributed training log before committing the node result and waits
-   for the external agent's answer. ASHA only asks when comparable intermediate
-   measurements and enough completed siblings exist. Evaluators without an
+   for the external agent's answer. ASHA asks when an intermediate metric and
+   enough eligible completed siblings exist; same-rung comparability is additionally
+   required for stop authority. Evaluators without an
    attributed training log cannot produce a training-monitor question.
 5. Review each enabled cross-run knowledge phase and record its action reference,
    or why no action applies, through `POST /api/runs/{run_id}/harness-reviews`.
@@ -780,6 +792,8 @@ python -m benchmarks.external_session_smoke --out .tmp/monitor-proof --monitor -
 python -m benchmarks.external_deadline_smoke --out .tmp/deadline-proof
 # Inspect actual live loss: protection, authorized stop recovery, checkpoint validation.
 python -m benchmarks.external_live_monitor_smoke --out .tmp/live-monitor-proof
+# Compare measured ASHA rungs, recover a stop question, and test objective retarget.
+python -m benchmarks.external_asha_smoke --out .tmp/asha-proof
 ```
 
 The offline scenario runs three real CPU training configurations with a protected
@@ -849,6 +863,20 @@ protected sources stay unchanged, and terminal/run interpretations appear in Rus
 All three runs pass `inspect`/`replay`. Use `--case improving`, `--case frozen_stop`
 or `--case checkpoint_validation` to select one case. Delays pace real optimizer
 steps for observation; this does not test model judgment or a multi-hour session.
+
+The ASHA probe measures two baseline SGD curves before each new control candidate.
+Its five cases cover same-resource stop recovery, no declared resource, an absent
+peer rung, operator retarget before evaluation, and retarget while a stop question
+is open and MCP is disconnected. The last case reconnects to the same question
+with current abort authority removed and unchanged journal bytes. Only the fixture's
+operator performs retarget, with a private credential never supplied to MCP.
+An opaque protected command trains and scores once per node, computing actual
+held-out MSE at each step. Stop produces no completed metric or checkpoint; advisory
+cases finish normally. Every terminal node and finalized run gets a Russian result
+interpretation, protected scorer bytes stay unchanged, and `inspect`/`replay` pass.
+Use `--case same_resource_stop`, `missing_resource`, `unmatched_rung`, `retarget`
+or `retarget_open` to select one case in a new output directory. This is protocol
+acceptance with real short SGD, not a claim that ASHA or the agent makes good ML decisions.
 
 ## Delegating only code editing
 

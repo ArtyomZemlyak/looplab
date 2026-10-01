@@ -326,7 +326,7 @@ def run_obligations(task, settings, *, generation: str) -> dict:
                              "asha_live_kill": settings.asha_live_kill,
                              "asha_live_min_siblings": settings.asha_live_min_siblings},
                 "checkpoint": "intermediate_objective_with_enough_finished_siblings",
-                "proof": "answer each opened harness-checkpoints rank observation before terminal",
+                "proof": "answer each rank observation before terminal; abort requires watch and three consecutive same-rung underperforming checks in the current stage, and is disabled after objective retarget, including an already open question",
                 "enforced": True, "conditional_on": "metric reader yields an intermediate sample",
             },
         },

@@ -22,7 +22,8 @@ from looplab.events.eventstore import (EventStore, EventStoreLockError, interpro
 from looplab.events.replay import fold
 from looplab.events.run_generation import run_generation_token
 from looplab.harness.checkpoint_history import (CHECKPOINT_PHASES as _PHASES,
-                                               allowed_verdicts, checkpoint_records, project_checkpoints)
+                                               allowed_verdicts, checkpoint_records,
+                                               current_question_authority, project_checkpoints)
 
 _MAX_LEDGER = 16 * 1024 * 1024
 
@@ -140,7 +141,7 @@ def pending(rd: Path, expected_generation: str) -> list[dict]:
         raise HTTPException(409, "run generation changed")
     state = fold(events)
     questions, answers = _projection(_rows(_path(rd)))
-    return [q for key, q in questions.items() if key not in answers
+    return [current_question_authority(q, state) for key, q in questions.items() if key not in answers
             and q["run_generation"] == expected_generation.lower()
             and q["run_uid"] == state.run_uid
             and q.get("claim_seq") == _claim_seq(events, q["node_id"], q["node_generation"])
@@ -191,7 +192,7 @@ def respond(srv, rd: Path, body) -> dict:
                 elif q["phase_id"] == "deadline_grace":
                     if body.verdict not in allowed_verdicts(q):
                         raise HTTPException(400, "deadline review needs extend or stop")
-                elif body.verdict not in allowed_verdicts(q):
+                elif body.verdict not in allowed_verdicts(current_question_authority(q, state)):
                     raise HTTPException(400, "this monitor is advisory; abort is disabled")
                 if body.verdict != "fail" and body.failure_kind:
                     raise HTTPException(400, "failure_kind is only valid on fail")
