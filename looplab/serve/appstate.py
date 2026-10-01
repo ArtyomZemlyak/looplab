@@ -43,6 +43,7 @@ from looplab.events.types import EV_NODE_CREATED
 from looplab.serve.deletion_transaction import (
     DELETE_IDENTITY_PREFIX, DELETE_QUARANTINE_PREFIX, DELETE_RECEIPT_PREFIX)
 from looplab.serve.engine_proc import _engine_liveness
+from looplab.serve.agent_activity import AgentActivity
 from looplab.serve.http import refusal
 from looplab.serve.jobs import JobRegistry
 from looplab.serve.llm_context import global_settings, llm_settings
@@ -265,6 +266,7 @@ class AppState:
         self.commands = RunCommandService(self)
         self.resume_cancel = resume_cancel
         self.harness_auth_configured = False  # stamped once by make_app; never stores a secret
+        self.agent_activity = AgentActivity()
         # Keyed on `atomicio.file_identity` — the SAME canonical signature `state_payload`'s
         # reset-safe cache key is built from, not a narrower mirror of it. The comment here used to
         # claim that equivalence while `run_projections` spelled the tuple by hand minus `st_dev` and

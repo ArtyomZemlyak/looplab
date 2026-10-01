@@ -120,6 +120,8 @@ def brief(progress: dict) -> dict:
             "candidate_requirements", "finish_reviews_due", "finish_report_due",
             "pending_checkpoint_count")
     result = {key: progress[key] for key in keys}
+    if "agent_activity" in progress:
+        result["agent_activity"] = progress["agent_activity"]
     nodes = progress["finish_pending_nodes"]
     result.update(finish_pending_nodes=nodes[:20], finish_pending_node_count=len(nodes),
                   finish_pending_nodes_truncated=len(nodes) > 20)

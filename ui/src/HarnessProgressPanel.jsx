@@ -4,6 +4,7 @@ import { useScopedResource } from './useScopedResource.js'
 import Panel from './PanelShell.jsx'
 import HarnessNextStep, { validHarnessNextStep } from './HarnessNextStep.jsx'
 import HarnessHandoff from './HarnessHandoff.jsx'
+import AgentActivity from './AgentActivity.jsx'
 import { invalidPanelPayload, isRecord, PANEL_REQUEST_TIMEOUT_MS, RUN_GENERATION_RE } from './panelPrimitives.js'
 import { PanelResourceNotice } from './PanelResourceNotice.jsx'
 
@@ -51,6 +52,7 @@ export function HarnessProgressPanel({ runId, expectedGeneration, seq, externalM
         <p>{progress.next_step.detail}</p></details>
         : <span role="status">Next step unavailable</span>}
       {!fresh && <span className="spacer" />}
+      <AgentActivity activity={progress?.agent_activity} fresh={fresh} />
       {!fresh && <button type="button" className="btn sm ghost"
         onClick={() => resource.retry({ supersede: true })}>Retry</button>}
       <button type="button" className="btn sm" onClick={onOpen}>Agent cycle</button>
@@ -99,6 +101,8 @@ export function HarnessProgressPanel({ runId, expectedGeneration, seq, externalM
       <p className="muted">Measured prefix: {progress.at_node} nodes, event #{progress.event_seq}.
         This is a read of several durable journals; refresh after a new event or response.</p>
       <HarnessNextStep step={progress.next_step} runId={runId}
+        fresh={resource.status === 'ready' && !(seq > progress.event_seq)} />
+      <AgentActivity activity={progress.agent_activity}
         fresh={resource.status === 'ready' && !(seq > progress.event_seq)} />
       <p className="muted">Journal rows: decisions {progress.source_health.decisions.accepted_rows},
         reviews {progress.source_health.reviews.accepted_rows}, checkpoints

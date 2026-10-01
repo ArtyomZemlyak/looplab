@@ -78,6 +78,13 @@ _LAYOUT = {
     "phase_events": "core",     # inner agent phases as DIAGNOSTIC events through an engine-installed sink
     "evidence": "core",  # the ONE untrusted-evidence envelope: label + guard sentence + fence
     "appstate": "serve",
+    "agent_activity": "serve",  # process-local authenticated harness-read observations, not liveness
+    "command_identity": "serve",
+    "command_receipt": "serve",
+    "external_attention": "serve",
+    "assistant_language": "serve",
+    "result_notices": "serve",
+    "run_result_summary": "serve",
     "principal": "serve",      # who is asking, and the one portfolio-visibility decision
     "node_activity": "serve",  # generation-scoped public building/queue/evaluation projection
     "eval_occupancy": "events",  # durable eval-start/terminal occupancy analytics

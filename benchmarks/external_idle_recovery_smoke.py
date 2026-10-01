@@ -18,6 +18,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 
 import anyio
 from mcp import ClientSession
@@ -35,7 +36,7 @@ from looplab.serve.server import make_app
 CASES = ("agent_loss", "engine_loss")
 
 
-def run_case(root, name):
+def run_case(root, name, quiet_hold_seconds=0):
     root.mkdir(parents=True, exist_ok=False)
     runs = root / "runs"; runs.mkdir()
     source = root / "source"; source.mkdir()
@@ -182,11 +183,39 @@ def run_case(root, name):
         generation = state["generation"]; proof["generation"] = generation
         anyio.run(session, "first", generation, first, True)
         assert engine.poll() is None
+        # The observer is an OPERATOR request, so it cannot make the dead MCP
+        # appear active. A real hold tests the production monotonic expiry clock.
+        with HarnessAPI(url, owner).client as http:
+            params = {"expected_generation": generation, "brief": "true"}
+            def observed_activity():
+                response = http.get("api/runs/demo/harness-progress", params=params)
+                assert response.status_code == 200, response.text
+                return response.json()
+            contact = observed_activity()
+            assert contact["agent_activity"]["status"] == "recent_request"
+            before_hold = (runs / "demo" / "events.jsonl").read_bytes()
+            held = time.monotonic()
+            while time.monotonic() - held < quiet_hold_seconds:
+                time.sleep(max(0, min(.5, quiet_hold_seconds - (time.monotonic() - held))))
+                assert engine.poll() is None
+            quiet = observed_activity()
+            expected = "quiet" if quiet_hold_seconds >= contact["agent_activity"]["quiet_after_s"] else "recent_request"
+            assert quiet["agent_activity"]["status"] == expected
+            assert quiet["agent_activity"]["last_seen_at"] == contact["agent_activity"]["last_seen_at"]
+            assert quiet["execution"]["engine_running"] is True and quiet["finish_pending_node_count"] == 0
+            assert (runs / "demo" / "events.jsonl").read_bytes() == before_hold
+            proof.update(quiet_hold_seconds=quiet_hold_seconds, observed_activity=quiet["agent_activity"],
+                         quiet_activity_changed_no_work=True)
         if name == "engine_loss":
             engine.terminate(); engine.wait(timeout=10)
         server.should_exit = True; thread.join(timeout=5)
         assert not thread.is_alive()
         server, thread = start_ui()
+        with HarnessAPI(url, owner).client as http:
+            clean = http.get("api/runs/demo/harness-progress", params={
+                "expected_generation": generation, "brief": "true"}).json()
+            assert clean["agent_activity"]["status"] == "not_observed"
+            proof["ui_restart_forgot_contact"] = True
         anyio.run(session, "reconnected", generation, recovered)
         owned_engines[-1].wait(timeout=10)
         rd = runs / "demo"
@@ -225,9 +254,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--case", choices=["all", *CASES], default="all")
+    parser.add_argument("--quiet-hold-seconds", type=float, default=0,
+                        help="Real idle hold after owned MCP death; >=120 tests quiet activity without agent calls.")
     args = parser.parse_args()
+    if not 0 <= args.quiet_hold_seconds <= 14400:
+        parser.error("quiet hold must be between zero and four hours")
     root = args.out.resolve(); root.mkdir(parents=True, exist_ok=False)
-    proof = [run_case(root / name, name) for name in CASES if args.case in ("all", name)]
+    proof = [run_case(root / name, name, args.quiet_hold_seconds) for name in CASES if args.case in ("all", name)]
     (root / "acceptance.json").write_text(json.dumps(proof, ensure_ascii=False, indent=2), encoding="utf8")
 
 

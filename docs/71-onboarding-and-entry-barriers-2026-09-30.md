@@ -593,10 +593,10 @@ External run здесь намеренно не получал кандидат�
 | OB-06 | Частично | Launch card показывает цель, метрику, направление, пути, применимые права и лимиты перед техническими настройками; проверенный обзор берётся из серверного preview. | Проверить читаемость карточки с длинными путями на desktop и с реальным новым пользователем. |
 | OB-07 | Частично | Composer показывает активные права и понятное пояснение; четыре варианта раскрываются по запросу, выбор возвращает фокус на видимый переключатель. | Проверить понимание режимов с новым пользователем. |
 | OB-08 | Частично | Essential открывается с модели, показывает 13 полей ресурсов и лимитов с короткими пояснениями; технические детали и runtime permissions раскрываются отдельно. | Проверить подключение модели и понимание лимитов с новым пользователем. |
-| OB-09 | Частично | Run workspace и Agent cycle показывают next step; списки различают внешний режим и engine, attention открывает текущие вопросы (§34–36). Гибель MCP и pause/resume проверены (§37–38). | Подключение самого агента не измеряется; многочасовой сценарий OB-10 ещё открыт. |
-| OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–46 проверяют MCP/UI recovery, pause/resume, engine loss, obligations, monitor, deadline и ASHA. §44–45 добавляют live curves и retarget; §46 — recovery между экспериментами без pending nodes. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
+| OB-09 | Частично | Run workspace и Agent cycle показывают next step; списки различают внешний режим и engine, attention открывает текущие вопросы (§34–36). Гибель MCP и pause/resume проверены (§37–38). §47 показывает последнее успешное scoped progress чтение. | Активность запросов не доказывает живость агента; многочасовой сценарий OB-10 ещё открыт. |
+| OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–47 проверяют MCP/UI recovery, pause/resume, engine loss, obligations, monitor, deadline и ASHA. §47 — реальные 121 секунды без MCP-запросов и сброс наблюдения при restart UI. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. Harness-only auth configuration требует исправления (§47). |
 | OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. §39/41 исправляют ссылки checkpoint и concept base на реальные MCP-фазы. | Проверены контракт, subprocess-кандидаты, desktop и discovery из серверной подсказки; подключение нового клиента относится к OB-10. |
-| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–46: source health, lifecycle verdict, engine recovery, obligations, deadline, training/ASHA monitor, retarget и idle recovery без pending nodes. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. Живость внешнего агента остаётся явно неизмеряемой. |
+| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–47: source health, lifecycle verdict, engine recovery, obligations, deadline, training/ASHA monitor, retarget, idle recovery и scoped request activity. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. Наблюдение запросов не измеряет живость внешнего агента. |
 | OB-14 | Частично | Начало сайта показывает два основных входа. | Большая архитектурная схема всё ещё нуждается в упрощении для первого знакомства. |
 
 Остальные пункты §3 и соответствующие сценарии §11 остаются открытыми. Изменения первого
@@ -2129,3 +2129,56 @@ backend/contract/layering и **110** MCP/handoff/connection/receipt/liveness
 подтверждает только этот запрос; тихий run не доказывает гибель агента. Два коротких
 scripted-прогона не закрывают многочасовую работу, model judgments или интерактивные
 разрешения клиентов. Этот пункт закрывает неверный recovery hint для idle engine.
+
+## 47. OB-09/10/12: наблюдаемая активность scoped progress запросов
+
+**2026-10-01.** Agent cycle показывает последнее успешное чтение progress с
+harness credential. Через **120 секунд** без нового такого чтения статус становится
+`quiet`. Это наблюдение запросов, а не проверка живости: агент может рассуждать,
+ждать разрешения клиента или быть отключён. `execution.agent_connection` остаётся
+`not_measured`. Получение ответа клиентом сервер тоже не доказывает.
+
+Optional `agent_activity` возвращается в full/brief HTTP progress и MCP `run_progress`,
+включая чтение из `connection_check`. Owner/browser polling, другие API calls,
+неавторизованные и wrong-generation запросы не обновляют время. Наблюдение хранится
+только в памяти UI-процесса, максимум **256** run/generation entries; restart,
+eviction и новая generation оставляют `not_observed`. Возраст измеряется monotonic
+clock, timestamp — server UTC. Нет новых файлов, событий, heartbeat timers,
+admission/finish gates, автоматического resume или internal takeover.
+
+UI поддерживает русский и английский язык. Failed/stale refresh убирает прежний
+сигнал; malformed optional activity показывает отдельное сообщение, сохраняя
+authoritative obligations. Старый сервер без поля сохраняет прежний интерфейс.
+На приватном desktop preview проверены Agent cycle и панель при **1920×1080**;
+кнопка закрытия находится в viewport. Пользовательский UI на 8775 не менялся.
+
+### Реальная пауза после measured результата
+
+`benchmarks.external_idle_recovery_smoke --case agent_loss --quiet-hold-seconds 121`
+обучает первый защищённый CPU SGD candidate, завершает свой MCP и держит engine
+живым **121 секунду**. Owner polling получает `quiet`, сохраняя last-read timestamp;
+event log неизменен, pending nodes отсутствуют. Restart приватного UI забывает
+наблюдение. Новая MCP-сессия читает исходную квитанцию без повторного training,
+после явного inject второй candidate оценивается нормально.
+
+Proof: `.tmp/agent-activity-live-proof-1/acceptance.json`. Ровно **два** opaque score
+executions; held-out MSE **0.13721179500378475** и **0.01337676906957059**.
+Protected scorer bytes неизменны. CLI `inspect`/`replay` проходят; terminal nodes
+и явно завершённый run получили русские result-notices со stable action IDs.
+
+Перед изменением прошли **193 replay** проверки. После — **236 backend/MCP**,
+**800 activity/package-layout** и **7 mounted UI**. Layout gate также обнаружил
+шесть прежних пропусков в compatibility map: command identity/receipt, external
+attention, assistant language, result notices и run result summary. Добавлены
+соответствия существующим serve modules. Guide, discovery и full B/E diagram
+обновлены; OpenAPI регенерирован без изменения маршрутов. Финальные **31 docs/diagram**
+проверка и `mkdocs build --strict` прошли; staged production build успешен.
+Private HEAD build: **607640 B** JS gzip; новая сборка — **608712 B**, прирост
+**1072 B**. Общий ceiling изменён с 594 на **595 KiB** по этому измерению;
+CSS, initial shell и структурные бюджеты не изменены.
+
+Граница: короткая scripted пауза не закрывает многочасовые сценарии, модельные
+решения и интерактивные разрешения клиентов. Детектор смерти агента не добавлен.
+При preview найден следующий onboarding defect: harness token без owner token
+на private server даёт `auth/status.required=false`, но owner run reads — 401;
+UI зависает на загрузке. Это отдельный следующий пункт исправления auth contract.

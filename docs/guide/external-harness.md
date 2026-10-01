@@ -368,6 +368,25 @@ The engine probe is independent of the journal prefix; refresh even when no
 new event arrives. The UI polls this read every ten seconds and displays the
 observation in its next step. A failed refresh withdraws that advice.
 
+Progress also has `agent_activity`, an informational observation independent of
+the journals and engine probe. Only a successful `harness-progress` read using
+the scoped harness credential updates it; this includes MCP `run_progress` and
+the progress read inside `connection_check`. Owner/browser polling, capabilities,
+other API calls, a merely running MCP process and invalid requests do not count.
+`recent_request` means a progress request was observed within **120 seconds**;
+`quiet` means no such request was observed for at least that long. It does not
+prove agent death, thinking, connection or delivery of the response to the client.
+`not_observed` means this UI process has no observation for this run generation.
+`last_seen_at` is server UTC; `age_seconds` uses a monotonic clock. The cache has
+at most **256** run/generation entries and stores no credential or request body.
+Restarting the UI, eviction or a new generation loses the observation. Nothing
+is added to events or sidecar journals. It never blocks evaluation/finalization,
+answers a checkpoint, pauses/resumes compute or invokes an internal replacement.
+The compact workspace and Agent cycle show the signal separately, with Russian
+labels when Russian is selected. Failed/stale reads withdraw it; malformed optional
+activity is unavailable without hiding the authoritative obligations. Inspect
+your client, current checkpoints and original receipts when the signal is quiet.
+
 Checkpoint headings distinguish a completed-stage review, training monitor,
 and deadline-extension decision. Questions and incomplete sources retain their
 priority even if the engine stops. Follow the full question's allowed verdicts;
@@ -805,6 +824,8 @@ python -m benchmarks.external_live_monitor_smoke --out .tmp/live-monitor-proof
 python -m benchmarks.external_asha_smoke --out .tmp/asha-proof
 # Recover between experiments: MCP loss with a live engine or an explicitly resumed engine.
 python -m benchmarks.external_idle_recovery_smoke --out .tmp/idle-proof
+# Observe actual request silence after MCP death, without owner polling refreshing it.
+python -m benchmarks.external_idle_recovery_smoke --out .tmp/activity-proof --case agent_loss --quiet-hold-seconds 121
 ```
 
 The offline scenario runs three real CPU training configurations with a protected
@@ -898,6 +919,11 @@ creates one replacement engine, and an exact retry creates none. Both cases
 measure a second candidate, publish result interpretations, finalize explicitly
 and pass `inspect`/`replay`. Select `--case agent_loss` or `--case engine_loss`.
 This short protocol test observes engine ownership, not remote agent availability.
+Its optional `--quiet-hold-seconds 121` holds the real engine idle after MCP death
+for more than the activity threshold. Operator reads then see `quiet`; the measured
+result and event log remain unchanged. UI restart shows `not_observed`, and a new
+MCP progress read establishes a new observation. A quiet/forgotten observation
+never resumes the run or becomes a verdict that the agent died.
 
 ## Delegating only code editing
 

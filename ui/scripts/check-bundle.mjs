@@ -109,7 +109,11 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // 2026-10-01 external inbox/list: 607,640 B JS / 58,684 B CSS. The portfolio map
     // is now a separate lazy module rather than part of every graph workspace. Owner DAG
     // fell to 403,362 B and review DAG to 265,140 B; every structural ceiling is unchanged.
-    js: { gzip: 594 * KIB },
+    // 2026-10-01 observed agent progress activity: private HEAD build 607,640 B;
+    // current 608,712 B (+1,072 B). The bytes buy strict optional telemetry validation
+    // and EN/RU activity labels. CSS, initial shell and structural ceilings are unchanged;
+    // 595 KiB leaves 568 B above this measured baseline.
+    js: { gzip: 595 * KIB },
     css: { gzip: 57.5 * KIB },
   },
   individual: {

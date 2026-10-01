@@ -1081,7 +1081,7 @@ def build_router(srv) -> APIRouter:
             raise refusal("event_log_unreadable") from exc
 
     @router.get("/api/runs/{run_id}/harness-progress")
-    def get_harness_progress(run_id: str, response: Response,
+    def get_harness_progress(run_id: str, request: Request, response: Response,
                              expected_generation: str = Query(...),
                              offset: int = Query(0, ge=0, le=1_000_000),
                              limit: int = Query(20, ge=1, le=100),
@@ -1095,14 +1095,21 @@ def build_router(srv) -> APIRouter:
         the shared next step, source health, counts and detail read references.
         execution separates recorded node activity from the last-read engine lock
         probe; agent connection is not measured. This read starts no work.
+        agent_activity records only successful progress reads using the scoped
+        harness credential in this UI process. Owner/browser reads do not refresh
+        it. Two minutes of silence is quiet activity, not proof of agent death.
         """
         from looplab.harness.progress import snapshot
         if _RUN_GENERATION_RE.fullmatch(expected_generation) is None:
             raise HTTPException(400, "expected_generation must be a SHA-256 token")
         response.headers["Cache-Control"] = "no-store"
         response.headers["Vary"] = "X-LoopLab-Token, Authorization"
-        result = snapshot(_run_dir(run_id), expected_generation,
+        rd = _run_dir(run_id)
+        result = snapshot(rd, expected_generation,
                           activity_reader=public_node_activity, offset=offset, limit=limit)
+        if request_agent_token(request):
+            srv.agent_activity.observe(rd, result["generation"])
+        result["agent_activity"] = srv.agent_activity.snapshot(rd, result["generation"])
         if brief:
             from looplab.harness.progress_summary import brief as compact_progress
             return compact_progress(result)
