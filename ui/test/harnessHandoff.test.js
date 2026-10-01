@@ -71,6 +71,7 @@ test('handoff opens on demand, copies verified context and withdraws stale conte
     assert.match(view.container.querySelector('pre').textContent, /mcpServers/)
     assert.match(view.container.textContent, /Pending approval means/)
     assert.match(view.container.textContent, /Connected confirms the stdio process only/)
+    assert.match(view.container.textContent, /Tool calls can still need client approval/)
     assert.doesNotMatch(view.container.textContent, /MCP configuration copied/)
     await React.act(async () => {
       [...view.container.querySelectorAll('button')].find(b => b.textContent === 'Copy agent instruction').click()
@@ -78,6 +79,8 @@ test('handoff opens on demand, copies verified context and withdraws stale conte
     assert.equal(writes.length, 2)
     assert.match(writes[1], /harness-contract/)
     assert.match(writes[1], /connection_check/)
+    assert.match(writes[1], /permission_denials/)
+    assert.match(writes[1], /isError\/is_error/)
     assert.match(view.container.textContent, /instruction copied/)
     const identity = view.container.querySelector('.harness-recovery input')
     await React.act(async () => {

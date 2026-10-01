@@ -61,20 +61,20 @@ export default function HarnessHandoff({ runId, generation, seq }) {
         <p>{client === 'codex' ? 'Place this in a trusted project .codex/config.toml or your user config. env_vars forwards the scoped token from the Codex process environment.'
           : client === 'claude' ? 'Place this in your project .mcp.json. The token placeholder reads the scoped credential from the Claude process environment.'
             : "This is a generic stdio descriptor; configure scoped credential forwarding in your client's environment settings."} The token value is not included.</p>
-        <p>If LoopLab is installed in a virtual environment, replace command with the full path to its looplab executable on the client machine. Restart the client after supplying the credential. No scoped token means harness-mcp refuses to connect; it never falls back to owner access.</p>
-        <p>{client === 'claude' ? 'Open Claude interactively in that project and review its project MCP approval prompt. Pending approval means the MCP process has not connected yet.'
-          : client === 'codex' ? 'Open Codex in a trusted project and inspect /mcp to confirm that looplab loaded.'
-            : 'Inspect the MCP server status in your client.'} Connected confirms the stdio process only. Ask the agent to call connection_check for this run before continuing; it checks the live UI/API without starting work.</p>
+        <p>For a virtual environment, set command to the full looplab executable path on the client machine. Supply the scoped credential and restart the client. harness-mcp refuses a missing token; it never falls back to owner access.</p>
         <h4>2. Supply the scoped credential separately</h4>
         <p role="status">{value.credential_configured ? 'A harness credential is configured on this server.'
           : 'Operator setup required: this server has no scoped harness credential configured.'}</p>
         <p>{value.credential_policy}</p><p>{value.scope}</p>
-        <h4>3. Pass the run instruction to your agent</h4>
+        <h4>3. Connect and give the agent this run</h4>
+        <p>{client === 'claude' ? 'Open Claude interactively in that project and review its project MCP approval prompt. Pending approval means the MCP process has not connected yet.'
+          : client === 'codex' ? 'Open Codex in a trusted project and inspect /mcp to confirm that looplab loaded.'
+            : 'Inspect the MCP server status in your client.'} Connected confirms the stdio process only. Tool calls can still need client approval. Use connection_check for this run and inspect its result.{client === 'claude' && ' In Claude --print, exit 0 can include permission_denials.'}</p>
         <button type="button" className="btn sm" onClick={copy}>Copy agent instruction</button>
         {copied?.scope === scope && copied.type === 'instruction' && <p role="status">{copied.message}</p>}
         <details><summary>Preview instruction and workspace permissions</summary>
           <pre>{harnessAgentInstruction(value, url)}</pre></details>
-        <p className="muted">Copying configures nothing and starts no experiment. Reconnect to this same run using current state, receipts and checkpoints.</p>
+        <p className="muted">Copying starts no work. Reconnect here with current state, receipts and checkpoints.</p>
       </>}
       {RUN_GENERATION_RE.test(generation || '') && <HarnessReceipt key={scope} runId={runId} generation={generation} />}
     </>}

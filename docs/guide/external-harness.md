@@ -167,10 +167,12 @@ reconnect to the same run using current command receipts and checkpoints.
 Engine liveness does not measure agent liveness. The handoff has been exercised
 with Python MCP SDK 2.2.0 and Codex 0.159.2's real MCP client: discovery, live reads,
 ready-made candidates, measured evaluations, receipts, retries and result commentary.
-Claude Code 2.1.286's actual project configuration was checked for pending approval,
-approved stdio connection and missing-token failure. No model turns were started;
-Claude tool execution, model decisions and interactive approvals still need their
-own acceptance checks. See doc 71 sections 31–32 for the tested boundary.
+Claude Code 2.1.286's project configuration was checked for pending approval,
+approved stdio connection and missing-token failure. Its real MCP client also completed
+candidate evaluation, reconnect/retry and result commentary with a local scripted
+Messages provider. The provider selected tool calls; LoopLab measured the scores.
+Paid model judgment and interactive tool approvals remain untested. See doc 71
+sections 31–33 for the tested boundary.
 
 ### Check the live connection
 
@@ -195,6 +197,39 @@ For Claude, open the project interactively and review the MCP approval prompt be
 expecting a project server to connect. `/mcp` shows its status. This is client approval,
 not a LoopLab checkpoint. Neither **Pending approval** nor **Connected** proves that
 LoopLab has received a candidate. Resolve connection diagnostics before decisions.
+
+**Tool approval is a separate step.** A loaded server can still wait for permission
+to call its tools. Review the client's tool prompt. In Claude `--print`, a refused
+tool can return `is_error: true` and appear in the final JSON `permission_denials`
+while the CLI exits **0** with `is_error: false`. Inspect each MCP tool result, then
+the API status and durable receipt; do not count a client exit as a submitted candidate.
+If permission was refused, review it and reconnect to the same run. Read the original
+command receipt before retrying a potentially submitted command. Approving a project
+server does not grant permission for every call, resume the engine or answer a checkpoint.
+`api_request` can write through the scoped server-wide credential; review its scope
+before allowing unattended use. Client policy remains authoritative.
+
+### Reproduce the Claude transport check
+
+From a source checkout with `[ui,harness]` installed and an installed Claude Code,
+run this opt-in, local acceptance check:
+
+```sh
+python -m benchmarks.claude_harness_smoke --claude /absolute/path/to/claude --out .tmp/claude-smoke
+```
+
+The output directory must be new. It starts a disposable loopback server/root,
+protected CPU training scorer and local scripted Messages provider. Three fresh
+Claude invocations check a denied tool, submit a candidate, then reconnect/retry,
+measure two successful configurations and one failed configuration, publish Russian
+interpretations and explicitly finish. Inspect/replay and protected file bytes are checked.
+The client gets only a synthetic API key and scoped test token, isolated settings,
+default permission mode and an explicit allowlist of LoopLab tools for the authorized
+cases. It uses no permission bypass, shell tools, saved chat or model account.
+`acceptance.json` stores client version, call counts and measured outcomes. Claude's
+cost estimate reflects fixture token counts; it is not a provider charge. This checks
+transport and permission handling, not an LLM's research choices or enabled optional
+obligations (research, concepts, reports and monitors are disabled for this small task).
 
 ## External harness setup
 

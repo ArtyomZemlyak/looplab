@@ -594,7 +594,7 @@ External run здесь намеренно не получал кандидат�
 | OB-07 | Частично | Composer показывает активные права и понятное пояснение; четыре варианта раскрываются по запросу, выбор возвращает фокус на видимый переключатель. | Проверить понимание режимов с новым пользователем. |
 | OB-08 | Частично | Essential открывается с модели, показывает 13 полей ресурсов и лимитов с короткими пояснениями; технические детали и runtime permissions раскрываются отдельно. | Проверить подключение модели и понимание лимитов с новым пользователем. |
 | OB-09 | Частично | Живой внешний run без узлов показывает роль агента и ссылку на Agent cycle без спиннера подготовки. | Показать точное ожидание и состояние агента в других фазах. |
-| OB-10 | Частично | UI готовит handoff и конфигурации клиентов без credential; `connection_check` проверяет доступ к live run. | См. §32: настоящий Codex MCP выполнил measured candidates, Claude проверен для approval/stdio/token. Модельные решения и полный tool cycle Claude ещё не проверены. |
+| OB-10 | Частично | UI готовит handoff и конфигурации без credential; `connection_check` проверяет live run. Codex и Claude выполнили measured candidates через MCP. | См. §33: полный Claude tool cycle с локальным scripted provider и отдельное разрешение вызовов. Модельные решения и интерактивное подтверждение инструментов ещё не проверены. |
 | OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. | См. §25: проверены контракт, реальные subprocess-кандидаты и desktop; подключение нового клиента относится к OB-10. |
 | OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; чтение original receipt без worker restart, поиск по ID/key и generation fence. | См. §27: проверены disconnect, новая MCP-сессия и отсутствие дубля. Живость внешнего агента остаётся явно неизмеряемой. |
 | OB-14 | Частично | Начало сайта показывает два основных входа. | Большая архитектурная схема всё ещё нуждается в упрощении для первого знакомства. |
@@ -1231,3 +1231,66 @@ JS gzip **605667 B** (+239 B), CSS **58445 B** (без роста), initial **82
 Визуальная проверка нового абзаца в этой итерации не выполнена: встроенный браузер
 отказал в открытии тестового localhost (`ERR_BLOCKED_BY_CLIENT`). Проверки поведения
 UI и production build прошли; предыдущая проверка Full HD/2K относится к §31.
+
+## 33. OB-10: Claude tool cycle и отдельное разрешение вызовов
+
+Подключение сервера и разрешение вызывать его инструменты — два разных шага клиента.
+Настоящий Claude Code **2.1.286** в `--print --permission-mode default` без разрешения
+на `connection_check` вернул tool result с `is_error: true` и `permission_denials`.
+При этом итоговый JSON содержал `is_error: false`, а CLI завершился с кодом **0**.
+Такой результат не доказывает, что инструмент выполнялся или кандидат был принят.
+
+В UI пояснение перенесено к **3. Connect and give the agent this run**, рядом с
+копированием инструкции. Оно различает project approval, Connected, разрешение
+инструмента и результат чтения API. Подсказка `--print` показывается для Claude.
+Копируемая инструкция и MCP initialize предлагают проверять `isError/is_error`,
+`permission_denials`, HTTP status и durable receipt. При отказе нужно рассмотреть
+клиентское разрешение; после неоднозначной отправки — прочитать original receipt
+до повтора. Это не новый checkpoint и не ожидание внутри LoopLab.
+
+### Воспроизводимая локальная приёмка
+
+В репозитории добавлен `benchmarks/claude_harness_smoke.py`; запуск описан в
+[external guide](guide/external-harness.md#reproduce-the-claude-transport-check).
+Он требует установленного Claude и нового output directory. Для Windows проверен
+нативный `claude.exe` из официального закреплённого npm package. Пользовательские
+настройки, аккаунт и существующие runs не используются; `--bare`, отдельный config
+directory, `--no-session-persistence`, default permissions, запрет built-in tools
+и allowlist только нужных LoopLab tools ограничивают тестовую сессию.
+
+Локальный Messages provider выдаёт заранее заданные tool calls по официальному
+[SSE-протоколу](https://platform.claude.com/docs/en/build-with-claude/streaming).
+Он не является моделью и не возвращает метрики: JSON результатов приходит от
+настоящего MCP-клиента Claude и LoopLab API. Наблюдатель отказывает при tool error,
+неверном tool ID, неоднозначном content или отсутствии ожидаемого результата.
+CLI cost estimate основан на тестовых token counts; это не списание провайдером.
+
+Финальный прогон на отдельном root прошёл три сеанса:
+
+| Сеанс | Проверяемая граница | Результат |
+|---|---|---|
+| Без tool approval | Один запрос `connection_check`; client default permissions | Refused, `permission_denials: 1`, CLI exit 0 |
+| Первый клиент | capabilities, connection, task/config/contract, phases/progress, scoped owner refusal; ready-made кандидат | 11 выполненных tool calls; клиент явно завершился после receipt |
+| Новый клиент | Те же bootstrap reads, original receipt, exact retry; ещё две оценки, checkpoints, русские commentary/retry и явный finish | 57 выполненных tool calls; исходный command ID сохранён, дополнительных узлов от retry нет |
+
+5 и 80 шагов защищённого SGD scorer дали held-out MSE **0,7807408706** и
+**0,0000126094**. Нулевое число шагов дало **failed без метрики**; интерпретация
+объясняет, что обучение не началось и нужно исправить конфиг. Записаны комментарии
+после каждого узла и завершённого run; повторы вернули `replayed`. Scorer в source
+и всех трёх node directories побайтно неизменен. `inspect` и `replay` прошли.
+Счётчики в `acceptance.json` различают tool attempts и client tool errors.
+
+Исследование, concepts, reports, lessons и monitors в этой маленькой задаче выключены.
+Это проверка transport/permissions/recovery, а не всех внешних обязательств или
+решений LLM. Интерактивное подтверждение tool prompt человеком и реальное модельное
+планирование остаются открытой частью OB-10. Разрешения клиента не обходятся.
+
+Проверки: **193 replay passed**, **116 targeted Python passed**, **3 focused UI passed**;
+production build и все bundle/reachability gates проходят без изменения ceilings.
+JS gzip **605642 B** (−25 B к §32), CSS **58445 B**, initial JS **82970 B**.
+UI открыт в Edge: фактический viewport **1920×1080**, инструкция читается,
+горизонтального переполнения документа и pre нет. Попытка выставить 2K не изменила
+фактический viewport, поэтому новая 2K-проверка не заявляется. Визуальное ограничение
+встроенного браузера из §32 закрыто проверкой через Edge.
+
+![Разрешение инструментов рядом с передачей run-инструкции](assets/71-onboarding/26-client-tool-approval.jpg)

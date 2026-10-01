@@ -27,6 +27,7 @@ MCP_INSTRUCTIONS = (
     "before retrying; preserve the exact payload and original key. Explicitly pause or finalize. "
     "Quiet logs do not prove agent or engine liveness. "
     "MCP Connected proves stdio only; use connection_check for live run reads. "
+    "Client tool approval may still be required. Inspect isError/is_error, permission_denials and HTTP status; exit 0 is not an applied command receipt. "
     "Follow enabled admission/finish obligations. A trainer exit is not terminal evaluation. "
     "After each terminal node and finalized run, read generation-fenced result-notices and POST "
     "a brief interpretation in the user's language with receipt_id, evidence_token and a stable "
