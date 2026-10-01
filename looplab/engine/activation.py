@@ -803,6 +803,11 @@ CAUSE_UNVERIFIABLE = "activation_unverifiable"
 CAUSE_NOT_PRINTED = "not_printed"
 CAUSE_ENV = "env_not_satisfied"
 CAUSE_FILE = "file_not_satisfied"
+# The block causes that are DECLARATION errors -- the marker named text no code prints (TP3), or
+# text whose printer nobody could establish -- and so the only ones re-check without re-run may
+# answer (`engine/evaluate.py::_activation_recheck`). TP1/TP2 say the path did not RUN, and env/file
+# that the value or artefact is not there: each of those needs a new evaluation.
+RECHECKABLE_CAUSES = frozenset({CAUSE_TP3, CAUSE_UNKNOWN})
 
 
 def _weakest(grades) -> str:

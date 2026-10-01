@@ -2046,7 +2046,8 @@ class EvaluateMixin:
         evidence = None
         if verdict.verdict == act.VERDICT_BLOCK and mode == "graded":
             evidence = {"spans": spans, "changed": changed, "metric": a.res.metric,
-                        "digest": act.changed_code_digest(a.workdir, changed)}
+                        "digest": act.changed_code_digest(a.workdir, changed),
+                        "causes": dict(verdict.causes)}
         return verdict, evidence
 
     def _apply_activation_verdict(self, a: "EvalAttempt", verdict, evidence) -> None:
@@ -2072,7 +2073,8 @@ class EvaluateMixin:
 
     async def _activation_recheck(self, a: "EvalAttempt", changed, deleted,
                                   code_changed: bool) -> bool:
-        """RE-CHECK WITHOUT RE-RUN, after an `inert_path` whose repair rewrote ONLY the declaration.
+        """RE-CHECK WITHOUT RE-RUN, after an `inert_path` whose repair rewrote ONLY the declaration,
+        and only when that `inert_path` was a DECLARATION error (`activation.RECHECKABLE_CAUSES`).
 
         True when the repaired declaration is proven on the failed attempt's OWN output, and the
         attempt then settles with the metric it printed -- no second evaluation. Every condition is
@@ -2096,7 +2098,16 @@ class EvaluateMixin:
                 or a._engine_reason != "inert_path" or not getattr(a.res, "inert_path", None)
                 or deleted or code_changed):
             return False
-        from looplab.engine.activation import ACTIVATION_MANIFEST_NAME, CHANGE_CLASS_IGNORED
+        from looplab.engine.activation import (ACTIVATION_MANIFEST_NAME, CHANGE_CLASS_IGNORED,
+                                               RECHECKABLE_CAUSES)
+        # ONLY A DECLARATION ERROR is re-checkable: every marker the attempt was blocked on must have
+        # been one nothing printed because nothing COULD (TP3) or nobody could say what prints it.
+        # A TP1/TP2 block says the path did not run; letting a manifest-only repair swap that marker
+        # for another line the same log holds -- `cache: falling back`, printed by the except branch
+        # of the very file that fell back -- scored the fallback as `strong` (critic probe P2).
+        causes = evidence.get("causes") or {}
+        if not causes or any(c not in RECHECKABLE_CAUSES for c in causes.values()):
+            return False
         moved = set(changed or ())
         if ACTIVATION_MANIFEST_NAME not in moved or not moved <= CHANGE_CLASS_IGNORED:
             return False

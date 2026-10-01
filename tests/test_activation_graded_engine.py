@@ -488,3 +488,52 @@ def test_the_repo_developer_s_config_only_marker_reaches_the_unverified_warn(tmp
     assert (terminal.data["activation"]["verdict"], terminal.data["activation"]["gate"]) == (
         "warn", "gate")
     assert 0 in fold(EventStore(run_dir / "events.jsonl").read_all()).breed_excluded
+
+
+# MAJOR 3: a TP1 block is not re-checkable. The except branch of the very file that fell back prints
+# `cache: falling back`; a manifest-only repair declaring THAT line re-checked as `strong`.
+_SWALLOWED = ("import json\ndef fast():\n    raise AttributeError('removed')\n"
+              "try:\n    fast()\n    print('PREFIX CACHE ON')\nexcept Exception:\n"
+              "    print('cache: falling back')\n"
+              "print(json.dumps({'metric': 1.004}))\n")
+
+
+def test_a_tp1_block_is_never_re_checked_from_the_same_log(tmp_path):
+    """Critic MAJOR 3 (probe P2): the attempt is blocked as TP1 (the changed code prints `PREFIX
+    CACHE ON`, it never appeared); the repair swaps the declaration for the fallback's own line. That
+    is not a declaration error, so no re-check: the evaluation runs again (it then measures what the
+    new declaration says -- the engine cannot tell a fallback's words from a path's, and the
+    contract is the declaration). MUTATION: drop the cause gate -> one invocation, rechecked."""
+    events, _dev, _ = _run(tmp_path, base=_ENTRY,
+                           node_files={"main.py": _SWALLOWED, **_manifest(["PREFIX CACHE ON"])},
+                           plan=[_manifest(["cache: falling back"])])
+    assert len(_types(events, "eval_invocation_claimed")) == 2
+    rechecked = [e for e in _types(events, "node_evaluated")
+                 if (e.data.get("activation") or {}).get("rechecked")]
+    assert rechecked == []
+
+
+def test_re_check_refuses_when_the_changed_code_is_not_what_the_attempt_left(tmp_path):
+    """Critic MINOR 8a: the evaluation rewrote its own changed file (here it appends to itself), so
+    the bytes on disk at repair time are not what that attempt left -- no re-check, a re-run.
+    MUTATION: drop the digest comparison -> one invocation."""
+    selfmod = _PRINTS_ACTIVE + "open(__file__, 'a').write('# ran\\n')\n"
+    events, _dev, _ = _run(tmp_path, base=_ENTRY,
+                           node_files={"main.py": selfmod, **_manifest(["NEW PATH ON"])},
+                           plan=[_manifest(["NEW PATH ACTIVE"])])
+    assert len(_types(events, "eval_invocation_claimed")) == 2
+
+
+def test_re_check_refuses_when_the_attempt_s_log_bytes_cannot_be_re_read(tmp_path):
+    """Critic MINOR 8c: a log the failed attempt wrote (and the check read) is REPLACED before the
+    re-check -- here re-materialized from the node's files -- so its bytes are no longer the
+    attempt's: no re-check, a re-run, even though the marker is in the captured stdout.
+    MUTATION: `read_log_spans` None -> [] -> one invocation."""
+    writes_log = _PRINTS_ACTIVE + "open('side.log', 'w').write('side channel\\n')\n"
+    events, _dev, _ = _run(tmp_path, base=_ENTRY,
+                           # the same bytes the eval writes, so the changed-code digest still
+                           # matches and only the log's IDENTITY (a fresh inode) moved
+                           node_files={"main.py": writes_log, "side.log": "side channel\n",
+                                       **_manifest(["NEW PATH ON"])},
+                           plan=[_manifest(["NEW PATH ACTIVE"])])
+    assert len(_types(events, "eval_invocation_claimed")) == 2
