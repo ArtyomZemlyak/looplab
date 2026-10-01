@@ -669,6 +669,75 @@ def scan_texts(files, needles, *, complete: bool = True) -> EmitterScan:
     return scan
 
 
+# ---------------------------------------------------------------- an assignment the change itself made
+#
+# A marker spelled `NAME=value` whose value a config file THIS change touched assigns is ALWAYS the
+# `env` entry `{"kind": "env", "name": NAME, "equals": value, "file": that config}` -- at the
+# declaration lint and again at settle, whatever else in the tree contains the same text. The
+# declared intent is "this value is set", and the static env check verifies exactly that. A code
+# literal that merely contains the same text proves nothing more: minionerec-lora-v1 node 2,
+# 2026-10-01, where `MiniOneRec/sft_resume.py` holds `why_off = "SFT_RESUME_EVERY_MIN=0"` -- a reason
+# string stored in a dict, never printed on the run's path -- which the emitter scan reads as an
+# EXISTING printer, so the node's config-only fix would have been blocked as TP2. TP2 (a flag that
+# should enable an existing path with a silent fallback) is still caught by a log marker the PATH
+# prints, which stays blocking. A value the touched config does NOT assign (or no touched config
+# assigns the name at all) is left a `log` entry, and the emitter rules apply to it unchanged.
+_ASSIGNMENT_MARKER = re.compile(r"(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*[=:]\s*(\S.*)")
+
+
+def config_assignment_entry(text, configs) -> Optional[dict]:
+    """The `env` entry an assignment-shaped marker `text` normalizes to, or None. `configs` is
+    `{path: text}` of the config files the node's change touched; the first (by path) whose
+    effective LAST assignment of NAME equals the value -- `env_assignment`, the env check's own
+    parsing -- names the file."""
+    if not isinstance(text, str):
+        return None
+    m = _ASSIGNMENT_MARKER.fullmatch(text.strip())
+    if not m:
+        return None
+    name, value = m.group(1), m.group(2).strip()
+    for path in sorted(configs or {}):
+        body = configs[path]
+        if not isinstance(body, str) or not is_config_path(path):
+            continue
+        got = env_assignment(body, name)
+        if got is not None and got == _unquote(value):
+            entry = normalize_entry({"kind": KIND_ENV, "name": name, "equals": value, "file": path})
+            if entry is not None:
+                return entry
+    return None
+
+
+def normalize_config_assignments(entries, configs) -> tuple:
+    """`(entries, rewritten)`: every `log` text entry `config_assignment_entry` recognizes replaced by
+    its `env` entry (deduplicated, `normalize_entries` bounds), and the marker texts it replaced."""
+    out, rewritten = [], []
+    for entry in entries or ():
+        env = (config_assignment_entry(entry.get("text"), configs)
+               if entry.get("kind") == KIND_LOG else None)
+        if env is not None:
+            rewritten.append(entry["text"])
+            out.append(env)
+        else:
+            out.append(entry)
+    return normalize_entries(out), rewritten
+
+
+def touched_configs(workdir, changed_paths) -> dict:
+    """`{path: text}` of the changed paths that are config files, read from `workdir` (bounded,
+    link-free, contained); an unreadable one is left out."""
+    from looplab.core.pathsafe import contained_member
+    out = {}
+    for rel in sorted(changed_paths or ()):
+        if not is_config_path(rel) or rel in CHANGE_CLASS_IGNORED:
+            continue
+        target = contained_member(workdir, rel)
+        raw = read_bounded_regular_file(target, _ENV_FILE_BYTES) if target is not None else None
+        if raw is not None:
+            out[rel] = raw.decode("utf-8", "replace")
+    return out
+
+
 # ---------------------------------------------------------------- what the node changed
 
 def node_change(node, parents=()) -> tuple:

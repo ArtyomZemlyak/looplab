@@ -125,14 +125,33 @@ def _manifest(markers) -> dict:
 
 # ------------------------------------------------------------ REGRESSION: the incident
 
-def test_the_incident_settles_with_its_metric_and_an_unverified_flag(tmp_path):
-    """minionerec-lora-v1 node 2 under `graded`: a config-only change whose markers nothing could
-    print keeps its metric -- one invocation, settled `ok`, `node_evaluated` with the metric and an
-    `activation` record (grade weak), no repair, no second run.
-    MUTATION: make the matrix block `no_emitter` on a config-only change -> `node_failed inert_path`
-    and a second invocation."""
-    events, dev, run_dir = _run(tmp_path, node_files={ENV: INCIDENT_ENV,
-                                                      **_manifest(INCIDENT_MARKERS)})
+# The base tree of the incident's repo holds the markers' TEXT in code that never prints it:
+# `MiniOneRec/sft_resume.py`'s reason string, stored in a dict (a guarded literal the emitter scan
+# reads as an EXISTING printer), and the runner's own guarded assignment of the same value.
+INCIDENT_BASE = {
+    "MiniOneRec/sft_resume.py": (
+        "def resolve_resume_settings(env):\n"
+        "    every_min = float(env.get('SFT_RESUME_EVERY_MIN') or '60')\n"
+        "    why_off = ''\n"
+        "    if every_min <= 0:\n"
+        "        why_off = \"SFT_RESUME_EVERY_MIN=0\"\n"
+        "    return {'enabled': not why_off, 'why_off': why_off}\n"),
+    "MiniOneRec/looplab/run_experiment.sh": (
+        "if [[ \"${SFT_EVAL_SAMPLE:-0}\" -gt \"$_valid_rows\" ]]; then\n"
+        "    SFT_EVAL_SAMPLE=-2; export SFT_EVAL_SAMPLE\n"
+        "fi\n"),
+}
+
+
+def test_the_incident_settles_with_its_metric_through_the_env_check(tmp_path):
+    """minionerec-lora-v1 node 2 under `graded`, with the incident's own base tree: both markers are
+    `NAME=value` assignments the node's changed `experiment.env` makes, so both are the `env` entries
+    the static check verifies -- even though `sft_resume.py` holds `why_off =
+    "SFT_RESUME_EVERY_MIN=0"`, which the emitter scan reads as an existing printer (TP2). One
+    invocation, settled `ok`, `node_evaluated` with the metric, grade weak, no repair.
+    MUTATION: disable `normalize_config_assignments` -> marker 2 blocks as TP2, a second invocation."""
+    events, dev, run_dir = _run(tmp_path, base=INCIDENT_BASE,
+                                node_files={ENV: INCIDENT_ENV, **_manifest(INCIDENT_MARKERS)})
     claims = _types(events, "eval_invocation_claimed")
     settles = _types(events, "eval_invocation_settled")
     assert len(claims) == 1 and [s.data["outcome"] for s in settles] == ["ok"]
@@ -140,12 +159,35 @@ def test_the_incident_settles_with_its_metric_and_an_unverified_flag(tmp_path):
     [terminal] = _types(events, "node_evaluated", "node_failed")
     assert terminal.type == "node_evaluated" and terminal.data["metric"] == 0.1126388
     record = terminal.data["activation"]
-    assert (record["verdict"], record["grade"], record["change_class"]) == (
-        "warn", "weak", "config_only")
-    assert record["missing"] == INCIDENT_MARKERS and record["gate"] == "audit"
+    assert (record["verdict"], record["grade"], record["change_class"], record["kinds"]) == (
+        "ok", "weak", "config_only", ["env"])
+    assert record["missing"] == []
     assert terminal.data["violations"] == []                 # NOT a violations row: still feasible
     node = fold(EventStore(run_dir / "events.jsonl").read_all()).nodes[0]
-    assert node.feasible and node.activation["verdict"] == "warn"
+    assert node.feasible and node.activation["grade"] == "weak"
+
+
+def test_an_assignment_marker_the_touched_config_does_not_set_keeps_the_log_rules(tmp_path):
+    """`USE_X=1` declared while the changed config sets `USE_X=0`: not the env entry -- a log marker
+    nothing prints, on a config-only change, so the graded WARN (the metric stands, flagged)."""
+    events, _dev, _ = _run(tmp_path, node_files={
+        "conf/run.env": "USE_X=0\n", **_manifest(["USE_X=1"])})
+    [terminal] = _types(events, "node_evaluated")
+    record = terminal.data["activation"]
+    assert (record["verdict"], record["kinds"], record["missing"]) == ("warn", ["log"], ["USE_X=1"])
+
+
+def test_a_config_only_marker_nothing_could_print_settles_flagged_unverified(tmp_path):
+    """The graded WARN itself: a config-only change whose marker is no assignment and that no code
+    anywhere prints keeps its metric, flagged -- not a violations row."""
+    events, dev, _ = _run(tmp_path, node_files={ENV: INCIDENT_ENV, **_manifest(["LORA OFF"])})
+    assert len(_types(events, "eval_invocation_claimed")) == 1 and dev.errors == []
+    [terminal] = _types(events, "node_evaluated")
+    record = terminal.data["activation"]
+    assert (record["verdict"], record["grade"], record["change_class"]) == (
+        "warn", "weak", "config_only")
+    assert record["missing"] == ["LORA OFF"] and record["gate"] == "audit"
+    assert terminal.data["violations"] == []
 
 
 def test_the_incident_under_strict_is_inert_path_as_it_always_was(tmp_path):
@@ -167,7 +209,7 @@ def test_the_incident_under_strict_is_inert_path_as_it_always_was(tmp_path):
 
 def test_the_gate_bars_an_unverified_node_from_best_and_keeps_it_feasible(tmp_path):
     events, _dev, run_dir = _run(tmp_path, gate="gate",
-                                 node_files={ENV: INCIDENT_ENV, **_manifest(INCIDENT_MARKERS)})
+                                 node_files={ENV: INCIDENT_ENV, **_manifest(["LORA OFF"])})
     [terminal] = _types(events, "node_evaluated")
     assert terminal.data["activation"]["gate"] == "gate"
     state = fold(EventStore(run_dir / "events.jsonl").read_all())
@@ -218,8 +260,9 @@ def test_tp3_a_marker_declared_on_a_code_change_with_no_printer_is_still_inert_p
 
 
 def test_tp3_on_a_code_change_says_a_config_assignment_is_not_a_printed_marker(tmp_path):
+    # The node does NOT set it (the base env says 0), so it stays a log marker nothing prints.
     events, dev, _ = _run(tmp_path, base={"svc.py": "x = 1\n"}, node_files={
-        "svc.py": "x = 2\n", ENV: INCIDENT_ENV, **_manifest(["SFT_EVAL_SAMPLE=-2"])})
+        "svc.py": "x = 2\n", **_manifest(["SFT_EVAL_SAMPLE=-2"])})
     assert _types(events, "node_failed")[0].data["reason"] == "inert_path"
     assert "config assignment, not a printed marker" in dev.errors[0]
     assert "do not add an echo" in dev.errors[0]

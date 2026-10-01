@@ -424,3 +424,45 @@ def test_the_historical_developer_is_unchanged(monkeypatch):
     dev = LLMRepoDeveloper.__new__(LLMRepoDeveloper)          # never ran __init__: historical
     prop = dev._emit_spec()["function"]["parameters"]["properties"]["activation_markers"]
     assert prop == LLMRepoDeveloper._ACTIVATION_MARKERS_PROPERTY
+
+
+# ------------------------------------------------------------ the change's own config assignment
+
+from pathlib import Path  # noqa: E402
+
+_INCIDENT_DATA = Path(__file__).parent / "data" / "activation_incident"
+
+
+def test_the_real_node_2_declaration_is_rewritten_to_env_over_the_real_base_tree():
+    """minionerec-lora-v1 node 2, the REAL bytes: the files its seq-585 repair wrote
+    (`experiment.env`, the manifest) against excerpts of the base repo it ran on -- `sft_resume.py`,
+    whose `why_off = "SFT_RESUME_EVERY_MIN=0"` reason string the emitter scan reads as an existing
+    printer, and `run_experiment.sh`, whose guarded `SFT_EVAL_SAMPLE=-2` assignment is one too.
+    Both markers are values the node's changed config sets, so both are env entries.
+    MUTATION: drop `normalize_config_assignments` -> marker 2 stays a log marker."""
+    env = "MiniOneRec/looplab/experiment.env"
+    written = {env: (_INCIDENT_DATA / "experiment.env").read_text(),
+               act.ACTIVATION_MANIFEST_NAME: (_INCIDENT_DATA / "looplab_activation.json").read_text()}
+    base = {env: (_INCIDENT_DATA / "experiment.base.env").read_text(),
+            "MiniOneRec/sft_resume.py": (_INCIDENT_DATA / "sft_resume.excerpt.py").read_text(),
+            "MiniOneRec/looplab/run_experiment.sh":
+                (_INCIDENT_DATA / "run_experiment.excerpt.sh").read_text()}
+    markers = json.loads(written[act.ACTIVATION_MANIFEST_NAME])["markers"]
+    assert markers == _INCIDENT_MARKERS
+    assert act.scan_texts(base, markers).found.get("SFT_RESUME_EVERY_MIN=0")   # the false printer
+    lint = activation_declaration_lint(markers, written, before=base.get, originals=base)
+    assert lint.change_class == act.CHANGE_CONFIG_ONLY
+    assert list(lint.entries) == [
+        {"kind": "env", "name": "SFT_EVAL_SAMPLE", "equals": "-2", "file": env},
+        {"kind": "env", "name": "SFT_RESUME_EVERY_MIN", "equals": "0", "file": env}]
+    assert not lint.bounce and not lint.warning
+
+
+def test_an_assignment_marker_the_touched_config_does_not_set_is_not_rewritten_to_env():
+    lint = activation_declaration_lint(["USE_X=1"], {"conf/run.env": "USE_X=0\n"})
+    assert all(e["kind"] != "env" for e in lint.entries)
+    assert act.config_assignment_entry("USE_X=1", {"conf/run.env": "USE_X=0\nUSE_X=1\n"}) == {
+        "kind": "env", "name": "USE_X", "equals": "1", "file": "conf/run.env"}   # the LAST wins
+    assert act.config_assignment_entry("USE_X=1", {"conf/run.env": "USE_X=1\nUSE_X=0\n"}) is None
+    assert act.config_assignment_entry("USE_X=1", {"run.sh": "USE_X=1\n"}) is None   # not config
+    assert act.config_assignment_entry("cache ON now", {"a.yaml": "cache ON now\n"}) is None

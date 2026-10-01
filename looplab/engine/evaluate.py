@@ -2008,6 +2008,14 @@ class EvaluateMixin:
         for `_activation_recheck`, else None."""
         from looplab.engine import activation as act
         mode = getattr(self, "_activation_check", "graded")
+        changed, code_changed = act.node_change(a.node, self._activation_parents(a))
+        cls = act.change_class(changed, code_changed)
+        if mode == "graded":
+            # An assignment-shaped marker the change's own config sets IS an env entry, whatever
+            # else in the tree contains its text (`activation.config_assignment_entry`; the
+            # sft_resume.py `why_off` literal of minionerec-lora-v1 node 2, 2026-10-01).
+            entries, _ = act.normalize_config_assignments(
+                entries, act.touched_configs(a.workdir, changed))
         logs = act.log_entries(entries)
         texts = [t for t in (a.res.stdout or "", a.res.stderr or "") if isinstance(t, str) and t]
         printed = {act.entry_label(e): act.log_entry_seen(e, texts) for e in logs}
@@ -2023,8 +2031,6 @@ class EvaluateMixin:
                 satisfied[act.entry_label(e)] = act.check_env_entry(e, a.workdir)
             elif e.get("kind") == act.KIND_FILE:
                 satisfied[act.entry_label(e)] = act.check_file_entry(e, a.workdir, a._t0)
-        changed, code_changed = act.node_change(a.node, self._activation_parents(a))
-        cls = act.change_class(changed, code_changed)
         emitters: dict = {}
         if mode == "graded" and logs:
             scan = act.scan_emitters(a.workdir, [e["text"] for e in logs if e.get("text")])

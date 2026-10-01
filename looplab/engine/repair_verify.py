@@ -1753,7 +1753,8 @@ def activation_declaration_lint(markers, written: dict, *, before=None, original
 
     `regex`, `env`, `file` and `none` entries are kept as declared."""
     from looplab.engine.activation import (CHANGE_CLASS_IGNORED, CHANGE_CONFIG_ONLY, KIND_ENV,
-                                           KIND_LOG, KIND_NONE, change_class, normalize_entries,
+                                           KIND_LOG, KIND_NONE, change_class, is_config_path,
+                                           normalize_config_assignments, normalize_entries,
                                            scan_texts)
     entries = normalize_entries(markers)
     if not entries:
@@ -1767,9 +1768,17 @@ def activation_declaration_lint(markers, written: dict, *, before=None, original
             if isinstance(b, str) and p not in CHANGE_CLASS_IGNORED}
     tree.update({str(p).replace("\\", "/"): b for p, b in (written or {}).items()
                  if isinstance(b, str) and str(p) not in CHANGE_CLASS_IGNORED})
+    # FIRST, whatever any emitter says: an assignment-shaped marker the change's own config sets is
+    # the `env` entry (`activation.config_assignment_entry` -- minionerec-lora-v1 node 2's
+    # `why_off = "SFT_RESUME_EVERY_MIN=0"` literal in sft_resume.py must not keep it a log marker).
+    entries, rewritten = normalize_config_assignments(
+        entries, {p: tree[p] for p in changed if p in tree and is_config_path(p)})
+    notes = [f"{t!r} is a value this change's config file sets, not a line any code prints; "
+             "recorded as an env entry the engine checks statically. Do not add an echo for the "
+             "check." for t in rewritten]
     needles = [e["text"] for e in entries if e.get("kind") == KIND_LOG and e.get("text")]
     scan = scan_texts(tree, needles, complete=originals_complete)
-    out, notes, missing, unconditional = [], [], [], []
+    out, missing, unconditional = [], [], []
     for entry in entries:
         text = entry.get("text") if entry.get("kind") == KIND_LOG else None
         if not text:
