@@ -16,10 +16,12 @@ import orjson
 from fastapi import HTTPException
 
 from looplab.core.atomicio import append_jsonl_bytes_locked
+from looplab.core.jsonlio import read_jsonl_lenient_with_health
 from looplab.events.eventstore import (EventStore, EventStoreLockError, interprocess_lock,
-                                       read_jsonl_lenient)
+                                       log_integrity)
 from looplab.events.replay import fold
 from looplab.events.run_generation import run_generation_token
+from looplab.harness.checkpoint_history import checkpoint_records
 
 _MAX_LEDGER = 16 * 1024 * 1024
 _PHASES = frozenset({"stage_check", "train_monitor", "asha_live", "deadline_grace"})
@@ -55,17 +57,37 @@ def _path(rd: Path) -> Path:
 def _rows(path: Path) -> list[dict]:
     if path.exists() and path.stat().st_size > _MAX_LEDGER:
         raise OSError("external checkpoint ledger exceeds its review bound")
-    return read_jsonl_lenient(path)
+    rows, health = read_jsonl_lenient_with_health(path)
+    checkpoint_records(rows, health)
+    if not health["read_complete"]:
+        raise OSError("external checkpoint journal is incomplete; repair the source before responding")
+    return rows
 
 
 def _projection(rows: list[dict]) -> tuple[dict[str, dict], dict[str, dict]]:
-    questions, answers = {}, {}
-    for row in rows:
-        if row.get("type") == "question":
-            questions[row["checkpoint_id"]] = row
-        elif row.get("type") == "answer":
-            answers[row["checkpoint_id"]] = row
-    return questions, answers
+    health = {"read_complete": True}
+    records = checkpoint_records(rows, health)
+    if not health["read_complete"]:
+        raise OSError("external checkpoint records are incomplete")
+    return records
+
+
+def _require_event_source(rd: Path):
+    path = Path(rd) / "events.jsonl"
+    if not log_integrity(path)["complete"]:
+        raise OSError("external checkpoint event history is incomplete")
+    # Display readers may call a missing/empty log complete. An existing checkpoint
+    # cannot be resolved without its run's event source.
+    if path.stat().st_size == 0:
+        raise OSError("external checkpoint event history is absent")
+
+
+def _events(rd: Path):
+    _require_event_source(rd)
+    events = EventStore(Path(rd) / "events.jsonl").read_all()
+    # Detect a damaged append during the read; an ordinary valid append is harmless.
+    _require_event_source(rd)
+    return events
 
 
 def ask(rd: Path, node_id: int, node_generation: int, phase_id: str,
@@ -74,7 +96,7 @@ def ask(rd: Path, node_id: int, node_generation: int, phase_id: str,
     """Open one question; the engine calls this in the eval worker or observer."""
     if phase_id not in _PHASES:
         raise ValueError("unknown external checkpoint phase")
-    events = EventStore(Path(rd) / "events.jsonl").read_all()
+    events = _events(rd)
     state = fold(events)
     node = state.nodes.get(node_id)
     if node is None or node.attempt < node_generation:
@@ -97,12 +119,13 @@ def ask(rd: Path, node_id: int, node_generation: int, phase_id: str,
 
 
 def answer_for(rd: Path, checkpoint_id: str) -> dict | None:
+    _require_event_source(rd)
     _, answers = _projection(_rows(_path(rd)))
     return answers.get(checkpoint_id)
 
 
 def pending(rd: Path, expected_generation: str) -> list[dict]:
-    events = EventStore(rd / "events.jsonl").read_all()
+    events = _events(rd)
     if run_generation_token(events) != expected_generation.lower():
         raise HTTPException(409, "run generation changed")
     state = fold(events)
@@ -123,7 +146,7 @@ def respond(srv, rd: Path, body) -> dict:
         with srv.commands.sequence(rd):
             if not read_config_snapshot(rd / "config.snapshot.json").external_harness:
                 raise HTTPException(409, "checkpoints require external harness mode")
-            events = EventStore(rd / "events.jsonl").read_all()
+            events = _events(rd)
             generation = run_generation_token(events)
             if not generation or generation != body.expected_generation.lower():
                 raise HTTPException(409, "run generation changed")

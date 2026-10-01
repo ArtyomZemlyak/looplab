@@ -5,7 +5,8 @@ receipt is updated for invalid records; no side effect or connection claim occur
 """
 
 
-def project_checkpoints(rows, health, events, state, generation):
+def checkpoint_records(rows, health):
+    """Validate the shared journal contract before any reader interprets its records."""
     questions, answers = {}, {}
     invalid_records = 0
     for row in rows:
@@ -35,6 +36,11 @@ def project_checkpoints(rows, health, events, state, generation):
     invalid_records += sum(key not in questions for key in answers)
     health["invalid_record_rows"] = invalid_records
     health["read_complete"] &= invalid_records == 0
+    return questions, answers
+
+
+def project_checkpoints(rows, health, events, state, generation):
+    questions, answers = checkpoint_records(rows, health)
     claim_seqs = {}
     for event in events:
         if event.type == "eval_invocation_claimed":

@@ -11,8 +11,6 @@ from looplab.core.config import read_config_snapshot
 from looplab.core.errors import ConfigRefusal
 from looplab.events.replay import fold
 from looplab.events.run_generation import run_generation_token
-from looplab.harness.checkpoint_history import project_checkpoints
-from looplab.harness.journals import read_source
 from looplab.serve.attention import _opaque_id, _timestamp
 
 
@@ -37,6 +35,10 @@ def attention_source_identity(rd: Path):
 
 
 def external_checkpoint_attention(run_id: str, rd: Path, events) -> list[dict]:
+    # Load external workflow projections only when this attention surface is read.
+    from looplab.harness.checkpoint_history import project_checkpoints
+    from looplab.harness.journals import read_source
+
     mode = external_mode(rd)
     if mode is None and (rd / "config.snapshot.json").exists():
         raise ValueError("run mode could not be read")

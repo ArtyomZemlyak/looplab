@@ -681,7 +681,16 @@ normal; it does not create a new research run. Search `phases("recovery")` and r
    `succeeded` describes the control command, not a completed experiment.
 4. Continue the outstanding decision, or explicitly pause/finalize. A checkpoint
    may remain open after the evaluator command has finished; answer it before
-treating the node as terminal. Finalization can owe a report or reviews.
+   treating the node as terminal. Finalization can owe a report or reviews.
+
+If checkpoint reads or answers return **503**, inspect `source_health`. Damaged,
+duplicate, orphaned or invalid checkpoint records cannot supply a current question
+or an answer to the engine. A missing, empty or incomplete event history also
+refuses checkpoint reads, publication and answer consumption. The engine keeps the existing question
+unresolved; reconnecting does not repair journals or approve the stage. An operator
+must recover the source explicitly, then the agent must refresh state and progress.
+Keep a lost checkpoint answer's exact body and `action_id`: after a healthy source
+is available, an identical retry returns `replayed`, even after the node is terminal.
 
 In the UI, open **Agent cycle → Connect external agent → Reconnect or recover a
 lost response**. Read by original key or command ID. Typing submits nothing;
@@ -702,6 +711,24 @@ Reads are bounded to a 2 MiB record and omit payloads, hashes and error prose.
 The UI does not currently prove whether a remote agent process is connected.
 It reports the known engine and run obligations; a quiet event log alone is not
 evidence that the agent has died.
+
+### Reproduce recovery locally
+
+From a source checkout with `[ui,harness]` installed, use a **new** output directory:
+
+```sh
+python -m benchmarks.external_session_smoke --out .tmp/new-session-proof
+```
+
+The offline scenario runs three real CPU training configurations with a protected
+scorer. It kills its own MCP process, restarts its private UI server, withholds two
+committed acknowledgements as HTTP 503, and damages a disposable checkpoint tail.
+It checks original receipt recovery without duplicate candidates, read-only history,
+source refusal, answer replay after terminal, result summaries, and `inspect`/`replay`.
+Only this fixture restores its known valid bytes; that is not a production repair
+procedure. `acceptance.json`, engine logs and inspection output are saved under the
+output directory. This checks protocol recovery, not model judgments or interactive
+tool approval in an installed Codex/Claude client. Remote agent liveness is unmeasured.
 
 ## Delegating only code editing
 
