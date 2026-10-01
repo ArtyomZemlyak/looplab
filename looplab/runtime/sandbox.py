@@ -521,6 +521,11 @@ class RunResult:
     # Like `drift`, `metric` is then forced to None: the number measured the path the node meant to
     # replace, not its change. None on the normal path and on every node that declared no marker.
     inert_path: Optional[dict] = None
+    # THE GRADED ACTIVATION RECORD (`engine/activation.py::ActivationVerdict.record`), set by the
+    # engine on an eval that SETTLES under `activation_check=graded` with a declaration: its grade,
+    # and on a WARN (`activation_unverified`, minionerec-lora-v1 node 2, 2026-10-01) what could not
+    # be verified. Written onto `node_evaluated.activation`; never a violation, never the metric.
+    activation: Optional[dict] = None
     # A FAILED EVAL CANARY that its clock killed twice — at its cap and at the one mechanical retry's
     # doubled cap (`engine/eval_canary.py`, doc 69 69.10). Set only by `canary_failure_result`; read
     # by `triage._failure_reason`, which names it `canary_timeout`: the ENGINE's own clock, and no

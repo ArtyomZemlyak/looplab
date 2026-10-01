@@ -967,6 +967,21 @@ class CrashRepairMixin:
             return ("[failure kind: not_learning]\n" + error + "\n"
                     + (_DIAGNOSED_NOT_LEARNING_LEAD if _diagnosed else _WATCHDOG_NOT_LEARNING_LEAD)
                     + _NOT_LEARNING_FIX)
+        if reason == "inert_path" and getattr(self, "_activation_check", "graded") == "graded":
+            # THE GRADED DIRECTIVE (minionerec-lora-v1 node 2, 2026-10-01). The historical one below
+            # lists "a flag, environment variable or config value that was never set" and says "keep
+            # the marker" -- and a config-only node whose markers were env assignments added `echo`
+            # lines for the check and paid a full re-run. The error above names each marker's cause;
+            # this says what a marker IS and what a re-declaration costs.
+            return ("[failure kind: inert_path]\n" + error + "\n"
+                    "Your change did not prove it RAN. A marker is a line YOUR NEW CODE prints only "
+                    "when the new path works. Where the account above says your code (or existing "
+                    "code your change should enable) prints the marker and it never appeared, the "
+                    "path did not run: find why in the evaluation log and fix that, keeping the "
+                    "marker. A config or env-only change needs no printed marker: re-declare such an "
+                    "entry as {\"kind\": \"env\", \"name\": ..., \"equals\": ..., \"file\": ...} "
+                    "or none. Do not add an echo just for the check: a line that prints whatever "
+                    "happens proves nothing.")
         if reason == "inert_path":
             # NOT "diagnose the crash": nothing crashed that the engine saw. The eval exited 0 and
             # printed a number; what failed is the node's own claim about what running looks like

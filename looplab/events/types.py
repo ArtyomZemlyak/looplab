@@ -2028,7 +2028,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "trials", "violations"
         ),
         optional=(
-            "attempt", "extra_metrics_direction", "extra_metrics_provenance",
+            "activation", "attempt", "extra_metrics_direction", "extra_metrics_provenance",
             "metric_provenance", "resource_curve", "self_metric", "stderr_tail"
         ),
     ),
@@ -2042,7 +2042,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "reason_evidence_resolved", "reason_evidence_root", "reason_findings",
             "reason_hypotheses",
             "reason_override_refused", "reason_source", "reason_summary", "repair_stop", "scope",
-            "step", "triage_action", "triage_rationale"
+            "step", "triage_action", "triage_rationale", "withheld_metric"
         ),
     ),
     "node_repaired": PayloadContract(
@@ -2058,7 +2058,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "param_overrides", "reason", "reason_evidence", "reason_evidence_resolved",
             "reason_evidence_root", "reason_findings", "reason_hypotheses",
             "reason_override_refused", "reason_source",
-            "reason_summary", "salvaged_metric", "unmet", "unparseable_repairs", "verified"
+            "reason_summary", "salvaged_metric", "unmet", "unparseable_repairs", "verified",
+            "withheld_metric"
         ),
     ),
     "node_reset": PayloadContract(

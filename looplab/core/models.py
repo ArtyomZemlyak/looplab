@@ -1442,6 +1442,54 @@ FAILURE_REASONS: tuple[str, ...] = ("crash", "timeout", "oom", "setup", "no_metr
                                     "needs_failed", "not_learning", "check_false_positive",
                                     "rules_violation", "inert_path", "canary_timeout")
 
+# THE GRADED ACTIVATION RECORD a `node_evaluated` row may carry (`engine/activation.py::
+# ActivationVerdict.record`, written by `engine/evaluate.py::_apply_activation_verdict`). It exists
+# because of minionerec-lora-v1 node 2, 2026-10-01: a config-only node's markers were env
+# assignments no code prints, and its metric was withheld; under `activation_check=graded` such a
+# node SETTLES, flagged `verdict: "warn"` (activation unverified) -- a record, never a violation.
+# Folded through `normalize_activation_record` (a hand-edited row cannot park anything else on the
+# node); absent on every log before it, so old logs fold with `Node.activation = None`.
+ACTIVATION_VERDICTS = ("ok", "warn")
+ACTIVATION_GRADES = ("strong", "medium", "weak")
+_ACTIVATION_TEXT_CAP = 200
+_ACTIVATION_LIST_CAP = 8
+
+
+def normalize_activation_record(value) -> Optional[dict]:
+    """The `activation` record as the fold keeps it, or None for anything that is not one. Total."""
+    if not isinstance(value, dict) or value.get("verdict") not in ACTIVATION_VERDICTS:
+        return None
+
+    def _texts(items):
+        return [str(x)[:_ACTIVATION_TEXT_CAP] for x in (items if isinstance(items, list) else [])
+                if isinstance(x, str)][:_ACTIVATION_LIST_CAP]
+
+    grade = value.get("grade")
+    out = {"verdict": value["verdict"],
+           "grade": grade if grade in ACTIVATION_GRADES else "weak",
+           "missing": _texts(value.get("missing")),
+           "kinds": [k for k in _texts(value.get("kinds")) if k in ("log", "env", "file", "none")],
+           "mode": value.get("mode") if value.get("mode") in ("strict", "graded") else "graded",
+           "change_class": (value.get("change_class")
+                            if value.get("change_class") in ("config_only", "code") else "code")}
+    causes = value.get("causes")
+    if isinstance(causes, dict):
+        out["causes"] = {str(k)[:_ACTIVATION_TEXT_CAP]: str(v)[:64] for k, v in causes.items()
+                         if isinstance(k, str) and isinstance(v, str)}
+        out["causes"] = dict(list(out["causes"].items())[:_ACTIVATION_LIST_CAP])
+    if value.get("gate") in ("audit", "gate"):
+        out["gate"] = value["gate"]
+    if value.get("rechecked") is True:
+        out["rechecked"] = True
+    return out
+
+
+def activation_unverified(node) -> bool:
+    """Did this node settle on an activation the engine could not verify (the graded WARN)?"""
+    record = getattr(node, "activation", None)
+    return isinstance(record, dict) and record.get("verdict") == "warn"
+
+
 # The reasons that are not eligible for inline repair (two since 2026-09-27), and the criterion is
 # `tests/test_inline_repair_reason_coverage.py`'s own: a reason should end a node with no repair
 # attempted only when it is evidence the HYPOTHESIS is wrong. Every other member describes a run
@@ -1764,6 +1812,11 @@ class Node(BaseModel):
     # default policy and is therefore not `feasible`), but the enforcement is not the EXPLANATION,
     # and a reader asking "why is this node infeasible with a metric" must not have to guess.
     metric_provenance: Optional[dict] = None
+    # WHAT THE GRADED ACTIVATION CHECK SAID about this node's declared markers
+    # (`normalize_activation_record`): its grade, and on a WARN the markers nothing could verify and
+    # the gate decision made for them. None for every node that declared nothing, every node a
+    # `strict`/`off` run settled, and every node an older log recorded (invariant 5).
+    activation: Optional[dict] = None
 
     @field_validator("extra_metrics", mode="before")
     @classmethod

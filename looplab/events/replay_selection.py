@@ -24,7 +24,7 @@ from looplab.core.code_blocks import still_cut_of
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, SearchFitness, is_usable_metric,
                                   one_se_better, one_se_non_inferior,
                                   verifier_evidence_digest, verifier_raw_evidence_digest)
-from looplab.core.models import (Event, Node, NodeStatus, RunState,
+from looplab.core.models import (Event, Node, NodeStatus, RunState, activation_unverified,
                                  coerce_node_id as _coerce_node_id, row_objective)
 from looplab.events.replay_ctx import (_MISSING, _FoldCtx, _event_generation, _generation_matches,
                                        _node_for_event)
@@ -38,11 +38,23 @@ def flagged_node_ids(st: RunState) -> set:
     `critic:hardcoded_metric` — is HARD and gates; every OTHER `critic:` issue and `perfect_metric`
     stay advisory in every mode (perfect_metric flags the EXACT theoretical optimum — metric==0.0 on
     min / ==1.0 on max — which a legitimately-perfect score hits, so gating on it could exclude honest
-    winners). Empty under `audit`. Shared by the fold and the engine's holdout-topk so both apply the
-    SAME exclusion."""
-    if st.trust_gate not in ("gate", "block"):
-        return set()
-    return hard_flagged_ids(st)
+    winners). Empty under `audit` — bar the nodes an unverified activation was GATED on
+    (`activation_gated_ids`), which join in every trust mode because their gate was decided per node.
+    Shared by the fold and the engine's holdout-topk so both apply the SAME exclusion."""
+    trust = hard_flagged_ids(st) if st.trust_gate in ("gate", "block") else set()
+    return trust | activation_gated_ids(st)
+
+
+def activation_gated_ids(st: RunState) -> set:
+    """Node ids an UNVERIFIED activation bars from best and from breeding: an evaluated node whose
+    `activation` record is the graded check's WARN with `gate: "gate"` stamped on it at the terminal
+    (`Settings.activation_unverified_gate`, minionerec-lora-v1 node 2, 2026-10-01). The decision
+    rides on the row, so this reads what was decided then, never the setting now; a node stays
+    FEASIBLE (kept for diversity and audit), exactly `trust_gate=gate`'s shape. Empty on every log
+    written before the record existed, so `flagged_node_ids` is unchanged for them."""
+    return {nid for nid, n in st.nodes.items()
+            if n.status is NodeStatus.evaluated and activation_unverified(n)
+            and (n.activation or {}).get("gate") == "gate"}
 
 
 def promotion_eligible_nodes(st: RunState, *, flagged=None) -> list[Node]:
@@ -348,7 +360,9 @@ def _apply_trust_gate(st: RunState) -> set:
     # the stricter mode.
     st.breed_excluded = set(flagged)
     if st.trust_gate == "block":
-        for nid in flagged:
+        # `block`'s infeasibility is the TRUST gate's alone: an unverified activation in `flagged`
+        # (`activation_gated_ids`) is gated like `gate` and stays feasible whatever `trust_gate` is.
+        for nid in flagged & hard_flagged_ids(st):
             nb = st.nodes.get(nid)
             if nb is not None:
                 nb.feasible = False

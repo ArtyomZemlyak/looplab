@@ -1371,7 +1371,7 @@ class Settings(BaseSettings):
     # What an UNVERIFIED activation (the graded check's WARN) does to selection, on `trust_gate`'s
     # vocabulary: "audit" (default) records the flag and changes nothing; "gate" stamps the decision
     # on the node's `activation` record and the fold bars the node from best and from breeding while
-    # it stays feasible. Recorded per node at
+    # it stays feasible (`events/replay_selection.py::activation_gated_ids`). Recorded per node at
     # the terminal, so a replay reads the decision that was made, whatever this field says later.
     activation_unverified_gate: str = "audit"
     # METRIC SALVAGE (`engine/metric_salvage.py`): what happens when a node fails for something other

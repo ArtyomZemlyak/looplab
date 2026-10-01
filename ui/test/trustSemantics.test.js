@@ -84,3 +84,16 @@ test('a real salvage still reads as a salvage', () => {
   }
   assert.equal(nodeFeasibilityStatus(node).label, 'Metric salvaged, not measured')
 })
+
+test('an unverified activation is a warning on a feasible node, never a plain success', () => {
+  // minionerec-lora-v1 node 2 (2026-10-01): a config-only node whose markers no code prints settles
+  // with its metric under the graded activation check, flagged — not "Feasible" and nothing more.
+  const node = { status: 'evaluated', feasible: true, violations: [],
+    activation: { verdict: 'warn', grade: 'weak', change_class: 'config_only' } }
+  const status = nodeFeasibilityStatus(node)
+  assert.equal(status.tone, 'warn')
+  assert.equal(status.label, 'Activation unverified (config-only)')
+  assert.match(nodeFeasibilityStatus({ ...node, activation: { ...node.activation, gate: 'gate' } }).detail,
+    /barred from best/)
+  assert.equal(nodeFeasibilityStatus({ ...node, activation: { verdict: 'ok', grade: 'strong' } }).tone, 'ok')
+})

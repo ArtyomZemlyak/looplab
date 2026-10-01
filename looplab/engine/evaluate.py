@@ -959,6 +959,67 @@ def _earlier_host_refusals(events, node_id: int, generation: int, attempt: int,
     return max(0, len(rows) - 1)
 
 
+_INERT_CAUSE_TEXT = {
+    "emitter_in_changed_code_not_printed": (
+        "YOUR CHANGED code prints it, and it never appeared: the new path did not run -- a "
+        "try/except that caught an exception and fell back (print its traceback if it does not), "
+        "a branch that is never taken on this data. Make it run; keep the marker."),
+    "emitter_in_existing_code_not_printed": (
+        "EXISTING code prints it when the path your change should enable runs, and it never "
+        "appeared: the flag, config or environment value your change sets did not take effect "
+        "(misspelled, overridden later, read from another file). Fix that; keep the marker."),
+    "emitter_unknown_not_printed": (
+        "it never appeared, and the engine could not establish which code prints it. Declare the "
+        "exact text your new code prints when the new path runs."),
+    "env_not_satisfied": (
+        "the named file does not assign that value (the engine reads its LAST assignment)."),
+    "file_not_satisfied": (
+        "the file is missing, empty, older than this attempt, or does not hold those values."),
+}
+
+
+def inert_path_account(inert: dict) -> str:
+    """The graded `[inert_path]` failure text: what was withheld, the change class and declared
+    kinds, and per marker the cause the matrix named (`activation.check_activation`). A marker no
+    code prints that is spelled `NAME=value` is said to be a config assignment -- not a printed
+    marker -- with the re-declaration that fits it, never an `echo` (minionerec-lora-v1 node 2)."""
+    import re as _re
+    causes = inert.get("causes") or {}
+    lines = []
+    for label in inert.get("missing") or []:
+        cause = causes.get(label, "")
+        if cause == "no_emitter_on_code_change":
+            if _re.match(r"^\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_.\-]*\s*[=:]", str(label)):
+                why = ("no code prints it: it is a config assignment, not a printed marker. "
+                       "Re-declare it as {\"kind\": \"env\", \"name\": ..., \"equals\": ..., "
+                       "\"file\": ...} or declare none; do not add an echo for the check.")
+            else:
+                why = ("no code anywhere prints it: write the code path that prints it when it "
+                       "runs, or correct the marker to the text your new code prints.")
+        else:
+            why = _INERT_CAUSE_TEXT.get(cause, "it never appeared.")
+        lines.append(f"  {label!r} -- {why}")
+    kinds = ", ".join(str(k) for k in (inert.get("kinds") or [])) or "log"
+    return (f"[inert_path] the evaluation finished and printed metric {inert.get('metric')!r}, "
+            f"but the activation declaration this node made was not proven (change class: "
+            f"{inert.get('change_class')}; declared kinds: {kinds}). So that number may have "
+            "measured the path this node meant to replace, not the change -- it is withheld.\n"
+            + "\n".join(lines) + "\n")
+
+
+def withheld_metric(res) -> Optional[dict]:
+    """`{"metric": m, "reason": "inert_path"}` when `res` withheld a finite metric as `inert_path`,
+    else None -- the `withheld_metric` column `node_repaired` and `node_failed` carry so the number a
+    6.8 h run printed is a field, not a substring (minionerec-lora-v1 node 2, 2026-10-01). Never
+    read by selection, salvage or ranking."""
+    inert = getattr(res, "inert_path", None)
+    value = inert.get("metric") if isinstance(inert, dict) else None
+    if (not isinstance(value, (int, float)) or isinstance(value, bool)
+            or not math.isfinite(float(value))):
+        return None
+    return {"metric": float(value), "reason": "inert_path"}
+
+
 def _ledger_fix(rationale) -> str:
     """A `node_repaired.rationale` as the ledger row keeps it — `repair_ledger_row`'s `fix`, the ONE
     spelling, which a held verdict's words are read through on both of its paths
@@ -1556,6 +1617,11 @@ class EvalAttempt:
     # the logs the engine itself appends to — the only ones read past those cursors.
     _marker_snapshot: Any = None
     _marker_engine_logs: Any = None
+    # What a graded BLOCK leaves for re-check without re-run (`_activation_recheck`): the exact log
+    # bytes this attempt wrote (`activation.LogSpan`s), the digest of the node's changed files as the
+    # attempt left them, those paths, and the withheld metric. Bound by SETTLE_OUTCOME, cleared by
+    # RUN_ATTEMPT — never carried past the attempt it describes (minionerec-lora-v1 node 2).
+    activation_evidence: Any = None
     _live_questions: list = field(default_factory=list)
     _external_observed_phases: set = field(default_factory=set)
     _seen: dict = field(default_factory=dict)          # the intervention watcher's one verdict
@@ -1917,6 +1983,84 @@ class EvaluateMixin:
         a.invocation_id = ""
         async with self._write_lock:
             self.store.append(EV_EVAL_INVOCATION_SETTLED, row)
+
+    # ------------------------------------------------------------ the activation check
+    #
+    # minionerec-lora-v1 node 2, 2026-10-01: the node changed ONLY `MiniOneRec/looplab/experiment.env`
+    # and declared `SFT_EVAL_SAMPLE=-2` / `SFT_RESUME_EVERY_MIN=0` -- env ASSIGNMENTS, which no code
+    # prints. Attempt 3 trained 6.8 h, printed 0.1126388, and the metric was withheld as `inert_path`;
+    # the repair added `echo` lines for the check and paid a full 7 h re-run. The three methods below
+    # are the engine half of `engine/activation.py`: the verdict (in a worker thread, it walks the
+    # tree), and applying it to the attempt.
+
+    def _activation_parents(self, a: "EvalAttempt") -> list:
+        nodes = getattr(a.state, "nodes", None) or {}
+        return [nodes.get(p) for p in (getattr(a.node, "parent_ids", None) or []) if p is not None]
+
+    def _activation_verdict(self, a: "EvalAttempt", entries) -> tuple:
+        """`(ActivationVerdict, evidence)` for THIS attempt's declaration `entries`. Worker thread.
+
+        `strict` asks exactly what the historical check asked -- every log entry against the captured
+        streams, then this attempt's own log bytes (`activation._fresh_logs`'s cursor) -- and blocks
+        on any missing one. `graded` adds the facts the matrix keys on: where each marker's printer
+        lives (`scan_emitters` over the evaluated tree), what the node changed against its parents
+        (`node_change`), and the static env/file predicates. `evidence` is what a graded BLOCK leaves
+        for `_activation_recheck`, else None."""
+        from looplab.engine import activation as act
+        mode = getattr(self, "_activation_check", "graded")
+        logs = act.log_entries(entries)
+        texts = [t for t in (a.res.stdout or "", a.res.stderr or "") if isinstance(t, str) and t]
+        printed = {act.entry_label(e): act.log_entry_seen(e, texts) for e in logs}
+        spans: list = []
+        if not all(printed.values()) and a.workdir is not None:
+            more, spans = act.attempt_log_texts(a.workdir, a._t0, a._marker_snapshot,
+                                                a._marker_engine_logs)
+            printed = {label: seen or act.log_entry_seen(e, more)
+                       for (label, seen), e in zip(printed.items(), logs)}
+        satisfied = {}
+        for e in entries:
+            if e.get("kind") == act.KIND_ENV:
+                satisfied[act.entry_label(e)] = act.check_env_entry(e, a.workdir)
+            elif e.get("kind") == act.KIND_FILE:
+                satisfied[act.entry_label(e)] = act.check_file_entry(e, a.workdir, a._t0)
+        changed, code_changed = act.node_change(a.node, self._activation_parents(a))
+        cls = act.change_class(changed, code_changed)
+        emitters: dict = {}
+        if mode == "graded" and logs:
+            scan = act.scan_emitters(a.workdir, [e["text"] for e in logs if e.get("text")])
+            for e in logs:
+                found = scan.found.get(e.get("text") or "", [])
+                emitters[act.entry_label(e)] = (
+                    None if not e.get("text") or (not found and not scan.complete) else found)
+        verdict = act.check_activation(entries, printed=printed, emitters=emitters,
+                                       changed=changed, change_cls=cls, satisfied=satisfied,
+                                       mode=mode)
+        evidence = None
+        if verdict.verdict == act.VERDICT_BLOCK and mode == "graded":
+            evidence = {"spans": spans, "changed": changed, "metric": a.res.metric,
+                        "digest": act.changed_code_digest(a.workdir, changed)}
+        return verdict, evidence
+
+    def _apply_activation_verdict(self, a: "EvalAttempt", verdict, evidence) -> None:
+        """A BLOCK withholds the metric as `inert_path` (the historical `{missing, metric}`, plus the
+        graded matrix's `kinds`/`change_class`/`causes` only under `graded`, so a strict run's
+        failure text is byte for byte what it was). A graded settle keeps `a.ok` and the metric and
+        carries the record -- with the `activation_unverified_gate` decision stamped on a WARN, so a
+        replay reads the decision that was made."""
+        if verdict.verdict == "block":
+            a.res.inert_path = {"missing": list(verdict.missing), "metric": a.res.metric}
+            if verdict.mode == "graded":
+                a.res.inert_path.update({"kinds": list(verdict.kinds),
+                                         "change_class": verdict.change_class,
+                                         "causes": dict(verdict.causes)})
+            a.activation_evidence = evidence
+            a.res.metric = None
+            a.ok = False
+        elif verdict.mode == "graded":
+            record = verdict.record()
+            if verdict.verdict == "warn":
+                record["gate"] = getattr(self, "_activation_unverified_gate", "audit")
+            a.res.activation = record
 
     def _record_node_build_delta(self, node) -> bool:
         """Say whether this node's built SOURCE differs from the parent it claims to modify.
@@ -2469,6 +2613,13 @@ class EvaluateMixin:
             return _canary
         _stderr_tail = self._redact(res.stderr[-500:])
         _inert = getattr(res, "inert_path", None)
+        if _inert and _inert.get("change_class"):
+            # THE GRADED ACCOUNT (`activation_check=graded`, minionerec-lora-v1 node 2, 2026-10-01):
+            # the matrix said WHY each marker blocks, and the repair needs that more than the
+            # historical sentence -- which listed "a flag or environment variable that was never
+            # set" and sent a config-only node to add `echo` lines for the check. Only the graded
+            # check stamps `change_class`, so a strict run's text below is byte for byte unchanged.
+            return inert_path_account(_inert) + (_stderr_tail if _stderr_tail.strip() else "")
         if _inert:
             # Said FIRST and in full: this attempt did not fail in any way its stderr shows, so the
             # tail below is context -- often the fallback's own traceback -- and not the diagnosis.
@@ -4082,8 +4233,13 @@ class EvaluateMixin:
         # took (critic crit_v51 F1b / crit_v52 F2, driven). The watchers' snapshot when there is
         # one, else its own, taken only for a node that declares a marker (a node that declares
         # none costs one bounded manifest read here and nothing else).
-        from looplab.engine.activation import read_markers
-        _declares_markers = bool(read_markers(a.workdir))
+        # Typed since the graded check (minionerec-lora-v1 node 2, 2026-10-01): a node declares
+        # MARKERS when its manifest holds a `log` entry; `env`/`file` entries read no log. A run
+        # with the check `off` reads no manifest at all.
+        from looplab.engine.activation import log_entries, read_manifest
+        a.activation_evidence = None
+        _declares_markers = (getattr(self, "_activation_check", "graded") != "off"
+                             and bool(log_entries(read_manifest(a.workdir))))
         a._marker_snapshot = (a._log_snapshot if a._log_snapshot is not None
                               else snapshot_training_logs(a.workdir) if _declares_markers
                               else None)
@@ -4297,18 +4453,21 @@ class EvaluateMixin:
         # invocation settles, because a success is exactly what it can overturn: a declared marker
         # that nothing printed means the number measured the path this node meant to replace. The
         # metric is withheld as `drift` withholds one, and `_failure_reason` names it `inert_path`.
-        if a.ok:
-            from looplab.engine.activation import missing_markers, read_markers
-            _declared = read_markers(a.workdir)
+        #
+        # HOW it is asked is `Settings.activation_check` (minionerec-lora-v1 node 2, 2026-10-01: a
+        # config-only node's 6.8 h metric withheld over two `NAME=value` markers no code prints).
+        # `strict` is the historical rule, the same `missing` list for the same manifest; `graded` is
+        # the deterministic matrix (`activation.check_activation`), whose WARN keeps `a.ok` and the
+        # metric and rides on `a.res.activation` -- the terminal's `activation` record, never a
+        # violation (a violation makes the node infeasible); `off` reads nothing. In a WORKER thread:
+        # the graded matrix walks the node's tree for each marker's printer.
+        if a.ok and getattr(self, "_activation_check", "graded") != "off":
+            from looplab.engine.activation import read_manifest
+            _declared = read_manifest(a.workdir)
             if _declared:
-                _missing = missing_markers(
-                    _declared, texts=(a.res.stdout or "", a.res.stderr or ""),
-                    workdir=a.workdir, since=a._t0, snapshot=a._marker_snapshot,
-                    engine_logs=a._marker_engine_logs)
-                if _missing:
-                    a.res.inert_path = {"missing": _missing, "metric": a.res.metric}
-                    a.res.metric = None
-                    a.ok = False
+                _verdict, _evidence = await anyio.to_thread.run_sync(
+                    functools.partial(self._activation_verdict, a, _declared))
+                self._apply_activation_verdict(a, _verdict, _evidence)
         # …and the receipt closes, BEFORE any of the branches below can write a terminal or return.
         # The pair must bracket the evaluator invocation and nothing else: settling it inside one of
         # those branches would leave every other branch's invocation open, which reads as a crash
@@ -5423,6 +5582,7 @@ class EvaluateMixin:
             prev_files=prev_files, prev_code=a.node.code or "",
             files=repaired_files, code=new_code,
             changed=changed, deleted=new_deleted)
+        _withheld = withheld_metric(a.res)
         async with self._write_lock:
             repair_payload = {
                 "node_id": a.node_id, "generation": a.generation,
@@ -5552,7 +5712,12 @@ class EvaluateMixin:
                 # `inline_repair_retrain_cap` in seconds on the chains that cap cannot
                 # charge in counts.
                 "eval_seconds": a.attempt_eval_seconds,
-                "unparseable_repairs": a.unparseable_repairs}
+                "unparseable_repairs": a.unparseable_repairs,
+                # THE NUMBER `inert_path` WITHHELD, as a structured column rather than a substring of
+                # `error_in` (minionerec-lora-v1 node 2: 0.1126388 after 6.8 h). A RECORD: nothing
+                # selects, salvages or ranks on it -- the reason stays engine-final and never
+                # salvaged. Omitted on every other failure, so no other row changes shape.
+                **({"withheld_metric": _withheld} if _withheld else {})}
             if repaired_footprint is not None:
                 repair_payload.update({
                     "idea_footprint": repaired_footprint,
@@ -5953,6 +6118,13 @@ class EvaluateMixin:
                 _eval_payload["violations"] = _terminal.violations
                 if _terminal.metric_provenance is not None:
                     _eval_payload["metric_provenance"] = _terminal.metric_provenance
+                # THE GRADED ACTIVATION RECORD (`_apply_activation_verdict`): its grade, and on a WARN
+                # what could not be verified and the gate decision made for it. NOT a `violations`
+                # row -- `feasible = not violations` would exclude a node whose metric stands
+                # (minionerec-lora-v1 node 2). Absent under `strict`/`off` and on every node that
+                # declared nothing, so those rows are byte-identical to what they were.
+                if isinstance(getattr(a.res, "activation", None), dict):
+                    _eval_payload["activation"] = a.res.activation
                 self.store.append(EV_NODE_EVALUATED, _eval_payload)
                 # WHAT THE TRAINING PROCESS SAID IT RAN AT (`runtime/effective_batch.py`), bound at
                 # the metric read beside the applied coordinates and recorded as its own diagnostic
@@ -6109,5 +6281,9 @@ class EvaluateMixin:
                 if a.repeated_failure:
                     data["repair_stop"] = REPAIR_STOP_REPEATED_FAILURE
                     data["failure_signature"] = a.repeated_failure
+                # The number `inert_path` withheld, on the terminal too (`withheld_metric`).
+                _withheld = withheld_metric(a.res)
+                if _withheld:
+                    data["withheld_metric"] = _withheld
                 self.store.append(EV_NODE_FAILED, data)
             self._maybe_crash()

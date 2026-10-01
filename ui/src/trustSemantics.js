@@ -99,6 +99,10 @@ export const isUnboundSubjectViolation = v =>
 // winner selection was the one shown nothing at all, on the node where it matters most. The
 // commit's own argument ("a provenance field alone would be 'can tell' and not 'does'") applies to
 // its own permissive rung: the field is folded and served, so read it.
+// The node's folded `activation` record (`core/models.py::normalize_activation_record`): `warn` is
+// the graded check's "activation unverified".
+export const isActivationUnverified = node => node?.activation?.verdict === 'warn'
+
 export const salvagedProvenance = node =>
   (node?.metric_provenance?.salvaged ? node.metric_provenance : null)
 
@@ -162,6 +166,21 @@ export function nodeFeasibilityStatus(node) {
       + `${provenance.stage ? ` after stage “${provenance.stage}” failed its contract` : ''}`
       + '. metric_salvage is set to “select”, so it competes for champion like a measured result.',
   )
+  // AN UNVERIFIED ACTIVATION (the engine's graded check, minionerec-lora-v1 node 2, 2026-10-01):
+  // feasible, and its metric stands, but nothing proved its declared change took effect — a
+  // config-only change whose markers no code prints. "Feasible" alone would be the silence the
+  // engine's `activation` record exists to break. `gate` is the decision stamped on the node.
+  if (node?.status === 'evaluated' && node?.feasible === true && isActivationUnverified(node)) {
+    return result(
+      'warn',
+      'Activation unverified (config-only)',
+      'The metric stands, but this config-only change declared markers no code prints, so the '
+        + 'run could not verify the change took effect'
+        + (node.activation.gate === 'gate'
+          ? '. activation_unverified_gate is “gate”: it is barred from best and from breeding.'
+          : '.'),
+    )
+  }
   if (node?.status === 'evaluated' && node?.feasible === true) return result(
     'ok',
     'Feasible',
