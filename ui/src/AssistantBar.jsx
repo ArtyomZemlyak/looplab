@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Turn, PermCard } from './AssistantChat.jsx'
 import AssistantModePicker from './AssistantModePicker.jsx'
+import AssistantLanguagePicker from './AssistantLanguagePicker.jsx'
+import { useAssistantLanguage } from './useAssistantLanguage.js'
 import { OpIcon } from './icons.jsx'
 import { useCommandStatusPoll, useMediaQuery, usePoll } from './hooks.js'
 import {
@@ -164,6 +166,18 @@ const RUN_HINTS = [
 ]
 const EMPTY_RUN_HINTS = ['Review open work in this run', 'What is needed before the first experiment?']
 const STALLED_HINT = 'Why did this run stop?'
+const RUSSIAN_HINTS = {
+  'Start a new run': 'Начать новый запуск',
+  'Summarize my runs': 'Подвести итог моих запусков',
+  'Explain my best result': 'Объяснить мой лучший результат',
+  'What should I try next?': 'Что попробовать дальше?',
+  'Summarize this run': 'Подвести итог этого запуска',
+  'Explain its best result': 'Объяснить лучший результат',
+  'Review open work in this run': 'Что осталось сделать в этом запуске?',
+  'Choose the next experiment': 'Выбрать следующий эксперимент',
+  'What is needed before the first experiment?': 'Что нужно для первого эксперимента?',
+  'Why did this run stop?': 'Почему этот запуск остановился?',
+}
 
 const ASSISTANT_OVERLAY_MAX_PX = 1199
 const assistantMaxWidth = compact => Math.max(320, window.innerWidth - (compact ? 120 : 620))
@@ -208,6 +222,9 @@ const useLatestHandler = handler => {
 }
 
 export default function AssistantBar({ runId, hidden = false, onReady }) {
+  const [responseLanguage, setResponseLanguage] = useAssistantLanguage()
+  const ru = responseLanguage === 'ru'
+  const text = (en, russian) => ru ? russian : en
   const compactAssistant = useMediaQuery(`(max-width: ${ASSISTANT_OVERLAY_MAX_PX}px)`)
   const attentionIndicator = useAttentionIndicator()
   const runAccessKey = runId == null ? null : String(runId)
@@ -1112,7 +1129,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           // Re-read above before POST: if the old worker persisted its reply after our first GET, this
           // path observes it instead of accidentally appending a fresh duplicate turn.
           assistantMessageStream(id, recovery.instruction, recovery.mode, {},
-            recoveryCtrl.signal, recovery.display, acknowledgedLiveShareIds).catch(error => {
+            recoveryCtrl.signal, recovery.display, acknowledgedLiveShareIds, recovery.responseLanguage).catch(error => {
             if (!replyAttemptCurrent(reattachAttempt, id)) return
             if (assistantLiveShareAckRequired(error)) {
               exactState = 'settled'
@@ -2239,7 +2256,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // Stream one instruction to the assistant. `userText` = the bubble shown; `instruction` = what the
   // model receives (run context + attached files appended, not shown in the bubble).
   const runLLM = async (instruction, { userText = null, ensureVisible = false, context = null,
-    retryFiles = null, turnMode = null, clearComposer = false, acknowledgedShareMeta = null } = {}) => {
+    retryFiles = null, turnMode = null, turnLanguage = null, clearComposer = false, acknowledgedShareMeta = null } = {}) => {
     const guardedSid = sidRef.current || sid
     // The seven-fact send gate is `assistantTurnModel.js::sendTurnBlock` (doc 25 UI-05) — one order,
     // one sentence per refusal, and a truth table over all seven. A refusal that asks for a
@@ -2293,6 +2310,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     const runScopeAtSend = draftAtSend.runScope
     const atts = retryFiles != null ? [...retryFiles] : [...draftAtSend.files]
     const effectiveMode = turnMode || normalizeComposerMode(draftAtSend.mode)
+    const languageAtSend = turnLanguage ?? responseLanguage
     // A just-fired Stop's cancel POST may still be in flight. Wait before consuming the composer or
     // publishing an optimistic turn, so a session choice made during this wait leaves the draft exact.
     if (cancelReqRef.current) { try { await cancelReqRef.current } catch { /* done */ } }
@@ -2381,7 +2399,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     const localUserTurn = { role: 'user', content: userText || instruction,
       context: hasCtx ? ctxInfo : null,
       retryPayload: { instruction, raw: fullInstruction.trim(), userText: userText || instruction,
-        context, files: atts, mode: effectiveMode, historyLength: localHistoryLength },
+        context, files: atts, mode: effectiveMode, responseLanguage: languageAtSend, historyLength: localHistoryLength },
       localAttempt }
     atBottomRef.current = true          // sending my own message: always scroll it into view
     setMsgs(m => [...m, localUserTurn,
@@ -2429,7 +2447,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           flash(safeErrorNotice(e))
         }),
       }, ctrl.signal, userText || instruction,
-      acknowledgedLiveShareIds)   // persist the CLEAN bubble, not the ctx-augmented instruction
+      acknowledgedLiveShareIds, languageAtSend)   // persist the CLEAN bubble, not the ctx-augmented instruction
       if (!replyAttemptCurrent(localAttempt, id)) return
       // Stop may race with a terminal frame. Even if the stream resolved first, the turn is cancelled:
       // do not overwrite the "(stopped)" bubble that stop() already wrote.
@@ -2683,13 +2701,14 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       const persisted = assistantRecoveryPayload(prior)
       if (!persisted) { flash('The saved Assistant turn cannot be retried safely'); return }
       runLLM(persisted.instruction, { userText: persisted.display, ensureVisible: true,
-        turnMode: persisted.mode, acknowledgedShareMeta })
+        turnMode: persisted.mode, turnLanguage: persisted.responseLanguage ?? 'auto', acknowledgedShareMeta })
       return
     }
     if (prior.retryPayload) {
       const payload = prior.retryPayload
       runLLM(payload.instruction, { userText: payload.userText, ensureVisible: true,
         context: payload.context || null, retryFiles: payload.files || [], turnMode: payload.mode || null,
+        turnLanguage: payload.responseLanguage ?? 'auto',
         acknowledgedShareMeta })
       return
     }
@@ -3108,7 +3127,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     : firstRun || !runsLoaded ? [NEW_RUN_HINT] : OVERVIEW_HINTS
   const proposalContext = !historical && draftingNewRun
   const runContextBanner = (runId || proposalContext) && <div className={`asst-run-context${!proposalContext && selectedRunStatus === 'stalled' ? ' stalled' : ''}`}>
-    <span className="asst-run-context-label">{proposalContext ? 'Drafting' : historical ? 'Viewing run' : 'Next message to run'}</span>
+    <span className="asst-run-context-label">{proposalContext ? text('Drafting', 'Подготовка')
+      : historical ? text('Viewing run', 'Просмотр запуска') : text('Next message to run', 'Следующее сообщение о запуске')}</span>
     <strong title={proposalContext ? 'New run proposal' : selectedRun?.goal || runId}>
       {proposalContext ? 'New run proposal' : selectedRun?.label || selectedRun?.run_id || runId}
     </strong>
@@ -3457,9 +3477,17 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     {renderWatchStrip()}
     {msgs.length === 0 && <div className={'asst-empty' + (runId && selectedRun?.nodes > 0 ? ' has-results' : '')}>
       <div className="asst-empty-eyebrow">LOOPLAB ASSISTANT</div>
-      <h2>{newRunDraft ? 'What should we investigate?' : showRunResult ? 'What did this run achieve?'
-        : runId ? 'Work through this run together' : 'What would you like to explore?'}</h2>
-      <p>{newRunDraft
+      <h2>{newRunDraft ? text('What should we investigate?', 'Что исследуем?')
+        : showRunResult ? text('What did this run achieve?', 'Каков результат запуска?')
+        : runId ? text('Work through this run together', 'Разберём этот запуск вместе')
+          : text('What would you like to explore?', 'Что хотите исследовать?')}</h2>
+      <p>{ru ? newRunDraft
+        ? 'Опишите цель, расположение кода и данных и ограничение по времени. Перед стартом проверьте карточку запуска.'
+        : runId ? showRunResult ? 'Прочитайте итог, откройте код решения или подготовьте вопрос ниже.'
+          : selectedRunHasNoNodes ? 'Оценок пока нет. Спросите, что требуется перед первым экспериментом.'
+            : 'Спросите о результатах или следующем эксперименте.'
+          : 'Опишите цель исследования или спросите о результатах. Запуск начнётся после проверки и подтверждения карточки.'
+        : newRunDraft
         ? 'Describe the goal, server paths, and time limit. For example: improve accuracy on [dataset] in three experiments. Review the launch card before starting.'
         : runId
           ? showRunResult ? 'Read the recorded result, open its code, or prepare a question below.'
@@ -3478,9 +3506,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           onClick={() => {
             if (openSessionPendingRef.current) return
             setNewRunDraft(h === NEW_RUN_HINT)
-            if (h !== NEW_RUN_HINT) setInput(current => current.trim() ? current : h)
+            if (h !== NEW_RUN_HINT) setInput(current => current.trim() ? current : ru ? RUSSIAN_HINTS[h] : h)
             inputRef.current?.focus()
-          }}>{h}</button>)}
+          }}>{ru ? RUSSIAN_HINTS[h] : h}</button>)}
       </div>}
     </div>}
     {msgs.map((m, i) => <React.Fragment key={i}>
@@ -3516,7 +3544,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           inputRef.current?.focus()
         }} />
     </React.Suspense>}
-    {showRunResult && <details className="asst-result-details"><summary>Compare selected result and open solution</summary><React.Suspense fallback={null}>
+    {showRunResult && <details className="asst-result-details"><summary>{text('Compare selected result and open solution', 'Сравнить результат и открыть решение')}</summary><React.Suspense fallback={null}>
       <AssistantRunResult run={selectedRun} onOpen={openRunFromAssistant} onReady={onResultReady}
         askDisabled={composerEditingPaused || !!input.trim()}
         askDisabledReason={input.trim() ? 'Finish or clear your current draft before preparing a result question'
@@ -3524,7 +3552,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         onAsk={() => {
           if (openSessionPendingRef.current || composerEditingPaused || input.trim()) return
           setNewRunDraft(false)
-          setInput('Explain this run’s result, compare it with the first eligible experiment, and show the caveats and solution artifacts. Do not start another experiment.')
+          setInput(text('Explain this run’s result, compare it with the first eligible experiment, and show the caveats and solution artifacts. Do not start another experiment.',
+            'Объясни итог запуска, сравни с первым допустимым экспериментом и покажи ограничения и файлы решения. Не запускай новые эксперименты.'))
           inputRef.current?.focus()
         }} />
     </React.Suspense></details>}
@@ -3574,8 +3603,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // "fold back to the bar" are different sentences about different places on screen.
   const newChatButton = (cls, label, idleTitle) => {
     const gate = newChatGate({ turnStarting, retryChecking, directConfirm }, idleTitle)
-    return <button className={cls} aria-label="Start a new Assistant chat"
-      title={gate.title} disabled={gate.disabled} onClick={newChat}>{label}</button>
+    return <button className={cls} aria-label={text('Start a new Assistant chat', 'Начать новый чат с ассистентом')}
+      title={gate.title} disabled={gate.disabled} onClick={newChat}>{ru ? '+ Чат' : label}</button>
   }
   const foldToBarButton = (cls, idleTitle) => {
     const fold = foldControl(directConfirm, idleTitle)
@@ -3585,11 +3614,13 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   }
 
   // mode selector row — placed BELOW the input in the side + full composers.
-  const modeRow = <AssistantModePicker mode={mode} disabled={historical || composerEditingPaused}
+  const languagePicker = <AssistantLanguagePicker language={responseLanguage} onChange={setResponseLanguage}
+    disabled={busy || turnStarting || retryChecking} />
+  const modeRow = <><AssistantModePicker mode={mode} language={responseLanguage} disabled={historical || composerEditingPaused}
     disabledReason={historical ? readOnlyShort
       : sessionOpening ? 'Wait for the selected Assistant chat to finish opening'
         : forkingCurrentSession ? 'Wait for this chat to finish forking' : 'Wait for the current action'}
-    onChange={value => { if (!openSessionPendingRef.current) setComposerMode(value) }} />
+    onChange={value => { if (!openSessionPendingRef.current) setComposerMode(value) }} />{languagePicker}</>
 
   // The /command hint listbox — one definition reused by the docked bar AND the side/full composers, so
   // command discovery is identical everywhere. Only one view renders at a time, so the shared id is unique.
@@ -3614,10 +3645,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     className={'chat-in asst-in' + (directConfirm ? ' direct-confirming' : '')}>
     <div className="asst-next-context" role="note" aria-label="Assistant conversation and message context">
       <span className="asst-next-chat" title={currentSession?.title || 'New chat'}>
-        Chat <strong>{currentSession?.title || 'New chat'}</strong>
+        {text('Chat', 'Чат')} <strong>{currentSession?.title || text('New chat', 'Новый чат')}</strong>
       </span>
       <span className="asst-next-target" title={nextMessageTarget}>
-        {historical ? 'Viewing' : 'Next message to'} <strong>{nextMessageTarget}</strong>
+        {historical ? text('Viewing', 'Просмотр') : text('Next message to', 'Следующее сообщение о')} <strong>{nextMessageTarget}</strong>
       </span>
       {nextMessageRefs.length > 0 && <span className="asst-next-refs">
         {nextMessageRefs.map(id => <span key={id}>#{id}</span>)}
@@ -3740,7 +3771,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       {suggestionPop}
       {attachBtn('asst-attach')}
       <textarea className="text" ref={inputRef} value={input}
-        aria-label="Assistant message" aria-describedby={[
+        aria-label={text('Assistant message', 'Сообщение ассистенту')} aria-describedby={[
           draftingNewRun ? 'assistant-new-run-hint' : '',
           shareUnknown || shareVerifying ? 'assistant-share-status' : '',
         ].filter(Boolean).join(' ') || undefined}
@@ -3749,7 +3780,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         placeholder={historical ? readOnlyShort : shareUnknown
           ? 'Public-link status unknown · keep drafting; Send will verify it' : shareBusy
             ? 'Finishing public-link action…' : forkingCurrentSession
-              ? 'Forking this chat…' : newRunDraft ? 'Describe the goal for your new run…' : placeholder} />
+              ? 'Forking this chat…' : newRunDraft ? text('Describe the goal for your new run…', 'Опишите цель нового запуска…')
+                : ru ? 'Спросите ассистента… (Enter — отправить, Shift+Enter — новая строка)' : placeholder} />
       {busy
         ? <button className="btn sm" aria-label="Stop Assistant" title="stop" onClick={stop}>■</button>
         : <button className="btn sm primary"
@@ -3761,7 +3793,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
               : shareUnknown || shareVerifying ? shareVerifying ? 'Checking…' : 'Verify to send'
               : commandBusy || shareBusy ? 'Waiting…'
               : forkingCurrentSession ? 'Forking…'
-                : pendingFileReads > 0 ? 'Reading…' : 'Send'}</button>}
+                : pendingFileReads > 0 ? 'Reading…' : text('Send', 'Отправить')}</button>}
     </div>
     {draftingNewRun && <div id="assistant-new-run-hint" className="asst-new-run-hint" role="note">
       <span>{newRunDraft
@@ -3842,6 +3874,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         title={`${activeMode.label} · ${activeMode.hint}`} onClick={openSide}>
         <span className="cmdbar-mode-prefix">Mode · </span><span>{activeMode.label}</span>
       </button>
+      {languagePicker}
       <div className="cmdbar-field">
         {(refNodes(input).length > 0 || files.length > 0) && <div className="cmdbar-ctx">
           {runId && refNodes(input).map(id => <span key={id} className="chip xs">#{id}</span>)}
@@ -3860,7 +3893,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           placeholder={historical ? readOnlyShort : shareUnknown
             ? 'Public-link status unknown · keep drafting; Send will verify it' : shareBusy
               ? 'Finishing public-link action…' : forkingCurrentSession
-                ? 'Forking this chat…' : runId
+                ? 'Forking this chat…' : ru ? 'Задайте вопрос или опишите цель… (/ — команды)'
+                : runId
                   ? 'Command or ask…  /stop · pause · #12 to attach an experiment · or describe what to do'
                   : 'Describe a run to start, or ask the assistant…  ( / for commands )'} />
       </div>
@@ -3992,7 +4026,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         aria-valuenow={Math.round(sideW)} tabIndex={0} onPointerDown={startResize}
         onKeyDown={resizeWithKeys} title="Drag or use arrow keys to resize" />}
       <div className="asst-drawer-h">
-        <b className="asst-drawer-ttl">Assistant</b>
+        <b className="asst-drawer-ttl">{text('Assistant', 'Ассистент')}</b>
         {ctxChip}
         {launchRecoveryButton}
         {sid && (currentSession?.shared || shareCopy || shareUnknown)
@@ -4007,15 +4041,15 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         {compactAssistant && attentionIndicator.active && <AttentionLauncher
           indicator={attentionIndicator} embedded onClick={openAttentionCenter} />}
         {newChatButton('btn sm ghost', '＋ Chat', 'new chat')}
-        <button className="btn sm ghost" title="expand to the full view" onClick={openFull}>⤢ full</button>
+        <button className="btn sm ghost" title={text('expand to the full view', 'Открыть полный чат')} onClick={openFull}>{text('⤢ full', '⤢ весь чат')}</button>
         {foldToBarButton('btn sm ghost', 'collapse to the bar')}
       </div>
       <div className="asst-side-conversation" role="group" aria-label="Current Assistant chat">
-        <span>Chat</span>
+        <span>{text('Chat', 'Чат')}</span>
         <strong title={currentSession?.title || (sid ? 'Loading chat…' : 'New chat')}>
-          {currentSession?.title || (sid ? 'Loading chat…' : 'New chat')}
+          {currentSession?.title || (sid ? text('Loading chat…', 'Загрузка чата…') : text('New chat', 'Новый чат'))}
         </strong>
-        <button type="button" className="btn sm ghost" onClick={openFull}>All chats</button>
+        <button type="button" className="btn sm ghost" onClick={openFull}>{text('All chats', 'Все чаты')}</button>
       </div>
       {runContextBanner}
       <div className="asst-drawer-feed" ref={feedRef} role="log" aria-label="Assistant transcript"
@@ -4033,7 +4067,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       <div className="asst-side">
         <div className="asst-side-h">
           {foldToBarButton('btn sm', 'fold back to the bar')}
-          <span className="ttl" style={{ flex: 1 }}>Assistant</span>
+          <span className="ttl" style={{ flex: 1 }}>{text('Assistant', 'Ассистент')}</span>
           {newChatButton('btn sm primary', '+ Chat', undefined)}
         </div>
         <div ref={sessionsRef} className="asst-sessions"
@@ -4054,7 +4088,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
             <button type="button" className="btn xs" onClick={refreshSessions}>Retry</button>
           </div>}
           {sessionsStatus === 'ready' && sessions.length === 0
-            && <div className="muted asst-session-empty">No chats yet.</div>}
+            && <div className="muted asst-session-empty">{text('No chats yet.', 'Пока нет чатов.')}</div>}
           {sessions.map(s => <div key={s.id} className={'asst-sess'
             + (s.id === sid ? ' active' : '') + (String(openingSid || '') === String(s.id) ? ' opening' : '')
             + (s.cleanup_required ? ' cleanup-required' : '')}>
@@ -4098,7 +4132,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       </div>
       <div className="asst-main">
         <div className="asst-main-h">
-          <span className="ttl" style={{ flex: 1 }}>{currentSession?.title || 'New chat'}</span>
+          <span className="ttl" style={{ flex: 1 }}>{currentSession?.title || text('New chat', 'Новый чат')}</span>
           {attentionIndicator.active && <AttentionLauncher
             indicator={attentionIndicator} embedded onClick={openAttentionCenter} />}
           {ctxChip}
@@ -4158,7 +4192,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
               disabled={shareBusy || forkingCurrentSession}
               onClick={revokeCurrentShares}>{shareBusySid === sid ? 'working…'
                 : `⤫ ${shareUnknown ? 'revoke pending' : 'unshare'}`}</button>}
-          <button className="btn sm ghost" title="dock to the right" onClick={openSide}>▧ side</button>
+          <button className="btn sm ghost" title={text('dock to the right', 'Открыть сбоку')} onClick={openSide}>{text('▧ side', '▧ сбоку')}</button>
           {foldToBarButton('btn sm ghost', 'fold to the bar')}
         </div>
         {shareCopy && <div className="copy-link-fallback" role="status">

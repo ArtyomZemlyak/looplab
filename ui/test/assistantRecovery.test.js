@@ -148,7 +148,7 @@ test('Assistant reload/retry path reuses the dangling turn and never appends a s
   assert.match(openSession, /const latestTurn = danglingAssistantTurn\(latest\.messages \|\| \[\]\)/)
   assert.match(openSession, /latestTurn\.turn_id !== dangling\.turn_id/)
   assert.match(openSession, /const recovery = assistantRecoveryPayload\(latestTurn\)/)
-  assert.match(openSession, /assistantMessageStream\(id, recovery\.instruction, recovery\.mode, \{\},[\s\S]*?recovery\.display, acknowledgedLiveShareIds\)/,
+  assert.match(openSession, /assistantMessageStream\(id, recovery\.instruction, recovery\.mode, \{\},[\s\S]*?recovery\.display, acknowledgedLiveShareIds, recovery\.responseLanguage\)/,
     'the recovery retry must carry the acknowledged live-share ids, or the server cannot refuse a '
     + 'retry into a public link whose state changed under the operator')
   assert.doesNotMatch(openSession, /role: 'user'/)
@@ -159,4 +159,17 @@ test('Assistant reload/retry path reuses the dangling turn and never appends a s
   assert.match(source, /if \(msgs\[assistantIndex\]\?\.recoveryBlocked\) return null/)
   assert.match(chat, /role=\{m\.recoveryBlocked \? 'alert' : undefined\}/)
   assert.match(css, /\.chat-bubble\.assistant-recovery-blocked/)
+})
+
+test('a saved Russian turn retains its language when the browser preference changes', async () => {
+  const saved = { role: 'user', content: 'Explain', mode: 'plan', turn_id: 'lang-turn', response_language: 'ru' }
+  const recovery = assistantRecoveryPayload(saved)
+  assert.equal(recovery.responseLanguage, 'ru')
+  assert.equal(assistantRecoveryPayload({ ...saved, response_language: 'unknown' }), null)
+  const calls = []
+  await withFetch(async (url, options) => { calls.push(JSON.parse(options.body)); return completedStream() },
+    () => assistantMessageStream('lang', recovery.instruction, recovery.mode, {}, undefined,
+      recovery.display, [], recovery.responseLanguage))
+  assert.equal(calls[0].response_language, 'ru')
+  assert.equal(calls[0].display, 'Explain')
 })

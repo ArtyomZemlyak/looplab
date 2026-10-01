@@ -17,7 +17,9 @@ export function assistantRecoveryPayload(turn) {
   const instruction = turn.raw == null || turn.raw === '' ? display : turn.raw
   const mode = typeof turn.mode === 'string' ? turn.mode : null
   if (!display || typeof instruction !== 'string' || !instruction || !RECOVERY_MODES.has(mode)) return null
-  return { instruction, display, mode }
+  const language = turn.response_language ?? 'auto'
+  if (!['auto', 'en', 'ru'].includes(language)) return null
+  return { instruction, display, mode, ...(language !== 'auto' ? { responseLanguage: language } : {}) }
 }
 
 export function assistantTurnIndex(messages, prior) {
@@ -37,6 +39,7 @@ export function assistantTurnIndex(messages, prior) {
   }
   const durableRaw = durableUser.raw || durableUser.content
   return durableUser.content === prior.content && durableRaw === payload.raw && durableUser.mode === payload.mode
+    && (durableUser.response_language ?? 'auto') === (payload.responseLanguage ?? 'auto')
     ? userIndex : -1
 }
 

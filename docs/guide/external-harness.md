@@ -60,8 +60,11 @@ The Assistant transcript for the attached run shows a free completion brief
 after each terminal evaluation (including failure/abort), and after the run has
 finished finalization and released its engine. It uses recorded metrics, names
 confirmation and constraints, and links to the exact node attempt or Report.
-A trainer exit or an unanswered monitor checkpoint is not completion. EN/РУ
-switches these briefs; it does not translate existing model/agent prose.
+A trainer exit or an unanswered monitor checkpoint is not completion. The composer
+language selector (Auto / English / Русский) controls new Assistant replies and
+these briefs; it does not translate existing model/agent prose. The browser choice
+does not change the external agent's contract: publish interpretations in the
+user's language.
 
 External agents should add a short interpretation after each completion:
 

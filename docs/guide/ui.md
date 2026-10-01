@@ -9,8 +9,14 @@ describe your goal and where the code or data live, then review its launch card.
 The run opens with its current status, and **Report** shows the measured result and caveats.
 For the attached run, Assistant chat also shows free short briefs after each completed
 evaluation and after finalization. They include the score, confirmation/constraints and
-links to the exact experiment. **EN/РУ** chooses the brief language; external agent
-interpretations appear separately. Earlier results and the detailed selected-result
+links to the exact experiment. **Language / Язык** beside the composer offers
+**Auto**, **English** and **Русский**, even before the first run. It sets the
+language of new Assistant replies and completion briefs and is saved in this browser.
+Auto lets the model follow your message language; generated briefs default to English.
+Russian also translates the main chat controls and prepared result questions.
+Existing model replies and external agent interpretations keep their original text.
+Switching language does not send a message or call a model. Retrying an interrupted
+message keeps that message's original language. Earlier results and the detailed selected-result
 comparison are expandable. These reads do not call a model or start work.
 **Explain result in chat** and **Discuss failure in chat** prepare an evidence-focused
 question about that exact attempt. They preserve an existing draft; sending is explicit.

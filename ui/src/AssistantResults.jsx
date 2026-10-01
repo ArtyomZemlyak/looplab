@@ -1,12 +1,13 @@
 import React, { useEffect, useState } from 'react'
-import { get, runApiPath, storageGet, storageSet } from './util.js'
+import { get, runApiPath } from './util.js'
+import { useAssistantLanguage } from './useAssistantLanguage.js'
 import { useScopedResource } from './useScopedResource.js'
 import { hashWithRunRouteState } from './runRouteState.js'
 import { resultNoticeQuestion, resultNoticeText, validResultNotices } from './resultNoticeModel.js'
 import './assistant-run-result.css'
 
 export default function AssistantResults({ runId, generation, onOpen, onReady, onAsk, askDisabled, askDisabledReason }) {
-  const [language, setLanguage] = useState(() => storageGet('looplab.resultLanguage') === 'ru' ? 'ru' : 'en')
+  const [language] = useAssistantLanguage()
   const [limit, setLimit] = useState(50)
   const resource = useScopedResource(signal => get(runApiPath(runId, '/result-notices')
     + `?expected_generation=${generation}&limit=${limit}`, { signal, cache: 'no-store' }), {
@@ -44,10 +45,7 @@ export default function AssistantResults({ runId, generation, onOpen, onReady, o
     </article>
   }
   return <section className="asst-result-feed" aria-label={ru ? 'Итоги экспериментов в чате' : 'Experiment results in chat'}>
-    <div className="asst-result-feed-head"><span>{ru ? 'Краткие итоги · без вызова модели' : 'Completion briefs · no model call'}</span>
-      <label>{ru ? 'Язык' : 'Language'} <select value={language} onChange={event => {
-        setLanguage(event.target.value); storageSet('looplab.resultLanguage', event.target.value)
-      }}><option value="en">EN</option><option value="ru">РУ</option></select></label></div>
+    <div className="asst-result-feed-head"><span>{ru ? 'Краткие итоги · без вызова модели' : 'Completion briefs · no model call'}</span></div>
     {onAsk && rows.length > 0 && <p className="muted">
       {ru ? 'Кнопка подготовит вопрос в поле сообщения. Отправьте его, когда будете готовы.'
         : 'The button prepares a question in the composer. Send it when you are ready.'}</p>}

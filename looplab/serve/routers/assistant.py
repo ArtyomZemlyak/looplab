@@ -41,6 +41,7 @@ from looplab.serve.assistant_watch import (
     SessionWatches, WatchDeferred, WatchRefusal, WatchService, WatchStore,
     observed_run_states)
 from looplab.serve.engine_proc import _engine_alive, _engine_liveness
+from looplab.serve.assistant_language import response_language as _response_language
 from looplab.serve.http import json_object
 from looplab.serve.llm_context import _client_tokens
 from looplab.serve.protocol import (
@@ -1581,6 +1582,10 @@ def build_router(srv) -> APIRouter:
         # a page reload doesn't reveal the preamble; the model still receives the full instruction.
         display = (body.get("display") or "").strip()
         mode = body.get("mode")
+        try:
+            language = _response_language(body.get("response_language", "auto"))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         acknowledged_live_ids = _acknowledged_live_share_ids(body)
         try:
             sess = _asst.get(sid)
@@ -1650,6 +1655,15 @@ def build_router(srv) -> APIRouter:
                         "message": "Recovery must use the exact persisted instruction and permission mode.",
                     })
                 turn_id = str(trailing["turn_id"])
+                try:
+                    persisted_language = _response_language(trailing.get("response_language", "auto"))
+                except ValueError as exc:
+                    raise HTTPException(409, {"code": "assistant_turn_recovery_mismatch",
+                                              "field": "persisted_language"}) from exc
+                if "response_language" in body and language != persisted_language:
+                    raise HTTPException(409, {"code": "assistant_turn_recovery_mismatch",
+                                              "field": "response_language"})
+                language = persisted_language
                 instruction = persisted_instruction
                 eff_mode = persisted_mode
                 history = history[:-1]
@@ -1665,17 +1679,19 @@ def build_router(srv) -> APIRouter:
             else:
                 turn_id = secrets.token_hex(16)
                 turn = {"role": "user", "content": shown, "mode": eff_mode, "turn_id": turn_id}
+                if language != "auto":
+                    turn["response_language"] = language
                 if display and display != instruction:
                     # Keep the FULL model-facing instruction (attachments/context) beside clean copy.
                     turn["raw"] = instruction
                 _asst.append(sid, turn)
-            _asst.update_meta(sid, mode=eff_mode)   # remember the chosen mode so a reload/switch keeps it
+            _asst.update_meta(sid, mode=eff_mode, response_language=language)
             s = _llm_settings()
         except Exception:
             _release_turn(sid, cancel_ev, turn_epoch)
             raise
         return (instruction, eff_mode, history, cancel_ev, s, turn_id, recover_turn, turn_epoch,
-                current_live_ids)
+                current_live_ids, language)
 
     def _make_progress_hooks(sid: str, cancel_ev: "threading.Event", q=None):
         """The per-turn `on_step`/`on_todos` callbacks. `q` (stream endpoint only) additionally mirrors
@@ -1826,6 +1842,7 @@ def build_router(srv) -> APIRouter:
             turn_id = secrets.token_hex(8)
             res = _assistant_run_turn(
                 client, root, history, instruction, mode,
+                response_language=_response_language(sess["meta"].get("response_language", "auto")),
                 alive_fn=_engine_alive, settings=s, approver=approver,
                 # THE PARTY THAT ARMED THE WATCH, pinned on the record at arming (like its mode): a
                 # wake-up has no request, and a legacy record with no pin runs as `anonymous`.
@@ -1941,11 +1958,12 @@ def build_router(srv) -> APIRouter:
     async def assistant_message(sid: str, request: Request):
         """One assistant turn. Persists the user turn, drives the read-only tool loop as a BACKGROUND
         JOB (so a long turn returns {status:'running', job_id} the UI awaits via jobAwait instead of
-        504ing), then persists the assistant reply. Soft-fails offline."""
+        504ing), then persists the assistant reply. Soft-fails offline. Optional body
+        `response_language` is auto (default), en or ru; recovery retains the saved choice."""
         body = await json_object(request)
         principal = request_principal(request)     # captured on the request thread; the turn runs off it
         (instruction, eff_mode, history, cancel_ev, s, turn_id, recover_turn,
-         turn_epoch, begin_live_ids) = _begin_turn(sid, body)
+         turn_epoch, begin_live_ids, language) = _begin_turn(sid, body)
         try:
             from looplab.core.llm import make_llm_client_for
             client = make_llm_client_for(s, factory=srv.make_llm_client)
@@ -1967,6 +1985,7 @@ def build_router(srv) -> APIRouter:
         def _compute() -> dict:
             try:
                 res = _assistant_run_turn(client, root, history, instruction, eff_mode,
+                                          response_language=language,
                                           alive_fn=_engine_alive, settings=s, approver=approver,
                                           principal=principal,
                                           on_step=_on_step, on_todos=_on_todos,
@@ -1992,12 +2011,13 @@ def build_router(srv) -> APIRouter:
     async def assistant_message_stream(sid: str, request: Request):
         """Streaming variant: SSE of `token` (final-answer tokens), `step`, `todos`, then `done` (the
         full result) — real token streaming for the Claude-Desktop feel. HITL still works: a mutating
-        action pauses the worker on the permission registry while the client polls /permissions."""
+        action pauses the worker on the permission registry while the client polls /permissions.
+        Optional `response_language`: auto (default), en or ru. Recovery keeps the saved choice."""
         import queue as _queue
         body = await json_object(request)
         principal = request_principal(request)     # captured on the request thread; the turn runs off it
         (instruction, eff_mode, history, cancel_ev, s, turn_id, recover_turn,
-         turn_epoch, begin_live_ids) = _begin_turn(sid, body)
+         turn_epoch, begin_live_ids, language) = _begin_turn(sid, body)
         q: "_queue.Queue" = _queue.Queue()
         try:
             from looplab.core.llm import make_llm_client_for
@@ -2050,6 +2070,7 @@ def build_router(srv) -> APIRouter:
         def _worker():
             try:
                 res = _assistant_run_turn(client, root, history, instruction, eff_mode,
+                                          response_language=language,
                                           alive_fn=_engine_alive, settings=s, approver=approver,
                                           principal=principal,
                                           on_step=_on_step, on_todos=_on_todos, on_text=_on_text,

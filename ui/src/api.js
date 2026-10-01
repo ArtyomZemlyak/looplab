@@ -807,13 +807,15 @@ const assistantLiveShareAckIds = value => {
 }
 
 export async function assistantMessageStream(sid, instruction, mode, cbs = {}, signal, display = null,
-  acknowledgedLiveShareIds = []) {
+  acknowledgedLiveShareIds = [], responseLanguage = 'auto') {
   const body = {
     instruction,
     mode,
     acknowledged_live_share_ids: assistantLiveShareAckIds(acknowledgedLiveShareIds),
   }
   if (display != null) body.display = display
+  if (!['auto', 'en', 'ru'].includes(responseLanguage)) throw new Error('Invalid Assistant response language')
+  if (responseLanguage !== 'auto') body.response_language = responseLanguage
   const r = await fetch(apiUrl(`/api/assistant/sessions/${encodeURIComponent(sid)}/message_stream`),
     { method: 'POST', headers: _authHeaders({ 'Content-Type': 'application/json' }),
       // Recovery must send the persisted clean display even when it happens to equal `instruction`:

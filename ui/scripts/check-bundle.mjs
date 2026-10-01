@@ -94,7 +94,10 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // 2026-10-01 completion briefs: measured 599,253 B JS (+5,074 B), initial 82,912 B.
     // Node/run receipts and RU/EN prose load with the open Assistant; no eager result polling.
     // Initial shell and every route/reachability ceiling remain unchanged.
-    js: { gzip: 586 * KIB },
+    // 2026-10-01 Assistant language: 602,939 B JS / 58,337 B CSS. +3,686 B JS buys
+    // persistent Auto/English/Russian, translated chat controls and pinned-turn recovery.
+    // Initial shell: 82,969 B (+57 B); result bodies remain lazy, forbidden closures pass.
+    js: { gzip: 590 * KIB },
     css: { gzip: 57 * KIB },
   },
   individual: {
@@ -129,7 +132,8 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-09-30 model-status entry: measured 219,213 B JS; the status itself stays lazy.
       // 2026-09-30 permission disclosure: measured 220,270 B JS (+314 B); collapsed choices
       // preserve the current draft mode and return focus after an explicit selection.
-      limits: { js: { gzip: 216 * KIB }, css: { gzip: 40 * KIB } },
+      // 2026-10-01 Assistant language: 223,790 B; owner chrome contains its translated controls.
+      limits: { js: { gzip: 219 * KIB }, css: { gzip: 40 * KIB } },
     },
     {
       name: 'Run compare increment',
@@ -173,7 +177,8 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-09-30 result clarity: measured 400,869 B JS / 46,371 B CSS; Inspector's
       // recorded result, repeat checks and comparison qualifications share this route.
       // Shared health extraction changes compression streams: 401,716 B JS.
-      limits: { js: { gzip: 393 * KIB }, css: { gzip: 46 * KIB } },
+      // 2026-10-01 Assistant language: 405,152 B; the same owner chrome increment.
+      limits: { js: { gzip: 396 * KIB }, css: { gzip: 46 * KIB } },
     },
     {
       name: 'valid review DAG route',
@@ -210,7 +215,8 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-09-30 result clarity: measured 264,356 B JS; Assistant's result body stays lazy.
       // 2026-10-01 final integrated build: measured 265,214 B JS; existing ceiling holds.
       // 2026-10-01: 265,223 B (+9 B): RunView passes the live sequence to the lazy agent panel.
-      limits: { js: { gzip: 260 * KIB }, css: { gzip: 43 * KIB } },
+      // 2026-10-01 Assistant language: 268,292 B; the same owner chrome increment.
+      limits: { js: { gzip: 263 * KIB }, css: { gzip: 43 * KIB } },
     },
     {
       name: 'panel-hub increment',
