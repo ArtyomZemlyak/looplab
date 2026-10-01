@@ -981,7 +981,9 @@ class CrashRepairMixin:
                     "marker. A config or env-only change needs no printed marker: re-declare such an "
                     "entry as {\"kind\": \"env\", \"name\": ..., \"equals\": ..., \"file\": ...} "
                     "or none. Do not add an echo just for the check: a line that prints whatever "
-                    "happens proves nothing.")
+                    "happens proves nothing. If you change ONLY the declaration and every new marker "
+                    "is printed by your changed code, the engine re-checks it against this attempt's "
+                    "own output instead of re-running it.")
         if reason == "inert_path":
             # NOT "diagnose the crash": nothing crashed that the engine saw. The eval exited 0 and
             # printed a number; what failed is the node's own claim about what running looks like

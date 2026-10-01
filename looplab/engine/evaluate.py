@@ -1991,7 +1991,7 @@ class EvaluateMixin:
     # prints. Attempt 3 trained 6.8 h, printed 0.1126388, and the metric was withheld as `inert_path`;
     # the repair added `echo` lines for the check and paid a full 7 h re-run. The three methods below
     # are the engine half of `engine/activation.py`: the verdict (in a worker thread, it walks the
-    # tree), and applying it to the attempt.
+    # tree), applying it to the attempt, and re-check without re-run after a manifest-only repair.
 
     def _activation_parents(self, a: "EvalAttempt") -> list:
         nodes = getattr(a.state, "nodes", None) or {}
@@ -2061,6 +2061,78 @@ class EvaluateMixin:
             if verdict.verdict == "warn":
                 record["gate"] = getattr(self, "_activation_unverified_gate", "audit")
             a.res.activation = record
+
+    async def _activation_recheck(self, a: "EvalAttempt", changed, deleted,
+                                  code_changed: bool) -> bool:
+        """RE-CHECK WITHOUT RE-RUN, after an `inert_path` whose repair rewrote ONLY the declaration.
+
+        True when the repaired declaration is proven on the failed attempt's OWN output, and the
+        attempt then settles with the metric it printed -- no second evaluation. Every condition is
+        one the bytes decide, and any doubt answers False (re-run, the historical path):
+
+          * `activation_check` is `graded`, the engine's reason was `inert_path`, and the attempt
+            left its evidence (`_activation_verdict`);
+          * the change set is the activation manifest (and at most the idea report), nothing
+            deleted, the solution code unmoved;
+          * (a) the node's changed files are byte-identical to what that attempt left on disk;
+          * (b) every new entry is a `log` text whose printer is in the node's CHANGED code -- a
+            downgrade to `none`/`env`, or a marker only existing code prints, is not proven by
+            output and takes the re-run;
+          * (c) every new marker is in the attempt's captured streams or its own log bytes
+            (`activation.read_log_spans`: the same file, not truncated, nothing appended counted).
+
+        minionerec-lora-v1 node 2, 2026-10-01: a declaration fixed after a 6.8 h run cost a full 7 h
+        re-run of code that had not changed."""
+        evidence, a.activation_evidence = a.activation_evidence, None
+        if (evidence is None or getattr(self, "_activation_check", "graded") != "graded"
+                or a._engine_reason != "inert_path" or not getattr(a.res, "inert_path", None)
+                or deleted or code_changed):
+            return False
+        from looplab.engine.activation import ACTIVATION_MANIFEST_NAME, CHANGE_CLASS_IGNORED
+        moved = set(changed or ())
+        if ACTIVATION_MANIFEST_NAME not in moved or not moved <= CHANGE_CLASS_IGNORED:
+            return False
+        verdict = await anyio.to_thread.run_sync(
+            functools.partial(self._activation_recheck_verdict, a, evidence))
+        if verdict is None:
+            return False
+        a.res.metric = evidence["metric"]
+        a.res.inert_path = None
+        a.ok = True
+        record = verdict.record()
+        record["rechecked"] = True
+        a.res.activation = record
+        a.sp.set("activation_rechecked", True)
+        return True
+
+    def _activation_recheck_verdict(self, a: "EvalAttempt", evidence):
+        """The proven verdict for `_activation_recheck`, or None. Worker thread."""
+        from looplab.engine import activation as act
+        entries = act.read_manifest(a.workdir)
+        if (not entries or evidence.get("metric") is None
+                or any(e.get("kind") != act.KIND_LOG or not e.get("text") for e in entries)):
+            return None
+        if act.changed_code_digest(a.workdir, evidence["changed"]) != evidence["digest"]:
+            return None
+        changed, code_changed = act.node_change(a.node, self._activation_parents(a))
+        scan = act.scan_emitters(a.workdir, [e["text"] for e in entries])
+        emitters = {}
+        for e in entries:
+            found = scan.found.get(e["text"]) or []
+            if not any(x.path in changed for x in found):
+                return None
+            emitters[e["text"]] = found
+        logs = act.read_log_spans(evidence.get("spans") or [])
+        if logs is None:
+            return None
+        haystacks = [t for t in (a.res.stdout or "", a.res.stderr or "")
+                     if isinstance(t, str) and t] + logs
+        printed = {e["text"]: act.log_entry_seen(e, haystacks) for e in entries}
+        verdict = act.check_activation(entries, printed=printed, emitters=emitters,
+                                       changed=changed,
+                                       change_cls=act.change_class(changed, code_changed),
+                                       mode="graded")
+        return verdict if verdict.verdict == act.VERDICT_OK else None
 
     def _record_node_build_delta(self, node) -> bool:
         """Say whether this node's built SOURCE differs from the parent it claims to modify.
@@ -5799,6 +5871,13 @@ class EvaluateMixin:
                 "byte-identical, so re-evaluating would re-run inputs this node has already "
                 "run; abandoning in-node repair — the node ends here, and the loop's next "
                 "proposal is fresh work rather than another attempt at this one"))
+            return PHASE_SETTLED
+        # RE-CHECK WITHOUT RE-RUN (`_activation_recheck`, minionerec-lora-v1 node 2): a repair that
+        # rewrote only the activation manifest after `inert_path`, whose new markers' printers are in
+        # the node's changed code, is held to the failed attempt's own output instead of being run
+        # again. The row above is already durable; the terminal follows with the metric that
+        # attempt printed and no new `eval_invocation_claimed`.
+        if await self._activation_recheck(a, changed, new_deleted, _code_changed):
             return PHASE_SETTLED
         _stages = self._resolved_stages(a.node, a.workdir)
         # `deleted` and the eval spec's `cwd` ride along so the predicate can fail closed on

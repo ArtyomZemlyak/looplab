@@ -274,6 +274,54 @@ def test_a_marker_an_earlier_attempt_printed_before_crashing_does_not_vouch(tmp_
     assert terminal.type == "node_failed" and terminal.data["reason"] == "inert_path"
 
 
+# ------------------------------------------------------------ re-check without re-run
+
+_PRINTS_ACTIVE = ("import json, os\nif not os.environ.get('NO_NEW'):\n    print('NEW PATH ACTIVE')\n"
+                  "print(json.dumps({'metric': 0.75}))\n")
+
+
+def test_a_manifest_only_repair_proven_by_the_failed_attempt_s_output_settles_without_a_run(tmp_path):
+    """The new path RAN and printed `NEW PATH ACTIVE`; the declaration named a text nothing prints
+    (TP3, blocked). The repair rewrites ONLY the manifest to the printed text, whose printer is in the
+    node's changed code: the engine re-reads that attempt's own bytes and settles -- one invocation.
+    MUTATION: drop the re-check call -> a second `eval_invocation_claimed`."""
+    events, _dev, _ = _run(tmp_path, base=_ENTRY,
+                           node_files={"main.py": _PRINTS_ACTIVE, **_manifest(["NEW PATH ON"])},
+                           plan=[_manifest(["NEW PATH ACTIVE"])])
+    assert len(_types(events, "eval_invocation_claimed")) == 1
+    assert len(_types(events, "node_repaired")) == 1
+    [terminal] = _types(events, "node_evaluated", "node_failed")
+    assert terminal.type == "node_evaluated" and terminal.data["metric"] == 0.75
+    assert terminal.data["activation"]["rechecked"] is True
+    assert terminal.data["activation"]["grade"] == "strong"
+
+
+def test_a_manifest_only_repair_whose_printer_is_existing_code_is_re_evaluated(tmp_path):
+    base = {"lib.py": "def go():\n    if True:\n        print('LIB PATH ACTIVE')\n", **_ENTRY}
+    run_py = ("import json, lib\nlib.go()\nprint(json.dumps({'metric': 0.75}))\n")
+    events, _dev, _ = _run(tmp_path, base=base,
+                           node_files={"main.py": run_py, **_manifest(["NEW PATH ON"])},
+                           plan=[_manifest(["LIB PATH ACTIVE"])])
+    assert len(_types(events, "eval_invocation_claimed")) == 2           # a normal re-evaluation
+    assert _types(events, "node_evaluated")[0].data["metric"] == 0.75
+
+
+def test_a_downgrade_to_none_on_a_code_change_is_re_evaluated(tmp_path):
+    events, _dev, _ = _run(tmp_path, base=_ENTRY,
+                           node_files={"main.py": _PRINTS_ACTIVE, **_manifest(["NEW PATH ON"])},
+                           plan=[_manifest([{"kind": "none", "why": "nothing to print"}])])
+    assert len(_types(events, "eval_invocation_claimed")) == 2
+    [terminal] = _types(events, "node_evaluated")
+    assert terminal.data["activation"]["kinds"] == ["none"]
+
+
+def test_a_manifest_only_repair_is_not_re_checked_under_strict(tmp_path):
+    events, _dev, _ = _run(tmp_path, mode="strict", base=_ENTRY,
+                           node_files={"main.py": _PRINTS_ACTIVE, **_manifest(["NEW PATH ON"])},
+                           plan=[_manifest(["NEW PATH ACTIVE"])])
+    assert len(_types(events, "eval_invocation_claimed")) == 2
+
+
 # ------------------------------------------------------------ replay
 
 def test_an_old_inert_path_journal_folds_as_before_and_old_rows_carry_no_activation(tmp_path):
