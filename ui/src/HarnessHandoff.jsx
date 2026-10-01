@@ -9,6 +9,7 @@ import HarnessReceipt from './HarnessReceipt.jsx'
 export default function HarnessHandoff({ runId, generation, seq }) {
   const [open, setOpen] = useState(false)
   const [copied, setCopied] = useState(null)
+  const [client, setClient] = useState('codex')
   const scope = `${runId}:${generation}`
   const resource = useScopedResource(signal => get(runApiPath(runId, '/harness-handoff')
     + `?expected_generation=${generation}`, { cache: 'no-store', signal }).then(value => {
@@ -22,9 +23,17 @@ export default function HarnessHandoff({ runId, generation, seq }) {
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(harnessAgentInstruction(value, url))
-      setCopied({ scope, message: 'Agent instruction copied. Supply the scoped secret separately.' })
+      setCopied({ scope, type: 'instruction', message: 'Agent instruction copied. Supply the scoped secret separately.' })
     } catch {
-      setCopied({ scope, message: 'Clipboard unavailable. Select the instruction below and copy it manually.' })
+      setCopied({ scope, type: 'instruction', message: 'Clipboard unavailable. Select the instruction below and copy it manually.' })
+    }
+  }
+  const copyConfig = async () => {
+    try {
+      await navigator.clipboard.writeText(harnessMcpDescriptor(url, client))
+      setCopied({ scope, type: 'config', client, message: 'MCP configuration copied. Supply the scoped secret separately.' })
+    } catch {
+      setCopied({ scope, type: 'config', client, message: 'Clipboard unavailable. Select the configuration below and copy it manually.' })
     }
   }
   return <details className="harness-handoff" onToggle={event => setOpen(event.currentTarget.open)}>
@@ -43,15 +52,23 @@ export default function HarnessHandoff({ runId, generation, seq }) {
           <dt>Engine probe</dt><dd>{value.engine_running === null ? 'Unknown' : value.engine_running ? 'Alive at last read' : 'Stopped at last read'} · agent connection is not measured</dd>
         </dl>
         <h4>1. Configure the MCP process</h4>
-        <pre>{harnessMcpDescriptor(url)}</pre>
-        <p>This is a generic stdio descriptor; place these fields in your client's MCP configuration. It contains no token.</p>
+        <label>MCP client <select value={client} onChange={event => { setClient(event.target.value); setCopied(null) }}>
+          <option value="codex">Codex</option><option value="claude">Claude Code</option>
+          <option value="generic">Other MCP client</option></select></label>
+        <pre>{harnessMcpDescriptor(url, client)}</pre>
+        <button type="button" className="btn sm" onClick={copyConfig}>Copy MCP configuration</button>
+        {copied?.scope === scope && copied.type === 'config' && copied.client === client && <p role="status">{copied.message}</p>}
+        <p>{client === 'codex' ? 'Place this in a trusted project .codex/config.toml or your user config. env_vars forwards the scoped token from the Codex process environment.'
+          : client === 'claude' ? 'Place this in your project .mcp.json. The token placeholder reads the scoped credential from the Claude process environment.'
+            : "This is a generic stdio descriptor; configure scoped credential forwarding in your client's environment settings."} The token value is not included.</p>
+        <p>If LoopLab is installed in a virtual environment, replace command with the full path to its looplab executable on the client machine. Restart the client after supplying the credential. No scoped token means harness-mcp refuses to connect; it never falls back to owner access.</p>
         <h4>2. Supply the scoped credential separately</h4>
         <p role="status">{value.credential_configured ? 'A harness credential is configured on this server.'
           : 'Operator setup required: this server has no scoped harness credential configured.'}</p>
         <p>{value.credential_policy}</p><p>{value.scope}</p>
         <h4>3. Pass the run instruction to your agent</h4>
         <button type="button" className="btn sm" onClick={copy}>Copy agent instruction</button>
-        {copied?.scope === scope && <p role="status">{copied.message}</p>}
+        {copied?.scope === scope && copied.type === 'instruction' && <p role="status">{copied.message}</p>}
         <details><summary>Preview instruction and workspace permissions</summary>
           <pre>{harnessAgentInstruction(value, url)}</pre></details>
         <p className="muted">Copying configures nothing and starts no experiment. Reconnect to this same run using current state, receipts and checkpoints.</p>

@@ -49,7 +49,18 @@ Recovery: ${value.recovery}
 Check engine status in /state before deciding to resume. Connecting does not authorize a new run, automatic resume or internal-agent takeover. Server paths may be unavailable on a remote client.`
 }
 
-export function harnessMcpDescriptor(serverUrl) {
+export function harnessMcpDescriptor(serverUrl, client = 'generic') {
+  const url = harnessServerUrl(serverUrl)
+  if (client === 'codex') return `[mcp_servers.looplab]
+command = "looplab"
+args = ["harness-mcp"]
+env_vars = ["LOOPLAB_HARNESS_TOKEN"]
+env = { LOOPLAB_HARNESS_URL = ${JSON.stringify(url)} }`
+  if (client === 'claude') return JSON.stringify({ mcpServers: { looplab: {
+    type: 'stdio', command: 'looplab', args: ['harness-mcp'],
+    env: { LOOPLAB_HARNESS_URL: url, LOOPLAB_HARNESS_TOKEN: '${LOOPLAB_HARNESS_TOKEN:-}' },
+  } } }, null, 2)
+  if (client !== 'generic') throw new Error('Unknown MCP client')
   return JSON.stringify({ command: 'looplab', args: ['harness-mcp'],
-    env: { LOOPLAB_HARNESS_URL: harnessServerUrl(serverUrl) } }, null, 2)
+    env: { LOOPLAB_HARNESS_URL: url } }, null, 2)
 }

@@ -25,7 +25,11 @@ def harness_mcp() -> None:
 
     Requires `pip install 'looplab[harness,ui]'` and a running `looplab ui`.
     Set LOOPLAB_HARNESS_URL for another local/proxied UI and LOOPLAB_HARNESS_TOKEN
-    for the scoped agent credential (LOOPLAB_UI_TOKEN remains a legacy owner fallback).
+    for the scoped agent credential. Missing credentials fail before connection;
+    LOOPLAB_UI_TOKEN is never used as a fallback.
     """
     from looplab.harness.mcp_server import run_stdio
-    run_stdio()
+    try:
+        run_stdio()
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc

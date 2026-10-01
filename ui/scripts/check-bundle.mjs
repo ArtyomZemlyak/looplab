@@ -100,7 +100,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // 2026-10-01 clearer briefs: 604,971 B JS / 58,402 B CSS. +2,032 B JS makes
     // score/mean comparisons explicit, explains caveats and routes stopped attempts to logs.
     // All additions stay in lazy result chunks; owner route/reachability ceilings unchanged.
-    js: { gzip: 591 * KIB },
+    // 2026-10-01 client bootstrap: measured 605,428 B JS (+457 B), initial 82,977 B.
+    // Codex/Claude configs and copy action stay in the lazy Agent cycle; closures unchanged.
+    js: { gzip: 591.5 * KIB },
     css: { gzip: 57.25 * KIB },
   },
   individual: {

@@ -19,6 +19,20 @@ from looplab.harness.phases import phase_catalog, phase_detail
 
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_REQUEST_BYTES = 1024 * 1024
+MCP_INSTRUCTIONS = (
+    "LoopLab evaluates ready-made experiments; the external agent proposes candidates. "
+    "Start with capabilities, then read /state, task, config and harness-contract. "
+    "Call run_progress with the current generation; inspect source_health and checkpoints. "
+    "Search phases and read phase_info before decisions. On reconnect, read command_receipt "
+    "before retrying; preserve the exact payload and original key. Explicitly pause or finalize. "
+    "Quiet logs do not prove agent or engine liveness. "
+    "Follow enabled admission/finish obligations. A trainer exit is not terminal evaluation. "
+    "After each terminal node and finalized run, read generation-fenced result-notices and POST "
+    "a brief interpretation in the user's language with receipt_id, evidence_token and a stable "
+    "action_id; retry a lost response with the exact body. Scores come from LoopLab, not prose. "
+    "Commentary executes no actions and never replaces checkpoints or report obligations. "
+    "Use only the scoped harness credential; owner-only workflows require the operator."
+)
 
 
 class HarnessAPI:
@@ -144,7 +158,7 @@ def build_server(api: HarnessAPI):
         from mcp.server.fastmcp import FastMCP
     from mcp.types import ToolAnnotations
 
-    mcp = FastMCP("looplab")
+    mcp = FastMCP("looplab", instructions=MCP_INSTRUCTIONS)
 
     @mcp.tool()
     def capabilities() -> dict:
@@ -263,7 +277,16 @@ def build_server(api: HarnessAPI):
 
 
 def run_stdio(url: str | None = None, token: str | None = None) -> None:
+    credential = token if token is not None else os.environ.get("LOOPLAB_HARNESS_TOKEN", "")
+    if not credential or not credential.strip() or credential == "${LOOPLAB_HARNESS_TOKEN}":
+        raise ValueError("Set LOOPLAB_HARNESS_TOKEN in the MCP process environment. "
+                         "LOOPLAB_UI_TOKEN is never used by harness-mcp; ask the operator "
+                         "for a distinct scoped credential.")
+    if credential == os.environ.get("LOOPLAB_UI_TOKEN", ""):
+        raise ValueError("The harness credential must differ from LOOPLAB_UI_TOKEN.")
     api = HarnessAPI(url or os.environ.get("LOOPLAB_HARNESS_URL", "http://127.0.0.1:8765"),
-                     token if token is not None else (os.environ.get("LOOPLAB_HARNESS_TOKEN")
-                                                     or os.environ.get("LOOPLAB_UI_TOKEN", "")))
-    build_server(api).run(transport="stdio")
+                     credential)
+    try:
+        build_server(api).run(transport="stdio")
+    finally:
+        api.client.close()

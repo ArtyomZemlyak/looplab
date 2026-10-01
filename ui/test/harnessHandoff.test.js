@@ -34,6 +34,14 @@ test('handoff strips URL credentials/query/fragment, retains proxy and excludes 
   const descriptor = JSON.parse(harnessMcpDescriptor(href))
   assert.deepEqual(descriptor, { command: 'looplab', args: ['harness-mcp'],
     env: { LOOPLAB_HARNESS_URL: 'https://host/user/u/proxy/8765' } })
+  const codex = harnessMcpDescriptor(href, 'codex')
+  assert.match(codex, /\[mcp_servers.looplab\]/)
+  assert.match(codex, /env_vars = \["LOOPLAB_HARNESS_TOKEN"\]/)
+  assert.doesNotMatch(codex, /private|LOOPLAB_UI_TOKEN/)
+  const claude = JSON.parse(harnessMcpDescriptor(href, 'claude')).mcpServers.looplab
+  assert.equal(claude.env.LOOPLAB_HARNESS_TOKEN, '${LOOPLAB_HARNESS_TOKEN:-}')
+  assert.equal(claude.env.LOOPLAB_HARNESS_URL, 'https://host/user/u/proxy/8765')
+  assert.throws(() => harnessMcpDescriptor(href, 'unknown'))
 })
 
 test('handoff opens on demand, copies verified context and withdraws stale context after refresh failure', async () => {
@@ -52,10 +60,20 @@ test('handoff opens on demand, copies verified context and withdraws stale conte
     assert.match(view.container.textContent, /Stopped at last read/)
     assert.match(view.container.textContent, /agent connection is not measured/)
     await React.act(async () => {
+      [...view.container.querySelectorAll('button')].find(b => b.textContent === 'Copy MCP configuration').click()
+    })
+    assert.match(writes[0], /env_vars = \["LOOPLAB_HARNESS_TOKEN"\]/)
+    const picker = view.container.querySelector('select')
+    await React.act(async () => {
+      picker.value = 'claude'; picker.dispatchEvent(new window.Event('change', { bubbles: true }))
+    })
+    assert.match(view.container.querySelector('pre').textContent, /mcpServers/)
+    assert.doesNotMatch(view.container.textContent, /MCP configuration copied/)
+    await React.act(async () => {
       [...view.container.querySelectorAll('button')].find(b => b.textContent === 'Copy agent instruction').click()
     })
-    assert.equal(writes.length, 1)
-    assert.match(writes[0], /harness-contract/)
+    assert.equal(writes.length, 2)
+    assert.match(writes[1], /harness-contract/)
     assert.match(view.container.textContent, /instruction copied/)
     const identity = view.container.querySelector('.harness-recovery input')
     await React.act(async () => {

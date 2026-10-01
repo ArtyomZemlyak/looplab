@@ -1,6 +1,9 @@
 .harness-handoff { margin: 14px 0; padding: 14px 16px; border: 1px solid var(--line-2);
   border-radius: 9px; background: var(--bg-2); line-height: 1.5; }
 .harness-handoff > summary { font-weight: 650; cursor: pointer; }
+.harness-handoff > label { display: flex; align-items: center; gap: 12px; }
+.harness-handoff > label select { min-width: 180px; padding: 6px 10px; color: var(--fg);
+  background: var(--bg); border: 1px solid var(--line); border-radius: 6px; font: inherit; }
 .harness-handoff dl { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 8px 16px; }
 .harness-handoff dt { color: var(--fg-dim); }
 .harness-handoff dd { margin: 0; overflow-wrap: anywhere; }

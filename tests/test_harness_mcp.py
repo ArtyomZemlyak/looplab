@@ -3,7 +3,7 @@ import httpx
 import pytest
 import anyio
 
-from looplab.harness.mcp_server import HarnessAPI, build_server
+from looplab.harness.mcp_server import HarnessAPI, MCP_INSTRUCTIONS, build_server, run_stdio
 
 
 def test_mcp_advertises_run_controls_and_full_settings_discovery():
@@ -20,6 +20,58 @@ def test_mcp_advertises_run_controls_and_full_settings_discovery():
     receipt = next(tool for tool in tools if tool.name == "command_receipt")
     hints = receipt.annotations.model_dump(by_alias=True)
     assert hints["readOnlyHint"] and not hints["destructiveHint"]
+    assert build_server(api).instructions == MCP_INSTRUCTIONS
+    assert "current generation" in MCP_INSTRUCTIONS[:512]
+    assert "command_receipt" in MCP_INSTRUCTIONS[:512]
+
+
+@pytest.mark.parametrize("scoped,owner", [(None, None), (None, "owner-secret"),
+    ("", "owner-secret"), ("   ", "owner-secret"), ("${LOOPLAB_HARNESS_TOKEN}", None),
+    ("same-secret", "same-secret")])
+def test_stdio_never_uses_an_owner_fallback_or_opens_transport_without_scoped_token(monkeypatch, scoped, owner):
+    import looplab.harness.mcp_server as module
+    for name, value in [("LOOPLAB_HARNESS_TOKEN", scoped), ("LOOPLAB_UI_TOKEN", owner)]:
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    monkeypatch.setattr(module, "HarnessAPI", lambda *_a, **_kw: pytest.fail("invalid setup opened transport"))
+    with pytest.raises(ValueError) as exc:
+        run_stdio()
+    assert "LOOPLAB_UI_TOKEN" in str(exc.value)
+    assert "owner-secret" not in str(exc.value) and "same-secret" not in str(exc.value)
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_stdio_forwards_only_selected_scoped_credential_and_closes_transport(monkeypatch, explicit):
+    import looplab.harness.mcp_server as module
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-secret")
+    monkeypatch.setenv("LOOPLAB_HARNESS_TOKEN", "scoped-secret")
+    clients = []
+    def api(url, token):
+        assert url == "http://127.0.0.1:8765"
+        assert token == ("explicit-secret" if explicit else "scoped-secret")
+        value = HarnessAPI(url, token, transport=httpx.MockTransport(lambda _: pytest.fail("unexpected HTTP")))
+        clients.append(value)
+        return value
+    class Server:
+        def run(self, transport):
+            assert transport == "stdio"
+    monkeypatch.setattr(module, "HarnessAPI", api)
+    monkeypatch.setattr(module, "build_server", lambda _: Server())
+    run_stdio(url="http://127.0.0.1:8765", token="explicit-secret" if explicit else None)
+    assert clients[0].client.is_closed
+
+
+def test_cli_reports_missing_credential_before_opening_stdio(monkeypatch):
+    from typer.testing import CliRunner
+    from looplab.cli import app
+    monkeypatch.delenv("LOOPLAB_HARNESS_TOKEN", raising=False)
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-secret")
+    result = CliRunner().invoke(app, ["harness-mcp"])
+    assert result.exit_code == 2
+    assert "LOOPLAB_HARNESS_TOKEN" in result.output
+    assert "owner-secret" not in result.output
 
 
 @pytest.mark.parametrize("status", [200, 404, 409, 503])

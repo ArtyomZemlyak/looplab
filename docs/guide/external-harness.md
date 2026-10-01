@@ -112,7 +112,9 @@ external agent**. Opening this block performs an authenticated read of
 `GET /api/runs/{run_id}/harness-handoff?expected_generation=TOKEN`. The server
 checks the run generation, external mode, event history and saved task/config.
 The block displays its actual run root and directory, a last-read engine probe,
-and a generic stdio process descriptor:
+and a copyable MCP configuration. Choose **Codex**, **Claude Code**, or
+**Other MCP client**. Codex uses TOML with `env_vars`; Claude uses project
+`.mcp.json` with environment expansion. The other-client descriptor is:
 
 ```json
 {
@@ -122,7 +124,8 @@ and a generic stdio process descriptor:
 }
 ```
 
-Place these fields in the MCP configuration format your client supports. LoopLab
+Use **Copy MCP configuration**, or select the displayed text when clipboard access
+is unavailable. Place it in your client's configuration file. LoopLab
 must be installed on that client's machine; if its executable is not on PATH,
 use its installed executable path. The UI uses its current HTTP(S) origin and
 proxy prefix, removing URL credentials, query and fragment. Check that this URL
@@ -132,6 +135,11 @@ The run and source paths belong to the server host and may not exist locally.
 Supply a distinct `LOOPLAB_HARNESS_TOKEN` through the client's protected credential
 mechanism. Remove `LOOPLAB_UI_TOKEN` from the MCP process environment, including
 inherited variables. The descriptor and copied instruction contain no credential.
+Restart the coding client after setting its environment. `harness-mcp` refuses
+to start without a nonempty scoped credential or when it matches the inherited
+owner token; it never falls back to `LOOPLAB_UI_TOKEN`. An unexpanded token
+placeholder also fails locally. Claude's empty default makes an unset variable
+fail at startup instead of sending placeholder text to the API.
 The block reports only whether a scoped credential was configured when this
 server started; it cannot tell whether your client has the right secret or is
 connected. If none is configured, the operator must configure one and restart the
@@ -150,8 +158,11 @@ Copying does not launch/resume a run or change a client configuration. After
 connecting, read current state and compare generation/run UID before acting;
 reconnect to the same run using current command receipts and checkpoints.
 Engine liveness does not measure agent liveness. This handoff has been exercised
-with the Python MCP SDK over real stdio; client-specific installation, secret
-storage and version compatibility still require their own acceptance checks.
+with the Python MCP SDK over real stdio. Generated Codex TOML has also been parsed
+by installed Codex CLI 0.159.2 using temporary overrides, without writing its
+configuration. That verifies parsing, not a model-driven Codex session. Claude
+CLI was unavailable; its runtime, client approval flow and credential storage
+still require acceptance checks. See doc 71 section 31 for the tested boundary.
 
 ## External harness setup
 
@@ -280,7 +291,8 @@ For Codex, add this to your project `.codex/config.toml` (or the user config):
 [mcp_servers.looplab]
 command = "looplab"
 args = ["harness-mcp"]
-env_vars = ["LOOPLAB_HARNESS_TOKEN", "LOOPLAB_HARNESS_URL"]
+env_vars = ["LOOPLAB_HARNESS_TOKEN"]
+env = { LOOPLAB_HARNESS_URL = "http://127.0.0.1:8765" }
 ```
 
 For Claude Code, a project `.mcp.json` can pass those environment variables
@@ -294,13 +306,22 @@ without putting the token value in the file:
       "command": "looplab",
       "args": ["harness-mcp"],
       "env": {
-        "LOOPLAB_HARNESS_TOKEN": "${LOOPLAB_HARNESS_TOKEN}",
-        "LOOPLAB_HARNESS_URL": "${LOOPLAB_HARNESS_URL:-http://127.0.0.1:8765}"
+        "LOOPLAB_HARNESS_TOKEN": "${LOOPLAB_HARNESS_TOKEN:-}",
+        "LOOPLAB_HARNESS_URL": "http://127.0.0.1:8765"
       }
     }
   }
 }
 ```
+
+The credential is read from the coding client's environment. Replace the URL
+with your reachable UI/API address and `command` with the installed executable
+path when necessary. Formats follow the official
+[Codex MCP documentation](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)
+and [Claude Code MCP documentation](https://code.claude.com/docs/en/mcp).
+On MCP initialization, LoopLab supplies workflow instructions for generation
+checks, phase discovery, reconnect receipts, explicit finish and result commentary;
+the launched run's contract still defines its obligations.
 
 The normal control cycle is:
 
@@ -620,9 +641,9 @@ and an edit of the run's configuration. What it may submit is marked
 `submitted_by: agent_token` on the command record. The operator,
 with the owner's token, keeps everything. A run whose snapshot cannot be read refuses
 the harness token those
-commands. Legacy configurations passing `LOOPLAB_UI_TOKEN` still give
-the agent full UI owner authority; keep that owner credential out of its environment
-when operator policy must remain separate. Agent reasoning and model token cost
+commands. The HTTP API's `LOOPLAB_UI_TOKEN` grants full owner authority;
+`harness-mcp` no longer uses it as a fallback. Keep it out of the agent environment.
+Agent reasoning and model token cost
 happen outside LoopLab's ledger; the event log records the submitted candidate,
 measured execution and command receipts, not external provider billing.
 
