@@ -8,6 +8,7 @@ that is trying to finish.
 from __future__ import annotations
 
 from looplab.harness.phases import CHECKPOINT_DECISION_PHASES
+from looplab.harness.checkpoint_history import allowed_verdicts
 
 _RUN = "/api/runs/{run_id}"
 
@@ -48,6 +49,11 @@ def _next_step(progress: dict) -> dict:
                  "deadline_grace": "Decide whether to extend the deadline"}.get(
                      q["phase_id"], "Answer the evaluation question")
         detail = "Evaluation has an unanswered checkpoint. Read live state, the full question and its allowed verdicts; evaluator completion alone does not settle the node."
+        detail += " Allowed verdicts: " + ", ".join(allowed_verdicts(q)) + "."
+        if q["phase_id"] in ("train_monitor", "asha_live") and not q["kill_enabled"]:
+            detail += " This checkpoint does not grant abort authority."
+        if q["phase_id"] == "deadline_grace":
+            detail += " The runtime caps any one-time extension."
         if progress["recorded_lifecycle"]["paused"]:
             detail = "Run is paused for new work; its recorded in-flight evaluation still has this checkpoint. Answering does not resume search. " + detail
         return _step("answer_checkpoint", title, detail,

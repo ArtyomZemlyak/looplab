@@ -283,6 +283,8 @@ def test_checkpoint_names_the_required_decision_even_after_engine_stops(tmp_path
     assert body["execution"]["engine_running"] is False
     assert "recorded question" in body["next_step"]["detail"]
     assert "refresh after resume" in body["next_step"]["detail"]
+    assert {"stage_check": "proceed, inconclusive, fail", "train_monitor": "continue, watch",
+            "deadline_grace": "extend, stop"}[phase] in body["next_step"]["detail"]
     assert body["next_step"]["code"] == "answer_checkpoint"
     assert body["next_step"]["title"] == title
     assert body["next_step"]["phase_id"] == {"stage_check": "evaluation",

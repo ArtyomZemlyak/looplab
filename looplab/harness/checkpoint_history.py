@@ -4,6 +4,20 @@ The input is one event prefix plus independently read checkpoint rows. The healt
 receipt is updated for invalid records; no side effect or connection claim occurs.
 """
 
+CHECKPOINT_PHASES = frozenset({"stage_check", "train_monitor", "asha_live", "deadline_grace"})
+
+
+def allowed_verdicts(question):
+    """Response vocabulary derived from the validated question's actual authority."""
+    phase = question["phase_id"]
+    if phase == "stage_check":
+        return ("proceed", "inconclusive", "fail")
+    if phase == "deadline_grace":
+        return ("extend", "stop")
+    if phase in ("train_monitor", "asha_live"):
+        return ("continue", "watch", "abort") if question.get("kill_enabled") is True else ("continue", "watch")
+    return ()
+
 
 def checkpoint_records(rows, health):
     """Validate the shared journal contract before any reader interprets its records."""
@@ -19,6 +33,9 @@ def checkpoint_records(rows, health):
             if (type(row.get("node_id")) is not int
                     or type(row.get("node_generation")) is not int
                     or type(row.get("claim_seq")) is not int
+                    or type(row.get("kill_enabled")) is not bool
+                    or not isinstance(row.get("phase_id"), str)
+                    or row["phase_id"] not in CHECKPOINT_PHASES
                     or not all(isinstance(row.get(key), str) for key in
                                ("run_generation", "run_uid", "phase_id", "stage",
                                 "expectation", "observation"))

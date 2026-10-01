@@ -21,10 +21,10 @@ from looplab.events.eventstore import (EventStore, EventStoreLockError, interpro
                                        log_integrity)
 from looplab.events.replay import fold
 from looplab.events.run_generation import run_generation_token
-from looplab.harness.checkpoint_history import checkpoint_records, project_checkpoints
+from looplab.harness.checkpoint_history import (CHECKPOINT_PHASES as _PHASES,
+                                               allowed_verdicts, checkpoint_records, project_checkpoints)
 
 _MAX_LEDGER = 16 * 1024 * 1024
-_PHASES = frozenset({"stage_check", "train_monitor", "asha_live", "deadline_grace"})
 
 
 class CheckpointSubjectGone(ValueError):
@@ -181,7 +181,7 @@ def respond(srv, rd: Path, body) -> dict:
                 if q.get("claim_seq") != _claim_seq(events, q["node_id"], q["node_generation"]):
                     raise HTTPException(409, "checkpoint belongs to a superseded evaluator attempt")
                 if q["phase_id"] == "stage_check":
-                    if body.verdict not in {"proceed", "inconclusive", "fail"}:
+                    if body.verdict not in allowed_verdicts(q):
                         raise HTTPException(400, "stage check needs proceed, inconclusive or fail")
                     if body.verdict == "fail" and (body.failure_kind not in STAGE_CHECK_HARD_KINDS
                                                     or body.failure_kind == "unstructured"
@@ -189,10 +189,9 @@ def respond(srv, rd: Path, body) -> dict:
                                                         and not q["expectation"])):
                         raise HTTPException(400, "invalid stage failure kind")
                 elif q["phase_id"] == "deadline_grace":
-                    if body.verdict not in {"extend", "stop"}:
+                    if body.verdict not in allowed_verdicts(q):
                         raise HTTPException(400, "deadline review needs extend or stop")
-                elif body.verdict not in ({"continue", "watch", "abort"} if q["kill_enabled"]
-                                          else {"continue", "watch"}):
+                elif body.verdict not in allowed_verdicts(q):
                     raise HTTPException(400, "this monitor is advisory; abort is disabled")
                 if body.verdict != "fail" and body.failure_kind:
                     raise HTTPException(400, "failure_kind is only valid on fail")

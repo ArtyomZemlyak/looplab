@@ -596,7 +596,7 @@ External run здесь намеренно не получал кандидат�
 | OB-09 | Частично | Run workspace и Agent cycle показывают next step; списки различают внешний режим и engine, attention открывает текущие вопросы (§34–36). Гибель MCP и pause/resume проверены (§37–38). | Подключение самого агента не измеряется; многочасовой сценарий OB-10 ещё открыт. |
 | OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–38 проверяют три MCP-сессии, restart UI, pause/resume и повторную оценку. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
 | OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. §39/41 исправляют ссылки checkpoint и concept base на реальные MCP-фазы. | Проверены контракт, subprocess-кандидаты, desktop и discovery из серверной подсказки; подключение нового клиента относится к OB-10. |
-| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–41: source health, lifecycle verdict, engine recovery и восстановление включённых report/review обязанностей. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. Живость внешнего агента остаётся явно неизмеряемой. |
+| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–42: source health, lifecycle verdict, engine recovery, report/review и открытый training monitor. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. Живость внешнего агента остаётся явно неизмеряемой. |
 | OB-14 | Частично | Начало сайта показывает два основных входа. | Большая архитектурная схема всё ещё нуждается в упрощении для первого знакомства. |
 
 Остальные пункты §3 и соответствующие сценарии §11 остаются открытыми. Изменения первого
@@ -1770,3 +1770,79 @@ progress, MCP и доступ; **5 mounted UI**, **32 docs/architecture** про
 API без provider/model вызовов. Research memo здесь — разбор локального кода и
 измеренных результатов, не поиск литературы. Качество модельных решений,
 интерактивные разрешения клиентов и многочасовой сеанс остаются открытыми в OB-10.
+
+## 42. OB-10/11/12: recovery открытого monitor и строгая stop authority
+
+### Воспроизведённая ошибка metadata
+
+Общий checkpoint reader проверял базовые поля вопроса, но не требовал boolean
+для `kill_enabled` и не ограничивал `phase_id` реализованными видами вопросов.
+При повреждении journal строка `"false"` была truthy: старый POST validator
+принимал `abort` для изначально advisory monitor. Отдельное воспроизведение кода
+предыдущего коммита в disposable process дало **HTTP 200** и consumed verdict
+`abort`; рабочие файлы репозитория не откатывались.
+
+Теперь источник требует известный checkpoint kind и строго boolean
+`kill_enabled`. Ошибочные строки, integer, null и неизвестные виды отказаны
+до интерпретации ответа: GET/POST checkpoint возвращают **503**, progress становится
+incomplete с `inspect_sources`, engine не публикует и не употребляет ответы из
+такого journal. Восстановление известных корректных fixture bytes возвращает
+обычное поведение; это не автоматический ремонт production источника.
+Проверен также list вместо phase ID, чтобы validator не создавал 500.
+
+Разрешённые verdicts определяются общей функцией для POST validator и подсказки:
+
+| Вопрос | Допустимый ответ |
+| --- | --- |
+| Checked stage | `proceed`, `inconclusive`, `fail`; для fail действуют прежние hard-kind проверки |
+| Advisory monitor | `continue`, `watch`; abort не предоставлен |
+| Monitor с boolean kill authority | `continue`, `watch`, `abort` |
+| Deadline grace | `extend`, `stop`; runtime ограничивает одно продление |
+
+UI показывает эту серверную подсказку, включая отказ abort authority. Полный вопрос
+и phase_info остаются обязательными reads. Run setting `train_monitor_kill=true`
+сам по себе не разрешает abort на первом advisory checkpoint. Новые verdicts,
+события, автоматический ответ и engine gates не добавлены.
+
+### Реальная оценка и второй разрыв MCP
+
+Добавлен `--monitor` в `benchmarks.external_session_smoke`: оператор задаёт один
+protected `train_eval` command с training role, который выполняет SGD и scoring
+один раз. `train_monitor=true`, `train_monitor_kill=true`, cadence — **600 секунд**.
+Команда выполняется быстро, поэтому вопрос открывается в final observation до
+terminal узла. Observation — настоящий stdout/stderr command, не искусственная
+кривая обучения. Этот сценарий не проверяет решение об остановке живой loss curve.
+
+После stage verdict protected command уже завершён, но узел pending, метрика ещё
+отсутствует и первый training monitor advisory. Агент не отвечает: завершается
+второй собственный MCP-процесс, UI перезапускается второй раз. Новая сессия читает
+тот же checkpoint ID и неизменный checkpoint journal; engine остаётся тем же.
+Недопустимый `abort` получает **400**, вопрос остаётся pending. Явный `continue`
+закрывает его; exact replay не дублирует ответ. Только затем фиксируется terminal.
+
+Четыре monitor вопроса обслужены отдельно: первый узел, второй узел, его новая
+попытка после reset и неуспешный третий узел. Новый attempt получает новый вопрос;
+failed-конфигурация остаётся без метрики после review. Первый command выполняется
+ровно один раз при recovery живого engine. Все protected scorer bytes неизменны.
+Monitor был видимой обязанностью, а не скрытым ожиданием команды.
+
+Combined proof с включёнными research/concept/report/review обязанностями:
+`.tmp/external-monitor-final-proof-1/acceptance.json`. Также пройден monitor-only
+сценарий `.tmp/external-monitor-reconnect-proof-1/acceptance.json`. Оба завершены
+явно, русские result-notices опубликованы, CLI `inspect`/`replay` проходят.
+Инструкция запуска добавлена в [external guide](guide/external-harness.md).
+
+### Проверки и границы
+
+До исправления падали **11** направленных проверок authority/discovery; после
+него проходят **300 backend** проверок, включая **10** вариантов неверной metadata,
+checkpoint lifecycle, progress, доступы и границы пакетов; **5 mounted UI** проверок.
+Перед изменением прошли **193 replay** проверки. Deadline verdict и реальное
+продление subprocess проверяются существующими backend-тестами; отдельный live
+MCP reconnect на deadline ещё не проведён. Также остаются открытыми многочасовой
+сеанс, реальные модельные решения и интерактивные разрешения клиентов в OB-10.
+
+Также прошли **32 docs/architecture** проверки и `mkdocs build --strict`.
+
+Контрольный live-прогон без monitor, с обязанностями и остановкой engine,
+тоже завершился: `.tmp/external-monitor-control-proof-1/acceptance.json`.

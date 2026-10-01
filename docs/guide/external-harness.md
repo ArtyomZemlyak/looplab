@@ -345,6 +345,11 @@ no extra verdict or early-stop authority. Recorded pause/finish/stop requests
 direct the agent to live state and command receipts; they do not prove that an
 engine or external agent process is alive. Submitted experiments remain visible
 as unsettled even when their evaluator has exited.
+The next-step explanation lists the same verdict vocabulary the server validates:
+stage checks use `proceed`, `inconclusive`, `fail`; monitors use `continue`, `watch`
+and `abort` only when that question grants kill authority; deadline review uses
+`extend`, `stop` with a runtime-capped extension. A kill-enabled run setting alone
+does not grant abort on its first advisory monitor question.
 
 Both full and compact progress include `execution`: a last-read `engine_running`
 lock probe (`true`, `false`, or `null`), `agent_connection: "not_measured"`, and
@@ -701,6 +706,9 @@ or an answer to the engine. A missing, empty or incomplete event history also
 refuses checkpoint reads, publication and answer consumption. The engine keeps the existing question
 unresolved; reconnecting does not repair journals or approve the stage. An operator
 must recover the source explicitly, then the agent must refresh state and progress.
+Question kinds must belong to the implemented checkpoint vocabulary and
+`kill_enabled` must be a boolean. A string such as `"false"`, an integer or an
+unknown kind makes the source incomplete; truthiness never supplies stop authority.
 Keep a lost checkpoint answer's exact body and `action_id`: after a healthy source
 is available, an identical retry returns `replayed`, even after the node is terminal.
 That receipt proves prior acceptance. The engine consumes a verdict only while its
@@ -750,6 +758,8 @@ python -m benchmarks.external_session_smoke --out .tmp/held-proof --checkpoint-h
 python -m benchmarks.external_session_smoke --out .tmp/engine-loss-proof --engine-loss
 # Enable research, concept base, report and lesson/skill obligations across reconnect.
 python -m benchmarks.external_session_smoke --out .tmp/obligations-proof --obligations
+# Reconnect while a fast command's first advisory training review is unanswered.
+python -m benchmarks.external_session_smoke --out .tmp/monitor-proof --monitor --obligations
 ```
 
 The offline scenario runs three real CPU training configurations with a protected
@@ -779,6 +789,15 @@ reviews because this single deterministic fixture supports no reusable ML findin
 Reports/reviews survive reconnect and become due again after reset, even when the
 node count is unchanged. Finalization closes finish obligations without satisfying
 an expansion-only research gate. This flag can be combined with `--engine-loss`.
+With `--monitor`, the operator declares one protected `train_eval` command with a
+training role. It performs training and scoring once. Monitoring is enabled with
+kill configured and a 600-second cadence; the fast command opens its first question
+in the final observation before node terminal. The fixture kills a second owned
+MCP process at that monitor, restarts its UI again, and verifies the same question
+and live engine on reconnect. Advisory `abort` is refused, explicit `continue`
+settles the question, and exact replay creates no duplicate answer. Reset gets a
+fresh monitor; the failed configuration keeps no metric after its own review.
+This tests completed-command advisory recovery, not live-curve stop judgment.
 Only this fixture restores its known valid bytes; that is not a production repair
 procedure. `acceptance.json`, engine logs and inspection output are saved under the
 output directory. This checks protocol recovery, not model judgments or interactive

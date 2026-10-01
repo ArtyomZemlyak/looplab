@@ -61,6 +61,37 @@ def test_engine_cannot_publish_or_consume_an_answer_from_a_damaged_source(tmp_pa
     assert source.read_bytes() == damaged
 
 
+@pytest.mark.parametrize("phase", ["train_monitor", "asha_live"])
+@pytest.mark.parametrize("field,value", [("kill_enabled", "false"), ("kill_enabled", 0),
+    ("kill_enabled", None), ("phase_id", "unknown_monitor"), ("phase_id", [])])
+def test_invalid_checkpoint_authority_is_not_interpreted_as_permission(tmp_path, phase, field, value):
+    rd, store, client = seeded(tmp_path)
+    question = ask(rd, 0, 0, phase, kill_enabled=False, observation="Actual log")
+    generation = run_generation_token(store.read_all())
+    journal = rd / "harness_checkpoints.jsonl"
+    healthy = journal.read_bytes()
+    journal.write_text(json.dumps({**question, field: value}) + "\n", encoding="utf8")
+    damaged = journal.read_bytes()
+    path = "/api/runs/demo/harness-checkpoints"
+    assert client.get(path, params={"expected_generation": generation}).status_code == 503
+    assert client.post(path, json={"expected_generation": generation,
+        "checkpoint_id": question["checkpoint_id"], "action_id": "invalid:authority",
+        "verdict": "abort", "reason": "No authority may be inferred from malformed metadata"}).status_code == 503
+    progress = client.get("/api/runs/demo/harness-progress", params={
+        "expected_generation": generation, "brief": True}).json()
+    assert not progress["complete"] and progress["next_step"]["code"] == "inspect_sources"
+    assert progress["source_health"]["checkpoints"]["invalid_record_rows"] == 1
+    with pytest.raises(OSError):
+        answer_for(rd, question["checkpoint_id"])
+    with pytest.raises(OSError):
+        ask(rd, 0, 0, phase)
+    assert journal.read_bytes() == damaged
+    journal.write_bytes(healthy)
+    assert client.post(path, json={"expected_generation": generation,
+        "checkpoint_id": question["checkpoint_id"], "action_id": "healthy:authority",
+        "verdict": "continue", "reason": "Reviewed the restored advisory question"}).status_code == 200
+
+
 def test_engine_cannot_consume_a_saved_answer_when_event_source_is_missing(tmp_path):
     rd, store, client = seeded(tmp_path)
     question = ask(rd, 0, 0, "stage_check")

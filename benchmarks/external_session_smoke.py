@@ -14,6 +14,8 @@ Use --engine-loss to terminate this fixture's engine at that checkpoint and
 check explicit recovery with a fresh evaluator question.
 Use --obligations to exercise enabled research, concept base, report and
 lesson/skill reviews across MCP sessions and node reset.
+Use --monitor for a checked operator training/evaluation command, followed by
+an advisory monitor that survives a second MCP loss and UI restart.
 """
 from __future__ import annotations
 
@@ -38,6 +40,7 @@ import uvicorn
 
 from benchmarks.claude_harness_smoke import SCORER, wait_for
 from benchmarks._external_obligation_cycle import settle_obligations
+from benchmarks._external_monitor_cycle import drain_monitors
 from looplab.events.eventstore import EventStore
 from looplab.harness.mcp_server import HarnessAPI
 from looplab.serve.protocol import COMMAND_TERMINAL_STATUSES
@@ -55,9 +58,10 @@ async def until(function, predicate, seconds=30):
 
 
 class Client:
-    def __init__(self, session, generation, obligations=False):
+    def __init__(self, session, generation, obligations=False, monitor=False):
         self.session, self.generation = session, generation
         self.obligations = obligations
+        self.monitor, self.monitor_answers = monitor, []
 
     async def call(self, name, args):
         result = await self.session.call_tool(name, args)
@@ -129,7 +133,13 @@ class Client:
         return question
 
     async def terminal(self, nid, status="evaluated"):
-        value = await until(self.state, lambda row: row["state"]["nodes"].get(str(nid), {}).get("status") == status)
+        async def observed():
+            value = await self.state()
+            if self.monitor and value["state"]["nodes"].get(str(nid), {}).get("status") == "pending":
+                await drain_monitors(self, nid)
+                value = await self.state()
+            return value
+        value = await until(observed, lambda row: row["state"]["nodes"].get(str(nid), {}).get("status") == status)
         return value["state"]["nodes"][str(nid)]
 
     async def commentary(self, kind, action, summary, nid=None):
@@ -154,6 +164,8 @@ def main():
                         help="Terminate the owned engine at its open checkpoint before reconnect")
     parser.add_argument("--obligations", action="store_true",
                         help="Enable research/concept/report and lesson/skill reviews in the recovery scenario")
+    parser.add_argument("--monitor", action="store_true",
+                        help="Enable first advisory training reviews after the fast protected command")
     args = parser.parse_args()
     if not 0 <= args.checkpoint_hold_seconds <= 86400:
         parser.error("--checkpoint-hold-seconds must be finite and between 0 and 86400")
@@ -170,6 +182,8 @@ def main():
             "metric": {"reader": "stdout_json", "key": "metric"},
             "stages": [{"name": "score", "command": [sys.executable, "score.py"], "check": True,
                 "expect": {"assert": "Declared training completes and held-out MSE is finite."}}]}}
+    if args.monitor:
+        task["cmd"]["stages"][0].update(name="train_eval", role="training")
     task_path = root / "task.json"; task_path.write_text(json.dumps(task), encoding="utf8")
     token, owner = secrets.token_hex(32), secrets.token_hex(32)
     env_before = dict(os.environ)
@@ -185,7 +199,8 @@ def main():
     owned_engines = []
     faults = {"command": False, "answer": False}
     proof = {"agent_connection": "not_measured", "model_judgment_tested": False,
-             "engine_loss": args.engine_loss, "obligations": args.obligations, "observations": []}
+             "engine_loss": args.engine_loss, "obligations": args.obligations,
+             "monitor": args.monitor, "monitor_answers": [], "observations": []}
     log = (root / "engine.log").open("w", encoding="utf8")
 
     def start_ui():
@@ -233,13 +248,14 @@ def main():
             env={**child_env, "LOOPLAB_HARNESS_URL": url, "LOOPLAB_HARNESS_TOKEN": token})
         async with stdio_client(params) as (reader, writer), ClientSession(reader, writer) as mcp:
             await mcp.initialize()
-            client = Client(mcp, generation, args.obligations)
+            client = Client(mcp, generation, args.obligations, args.monitor)
             assert (await client.call("capabilities", {}))["protocol_version"] == 4
             assert (await client.call("connection_check", {"run_id": "demo", "expected_generation": generation}))["ok"]
             for suffix in ("config", "harness-contract", "artifact?root=run&path=task.snapshot.json&expected_generation=" + generation):
                 await client.request("GET", suffix)
             await drive(client)
-            if name == "first":
+            proof["monitor_answers"].extend(client.monitor_answers)
+            if name in ("first", "monitor_open"):
                 os.kill(int(pid_file.read_text()), signal.SIGTERM)
 
     async def first(client):
@@ -348,6 +364,32 @@ def main():
             proof["observations"].append("explicit resume reused the live engine and original checkpoint without another score stage")
         assert not (await client.state())["state"]["paused"]
         await client.request("POST", "harness-checkpoints", answer, status=503)
+        proof["first_stage_answer"] = answer
+        if args.monitor:
+            rows = await until(lambda: client.read("harness-checkpoints"), lambda value:
+                any(row["phase_id"] == "train_monitor" for row in value["pending"]))
+            monitor, = rows["pending"]
+            assert monitor["node_id"] == 0 and monitor["kill_enabled"] is False
+            progress = await client.progress()
+            assert progress["next_step"]["phase_id"] == "monitor"
+            node = (await client.state())["state"]["nodes"]["0"]
+            assert node["status"] == "pending" and node["metric"] is None
+            proof["monitor_checkpoint"] = monitor["checkpoint_id"]
+            proof["monitor_journal_sha256"] = hashlib.sha256(journal.read_bytes()).hexdigest()
+            proof["observations"].append("completed protected command held its terminal at the first advisory monitor; second MCP process killed before answering")
+            return
+        await after_first_answer(client)
+
+    async def after_first_answer(client):
+        answer = proof.pop("first_stage_answer")
+        if args.monitor:
+            rows = (await client.read("harness-checkpoints"))["pending"]
+            assert len(rows) == 1 and rows[0]["checkpoint_id"] == proof["monitor_checkpoint"]
+            journal = runs / "demo" / "harness_checkpoints.jsonl"
+            assert hashlib.sha256(journal.read_bytes()).hexdigest() == proof.pop("monitor_journal_sha256")
+            assert len(owned_engines) == 1 + int(args.engine_loss)
+            assert owned_engines[-1].poll() is None
+            proof["observations"].append("restarted UI and fresh MCP retained the unanswered monitor and same live engine")
         first_node = await client.terminal(0)
         assert (await client.request("POST", "harness-checkpoints", answer))["replayed"]
         summary = ("После остановки engine незавершённую оценку выполнили заново. Кандидат сохранился; новый evaluator потребовал свежий checkpoint, старый ответ отклонён. Получен один terminal-результат; повторяемость ещё не проверена."
@@ -394,7 +436,7 @@ def main():
         await until(client.state, lambda row: not row["state"]["paused"])
         await until(client.progress, lambda row: row["execution"]["engine_running"] is True)
         assert len(owned_engines) == 2 + int(args.engine_loss)
-        proof["observations"].append("third MCP session did not resume on reads; durable resume spawned one replacement engine")
+        proof["observations"].append("fresh MCP session did not resume on reads; durable resume spawned one replacement engine")
 
         await client.call("phases", {"query": "evaluation"})
         await client.call("phase_info", {"phase_id": "evaluation"})
@@ -449,6 +491,8 @@ def main():
         if args.obligations:
             flags.update(deep_research_every=1, report_every=1, concept_run_base=True, reflection_priors=True,
                          lessons_every=1, comparative_lessons=True)
+        if args.monitor:
+            flags.update(train_monitor=True, train_monitor_kill=True, train_monitor_interval_s=600)
         command = [sys.executable, "-m", "looplab.cli", "run", str(task_path), "--out", str(runs / "demo"),
                    "--backend", "toy", "--max-nodes", "4"]
         for key, value in flags.items():
@@ -464,7 +508,12 @@ def main():
         server.should_exit = True; thread.join(timeout=5)
         assert not thread.is_alive()
         server, thread = start_ui()
-        anyio.run(session, "reconnected", generation, recovered)
+        anyio.run(session, "monitor_open" if args.monitor else "reconnected", generation, recovered)
+        if args.monitor:
+            server.should_exit = True; thread.join(timeout=5)
+            assert not thread.is_alive()
+            server, thread = start_ui()
+            anyio.run(session, "monitor_reconnected", generation, after_first_answer)
         anyio.run(session, "resumed", generation, resumed)
         for proc in owned_engines:
             proc.wait(timeout=10)
@@ -474,8 +523,11 @@ def main():
             and row.data.get("node_id") == 0 and row.data.get("generation") == 0
             and row.data.get("phase") == "stage" and row.data.get("status") == "finished"]
         assert len(first_stages) == 1 + int(args.engine_loss)
-        assert all(row.data["name"] == "score" for row in first_stages)
+        assert all(row.data["name"] == ("train_eval" if args.monitor else "score") for row in first_stages)
         proof["initial_score_stage_completions"] = len(first_stages)
+        if args.monitor:
+            assert len(proof["monitor_answers"]) == 4
+            assert all(row["advisory_abort_refused"] for row in proof["monitor_answers"])
         if args.obligations:
             counts = {kind: sum(row.type == kind for row in events) for kind in
                       ("research_completed", "run_concepts", "report_generated")}
