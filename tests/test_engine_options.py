@@ -68,6 +68,8 @@ _PERTURBED_VALUE = {
     "trust_gate": "gate",           # anything outside audit|gate|block is a ConfigRefusal
     "metric_salvage": "select",     # an unknown mode settles to the default `audit`
     "metric_subject": "require",    # an unknown rung settles to the default `audit`
+    "activation_check": "strict",   # an unknown mode settles to the refusing `strict`
+    "activation_unverified_gate": "gate",   # an unknown gate settles to the default `audit`
 }
 _PERTURBED_BESIDE = {
     # `agent_drives_actions = unified_agent and agent_drives_actions`: inert without the facade.

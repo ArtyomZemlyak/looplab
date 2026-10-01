@@ -1349,6 +1349,31 @@ class Settings(BaseSettings):
     # calibrated ones was not protection — it was a way for a whole class of failure to be dropped
     # without anyone deciding to drop it. Env override expects a JSON array.
     inline_repair_reasons: tuple[str, ...] = REPAIRABLE_REASONS
+    # THE ACTIVATION CHECK (`engine/activation.py`): how a node's declared markers are held against
+    # what its evaluation printed. minionerec-lora-v1 node 2, 2026-10-01: the node changed ONLY a
+    # config file and declared two `NAME=value` assignments as markers; nothing prints an assignment,
+    # so a 6.8 h run's 0.1126388 was withheld as `inert_path`, the repair added `echo` lines for the
+    # check, and a full 7 h re-run followed.
+    #   "strict" — the historical rule: a declared marker that was not printed withholds the metric.
+    #   "graded" — the deterministic matrix (`activation.check_activation`): a missing marker whose
+    #              printer exists in the node's changed code (TP1) or in existing code (TP2), or one
+    #              declared on a CODE change with no printer anywhere (TP3), still withholds it; one
+    #              nothing anywhere could print, on a CONFIG-ONLY change, settles the node with its
+    #              metric and an `activation` record (`activation_unverified_gate` decides what that
+    #              flag does). Typed `env`/`file` entries are checked statically. A manifest-only
+    #              repair whose new markers' printers are in the node's changed code is re-checked
+    #              against the failed attempt's own bytes instead of re-running it.
+    #   "off"    — no check: every declaration is ignored.
+    # `inert_path` stays engine-final and never salvaged in every mode; only WHEN it is raised moves.
+    # Default "graded"; a pre-field snapshot resumes "strict" (`LEGACY_CONFIG_SNAPSHOT_DEFAULTS`),
+    # because it changes which metrics stand and what the repair prompt says.
+    activation_check: str = "graded"
+    # What an UNVERIFIED activation (the graded check's WARN) does to selection, on `trust_gate`'s
+    # vocabulary: "audit" (default) records the flag and changes nothing; "gate" stamps the decision
+    # on the node's `activation` record and the fold bars the node from best and from breeding while
+    # it stays feasible. Recorded per node at
+    # the terminal, so a replay reads the decision that was made, whatever this field says later.
+    activation_unverified_gate: str = "audit"
     # METRIC SALVAGE (`engine/metric_salvage.py`): what happens when a node fails for something other
     # than "the metric is absent" and the operator's OWN declared reader can still find the metric
     # that eval already produced. The case it exists for: v5 node 0 trained 76 minutes, printed
@@ -3463,6 +3488,11 @@ class Settings(BaseSettings):
     _ENUM_FIELDS: typing.ClassVar[tuple] = (
         ("trust_gate", ("audit", "gate", "block")),
         ("metric_salvage", ("off", "audit", "select")),
+        # Spelled out rather than imported from `engine/activation.py::ACTIVATION_MODES` /
+        # `ACTIVATION_GATES` (core imports nothing above itself); `tests/test_activation_graded.py`
+        # pins the two spellings equal.
+        ("activation_check", ("off", "strict", "graded")),
+        ("activation_unverified_gate", ("audit", "gate")),
         ("merge_mode", ("auto", "mean", "ensemble")),
         ("novelty_mode", ("off", "algo", "llm")),
         ("strategist_backend", ("off", "rule", "llm", "agent")),
@@ -3750,6 +3780,10 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     "max_eval_timeout": 24 * 3600.0,
     "watchdog_reflection": False,
     "card_driven_selection": False,
+    # A run launched before the graded activation check resumes on the rule it ran under: a declared
+    # marker that was not printed withholds the metric (minionerec-lora-v1 node 2, 2026-10-01, is why
+    # the default moved). `graded` changes which metrics stand and what the repair prompt says.
+    "activation_check": "strict",
     # B1's forced exploitation is a SEARCH TREATMENT, and a run already in flight never consented to
     # one. A snapshot written before the field existed resumes with the search it was launched under
     # -- the same rule as `card_driven_selection` two lines up, and for the same reason: mixing two

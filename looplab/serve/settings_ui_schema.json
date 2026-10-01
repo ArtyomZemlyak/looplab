@@ -629,6 +629,29 @@
           "help": "Comma-separated failure reasons eligible for inline repair (crash | timeout | oom | setup | no_metric | drift | unclassified | expect_failed | check_failed | diverged | stalled | needs_failed | not_learning | check_false_positive | inert_path). Default: ALL of them — none of these means the HYPOTHESIS was wrong, which is the only thing that should end a node with no repair attempted. `expect_failed` and `check_failed` are declared-contract failures: the stage ran and then failed a contract its own manifest stated, which is not the same as printing no metric. A run once lost a 76-minute training that had already computed its metric, because the checkpoint path in its stage manifest was one directory off. `diverged` and `stalled` are LoopLab's own watchdogs stopping a stage — a non-finite loss, or a process alive and silent; they exit the same way an OOM kill does and need the opposite fix, so they are their own reasons. `not_learning` is the LIVE training watchdog stopping a stage mid-run when its judge attributed the fault to the IMPLEMENTATION — a loss frozen or flat while the process reports itself healthy, which no exit code can describe and which needs neither `oom`'s fix nor `diverged`'s. Drop it from this list and such a stop terminalizes the node instead, recording a verdict against an idea whose code was never checked. `needs_failed` is a stage refused BEFORE it ran because a file it declares it reads was not there — the stage's code is not implicated, so it gets its own directive too. `unclassified` is the odd one and the one to think twice about dropping: it is not a kind of failure at all, it is what the engine records when the failure DIAGNOSTICIAN was wired, was asked what went wrong, and could not answer — a flapping provider, an emit nobody could read. Drop it and a node is thrown away over something that was never a fact about the node. It repairs BLIND, so it is bounded harder than a diagnosed failure and buys no extra attempts. Narrow the list only if you want those nodes to die unrepaired; the SPEND is bounded by inline repair attempts, the re-train cap and the per-attempt triage judge, not by this list. `check_false_positive` is the only one no watchdog and no classifier can produce: the failure DIAGNOSTICIAN says the stage's declared check refused a run that actually met its condition — measured on this box, five of twenty-two `check_failed` rows were the checker being wrong, with the diagnostician quoting validation numbers out of the same log the checker read. Leaving it on points that repair at the CHECK instead of asking a Developer to rewrite an experiment whose numbers were correct; it can neither suppress a metric nor grant one. `inert_path` is the newest and the only one about a run that SUCCEEDED: it exited 0 and printed its metric, but an activation marker the node itself declared its new code prints never appeared — so the number measured the path the node meant to replace. It is not a verdict on the idea, which never ran; drop it and such a node is scored as an idea that does not help."
         },
         {
+          "key": "activation_check",
+          "label": "↳ activation check",
+          "type": "enum",
+          "options": [
+            "off",
+            "strict",
+            "graded"
+          ],
+          "default": "graded",
+          "help": "How a node's declared activation markers (lines its new code prints only when the new path runs) are held against what its evaluation printed. \"graded\" (default): a missing marker that some code could print — the node's changed code, or existing code its change should have enabled — or one declared on a CODE change with nothing anywhere to print it, still withholds the metric as inert_path and sends the node to repair; a marker nothing anywhere could print on a change that touched only config files keeps the metric and flags the node \"activation unverified\". A typed env or file declaration is checked statically. A repair that only rewrites the declaration is re-checked against the failed attempt's own output instead of re-running it, when the new markers' printers are in the node's changed code. A run once withheld a 6.8-hour training's metric because a config-only node had declared two NAME=value assignments as markers; the repair then added echo lines for the check and paid a full re-run. \"strict\" is the historical rule: any declared marker that was not printed withholds the metric. \"off\" ignores every declaration. A run started before this setting existed resumes with \"strict\"."
+        },
+        {
+          "key": "activation_unverified_gate",
+          "label": "↳ unverified activation",
+          "type": "enum",
+          "options": [
+            "audit",
+            "gate"
+          ],
+          "default": "audit",
+          "help": "What an \"activation unverified\" flag (the graded check's warning: a config-only node whose markers nothing could print) does to selection. \"audit\" (default) records it and changes nothing. \"gate\" keeps the node feasible and in the tree but bars it from becoming the best node and from being bred from, like the trust gate's \"gate\". The decision is recorded on the node when it settles, so changing this later does not re-judge nodes already settled."
+        },
+        {
           "key": "metric_salvage",
           "label": "↳ metric salvage",
           "type": "enum",

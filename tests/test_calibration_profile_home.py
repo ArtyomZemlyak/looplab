@@ -415,7 +415,13 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               added and `[]` removed; `_EXPECTED_FIELD_COUNT` goes 280 -> 281 and both pins are
 #               re-set (the pre-change tree re-derives 75718f29…). INERT for a calibration replicate:
 #               its default is 0 (never stop) in `Settings` and `EngineOptions` alike.
-_EXPECTED_DIGEST = "sha256:364851ee2bd0975e59a87c01274d12f21b7ed4f0861c3a239ea1a2e131ac8874"
+#   2026-10-01  + activation_check, activation_unverified_gate (the graded activation check and what
+#               its warning does to selection; minionerec-lora-v1 node 2). The 'field set changed
+#               too' branch: exactly those two added and `[]` removed; `_EXPECTED_FIELD_COUNT` goes
+#               281 -> 283 and both pins are re-set (the pre-change tree re-derives 364851ee…). INERT
+#               for a calibration replicate: the toy workload's nodes declare no activation markers,
+#               so neither field is ever read.
+_EXPECTED_DIGEST = "sha256:c11422fc70a5a2a6e9821a83fa58fbfd64a574ac64a0f76802b024ed795b68e9"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -931,7 +937,8 @@ _EXPECTED_DIGEST = "sha256:364851ee2bd0975e59a87c01274d12f21b7ed4f0861c3a239ea1a
 #   2026-09-30  + endgame_inject_recut (doc 69 69.25): 278 -> 279; see the digest history.
 #   2026-09-30  + lesson_prior_claim_decisions (doc 69 69.21): 279 -> 280; see the digest history.
 #   2026-09-30  + plateau_stop_nodes (doc 70 70.4): 280 -> 281; see the digest history.
-_EXPECTED_FIELD_COUNT = 281
+#   2026-10-01  + activation_check, activation_unverified_gate: 281 -> 283; see the digest history.
+_EXPECTED_FIELD_COUNT = 283
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

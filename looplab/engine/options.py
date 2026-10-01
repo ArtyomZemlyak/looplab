@@ -380,6 +380,13 @@ class EngineOptions:
     # this is the copy that would silently disagree with Settings.
     inline_repair_reasons: tuple = REPAIRABLE_REASONS  # reasons eligible for inline repair
     metric_salvage: str = "audit"        # off | audit | select — see core/config.py
+    # The graded activation check (`Settings.activation_check`; minionerec-lora-v1 node 2,
+    # 2026-10-01). "graded" on BOTH sides, so not a divergence-table row: the matrix only ever
+    # settles what nothing anywhere could print on a CONFIG-ONLY change, and every TP class that
+    # `strict` caught it still catches (`tests/test_a_path_that_never_ran_is_not_a_result.py` runs
+    # under it). A pre-field snapshot resumes "strict" (`LEGACY_CONFIG_SNAPSHOT_DEFAULTS`).
+    activation_check: str = "graded"
+    activation_unverified_gate: str = "audit"   # audit | gate — what an unverified activation does
     metric_salvage_repair: bool = True   # fix the DECLARATION too; never re-evaluates
     inline_repair_retrain_cap: int = 2   # max FULL pipeline re-runs (re-trains) before abandoning
     auto_install_deps: bool = True       # pip-install a missing KNOWN lib + re-run (trusted_local only)

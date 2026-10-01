@@ -275,7 +275,9 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   lesson whose claim the operator rejected. The Python half moved too.
   //   248 -> 249 (2026-09-30): `plateau_stop_nodes` — K settled endgame nodes without a new leader
   //   finish the run. The Python half moved too.
-  assert.equal(Object.keys(schema.fieldByKey).length, 249)
+  //   249 -> 251 (2026-10-01): `activation_check` + `activation_unverified_gate` — the graded
+  //   activation check and what its warning does to selection. The Python half moved too.
+  assert.equal(Object.keys(schema.fieldByKey).length, 251)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

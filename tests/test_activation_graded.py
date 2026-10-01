@@ -275,3 +275,22 @@ def test_log_spans_re_read_only_the_failed_attempt_s_bytes(tmp_path):
     assert act.read_log_spans(spans) == ["attempt 1: fallback\n"]
     log.write_text("x")                                            # truncated: no re-check at all
     assert act.read_log_spans(spans) is None
+
+
+# ------------------------------------------------------------ 6. the settings
+
+def test_the_settings_vocabulary_is_the_engine_s_and_an_old_snapshot_resumes_strict():
+    """core spells the vocabulary out (it imports nothing above itself); this pins the two equal."""
+    from looplab.core.config import (LEGACY_CONFIG_SNAPSHOT_DEFAULTS, Settings,
+                                     settings_from_snapshot)
+    from looplab.engine.options import EngineOptions
+    assert dict(Settings._ENUM_FIELDS)["activation_check"] == act.ACTIVATION_MODES
+    assert dict(Settings._ENUM_FIELDS)["activation_unverified_gate"] == act.ACTIVATION_GATES
+    assert Settings().activation_check == EngineOptions().activation_check == "graded"
+    assert Settings().activation_unverified_gate == "audit"
+    with pytest.raises(ValueError):
+        Settings(activation_check="lenient")
+    assert LEGACY_CONFIG_SNAPSHOT_DEFAULTS["activation_check"] == "strict"
+    assert settings_from_snapshot({}).activation_check == "strict"       # a pre-field snapshot
+    assert settings_from_snapshot({"activation_check": "graded"}).activation_check == "graded"
+    assert EngineOptions.from_settings(Settings(activation_check="off")).activation_check == "off"
