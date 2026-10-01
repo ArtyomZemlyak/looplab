@@ -671,8 +671,8 @@ def scan_texts(files, needles, *, complete: bool = True) -> EmitterScan:
 
 # ---------------------------------------------------------------- an assignment the change itself made
 #
-# A marker spelled `NAME=value` whose value a config file THIS change touched assigns is ALWAYS the
-# `env` entry `{"kind": "env", "name": NAME, "equals": value, "file": that config}` -- at the
+# On a CONFIG-ONLY change, a marker spelled `NAME=value` whose value a config file THIS change
+# touched assigns is ALWAYS the `env` entry `{"kind": "env", "name": NAME, "equals": value, "file": that config}` -- at the
 # declaration lint and again at settle, whatever else in the tree contains the same text. The
 # declared intent is "this value is set", and the static env check verifies exactly that. A code
 # literal that merely contains the same text proves nothing more: minionerec-lora-v1 node 2,
@@ -681,7 +681,10 @@ def scan_texts(files, needles, *, complete: bool = True) -> EmitterScan:
 # EXISTING printer, so the node's config-only fix would have been blocked as TP2. TP2 (a flag that
 # should enable an existing path with a silent fallback) is still caught by a log marker the PATH
 # prints, which stays blocking. A value the touched config does NOT assign (or no touched config
-# assigns the name at all) is left a `log` entry, and the emitter rules apply to it unchanged.
+# assigns the name at all) is left a `log` entry, and the emitter rules apply to it unchanged -- as
+# they do to EVERY marker of a CODE change, where the same text is what the new code may print only
+# when its path runs (critic probe: `USE_NEW=1` printed by a guarded new path behind a swallowed
+# fallback, read as "the value is set", scored TP1). The callers gate on the change class.
 _ASSIGNMENT_MARKER = re.compile(r"(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*[=:]\s*(\S.*)")
 
 

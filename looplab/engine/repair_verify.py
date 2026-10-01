@@ -1714,9 +1714,6 @@ class ActivationLint:
     change_class: str = "code"
 
 
-_ASSIGN_MARKER = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.\-]*)\s*[=:]\s*(.*?)\s*$")
-
-
 def _changed_paths(written: dict, before) -> set:
     from looplab.engine.activation import CHANGE_CLASS_IGNORED
     out = set()
@@ -1752,8 +1749,8 @@ def activation_declaration_lint(markers, written: dict, *, before=None, original
         tree could not be read whole -- then kept, and the settle-time check decides.
 
     `regex`, `env`, `file` and `none` entries are kept as declared."""
-    from looplab.engine.activation import (CHANGE_CLASS_IGNORED, CHANGE_CONFIG_ONLY, KIND_ENV,
-                                           KIND_LOG, KIND_NONE, change_class, is_config_path,
+    from looplab.engine.activation import (CHANGE_CLASS_IGNORED, CHANGE_CONFIG_ONLY, KIND_LOG,
+                                           change_class, is_config_path,
                                            normalize_config_assignments, normalize_entries,
                                            scan_texts)
     entries = normalize_entries(markers)
@@ -1768,14 +1765,20 @@ def activation_declaration_lint(markers, written: dict, *, before=None, original
             if isinstance(b, str) and p not in CHANGE_CLASS_IGNORED}
     tree.update({str(p).replace("\\", "/"): b for p, b in (written or {}).items()
                  if isinstance(b, str) and str(p) not in CHANGE_CLASS_IGNORED})
-    # FIRST, whatever any emitter says: an assignment-shaped marker the change's own config sets is
-    # the `env` entry (`activation.config_assignment_entry` -- minionerec-lora-v1 node 2's
-    # `why_off = "SFT_RESUME_EVERY_MIN=0"` literal in sft_resume.py must not keep it a log marker).
-    entries, rewritten = normalize_config_assignments(
-        entries, {p: tree[p] for p in changed if p in tree and is_config_path(p)})
-    notes = [f"{t!r} is a value this change's config file sets, not a line any code prints; "
-             "recorded as an env entry the engine checks statically. Do not add an echo for the "
-             "check." for t in rewritten]
+    # FIRST, whatever any emitter says -- but ONLY on a CONFIG-ONLY change: an assignment-shaped
+    # marker the change's own config sets is the `env` entry (`activation.config_assignment_entry`;
+    # minionerec-lora-v1 node 2's `why_off = "SFT_RESUME_EVERY_MIN=0"` literal in sft_resume.py must
+    # not keep it a log marker). On a CODE change the same text is what the NEW code prints when
+    # its path runs (critic: a `USE_NEW=1` printed only by the guarded new path, behind a fallback
+    # that swallowed its exception, read as a satisfied env entry -- TP1 scored), so it stays a log
+    # marker and the settle-time matrix decides it (TP1/TP3).
+    notes: list = []
+    if cls == CHANGE_CONFIG_ONLY:
+        entries, rewritten = normalize_config_assignments(
+            entries, {p: tree[p] for p in changed if p in tree and is_config_path(p)})
+        notes = [f"{t!r} is a value this change's config file sets, not a line any code prints; "
+                 "recorded as an env entry the engine checks statically. Do not add an echo for "
+                 "the check." for t in rewritten]
     needles = [e["text"] for e in entries if e.get("kind") == KIND_LOG and e.get("text")]
     scan = scan_texts(tree, needles, complete=originals_complete)
     out, missing, unconditional = [], [], []
@@ -1790,25 +1793,17 @@ def activation_declaration_lint(markers, written: dict, *, before=None, original
             if all(e.path in changed and not e.conditional for e in found):
                 unconditional.append((text, sorted({e.path for e in found})))
             continue
-        configured = sorted(scan.configured.get(text) or [])
-        m = _ASSIGN_MARKER.match(text)
-        if configured and m:
-            where = next((p for p in configured if p in changed), configured[0])
-            env = {"kind": KIND_ENV, "name": m.group(1), "equals": m.group(2), "file": where}
-            if normalize_entries([env]):
-                out.append(normalize_entries([env])[0])
-                notes.append(f"{text!r} is a config value ({where} sets it), not a line any code "
-                             f"prints; recorded as env {m.group(1)}={m.group(2)} in {where}. Do "
-                             "not add an echo for the check.")
-                continue
-        if cls == CHANGE_CONFIG_ONLY:
-            why = (f"config-only change; {text!r} is printed by no code"[:300])
-            out.append({"kind": KIND_NONE, "why": why})
-            notes.append(f"{text!r} is printed by no code and this change touches only config "
-                         "files; recorded as none. Do not add an echo for the check.")
-            continue
+        # NO PRINTER FOUND. The declaration is KEPT as the log marker it is, never rewritten here:
+        #   * never to `env` off a file this change did not touch (critic: a base `USE_FUSED=1`
+        #     made an env entry that held whatever the node did) -- the touched-config rewrite
+        #     above is the only one;
+        #   * never to `none` on a config-only change: the settle-time matrix then records the
+        #     honest WARN `activation_unverifiable`, which `activation_unverified_gate` can act on
+        #     -- a `none` settles `ok` and left that gate unreachable for the repo Developer;
+        #   * and an INCOMPLETE tree proves no absence: settle decides on its own scan.
+        # Only a CODE change with a COMPLETE scan bounces (TP3: declared, never written).
         out.append(entry)
-        if scan.complete:
+        if cls != CHANGE_CONFIG_ONLY and scan.complete:
             missing.append(text)
     final = normalize_entries(out)
     bounce = warning = ""
@@ -1820,8 +1815,10 @@ def activation_declaration_lint(markers, written: dict, *, before=None, original
                   "withholds its metric even when the new path ran. A config file or a `NAME=value` "
                   "assignment prints nothing. Declare the exact text your new path prints (a "
                   "fragment of that print is enough); a config or env-only change needs no marker "
-                  "(or a `{\"kind\": \"env\", ...}` entry). Do not add an echo for the check. "
-                  "Then call done again.")
+                  "(or a `{\"kind\": \"env\", ...}` entry). If a `NAME=value` marker is a value "
+                  "your change sets in a config file, declare it explicitly as {\"kind\": \"env\", "
+                  "\"name\": ..., \"equals\": ..., \"file\": ...}. Do not add an echo for the "
+                  "check. Then call done again.")
     if unconditional:
         listed = "\n".join(f"  {t!r} -- printed only by unconditional line(s) in {', '.join(p)}"
                            for t, p in unconditional[:_MAX_LISTED_HANDLERS])

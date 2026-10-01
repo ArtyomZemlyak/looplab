@@ -2010,10 +2010,12 @@ class EvaluateMixin:
         mode = getattr(self, "_activation_check", "graded")
         changed, code_changed = act.node_change(a.node, self._activation_parents(a))
         cls = act.change_class(changed, code_changed)
-        if mode == "graded":
-            # An assignment-shaped marker the change's own config sets IS an env entry, whatever
-            # else in the tree contains its text (`activation.config_assignment_entry`; the
-            # sft_resume.py `why_off` literal of minionerec-lora-v1 node 2, 2026-10-01).
+        if mode == "graded" and cls == act.CHANGE_CONFIG_ONLY:
+            # An assignment-shaped marker a CONFIG-ONLY change's own config sets IS an env entry,
+            # whatever else in the tree contains its text (`activation.config_assignment_entry`;
+            # the sft_resume.py `why_off` literal of minionerec-lora-v1 node 2, 2026-10-01). On a
+            # CODE change it stays a log marker: the new code may print it only when its path runs,
+            # and reading it as "the value is set" scored a swallowed fallback (TP1, critic probe).
             entries, _ = act.normalize_config_assignments(
                 entries, act.touched_configs(a.workdir, changed))
         logs = act.log_entries(entries)

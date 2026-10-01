@@ -380,3 +380,111 @@ def test_an_old_inert_path_journal_folds_as_before_and_old_rows_carry_no_activat
     events, _dev, run_dir = _run(tmp_path / "plain", node_files={ENV: INCIDENT_ENV})
     node = fold(EventStore(run_dir / "events.jsonl").read_all()).nodes[0]
     assert node.activation is None and "activation" not in _types(events, "node_evaluated")[0].data
+
+
+# ------------------------------------------------------------ the critic's pass (post-review fixes)
+
+def _lint_then_run(tmp_path, monkeypatch, *, base, writes, markers, **run_kw):
+    """The whole chain: a REAL `LLMRepoDeveloper(activation_graded=True)` over the task repo `base`
+    writes `writes` and declares `markers` (its graded lint decides what the manifest says), then the
+    REAL evaluation loop runs that node. Returns `(events, dev, run_dir, refusals, files)`."""
+    import looplab.agents.agent as agent_mod
+    from looplab.adapters.repo_task import LLMRepoDeveloper
+
+    refusals: list = []
+
+    def fake_loop(client, tools, messages, emit_spec, *, finalize, fallback, **opts):
+        name = emit_spec["function"]["name"]
+        if name == "declare_stages":
+            return finalize({"stages": []})
+        if name == "propose_plan":
+            return finalize({"steps": []})
+        for path, content in writes.items():
+            tools.execute("write_file", {"path": path, "content": content})
+        args = {"summary": "s", "activation_markers": list(markers)}
+        validate = opts.get("validate")
+        if validate is not None and (refusal := validate(dict(args))):
+            refusals.append(refusal)
+        return finalize(args)
+
+    monkeypatch.setattr(agent_mod, "drive_tool_loop", fake_loop)
+    repo = tmp_path / "devrepo"
+    files = {ENV: BASE_ENV, "run.py": RUN_PY, **base}
+    for rel, body in files.items():
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text(body)
+    task = RepoTask(id="r", goal="g", direction="max", editable_path=str(repo), edit_surface=["*"],
+                    protect=[], eval=EvalSpec(command=[PY, "run.py"],
+                                              metric={"kind": "stdout_json", "key": "metric"}))
+    dev = LLMRepoDeveloper(object(), task, plan_decompose=False, activation_graded=True)
+    dev.implement(Idea(operator="draft", params={}, rationale="x"))
+    node_files = {p: b for p, b in dev.last_files.items()
+                  if p in writes or p == act.ACTIVATION_MANIFEST_NAME}
+    events, rdev, run_dir = _run(tmp_path / "eval", base=base, node_files=node_files, **run_kw)
+    return events, rdev, run_dir, refusals, node_files
+
+
+# BLOCKER 1: the new path is guarded by a flag the node sets in its config and swallows its own
+# exception; `USE_NEW=1` is printed by the NEW code only when the path ran.
+_P1_MAIN = ("import json\n"
+            "env = dict(l.split('=',1) for l in open('conf/run.env').read().split() if '=' in l)\n"
+            "def fast():\n    raise AttributeError('gone')\n"
+            "if env.get('USE_NEW') == '1':\n"
+            "    try:\n        fast()\n        print('USE_NEW=1')\n"
+            "    except Exception:\n        pass\n"
+            "print(json.dumps({'metric': 1.004}))\n")
+
+
+def test_tp1_behind_a_flag_the_code_change_sets_is_not_read_as_an_env_entry(tmp_path):
+    """Critic BLOCKER 1 (probe P1): on a CODE change `USE_NEW=1` is what the new path prints; the
+    assignment rule read it as "the value is set" (the node's config sets it), the env check held,
+    and a swallowed fallback was scored. MUTATION: apply the rewrite on code changes -> evaluated."""
+    base = dict(_ENTRY, **{"conf/run.env": "USE_NEW=0\n"})
+    events, dev, _ = _run(tmp_path, base=base, node_files={
+        "main.py": _P1_MAIN, "conf/run.env": "USE_NEW=1\n", **_manifest(["USE_NEW=1"])})
+    [terminal] = _types(events, "node_evaluated", "node_failed")
+    assert terminal.type == "node_failed" and terminal.data["reason"] == "inert_path"
+    assert "YOUR CHANGED code prints it" in dev.errors[0]
+
+
+def test_tp1_behind_a_flag_through_the_real_developer_lint(tmp_path, monkeypatch):
+    base = dict(_ENTRY, **{"conf/run.env": "USE_NEW=0\n"})
+    events, _dev, _, refusals, files = _lint_then_run(
+        tmp_path, monkeypatch, base=base, markers=["USE_NEW=1"],
+        writes={"main.py": _P1_MAIN, "conf/run.env": "USE_NEW=1\n"})
+    assert json.loads(files[act.ACTIVATION_MANIFEST_NAME]) == {"markers": ["USE_NEW=1"]}
+    assert _types(events, "node_failed")[0].data["reason"] == "inert_path"
+
+
+def test_an_untouched_base_config_never_vouches_for_a_code_change(tmp_path, monkeypatch):
+    """Critic MAJOR 2, end to end: the base `conf/base.env` already says `USE_FUSED=1`; the code
+    change's new path (an f-string print, behind a swallowed fallback) never ran. The lint rewrote
+    the marker to an env entry on the BASE file, which held whatever happened, and the eval scored.
+    Now the lint bounces with the advice and keeps the log marker, and the eval withholds (TP3: no
+    literal printer). MUTATION: the old `configured and m` rewrite -> evaluated, env/weak."""
+    main = ("import json\ndef fast():\n    raise AttributeError('gone')\n"
+            "try:\n    fast()\n    print(f'USE_FUSED={1}')\nexcept Exception as e:\n"
+            "    print('fused path unavailable:', e)\n"
+            "print(json.dumps({'metric': 1.004}))\n")
+    base = dict(_ENTRY, **{"conf/base.env": "USE_FUSED=1\n"})
+    events, _dev, _, refusals, files = _lint_then_run(
+        tmp_path, monkeypatch, base=base, markers=["USE_FUSED=1"], writes={"main.py": main})
+    assert refusals and "declare it explicitly as" in refusals[0]
+    assert json.loads(files[act.ACTIVATION_MANIFEST_NAME]) == {"markers": ["USE_FUSED=1"]}
+    [terminal] = _types(events, "node_evaluated", "node_failed")
+    assert terminal.type == "node_failed" and terminal.data["reason"] == "inert_path"
+
+
+def test_the_repo_developer_s_config_only_marker_reaches_the_unverified_warn(tmp_path, monkeypatch):
+    """Critic MAJOR 5, end to end: the lint rewrote a config-only marker nothing prints to `none`, so
+    the node settled `ok` and the WARN -- and `activation_unverified_gate` -- could never fire for
+    the in-house Developer. Kept as the log marker, settle records the WARN and the gate bars it.
+    MUTATION: rewrite to none -> verdict ok, not gated."""
+    events, _dev, run_dir, refusals, files = _lint_then_run(
+        tmp_path, monkeypatch, base={}, markers=["LORA OFF"], writes={ENV: INCIDENT_ENV},
+        gate="gate")
+    assert refusals == []
+    [terminal] = _types(events, "node_evaluated")
+    assert (terminal.data["activation"]["verdict"], terminal.data["activation"]["gate"]) == (
+        "warn", "gate")
+    assert 0 in fold(EventStore(run_dir / "events.jsonl").read_all()).breed_excluded

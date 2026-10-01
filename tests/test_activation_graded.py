@@ -326,20 +326,60 @@ def test_the_incident_s_markers_are_rewritten_to_env_instead_of_passing():
 
 
 def test_the_manifest_itself_is_never_the_file_an_env_entry_is_checked_in():
-    """The manifest is a `.json` holding every marker verbatim; a config value the change did not
-    set in a file of its own must not be pinned to it (`MiniOneRec/...` sorts after it)."""
-    written = {act.ACTIVATION_MANIFEST_NAME: act.manifest_text(["Z_FLAG=1"])}
-    lint = activation_declaration_lint(["Z_FLAG=1"], written, originals={"z/conf.env": "Z_FLAG=1\n"})
+    """The manifest is a `.json` holding every marker verbatim and sorts before the node's config;
+    the env entry must name the config the change touched, never the manifest."""
+    written = {act.ACTIVATION_MANIFEST_NAME: act.manifest_text(["Z_FLAG=1"]),
+               "z/conf.env": "Z_FLAG=1\n"}
+    lint = activation_declaration_lint(["Z_FLAG=1"], written)
     assert list(lint.entries) == [{"kind": "env", "name": "Z_FLAG", "equals": "1",
                                    "file": "z/conf.env"}]
 
 
-def test_a_marker_nothing_prints_is_none_on_a_config_change_and_bounced_on_a_code_change():
+def test_a_marker_nothing_prints_stays_a_log_marker_on_a_config_change_and_bounces_on_code():
+    """Critic MAJOR 5: rewritten to `none`, a config-only marker nothing prints settled `ok` and the
+    WARN (and `activation_unverified_gate`) was unreachable for the repo Developer. It stays the log
+    marker; settle records the WARN. MUTATION: rewrite to none -> kinds ['none']."""
     config_only = activation_declaration_lint(["LORA ON"], {"conf/a.yaml": "lora: true\n"})
-    assert [e["kind"] for e in config_only.entries] == ["none"] and not config_only.bounce
+    assert list(config_only.entries) == [{"kind": "log", "text": "LORA ON"}]
+    assert not config_only.bounce
     code = activation_declaration_lint(["LORA ON"], {"train.py": "print('lora')\n"})
     assert [e["kind"] for e in code.entries] == ["log"]
     assert "'LORA ON'" in code.bounce and "Do not add an echo" in code.bounce
+
+
+def test_an_incomplete_tree_never_turns_a_config_only_marker_into_anything():
+    """Critic MAJOR 4a: an unread tree proves no absence -- kept, never `none`, never bounced."""
+    lint = activation_declaration_lint(["LORA ON"], {"conf/a.yaml": "lora: true\n"},
+                                       originals={}, originals_complete=False)
+    assert list(lint.entries) == [{"kind": "log", "text": "LORA ON"}] and not lint.bounce
+
+
+def test_an_untouched_config_never_makes_an_env_entry():
+    """Critic MAJOR 2: a base `conf/base.env` already holding `USE_FUSED=1` made the code change's
+    marker an env entry that held whatever the node did. On a code change nothing is rewritten; the
+    bounce says to declare env explicitly if that is what is meant. MUTATION: the old
+    `configured and m` rewrite -> env on conf/base.env."""
+    written = {"svc.py": "def go(on):\n    if on:\n        print(f'USE_FUSED={1}')\n"}
+    lint = activation_declaration_lint(["USE_FUSED=1"], written,
+                                       originals={"conf/base.env": "USE_FUSED=1\n"})
+    assert list(lint.entries) == [{"kind": "log", "text": "USE_FUSED=1"}]
+    assert "declare it explicitly as" in lint.bounce
+    # …and on a config-only change only a config the change TOUCHED counts
+    lint = activation_declaration_lint(["USE_FUSED=1"], {"conf/other.env": "X=1\n"},
+                                       originals={"conf/base.env": "USE_FUSED=1\n"})
+    assert [e["kind"] for e in lint.entries] == ["log"]
+
+
+def test_on_a_code_change_an_assignment_marker_stays_a_log_marker():
+    """Critic BLOCKER 1, the lint half: the change sets `USE_NEW=1` in its config AND writes the new
+    path that prints `USE_NEW=1`; the marker is what that path prints, not "the value is set"."""
+    written = {"conf/run.env": "USE_NEW=1\n",
+               "main.py": "if on:\n    try:\n        fast()\n        print('USE_NEW=1')\n"
+                          "    except Exception:\n        pass\n"}
+    lint = activation_declaration_lint(["USE_NEW=1"], written,
+                                       before=lambda p: {"conf/run.env": "USE_NEW=0\n"}.get(p))
+    assert lint.change_class == act.CHANGE_CODE
+    assert list(lint.entries) == [{"kind": "log", "text": "USE_NEW=1"}] and not lint.bounce
 
 
 def test_a_printer_in_code_the_session_never_touched_keeps_the_marker():
