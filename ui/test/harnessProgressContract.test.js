@@ -115,12 +115,23 @@ test('next step follows server advice, refreshes on events and hides after a fai
     assert.match(view.container.textContent, /phase_info: monitor/)
     assert.match(view.container.textContent, /Allowed verdicts: continue, watch/)
     assert.match(view.container.textContent, /does not grant abort authority/)
-    payload = { ...payload, event_seq: 14, next_step: { ...step, code: 'choose_direction',
-      title: 'Choose the next experiment or finish', action: null, phase_id: null } }
+    payload = { ...payload, event_seq: 14, next_step: { ...step, phase_id: 'deadline_grace',
+      title: 'Decide whether to extend the deadline',
+      detail: 'Allowed verdicts: extend, stop. While waiting for a verdict, the command may keep running; this wait has no automatic timeout. The runtime caps one extension starting after extend is consumed.' } }
     await view.rerender({ ...props, seq: 14 })
+    await until(() => view.container.textContent.includes('Next step · Decide'), 'deadline discovery')
+    assert.match(view.container.textContent, /phase_info: deadline_grace/)
+    assert.match(view.container.textContent, /Allowed verdicts: extend, stop/)
+    assert.match(view.container.textContent, /command may keep running/)
+    assert.match(view.container.textContent, /no automatic timeout/)
+    assert.match(view.container.textContent, /after extend is consumed/)
+    assert.ok(!view.container.textContent.includes('does not grant abort authority'))
+    payload = { ...payload, event_seq: 15, next_step: { ...step, code: 'choose_direction',
+      title: 'Choose the next experiment or finish', action: null, phase_id: null } }
+    await view.rerender({ ...props, seq: 15 })
     await until(() => view.container.textContent.includes('Next step · Choose'), 'event-driven refresh')
     globalThis.fetch = fetchStub({ '/api/runs/mnist/harness-progress': () => jsonResponse({}, 503) })
-    await view.rerender({ ...props, seq: 15 })
+    await view.rerender({ ...props, seq: 16 })
     await until(() => view.container.textContent.includes('refresh failed'), 'failed refresh')
     assert.ok(!view.container.textContent.includes('Next step · Choose'))
     assert.match(view.container.textContent, /Next step unavailable/)

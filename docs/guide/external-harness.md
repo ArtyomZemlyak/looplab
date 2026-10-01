@@ -494,7 +494,16 @@ The normal control cycle is:
    the agent receives a `deadline_grace` checkpoint. Answer `extend` or `stop`;
    the runtime limits an extension to the operator's configured allowance and
    records the granted seconds with the stage. The external run does not invoke
-   LoopLab's internal deadline judge, and a missing answer never grants time.
+   LoopLab's internal deadline judge. While the question is unanswered, its
+   watchdog waits for the agent; the command is not suspended and may keep
+   running or finish. This wait has no automatic timeout. The cap limits one
+   extension starting when the runtime consumes `extend`; it does **not** bound
+   the unanswered wait or the command's total wall time. A disconnected agent
+   therefore leaves an explicit pending question, even if the command finishes.
+   Reconnect, inspect the current question and logs, then answer explicitly.
+   `stop` records a deadline failure without a completed score. Setting
+   `eval_deadline_grace_s=0` disables this question and keeps the ordinary deadline
+   timeout. No automatic answer or agent-death detection is provided.
    The train observer checks at the configured adaptive cadence during a command
    evaluation. If an evaluation finishes before its first tick, LoopLab checks
    its final attributed training log before committing the node result and waits
@@ -760,6 +769,8 @@ python -m benchmarks.external_session_smoke --out .tmp/engine-loss-proof --engin
 python -m benchmarks.external_session_smoke --out .tmp/obligations-proof --obligations
 # Reconnect while a fast command's first advisory training review is unanswered.
 python -m benchmarks.external_session_smoke --out .tmp/monitor-proof --monitor --obligations
+# Reconnect at deadline: extend, stop, exhausted cap; also test disabled grace.
+python -m benchmarks.external_deadline_smoke --out .tmp/deadline-proof
 ```
 
 The offline scenario runs three real CPU training configurations with a protected
@@ -802,6 +813,20 @@ Only this fixture restores its known valid bytes; that is not a production repai
 procedure. `acceptance.json`, engine logs and inspection output are saved under the
 output directory. This checks protocol recovery, not model judgments or interactive
 tool approval in an installed Codex/Claude client. Remote agent liveness is unmeasured.
+
+The separate deadline probe launches four isolated runs with an unchanged protected
+SGD scorer and an operator-declared timeout. A deliberate timer before SGD makes
+deadline decisions reproducible. For enabled grace it observes continued command
+output during an unanswered checkpoint, kills its own MCP, restarts its UI and
+reads the same question with the same live engine and no terminal metric. It rejects
+`abort`, explicitly answers `extend` or `stop`, and retries the exact answer both
+before and after terminal. The completion case measures held-out MSE; stop and
+exhausted grace retain no metric. Stage events record the granted cap, including
+the timed-out stage. Each command executes once, and a cap allows no second question.
+With grace disabled there is no checkpoint. All runs publish result interpretations
+in Russian and pass `inspect`/`replay`. Use `--case completed_extend`, `--case stop`,
+`--case capped_extend` or `--case disabled` for one scenario in a new output directory.
+This checks protocol timing with fault injection, not long-running ML or model judgment.
 
 ## Delegating only code editing
 

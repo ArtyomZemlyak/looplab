@@ -142,7 +142,7 @@ PHASES: tuple[Phase, ...] = (
           ("POST /api/runs/{run_id}/harness-checkpoints", "command:node_abort"),
           legacy_prompt_family="monitor"),
     Phase("deadline_grace", "StageDeadline", "engine/eval_stages.py; runtime/command_eval.py",
-          "At a command deadline, decide whether the bounded one-time extension is warranted.",
+          "At a command deadline, answer extend or stop. While unanswered, the command may keep running with no automatic timeout; the one-time cap starts after extend is consumed.",
           ("GET /api/runs/{run_id}/harness-checkpoints", "GET /api/runs/{run_id}/nodes/{nid}/logs"),
           ("POST /api/runs/{run_id}/harness-checkpoints",)),
     Phase("evaluation", "Node/Metric", "engine/evaluate.py; engine/eval_stages.py",

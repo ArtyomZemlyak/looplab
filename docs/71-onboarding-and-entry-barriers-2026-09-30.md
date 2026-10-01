@@ -1839,10 +1839,72 @@ Combined proof с включёнными research/concept/report/review обяз
 checkpoint lifecycle, progress, доступы и границы пакетов; **5 mounted UI** проверок.
 Перед изменением прошли **193 replay** проверки. Deadline verdict и реальное
 продление subprocess проверяются существующими backend-тестами; отдельный live
-MCP reconnect на deadline ещё не проведён. Также остаются открытыми многочасовой
+MCP reconnect на deadline выполнен следующим шагом, в §43. Остаются открытыми многочасовой
 сеанс, реальные модельные решения и интерактивные разрешения клиентов в OB-10.
 
 Также прошли **32 docs/architecture** проверки и `mkdocs build --strict`.
 
 Контрольный live-прогон без monitor, с обязанностями и остановкой engine,
 тоже завершился: `.tmp/external-monitor-control-proof-1/acceptance.json`.
+
+## 43. OB-10/11/12: MCP recovery на deadline и точный смысл cap
+
+**2026-10-01.** Добавлен отдельный воспроизводимый offline-прогон
+`benchmarks.external_deadline_smoke`. Четыре приватных run, настоящий CLI engine,
+реальный stdio MCP и перезапускаемый UI используют неизменный protected scorer.
+Он выполняет пять шагов SGD и считает held-out MSE. Таймер перед обучением —
+контролируемая инъекция задержки, а не доказательство медленного ML обучения.
+Ни scorer, ни метрика не задаются внешним агентом. Editable только `config.json`.
+
+### Устранена неточность про ожидание deadline
+
+Прежнее объяснение «missing answer never grants time» не описывало расход времени:
+callback ждёт явного ответа, но не приостанавливает subprocess. Пока агент отсутствует,
+команда может продолжать работу или завершиться, а узел остаётся pending без метрики.
+На этом ожидании нет автоматического timeout. Cap ограничивает единственное
+продление **после употребления `extend` runtime**, а не полное время команды
+и не интервал до ответа. Это теперь явно сказано в `looplab harness`,
+`harness-contract`, `phase_info(deadline_grace)`, серверной подсказке `next_step`,
+видимой в UI, и [external guide](guide/external-harness.md).
+
+Автоматический verdict, остановка при потере MCP и измерение соединения агента
+не добавлены. Если нужен обычный timeout без ожидания агента, оператор отключает
+deadline review через `eval_deadline_grace_s=0` при настройке запуска.
+
+### Проверенные сценарии
+
+| Режим | Явное решение и наблюдаемый результат |
+| --- | --- |
+| `completed_extend` | После разрыва MCP и restart UI восстановлен тот же вопрос. Extend с cap 15 секунд; SGD завершён, измеренный MSE **0.7807408706494512** |
+| `stop` | После reconnect явный stop завершает stage с timeout; узел failed, метрики нет |
+| `capped_extend` | После reconnect один extend с cap 1 секунда; медленная команда остановлена, stage хранит `deadline_grace_s=1`, метрики нет; второго вопроса нет |
+| `disabled` | Grace выключен, обычный timeout; ни question, ни ответа агента, ни метрики |
+
+При включённом grace каждый run сначала держит естественно открытый вопрос
+без ответа более **1.2 секунды** при declared deadline **0.8 секунды**. Реальный
+command log растёт: ожидание не является заморозкой обучения или общим time cap.
+Узел всё ещё pending, metric отсутствует. Затем завершается только собственный
+MCP-процесс и перезапускается приватный UI. Read-only reconnect сохраняет checkpoint
+ID и journal, видит прежний живой engine, не отвечает и не запускает команду повторно.
+Перед ответом protected command ещё находится в задержке, до SGD.
+
+Неподходящий для deadline `abort` получает **400** и не закрывает вопрос. Явные
+extend/stop, их exact retry до terminal и после terminal дают одну квитанцию ответа.
+На каждый run приходится один score execution и один terminal event. Timeout
+никогда не превращён в завершённый score. Защищённые bytes проверяются и в source,
+и в node workspace. На каждый узел и финализированный run отправлены краткие
+русские result-notices с evidence token; повтор не дублирует комментарий.
+Все четыре run явно завершены и проходят CLI `inspect`/`replay`.
+
+Proof: `.tmp/external-deadline-proof-2/acceptance.json`, отдельные journals,
+engine logs и inspect/replay в подкаталогах случаев. Команда воспроизведения
+и выбор отдельного случая добавлены в guide. Граница проверки: protocol timing,
+реальные процессы и настоящее короткое SGD; многочасовой сеанс, модельные решения,
+интерактивные разрешения клиентов и обнаружение гибели удалённого агента остаются открытыми.
+
+Перед изменениями прошли **193 replay** проверки. После уточнения контракта —
+**155 backend**, **5 mounted UI**, **32 docs/architecture** и `mkdocs build --strict`.
+Полная матрица из четырёх live-сценариев выполнена дважды; второй прогон также
+проверяет рост log при unanswered wait, stage cap и exact replay после terminal.
+В нём stop → terminal занял **0.156 секунды**, extend с cap 1 → timeout terminal —
+**1.203 секунды** с учётом polling, cleanup и публикации события.

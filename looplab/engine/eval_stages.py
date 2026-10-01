@@ -1578,6 +1578,8 @@ class EvalStagesMixin:
 
         The runtime owns the actual extension cap and records any seconds granted on
         the stage row. A missing answer cannot silently mean permission to extend.
+        Waiting does not suspend the command or limit its total wall time: this
+        callback blocks the watchdog, and the grace clock starts after its answer.
         """
         import math
         import time

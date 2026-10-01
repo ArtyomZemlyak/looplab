@@ -308,7 +308,7 @@ def run_obligations(task, settings, *, generation: str) -> dict:
                 "required": bool(external and settings.eval_deadline_grace_s != 0),
                 "settings": {"eval_deadline_grace_s": settings.eval_deadline_grace_s},
                 "checkpoint": "command_stage_reaches_its_time_limit",
-                "proof": "answer extend or stop before the runtime decides its bounded one-time grace",
+                "proof": "answer extend or stop; the command may keep running during the unanswered wait, which has no automatic timeout; one capped extension starts after extend is consumed",
                 "enforced": True, "conditional_on": "a command evaluation reaches its deadline",
             },
             "train_monitor": {

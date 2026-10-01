@@ -53,7 +53,7 @@ def _next_step(progress: dict) -> dict:
         if q["phase_id"] in ("train_monitor", "asha_live") and not q["kill_enabled"]:
             detail += " This checkpoint does not grant abort authority."
         if q["phase_id"] == "deadline_grace":
-            detail += " The runtime caps any one-time extension."
+            detail += " While waiting for a verdict, the command may keep running; this wait has no automatic timeout. The runtime caps one extension starting after extend is consumed."
         if progress["recorded_lifecycle"]["paused"]:
             detail = "Run is paused for new work; its recorded in-flight evaluation still has this checkpoint. Answering does not resume search. " + detail
         return _step("answer_checkpoint", title, detail,
