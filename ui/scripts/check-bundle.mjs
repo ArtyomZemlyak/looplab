@@ -106,7 +106,10 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // 606,794 B / 58,684 B. +1,152 B JS buys brief polling, generation/event fences
     // and the main-screen next step. The cycle/notice extraction keeps other panels lazy;
     // initial shell and all route, cycle and forbidden-reachability limits remain unchanged.
-    js: { gzip: 593 * KIB },
+    // 2026-10-01 external inbox/list: 607,640 B JS / 58,684 B CSS. The portfolio map
+    // is now a separate lazy module rather than part of every graph workspace. Owner DAG
+    // fell to 403,362 B and review DAG to 265,140 B; every structural ceiling is unchanged.
+    js: { gzip: 594 * KIB },
     css: { gzip: 57.5 * KIB },
   },
   individual: {

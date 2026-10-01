@@ -29,17 +29,18 @@ function RunNode({ data }) {
   const concepts = sortedRunConcepts(run)
   const themes = concepts.length ? [] : Object.entries(run.themes || {})
   const status = effectiveRunStatus(run)
+  const label = run.external_harness === true ? `External · ${status === 'running' ? 'engine active' : status}` : status
   const stalled = status === 'stalled'
   const open = () => data.onOpen(run.run_id)
   return (
     <a className="run-node nodrag nopan" data-run-open-id={run.run_id}
          href={`#/run/${encodeURIComponent(run.run_id)}`}
          onClick={event => followClientRoute(event, open)}
-         aria-label={`Open ${run.label || run.run_id}, ${status}, ${run.task_id || 'unknown task'}`}
+         aria-label={`Open ${run.label || run.run_id}, ${label}, ${run.task_id || 'unknown task'}`}
          title={run.goal}>
       <Handle type="source" position={Position.Right} style={{ opacity: 0 }} />
       <Handle type="target" position={Position.Left} style={{ opacity: 0 }} />
-      <div className="row"><span className={'pill phase ' + status}>{status}</span>
+      <div className="row"><span className={'pill phase ' + status}>{label}</span>
         <b>{run.label || run.run_id}</b></div>
       <div className="muted">{run.label ? `${run.run_id} · ` : ''}{run.task_id} · best {fmt(run.best_confirmed ?? run.best_metric)} {run.direction || ''}</div>
       {concepts.length > 0 && <div className="chips">{concepts.slice(0, 4).map(([id, info]) =>

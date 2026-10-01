@@ -18,6 +18,7 @@ export const ATTENTION_KINDS = new Set([
   // budget is spent and only the operator can extend it (doc 68 68.8). The command itself read
   // `succeeded` — its postcondition is the engine's ack — so without this nothing said it was parked.
   'request_parked',
+  'external_checkpoint',
 ])
 const SEVERITIES = new Set(['action', 'warning', 'danger', 'success'])
 const SEVERITY_PRIORITY = Object.freeze({ danger: 4, action: 3, warning: 2, success: 1 })
@@ -29,6 +30,7 @@ const NEEDS_ACTION = new Set([
   'train_overrun',
   // Nothing runs until the operator extends the node budget (`budget_extend add_nodes`).
   'request_parked',
+  'external_checkpoint',
 ])
 
 const COPY = Object.freeze({
@@ -63,6 +65,7 @@ const COPY = Object.freeze({
   // The FALLBACK: the server's measured sentence (`events/parked_requests.py::parked_request_detail`)
   // says which request and how many slots are taken; this row is for a payload that carries none.
   request_parked: ['Operator request waiting for node budget', 'A queued experiment waits for a node slot: the node budget is spent. Extend it with budget_extend add_nodes.', 'Open Events'],
+  external_checkpoint: ['External agent answer needed', 'Read the current evaluation question and allowed responses in Agent cycle. Agent connection is not measured.', 'Open Agent cycle'],
   assistant_permission: ['Assistant approval needed', 'Open Assistant to review the exact action and scope.', 'Open Assistant'],
 })
 
@@ -95,7 +98,8 @@ export function attentionHref(item) {
   const exactNodeId = safeInteger(item.nodeId)
   const exactNodeAttempt = safeInteger(item.nodeGeneration)
   const hasExactNode = exactNodeId != null && exactNodeAttempt != null
-  if (item.kind === 'approval' && hasExactNode) state.nodeId = exactNodeId
+  if (item.kind === 'external_checkpoint') state.panel = 'agent'
+  else if (item.kind === 'approval' && hasExactNode) state.nodeId = exactNodeId
   else if (item.kind === 'approval') state.panel = 'events'
   else if (item.kind === 'finished' || item.kind === 'budget_exhausted'
       || item.kind === 'stopped') state.view = 'report'
@@ -145,7 +149,7 @@ export function normalizeRunAttention(raw) {
   const item = {
     id, source: 'run', kind, severity, title, detail, actionLabel,
     runId, generation, seq, created: safeTime(raw.created), active: raw.active,
-    notifyEligible: raw.browser === true && raw.derived === false && raw.stale !== true,
+    notifyEligible: kind !== 'external_checkpoint' && raw.browser === true && raw.derived === false && raw.stale !== true,
     derived: raw.derived, stale: raw.stale === true, nodeId, nodeGeneration,
     runLabel, taskId, contextLabel: runLabel || runId,
   }

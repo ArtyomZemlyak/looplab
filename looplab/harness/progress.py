@@ -14,21 +14,20 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from looplab.core.config import read_config_snapshot
-from looplab.core.jsonlio import read_jsonl_lenient_with_health
 from looplab.events.eventstore import EventStore, log_integrity
 from looplab.events.eval_occupancy import withheld_lifecycles
 from looplab.events.replay import fold
+from looplab.events.run_generation import run_generation_token
+from looplab.harness.checkpoint_history import project_checkpoints
 from looplab.harness.decisions import decision_file, required_decisions
 from looplab.harness.hypotheses import merge_due
+from looplab.harness.journals import read_source as _source
 from looplab.harness.obligations import (concept_tags_required, evidence_revision,
                                          external_finish_due, report_cadence_due,
                                          research_due, run_base_due)
 from looplab.harness.reviews import (cadence_reviews_due, required_reviews,
                                      review_file)
 from looplab.harness.selection import value_due, verification_due
-from looplab.events.run_generation import run_generation_token
-
-_SIDECAR_MAX_BYTES = 16 * 1024 * 1024
 
 
 def _policy_preview(settings, state) -> dict:
@@ -62,17 +61,6 @@ def _policy_preview(settings, state) -> dict:
             "actions": actions[:32], "total_actions": len(actions),
             "truncated": len(actions) > 32,
             "meaning": "read-only policy reconstruction on this event prefix; admission and the live engine may apply further gates; the external agent authors every candidate"}
-
-
-def _source(path: Path) -> tuple[list[dict], dict]:
-    try:
-        exists = path.exists()
-        if exists and path.stat().st_size > _SIDECAR_MAX_BYTES:
-            raise HTTPException(503, {"code": "harness_history_too_large", "source": path.name})
-        rows, health = read_jsonl_lenient_with_health(path)
-        return rows, {**health, "file_present": exists}
-    except OSError as exc:
-        raise HTTPException(503, {"code": "harness_history_unavailable", "source": path.name}) from exc
 
 
 def _page(rows: list[dict], offset: int, limit: int) -> dict:
@@ -126,55 +114,7 @@ def snapshot(rd: Path, expected_generation: str, *, activity_reader,
         for row in reviews if row.get("generation") == generation
         and row.get("run_uid") == uid]
 
-    questions, answers = {}, {}
-    invalid_records = 0
-    for row in checkpoints:
-        if (row.get("type") not in ("question", "answer")
-                or not isinstance(row.get("checkpoint_id"), str)
-                or not row["checkpoint_id"]):
-            invalid_records += 1
-            continue
-        if row["type"] == "question":
-            if (type(row.get("node_id")) is not int
-                    or type(row.get("node_generation")) is not int
-                    or type(row.get("claim_seq")) is not int
-                    or not all(isinstance(row.get(key), str) for key in
-                               ("run_generation", "run_uid", "phase_id", "stage",
-                                "expectation", "observation"))
-                    or row["checkpoint_id"] in questions):
-                invalid_records += 1
-                continue
-            questions[row["checkpoint_id"]] = row
-        else:
-            if (not all(isinstance(row.get(key), str) for key in
-                        ("verdict", "action_id", "reason"))
-                    or row["checkpoint_id"] in answers):
-                invalid_records += 1
-                continue
-            answers[row["checkpoint_id"]] = row
-    invalid_records += sum(key not in questions for key in answers)
-    checkpoint_health["invalid_record_rows"] = invalid_records
-    checkpoint_health["read_complete"] &= invalid_records == 0
-    claim_seqs = {}
-    for event in events:
-        if event.type == "eval_invocation_claimed":
-            node_id, attempt = event.data.get("node_id"), event.data.get("generation")
-            if type(node_id) is int and type(attempt) is int:
-                claim_seqs[(node_id, attempt)] = event.seq
-    checkpoint_rows = []
-    for q in questions.values():
-        if q.get("run_generation") != generation or q.get("run_uid") != uid:
-            continue
-        answer = answers.get(q["checkpoint_id"])
-        node = state.nodes.get(q.get("node_id"))
-        same_attempt = (node is not None and node.attempt == q.get("node_generation")
-                        and q.get("claim_seq") ==
-                        claim_seqs.get((q["node_id"], q["node_generation"]), -1))
-        checkpoint_rows.append({"question": q, "answer": answer,
-                                "lifecycle": "same_node_attempt" if same_attempt else "superseded",
-                                "status": "answered" if answer else
-                                "pending" if same_attempt and node.status == "pending"
-                                else "superseded"})
+    checkpoint_rows = project_checkpoints(checkpoints, checkpoint_health, events, state, generation)
 
     blockers = []
     def due(name: str, condition: bool, action: str):

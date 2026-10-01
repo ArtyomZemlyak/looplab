@@ -128,7 +128,8 @@ export default defineConfig({
               // The app adapter and these private graph dependencies are an exact @xyflow
               // co-closure; no non-graph source imports them. One stream shares a gzip dictionary
               // without moving graph code onto any non-graph route.
-              test: /(?:[/\\]node_modules[/\\](?:@xyflow|classcat|d3-[^/\\]+|use-sync-external-store|zustand)[/\\]|[/\\]src[/\\](?:groupnodes|MapView)\.jsx$)/,
+              // Portfolio MapView stays at its own lazy entrance; DAG/review do not need its run cards.
+              test: /(?:[/\\]node_modules[/\\](?:@xyflow|classcat|d3-[^/\\]+|use-sync-external-store|zustand)[/\\]|[/\\]src[/\\]groupnodes\.jsx$)/,
               includeDependenciesRecursively: false,
             },
             {

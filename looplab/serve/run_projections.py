@@ -39,6 +39,7 @@ from looplab.serve.deletion_transaction import (
     DELETE_IDENTITY_PREFIX, DELETE_QUARANTINE_PREFIX, DELETE_RECEIPT_PREFIX)
 from looplab.serve.run_commands import run_generation_token
 from looplab.serve.run_result_summary import run_result_summary
+from looplab.serve.external_attention import external_mode, optional_identity
 
 
 def _listed_fence_holds(rd, fence_names: set) -> bool:
@@ -175,7 +176,13 @@ def _run_row(srv, rd, fence_names: set, *, cache_key: str):
         # (ino, ctime_ns, size, mtime_ns) reads as unchanged, and the dashboard keeps serving the
         # previous generation's summary. Not exotic — geesefs/s3fs synthesize inode numbers from
         # the path, so a restored or rsynced run dir on a FUSE/S3 mount collides by construction.
-        sig = file_identity(stt)
+        # The launch mode is in the config snapshot, not the log. A repaired/replaced
+        # snapshot must invalidate this field without requiring a new event.
+        try:
+            config_identity = optional_identity(rd / "config.snapshot.json")
+        except OSError:
+            config_identity = ("unreadable",)
+        sig = (file_identity(stt), config_identity)
         cached = srv.summary_cache.get(cache_key)
         # Stored as (signature, summary): the flattened `(*sig, summary)` made the tuple WIDTH
         # load-bearing, so widening the signature by one field silently turned `cached[4]` into
@@ -215,6 +222,7 @@ def _run_row(srv, rd, fence_names: set, *, cache_key: str):
             "deletion_generation": run_deletion_snapshot_token(log, generation),
             "seq": events[-1].seq if events else -1,
             "direction": st.direction, "finished": st.finished,
+            "external_harness": external_mode(rd),
             "phase": srv.phase(st, finalize_incomplete=finalize_incomplete),
             "finalization_incomplete": finalize_incomplete, "nodes": len(st.nodes),
             # Whether the fold above saw the WHOLE log. Every other field in this row is derived

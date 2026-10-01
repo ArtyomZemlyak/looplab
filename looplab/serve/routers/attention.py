@@ -11,12 +11,13 @@ import time
 
 from fastapi import APIRouter, HTTPException, Query
 
-from looplab.core.atomicio import file_identity
 from looplab.events.eventstore import log_divergence
 from looplab.serve.attention import (
     ATTENTION_NEEDS_ACTION_KINDS, project_event_attention, project_runtime_attention,
     visible_event_attention)
 from looplab.serve.engine_proc import _engine_liveness
+from looplab.serve.external_attention import (attention_source_identity,
+                                             external_checkpoint_attention)
 
 
 _MAX_CACHE_ENTRIES = 8192  # exceeds the documented 5k-run operating target without unbounded growth
@@ -51,7 +52,7 @@ class _CursorRecord:
 
 def build_router(srv) -> APIRouter:
     router = APIRouter()
-    # run_id -> (reset-safe file signature, event projection). The live process probe is deliberately
+    # run_id -> (events/config/checkpoint identities, durable projection). The live process probe is deliberately
     # not cached: engine liveness can change without appending an event.
     cache: dict[str, tuple[tuple, dict, bool]] = {}
     # This route is a sync `def` → FastAPI runs concurrent polls on threadpool threads. Guard every
@@ -131,8 +132,7 @@ def build_router(srv) -> APIRouter:
                 if callable(validator):
                     rd = validator(rd)
                     log = rd / "events.jsonl"
-                stat = log.stat()
-                signature = file_identity(stat)
+                signature = attention_source_identity(rd)
                 cached = cache.get(rd.name)
                 if cached is not None and cached[0] == signature:
                     projection = cached[1]
@@ -144,12 +144,12 @@ def build_router(srv) -> APIRouter:
                     projection = None
                     terminal_released = False
                     for _attempt in range(2):
-                        before = log.stat()
-                        candidate = project_event_attention(rd.name, srv.events(rd))
+                        before_sig = attention_source_identity(rd)
+                        events = srv.events(rd)
+                        candidate = project_event_attention(rd.name, events)
+                        candidate['items'].extend(external_checkpoint_attention(rd.name, rd, events))
                         divergence = log_divergence(log)
-                        after = log.stat()
-                        before_sig = file_identity(before)
-                        after_sig = file_identity(after)
+                        after_sig = attention_source_identity(rd)
                         if divergence is not None:
                             # `iter_jsonl` deliberately returns the valid prefix of a damaged log.
                             # That is useful for forensic reads, but an owner alert inferred from a

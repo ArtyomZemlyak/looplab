@@ -78,6 +78,7 @@ ATTENTION_NEEDS_ACTION_KINDS = frozenset({
     # A queued operator request (inject / fork / forced ablation) waiting for a node slot: only the
     # operator can extend the node budget, and until then the request does not run (doc 68 68.8).
     "request_parked",
+    "external_checkpoint",
 })
 
 

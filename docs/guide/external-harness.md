@@ -634,6 +634,25 @@ failed evaluations become terminal evidence for the external agent; inline repai
 training-log judges, ASHA judges and inter-stage model checks do not run. The
 operator's declared artifact checks and score reader continue to apply.
 
+## Finding a run that needs an agent answer
+
+The run list, portfolio map, comparison and campaign finder identify external runs
+from their saved configuration. A live engine is labelled **engine active**; this
+does not prove that the external agent is connected or choosing experiments.
+
+Unanswered stage, training monitor, ASHA and deadline questions appear in the UI's
+**Attention center → Needs action**. **Open Agent cycle** opens that run with its
+generation fence. Read the full question and allowed responses through MCP before
+answering. Opening the inbox or cycle sends no answer and does not resume the engine.
+These questions do not generate desktop notifications.
+
+Answers invalidate the inbox cache even without a new event. Reset attempts,
+replacement runs and superseded evaluator claims retire their old questions. A
+damaged checkpoint journal or unreadable saved mode makes attention incomplete;
+previous verified rows are explicitly stale. Engine liveness and agent connectivity
+remain separate facts. The existing inbox refresh can delay discovery by several
+seconds; it adds no evaluation wait of its own.
+
 ## Reconnect and recovery
 
 The UI server, run engine, and coding agent are separate processes. If the agent

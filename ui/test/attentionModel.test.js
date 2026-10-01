@@ -27,6 +27,20 @@ const runItem = (overrides = {}) => ({
   ...overrides,
 })
 
+test('external questions open the current Agent cycle without exposing private prose or OS alerts', () => {
+  const item = normalizeRunAttention(runItem({ kind: 'external_checkpoint',
+    title: 'PRIVATE stage expectation', detail: 'PRIVATE training log', browser: true }))
+  assert.ok(item.needsAction)
+  assert.equal(item.notifyEligible, false)
+  assert.equal(item.actionLabel, 'Open Agent cycle')
+  const route = parseRunRouteState(item.href)
+  assert.deepEqual(route.issues, [])
+  assert.equal(route.state.panel, 'agent')
+  assert.equal(route.state.generation, GENERATION)
+  assert.equal(route.state.nodeId, null)
+  assert.doesNotMatch(JSON.stringify(item), /PRIVATE/)
+})
+
 test('run attention uses client-owned copy and an exact generation-fenced route', () => {
   const item = normalizeRunAttention(runItem({
     title: 'TOP_SECRET_SERVER_TITLE',

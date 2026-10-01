@@ -33,7 +33,8 @@ export default function CampaignRuns() {
       <code style={{ userSelect: 'all' }}>{openCommand(f.runRoot)}</code>
       <ul>{f.runs.map(r => <li key={r.runId}>
         <strong>{r.runId}</strong>{r.taskId && ` · ${r.taskId}`}{r.phase && ` · ${r.phase}`}
-        {r.bestMetric !== null && ` · best ${fmt(r.bestMetric)}`}{r.running && ' · running'}
+        {r.external && ' · External agent'}
+        {r.bestMetric !== null && ` · best ${fmt(r.bestMetric)}`}{r.running && ' · engine active'}
         {r.updated !== null && <span className="muted"> · {fmtAgo(r.updated)}</span>}
       </li>)}</ul>
     </details>)}

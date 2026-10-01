@@ -31,6 +31,7 @@ export function campaignFolders(payload) {
           bestMetric: Number.isFinite(run.best_metric) ? run.best_metric : null,
           nodes: Number.isInteger(run.nodes) && run.nodes >= 0 ? run.nodes : null,
           running: run.engine_running === true,
+          external: run.external_harness === true,
           updated: Number.isFinite(run.mtime) ? run.mtime : null,
         }]
       })

@@ -115,7 +115,7 @@ export function championRunHref(run, detail) {
 // Exported so a test can hold each column to the rule it prints, the `objective` one included.
 export const valueFor = (id, run, detail, names, formatMetric) => {
   const state = detail?.state
-  if (id === 'status') return effectiveRunStatus(run)
+  if (id === 'status') return run.external_harness === true ? 'External · ' + (effectiveRunStatus(run) === 'running' ? 'engine active' : effectiveRunStatus(run)) : effectiveRunStatus(run)
   if (id === 'task') return run.task_id || '—'
   if (id === 'best') return formatMetric(run.best_confirmed ?? run.best_metric)
   if (id === 'objective') return compareObjective(run)

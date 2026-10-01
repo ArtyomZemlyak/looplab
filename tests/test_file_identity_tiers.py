@@ -278,15 +278,35 @@ def test_the_state_cache_key_no_longer_omits_st_dev():
     assert "*file_identity(stt)" in source
 
 
-def test_the_attention_feed_signature_covers_the_windows_reparse_field():
+def test_the_attention_feed_signature_covers_the_windows_reparse_field(tmp_path, monkeypatch):
     """Three hand-spelled 5-tuples were `file_identity` minus `st_file_attributes`, so a log that
     gained a reparse point compared EQUAL and the cached projection was served for a different file."""
-    from looplab.serve.routers import attention
+    from types import SimpleNamespace
+    from looplab.serve.external_attention import attention_source_identity
 
-    import inspect
-    source = inspect.getsource(attention)
-    assert "st_ctime_ns," not in source, "a hand-rolled stat signature is back in the attention feed"
-    assert source.count("file_identity(") >= 3
+    rd = tmp_path / "run"
+    rd.mkdir()
+    for name in ("events.jsonl", "config.snapshot.json", "harness_checkpoints.jsonl"):
+        (rd / name).write_text("{}\n")
+    original_stat = Path.stat
+    target = [None]
+
+    def probe(path, *args, **kwargs):
+        actual = original_stat(path, *args, **kwargs)
+        if path.name != target[0]:
+            return actual
+        fields = {name: getattr(actual, name, 0) for name in
+                  ("st_dev", "st_ino", "st_ctime_ns", "st_size", "st_mtime_ns", "st_file_attributes")}
+        fields["st_file_attributes"] ^= 0x400  # Windows reparse attribute, all other fields identical.
+        return SimpleNamespace(**fields)
+
+    monkeypatch.setattr(Path, "stat", probe)
+    baseline = attention_source_identity(rd)
+    for index, name in enumerate(("events.jsonl", "config.snapshot.json", "harness_checkpoints.jsonl")):
+        target[0] = name
+        changed = attention_source_identity(rd)
+        assert changed[index] != baseline[index]
+        assert all(changed[i] == baseline[i] for i in range(3) if i != index)
 
 
 def _stat_on_another_device(base: os.stat_result) -> os.stat_result:

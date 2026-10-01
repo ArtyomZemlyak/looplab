@@ -2881,7 +2881,7 @@ export default function RunList({ onOpen, onGlobalNavigate,
                              title={stalled ? 'engine stopped unexpectedly — open the run to resume'
                                 : status === 'unknown' ? 'engine ownership could not be verified; inspect before acting'
                                 : status === 'finalizing' ? 'wrapping up report, lessons, and cost'
-                                : status === 'paused' ? 'paused intentionally' : undefined}>{status}</span>
+                                : status === 'paused' ? 'paused intentionally' : undefined}>{r.external_harness === true && status === 'running' ? 'engine active' : status}</span>
               })()}
               <a className="run-card-main" data-run-open-id={r.run_id}
                    href={`#/run/${encodeURIComponent(r.run_id)}`}
@@ -2893,6 +2893,8 @@ export default function RunList({ onOpen, onGlobalNavigate,
                    }}
                    aria-label={`Open run ${r.label || r.run_id}`}>
                 <div><b>{r.label || r.run_id}</b>
+                  {r.external_harness === true && <span className="pill" style={{ marginLeft: 6 }}
+                    title="The external agent chooses experiments. Its connection is not measured.">External agent</span>}
                   {startOverLocked && <span className="pill warn" style={{ marginLeft: 6 }}>Start over recovery</span>}
                   {r.project_id && projName[r.project_id] && <span className="pill" style={{ marginLeft: 6 }}><OpIcon name="folder" className="t-ic" /> {projName[r.project_id]}</span>}
                   {r.supertask_id && stName[r.supertask_id] && <span className="pill st-pill" style={{ marginLeft: 6 }}><OpIcon name="target" className="t-ic" /> {stName[r.supertask_id]}</span>}</div>

@@ -23,7 +23,7 @@ test('a folder lists its runs, and what cannot be shown is dropped rather than t
   assert.equal(campA.runsSkipped, 2)
   assert.deepEqual(campA.runs.map(r => r.runId), ['seed1', 'seed2'])
   assert.deepEqual(campA.runs[1], { runId: 'seed2', taskId: 't', phase: 'finished',
-    bestMetric: null, nodes: null, running: false, updated: null })
+    bestMetric: null, nodes: null, running: false, external: false, updated: null })
   assert.equal(campA.runs[0].bestMetric, 0.5)
   assert.deepEqual(campaignFolders(null), [])
   assert.deepEqual(campaignFolders({ folders: 'x' }), [])
