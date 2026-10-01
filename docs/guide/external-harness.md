@@ -367,6 +367,8 @@ reconciliation. These reads create no admission or finish requirement.
 Once these immediate issues are clear, choose **continue** or **finish**.
 `candidate_blockers_if_expanding`, per-Idea reviews and concept/hypothesis fields
 apply to continuation; they do not force a finalizing agent to propose again.
+Blocker `phase_id` names the MCP decision phase: the enabled concept base is
+`concept_tags` with `command:run_concepts`; its setting remains `concept_run_base`.
 `finish_pending_node_count`, `finish_report_due` and `finish_reviews_due` describe
 finalization. No current expansion gate is a guarantee of admission: candidate
 validation, task edit surface and budgets still apply. `policy_preview` is advice;
@@ -746,6 +748,8 @@ python -m benchmarks.external_session_smoke --out .tmp/new-session-proof
 python -m benchmarks.external_session_smoke --out .tmp/held-proof --checkpoint-hold-seconds 120
 # Kill only the fixture's engine at an open checkpoint and explicitly recover it.
 python -m benchmarks.external_session_smoke --out .tmp/engine-loss-proof --engine-loss
+# Enable research, concept base, report and lesson/skill obligations across reconnect.
+python -m benchmarks.external_session_smoke --out .tmp/obligations-proof --obligations
 ```
 
 The offline scenario runs three real CPU training configurations with a protected
@@ -767,6 +771,14 @@ stopped; explicit resume spawns a replacement, re-evaluates the same node attemp
 and opens a question bound to its fresh claim. The old answer receives 409 without
 changing the journal. The history retains that question as superseded. The proof
 counts both score executions and distinguishes them from the single terminal result.
+With `--obligations`, the operator enables research/report every node, a run concept
+base, reflection priors and per-node comparative lesson/skill reviews. The agent
+uses MCP discovery, publishes a research memo, tags candidates, seeds `run_concepts`,
+and writes reports over actual measured state. It records justified no-action
+reviews because this single deterministic fixture supports no reusable ML finding.
+Reports/reviews survive reconnect and become due again after reset, even when the
+node count is unchanged. Finalization closes finish obligations without satisfying
+an expansion-only research gate. This flag can be combined with `--engine-loss`.
 Only this fixture restores its known valid bytes; that is not a production repair
 procedure. `acceptance.json`, engine logs and inspection output are saved under the
 output directory. This checks protocol recovery, not model judgments or interactive

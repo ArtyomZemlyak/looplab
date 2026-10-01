@@ -123,7 +123,7 @@ def snapshot(rd: Path, expected_generation: str, *, activity_reader,
 
     due("research", research_due(settings, state, events), "command:research_completed")
     due("report", report_cadence_due(settings, state, events), "command:report_generated")
-    due("concept_run_base", run_base_due(settings, state), "command:run_concepts")
+    due("concept_tags", run_base_due(settings, state), "command:run_concepts")
     due("hypothesis_merge", merge_due(settings, state, events),
         "GET/POST /api/runs/{run_id}/harness-hypotheses")
     due("selection_verifier", verification_due(settings, state),

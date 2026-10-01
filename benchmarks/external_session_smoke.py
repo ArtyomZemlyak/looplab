@@ -12,6 +12,8 @@ Use --checkpoint-hold-seconds to observe a paused open checkpoint over a real
 wall-clock interval; waiting never answers the checkpoint or resumes the run.
 Use --engine-loss to terminate this fixture's engine at that checkpoint and
 check explicit recovery with a fresh evaluator question.
+Use --obligations to exercise enabled research, concept base, report and
+lesson/skill reviews across MCP sessions and node reset.
 """
 from __future__ import annotations
 
@@ -35,6 +37,7 @@ from starlette.responses import JSONResponse
 import uvicorn
 
 from benchmarks.claude_harness_smoke import SCORER, wait_for
+from benchmarks._external_obligation_cycle import settle_obligations
 from looplab.events.eventstore import EventStore
 from looplab.harness.mcp_server import HarnessAPI
 from looplab.serve.protocol import COMMAND_TERMINAL_STATUSES
@@ -52,8 +55,9 @@ async def until(function, predicate, seconds=30):
 
 
 class Client:
-    def __init__(self, session, generation):
+    def __init__(self, session, generation, obligations=False):
         self.session, self.generation = session, generation
+        self.obligations = obligations
 
     async def call(self, name, args):
         result = await self.session.call_tool(name, args)
@@ -98,6 +102,8 @@ class Client:
         return receipt
 
     async def inject(self, steps, key, status=200):
+        if self.obligations:
+            await settle_obligations(self, expanding=True)
         assert (await self.progress())["complete"]
         await self.call("phases", {"query": "implementation"})
         await self.call("phase_info", {"phase_id": "implementation"})
@@ -105,6 +111,8 @@ class Client:
             "idea": {"operator": "draft", "footprint": {"gpus": 0},
                      "rationale": f"Measure {steps} training steps with the unchanged scorer."},
             "files": {"config.json": json.dumps({"steps": steps})}}}
+        if self.obligations:
+            body["data"]["idea"]["concepts"] = ["model/linear"]
         return await self.request("POST", "commands", body, key, status)
 
     async def question(self):
@@ -144,6 +152,8 @@ def main():
                         help="Observe the paused open checkpoint for 0..86400 real seconds")
     parser.add_argument("--engine-loss", action="store_true",
                         help="Terminate the owned engine at its open checkpoint before reconnect")
+    parser.add_argument("--obligations", action="store_true",
+                        help="Enable research/concept/report and lesson/skill reviews in the recovery scenario")
     args = parser.parse_args()
     if not 0 <= args.checkpoint_hold_seconds <= 86400:
         parser.error("--checkpoint-hold-seconds must be finite and between 0 and 86400")
@@ -175,7 +185,7 @@ def main():
     owned_engines = []
     faults = {"command": False, "answer": False}
     proof = {"agent_connection": "not_measured", "model_judgment_tested": False,
-             "engine_loss": args.engine_loss, "observations": []}
+             "engine_loss": args.engine_loss, "obligations": args.obligations, "observations": []}
     log = (root / "engine.log").open("w", encoding="utf8")
 
     def start_ui():
@@ -223,7 +233,7 @@ def main():
             env={**child_env, "LOOPLAB_HARNESS_URL": url, "LOOPLAB_HARNESS_TOKEN": token})
         async with stdio_client(params) as (reader, writer), ClientSession(reader, writer) as mcp:
             await mcp.initialize()
-            client = Client(mcp, generation)
+            client = Client(mcp, generation, args.obligations)
             assert (await client.call("capabilities", {}))["protocol_version"] == 4
             assert (await client.call("connection_check", {"run_id": "demo", "expected_generation": generation}))["ok"]
             for suffix in ("config", "harness-contract", "artifact?root=run&path=task.snapshot.json&expected_generation=" + generation):
@@ -353,6 +363,9 @@ def main():
         await client.commentary("node", "session:summary:1", "Увеличили число шагов обучения; ошибка на той же проверке стала ниже. Это один детерминированный пример, не подтверждение устойчивости. Далее нужны независимые seeds.", 1)
         proof["metrics"] = [first_node["metric"], second["metric"]]
         proof["reset_answer"] = {**answer, "checkpoint_id": q["checkpoint_id"], "action_id": "session:stage:1"}
+        if args.obligations:
+            await settle_obligations(client, expanding=False)
+            proof["before_reset_evidence_revision"] = (await client.progress())["evidence_revision"]
 
         await client.call("phases", {"query": "recovery"})
         await client.call("phase_info", {"phase_id": "recovery"})
@@ -369,6 +382,10 @@ def main():
         assert (await client.state())["state"]["paused"]
         assert (await client.progress())["execution"]["engine_running"] is False
         assert (await client.receipt("session:candidate:1"))["command"]["status"] == "succeeded"
+        if args.obligations:
+            restored = await client.progress()
+            assert not restored["finish_reviews_due"] and not restored["finish_report_due"]
+            assert restored["evidence_revision"] == proof["before_reset_evidence_revision"]
         await anyio.sleep(.5)
         assert all(path.read_bytes() == content for path, content in before.items())
         await client.call("phases", {"query": "recovery"})
@@ -385,6 +402,14 @@ def main():
         await client.command("node_reset", {"node_id": 1, "from_stage": "eval", "generation": 0}, "session:reset:1")
         q = await client.question()
         assert q["node_id"] == 1 and q["node_generation"] == 1
+        if args.obligations:
+            refreshed = await client.progress()
+            assert refreshed["finish_report_due"] and set(refreshed["finish_reviews_due"]) == {"lessons", "skill_candidates"}
+            assert refreshed["evidence_revision"] != proof.pop("before_reset_evidence_revision")
+            history = (await client.read("harness-progress"))["history"]["reviews"]["items"]
+            assert history and all(row["validity"] == "superseded" for row in history)
+            proof["reset_obligations"] = {"report_due": True, "reviews_due": refreshed["finish_reviews_due"],
+                "superseded_reviews": len(history), "same_node_count": refreshed["at_node"]}
         old_answer = proof.pop("reset_answer")
         assert q["checkpoint_id"] != old_answer["checkpoint_id"]
         assert (await client.request("POST", "harness-checkpoints", old_answer))["replayed"]
@@ -406,6 +431,8 @@ def main():
         await client.call("phases", {"query": "recovery"})
         await client.call("phase_info", {"phase_id": "recovery"})
         assert (await client.progress())["complete"]
+        if args.obligations:
+            proof["finish_obligations"] = await settle_obligations(client, expanding=False)
         await client.command("run_abort", {"reason": "Completed disposable multi-session recovery acceptance."}, "session:finish")
         summary = ("Запуск явно завершён: два успешных узла, третий failed без метрики. После остановки engine незавершённая оценка повторена с новым checkpoint; готовый узел позже переизмерен через reset. Все продолжения были явными. Для исследовательского вывода нужны другие seeds."
                    if args.engine_loss else "Запуск явно завершён: два успешных узла, один повторно оценён после resume; третья конфигурация неуспешна. Разрыв MCP сохранил результаты, продолжение выбрано явно. Для исследовательского вывода нужны другие seeds.")
@@ -419,6 +446,9 @@ def main():
             "cross_run_concepts": False, "cross_run_curation": False, "reflection_priors": False,
             "lessons_every": 0, "comparative_lessons": False, "concurrent_research": False,
             "train_monitor": False, "asha_live": False, "stage_check_tools": False, "memory_dir": str(root / "memory")}
+        if args.obligations:
+            flags.update(deep_research_every=1, report_every=1, concept_run_base=True, reflection_priors=True,
+                         lessons_every=1, comparative_lessons=True)
         command = [sys.executable, "-m", "looplab.cli", "run", str(task_path), "--out", str(runs / "demo"),
                    "--backend", "toy", "--max-nodes", "4"]
         for key, value in flags.items():
@@ -446,6 +476,13 @@ def main():
         assert len(first_stages) == 1 + int(args.engine_loss)
         assert all(row.data["name"] == "score" for row in first_stages)
         proof["initial_score_stage_completions"] = len(first_stages)
+        if args.obligations:
+            counts = {kind: sum(row.type == kind for row in events) for kind in
+                      ("research_completed", "run_concepts", "report_generated")}
+            assert counts == {"research_completed": 3, "run_concepts": 1, "report_generated": 4}
+            reviews = [json.loads(line) for line in (runs / "demo" / "harness_reviews.jsonl").read_text(encoding="utf8").splitlines()]
+            assert len(reviews) == 8 and all(row["decision"] == "no_applicable_action" for row in reviews)
+            proof["obligation_receipts"] = {**counts, "reviews": len(reviews)}
         for path in [source / "score.py", *((runs / "demo" / "nodes" / f"node_{nid}" / "score.py") for nid in range(3))]:
             assert hashlib.sha256(path.read_bytes()).hexdigest() == scorer_hash
         for operation in ("inspect", "replay"):

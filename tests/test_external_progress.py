@@ -57,6 +57,31 @@ def test_policy_preview_tracks_live_strategy_without_creating_candidates(tmp_pat
     assert preview["actions"] and len(store.read_all()) == before + 1
 
 
+def test_concept_base_blocker_resolves_to_the_actual_mcp_phase(tmp_path):
+    from looplab.harness.phases import phase_detail
+
+    rd, store, client = _run(tmp_path)
+    config = json.loads((rd / "config.snapshot.json").read_text())
+    config["concept_run_base"] = True
+    (rd / "config.snapshot.json").write_text(json.dumps(config))
+    store.append("node_created", {"node_id": 2, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "concepts": ["model/linear"]}})
+    store.append("node_evaluated", {"node_id": 2, "metric": .5})
+    generation = run_generation_token(store.read_all())
+    for brief in (False, True):
+        progress = client.get("/api/runs/demo/harness-progress", params={
+            "expected_generation": generation, "brief": brief}).json()
+        blocker, = progress["candidate_blockers_if_expanding"]
+        phase = phase_detail(blocker["phase_id"])
+        assert phase is not None, blocker
+        assert blocker["action"] in phase["writes"]
+        assert phase["write_access"][blocker["action"]] == "external_agent"
+    before = (rd / "events.jsonl").read_bytes()
+    assert client.get("/api/runs/demo/harness-progress", params={
+        "expected_generation": generation}).json()["finish_report_due"] is False
+    assert (rd / "events.jsonl").read_bytes() == before
+
+
 def test_progress_restores_decisions_reviews_and_checkpoint_answers(tmp_path):
     rd, store, client = _run(tmp_path)
     generation = run_generation_token(store.read_all())

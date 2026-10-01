@@ -595,8 +595,8 @@ External run здесь намеренно не получал кандидат�
 | OB-08 | Частично | Essential открывается с модели, показывает 13 полей ресурсов и лимитов с короткими пояснениями; технические детали и runtime permissions раскрываются отдельно. | Проверить подключение модели и понимание лимитов с новым пользователем. |
 | OB-09 | Частично | Run workspace и Agent cycle показывают next step; списки различают внешний режим и engine, attention открывает текущие вопросы (§34–36). Гибель MCP и pause/resume проверены (§37–38). | Подключение самого агента не измеряется; многочасовой сценарий OB-10 ещё открыт. |
 | OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–38 проверяют три MCP-сессии, restart UI, pause/resume и повторную оценку. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
-| OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. §39 исправляет ссылки checkpoint на реальные MCP-фазы. | Проверены контракт, subprocess-кандидаты, desktop и discovery из серверной подсказки; подключение нового клиента относится к OB-10. |
-| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–40: source health, lifecycle verdict и восстановление после аварийной остановки engine. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. Живость внешнего агента остаётся явно неизмеряемой. |
+| OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. §39/41 исправляют ссылки checkpoint и concept base на реальные MCP-фазы. | Проверены контракт, subprocess-кандидаты, desktop и discovery из серверной подсказки; подключение нового клиента относится к OB-10. |
+| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–41: source health, lifecycle verdict, engine recovery и восстановление включённых report/review обязанностей. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. Живость внешнего агента остаётся явно неизмеряемой. |
 | OB-14 | Частично | Начало сайта показывает два основных входа. | Большая архитектурная схема всё ещё нуждается в упрощении для первого знакомства. |
 
 Остальные пункты §3 и соответствующие сценарии §11 остаются открытыми. Изменения первого
@@ -1703,3 +1703,70 @@ Result-notices по-прежнему используют измеренную e
 **193 replay** перед изменением. Контрольный live-прогон без `--engine-loss` тоже
 прошёл: `.tmp/external-engine-loss-control-1/acceptance.json`, один первый score
 stage и тот же checkpoint после resume живого engine.
+
+## 41. OB-10/11/12: recovery с включёнными фазами исследования и отчёта
+
+### Исправленная ссылка concept base
+
+Expansion blocker для включённого `concept_run_base` возвращал это имя настройки
+как `phase_id`, хотя в MCP-каталоге соответствующая фаза — `concept_tags`.
+Направленный тест полного и compact progress воспроизвёл отсутствующую фазу.
+Теперь blocker указывает `concept_tags` и прежний `command:run_concepts`.
+Проверены существование фазы и внешний write access. Настройка, admission gate,
+контрольный command и его защитные проверки не менялись. Mounted UI отображает
+реальное имя фазы и команду.
+
+### Реальный MCP-прогон с обязанностями
+
+Новый `--obligations` в `benchmarks.external_session_smoke` включает:
+`deep_research_every=1`, `report_every=1`, `concept_run_base=true`,
+`reflection_priors=true`, `lessons_every=1`, `comparative_lessons=true`.
+Для остальных выключенных обязанностей остаётся прежняя ограниченная конфигурация;
+нет заявления о проверке всех настроек LoopLab этим одним сценарием.
+
+Агент начинает с live contract/config/task/progress, ищет каждую требуемую фазу
+через MCP и проверяет write access. Fixture задаёт известный protected SGD scorer;
+агент читает task и измеренную историю, публикует
+research memo, задаёт кандидатам authored concept tags и seeding run base после
+первого измерения. Report содержит прочитанные node ID, attempt, status и metric;
+контент проходит обычную валидацию `report_generated`. Указанные числа получены
+scorer, не переданы как оценка кандидата.
+
+Lesson/skill reviews содержат `no_applicable_action` и причину: один искусственный
+детерминированный пример восстановления не даёт независимого ML-вывода для
+межзадачной памяти. Evidence — текущие terminal узлы. Exact replay review в том же
+evidence window не создаёт вторую запись. Новые reusable lessons не выдумываются.
+
+Report и reviews текущего node window публикуются перед штатной паузой. Третья
+MCP-сессия видит их актуальными без повторного authoring. После `node_reset`
+число узлов остаётся **2**, но меняется evidence revision: report и две review-фазы
+снова due, прежние **4** review-записи становятся `superseded`. После переоценки
+агент заново закрывает текущие требования перед третьим кандидатом.
+
+Перед finish опубликованы текущий report и две reasoned reviews. Expansion-only
+research всё ещё due при трёх узлах; он не мешает явному `run_abort`. Это проверяет
+разделение двух направлений работы, а не отключение обязательных finish gates.
+Result-notices после terminal узлов и run сохраняют русские сводки и exact retry.
+
+Сценарий также комбинируется с `--engine-loss`: новый evaluator отклоняет старый
+verdict, после чего агент продолжает через текущие обязанности. Измеренные MSE
+прежние: **0.7807408706494512** при пяти шагах, **0.000012609385167897514** при 80,
+failed без метрики при нуле. Повторная оценка 80 шагов совпала в этой задаче.
+Scorer побайтно неизменён; CLI `inspect` и `replay` проходят.
+
+Proof обычного восстановления с обязанностями:
+`.tmp/external-obligations-proof-4/acceptance.json`. Комбинированный сценарий с
+остановкой engine: `.tmp/external-obligations-final-proof-1/acceptance.json`.
+Рецепты и параметры приведены в [external guide](guide/external-harness.md).
+Комбинированный proof содержит **3** research memo, **1** run concept base,
+**4** report и **8** review-записей; exact replay reviews не увеличил их число.
+
+### Регрессия и границы
+
+Прошли **290 backend** проверок, включая external run mode, checkpoint lifecycle,
+progress, MCP и доступ; **5 mounted UI**, **32 docs/architecture** проверки и
+`mkdocs build --strict`. Перед изменением прошли
+**193 replay** проверки. Проверяются настоящие training subprocess, MCP и durable
+API без provider/model вызовов. Research memo здесь — разбор локального кода и
+измеренных результатов, не поиск литературы. Качество модельных решений,
+интерактивные разрешения клиентов и многочасовой сеанс остаются открытыми в OB-10.

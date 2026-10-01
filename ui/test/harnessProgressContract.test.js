@@ -67,7 +67,11 @@ test('external cycle renders candidate and finalization obligations from progres
   const harness = await mountLive({ visible: true })
   try {
     const { HarnessProgressPanel } = await harness.load('/src/panels.jsx')
-    globalThis.fetch = fetchStub({ '/api/runs/mnist/harness-progress': progress })
+    const withConceptBase = { ...progress, candidate_blockers_if_expanding: [
+      ...progress.candidate_blockers_if_expanding,
+      { phase_id: 'concept_tags', action: 'command:run_concepts' },
+    ] }
+    globalThis.fetch = fetchStub({ '/api/runs/mnist/harness-progress': withConceptBase })
     const view = await harness.mount(HarnessProgressPanel, {
       runId: 'mnist', expectedGeneration: generation, externalMode: true,
       configStatus: 'ready', onOpenEvents() {}, onClose() {},
@@ -77,6 +81,7 @@ test('external cycle renders candidate and finalization obligations from progres
     const content = view.container.textContent.replace(/\s+/g, ' ')
     assert.match(content, /A nonempty hypothesis statement is required/)
     assert.match(content, /Wait for or explicitly abort pending nodes: 2/)
+    assert.match(content, /concept_tags.*command:run_concepts/)
     assert.ok(globalThis.fetch.calls.some(call =>
       call.method === 'GET' && call.path === '/api/runs/mnist/harness-progress'))
   } finally {
