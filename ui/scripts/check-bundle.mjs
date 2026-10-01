@@ -86,7 +86,10 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // 2026-10-01 selected-result verdict and master integration: measured 590,319 B JS.
     // 2026-10-01 external next-step discovery: measured 590,849 B (+530 B).
     // Summary stays in the lazy panel; the existing shell/reachability ceilings remain.
-    js: { gzip: 578 * KIB },
+    // 2026-10-01 external-agent handoff: measured 592,872 B (+2,023 B).
+    // The lazy Agent cycle now reads verified connection context and prepares a credential-free
+    // instruction; initial shell remains 82,912 B. All route/reachability ceilings stay unchanged.
+    js: { gzip: 580 * KIB },
     css: { gzip: 57 * KIB },
   },
   individual: {

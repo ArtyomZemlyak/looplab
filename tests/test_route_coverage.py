@@ -75,7 +75,9 @@ def test_the_untested_backlog_only_shrinks(live, manifest):
     assert len(UNTESTED_ROUTES) <= 0, len(UNTESTED_ROUTES)
 
 
-def test_the_recorder_credits_the_route_a_request_reached_and_nothing_else(tmp_path, monkeypatch):
+@pytest.mark.parametrize("built_ui", [False, True])
+def test_the_recorder_credits_the_route_a_request_reached_and_nothing_else(tmp_path, monkeypatch,
+                                                                        built_ui):
     """What makes the manifest honest, driven: a request the token gate refuses reaches no route, a
     literal route is credited under its own template and a catch-all under ITS template (dispatch
     order, not URL text), and a 405 credits nothing."""
@@ -84,6 +86,11 @@ def test_the_recorder_credits_the_route_a_request_reached_and_nothing_else(tmp_p
     from looplab.serve.server import make_app
 
     monkeypatch.setenv("LOOPLAB_UI_TOKEN", "sekret")
+    dist = tmp_path / "dist"
+    if built_ui:
+        (dist / "assets").mkdir(parents=True)
+        (dist / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    monkeypatch.setattr("looplab.serve.server._ui_dist", lambda: dist)
     token = {"X-LoopLab-Token": "sekret"}
     recorder = RouteRecorder()
     recorder.install()
@@ -94,13 +101,19 @@ def test_the_recorder_credits_the_route_a_request_reached_and_nothing_else(tmp_p
         assert not recorder.dispatched, "a refused request reached no route"
         assert client.get("/api/memory", headers=token).status_code == 200
         assert client.get("/api/knowledge", headers=token).status_code == 200
-        assert client.get("/api/knowledge/x.md", headers=token).status_code == 405   # PUT-only
+        # With a built UI, the GET fallback handles this PUT-only path and refuses it
+        # as an unknown API route. Without that fallback dispatch produces a 405.
+        assert client.get("/api/knowledge/x.md", headers=token).status_code == (404 if built_ui else 405)
+        assert client.patch("/api/knowledge/x.md", headers=token).status_code == 405
     finally:
         recorder.uninstall()
-    assert dict(recorder.dispatched) == {
+    expected = {
         ("GET", "/api/memory"): {"tests/test_example.py"},
         ("GET", "/api/{kind}"): {"tests/test_example.py"},
     }
+    if built_ui:
+        expected[("GET", "/{path:path}")] = {"tests/test_example.py"}
+    assert dict(recorder.dispatched) == expected
 
 
 def test_a_merge_replaces_only_what_a_completely_run_file_dispatched():

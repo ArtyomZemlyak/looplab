@@ -32,6 +32,7 @@ import { timelineEventKey } from './timelineModel.js'
 import { queuedGenerationControls } from './queue.js'
 import Panel from './PanelShell.jsx'
 import HarnessNextStep, { validHarnessNextStep } from './HarnessNextStep.jsx'
+import HarnessHandoff from './HarnessHandoff.jsx'
 import './overview.css'
 import './report-trust-polish.css'
 import { DataTable, downloadBlob } from './accessibility.jsx'
@@ -863,6 +864,7 @@ export function HarnessProgressPanel({ runId, expectedGeneration, seq, externalM
     {!validGeneration && <p className="muted" role="status">Waiting for a durable run generation…</p>}
     {scope && <PanelResourceNotice resource={resource} label="Agent cycle"
       onRetry={() => resource.retry()} />}
+    {scope && <HarnessHandoff runId={runId} generation={expectedGeneration} seq={seq} />}
     {progress && <>
       {!progress.complete && <div className="report-inline-state error" role="alert">
         An event, decision, review or checkpoint journal has damaged rows. History below may be partial;

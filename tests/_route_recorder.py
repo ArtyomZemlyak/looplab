@@ -66,10 +66,18 @@ def live_routes(app) -> set[Route]:
 
 
 def live_app_routes() -> set[Route]:
+    from unittest.mock import patch
+
     from looplab.serve.server import make_app
 
     with tempfile.TemporaryDirectory() as root:
-        return live_routes(make_app(Path(root)))
+        # Include the production static routes even on CI without a built UI. Otherwise
+        # building the UI changes the coverage universe and recording loses these rows.
+        dist = Path(root) / "dist"
+        (dist / "assets").mkdir(parents=True)
+        (dist / "index.html").write_text("<!doctype html>", encoding="utf-8")
+        with patch("looplab.serve.server._ui_dist", return_value=dist):
+            return live_routes(make_app(Path(root) / "runs"))
 
 
 def parse_manifest(text: str) -> dict[Route, set[str]]:

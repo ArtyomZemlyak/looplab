@@ -60,6 +60,8 @@ def test_assets_are_gzipped_and_immutable_while_open_index_revalidates(tmp_path,
     assert client.get("/assets/runtime.js").headers["Cache-Control"] == "no-cache", (
         "manifest membership alone must not make a stable, non-content-addressed URL immutable")
     assert client.get("/").headers["Cache-Control"] == "no-cache"
+    assert client.get("/index.html").headers["Cache-Control"] == "no-cache"
+    assert client.get("/api/unknown-route").status_code == 404
 
 
 def test_live_sse_route_guard_supports_proxy_prefixes_without_matching_lookalikes():

@@ -110,7 +110,7 @@ class HarnessAPI:
 
     def run_progress(self, run_id: str, expected_generation: str) -> dict:
         if (not run_id or run_id in (".", "..")
-                or any(char in run_id for char in "/\\%")):
+                or any(char in run_id for char in "/\\")):
             raise ValueError("run_id must be one literal run identifier")
         if re.fullmatch(r"[a-fA-F0-9]{64}", expected_generation) is None:
             raise ValueError("expected_generation must be the SHA-256 token from /state")

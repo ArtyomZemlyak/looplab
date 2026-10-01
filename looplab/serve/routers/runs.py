@@ -1046,6 +1046,25 @@ def build_router(srv) -> APIRouter:
             raise refusal("config_snapshot_unreadable") from exc
         return run_obligations(task, settings, generation=generation)
 
+    @router.get("/api/runs/{run_id}/harness-handoff")
+    def get_harness_handoff(run_id: str, response: Response,
+                            expected_generation: str = Query(...)):
+        """Credential-free connection context for an already launched external run.
+
+        Server paths and task edit constraints are read from this run's snapshots.
+        A configured token or live engine is not proof of an agent connection.
+        """
+        from looplab.harness.handoff import snapshot
+        if _RUN_GENERATION_RE.fullmatch(expected_generation) is None:
+            raise HTTPException(400, "expected_generation must be a SHA-256 token")
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Vary"] = "X-LoopLab-Token, Authorization"
+        try:
+            return snapshot(_run_dir(run_id), expected_generation,
+                            credential_configured=srv.harness_auth_configured)
+        except OSError as exc:
+            raise refusal("event_log_unreadable") from exc
+
     @router.get("/api/runs/{run_id}/harness-progress")
     def get_harness_progress(run_id: str, expected_generation: str = Query(...),
                              offset: int = Query(0, ge=0, le=1_000_000),

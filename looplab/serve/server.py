@@ -792,6 +792,7 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
     srv = AppState(root=root, projects=projects, settings=settings_store, jobs=JobRegistry(),
                    reviews=reviews, resume_cancel=resume_cancel)
     srv.owner_auth_enabled = bool(ui_token)
+    srv.harness_auth_configured = bool(harness_token)
     # Explicit app-state handle for lifecycle integrations/tests; routers still close over the same
     # AppState instance, so replacing a dependency such as srv.commands is immediately observed.
     app.state.looplab = srv

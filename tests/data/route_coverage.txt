@@ -93,9 +93,10 @@ GET /api/runs/{run_id}/harness-checkpoints	tests/test_external_checkpoints.py
 POST /api/runs/{run_id}/harness-checkpoints	tests/test_external_checkpoints.py tests/test_external_progress.py
 GET /api/runs/{run_id}/harness-contract	tests/test_external_run_mode.py
 POST /api/runs/{run_id}/harness-decisions	tests/test_external_progress.py tests/test_external_run_mode.py
+GET /api/runs/{run_id}/harness-handoff	tests/test_harness_handoff.py
 GET /api/runs/{run_id}/harness-hypotheses	tests/test_external_run_mode.py
 POST /api/runs/{run_id}/harness-hypotheses	tests/test_external_run_mode.py
-GET /api/runs/{run_id}/harness-progress	tests/test_external_progress.py
+GET /api/runs/{run_id}/harness-progress	tests/test_external_progress.py tests/test_harness_handoff.py
 POST /api/runs/{run_id}/harness-reviews	tests/test_external_progress.py tests/test_external_run_mode.py tests/test_external_selection.py
 GET /api/runs/{run_id}/harness-selection	tests/test_external_selection.py
 POST /api/runs/{run_id}/harness-selection/values	tests/test_external_selection.py
@@ -149,7 +150,10 @@ DELETE /api/supertasks/{sid}	tests/test_server.py
 PATCH /api/supertasks/{sid}	tests/test_projects.py tests/test_server.py
 GET /api/tasks	tests/test_launch_preflight.py tests/test_server.py
 POST /api/validate	tests/test_launch_preflight.py tests/test_run_proposal_schema.py tests/test_tui.py
-GET /api/{kind}	tests/test_memory_endpoint.py tests/test_route_coverage.py tests/test_server.py
+GET /api/{kind}	tests/test_memory_endpoint.py tests/test_route_coverage.py tests/test_server.py tests/test_static_delivery.py
 PUT /api/{kind}/{name}	tests/test_server.py
 GET /api/{kind}/{name}/operations/{operation_id}	tests/test_server.py
 PUT /api/{kind}/{name}/operations/{operation_id}	tests/test_server.py
+GET /review	tests/test_static_delivery.py
+GET /review/	tests/test_static_delivery.py
+GET /{path:path}	tests/test_static_delivery.py

@@ -28,6 +28,7 @@ def harness_manifest(*, include_settings: bool = False) -> dict:
             "submission": "Submit ready-made code/files using inject_node through /api/runs/{run_id}/commands; set parent_id for a branch. A code-less proposal is refused in this mode.",
             "task_snapshot_read": "Read the launched task via GET /api/runs/{run_id}/artifact?root=run&path=task.snapshot.json&expected_generation=TOKEN; obtain TOKEN from /state. GET /api/runs/{run_id}/config reads its settings.",
             "next_step_read": "MCP run_progress(run_id, expected_generation) reads the compact next step, expansion/finish gates and source health. It forwards one GET harness-progress?brief=true; follow detail references for questions/history and refresh after events or answers. This is advice, not admission or engine/agent liveness.",
+            "connection_context": "UI Progress > Agent cycle > Connect external agent reads generation-fenced harness-handoff. It shows actual server paths, task constraints, a credential-free stdio descriptor and a copyable run instruction. Supply the scoped secret separately; token scope is server-wide, not one run. Copying starts no run or client process.",
             "repair": "Inspect a failed node and submit a corrected ready-made candidate; no in-process triage or inline repair runs.",
             "stopping": "Pause or finalize through the durable command API. No automatic proposal or empty-search finalization runs in this mode.",
         },

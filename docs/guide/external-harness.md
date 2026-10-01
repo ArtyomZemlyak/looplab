@@ -29,9 +29,11 @@ operator starts the server and run, while the coding agent proposes candidates.
    `looplab run task.json --out runs/my-run --backend toy -s external_harness=true`.
    Keep this process running. The external agent, not LoopLab's built-in Researcher,
    chooses the next candidate; the task's evaluator still runs inside LoopLab.
-3. Configure the coding client's stdio MCP server as `looplab harness-mcp`, passing
-   only `LOOPLAB_HARNESS_TOKEN` and the UI URL. Client-specific examples are below.
-   Give the agent this instruction, replacing the run ID:
+3. In **Progress → Agent cycle → Connect external agent**, inspect the server/root
+   and copy the instruction for this run. Configure the coding client's stdio MCP
+   server as `looplab harness-mcp`, passing only `LOOPLAB_HARNESS_TOKEN` and the UI
+   URL. Supply the credential separately; client-specific examples are below.
+   Without the UI handoff, give the agent this instruction, replacing the run ID:
 
    > Start with `looplab harness`. Through MCP, read the current state, task,
    > config, harness-contract and harness-progress for `my-run`.
@@ -51,6 +53,54 @@ The coding agent's own model calls can still cost money; they are outside
 LoopLab's provider-cost ledger. The scoped token cannot launch a run or change
 global settings. The full `harness` contract and the live progress endpoint
 remain authoritative if enabled obligations require more steps than this sketch.
+
+### Connect from the UI
+
+For an already launched external run, open **Progress → Agent cycle → Connect
+external agent**. Opening this block performs an authenticated read of
+`GET /api/runs/{run_id}/harness-handoff?expected_generation=TOKEN`. The server
+checks the run generation, external mode, event history and saved task/config.
+The block displays its actual run root and directory, a last-read engine probe,
+and a generic stdio process descriptor:
+
+```json
+{
+  "command": "looplab",
+  "args": ["harness-mcp"],
+  "env": {"LOOPLAB_HARNESS_URL": "http://127.0.0.1:8765"}
+}
+```
+
+Place these fields in the MCP configuration format your client supports. LoopLab
+must be installed on that client's machine; if its executable is not on PATH,
+use its installed executable path. The UI uses its current HTTP(S) origin and
+proxy prefix, removing URL credentials, query and fragment. Check that this URL
+is reachable from the client: `127.0.0.1` on a remote client is that client's host.
+The run and source paths belong to the server host and may not exist locally.
+
+Supply a distinct `LOOPLAB_HARNESS_TOKEN` through the client's protected credential
+mechanism. Remove `LOOPLAB_UI_TOKEN` from the MCP process environment, including
+inherited variables. The descriptor and copied instruction contain no credential.
+The block reports only whether a scoped credential was configured when this
+server started; it cannot tell whether your client has the right secret or is
+connected. If none is configured, the operator must configure one and restart the
+server before connecting. Its scope covers the server's launched external runs
+and limited controls on internal runs, rather than only the displayed run.
+
+**Copy agent instruction** prepares the run identity, generation, workspace edit
+constraints and recovery reads. Constraint lists are bounded to 40 entries with
+explicit totals; the agent must still read the full task, config and contract.
+Known secrets in paths/names are redacted, so those paths need not be usable as
+filesystem commands. If clipboard access fails, select the instruction in
+**Preview instruction and workspace permissions**. A failed refresh or a newer
+observed event withdraws the copy action until fresh context arrives.
+
+Copying does not launch/resume a run or change a client configuration. After
+connecting, read current state and compare generation/run UID before acting;
+reconnect to the same run using current command receipts and checkpoints.
+Engine liveness does not measure agent liveness. This handoff has been exercised
+with the Python MCP SDK over real stdio; client-specific installation, secret
+storage and version compatibility still require their own acceptance checks.
 
 ## External harness setup
 
@@ -78,9 +128,9 @@ Keep that run process open while the coding agent sends commands from another te
 
 Configure your coding agent's MCP client to launch `looplab harness-mcp` over stdio,
 with **only** `LOOPLAB_HARNESS_TOKEN` and, if the server is elsewhere,
-`LOOPLAB_HARNESS_URL=http://127.0.0.1:8765`. The process offers eight tools:
+`LOOPLAB_HARNESS_URL=http://127.0.0.1:8765`. The process offers nine tools:
 `capabilities`, `phases`, `phase_info`, `settings_keys`, `setting_info`, `operations`,
-`operation_schema` and `api_request`. The latter
+`operation_schema`, `run_progress` and `api_request`. The latter
 forwards to the same authenticated HTTP API as the UI. It never writes directly to
 the event log. Use the live `operations` catalog to discover read, settings,
 task, evidence, artifact and control routes, and `operation_schema` for a route's

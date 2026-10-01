@@ -62,7 +62,8 @@ def test_api_refuses_redirect_to_avoid_forwarding_owner_token():
 
 
 @pytest.mark.parametrize("status", [200, 403, 409, 503])
-def test_compact_progress_is_one_fenced_authenticated_read(status):
+@pytest.mark.parametrize("run_id", ["demo space", "mnist # %2F"])
+def test_compact_progress_is_one_fenced_authenticated_read(status, run_id):
     seen = []
 
     def handler(request):
@@ -71,10 +72,10 @@ def test_compact_progress_is_one_fenced_authenticated_read(status):
 
     api = HarnessAPI("http://127.0.0.1:8765", "scoped-token",
                      transport=httpx.MockTransport(handler))
-    assert api.run_progress("demo space", "a" * 64) == {
+    assert api.run_progress(run_id, "a" * 64) == {
         "status": status, "body": {"receipt": "unchanged"}}
     assert len(seen) == 1 and seen[0].method == "GET"
-    assert seen[0].url.path == "/api/runs/demo space/harness-progress"
+    assert seen[0].url.path == f"/api/runs/{run_id}/harness-progress"
     assert dict(seen[0].url.params) == {"expected_generation": "a" * 64, "brief": "true"}
     assert seen[0].headers["X-LoopLab-Token"] == "scoped-token"
     assert "Idempotency-Key" not in seen[0].headers
@@ -82,7 +83,7 @@ def test_compact_progress_is_one_fenced_authenticated_read(status):
 
 @pytest.mark.parametrize("run_id,generation", [
     ("..", "a" * 64), ("x/y", "a" * 64), ("x\\y", "a" * 64),
-    ("%2e%2e", "a" * 64), ("", "a" * 64), ("demo", "stale")])
+    ("/absolute", "a" * 64), ("", "a" * 64), ("demo", "stale")])
 def test_compact_progress_refuses_invalid_identity_before_transport(run_id, generation):
     api = HarnessAPI("http://127.0.0.1:8765", transport=httpx.MockTransport(
         lambda request: pytest.fail("invalid identity reached the transport")))

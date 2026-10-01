@@ -10,7 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-150 routes on 133 paths; 10 deprecated; 27 with a declared response model.
+151 routes on 134 paths; 10 deprecated; 27 with a declared response model.
 
 ### `/api`
 
@@ -190,6 +190,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `POST` | `/api/runs/{run_id}/harness-checkpoints` | Answer exactly one checkpoint; the engine applies the verdict before advancing. | — |  |
 | `GET` | `/api/runs/{run_id}/harness-contract` | Effective choices and enforced task constraints for this run incarnation. | — |  |
 | `POST` | `/api/runs/{run_id}/harness-decisions` | Record a reviewed choice for an enabled phase, bound to the submitted idea. | — |  |
+| `GET` | `/api/runs/{run_id}/harness-handoff` | Credential-free connection context for an already launched external run. | — |  |
 | `GET` | `/api/runs/{run_id}/harness-hypotheses` | Live pure-belief board and whether configured duplicate review is due. | — |  |
 | `POST` | `/api/runs/{run_id}/harness-hypotheses` | Record a duplicate review; a merge and its receipt append atomically. | — |  |
 | `GET` | `/api/runs/{run_id}/harness-progress` | Live external obligations, pending questions and paged decision histories. | — |  |

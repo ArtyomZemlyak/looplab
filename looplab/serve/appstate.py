@@ -264,6 +264,7 @@ class AppState:
         self.reviews = reviews or ReviewStore(root / ".reviews")
         self.commands = RunCommandService(self)
         self.resume_cancel = resume_cancel
+        self.harness_auth_configured = False  # stamped once by make_app; never stores a secret
         # Keyed on `atomicio.file_identity` — the SAME canonical signature `state_payload`'s
         # reset-safe cache key is built from, not a narrower mirror of it. The comment here used to
         # claim that equivalence while `run_projections` spelled the tuple by hand minus `st_dev` and

@@ -594,7 +594,7 @@ External run здесь намеренно не получал кандидат�
 | OB-07 | Частично | Composer показывает активные права и понятное пояснение; четыре варианта раскрываются по запросу, выбор возвращает фокус на видимый переключатель. | Проверить понимание режимов с новым пользователем. |
 | OB-08 | Частично | Essential открывается с модели, показывает 13 полей ресурсов и лимитов с короткими пояснениями; технические детали и runtime permissions раскрываются отдельно. | Проверить подключение модели и понимание лимитов с новым пользователем. |
 | OB-09 | Частично | Живой внешний run без узлов показывает роль агента и ссылку на Agent cycle без спиннера подготовки. | Показать точное ожидание и состояние агента в других фазах. |
-| OB-10 | Частично | External harness guide даёт короткий первый путь с подготовкой operator и действиями агента. | Автоматизированный bootstrap и handoff пока отсутствуют. |
+| OB-10 | Частично | UI готовит проверенный handoff для existing external run; stdio descriptor и инструкция без credential, workspace и reconnect reads. | См. §26: проверен реальный MCP stdio. Клиентская установка, secret storage и матрица версий Codex/Claude остаются ручной настройкой и требуют отдельной приёмки. |
 | OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. | См. §25: проверены контракт, реальные subprocess-кандидаты и desktop; подключение нового клиента относится к OB-10. |
 | OB-12 | Частично | В guide описан reconnect и проверка state/progress перед повторной отправкой. | Сервер пока не определяет живость внешнего агента. |
 | OB-14 | Частично | Начало сайта показывает два основных входа. | Большая архитектурная схема всё ещё нуждается в упрощении для первого знакомства. |
@@ -908,3 +908,47 @@ JS gzip, initial **82916 B**; total ceiling 578 KiB и Concepts closure 260 KiB 
 Production build, `check:bundle` и строгая сборка документации прошли.
 
 ![Следующий шаг и адреса чтения для внешнего агента](assets/71-onboarding/19-external-agent-next-step.png)
+
+## 26. Подключение внешнего агента из UI
+
+**2026-10-01 · OB-10.** В **Progress → Agent cycle → Connect external agent** оператор
+получает адрес сервера, фактические run-root/run-dir, идентичность запуска и probe движка.
+Чтение `harness-handoff` проверяет generation, external mode, целостность event history
+и сохранённые task/config. В инструкцию входят ограничения editable surface, protected names
+и operator stages; списки ограничены 40 строками с явными total/truncation. Полный task/contract
+по-прежнему обязателен. Пути относятся к серверу и могут быть недоступны на машине клиента.
+
+Три шага: настроить stdio MCP process, отдельно передать scoped credential, скопировать
+инструкцию агента. Generic descriptor содержит только executable, args и URL; секреты и
+owner credential не копируются. URL сохраняет proxy prefix и очищает user/password/query/hash.
+Из names/paths удаляются известные секреты. Сервер сообщает только факт настройки harness token,
+а не успешную авторизацию клиента. Scope шире одного run — рекомендован отдельный server/root.
+Если token не настроен, показан operator setup. Owner token не предлагается для обхода launch gate.
+
+Копирование не меняет MCP config и не запускает/resume эксперимент. При неуспешном refresh
+или более новом наблюдаемом событии контекст и copy снимаются. При запрете clipboard инструкция
+доступна для ручного копирования. После подключения агент сверяет текущие generation/run UID,
+читает receipts, checkpoints и progress; pause/finalize остаются явными решениями.
+Живой UI или engine не объявляется доказательством подключения внешнего агента.
+
+Локальная приёмка: отдельный root, настоящий CLI engine и MCP SDK **2.2.0** через stdio.
+Прошли initialize, capabilities, phases/phase_info и scoped run_progress; попытка MCP launch
+отклонена **403**. Owner credential не передавался MCP process. Два реальных быстрых кандидата:
+первый упал с исключением, второй quadratic измерен со score **0**. Проверены pause/resume,
+явный finish, stale generation **409**, inspect/replay. Это offline smoke, не MNIST и
+не доказательство качества научных решений модели. Версионная приёмка установленных
+Codex/Claude клиентов и их secret storage остаётся открытой частью OB-10.
+
+Дополнительно исправлен `run_progress` для буквальных run ID с пробелами, `#` и `%2F`:
+ID URL-encoded ровно один раз; настоящий slash/traversal остаётся запрещённым.
+Буквальное имя проверено через реальный HTTP server и ASGI transport; Starlette TestClient
+повторно декодирует такой path, поэтому этот кейс не проверяется через его sync transport.
+Route coverage теперь учитывает production static routes независимо от наличия UI build;
+реальные запросы записаны recorder, dispatch отдельно проверен с built/unbuilt UI.
+
+Проверки: **193 replay**, **204 Python** (1 существующий skip), **1792 UI**; production build,
+`check:bundle` и строгая сборка документации. JS gzip **592872 B** (+2023 B), initial **82912 B**; total ceiling поднят
+до 580 KiB по измерению, route/reachability ceilings сохранены. Desktop проверен в браузере
+на **1920 × 1080** и **2560 × 1440**: без горизонтального переполнения и ошибок консоли.
+
+![Контекст подключения и инструкция для внешнего агента](assets/71-onboarding/20-external-agent-handoff.png)
