@@ -112,6 +112,29 @@ shows the latest three briefs; earlier loaded results can be expanded. Reads
 are bounded to 50 items (up to 200 explicitly); the full event history remains
 in Events. Incomplete event/commentary sources produce an explicit error.
 
+#### Recover earlier results after reconnect
+
+Start with the latest page. Its `items` are chronological within the page;
+`next_cursor` reads the next **older** page with the same `expected_generation`
+and chosen `limit`. Pass the cursor unchanged until `next_cursor` is null
+(`has_more=false`). Even more than 200 receipts can be drained in bounded pages.
+If an MCP reply exceeds its byte cap, start again with a smaller page limit.
+For each current receipt with `commentary=null`, publish an evidence-bound summary
+with a stable action ID for that evidence version. Keep the exact body for retries;
+existing commentary does not need to be copied or submitted again.
+
+The cursor binds this server run directory, generation, anchor receipt and evidence
+token. New completions and commentary do not shift older pages; restart UI preserves
+the cursor at the same path. A reset, changed anchor confirmation/provenance or
+different run returns HTTP 409 `result_notice_cursor_changed` with refresh advice.
+Malformed cursors return HTTP 400 `result_notice_cursor_invalid`; they never silently
+select the latest page. Read current state/generation and start from the latest page
+after a cursor refusal. These are current-evidence pages, not a frozen snapshot:
+older receipts may change, and POST rechecks every evidence token. After draining,
+refresh the latest page for completions that arrived meanwhile. Paging starts no
+work and creates no new admission/finalization requirement. The browser still loads
+its bounded latest-results view; this API recovery procedure is for the agent.
+
 ### Connect from the UI
 
 For an already launched external run, open **Progress → Agent cycle → Connect
@@ -1034,6 +1057,13 @@ inside its stdio process. It reads every phase and the setting metadata before
 and after reconnect, while its server, engine and protected scorer use the normal
 interpreter. Uvicorn may be present as an MCP dependency; it must not be imported
 by the stdio path. Combine this option with the discovery/response faults above.
+Use `--result-backlog --case all` in a fresh output directory to defer the two
+node interpretations across MCP death/UI restart, then recover them using one-item
+pages. Each summary is posted and exactly retried while its next cursor stays valid;
+finalized run/node receipts are paged too. This covers both agent loss and engine
+loss with an explicit resume. It can use `--mcp-python`; response-loss proxy options
+are separate probes. The fixture waits for the engine's existing post-evaluation
+`trust_scan` before asserting that commentary/page reads append no events.
 
 ## Delegating only code editing
 

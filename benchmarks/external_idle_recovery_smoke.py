@@ -19,6 +19,7 @@ import subprocess
 import sys
 import threading
 import time
+from urllib.parse import urlencode
 
 import anyio
 from mcp import ClientSession
@@ -37,7 +38,7 @@ from looplab.serve.server import make_app
 CASES = ("agent_loss", "engine_loss")
 
 
-def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, response_fault="disconnect", read_fault="disconnect", discovery_fault="none", mcp_python=None):
+def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, response_fault="disconnect", read_fault="disconnect", discovery_fault="none", mcp_python=None, result_backlog=False):
     root.mkdir(parents=True, exist_ok=False)
     runs = root / "runs"; runs.mkdir()
     source = root / "source"; source.mkdir()
@@ -122,7 +123,11 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
         node = await client.terminal(nid)
         proof["metrics"].append(node["metric"])
         summary = "SGD и защищённый scoring завершены; результат измерен движком. Прочитайте исходную квитанцию при переподключении и явно выберите следующий эксперимент. Одного запуска недостаточно для вывода о повторяемости."
-        if proxy is not None and nid == 0:
+        if result_backlog:
+            # Fixture simulates a reconnect before the agent has interpreted its
+            # measured results. Commentary is not an engine admission/finish gate.
+            proof.setdefault("deferred_result_nodes", []).append(nid)
+        elif proxy is not None and nid == 0:
             await client.progress()
             await client.call("phases", {"query": "result_summary"})
             await client.call("phase_info", {"phase_id": "result_summary"})
@@ -217,11 +222,58 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
             assert len(owned_engines) == 2
         assert (await client.progress())["next_step"]["code"] == "choose_direction"
         await candidate(client, 1, 32)
+        if result_backlog:
+            async def settled_trust():
+                return EventStore(rd / "events.jsonl").read_all()
+            # The engine records trust_scan after node_evaluated. Establish that
+            # existing lifecycle boundary before attributing any event to reads.
+            await until(settled_trust, lambda rows: any(r.type == "trust_scan" and
+                r.data.get("node_id") == 1 and r.data.get("generation") == 0 for r in rows))
+            before = (rd / "events.jsonl").read_bytes()
+            cursor, seen = None, []
+            await client.call("phases", {"query": "result_summary"})
+            await client.call("phase_info", {"phase_id": "result_summary"})
+            while True:
+                query = {"expected_generation": generation, "limit": 1}
+                if cursor:
+                    query["cursor"] = cursor
+                page = await client.request("GET", "result-notices?" + urlencode(query))
+                row, = page["items"]
+                assert row["kind"] == "node" and row["commentary"] is None
+                seen.append(row["node_id"])
+                body = {"expected_generation": generation, "receipt_id": row["id"],
+                    "evidence_token": row["evidence_token"], "action_id": f"idle:summary:{row['node_id']}",
+                    "summary": "Результат SGD измерен защищённым scorer и восстановлен после reconnect. Это один запуск; повторяемость ещё не проверена. Следующий эксперимент выберите по измеренным данным."}
+                assert not (await client.request("POST", "result-notices", body))["replayed"]
+                assert (await client.request("POST", "result-notices", body))["replayed"]
+                cursor = page["next_cursor"]
+                assert page["has_more"] == (cursor is not None)
+                if cursor is None:
+                    break
+            assert seen == [1, 0], seen
+            after = (rd / "events.jsonl").read_bytes()
+            assert after == before, after[len(before):].decode("utf8")
+            proof.update(backlog_node_order=seen, backlog_commentary_changed_no_work=True)
         await client.call("phases", {"query": "recovery"})
         await client.call("phase_info", {"phase_id": "recovery"})
         await client.command("run_abort", {"reason": "Completed disposable idle recovery acceptance."}, "idle:finish")
         await client.commentary("run", "idle:summary:run",
             "Проверка явно завершена. Разрыв MCP сохранил измеренный результат и квитанцию. Чтения ничего не запускали; следующий кандидат оценён после явного продолжения. Это короткая проверка протокола, не оценка живости удалённого агента.")
+        if result_backlog:
+            cursor, seen = None, []
+            while True:
+                query = {"expected_generation": generation, "limit": 1}
+                if cursor:
+                    query["cursor"] = cursor
+                page = await client.request("GET", "result-notices?" + urlencode(query))
+                row, = page["items"]
+                assert row["commentary"]
+                seen.append(row["id"])
+                cursor = page["next_cursor"]
+                if cursor is None:
+                    break
+            assert seen == ["run", "node:1:0", "node:0:0"]
+            proof["final_result_page_order"] = seen
 
     async def session(label, generation, drive, kill=False):
         pid_file = root / f"{label}.pid"
@@ -343,6 +395,9 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
             (root / f"{operation}.txt").write_text(result.stdout, encoding="utf8")
         proof.update(protected_scorer_unchanged=True, score_executions=len(starts),
                      engine_processes=len(owned_engines), inspect_replay="passed")
+        if result_backlog:
+            assert len((rd / "result_commentary.jsonl").read_text(encoding="utf8").splitlines()) == 3
+            proof["commentary_count"] = 3
         if proxy is not None:
             catalog_reads = ([{"method": "GET", "route": "openapi.json", "upstream_status": 200}] * 2
                              if discovery_fault != "none" else [])
@@ -386,6 +441,8 @@ def main():
                         default="none", help="Fault both live discovery tools before the first candidate; requires --drop-command-response.")
     parser.add_argument("--mcp-python", type=Path,
                         help="Use a separate harness-only interpreter with FastAPI absent and UI imports blocked; server/engine stay on this interpreter.")
+    parser.add_argument("--result-backlog", action="store_true",
+                        help="Defer node commentary across reconnect, then drain result pages and publish/retry each summary.")
     args = parser.parse_args()
     if not 0 <= args.quiet_hold_seconds <= 14400:
         parser.error("quiet hold must be between zero and four hours")
@@ -397,11 +454,13 @@ def main():
         parser.error("read fault requires --drop-command-response")
     if args.discovery_fault != "none" and not args.drop_command_response:
         parser.error("discovery fault requires --drop-command-response")
+    if args.result_backlog and args.drop_command_response:
+        parser.error("result backlog uses deferred summaries; run response-loss probes separately")
     root = args.out.resolve(); root.mkdir(parents=True, exist_ok=False)
     mcp_python = str(args.mcp_python.resolve()) if args.mcp_python else None
     if mcp_python and not Path(mcp_python).is_file():
         parser.error("MCP interpreter does not exist")
-    proof = [run_case(root / name, name, args.quiet_hold_seconds, args.drop_command_response, args.response_fault, args.read_fault, args.discovery_fault, mcp_python)
+    proof = [run_case(root / name, name, args.quiet_hold_seconds, args.drop_command_response, args.response_fault, args.read_fault, args.discovery_fault, mcp_python, args.result_backlog)
              for name in CASES if args.case in ("all", name)]
     (root / "acceptance.json").write_text(json.dumps(proof, ensure_ascii=False, indent=2), encoding="utf8")
 

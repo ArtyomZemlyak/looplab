@@ -594,9 +594,9 @@ External run здесь намеренно не получал кандидат�
 | OB-07 | Частично | Composer показывает активные права и понятное пояснение; четыре варианта раскрываются по запросу, выбор возвращает фокус на видимый переключатель. | Проверить понимание режимов с новым пользователем. |
 | OB-08 | Частично | Essential открывается с модели, показывает 13 полей ресурсов и лимитов с короткими пояснениями; технические детали и runtime permissions раскрываются отдельно. | Проверить подключение модели и понимание лимитов с новым пользователем. |
 | OB-09 | Частично | Run workspace и Agent cycle показывают next step; списки различают внешний режим и engine, attention открывает текущие вопросы (§34–36). Гибель MCP и pause/resume проверены (§37–38). §47 показывает последнее успешное scoped progress чтение. | Активность запросов не доказывает живость агента; многочасовой сценарий OB-10 ещё открыт. |
-| OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–53 проверяют MCP/UI recovery, pause/resume, engine loss, obligations, monitor, deadline и ASHA. §47–53 — request activity, auth, потерянные/неполные ответы, identity/discovery recovery и отдельный клиент с установкой только `[harness]`. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
-| OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. §39/41 исправляют ссылки checkpoint/concept base на реальные MCP-фазы; §52 различает unavailable discovery и пустой catalog; §53 убирает FastAPI dependency из `phase_info`. | Проверены контракт, subprocess-кандидаты, desktop и discovery из серверной подсказки; подключение нового клиента относится к OB-10. |
-| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–53: source health, lifecycle verdict, engine recovery, obligations, monitor, retarget, idle recovery, activity, unknown acknowledgement, identity квитанции и discovery/reconnect отдельного minimal client. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. §49–53 повреждают реальные replies, включая discovery. Наблюдение запросов не измеряет живость агента. |
+| OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–54 проверяют MCP/UI recovery, pause/resume, engine loss, obligations, monitor, deadline и ASHA. §47–54 — request activity, auth, потерянные/неполные ответы, identity/discovery recovery, отдельный `[harness]` клиент и восстановление пропущенных интерпретаций результатов. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
+| OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. §39/41 исправляют ссылки checkpoint/concept base на реальные MCP-фазы; §52 различает unavailable discovery и пустой catalog; §53 убирает FastAPI dependency из `phase_info`; §54 добавляет cursor для старых result receipts. | Проверены контракт, subprocess-кандидаты, desktop и discovery из серверной подсказки; подключение нового клиента относится к OB-10. |
+| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–54: source health, lifecycle verdict, engine recovery, obligations, monitor, retarget, idle recovery, activity, unknown acknowledgement, identity квитанции, minimal client и пагинация результатов без дублей интерпретаций. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. §49–53 повреждают реальные replies, включая discovery. §54 восстанавливает сообщения после reconnect. Наблюдение запросов не измеряет живость агента. |
 | OB-14 | Частично | Начало сайта показывает два основных входа. | Большая архитектурная схема всё ещё нуждается в упрощении для первого знакомства. |
 
 Остальные пункты §3 и соответствующие сценарии §11 остаются открытыми. Изменения первого
@@ -2519,3 +2519,66 @@ package-map/layering пояснение и full B/E diagram. Новых settings
 LoopLab versions должны совпадать; live route schema и server validation обязательны.
 Реальный перенос между физическими машинами, model judgments, interactive client
 approvals и многочасовые сеансы ещё не закрыты.
+
+## 54. OB-10/11/12: восстановление пропущенных интерпретаций всех результатов
+
+**2026-10-01.** После reconnect внешний агент мог прочитать только последние
+**50** result receipts, максимум **200**. `has_more` сообщал о старых результатах,
+но способа получить следующую страницу не было. Если агент пропустил много
+завершений, исполнить требование кратко объяснить каждый результат было невозможно.
+До исправления все **9** новых направленных regression checks упали.
+
+Существующий GET `/result-notices` теперь возвращает `next_cursor`. Следующий GET
+с тем же `expected_generation` и неизменённым cursor читает строго более старые
+текущие receipts. Внутри страницы порядок хронологический, первой выдаётся самая
+новая страница. Default/max limit **50/200** сохранён; после `next_cursor=null`
+агент обновляет head для завершений, появившихся во время обхода. При MCP reply cap
+можно уменьшить limit. Нового endpoint или MCP tool не добавлено.
+
+Cursor связан с server run directory, generation, ID и evidence token опорного
+receipt. Новые terminal results, запись commentary и restart UI по тому же пути
+не сдвигают границу. Malformed cursor возвращает **400**
+`result_notice_cursor_invalid`; другой run/generation, исчезнувший или изменённый
+anchor — **409** `result_notice_cursor_changed` с советом обновить state/head и
+сверить уже опубликованные interpretations. Cursor не credential и не заменяет
+scoped access. Это просмотр текущего evidence, а не замороженный snapshot всего
+run: POST по-прежнему проверяет актуальность receipt/evidence token.
+
+Агент публикует только отсутствующую текущую commentary, сохраняя точное тело и
+stable action ID для повторов потерянного ответа. Чтение страниц и запись prose
+не запускают engine, не создают admission/finish gate и не заменяют checkpoints
+или reports. UI сохраняет bounded latest-results view; эта правка относится к
+восстановлению внешнего агента через API/MCP.
+
+### Два настоящих коротких recovery прогона
+
+`external_idle_recovery_smoke --case all --result-backlog --mcp-python
+PATH_TO_HARNESS_ONLY_PYTHON` откладывает node interpretations до reconnect.
+Проверены гибель MCP с restart собственного UI и гибель engine с явным resume.
+Отдельный client environment не содержит FastAPI; imports FastAPI/Uvicorn
+запрещены, metadata всех **32** фаз прочитана до и после reconnect.
+
+В каждом run выполнены ровно **два** protected CPU SGD score executions: MSE
+**0.13721179500378475** и **0.01337676906957059**. Агент читает страницы `limit=1`
+в порядке node **1 → 0**, пишет русскую interpretation и точно повторяет каждый
+POST. После явного finalize доступны run → node 1 → node 0, ровно **три** commentary
+rows без дублей. Agent-loss case сохраняет **один** engine; engine-loss case имеет
+исходный и **один** replacement после явного resume. Scorer bytes неизменны,
+CLI `inspect`/`replay` проходят. Proof:
+`.tmp/external-result-backlog-proof-2/acceptance.json`.
+
+Первый live fixture поймал существующий `trust_scan` после `node_evaluated` при
+проверке event bytes. Fixture теперь дожидается этой уже существующей границы
+перед проверкой: paging/commentary не меняют event log. В production нового
+ожидания нет. Две ошибки unit fixtures также исправлены: duplicate terminal
+игнорируется replay, поэтому evidence change проверяется через confirmation;
+provenance backfill требует исходный provenance object. Синтетические 205 receipts
+служат проверкой полноты страниц и не считаются измеренными ML experiments.
+
+Перед правкой прошли **193 replay** проверки. Result paging/notice набор —
+**15 passed**; финальный backend/MCP/control набор — **240 passed**, включая эти
+15 checks. Guide, AGENTS, manifest, MCP instructions/phase help и full B/E diagram
+обновлены. Ещё **31 docs/diagram** check и `mkdocs build --strict` прошли.
+API reference регенерирован без изменения маршрутов. Физический
+remote transfer, model judgments, interactive client approvals и многочасовые
+сеансы остаются открытыми.

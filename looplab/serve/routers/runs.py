@@ -1118,16 +1118,19 @@ def build_router(srv) -> APIRouter:
     @router.get("/api/runs/{run_id}/result-notices")
     def get_result_notices(run_id: str, response: Response,
                            expected_generation: str = Query(..., pattern=r"^[0-9a-fA-F]{64}$"),
-                           limit: int = Query(50, ge=1, le=200)):
+                           limit: int = Query(50, ge=1, le=200),
+                           cursor: Optional[str] = Query(None, max_length=256)):
         """Brief node/run completion evidence for Assistant chat. Pure read, no model call.
 
         Current attempts only; incomplete event sources fail closed. Run completion
         waits for finalization and engine release. Commentary is separate agent prose.
+        Follow next_cursor for older current receipts; changed anchor evidence
+        requires refreshing the latest page. Reads never submit or resume work.
         """
         from looplab.serve.result_notices import snapshot
         response.headers["Cache-Control"] = "no-store"
         response.headers["Vary"] = "X-LoopLab-Token, Authorization"
-        return snapshot(srv, _run_dir(run_id), expected_generation, limit=limit)
+        return snapshot(srv, _run_dir(run_id), expected_generation, limit=limit, cursor=cursor)
 
     @router.post("/api/runs/{run_id}/result-notices")
     def publish_result_commentary(run_id: str, body: ResultCommentaryBody):

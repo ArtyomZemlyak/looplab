@@ -197,7 +197,7 @@ PHASES: tuple[Phase, ...] = (
           ("GET /api/memory", "GET /api/runs/{run_id}/state"),
           ("POST /api/runs/{run_id}/skill-candidates", "POST /api/runs/{run_id}/harness-reviews")),
     Phase("result_summary", "CompletionReceipt", "serve/result_notices.py",
-          "After each terminal node and finalized run, publish a brief interpretation in Assistant chat using measured evidence.",
+          "After each terminal node and finalized run, publish a brief interpretation in Assistant chat using measured evidence; on reconnect follow result-notices.next_cursor for older receipts.",
           ("GET /api/runs/{run_id}/result-notices", "GET /api/runs/{run_id}/state",
            "GET /api/runs/{run_id}/harness-checkpoints"),
           ("POST /api/runs/{run_id}/result-notices",)),

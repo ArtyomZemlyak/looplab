@@ -42,6 +42,7 @@ MCP_INSTRUCTIONS = (
     "After each terminal node and finalized run, read generation-fenced result-notices and POST "
     "a brief interpretation in the user's language with receipt_id, evidence_token and a stable "
     "action_id; retry a lost response with the exact body. Scores come from LoopLab, not prose. "
+    "On reconnect, follow result-notices.next_cursor for older receipts, preserving expected_generation; only publish missing current commentary. A changed cursor requires refreshing the latest page. "
     "Commentary executes no actions and never replaces checkpoints or report obligations. "
     "Use only the scoped harness credential; owner-only workflows require the operator."
 )

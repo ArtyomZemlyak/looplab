@@ -7,6 +7,7 @@ it never contains executable actions or fulfills a research/report obligation.
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 
 import orjson
@@ -30,6 +31,7 @@ from looplab.core.redact import redact_secrets
 
 _MAX_BYTES = 2 * 1024 * 1024
 _FILE = "result_commentary.jsonl"
+_CURSOR = re.compile(r"rn1\.([0-9a-f]{64})\.(run|node:[0-9]+:[0-9]+)\.([0-9a-f]{64})")
 
 
 def _digest(value) -> str:
@@ -140,21 +142,41 @@ def _receipts(srv, rd: Path, expected_generation: str) -> tuple[str, list[dict]]
     return generation, rows
 
 
-def _snapshot(srv, rd: Path, expected_generation: str, *, limit: int = 50) -> dict:
+def _snapshot(srv, rd: Path, expected_generation: str, *, limit: int = 50, cursor: str | None = None) -> dict:
     generation, rows = _receipts(srv, rd, expected_generation)
+    # Page backwards from a real receipt, not a shifting offset. Appending new
+    # completions or publishing commentary cannot skip/duplicate older receipts.
+    # This is a current-evidence view, not an immutable snapshot of the whole run.
+    scope = _digest({"run_dir": str(rd.resolve()), "generation": generation})
+    end = len(rows)
+    if cursor is not None:
+        match = _CURSOR.fullmatch(cursor)
+        if match is None:
+            raise HTTPException(400, {"code": "result_notice_cursor_invalid",
+                "message": "Invalid result notice cursor.", "remediation": "Read the latest page and use its next_cursor unchanged."})
+        anchor = next((i for i, row in enumerate(rows) if row["id"] == match[2]
+                       and row["evidence_token"] == match[3]), None)
+        if match[1] != scope or anchor is None:
+            raise HTTPException(409, {"code": "result_notice_cursor_changed",
+                "message": "Result notice cursor belongs to another run or changed completion evidence.",
+                "remediation": "Refresh state/generation and the latest result page; reconcile existing commentary before continuing."})
+        end = anchor
+    start = max(0, end - limit)
+    page = rows[start:end]
     comments = _comments(rd)
     by_receipt = {(c["generation"], c["receipt_id"], c["evidence_token"]): c["summary"] for c in comments}
-    for row in rows[-limit:]:
+    for row in page:
         row["commentary"] = by_receipt.get((generation, row["id"], row["evidence_token"]))
     if srv.commands.generation_fence(rd)[1] != generation:
         raise HTTPException(409, {"code": "run_generation_changed"})
-    return {"version": 1, "generation": generation, "total": len(rows), "items": rows[-limit:],
-            "has_more": len(rows) > limit}
+    next_cursor = f"rn1.{scope}.{page[0]['id']}.{page[0]['evidence_token']}" if start and page else None
+    return {"version": 1, "generation": generation, "total": len(rows), "items": page,
+            "has_more": start > 0, "next_cursor": next_cursor}
 
 
-def snapshot(srv, rd: Path, expected_generation: str, *, limit: int = 50) -> dict:
+def snapshot(srv, rd: Path, expected_generation: str, *, limit: int = 50, cursor: str | None = None) -> dict:
     try:
-        return _snapshot(srv, rd, expected_generation, limit=limit)
+        return _snapshot(srv, rd, expected_generation, limit=limit, cursor=cursor)
     except OSError as exc:
         raise refusal("run_path_unreadable") from exc
 
