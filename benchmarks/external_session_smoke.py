@@ -6,6 +6,8 @@ The output directory must be new. No provider/model calls or user configuration 
 Faults affect only this disposable server/journal: two committed responses are replaced
 with HTTP 503, one owned MCP process is killed, the UI server is restarted, and a
 checkpoint tail is damaged then restored from this fixture's known valid bytes.
+It also pauses the engine, reconnects without resuming it, explicitly resumes via
+the production command spawner, and re-evaluates a node behind a fresh checkpoint.
 """
 from __future__ import annotations
 
@@ -30,6 +32,7 @@ import uvicorn
 
 from benchmarks.claude_harness_smoke import SCORER, wait_for
 from looplab.harness.mcp_server import HarnessAPI
+from looplab.serve.protocol import COMMAND_TERMINAL_STATUSES
 from looplab.serve.server import make_app
 
 
@@ -80,6 +83,14 @@ class Client:
                                                    "idempotency_key": key})
         assert result["status"] == 200, result
         return result["body"]
+
+    async def command(self, kind, data, key):
+        await self.request("POST", "commands", {"expected_generation": self.generation,
+            "type": kind, "data": data}, key)
+        receipt = await until(lambda: self.receipt(key), lambda row:
+            row["command"]["status"] in COMMAND_TERMINAL_STATUSES)
+        assert receipt["command"]["status"] == "succeeded", receipt
+        return receipt
 
     async def inject(self, steps, key, status=200):
         assert (await self.progress())["complete"]
@@ -139,19 +150,34 @@ def main():
     token, owner = secrets.token_hex(32), secrets.token_hex(32)
     env_before = dict(os.environ)
     os.environ.update(LOOPLAB_HARNESS_TOKEN=token, LOOPLAB_UI_TOKEN=owner,
-        LOOPLAB_MEMORY_DIR=str(root / "memory"), LOOPLAB_KNOWLEDGE_DIR=str(root / "knowledge"))
+        LOOPLAB_MEMORY_DIR=str(root / "memory"), LOOPLAB_KNOWLEDGE_DIR=str(root / "knowledge"),
+        CUDA_VISIBLE_DEVICES="")
     child_env = {key: value for key, value in os.environ.items() if not key.startswith("LOOPLAB_")}
     child_env["PYTHONIOENCODING"] = "utf-8"
     child_env["CUDA_VISIBLE_DEVICES"] = ""  # This pure CPU scorer needs no host GPU lease.
     bind = socket.socket(); bind.bind(("127.0.0.1", 0)); port = bind.getsockname()[1]; bind.close()
     url = f"http://127.0.0.1:{port}"
     server = thread = engine = None
+    owned_engines = []
     faults = {"command": False, "answer": False}
     proof = {"agent_connection": "not_measured", "model_judgment_tested": False, "observations": []}
     log = (root / "engine.log").open("w", encoding="utf8")
 
     def start_ui():
         app = make_app(runs, bind_host="127.0.0.1")
+        original_spawn = app.state.looplab.commands.spawn_engine
+
+        def tracked_spawn(*args, **kwargs):
+            # Keep production spawning; retain only this private server's children
+            # for cleanup, never discover or terminate unrelated host processes.
+            from looplab.serve.engine_proc import _spawned_engines
+
+            pid = original_spawn(*args, **kwargs)
+            if pid is not None:
+                owned_engines.append(_spawned_engines[pid])
+            return pid
+
+        app.state.looplab.commands.spawn_engine = tracked_spawn
 
         @app.middleware("http")
         async def discard_ack(request, call_next):
@@ -241,18 +267,63 @@ def main():
         second = await client.terminal(1)
         assert second["metric"] < first_node["metric"]
         await client.commentary("node", "session:summary:1", "Увеличили число шагов обучения; ошибка на той же проверке стала ниже. Это один детерминированный пример, не подтверждение устойчивости. Далее нужны независимые seeds.", 1)
+        proof["metrics"] = [first_node["metric"], second["metric"]]
+        proof["reset_answer"] = {**answer, "checkpoint_id": q["checkpoint_id"], "action_id": "session:stage:1"}
+
+        await client.call("phases", {"query": "recovery"})
+        await client.call("phase_info", {"phase_id": "recovery"})
+        await client.progress()
+        await client.command("pause", {}, "session:pause")
+        await until(client.state, lambda row: row["state"]["paused"])
+        await anyio.to_thread.run_sync(lambda: engine.wait(timeout=10))
+        assert (await client.progress())["execution"]["engine_running"] is False
+        proof["observations"].append("explicit pause stopped the original engine after measured work")
+
+    async def resumed(client):
+        rd = runs / "demo"
+        before = {path: path.read_bytes() for path in (rd / "events.jsonl", rd / "harness_checkpoints.jsonl")}
+        assert (await client.state())["state"]["paused"]
+        assert (await client.progress())["execution"]["engine_running"] is False
+        assert (await client.receipt("session:candidate:1"))["command"]["status"] == "succeeded"
+        await anyio.sleep(.5)
+        assert all(path.read_bytes() == content for path, content in before.items())
+        await client.call("phases", {"query": "recovery"})
+        await client.call("phase_info", {"phase_id": "recovery"})
+        await client.command("resume", {}, "session:resume")
+        await until(client.state, lambda row: not row["state"]["paused"])
+        await until(client.progress, lambda row: row["execution"]["engine_running"] is True)
+        assert len(owned_engines) == 2
+        proof["observations"].append("third MCP session did not resume on reads; durable resume spawned one replacement engine")
+
+        await client.call("phases", {"query": "evaluation"})
+        await client.call("phase_info", {"phase_id": "evaluation"})
+        await client.progress()
+        await client.command("node_reset", {"node_id": 1, "from_stage": "eval", "generation": 0}, "session:reset:1")
+        q = await client.question()
+        assert q["node_id"] == 1 and q["node_generation"] == 1
+        old_answer = proof.pop("reset_answer")
+        assert q["checkpoint_id"] != old_answer["checkpoint_id"]
+        assert (await client.request("POST", "harness-checkpoints", old_answer))["replayed"]
+        assert (await client.state())["state"]["nodes"]["1"]["status"] == "pending"
+        assert (await client.read("harness-checkpoints"))["pending"][0]["checkpoint_id"] == q["checkpoint_id"]
+        await client.request("POST", "harness-checkpoints", {**old_answer, "checkpoint_id": q["checkpoint_id"],
+            "action_id": "session:stage:1:retry", "reason": "Reviewed fresh output from reset attempt."})
+        repeated = await client.terminal(1)
+        assert repeated["attempt"] == 1 and repeated["metric"] == proof["metrics"][1]
+        proof["remeasurement"] = {"node_id": 1, "attempt": repeated["attempt"], "metric": repeated["metric"]}
+        await client.commentary("node", "session:summary:1:retry", "После явного resume повторили оценку узла. Старый ответ остался квитанцией; новый stage потребовал отдельной проверки. Результат совпал в этой детерминированной задаче, независимые seeds ещё нужны.", 1)
+        proof["observations"].append("reset retained old answer ACK but required a new checkpoint; node attempt 1 remeasured the same score")
 
         await client.inject(0, "session:candidate:2")
         failed = await client.terminal(2, "failed")
         assert failed["metric"] is None
         await client.commentary("node", "session:summary:2", "Конфигурация с нулём шагов отклонена scorer. Метрика отсутствует; это не завершённое обучение. Следующий шаг — исправить параметры, сохранив проверку.", 2)
-        proof["metrics"] = [first_node["metric"], second["metric"], failed["metric"]]
+        proof["metrics"].append(failed["metric"])
         await client.call("phases", {"query": "recovery"})
         await client.call("phase_info", {"phase_id": "recovery"})
         assert (await client.progress())["complete"]
-        await client.request("POST", "commands", {"expected_generation": client.generation, "type": "run_abort",
-            "data": {"reason": "Completed disposable multi-session recovery acceptance."}}, "session:finish")
-        await client.commentary("run", "session:summary:run", "Запуск явно завершён: два измеренных обучения и одна неуспешная конфигурация. Разрыв MCP не остановил engine; повторное подключение сохранило результаты. Для исследовательского вывода нужны другие seeds.")
+        await client.command("run_abort", {"reason": "Completed disposable multi-session recovery acceptance."}, "session:finish")
+        await client.commentary("run", "session:summary:run", "Запуск явно завершён: два успешных узла, один повторно оценён после resume; третья конфигурация неуспешна. Разрыв MCP сохранил результаты, продолжение выбрано явно. Для исследовательского вывода нужны другие seeds.")
         assert len((await client.state())["state"]["nodes"]) == 3
 
     try:
@@ -267,6 +338,7 @@ def main():
         for key, value in flags.items():
             command += ["-s", f"{key}={str(value).lower() if isinstance(value, bool) else value}"]
         engine = spawn(command)
+        owned_engines.append(engine)
         with HarnessAPI(url, token).client as http:
             current = wait_for(lambda: http.get("api/runs/demo/state?observe_only=true"),
                 lambda row: row.status_code == 200 and row.json()["state"].get("setup_done")).json()
@@ -277,7 +349,9 @@ def main():
         assert not thread.is_alive()
         server, thread = start_ui()
         anyio.run(session, "reconnected", generation, recovered)
-        engine.wait(timeout=10)
+        anyio.run(session, "resumed", generation, resumed)
+        for proc in owned_engines:
+            proc.wait(timeout=10)
         assert faults == {"command": True, "answer": True}
         for path in [source / "score.py", *((runs / "demo" / "nodes" / f"node_{nid}" / "score.py") for nid in range(3))]:
             assert hashlib.sha256(path.read_bytes()).hexdigest() == scorer_hash
@@ -290,8 +364,9 @@ def main():
         (root / "acceptance.json").write_text(json.dumps(proof, ensure_ascii=False, indent=2), encoding="utf8")
         print(json.dumps({"metrics": proof["metrics"], "inspect_replay": "passed"}), flush=True)
     finally:
-        if engine is not None and engine.poll() is None:
-            engine.terminate(); engine.wait(timeout=10)
+        for proc in owned_engines:
+            if proc.poll() is None:
+                proc.terminate(); proc.wait(timeout=10)
         if server is not None:
             server.should_exit = True
         if thread is not None:

@@ -21,7 +21,7 @@ from looplab.events.eventstore import (EventStore, EventStoreLockError, interpro
                                        log_integrity)
 from looplab.events.replay import fold
 from looplab.events.run_generation import run_generation_token
-from looplab.harness.checkpoint_history import checkpoint_records
+from looplab.harness.checkpoint_history import checkpoint_records, project_checkpoints
 
 _MAX_LEDGER = 16 * 1024 * 1024
 _PHASES = frozenset({"stage_check", "train_monitor", "asha_live", "deadline_grace"})
@@ -119,9 +119,19 @@ def ask(rd: Path, node_id: int, node_generation: int, phase_id: str,
 
 
 def answer_for(rd: Path, checkpoint_id: str) -> dict | None:
-    _require_event_source(rd)
-    _, answers = _projection(_rows(_path(rd)))
-    return answers.get(checkpoint_id)
+    events = _events(rd)
+    state = fold(events)
+    history = project_checkpoints(_rows(_path(rd)), {"read_complete": True},
+                                  events, state, run_generation_token(events))
+    # Receipt replay proves prior acceptance. A worker needs authority for THIS
+    # pending lifecycle and claim; a reset/reclaim must not inherit the verdict.
+    for row in history:
+        question = row["question"]
+        if (question["checkpoint_id"] == checkpoint_id
+                and row["lifecycle"] == "same_node_attempt"
+                and state.nodes[question["node_id"]].status == "pending"):
+            return row["answer"]
+    return None
 
 
 def pending(rd: Path, expected_generation: str) -> list[dict]:

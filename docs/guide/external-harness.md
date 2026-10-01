@@ -679,6 +679,8 @@ normal; it does not create a new research run. Search `phases("recovery")` and r
    restart a nonterminal worker. Choose that recovery deliberately after the read.
    Inspect Events and node state: the last request may already have applied, and
    `succeeded` describes the control command, not a completed experiment.
+   Wait for that command's terminal receipt before another state-changing command;
+   seeing its effect or a live replacement engine can precede the worker's finish.
 4. Continue the outstanding decision, or explicitly pause/finalize. A checkpoint
    may remain open after the evaluator command has finished; answer it before
    treating the node as terminal. Finalization can owe a report or reviews.
@@ -691,6 +693,12 @@ unresolved; reconnecting does not repair journals or approve the stage. An opera
 must recover the source explicitly, then the agent must refresh state and progress.
 Keep a lost checkpoint answer's exact body and `action_id`: after a healthy source
 is available, an identical retry returns `replayed`, even after the node is terminal.
+That receipt proves prior acceptance. The engine consumes a verdict only while its
+run generation/UID, node attempt and latest evaluator claim are still current and
+the node is pending. Reset or evaluator reclaim requires a fresh question and answer.
+Pause itself does not supersede an in-flight question: an evaluation draining after
+pause can still require its answer. Reconnecting to a stopped, paused run leaves it
+paused until an explicit durable `resume` succeeds.
 
 In the UI, open **Agent cycle → Connect external agent → Reconnect or recover a
 lost response**. Read by original key or command ID. Typing submits nothing;
@@ -725,6 +733,9 @@ scorer. It kills its own MCP process, restarts its private UI server, withholds 
 committed acknowledgements as HTTP 503, and damages a disposable checkpoint tail.
 It checks original receipt recovery without duplicate candidates, read-only history,
 source refusal, answer replay after terminal, result summaries, and `inspect`/`replay`.
+It then pauses, reconnects in a third MCP session, resumes through the production
+command spawner and resets a measured node. The old verdict remains replayable;
+the new attempt stays pending until its own checkpoint is answered.
 Only this fixture restores its known valid bytes; that is not a production repair
 procedure. `acceptance.json`, engine logs and inspection output are saved under the
 output directory. This checks protocol recovery, not model judgments or interactive
