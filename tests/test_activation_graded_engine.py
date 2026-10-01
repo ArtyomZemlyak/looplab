@@ -537,3 +537,57 @@ def test_re_check_refuses_when_the_attempt_s_log_bytes_cannot_be_re_read(tmp_pat
                                        **_manifest(["NEW PATH ON"])},
                            plan=[_manifest(["NEW PATH ACTIVE"])])
     assert len(_types(events, "eval_invocation_claimed")) == 2
+
+
+def test_a_printer_in_a_code_file_the_scan_cannot_read_blocks_instead_of_warning(tmp_path, monkeypatch):
+    """Critic MAJOR 4b: a code file past the scan's size bound (or a link) was skipped with the scan
+    still `complete`, so a config-only marker whose printer lives THERE read as "printed nowhere" and
+    WARNed. The scan is incomplete now; the printer is unknown, and unknown blocks.
+    MUTATION: skip the oversized file with complete=True -> evaluated, WARN."""
+    monkeypatch.setattr(act, "_SCAN_MAX_FILE_BYTES", 4096)
+    big = "def go(on):\n    if on:\n        print('BIG PATH ON')\n" + "# pad\n" * 1000
+    events, dev, _ = _run(tmp_path, base={"lib/big.py": big},
+                          node_files={ENV: INCIDENT_ENV, **_manifest(["BIG PATH ON"])})
+    [terminal] = _types(events, "node_evaluated", "node_failed")
+    assert terminal.type == "node_failed" and terminal.data["reason"] == "inert_path"
+    assert "could not establish which code prints it" in dev.errors[0]
+
+
+def test_a_printer_in_a_cython_module_is_an_existing_printer(tmp_path):
+    """Critic MAJOR 4b, the suffix half: a `.pyx` printer was never read, so a config-only change
+    that failed to enable it WARNed instead of blocking as TP2. MUTATION: drop `.pyx` -> WARN."""
+    pyx = "def go(bint on):\n    if on:\n        print('CY PATH ON')\n"
+    events, dev, _ = _run(tmp_path, base={"ext/fast.pyx": pyx},
+                          node_files={ENV: INCIDENT_ENV, **_manifest(["CY PATH ON"])})
+    assert _types(events, "node_failed")[0].data["reason"] == "inert_path"
+    assert "EXISTING code prints it" in dev.errors[0]
+
+
+def test_strict_reads_a_typed_manifest_exactly_as_master_did(tmp_path):
+    """Critic MINOR 6: master's check reads the manifest's STRINGS only (`read_markers`); a typed
+    entry is no declaration there. Under strict an env entry the config does not satisfy must be
+    ignored, as before -- not withheld. MUTATION: read_manifest under strict -> inert_path."""
+    wrong = {"kind": "env", "name": "SFT_EVAL_SAMPLE", "equals": "-1", "file": ENV}
+    events, _dev, _ = _run(tmp_path, mode="strict",
+                           node_files={ENV: INCIDENT_ENV, **_manifest([wrong])})
+    [terminal] = _types(events, "node_evaluated", "node_failed")
+    assert terminal.type == "node_evaluated" and "activation" not in terminal.data
+    # …and its strings are still held to the historical rule
+    events, _dev, _ = _run(tmp_path / "s", mode="strict",
+                           node_files={ENV: INCIDENT_ENV, **_manifest([wrong, "NEVER PRINTED"])})
+    assert _types(events, "node_failed")[0].data["reason"] == "inert_path"
+
+
+def test_a_stage_manifest_only_change_is_a_code_change(tmp_path):
+    """Critic MINOR 7: `looplab_stages.json` is the pipeline's COMMANDS; by its `.json` suffix a
+    change to it alone read as config-only, so a marker nothing prints WARNed where a code change's
+    TP3 blocks. MUTATION: drop it from EXECUTED_MANIFESTS -> config_only, WARN."""
+    from looplab.engine.eval_stages import STAGE_MANIFEST_NAME
+    assert STAGE_MANIFEST_NAME in act.EXECUTED_MANIFESTS
+    assert act.change_class({STAGE_MANIFEST_NAME}) == act.CHANGE_CODE
+    stages = json.dumps({"stages": [{"name": "train", "command": [PY, "run.py"], "timeout": 120}]})
+    events, dev, _ = _run(tmp_path, node_files={STAGE_MANIFEST_NAME: stages,
+                                                 **_manifest(["STAGED PATH ON"])})
+    [terminal] = _types(events, "node_evaluated", "node_failed")
+    assert terminal.type == "node_failed" and terminal.data["reason"] == "inert_path"
+    assert "no code anywhere prints it" in dev.errors[0]

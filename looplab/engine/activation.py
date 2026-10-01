@@ -430,9 +430,17 @@ def check_file_entry(entry, workdir, since: Optional[float]) -> bool:
 # marker that no code could ever print. So an occurrence in a config file, or on an assignment line
 # anywhere, is not an EMITTER.
 CONFIG_SUFFIXES = (".env", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".json")
-CODE_SUFFIXES = (".py", ".sh", ".bash", ".zsh", ".ksh", ".js", ".mjs", ".cjs", ".ts", ".rb", ".pl",
-                 ".lua", ".r", ".jl", ".go", ".rs", ".c", ".cc", ".cpp", ".cu", ".h", ".hpp",
-                 ".java", ".scala", ".kt")
+# Widened on the critic's pass: a printer in a Cython module, a CUDA header or a notebook the eval
+# executes was simply unread, and "no printer anywhere" on a config-only change then WARNed where an
+# existing printer should have blocked (TP2).
+CODE_SUFFIXES = (".py", ".pyx", ".pxd", ".sh", ".bash", ".zsh", ".ksh", ".fish", ".js", ".mjs",
+                 ".cjs", ".ts", ".rb", ".pl", ".lua", ".r", ".jl", ".go", ".rs", ".c", ".cc",
+                 ".cpp", ".cxx", ".cu", ".cuh", ".h", ".hpp", ".hxx", ".java", ".scala", ".kt",
+                 ".swift", ".php", ".ipynb", ".mk", ".cmake", ".ps1", ".bat", ".cmd")
+# Files whose CONTENTS the engine executes although their suffix reads as config: the stage manifest
+# (`engine/eval_stages.py::STAGE_MANIFEST_NAME`, pinned equal by a test) is the pipeline's commands,
+# so a change to it alone is a CODE change, and an `echo` in it is a printer.
+EXECUTED_MANIFESTS = frozenset({"looplab_stages.json"})
 # Paths the change class never counts: the engine's own declarations, not the node's change.
 CHANGE_CLASS_IGNORED = frozenset({ACTIVATION_MANIFEST_NAME, IDEA_REPORT_NAME})
 # The toy/dataset tasks' solution file: written from `node.code` by the sandbox, not from `files`.
@@ -455,12 +463,14 @@ def is_test_path(path) -> bool:
 
 def is_config_path(path) -> bool:
     name = str(path).replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if name in EXECUTED_MANIFESTS:
+        return False
     return name.endswith(CONFIG_SUFFIXES) or name == ".env" or name.startswith(".env.")
 
 
 def is_code_path(path, head: bytes = b"") -> bool:
     name = str(path).replace("\\", "/").rsplit("/", 1)[-1].lower()
-    if name.endswith(CODE_SUFFIXES):
+    if name.endswith(CODE_SUFFIXES) or name in EXECUTED_MANIFESTS:
         return True
     return "." not in name and head.startswith(b"#!")
 
@@ -614,6 +624,7 @@ def tree_texts(root, prefix: str = "") -> tuple:
     out: dict = {}
     root = str(root)
     entries = files = total = 0
+    complete = True
     pre = f"{prefix.rstrip('/')}/" if prefix and prefix != "." else ""
     try:
         for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
@@ -626,16 +637,26 @@ def tree_texts(root, prefix: str = "") -> tuple:
                 full = os.path.join(dirpath, name)
                 rel = pre + os.path.relpath(full, root).replace(os.sep, "/")
                 lowered = name.lower()
-                if not (lowered.endswith(CODE_SUFFIXES) or "." not in lowered
-                        or is_config_path(rel)):
+                suffixed_code = lowered.endswith(CODE_SUFFIXES) or lowered in EXECUTED_MANIFESTS
+                if not (suffixed_code or "." not in lowered or is_config_path(rel)):
                     continue
                 try:
                     st = os.lstat(full)
                 except OSError:
+                    if suffixed_code:
+                        complete = False
                     continue
                 if not _stat.S_ISREG(st.st_mode) or st.st_size > _SCAN_MAX_FILE_BYTES:
+                    # A CODE file this walk does not read -- a link, or one past the size bound --
+                    # may hold the printer: the scan is then incomplete, and a marker with no printer
+                    # found is UNKNOWN (blocked), never "nowhere" (critic: a 2 MB module skipped with
+                    # complete=True turned a TP2 into a config-only WARN).
+                    if suffixed_code:
+                        complete = False
                     continue
                 raw = read_bounded_regular_file(full, _SCAN_MAX_FILE_BYTES)
+                if raw is None and suffixed_code:
+                    complete = False
                 if raw is None or not (is_code_path(rel, raw[:2]) or is_config_path(rel)):
                     continue
                 files += 1
@@ -645,7 +666,7 @@ def tree_texts(root, prefix: str = "") -> tuple:
                 out[rel] = raw.decode("utf-8", "replace")
     except OSError:
         return out, False
-    return out, True
+    return out, complete
 
 
 def scan_emitters(workdir, needles) -> EmitterScan:

@@ -4327,10 +4327,13 @@ class EvaluateMixin:
         # Typed since the graded check (minionerec-lora-v1 node 2, 2026-10-01): a node declares
         # MARKERS when its manifest holds a `log` entry; `env`/`file` entries read no log. A run
         # with the check `off` reads no manifest at all.
-        from looplab.engine.activation import log_entries, read_manifest
+        from looplab.engine.activation import log_entries, read_manifest, read_markers
         a.activation_evidence = None
-        _declares_markers = (getattr(self, "_activation_check", "graded") != "off"
-                             and bool(log_entries(read_manifest(a.workdir))))
+        _mode = getattr(self, "_activation_check", "graded")
+        # `strict` reads the manifest exactly as master did (`read_markers`: strings only), so a
+        # typed manifest is no declaration there -- byte for byte the historical behaviour.
+        _declares_markers = (bool(read_markers(a.workdir)) if _mode == "strict"
+                             else _mode != "off" and bool(log_entries(read_manifest(a.workdir))))
         a._marker_snapshot = (a._log_snapshot if a._log_snapshot is not None
                               else snapshot_training_logs(a.workdir) if _declares_markers
                               else None)
@@ -4553,8 +4556,12 @@ class EvaluateMixin:
         # violation (a violation makes the node infeasible); `off` reads nothing. In a WORKER thread:
         # the graded matrix walks the node's tree for each marker's printer.
         if a.ok and getattr(self, "_activation_check", "graded") != "off":
-            from looplab.engine.activation import read_manifest
-            _declared = read_manifest(a.workdir)
+            from looplab.engine.activation import KIND_LOG, read_manifest, read_markers
+            # `strict` reads exactly what master read (`read_markers`: the manifest's STRINGS, typed
+            # entries dropped), so a strict run is byte-identical to it whatever the manifest holds.
+            _declared = ([{"kind": KIND_LOG, "text": m} for m in read_markers(a.workdir)]
+                         if getattr(self, "_activation_check", "graded") == "strict"
+                         else read_manifest(a.workdir))
             if _declared:
                 _verdict, _evidence = await anyio.to_thread.run_sync(
                     functools.partial(self._activation_verdict, a, _declared))
