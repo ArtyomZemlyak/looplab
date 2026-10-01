@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { fetchStub, mountLive, until } from './_mount.js'
+import { fetchStub, jsonResponse, mountLive, until } from './_mount.js'
 
 const generation = 'a'.repeat(64)
 const progress = {
@@ -35,4 +35,47 @@ test('external cycle renders candidate and finalization obligations from progres
   } finally {
     await harness.close()
   }
+})
+
+test('next step follows server advice, refreshes on events and hides after a failed refresh', async () => {
+  const harness = await mountLive({ visible: true })
+  try {
+    const { HarnessProgressPanel } = await harness.load('/src/panels.jsx')
+    const step = { code: 'answer_checkpoint', owner: 'external_agent',
+      title: 'Answer the evaluation question', detail: 'Waiting for an explicit verdict.',
+      reads: ['GET /api/runs/{run_id}/harness-checkpoints'],
+      action: 'POST /api/runs/{run_id}/harness-checkpoints', phase_id: 'stage_check' }
+    let payload = { ...progress, next_step: step }
+    globalThis.fetch = fetchStub({ '/api/runs/mnist/harness-progress': () => jsonResponse(payload) })
+    const props = { runId: 'mnist', expectedGeneration: generation, seq: 12,
+      externalMode: true, configStatus: 'ready', onOpenEvents() {}, onClose() {} }
+    const view = await harness.mount(HarnessProgressPanel, props)
+    await until(() => view.container.textContent.includes('Next step · Answer'), 'server next step')
+    assert.match(view.container.textContent, /GET \/api\/runs\/mnist\/harness-checkpoints/)
+    assert.match(view.container.textContent, /phase_info: stage_check/)
+    payload = { ...payload, event_seq: 13, next_step: { ...step, code: 'choose_direction',
+      title: 'Choose the next experiment or finish', action: null, phase_id: null } }
+    await view.rerender({ ...props, seq: 13 })
+    await until(() => view.container.textContent.includes('Next step · Choose'), 'event-driven refresh')
+    globalThis.fetch = fetchStub({ '/api/runs/mnist/harness-progress': () => jsonResponse({}, 503) })
+    await view.rerender({ ...props, seq: 14 })
+    await until(() => view.container.textContent.includes('refresh failed'), 'failed refresh')
+    assert.ok(!view.container.textContent.includes('Next step · Choose'))
+    assert.match(view.container.textContent, /Next step unavailable/)
+    assert.ok(globalThis.fetch.calls.every(call => call.method === 'GET'))
+  } finally { await harness.close() }
+})
+
+test('malformed next step cannot become a successful read', async () => {
+  const harness = await mountLive({ visible: true })
+  try {
+    const { HarnessProgressPanel } = await harness.load('/src/panels.jsx')
+    globalThis.fetch = fetchStub({ '/api/runs/mnist/harness-progress': {
+      ...progress, next_step: { title: 'Everything is ready' },
+    } })
+    const view = await harness.mount(HarnessProgressPanel, { runId: 'mnist',
+      expectedGeneration: generation, externalMode: true, configStatus: 'ready' })
+    await until(() => view.container.textContent.includes('Agent cycle: Unavailable'), 'invalid payload')
+    assert.ok(!view.container.textContent.includes('Everything is ready'))
+  } finally { await harness.close() }
 })

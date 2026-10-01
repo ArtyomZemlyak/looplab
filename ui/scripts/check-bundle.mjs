@@ -84,7 +84,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // 2026-09-30 inline model check: measured 589,781 B JS. Settings and Assistant
     // reuse one health/recovery component; the inline panel loads only when opened.
     // 2026-10-01 selected-result verdict and master integration: measured 590,319 B JS.
-    js: { gzip: 577 * KIB },
+    // 2026-10-01 external next-step discovery: measured 590,849 B (+530 B).
+    // Summary stays in the lazy panel; the existing shell/reachability ceilings remain.
+    js: { gzip: 578 * KIB },
     css: { gzip: 57 * KIB },
   },
   individual: {
@@ -199,7 +201,8 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-09-30 plain launch decision: measured 263,369 B JS in this closure.
       // 2026-09-30 result clarity: measured 264,356 B JS; Assistant's result body stays lazy.
       // 2026-10-01 final integrated build: measured 265,214 B JS; existing ceiling holds.
-      limits: { js: { gzip: 259 * KIB }, css: { gzip: 43 * KIB } },
+      // 2026-10-01: 265,223 B (+9 B): RunView passes the live sequence to the lazy agent panel.
+      limits: { js: { gzip: 260 * KIB }, css: { gzip: 43 * KIB } },
     },
     {
       name: 'panel-hub increment',

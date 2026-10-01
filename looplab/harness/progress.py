@@ -197,7 +197,10 @@ def snapshot(rd: Path, expected_generation: str, *, offset: int = 0,
               "checkpoints": checkpoint_health}
     pending = [row for row in checkpoint_rows if row["status"] == "pending"]
     finish_due = external_finish_due(rd, settings, state, events)
-    return {"generation": generation, "run_uid": uid,
+    result = {"generation": generation, "run_uid": uid,
+            "recorded_lifecycle": {"paused": bool(state.paused),
+                                   "finished": bool(state.finished),
+                                   "stop_requested": bool(state.stop_requested)},
             "event_seq": events[-1].seq, "at_node": n,
             "policy_preview": _policy_preview(settings, state),
             "evidence_revision": revision, "complete": all(
@@ -219,3 +222,6 @@ def snapshot(rd: Path, expected_generation: str, *, offset: int = 0,
                         "reviews": _page(reviews, offset, limit),
                         "checkpoints": _page(checkpoint_rows, offset, limit)},
             "review_phases_enabled": sorted(required_reviews(settings))}
+    from looplab.harness.progress_summary import next_step
+    result["next_step"] = next_step(result)
+    return result

@@ -31,6 +31,7 @@ import VirtualTimeline from './VirtualTimeline.jsx'
 import { timelineEventKey } from './timelineModel.js'
 import { queuedGenerationControls } from './queue.js'
 import Panel from './PanelShell.jsx'
+import HarnessNextStep, { validHarnessNextStep } from './HarnessNextStep.jsx'
 import './overview.css'
 import './report-trust-polish.css'
 import { DataTable, downloadBlob } from './accessibility.jsx'
@@ -801,7 +802,7 @@ export function FailuresPanel({ state, onClose, onSelect }) {
 // External decisions live in three durable sidecars, not in the folded event log. This read model
 // keeps the intermediate reasoning receipts inspectable after a client/server restart and labels
 // old evidence explicitly; it never pretends that a receipt for one Idea satisfies another Idea.
-export function HarnessProgressPanel({ runId, expectedGeneration, externalMode, configStatus,
+export function HarnessProgressPanel({ runId, expectedGeneration, seq, externalMode, configStatus,
   onOpenEvents, onClose }) {
   const [offset, setOffset] = useState(0)
   const validGeneration = RUN_GENERATION_RE.test(expectedGeneration || '')
@@ -812,6 +813,7 @@ export function HarnessProgressPanel({ runId, expectedGeneration, externalMode, 
       + `?expected_generation=${expectedGeneration}&offset=${offset}&limit=20`,
     { cache: 'no-store', signal }).then(value => {
     if (!isRecord(value) || value.generation !== expectedGeneration
+        || !validHarnessNextStep(value.next_step)
         || !isRecord(value.history) || !isRecord(value.source_health)
         || !isRecord(value.candidate_requirements)
         || !Array.isArray(value.candidate_blockers_if_expanding)
@@ -825,7 +827,8 @@ export function HarnessProgressPanel({ runId, expectedGeneration, externalMode, 
       invalidPanelPayload()
     }
     return value
-  }), { scope, gate: scope ? null : 'idle', timeout: PANEL_REQUEST_TIMEOUT_MS, pollMs: 10_000 })
+  }), { scope, gate: scope ? null : 'idle', timeout: PANEL_REQUEST_TIMEOUT_MS,
+    pollMs: 10_000, deps: [seq] })
   const progress = resource.data
   const history = progress?.history
   const blockers = progress?.candidate_blockers_if_expanding || []
@@ -868,6 +871,8 @@ export function HarnessProgressPanel({ runId, expectedGeneration, externalMode, 
       </div>}
       <p className="muted">Measured prefix: {progress.at_node} nodes, event #{progress.event_seq}.
         This is a read of several durable journals; refresh after a new event or response.</p>
+      <HarnessNextStep step={progress.next_step} runId={runId}
+        fresh={resource.status === 'ready' && !(seq > progress.event_seq)} />
       <p className="muted">Journal rows: decisions {progress.source_health.decisions.accepted_rows},
         reviews {progress.source_health.reviews.accepted_rows}, checkpoints
         {' '}{progress.source_health.checkpoints.accepted_rows}. The event timeline records

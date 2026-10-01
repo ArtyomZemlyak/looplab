@@ -40,7 +40,7 @@ operator starts the server and run, while the coding agent proposes candidates.
    > result and checkpoints, then decide what to do next. Explicitly pause or
    > finalize when done. Do not claim a score before LoopLab evaluates it.
 
-4. Watch the run in the UI. Before its first candidate, **Lineage → Agent cycle**
+4. Watch the run in the UI. Before its first candidate, **Progress → Agent cycle**
    shows what the external agent owes. A live server or engine does not prove
    that the agent is connected. If the agent stops, reconnect it to the **same**
    run, read current generation and receipts, and continue; do not blindly
@@ -140,6 +140,38 @@ node lifecycle, research, concepts, reports, selection and measured outcomes.
 Unsubmitted private agent planning cannot be reconstructed; publish material
 choices through the appropriate domain action. In the UI, open **Progress →
 Agent cycle** to inspect this view and its source health.
+
+### A short next step
+
+After reading the current `/state` generation and the run contract, call MCP
+`run_progress(run_id, expected_generation)`. It performs one read of
+`harness-progress?expected_generation=TOKEN&brief=true`; HTTP failures retain
+their original status, with no hidden retry or resume. The UI **Agent cycle**
+shows the same server-authored `next_step`.
+
+The summary prioritizes incomplete sources, then unanswered evaluation questions.
+It names the responsible external agent, detail reads, response route and phase.
+Read the full checkpoint and `phase_info` before answering: the summary grants
+no extra verdict or early-stop authority. Recorded pause/finish/stop requests
+direct the agent to live state and command receipts; they do not prove that an
+engine or external agent process is alive. Submitted experiments remain visible
+as unsettled even when their evaluator has exited.
+
+Once these immediate issues are clear, choose **continue** or **finish**.
+`candidate_blockers_if_expanding`, per-Idea reviews and concept/hypothesis fields
+apply to continuation; they do not force a finalizing agent to propose again.
+`finish_pending_node_count`, `finish_report_due` and `finish_reviews_due` describe
+finalization. No current expansion gate is a guarantee of admission: candidate
+validation, task edit surface and budgets still apply. `policy_preview` is advice;
+the compact view carries its source and count, with full actions in the detail read.
+
+The compact read preserves all four source-health receipts and each history's
+total, offset, limit and `has_more`. It omits receipt bodies and observations;
+question/node lists are limited to 20 with explicit total/truncation fields.
+Use `details.history` to page the full read and `details.questions` for full
+questions, substituting the current run ID and generation. Refresh after events
+or responses; sidecar-only writes also become visible through the UI's polling.
+The UI withdraws next-step advice after a failed refresh or a newer observed event.
 
 For Codex, add this to your project `.codex/config.toml` (or the user config):
 

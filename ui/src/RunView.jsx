@@ -2802,7 +2802,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {panel === 'trust' && panelAllowed('trust') && <TrustPanel state={state} runId={runId} onSelect={selectNodeFromPanel} onToast={showToast} onClose={closePanel} readOnly={mutationReadOnlyMode} />}
       {panel === 'queue' && panelAllowed('queue') && <QueuePanel state={state} runId={runId} onSelect={selectNodeFromPanel} onToast={showToast} onClose={closePanel} />}
       {panel === 'agent' && panelAllowed('agent') && <HarnessProgressPanel runId={runId}
-        expectedGeneration={generation} externalMode={configResource.data?.external_harness}
+        expectedGeneration={generation} seq={seq} externalMode={configResource.data?.external_harness}
         configStatus={configResource.status} onOpenEvents={() => setPanel('events')}
         onClose={closePanel} />}
       {panel === 'sensitivity' && panelAllowed('sensitivity') && <SensitivityPanel state={state} onSelect={selectNodeFromPanel} onClose={closePanel} />}

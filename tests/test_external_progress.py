@@ -70,6 +70,7 @@ def test_progress_restores_decisions_reviews_and_checkpoint_answers(tmp_path):
     assert initial.json()["finish_pending_nodes"] == []
     assert initial.json()["source_health"]["decisions"]["file_present"] is False
     assert initial.json()["history"]["decisions"]["total"] == 0
+    assert initial.json()["next_step"]["code"] == "choose_direction"
     decision = {"expected_generation": generation, "phase_id": "novelty",
                 "action_id": "novelty-1", "idea": {"operator": "draft"},
                 "decision": "submit", "reason": "The idea differs from previous trials"}
@@ -100,12 +101,15 @@ def test_progress_restores_decisions_reviews_and_checkpoint_answers(tmp_path):
     assert after["history"]["decisions"]["items"][0]["validity"] == "superseded"
     assert after["history"]["reviews"]["items"][0]["validity"] == "superseded"
     assert after["pending_checkpoint_count"] == 1
+    assert after["next_step"]["code"] == "answer_checkpoint"
+    assert after["next_step"]["phase_id"] == "stage_check"
     assert after["history"]["checkpoints"]["items"][0]["status"] == "pending"
     answer = {"expected_generation": generation, "checkpoint_id": q["checkpoint_id"],
               "action_id": "check-1", "verdict": "proceed", "reason": "Loss decreased"}
     assert client.post("/api/runs/demo/harness-checkpoints", json=answer).status_code == 200
     restored = TestClient(make_app(tmp_path / "runs")).get(path, params=args).json()
     assert restored["pending_checkpoint_count"] == 0
+    assert restored["next_step"]["code"] == "inspect_pending"
     assert restored["history"]["checkpoints"]["items"][0]["status"] == "answered"
     assert restored["history"]["checkpoints"]["items"][0]["answer"]["reason"] == "Loss decreased"
     store.append("eval_invocation_claimed", {"node_id": 2, "generation": 0})
@@ -117,6 +121,7 @@ def test_progress_restores_decisions_reviews_and_checkpoint_answers(tmp_path):
         fh.write(b"invalid json\n")
     damaged = client.get(path, params=args).json()
     assert damaged["complete"] is False
+    assert damaged["next_step"]["code"] == "inspect_sources"
     assert damaged["source_health"]["decisions"]["invalid_lines"] == 1
     assert damaged["history"]["decisions"]["total"] == 2
     with (rd / "harness_reviews.jsonl").open("ab") as fh:
@@ -130,3 +135,63 @@ def test_progress_restores_decisions_reviews_and_checkpoint_answers(tmp_path):
     hidden_tail = client.get(path, params=args).json()
     assert hidden_tail["complete"] is False
     assert hidden_tail["source_health"]["events"]["complete"] is False
+
+
+def test_compact_progress_preserves_gates_health_counts_and_history_location(tmp_path):
+    rd, store, client = _run(tmp_path)
+    config = json.loads((rd / "config.snapshot.json").read_text())
+    config.update(deep_research_every=1, report_every=1)
+    (rd / "config.snapshot.json").write_text(json.dumps(config))
+    generation = run_generation_token(store.read_all())
+    path = "/api/runs/demo/harness-progress"
+    args = {"expected_generation": generation, "offset": 2, "limit": 1}
+    full = client.get(path, params=args).json()
+    before = store.read_all()
+    compact = client.get(path, params={**args, "brief": True}).json()
+    assert store.read_all() == before  # discovery never drives the engine
+    assert compact["next_step"] == full["next_step"]
+    # Expansion research is a choice-specific gate, not an unconditional instruction.
+    assert compact["next_step"]["code"] == "choose_direction"
+    assert compact["candidate_blockers_if_expanding"][0]["phase_id"] == "research"
+    assert compact["finish_report_due"]
+    assert compact["source_health"] == full["source_health"]
+    assert compact["history"]["decisions"] == {"total": 0, "offset": 2, "limit": 1, "has_more": False}
+    assert "harness-progress" in compact["details"]["history"]
+    assert client.get(path, params={"expected_generation": "0" * 64, "brief": True}).status_code == 409
+    assert client.get(path, params={"expected_generation": "bad", "brief": True}).status_code == 400
+
+    # Large checkpoint observations stay on the authoritative detail endpoint.
+    for nid in range(2, 24):
+        store.append("node_created", {"node_id": nid, "parent_ids": [], "operator": "draft",
+                                      "idea": {"operator": "draft"}, "code": "print(2)"})
+        ask(rd, nid, 0, "train_monitor", observation="x" * 6000)
+    compact = client.get(path, params={**args, "brief": True}).json()
+    assert compact["pending_checkpoint_count"] == 22
+    assert len(compact["pending_checkpoints"]) == 20
+    assert compact["pending_checkpoints_truncated"]
+    assert compact["finish_pending_node_count"] == 22
+    assert compact["finish_pending_nodes_truncated"]
+    assert len(json.dumps(compact).encode()) < 16000
+    assert "observation" not in compact["pending_checkpoints"][0]
+    assert compact["history"]["checkpoints"]["total"] == 22
+    assert compact["next_step"]["code"] == "answer_checkpoint"
+    with (rd / "harness_reviews.jsonl").open("ab") as fh:
+        fh.write(b"invalid json\n")
+    damaged = client.get(path, params={**args, "brief": True}).json()
+    assert damaged["next_step"]["code"] == "inspect_sources"
+    assert damaged["pending_checkpoint_count"] == 22
+
+
+def test_progress_distinguishes_recorded_pause_and_finish_from_liveness(tmp_path):
+    _, store, client = _run(tmp_path)
+    args = {"expected_generation": run_generation_token(store.read_all()), "brief": True}
+    for event, key in (("pause", "paused"), ("run_finished", "finished")):
+        store.append(event, {"reason": "operator"})
+        compact = client.get("/api/runs/demo/harness-progress", params=args).json()
+        assert compact["recorded_lifecycle"][key]
+        assert compact["next_step"]["code"] == "inspect_lifecycle"
+        assert "does not certify" in compact["next_step"]["detail"]
+        routes = client.get("/openapi.json").json()["paths"]
+        for ref in compact["next_step"]["reads"]:
+            method, path = ref.split(" ", 1)
+            assert method.lower() in routes[path]

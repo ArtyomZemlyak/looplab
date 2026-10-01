@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import json
 import os
-from urllib.parse import unquote, urlsplit
+import re
+from urllib.parse import quote, unquote, urlsplit
 
 import httpx
 
@@ -107,12 +108,22 @@ class HarnessAPI:
         response = self.client.request(verb, self._path(path), json=body, headers=headers)
         return self._result(response)
 
+    def run_progress(self, run_id: str, expected_generation: str) -> dict:
+        if (not run_id or run_id in (".", "..")
+                or any(char in run_id for char in "/\\%")):
+            raise ValueError("run_id must be one literal run identifier")
+        if re.fullmatch(r"[a-fA-F0-9]{64}", expected_generation) is None:
+            raise ValueError("expected_generation must be the SHA-256 token from /state")
+        return self.request("GET", f"/api/runs/{quote(run_id, safe='')}/harness-progress"
+                            f"?expected_generation={expected_generation}&brief=true")
+
 
 def build_server(api: HarnessAPI):
     try:
         from mcp.server.mcpserver import MCPServer as FastMCP
     except ImportError:
         from mcp.server.fastmcp import FastMCP
+    from mcp.types import ToolAnnotations
 
     mcp = FastMCP("looplab")
 
@@ -198,6 +209,15 @@ def build_server(api: HarnessAPI):
     def operation_schema(path: str) -> dict:
         """Get a route's input/output schema before calling it."""
         return api.schema(path)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
+                                        idempotentHint=True, openWorldHint=False))
+    def run_progress(run_id: str, expected_generation: str) -> dict:
+        """Read the compact next step, continue/finish gates and source health.
+        Use the current generation from /state. Read detail references and phase_info
+        before deciding; refresh after events or answers. This performs one GET only,
+        returns HTTP failures unchanged, and never retries or submits a candidate."""
+        return api.run_progress(run_id, expected_generation)
 
     @mcp.tool()
     def api_request(method: str, path: str, body: dict | None = None,

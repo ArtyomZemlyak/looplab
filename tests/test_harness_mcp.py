@@ -12,7 +12,11 @@ def test_mcp_advertises_run_controls_and_full_settings_discovery():
         lambda request: pytest.fail("listing local tools contacted the UI")))
     tools = anyio.run(build_server(api).list_tools)
     assert {"capabilities", "phases", "phase_info", "settings_keys", "setting_info", "operations",
-            "operation_schema", "api_request"} == {tool.name for tool in tools}
+            "operation_schema", "api_request", "run_progress"} == {tool.name for tool in tools}
+    progress = next(tool for tool in tools if tool.name == "run_progress")
+    hints = progress.annotations.model_dump(by_alias=True)
+    assert hints["readOnlyHint"] and hints["idempotentHint"]
+    assert not hints["destructiveHint"]
 
 
 def test_discovery_and_command_forwarding_keep_auth_and_idempotency():
@@ -55,3 +59,32 @@ def test_api_refuses_redirect_to_avoid_forwarding_owner_token():
     api = HarnessAPI("http://127.0.0.1:8765", "secret", transport=httpx.MockTransport(
         lambda request: httpx.Response(302, headers={"Location": "https://example.com/"})))
     assert api.request("GET", "/api/runs")["status"] == 302
+
+
+@pytest.mark.parametrize("status", [200, 403, 409, 503])
+def test_compact_progress_is_one_fenced_authenticated_read(status):
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(status, json={"receipt": "unchanged"})
+
+    api = HarnessAPI("http://127.0.0.1:8765", "scoped-token",
+                     transport=httpx.MockTransport(handler))
+    assert api.run_progress("demo space", "a" * 64) == {
+        "status": status, "body": {"receipt": "unchanged"}}
+    assert len(seen) == 1 and seen[0].method == "GET"
+    assert seen[0].url.path == "/api/runs/demo space/harness-progress"
+    assert dict(seen[0].url.params) == {"expected_generation": "a" * 64, "brief": "true"}
+    assert seen[0].headers["X-LoopLab-Token"] == "scoped-token"
+    assert "Idempotency-Key" not in seen[0].headers
+
+
+@pytest.mark.parametrize("run_id,generation", [
+    ("..", "a" * 64), ("x/y", "a" * 64), ("x\\y", "a" * 64),
+    ("%2e%2e", "a" * 64), ("", "a" * 64), ("demo", "stale")])
+def test_compact_progress_refuses_invalid_identity_before_transport(run_id, generation):
+    api = HarnessAPI("http://127.0.0.1:8765", transport=httpx.MockTransport(
+        lambda request: pytest.fail("invalid identity reached the transport")))
+    with pytest.raises(ValueError):
+        api.run_progress(run_id, generation)
