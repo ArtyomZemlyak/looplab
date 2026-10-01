@@ -596,7 +596,7 @@ External run здесь намеренно не получал кандидат�
 | OB-09 | Частично | Живой внешний run без узлов показывает роль агента и ссылку на Agent cycle без спиннера подготовки. | Показать точное ожидание и состояние агента в других фазах. |
 | OB-10 | Частично | UI готовит проверенный handoff для existing external run; stdio descriptor и инструкция без credential, workspace и reconnect reads. | См. §26: проверен реальный MCP stdio. Клиентская установка, secret storage и матрица версий Codex/Claude остаются ручной настройкой и требуют отдельной приёмки. |
 | OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. | См. §25: проверены контракт, реальные subprocess-кандидаты и desktop; подключение нового клиента относится к OB-10. |
-| OB-12 | Частично | В guide описан reconnect и проверка state/progress перед повторной отправкой. | Сервер пока не определяет живость внешнего агента. |
+| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; чтение original receipt без worker restart, поиск по ID/key и generation fence. | См. §27: проверены disconnect, новая MCP-сессия и отсутствие дубля. Живость внешнего агента остаётся явно неизмеряемой. |
 | OB-14 | Частично | Начало сайта показывает два основных входа. | Большая архитектурная схема всё ещё нуждается в упрощении для первого знакомства. |
 
 Остальные пункты §3 и соответствующие сценарии §11 остаются открытыми. Изменения первого
@@ -952,3 +952,46 @@ Route coverage теперь учитывает production static routes неза
 на **1920 × 1080** и **2560 × 1440**: без горизонтального переполнения и ошибок консоли.
 
 ![Контекст подключения и инструкция для внешнего агента](assets/71-onboarding/20-external-agent-handoff.png)
+
+## 27. Восстановление внешней сессии и потерянного ответа
+
+**2026-10-01 · OB-12.** У существующего `GET /commands/{command_id}` есть намеренная
+семантика crash recovery: nonterminal record может перезапустить worker и продолжить
+команду. Для предварительной проверки добавлен отдельный **read-only command_receipt**
+в MCP и `GET /api/runs/{run_id}/command-receipt`. Общий `next_step` теперь указывает
+на это наблюдение. Исходный Idempotency-Key позволяет найти receipt, даже когда POST
+ответ потерялся и command ID неизвестен; вычисление identity разделяется с submit.
+Ключ передаётся в header, не URL. Обязательна текущая generation, проверенная до и после чтения.
+
+Этот GET не берёт exclusive sequencer, не запускает worker, не изменяет и не чинит record.
+Вывод ограничен status/type/ID, intent seq и кодом ошибки; payload, hashes и error prose
+исключены. Чтение файла ограничено 2 MiB; malformed/oversized/unreadable receipts дают отказ.
+Пустой record не удаляется. 404 не доказывает отсутствие применённой команды, 409 требует
+сверить identity, 503 требует проверить storage. Snapshot может отставать от event log.
+
+В **Agent cycle → Connect external agent → Reconnect or recover a lost response**
+показан recovery-рецепт и явное чтение по original key или command ID. Ввод не отправляет
+запрос; кнопка выполняет один GET. Данные формы живут только в памяти, при смене identity
+предыдущий результат снимается, проваленный refresh скрывает прежний status. Обновление
+handoff из-за нового event не теряет вводимый ключ; recovery доступен и при отказе handoff read. `succeeded`
+не выдаётся за завершение train/успешную научную оценку. MCP phase `recovery` показывает
+границу явного resume/retry/pause/finish и operator-only разрешения зависшего activity claim.
+
+Live smoke: настоящий CLI engine и две последовательно открытые stdio MCP-сессии.
+Первая отправила quadratic candidate и отключилась; response ID был отброшен, движок
+самостоятельно завершил оценку со score **0**. Новая MCP-сессия нашла original receipt
+по ключу; байты `.commands` и `events.jsonl` не изменились. Exact-key resubmission вернул
+тот же command ID, число узлов осталось **1**, дублей **0**. После pause engine остановился,
+новый reconnect/read не запустил его. Затем выполнены явные resume и finish.
+Внешний agent heartbeat и автоматическая замена агентом LoopLab не вводились; сервер
+не заявляет удалённую живость по тишине журнала. Это offline quadratic smoke, не MNIST.
+
+Проверки итогового набора: **364 Python** (5 существующих skip: Windows symlinks, `/proc` и fence), **1793 UI**, **193 replay**.
+Дополнительно проверены invalid selectors, oversized/corrupt receipt, fence во время reset,
+header-only key, отсутствие storage writes и скрытие stale UI. Production build,
+bundle gates и строгая документация прошли. После последней правки OpenAPI header отдельно
+проверены receipt, phase contract, route wiring и API reference. Измерено **594179 B** JS gzip,
+initial **82912 B**; total ceiling 581 KiB, остальные route/reachability ceilings сохранены.
+Desktop **1920 × 1080** и **2560 × 1440**: без горизонтального переполнения и ошибок консоли.
+
+![Явное чтение сохранённого receipt после reconnect](assets/71-onboarding/21-external-agent-recovery.png)

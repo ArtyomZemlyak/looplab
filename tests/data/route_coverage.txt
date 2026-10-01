@@ -73,7 +73,8 @@ POST /api/runs/{run_id}/chat	tests/test_collaboration.py tests/test_provider_err
 GET /api/runs/{run_id}/chat-log	tests/test_provider_error_redaction.py tests/test_server.py
 POST /api/runs/{run_id}/chat-log	tests/test_provider_error_redaction.py tests/test_report.py tests/test_server.py
 POST /api/runs/{run_id}/command	tests/test_evidence_consumer_fences.py tests/test_provider_error_redaction.py tests/test_report.py tests/test_serve_prompt_review.py tests/test_server.py
-POST /api/runs/{run_id}/commands	tests/test_admission_refuses_a_snapshot_the_child_would_refuse.py tests/test_collaboration.py tests/test_concept_tag_command.py tests/test_external_run_mode.py tests/test_fork_from_seq.py tests/test_refusal_vocabulary.py tests/test_run_command_service.py tests/test_server.py tests/test_stalled_finalization_affordance.py
+GET /api/runs/{run_id}/command-receipt	tests/test_command_receipt.py
+POST /api/runs/{run_id}/commands	tests/test_admission_refuses_a_snapshot_the_child_would_refuse.py tests/test_collaboration.py tests/test_command_receipt.py tests/test_concept_tag_command.py tests/test_external_run_mode.py tests/test_fork_from_seq.py tests/test_refusal_vocabulary.py tests/test_run_command_service.py tests/test_server.py tests/test_stalled_finalization_affordance.py
 GET /api/runs/{run_id}/commands/{command_id}	tests/test_admission_refuses_a_snapshot_the_child_would_refuse.py tests/test_run_command_service.py tests/test_stalled_finalization_affordance.py
 POST /api/runs/{run_id}/commands/{command_id}/retry	tests/test_collaboration.py tests/test_run_command_service.py
 GET /api/runs/{run_id}/comments	tests/test_collaboration.py tests/test_refusal_vocabulary.py

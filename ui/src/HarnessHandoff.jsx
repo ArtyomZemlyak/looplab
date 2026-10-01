@@ -4,6 +4,7 @@ import { useScopedResource } from './useScopedResource.js'
 import { PANEL_REQUEST_TIMEOUT_MS, RUN_GENERATION_RE } from './panelPrimitives.js'
 import { harnessAgentInstruction, harnessMcpDescriptor, harnessServerUrl, validHarnessHandoff } from './harnessHandoff.js'
 import './harness-handoff.css'
+import HarnessReceipt from './HarnessReceipt.jsx'
 
 export default function HarnessHandoff({ runId, generation, seq }) {
   const [open, setOpen] = useState(false)
@@ -55,6 +56,7 @@ export default function HarnessHandoff({ runId, generation, seq }) {
           <pre>{harnessAgentInstruction(value, url)}</pre></details>
         <p className="muted">Copying configures nothing and starts no experiment. Reconnect to this same run using current state, receipts and checkpoints.</p>
       </>}
+      {RUN_GENERATION_RE.test(generation || '') && <HarnessReceipt key={scope} runId={runId} generation={generation} />}
     </>}
   </details>
 }

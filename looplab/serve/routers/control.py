@@ -12,7 +12,7 @@ from typing import Any, Literal, Optional
 
 import anyio
 import orjson
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -207,10 +207,31 @@ def build_router(srv) -> APIRouter:
             drain_only=body.get("drain_only"), agent_token=agent_token))
 
     @router.get(
+        "/api/runs/{run_id}/command-receipt",
+    )
+    def command_receipt(run_id: str, response: Response,
+                        expected_generation: str, command_id: str = "",
+                        idempotency_key: str = Header("", alias="Idempotency-Key")):
+        """Observe a saved command by ID or Idempotency-Key without restarting work.
+
+        Unlike GET /commands/{command_id}, this never reconciles, heals or drives a
+        worker. A missing receipt is not proof that no action occurred. Generation
+        fences and server authority still apply; payloads and key digests are omitted.
+        """
+        from looplab.serve.command_receipt import snapshot
+        _command_response_headers(response)
+        return snapshot(srv.commands, _run_dir(run_id), expected_generation,
+                        command_id=command_id, idempotency_key=idempotency_key)
+
+    @router.get(
         "/api/runs/{run_id}/commands/{command_id}",
         responses=_command_responses("Current durable command record"),
     )
     def get_command(run_id: str, command_id: str, response: Response):
+        """Recover and observe a command; nonterminal records can restart workers.
+
+        Use GET /command-receipt for an observation with no execution side effects.
+        """
         _command_response_headers(response)
         return srv.commands.get(_run_dir(run_id), command_id)
 

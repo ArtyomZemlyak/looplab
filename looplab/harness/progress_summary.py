@@ -33,7 +33,7 @@ def next_step(progress: dict) -> dict:
         return _step("inspect_lifecycle", title,
                      "Read live state and command receipts before deciding to resume or complete finalization. Journal state does not certify engine or agent liveness.",
                      [f"GET {_RUN}/state", f"GET {_RUN}/events",
-                      f"GET {_RUN}/commands/{{command_id}}"])
+                      f"GET {_RUN}/command-receipt?expected_generation=TOKEN&command_id={{command_id}}"])
     if progress["finish_pending_nodes"]:
         return _step("inspect_pending", "Inspect submitted experiments",
                      "Submitted nodes remain unsettled. Read live state and checkpoints; finalization must wait for settlement or explicit cancellation. Further proposals have their own gates below.",

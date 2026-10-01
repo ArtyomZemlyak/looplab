@@ -128,9 +128,9 @@ Keep that run process open while the coding agent sends commands from another te
 
 Configure your coding agent's MCP client to launch `looplab harness-mcp` over stdio,
 with **only** `LOOPLAB_HARNESS_TOKEN` and, if the server is elsewhere,
-`LOOPLAB_HARNESS_URL=http://127.0.0.1:8765`. The process offers nine tools:
+`LOOPLAB_HARNESS_URL=http://127.0.0.1:8765`. The process offers ten tools:
 `capabilities`, `phases`, `phase_info`, `settings_keys`, `setting_info`, `operations`,
-`operation_schema`, `run_progress` and `api_request`. The latter
+`operation_schema`, `run_progress`, `command_receipt` and `api_request`. The latter
 forwards to the same authenticated HTTP API as the UI. It never writes directly to
 the event log. Use the live `operations` catalog to discover read, settings,
 task, evidence, artifact and control routes, and `operation_schema` for a route's
@@ -480,21 +480,46 @@ operator's declared artifact checks and score reader continue to apply.
 The UI server, run engine, and coding agent are separate processes. If the agent
 exits, the server can still show the run and an evaluation already in flight can
 finish. No new candidate is invented by LoopLab in external mode. Reconnect the
-agent to the existing MCP server and run rather than starting over.
+agent through MCP to the same UI/API server and run. A new stdio MCP session is
+normal; it does not create a new research run. Search `phases("recovery")` and read
+`phase_info("recovery")` before choosing a recovery action.
 
 1. Read `/state` for the current run generation and whether the engine is live,
-   paused, or finished. If the engine was stopped, the operator must resume it;
+   paused, or finished. If the engine stopped, an authorized operator or external
+   agent must explicitly choose resume after checking the outstanding work;
    reconnecting MCP by itself does not restart search.
 2. Read `harness-progress` using that generation. Inspect `source_health` before
    interpreting a missing decision or receipt. Check pending checkpoints and
    candidate/finish requirements. **Agent cycle** in the UI shows the same
    obligations and links to the event timeline.
-3. For a command whose response was lost, inspect its durable command identity
-   and node state before retrying. The last request may already have been applied.
-   Read measured results from LoopLab, not from the agent's prior message.
+3. For a lost command response, call MCP `command_receipt(run_id,
+   expected_generation, idempotency_key=ORIGINAL_KEY)`, or supply `command_id`
+   instead of the key if known. It performs one GET of `/command-receipt`; the key
+   travels in the `Idempotency-Key` header, not in the URL. This reads the saved
+   status without reconciliation, worker restart, record healing or an exclusive
+   sequencer lock. **GET `/commands/{command_id}` has different semantics:** it can
+   restart a nonterminal worker. Choose that recovery deliberately after the read.
+   Inspect Events and node state: the last request may already have applied, and
+   `succeeded` describes the control command, not a completed experiment.
 4. Continue the outstanding decision, or explicitly pause/finalize. A checkpoint
    may remain open after the evaluator command has finished; answer it before
-   treating the node as terminal. Finalization can owe a report or reviews.
+treating the node as terminal. Finalization can owe a report or reviews.
+
+In the UI, open **Agent cycle → Connect external agent → Reconnect or recover a
+lost response**. Read by original key or command ID. Typing submits nothing;
+**Read saved receipt** sends a GET. The form keeps its identity only in memory,
+and a failed refresh hides the previous status. No resume, retry or candidate
+submission is automatic. The ordinary Events view can help locate a `command_id`.
+
+Save the exact request payload, original key and target run generation in your
+agent's private recovery record **before** submission. If the response was lost,
+an exact resubmission uses that same payload and key; a new key can create a second
+candidate. For a recorded retryable failure, inspect current evidence before
+explicitly using `/commands/{command_id}/retry`. Changed payloads are new decisions.
+Never automatically retry after 404/409/503: a missing receipt does not prove
+that nothing applied; a generation mismatch requires a fresh identity check;
+an unreadable record needs operator recovery. The saved snapshot may lag events.
+Reads are bounded to a 2 MiB record and omit payloads, hashes and error prose.
 
 The UI does not currently prove whether a remote agent process is connected.
 It reports the known engine and run obligations; a quiet event log alone is not

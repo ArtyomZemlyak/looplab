@@ -2824,9 +2824,8 @@ class RunCommandService:
     def submit(self, rd: Path, idempotency_key: str, event_type: str, data,
                *, expected_generation: object = None, drain_only: object = None,
                agent_token: bool = False) -> dict:
-        key = str(idempotency_key or "")
-        if not key or len(key) > 512:
-            raise HTTPException(400, "Idempotency-Key is required and must be at most 512 characters")
+        from looplab.serve.command_identity import command_identity
+        command_id, key_digest = command_identity(idempotency_key)
         if not isinstance(event_type, str):
             raise HTTPException(400, "command type must be a string")
         raw_data = {} if data is None else data
@@ -2843,8 +2842,6 @@ class RunCommandService:
         # stale token may resolve an existing same-key record below, but missing/malformed input must
         # never be silently accepted just because a record happens to exist.
         expected = _normalize_expected_generation(expected_generation)
-        key_digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
-        command_id = "cmd_" + key_digest[:32]
         path = self._path(rd, command_id)
 
         should_start = False

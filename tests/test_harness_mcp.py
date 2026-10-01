@@ -12,11 +12,42 @@ def test_mcp_advertises_run_controls_and_full_settings_discovery():
         lambda request: pytest.fail("listing local tools contacted the UI")))
     tools = anyio.run(build_server(api).list_tools)
     assert {"capabilities", "phases", "phase_info", "settings_keys", "setting_info", "operations",
-            "operation_schema", "api_request", "run_progress"} == {tool.name for tool in tools}
+            "operation_schema", "api_request", "run_progress", "command_receipt"} == {tool.name for tool in tools}
     progress = next(tool for tool in tools if tool.name == "run_progress")
     hints = progress.annotations.model_dump(by_alias=True)
     assert hints["readOnlyHint"] and hints["idempotentHint"]
     assert not hints["destructiveHint"]
+    receipt = next(tool for tool in tools if tool.name == "command_receipt")
+    hints = receipt.annotations.model_dump(by_alias=True)
+    assert hints["readOnlyHint"] and not hints["destructiveHint"]
+
+
+@pytest.mark.parametrize("status", [200, 404, 409, 503])
+@pytest.mark.parametrize("by_key", [True, False])
+def test_command_receipt_is_one_get_with_original_key_in_header_only(status, by_key):
+    seen = []
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(status, json={"unchanged": True})
+    api = HarnessAPI("http://127.0.0.1:8765/proxy", "scoped", transport=httpx.MockTransport(handler))
+    args = {"idempotency_key": "original-key"} if by_key else {"command_id": "cmd_" + "a" * 32}
+    assert api.command_receipt("demo # %2F", "b" * 64, **args) == {"status": status, "body": {"unchanged": True}}
+    assert len(seen) == 1 and seen[0].method == "GET"
+    assert seen[0].url.path == "/proxy/api/runs/demo # %2F/command-receipt"
+    assert seen[0].url.params["expected_generation"] == "b" * 64
+    assert "original-key" not in str(seen[0].url)
+    assert seen[0].headers.get("Idempotency-Key", "") == ("original-key" if by_key else "")
+    assert not seen[0].content
+
+
+@pytest.mark.parametrize("args", [{}, {"command_id": "bad"},
+    {"command_id": "cmd_" + "a" * 32, "idempotency_key": "same"},
+    {"idempotency_key": "key\nheader"}, {"idempotency_key": "x" * 513}])
+def test_receipt_invalid_lookup_never_reaches_transport(args):
+    api = HarnessAPI("http://127.0.0.1:8765", transport=httpx.MockTransport(
+        lambda request: pytest.fail("invalid receipt lookup reached transport")))
+    with pytest.raises(ValueError):
+        api.command_receipt("demo", "a" * 64, **args)
 
 
 def test_discovery_and_command_forwarding_keep_auth_and_idempotency():

@@ -194,4 +194,7 @@ def test_progress_distinguishes_recorded_pause_and_finish_from_liveness(tmp_path
         routes = client.get("/openapi.json").json()["paths"]
         for ref in compact["next_step"]["reads"]:
             method, path = ref.split(" ", 1)
-            assert method.lower() in routes[path]
+            assert method.lower() in routes[path.split("?", 1)[0]]
+        assert any("/command-receipt?expected_generation=" in ref for ref in compact["next_step"]["reads"])
+        assert not any("/commands/{command_id}" in ref for ref in compact["next_step"]["reads"]), (
+            "a discovery read must not silently restart a nonterminal command worker")

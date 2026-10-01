@@ -57,11 +57,18 @@ test('handoff opens on demand, copies verified context and withdraws stale conte
     assert.equal(writes.length, 1)
     assert.match(writes[0], /harness-contract/)
     assert.match(view.container.textContent, /instruction copied/)
+    const identity = view.container.querySelector('.harness-recovery input')
+    await React.act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(identity, 'original-key')
+      identity.dispatchEvent(new window.Event('input', { bubbles: true }))
+    })
     globalThis.fetch = fetchStub({ '/api/runs/demo/harness-handoff': () => jsonResponse({}, 409) })
     await view.rerender({ ...props, seq: 13 })
     await until(() => view.container.textContent.includes('Connection context unavailable'), 'stale handoff')
     assert.ok(!view.container.textContent.includes('Copy agent instruction'))
     assert.ok(!view.container.textContent.includes('C:/Runs/demo'))
+    assert.equal(view.container.querySelector('.harness-recovery input').value, 'original-key',
+      'an event/context refresh must not lose the recovery identity while the operator types')
     assert.ok(globalThis.fetch.calls.every(call => call.method === 'GET'))
   } finally {
     if (previous) Object.defineProperty(navigator, 'clipboard', previous)

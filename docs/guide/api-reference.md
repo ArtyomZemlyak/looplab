@@ -10,7 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-151 routes on 134 paths; 10 deprecated; 27 with a declared response model.
+152 routes on 135 paths; 10 deprecated; 27 with a declared response model.
 
 ### `/api`
 
@@ -170,8 +170,9 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `GET` | `/api/runs/{run_id}/chat-log` | The saved chat turns for this run, in order ({role:'user'\|'assistant'\|'action', …}). | — |  |
 | `POST` | `/api/runs/{run_id}/chat-log` | Append ONE chat turn (the verbatim feed entry: role/content/trace or role/action/status) | — |  |
 | `POST` | `/api/runs/{run_id}/command` | Action-router (Workstream C): turn a free-text instruction into EITHER a concrete control | — |  |
+| `GET` | `/api/runs/{run_id}/command-receipt` | Observe a saved command by ID or Idempotency-Key without restarting work. | — |  |
 | `POST` | `/api/runs/{run_id}/commands` | *Submit Command* (no docstring) | `RunCommandRecord` |  |
-| `GET` | `/api/runs/{run_id}/commands/{command_id}` | *Get Command* (no docstring) | `RunCommandRecord` |  |
+| `GET` | `/api/runs/{run_id}/commands/{command_id}` | Recover and observe a command; nonterminal records can restart workers. | `RunCommandRecord` |  |
 | `POST` | `/api/runs/{run_id}/commands/{command_id}/retry` | *Retry Command* (no docstring) | `RunCommandRecord` |  |
 | `GET` | `/api/runs/{run_id}/comments` | *List Comments* (no docstring) | — |  |
 | `GET` | `/api/runs/{run_id}/comments/{comment_id}/history` | *Comment History* (no docstring) | — |  |

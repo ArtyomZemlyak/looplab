@@ -89,7 +89,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // 2026-10-01 external-agent handoff: measured 592,872 B (+2,023 B).
     // The lazy Agent cycle now reads verified connection context and prepares a credential-free
     // instruction; initial shell remains 82,912 B. All route/reachability ceilings stay unchanged.
-    js: { gzip: 580 * KIB },
+    // 2026-10-01 reconnect recovery: measured 594,179 B (+1,307 B), initial 82,912 B.
+    // Saved-receipt lookup stays in the lazy panel and sends only GET; all closure gates remain.
+    js: { gzip: 581 * KIB },
     css: { gzip: 57 * KIB },
   },
   individual: {

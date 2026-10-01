@@ -109,13 +109,32 @@ class HarnessAPI:
         return self._result(response)
 
     def run_progress(self, run_id: str, expected_generation: str) -> dict:
+        self._run_identity(run_id, expected_generation)
+        return self.request("GET", f"/api/runs/{quote(run_id, safe='')}/harness-progress"
+                            f"?expected_generation={expected_generation}&brief=true")
+
+    @staticmethod
+    def _run_identity(run_id: str, expected_generation: str):
         if (not run_id or run_id in (".", "..")
                 or any(char in run_id for char in "/\\")):
             raise ValueError("run_id must be one literal run identifier")
         if re.fullmatch(r"[a-fA-F0-9]{64}", expected_generation) is None:
             raise ValueError("expected_generation must be the SHA-256 token from /state")
-        return self.request("GET", f"/api/runs/{quote(run_id, safe='')}/harness-progress"
-                            f"?expected_generation={expected_generation}&brief=true")
+
+    def command_receipt(self, run_id: str, expected_generation: str,
+                        command_id: str = "", idempotency_key: str = "") -> dict:
+        self._run_identity(run_id, expected_generation)
+        if bool(command_id) == bool(idempotency_key):
+            raise ValueError("Supply exactly one command_id or idempotency_key")
+        if command_id and re.fullmatch(r"cmd_[0-9a-f]{32}", command_id) is None:
+            raise ValueError("Invalid durable command ID")
+        if idempotency_key and (len(idempotency_key) > 512
+                                or any(ord(ch) < 32 or ord(ch) == 127 for ch in idempotency_key)):
+            raise ValueError("Invalid idempotency key")
+        path = f"/api/runs/{quote(run_id, safe='')}/command-receipt?expected_generation={expected_generation}"
+        if command_id:
+            path += f"&command_id={command_id}"
+        return self.request("GET", path, idempotency_key=idempotency_key)
 
 
 def build_server(api: HarnessAPI):
@@ -227,6 +246,18 @@ def build_server(api: HarnessAPI):
         reuse the same key only for an exact lost-response retry. HTTP errors are returned
         with their status and body so the agent can handle stale state explicitly."""
         return api.request(method, path, body, idempotency_key)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
+                                        idempotentHint=True, openWorldHint=False))
+    def command_receipt(run_id: str, expected_generation: str,
+                        command_id: str = "", idempotency_key: str = "") -> dict:
+        """Observe a saved command after disconnect or a lost POST response.
+        Supply exactly one known command_id or the ORIGINAL Idempotency-Key.
+        This performs one generation-fenced GET without reconciliation, worker
+        restart, retry or resume. A missing/stale receipt does not prove no action
+        occurred; read state, events and checkpoints before choosing recovery.
+        """
+        return api.command_receipt(run_id, expected_generation, command_id, idempotency_key)
 
     return mcp
 

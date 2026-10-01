@@ -47,6 +47,7 @@ class Phase:
 # The writes the scoped harness credential may not make (`tests/test_agent_token_scope.py` drives
 # each against the middleware, and every other HTTP write of the index through it).
 OPERATOR_WRITES = frozenset({"PUT /api/settings", "POST /api/start",
+                             "POST /api/runs/{run_id}/resolve-activity-claims",
                              "PUT /api/{kind}/{name}/operations/{operation_id}"})
 
 
@@ -56,6 +57,13 @@ OPERATOR_WRITES = frozenset({"PUT /api/settings", "POST /api/start",
 # not proposed tools. A phase can be skipped if its analysis is redundant; the
 # evaluator and its recorded metrics are never replaced by an agent's judgement.
 PHASES: tuple[Phase, ...] = (
+    Phase("recovery", "Run/CommandReceipt", "serve/command_receipt.py; serve/run_commands.py",
+          "Reconnect to the same run; observe a saved receipt before explicitly choosing recovery. Agent liveness is not measured.",
+          ("GET /api/runs/{run_id}/state", "GET /api/runs/{run_id}/command-receipt",
+           "GET /api/runs/{run_id}/harness-progress", "GET /api/runs/{run_id}/harness-checkpoints"),
+          ("command:pause", "command:resume", "command:run_abort",
+           "POST /api/runs/{run_id}/commands/{command_id}/retry",
+           "POST /api/runs/{run_id}/resolve-activity-claims")),
     Phase("configuration", "Settings/PromptBundle", "core/config.py; core/prompts.py; serve/routers/misc.py",
           "Inspect and tune run settings and hot-reloaded role prompts.",
           ("GET /api/settings", "GET /api/runs/{run_id}/config",
