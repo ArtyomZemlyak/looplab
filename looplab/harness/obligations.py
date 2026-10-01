@@ -317,7 +317,7 @@ def run_obligations(task, settings, *, generation: str) -> dict:
                              "train_monitor_kill": settings.train_monitor_kill,
                              "train_monitor_interval_s": settings.train_monitor_interval_s},
                 "checkpoint": "changed_attributed_live_log_at_configured_cadence_or_first_final_log",
-                "proof": "answer each opened harness-checkpoints observation before terminal",
+                "proof": "answer each opened observation before terminal; watch requests another look, not abort permission; current-attempt loss and completed training artifacts can remove authority, so read each question's kill_enabled",
                 "enforced": True, "conditional_on": "command evaluation produces an attributed live log",
             },
             "asha_live": {

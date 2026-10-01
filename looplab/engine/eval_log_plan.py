@@ -670,8 +670,9 @@ STAGE_TRAJECTORY_MAX_CHUNK = 4 * 1024 * 1024
 
 
 def read_stage_trajectory(path, *, floor: int = 0,
-                          windows: int = STAGE_TRAJECTORY_WINDOWS) -> LossTrajectory:
-    """Measure the loss trajectory over THIS attempt's bytes of a finished stage log.
+                          windows: int = STAGE_TRAJECTORY_WINDOWS,
+                          snapshot: Optional[TrainingLogSnapshot] = None) -> LossTrajectory:
+    """Measure the loss trajectory over THIS attempt's bytes of a stage log.
 
     STREAMED, never slurped: the file is read from `floor` to EOF in record-aligned chunks and each
     chunk is reduced to one `LossWindow` on the way past, so peak memory is one chunk and every byte
@@ -686,6 +687,10 @@ def read_stage_trajectory(path, *, floor: int = 0,
     a floorless read splices two curves into one — inventing both a jump and a direction. Driven in
     `tests/test_stage_trajectory.py`.
 
+    A live observer passes its pre-attempt `snapshot`: the same open file's identity
+    and EOF probe derive the floor through `attempt_byte_floor`, overriding `floor`.
+    An unreadable boundary returns an empty trajectory rather than borrowing old bytes.
+
     Returns an empty `LossTrajectory` (`windows=0`, `direction="unknown"`) for every failure — no
     file, no permission, nothing above the floor, no loss value in the bytes. That is the value
     `trajectory_acquits_stage_check` refuses on, so an unreadable log leaves the checker's verdict
@@ -698,6 +703,10 @@ def read_stage_trajectory(path, *, floor: int = 0,
     try:
         with open_untrusted_regular(path) as fh:
             size = max(0, int(os.fstat(fh.fileno()).st_size))
+            if snapshot is not None:
+                floor = attempt_byte_floor(fh, path, snapshot)
+                if floor is None:
+                    return LossTrajectory()
             start = max(0, int(floor or 0))
             region = size - start
             if region <= 0:

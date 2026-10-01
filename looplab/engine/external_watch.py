@@ -58,7 +58,8 @@ async def observe_external_eval(engine, a, cancel, phase: str, *, final_pass: bo
                 if eligible and watching:
                     # The same measured-curve veto as the built-in watchdog can
                     # only remove early-stop authority, never create it.
-                    eligible = not trajectory_vetoes_kill(read_stage_trajectory(resolved.path))
+                    eligible = not trajectory_vetoes_kill(read_stage_trajectory(
+                        resolved.path, snapshot=a._log_snapshot))
                 return stage, tail, eligible, "", {"log_role": resolved.role}
             sample = latest_intermediate_sample(tail, a.workdir, metric)
             if sample is None:

@@ -487,6 +487,13 @@ The normal control cycle is:
    ASHA is enabled and live evidence exists, answer `continue` or `watch`;
    a follow-up question may grant `abort` after a prior `watch` and the engine's
    attribution/comparability checks. Disabled kill settings grant no `abort`.
+   `watch` requests another look; it does not itself authorize stopping. The
+   training monitor's deterministic loss veto reads only the current attempt's
+   bytes, including after reset or repair. An improving, non-anomalous curve
+   removes abort authority. Arrival of the declared training artifacts also
+   spends that authority, even if checkpoint validation still logs in the same
+   command. Read the new question's `kill_enabled` instead of carrying permission
+   from an earlier question. Flat loss alone is not proof that training is broken.
    An opened observation holds the node terminal until answered. Inspect measured
    metrics, stage logs and failures, then submit a corrected candidate if useful.
    The metric is measured by LoopLab's evaluator; never submit a claimed score.
@@ -771,6 +778,8 @@ python -m benchmarks.external_session_smoke --out .tmp/obligations-proof --oblig
 python -m benchmarks.external_session_smoke --out .tmp/monitor-proof --monitor --obligations
 # Reconnect at deadline: extend, stop, exhausted cap; also test disabled grace.
 python -m benchmarks.external_deadline_smoke --out .tmp/deadline-proof
+# Inspect actual live loss: protection, authorized stop recovery, checkpoint validation.
+python -m benchmarks.external_live_monitor_smoke --out .tmp/live-monitor-proof
 ```
 
 The offline scenario runs three real CPU training configurations with a protected
@@ -827,6 +836,19 @@ With grace disabled there is no checkpoint. All runs publish result interpretati
 in Russian and pass `inspect`/`replay`. Use `--case completed_extend`, `--case stop`,
 `--case capped_extend` or `--case disabled` for one scenario in a new output directory.
 This checks protocol timing with fault injection, not long-running ML or model judgment.
+
+The live monitor probe runs three protected CPU SGD configurations with a separate
+protected scorer. The improving curve keeps abort unavailable after `watch`.
+A zero-learning-rate control grants an explicit second-question abort; killing the
+fixture's MCP and restarting its UI preserves that question and live engine. The
+agent deliberately stops this acceptance control, which yields no completed metric
+or training artifact and never runs score. A third case saves its checkpoint before
+validation in the same command: subsequent questions remain advisory after `watch`.
+Each question is answered through MCP, exact retries create no duplicate answers,
+protected sources stay unchanged, and terminal/run interpretations appear in Russian.
+All three runs pass `inspect`/`replay`. Use `--case improving`, `--case frozen_stop`
+or `--case checkpoint_validation` to select one case. Delays pace real optimizer
+steps for observation; this does not test model judgment or a multi-hour session.
 
 ## Delegating only code editing
 

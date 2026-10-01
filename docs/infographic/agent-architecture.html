@@ -254,7 +254,7 @@ box("sd_memo", sx(4),SY,SW,92,"Deep-research memo","push+pull",C.dr,["1-line tak
 box("sd_ops", sx(5),SY,SW,92,"Op. yields → Strategist","ctx",C.s,["gain/eval-sec per operator","tunes the operator mix from evidence"]);
 box("sd_dir", sx(6),SY,SW,92,"Directives → Developer","push",C.d,["folded into the idea → steers CODE (+ pilot·triage·strategist)","§role-split: also the Developer's own cross-run code-fix lessons"]);
 box("sd_run", sx(7),SY,SW,92,"Run states → Boss","ctx",C.s,["paused·awaiting·trust-flag·leakage·stuck-build","Generation fence; real MCP phases (base: concept_tags). Question kind/boolean kill authority validated; bad metadata refuses reads/writes/consumption. Hints list verdicts; monitor abort only when granted. Unanswered deadline may keep command running with no wait timeout; one cap starts after extend. MCP/UI recovery keeps the live engine/question. Verdict fences UID, attempt, claim and pending status. Pause keeps questions; answer does not resume. Reports/reviews survive reconnect; reset invalidates evidence. Finish excludes expansion research. Engine liveness only; agent connection unmeasured."]);
-box("sd_watch",sx(8),SY,SW,92,"Watchdog flags → Researcher","push",C.ev,["train-monitor health + ASHA rank → proposal hint","‘seen training weakly — don’t re-propose’ (reads fold-ignored diagnostics)"]);
+box("sd_watch",sx(8),SY,SW,92,"Watchdog flags → Researcher","push",C.ev,["train-monitor health + ASHA rank → proposal hint","‘seen training weakly — don’t re-propose’ (reads fold-ignored diagnostics)","External train monitor reads current-attempt loss with its snapshot. Watch requests another look; abort needs the new question's authority. Improving curves or completed training artifacts remove authority. MCP/UI reconnect retains the live engine and unanswered question."]);
 
 /* ================= EDGES ================= */
 // setup → loop
@@ -265,7 +265,7 @@ edge("boss","b","refine","t",{c:C.s,dash:1,thin:1,label:"steer"});
 edge("propose","r","novelty","l",{c:C.sig,wide:1});
 edge("novelty","r","implement","l",{c:C.sig,wide:1});
 edge("implement","r","evaluate","l",{c:C.sig,wide:1});
-edge("evaluate","r","score","l",{c:C.sig,wide:1,label:"checkpoint / explicit verdict"});
+edge("evaluate","r","score","l",{c:C.sig,wide:1,label:"checkpoint / attempt fence"});
 edge("score","r","refine","l",{c:C.sig,wide:1});
 edge("refine","t","propose","t",{c:C.sig,label:"↺ next action — until budget",arc:110});
 // stage → its detail head (down)

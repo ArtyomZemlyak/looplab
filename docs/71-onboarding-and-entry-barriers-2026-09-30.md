@@ -594,7 +594,7 @@ External run здесь намеренно не получал кандидат�
 | OB-07 | Частично | Composer показывает активные права и понятное пояснение; четыре варианта раскрываются по запросу, выбор возвращает фокус на видимый переключатель. | Проверить понимание режимов с новым пользователем. |
 | OB-08 | Частично | Essential открывается с модели, показывает 13 полей ресурсов и лимитов с короткими пояснениями; технические детали и runtime permissions раскрываются отдельно. | Проверить подключение модели и понимание лимитов с новым пользователем. |
 | OB-09 | Частично | Run workspace и Agent cycle показывают next step; списки различают внешний режим и engine, attention открывает текущие вопросы (§34–36). Гибель MCP и pause/resume проверены (§37–38). | Подключение самого агента не измеряется; многочасовой сценарий OB-10 ещё открыт. |
-| OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–38 проверяют три MCP-сессии, restart UI, pause/resume и повторную оценку. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
+| OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–44 проверяют MCP/UI recovery, pause/resume, engine loss, obligations, monitor и deadline. §44 добавляет реальную live loss curve и явный stop. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
 | OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. §39/41 исправляют ссылки checkpoint и concept base на реальные MCP-фазы. | Проверены контракт, subprocess-кандидаты, desktop и discovery из серверной подсказки; подключение нового клиента относится к OB-10. |
 | OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–42: source health, lifecycle verdict, engine recovery, report/review и открытый training monitor. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. Живость внешнего агента остаётся явно неизмеряемой. |
 | OB-14 | Частично | Начало сайта показывает два основных входа. | Большая архитектурная схема всё ещё нуждается в упрощении для первого знакомства. |
@@ -1908,3 +1908,76 @@ engine logs и inspect/replay в подкаталогах случаев. Ком
 проверяет рост log при unanswered wait, stage cap и exact replay после terminal.
 В нём stop → terminal занял **0.156 секунды**, extend с cap 1 → timeout terminal —
 **1.203 секунды** с учётом polling, cleanup и публикации события.
+
+## 44. OB-10/11/12: живой SGD monitor и граница попытки для loss veto
+
+**2026-10-01.** Следующая проверка после deadline recovery — внешний agent review
+по ещё работающему training command. Ранее §42 проверял первый advisory вопрос
+после завершения быстрой команды. Теперь проверены реальные текущие loss points,
+`watch`, разрешённый stop, восстановление открытого stop-вопроса и завершение
+training authority по появлению declared checkpoint.
+
+### Найден и исправлен баг старой кривой
+
+В `external_watch.observe_external_eval` observation уже читался с pre-attempt
+snapshot, а `read_stage_trajectory` для deterministic kill veto вызывался **без него**.
+Логи дописываются при reset/repair; поэтому сервер показывал агенту текущие строки,
+но разрешение остановки мог определять по смеси текущей и предыдущей попытки.
+
+До изменения упали **четыре** регрессионные проверки:
+
+| Предыдущая попытка → текущая | Ошибка прежнего monitor |
+| --- | --- |
+| Descending loss → frozen loss | Старая descent запрещала abort новой попытки после watch |
+| `NaN` → неаномальная descending loss | Старая anomaly снимала veto; новая улучшающаяся попытка ошибочно получала abort authority |
+
+Оба направления воспроизведены для named pipeline и single-command `eval.log`.
+Теперь live trajectory получает snapshot текущей попытки. Общий reader определяет
+byte floor через существующий `attempt_byte_floor` на том же открытом файле;
+нечитаемая граница даёт пустую trajectory. Прежний explicit floor для stage check
+сохраняется. Логи не стираются, вопросы и ответы не переписываются. Новые verdicts,
+каденции, автоматическая остановка и модельные решения не добавлены.
+
+### Три реальных MCP-прогона
+
+Добавлен `benchmarks.external_live_monitor_smoke`: отдельные приватные run roots,
+настоящий CLI engine, stdio MCP и перезапускаемый UI. Оператор объявляет
+`train → score`; оба скрипта защищены, editable только `config.json`.
+Train действительно обновляет linear model по SGD и пишет рассчитанный loss,
+затем сохраняет weights. Отдельный scorer считает held-out MSE этих weights.
+Паузы по 0.1 секунды между optimizer steps нужны для наблюдения короткого CPU
+эксперимента; они не имитируют дорогой training и не создают выдуманную loss curve.
+Monitor cadence явно **0.4 секунды**, train kill включён, ASHA/deadline review выключены.
+
+| Сценарий | Наблюдение и результат |
+| --- | --- |
+| `improving` | 80 steps, `lr=0.05`; первый вопрос advisory, после watch abort остаётся запрещён descending veto. Обучение и score выполнены по одному разу; MSE **0.004653682304385089** |
+| `frozen_stop` | Контроль с `lr=0`: loss рассчитан реально, но optimizer не меняет weights. После watch новый вопрос даёт stop authority. MCP завершается, UI перезапускается; тот же вопрос и journal сохранены, engine жив. Явный abort даёт failed `monitor_broken`, без weights, score и метрики |
+| `checkpoint_validation` | 15 steps, `lr=0`; после записи weights command продолжает проверку checkpoint. После watch новые вопросы advisory: training authority уже потрачена. Отдельный score выполняется один раз, MSE **2.3913043478260874** |
+
+Первый run получил **10** вопросов, контроль stop — **2**, checkpoint validation —
+**9**. Каждый advisory abort получает 400, правильный ответ и exact retry — одну
+квитанцию. Один принятый abort останавливает только этот приватный контроль;
+flat loss сам по себе не объявляется доказательством поломки ML задачи.
+Каждый run имеет один terminal event. Protected source/workspace bytes неизменны.
+Все узлы и явно завершённые run получили короткие русские result-notices с
+evidence token и exact retry; CLI `inspect`/`replay` проходят.
+
+Proof: `.tmp/external-live-monitor-proof-1/acceptance.json`, journals и логи по
+сценариям. [External guide](guide/external-harness.md), MCP monitor purpose,
+harness-contract и B/E architecture diagram поясняют, что watch запрашивает новый
+взгляд, а permission берётся из **нового вопроса** по evidence текущей попытки.
+
+Границы: смешение старой и новой кривой воспроизведено направленными backend
+тестами; live-прогон отдельно проверяет настоящую текущую кривую, stop и recovery.
+Это не multi-hour session и не оценка научных решений модели. ASHA same-resource
+recovery, интерактивные разрешения клиентов и обнаружение гибели remote agent
+остаются открытыми сценариями.
+
+Перед изменением прошли **193 replay** проверки; после исправления — **216 backend**,
+включая четыре новые регрессии, stage trajectory, monitor contracts/receipts,
+checkpoint lifecycle и границы пакетов.
+
+После уточнения discovery повторно прошли **10** проверок harness manifest/phase
+contract. Также прошли **32 docs/architecture** и `mkdocs build --strict`;
+OpenAPI reference регенерирован, список маршрутов не изменился.

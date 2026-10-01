@@ -136,7 +136,7 @@ PHASES: tuple[Phase, ...] = (
                                       "triage_look_invitation", "triage_findings_invitation",
                                       "repair_critic_system")),
     Phase("monitor", "StageLog/TrainingVerdict", "engine/train_monitor.py; engine/asha_monitor.py",
-          "Inspect live training and stop an unpromising or unsafe node.",
+          "Inspect current-attempt live evidence. Watch before an authorized abort; improving loss and completed training artifacts can remove training-stop authority. Read each question's kill_enabled.",
           ("GET /api/runs/{run_id}/nodes/{nid}/logs", "GET /api/runs/{run_id}/state",
            "GET /api/runs/{run_id}/harness-checkpoints"),
           ("POST /api/runs/{run_id}/harness-checkpoints", "command:node_abort"),
