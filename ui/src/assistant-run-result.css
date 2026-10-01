@@ -11,3 +11,17 @@
 .asst-run-result-caution { color: var(--warn-text, var(--fg-dim)); }
 .asst-run-result-actions { display: flex; flex-wrap: wrap; gap: 7px; margin: 12px 0 8px; }
 .asst-run-result .btn { text-decoration: none; }
+.asst-result-feed { margin: 14px 0; text-align: left; font-size: 13px; line-height: 1.6; }
+.asst-result-feed-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--fg-mut); font-size: 11px; }
+.asst-result-feed select { background: var(--bg); color: var(--fg); border: 1px solid var(--line-2); border-radius: 5px; padding: 3px; }
+.asst-result-notice { margin: 10px 0; padding: 14px 16px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--card-bg, var(--bg)); overflow-wrap: anywhere; }
+.asst-result-notice p { margin: 6px 0; }
+.asst-result-notice a { font-size: 12px; color: var(--accent); }
+.asst-result-notice .asst-run-result-actions { align-items: center; margin: 10px 0 0; }
+.asst-result-commentary { margin: 10px 0; padding-left: 12px; border-left: 2px solid var(--line-2); white-space: pre-wrap; }
+.asst-result-commentary strong { color: var(--fg-dim); font-size: 11px; }
+.asst-result-feed summary { cursor: pointer; color: var(--fg-mut); padding: 8px 0; }
+.asst-result-details > summary { cursor: pointer; font-size: 12px; padding: 10px 0; }
+.asst-empty.has-results { margin: 0 auto; padding: 12px 16px; }
+.asst-empty.has-results h2 { font-size: 20px; line-height: 1.35; }
+.asst-empty.has-results p { font-size: 12px; margin: 6px 0; }

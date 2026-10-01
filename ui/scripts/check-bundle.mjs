@@ -91,7 +91,10 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // instruction; initial shell remains 82,912 B. All route/reachability ceilings stay unchanged.
     // 2026-10-01 reconnect recovery: measured 594,179 B (+1,307 B), initial 82,912 B.
     // Saved-receipt lookup stays in the lazy panel and sends only GET; all closure gates remain.
-    js: { gzip: 581 * KIB },
+    // 2026-10-01 completion briefs: measured 599,253 B JS (+5,074 B), initial 82,912 B.
+    // Node/run receipts and RU/EN prose load with the open Assistant; no eager result polling.
+    // Initial shell and every route/reachability ceiling remain unchanged.
+    js: { gzip: 586 * KIB },
     css: { gzip: 57 * KIB },
   },
   individual: {

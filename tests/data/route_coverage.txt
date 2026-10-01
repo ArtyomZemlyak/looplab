@@ -121,6 +121,8 @@ GET /api/runs/{run_id}/prov	tests/test_fork_from_seq.py tests/test_prov_claims.p
 POST /api/runs/{run_id}/report_refresh	tests/test_evidence_consumer_fences.py tests/test_provider_error_redaction.py tests/test_report.py tests/test_server.py
 POST /api/runs/{run_id}/reset	tests/test_durable_op_kit.py tests/test_report.py tests/test_reset_phase_locks.py tests/test_review_fixes.py tests/test_run_command_service.py tests/test_server.py
 POST /api/runs/{run_id}/resolve-activity-claims	tests/test_run_command_service.py
+GET /api/runs/{run_id}/result-notices	tests/test_result_notices.py
+POST /api/runs/{run_id}/result-notices	tests/test_result_notices.py
 GET /api/runs/{run_id}/reviews	tests/test_review_capabilities.py
 POST /api/runs/{run_id}/reviews	tests/test_card_public_projection.py tests/test_collaboration.py tests/test_concept_lens_durability.py tests/test_log_pages.py tests/test_refusal_vocabulary.py tests/test_review_capabilities.py tests/test_server_code_freshness.py
 DELETE /api/runs/{run_id}/reviews/{link_id}	tests/test_review_capabilities.py

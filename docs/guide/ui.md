@@ -7,6 +7,13 @@ Open **Runs**; Assistant is already visible on a desktop screen. Select **Start 
 describe your goal and where the code or data live, then review its launch card.
 **Validate** shows the effective task and settings; **Start run** begins the experiment.
 The run opens with its current status, and **Report** shows the measured result and caveats.
+For the attached run, Assistant chat also shows free short briefs after each completed
+evaluation and after finalization. They include the score, confirmation/constraints and
+links to the exact experiment. **EN/РУ** chooses the brief language; external agent
+interpretations appear separately. Earlier results and the detailed selected-result
+comparison are expandable. These reads do not call a model or start work.
+**Explain result in chat** and **Discuss failure in chat** prepare an evidence-focused
+question about that exact attempt. They preserve an existing draft; sending is explicit.
 For a complete first-run example, see the [Assistant quickstart](quickstart.md#assistant-in-the-web-ui).
 
 The chat needs a configured model. Open **LoopLab → Settings → Essential → Model** to check the saved

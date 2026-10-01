@@ -5,6 +5,12 @@ hide:
 
 # Architecture at a glance
 
+Completed node evaluation → generation/attempt-bound result receipt → free brief
+in Assistant chat. In external mode, the agent adds a bounded interpretation
+through `/result-notices` with an evidence token and idempotent action identity.
+Run receipts wait for completed finalization and engine release. Commentary is
+separate from metrics and owner chat actions; it adds no engine wait or report gate.
+
 Two **capability maps** of the engine: a **high-level one-pager** for the mental model, and a
 **detailed process diagram** covering the main stages, agents, memory tiers and trust controls.
 They are navigation aids, not an exhaustive executable specification. Where shown, status labels

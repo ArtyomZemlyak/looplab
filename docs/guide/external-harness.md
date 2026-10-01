@@ -54,6 +54,50 @@ LoopLab's provider-cost ledger. The scoped token cannot launch a run or change
 global settings. The full `harness` contract and the live progress endpoint
 remain authoritative if enabled obligations require more steps than this sketch.
 
+### Brief results in Assistant chat
+
+The Assistant transcript for the attached run shows a free completion brief
+after each terminal evaluation (including failure/abort), and after the run has
+finished finalization and released its engine. It uses recorded metrics, names
+confirmation and constraints, and links to the exact node attempt or Report.
+A trainer exit or an unanswered monitor checkpoint is not completion. EN/РУ
+switches these briefs; it does not translate existing model/agent prose.
+
+External agents should add a short interpretation after each completion:
+
+1. Read `GET /api/runs/{run_id}/result-notices?expected_generation=TOKEN` through
+   MCP `api_request`. The current run generation comes from `/state`.
+2. Copy the item's `id` and `evidence_token`. Submit through MCP `api_request`:
+
+   ```json
+   {
+     "expected_generation": "TOKEN",
+     "action_id": "stable-unique-summary-id",
+     "receipt_id": "node:0:0",
+     "evidence_token": "TOKEN_FROM_RECEIPT",
+     "summary": "What changed, what the evidence supports, caveats, and the next decision."
+   }
+   ```
+
+   POST to `/api/runs/{run_id}/result-notices`; for a finalized run use its `run`
+   receipt. Write in the user's language, at most 700 characters. Scores come
+   from LoopLab; metric, role and action fields are rejected. An interpretation
+   may be uncertain and is visibly separate from the recorded measurement.
+3. Retry a lost response with the **same action_id and exact body**. One comment
+   is allowed per receipt version. Reconnect/reload restores the same briefs;
+   changing the node attempt, measurement, provenance or comparison evidence
+   withdraws old commentary. This is a current evidence view, not a copied
+   Assistant-session message or a historical/public transcript.
+
+This path accepts the scoped harness token on external runs without giving it
+owner chat-log/model-workflow access. It stores bounded commentary beside the
+run, never executes actions, and does not fulfill reports or checkpoints. It
+adds **no admission/finalization gate or hidden engine wait**. If the agent
+disconnects, automatic measured briefs remain readable. The chat initially
+shows the latest three briefs; earlier loaded results can be expanded. Reads
+are bounded to 50 items (up to 200 explicitly); the full event history remains
+in Events. Incomplete event/commentary sources produce an explicit error.
+
 ### Connect from the UI
 
 For an already launched external run, open **Progress → Agent cycle → Connect

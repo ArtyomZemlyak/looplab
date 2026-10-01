@@ -1,0 +1,47 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { click, fetchStub, mountLive, until } from './_mount.js'
+import { generation, node, payload } from './_resultNoticesFixtures.js'
+import { parseRunRouteState } from '../src/runRouteState.js'
+
+test('completion messages reconnect once, use safe prose and withdraw stale evidence; links retain attempt', async () => {
+  const harness = await mountLive()
+  const { default: Results } = await harness.load('/src/AssistantResults.jsx')
+  const rows = [{ ...node, commentary: '<button onclick="resume()">Do not execute me</button>' }]
+  const backend = fetchStub({ 'GET /api/runs/demo/result-notices': () => payload(rows),
+    'GET /api/runs/other/result-notices': () => ({ ...payload([]), generation: 'c'.repeat(64) }) })
+  globalThis.fetch = backend
+  localStorage.clear()
+  const asked = []
+  const mounted = await harness.mount(Results, { runId: 'demo', generation, onAsk: question => asked.push(question) })
+  try {
+    await until(() => mounted.container.querySelector('.asst-result-notice'), 'node result')
+    const { container } = mounted
+    assert.equal(container.querySelectorAll('article').length, 1)
+    assert.match(container.textContent, /External agent · interpretation/)
+    assert.match(container.textContent, /<button onclick/)
+    assert.equal(container.querySelectorAll('.asst-result-commentary button').length, 0)
+    const target = parseRunRouteState(container.querySelector('article a').getAttribute('href')).state
+    assert.equal(target.generation, generation)
+    assert.equal(target.nodeGeneration, 1)
+    assert.equal(target.nodeId, 2)
+    await click(container.querySelector('article button'))
+    assert.match(asked[0], /experiment #2, attempt 1/)
+    await mounted.rerender({ runId: 'demo', generation, onAsk: question => asked.push(question), askDisabled: true })
+    assert.equal(container.querySelector('article button').disabled, true)
+    await click(container.querySelector('article button'))
+    assert.equal(asked.length, 1, 'cannot overwrite an existing draft')
+    await mounted.unmount()
+    const reopened = await harness.mount(Results, { runId: 'demo', generation })
+    try {
+      await until(() => reopened.container.querySelector('article'), 'reconnected results')
+      assert.equal(reopened.container.querySelectorAll('article').length, 1)
+      await reopened.rerender({ runId: 'other', generation: 'c'.repeat(64) })
+      await until(() => /after an experiment/.test(reopened.container.textContent), 'new run context')
+      assert.doesNotMatch(reopened.container.textContent, /Do not execute me|Experiment #2/)
+    } finally { await reopened.unmount() }
+    assert.equal(backend.calls.some(call => call.method !== 'GET'), false, 'reading never writes chat or starts work')
+  } finally {
+    await harness.close()
+  }
+})

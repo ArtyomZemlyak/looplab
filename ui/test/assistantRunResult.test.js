@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { click, fetchStub, mountLive, settle, unanswered, until } from './_mount.js'
 import { parseRunRouteState } from '../src/runRouteState.js'
+import { node, payload } from './_resultNoticesFixtures.js'
 
 const generation = 'a'.repeat(64)
 const receipt = { first: { node_id: 0, attempt: 0, value: 0.5, confirmed: false, seeds: null },
@@ -70,6 +71,7 @@ test('Assistant drafts the result question, preserves an existing draft, and sen
     'GET /api/assistant/sessions': { sessions: [] },
     'GET /api/assistant/watches': { watches: [] },
     'GET /api/runs': [row],
+    'GET /api/runs/demo/result-notices': payload([node]),
     'GET /api/assistant/permissions': ({ init }) => unanswered(init),
     'GET /api/assistant/progress': ({ init }) => unanswered(init),
   })
@@ -91,6 +93,8 @@ test('Assistant drafts the result question, preserves an existing draft, and sen
     assert.match(input.value, /Do not start another experiment/)
     assert.equal(document.activeElement, input)
     assert.equal(ask.disabled, true, 'the next click cannot overwrite a nonempty draft')
+    await until(() => mounted.container.querySelector('.asst-result-notice button'), 'node result question')
+    assert.equal(mounted.container.querySelector('.asst-result-notice button').disabled, true)
     assert.equal(backend.calls.some(call => call.method !== 'GET'), false,
       'preparing the question cannot send a message or run command')
   } finally {

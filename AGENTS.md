@@ -82,3 +82,11 @@ scope-report generation. Author the corresponding run decisions and reports
 through the durable commands and guarded knowledge APIs.
 When the evidence supports a reusable conclusion, publish it through `/lessons`
 with terminal node IDs; never include a claimed score in place of evaluation.
+
+After each terminal node and finalized run, read generation-fenced `/result-notices`
+and POST a brief interpretation in the user's language (max 700 characters), with
+the returned receipt_id and evidence_token plus a stable action_id. Explain what
+changed, caveats and the next decision; LoopLab supplies the measured numbers.
+Retry lost responses with the exact same body/action_id. This appears in Assistant
+chat without writing the owner's chat log or executing actions. It adds no hidden
+engine wait and never replaces checkpoints or report obligations.

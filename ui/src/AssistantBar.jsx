@@ -83,6 +83,7 @@ import { followClientRoute } from './accessibility.jsx'
 
 const FirstRunModelStatus = React.lazy(() => import('./FirstRunModelStatus.jsx'))
 const AssistantRunResult = React.lazy(() => import('./AssistantRunResult.jsx'))
+const AssistantResults = React.lazy(() => import('./AssistantResults.jsx'))
 
 // ── ONE assistant, three flowing views: bar ⇄ side(right) ⇄ full ───────────────────────────────
 //
@@ -3454,7 +3455,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     retryHandlers.publish(msgs.map((_, index) => retryHandlerFor(index)))
     return <>
     {renderWatchStrip()}
-    {msgs.length === 0 && <div className="asst-empty">
+    {msgs.length === 0 && <div className={'asst-empty' + (runId && selectedRun?.nodes > 0 ? ' has-results' : '')}>
       <div className="asst-empty-eyebrow">LOOPLAB ASSISTANT</div>
       <h2>{newRunDraft ? 'What should we investigate?' : showRunResult ? 'What did this run achieve?'
         : runId ? 'Work through this run together' : 'What would you like to explore?'}</h2>
@@ -3503,7 +3504,19 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         onLaunchDisclosure={retainTurnLaunchDisclosure}
         onLaunchStarted={settleTurnLaunchStarted} />
     </React.Fragment>)}
-    {showRunResult && <React.Suspense fallback={null}>
+    {!historical && !newRunDraft && runId && /^[0-9a-f]{64}$/.test(selectedRun?.generation || '') && <React.Suspense fallback={null}>
+      <AssistantResults key={`${runId}:${selectedRun.generation}`} runId={runId}
+        generation={selectedRun.generation} onOpen={openRunFromAssistant} onReady={onResultReady}
+        askDisabled={composerEditingPaused || !!input.trim()}
+        askDisabledReason={input.trim() ? 'Finish or clear your current draft before preparing a result question'
+          : 'The Assistant composer is unavailable in the current context'}
+        onAsk={question => {
+          if (composerEditingPaused || input.trim()) return
+          setInput(question)
+          inputRef.current?.focus()
+        }} />
+    </React.Suspense>}
+    {showRunResult && <details className="asst-result-details"><summary>Compare selected result and open solution</summary><React.Suspense fallback={null}>
       <AssistantRunResult run={selectedRun} onOpen={openRunFromAssistant} onReady={onResultReady}
         askDisabled={composerEditingPaused || !!input.trim()}
         askDisabledReason={input.trim() ? 'Finish or clear your current draft before preparing a result question'
@@ -3514,7 +3527,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           setInput('Explain this run’s result, compare it with the first eligible experiment, and show the caveats and solution artifacts. Do not start another experiment.')
           inputRef.current?.focus()
         }} />
-    </React.Suspense>}
+    </React.Suspense></details>}
     {!historical && pending.length > 0 && <div className="asst-perm-region" role="region"
       aria-label={`${pending.length} pending Assistant approval${pending.length === 1 ? '' : 's'}`}
       aria-live="assertive" aria-atomic="false">

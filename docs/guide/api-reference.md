@@ -10,7 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-152 routes on 135 paths; 10 deprecated; 27 with a declared response model.
+154 routes on 136 paths; 10 deprecated; 27 with a declared response model.
 
 ### `/api`
 
@@ -218,6 +218,8 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `POST` | `/api/runs/{run_id}/report_refresh` | Force a high-quality regeneration of the agent-authored run report NOW. Appends a | — |  |
 | `POST` | `/api/runs/{run_id}/reset` | round-7 "Replay": reset a run IN PLACE — archive its event log + spans + node workspaces and | — |  |
 | `POST` | `/api/runs/{run_id}/resolve-activity-claims` | Guarded operator recovery for an ownership claim that cannot be proven dead. | — |  |
+| `GET` | `/api/runs/{run_id}/result-notices` | Brief node/run completion evidence for Assistant chat. Pure read, no model call. | — |  |
+| `POST` | `/api/runs/{run_id}/result-notices` | Attach a short external interpretation to an exact measured completion. | — |  |
 | `GET` | `/api/runs/{run_id}/reviews` | *List Reviews* (no docstring) | — |  |
 | `POST` | `/api/runs/{run_id}/reviews` | *Create Review* (no docstring) | — |  |
 | `DELETE` | `/api/runs/{run_id}/reviews/{link_id}` | *Revoke Review* (no docstring) | — |  |

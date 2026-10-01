@@ -700,6 +700,17 @@ class ExternalReviewBody(BaseModel):
     action_ref: str = Field(default="", max_length=160)
 
 
+class ResultCommentaryBody(BaseModel):
+    """External interpretation of a server-issued completion receipt; no metric writes."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    expected_generation: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    action_id: str = Field(min_length=1, max_length=160, pattern=r"^[^\x00-\x1f\x7f]+$")
+    receipt_id: str = Field(pattern=r"^(run|node:[0-9]+:[0-9]+)$", max_length=100)
+    evidence_token: str = Field(pattern=r"^[0-9a-f]{64}$")
+    summary: str = Field(min_length=1, max_length=700)
+
+
 class ExternalCheckpointAnswer(BaseModel):
     """One live evaluation decision; checkpoint_id identifies the observed stage/tick."""
 
@@ -1086,6 +1097,31 @@ def build_router(srv) -> APIRouter:
             from looplab.harness.progress_summary import brief as compact_progress
             return compact_progress(result)
         return result
+
+    @router.get("/api/runs/{run_id}/result-notices")
+    def get_result_notices(run_id: str, response: Response,
+                           expected_generation: str = Query(..., pattern=r"^[0-9a-fA-F]{64}$"),
+                           limit: int = Query(50, ge=1, le=200)):
+        """Brief node/run completion evidence for Assistant chat. Pure read, no model call.
+
+        Current attempts only; incomplete event sources fail closed. Run completion
+        waits for finalization and engine release. Commentary is separate agent prose.
+        """
+        from looplab.serve.result_notices import snapshot
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Vary"] = "X-LoopLab-Token, Authorization"
+        return snapshot(srv, _run_dir(run_id), expected_generation, limit=limit)
+
+    @router.post("/api/runs/{run_id}/result-notices")
+    def publish_result_commentary(run_id: str, body: ResultCommentaryBody):
+        """Attach a short external interpretation to an exact measured completion.
+
+        First GET its receipt_id/evidence_token. Retry a lost response with the
+        same action_id and body. One comment per receipt version; changed evidence
+        withdraws old commentary. Does not append owner chat or execute actions.
+        """
+        from looplab.serve.result_notices import publish
+        return publish(srv, _run_dir(run_id), body)
 
     @router.get("/api/runs/{run_id}/harness-checkpoints")
     def get_harness_checkpoints(run_id: str, expected_generation: str = Query(...)):
