@@ -37,7 +37,7 @@ from looplab.serve.server import make_app
 CASES = ("agent_loss", "engine_loss")
 
 
-def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False):
+def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, response_fault="disconnect"):
     root.mkdir(parents=True, exist_ok=False)
     runs = root / "runs"; runs.mkdir()
     source = root / "source"; source.mkdir()
@@ -65,6 +65,8 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False):
     owned_engines = []
     proof = {"case": name, "model_judgment_tested": False, "agent_connection": "not_measured",
              "metrics": [], "read_steps": []}
+    if drop_command_response:
+        proof["response_fault"] = response_fault
     log = (root / "engine.log").open("w", encoding="utf8")
 
     def start_ui():
@@ -98,8 +100,11 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False):
             lost = await client.call("api_request", {"method": "POST", "path": "/api/runs/demo/commands",
                 "body": {"expected_generation": client.generation, "type": "inject_node", "data": data},
                 "idempotency_key": key})
-            assert lost["status"] is None and lost["outcome"] == "unknown"
+            expected_status = {"disconnect": None, "server_error": 503}.get(response_fault, 200)
+            assert lost["status"] == expected_status and lost["outcome"] == "unknown"
             assert lost["code"] == "request_outcome_unknown"
+            assert lost["reason"] == {"disconnect": "transport_error", "server_error": "server_error",
+                "invalid_json": "invalid_json", "oversized": "response_too_large"}[response_fault]
             receipt = await until(lambda: client.receipt(key), lambda row: row["command"]["status"] == "succeeded")
             replay = await client.command("inject_node", data, key)
             assert replay["command"]["id"] == receipt["command"]["id"]
@@ -119,7 +124,8 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False):
                     "evidence_token": row["evidence_token"], "action_id": f"idle:summary:{nid}", "summary": summary}
             proxy.drop_next_write = "/api/runs/demo/result-notices"
             lost = await client.call("api_request", {"method": "POST", "path": "/api/runs/demo/result-notices", "body": body})
-            assert lost["status"] is None and lost["outcome"] == "unknown"
+            expected_status = {"disconnect": None, "server_error": 503}.get(response_fault, 200)
+            assert lost["status"] == expected_status and lost["outcome"] == "unknown"
             saved = next(r for r in (await client.read("result-notices"))["items"] if r["id"] == row["id"])
             assert saved["commentary"] == summary
             assert (await client.request("POST", "result-notices", body))["replayed"]
@@ -191,8 +197,12 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False):
         async with stdio_client(params) as (reader, writer), ClientSession(reader, writer) as mcp:
             await mcp.initialize()
             client = Client(mcp, generation)
-            checked = await client.call("connection_check", {"run_id": "demo", "expected_generation": generation})
+            checked = await client.call("connection_check", {"run_id": "demo", "expected_generation":
+                generation.upper() if response_fault == "invalid_json" else generation})
             assert checked["ok"] and checked["agent_connection"] == "not_measured"
+            assert checked["generation"] == generation
+            if response_fault == "invalid_json":
+                proof["uppercase_handoff_canonicalized"] = True
             await client.call("capabilities", {})
             for suffix in ("config", "harness-contract",
                            "artifact?root=run&path=task.snapshot.json&expected_generation=" + generation):
@@ -203,7 +213,7 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False):
 
     try:
         if drop_command_response:
-            proxy = ResponseLossProxy(url)
+            proxy = ResponseLossProxy(url, response_fault)
         server, thread = start_ui()
         flags = {"external_harness": True, "deep_research_every": -1, "report_every": 0, "novelty_mode": "off",
             "foresight": False, "track_hypotheses": False, "concept_pivot": False, "concept_run_base": False,
@@ -309,13 +319,17 @@ def main():
                         help="Real idle hold after owned MCP death; >=120 tests quiet activity without agent calls.")
     parser.add_argument("--drop-command-response", action="store_true",
                         help="Lose accepted command/commentary replies and one read reply through an owned TCP proxy.")
+    parser.add_argument("--response-fault", choices=["disconnect", "invalid_json", "oversized", "server_error"],
+                        default="disconnect", help="Replace accepted write replies instead of disconnecting; requires --drop-command-response.")
     args = parser.parse_args()
     if not 0 <= args.quiet_hold_seconds <= 14400:
         parser.error("quiet hold must be between zero and four hours")
     if args.drop_command_response and args.case != "agent_loss":
         parser.error("response-loss acceptance requires --case agent_loss")
+    if args.response_fault != "disconnect" and not args.drop_command_response:
+        parser.error("response fault requires --drop-command-response")
     root = args.out.resolve(); root.mkdir(parents=True, exist_ok=False)
-    proof = [run_case(root / name, name, args.quiet_hold_seconds, args.drop_command_response)
+    proof = [run_case(root / name, name, args.quiet_hold_seconds, args.drop_command_response, args.response_fault)
              for name in CASES if args.case in ("all", name)]
     (root / "acceptance.json").write_text(json.dumps(proof, ensure_ascii=False, indent=2), encoding="utf8")
 

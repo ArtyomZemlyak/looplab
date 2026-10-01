@@ -181,6 +181,9 @@ optional `expected_generation` from the copied handoff. It reads `/state?observe
 generation-fenced handoff and compact progress. If the supplied generation differs,
 it stops before reading the replacement run's context. Without it, the tool discovers
 the current generation; use that only when you intend to inspect the current run.
+Generation is a hexadecimal digest: `connection_check` accepts either hex case and
+uses its canonical lowercase spelling for subsequent fenced reads. This does not
+accept a different digest or reinterpret a run ID, key or action ID.
 Observation bypasses the ordinary state route's reconciliation of a pending
 operator reset. It can see an unfinished reset, so the subsequent generation fences
 remain necessary; the diagnostic never completes that reset itself.
@@ -198,6 +201,18 @@ writes preserve the original `action_id` and exact body. Do not recover by inven
 a new key. HTTP responses, including 4xx/5xx, retain their original status/body;
 `status: null` never means an applied command. MCP delivering this diagnostic is
 successful tool transport, so inspect the returned fields even when `isError` is false.
+The same unknown write outcome is explicit for received **5xx**, oversized **2xx**
+or invalid JSON **2xx** acknowledgements. The original HTTP status survives; inspect
+`code` and `outcome` even with HTTP 200. `reason` names `transport_error`, `server_error`,
+`response_too_large` or `invalid_json`. A bounded 5xx body remains available; oversized
+and malformed success bodies are not presented as receipts. A read over the 256 KiB
+cap returns `response_incomplete`/`unavailable` with narrower-query advice; the cap
+does not suggest resubmitting a write. Typed `run_progress`/`command_receipt` also
+refuse HTTP-200 non-object bodies. This is envelope validation, not a substitute for
+domain schemas, generation fences or source health. Generic text GETs and empty
+204/205 mutation responses remain supported; validation 4xx responses keep their
+original status/body. Never infer whether a server error occurred before or after
+acceptance without reading durable evidence.
 Connection-check errors omit raw HTTP bodies, exception details and URLs. On success it returns server
 paths, last-read engine status, source health, `evidence_complete` and the next step.
 `ok: true` means these reads succeeded; incomplete journals remain explicit, and
@@ -958,6 +973,11 @@ evidence changes no work. Recovery, UI restart and a second measured candidate s
 produce exactly two score executions and three commentary rows (two nodes and one
 explicitly finalized run). This exercises real transport/protocol recovery with short
 protected SGD, not model decisions or interactive client approval.
+Add `--response-fault invalid_json`, `oversized` or `server_error` to replace the
+two accepted write replies with malformed HTTP 200, over-cap HTTP 200 or HTTP 503.
+The proxy first receives upstream 200 in every case. The GET reply still disconnects.
+Each independent case must preserve the same receipts, two actual score executions
+and three commentary rows; fault payloads never supply a metric.
 
 ## Delegating only code editing
 

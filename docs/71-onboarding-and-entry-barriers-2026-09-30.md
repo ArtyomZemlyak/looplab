@@ -594,9 +594,9 @@ External run здесь намеренно не получал кандидат�
 | OB-07 | Частично | Composer показывает активные права и понятное пояснение; четыре варианта раскрываются по запросу, выбор возвращает фокус на видимый переключатель. | Проверить понимание режимов с новым пользователем. |
 | OB-08 | Частично | Essential открывается с модели, показывает 13 полей ресурсов и лимитов с короткими пояснениями; технические детали и runtime permissions раскрываются отдельно. | Проверить подключение модели и понимание лимитов с новым пользователем. |
 | OB-09 | Частично | Run workspace и Agent cycle показывают next step; списки различают внешний режим и engine, attention открывает текущие вопросы (§34–36). Гибель MCP и pause/resume проверены (§37–38). §47 показывает последнее успешное scoped progress чтение. | Активность запросов не доказывает живость агента; многочасовой сценарий OB-10 ещё открыт. |
-| OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–48 проверяют MCP/UI recovery, pause/resume, engine loss, obligations, monitor, deadline и ASHA. §47 — реальные 121 секунды без MCP-запросов; §48 — понятный отказ при неверной auth configuration. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
+| OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–50 проверяют MCP/UI recovery, pause/resume, engine loss, obligations, monitor, deadline и ASHA. §47–50 — request activity, auth configuration, потерянные/неполные ответы и canonical generation. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
 | OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. §39/41 исправляют ссылки checkpoint и concept base на реальные MCP-фазы. | Проверены контракт, subprocess-кандидаты, desktop и discovery из серверной подсказки; подключение нового клиента относится к OB-10. |
-| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–49: source health, lifecycle verdict, engine recovery, obligations, monitor, retarget, idle recovery, scoped request activity и transport outcome unknown. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. §49 теряет настоящие TCP replies после принятия command/commentary. Наблюдение запросов не измеряет живость агента. |
+| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–50: source health, lifecycle verdict, engine recovery, obligations, monitor, retarget, idle recovery, request activity и unknown acknowledgement. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. §49–50 повреждают реальные replies после принятия command/commentary. Наблюдение запросов не измеряет живость агента. |
 | OB-14 | Частично | Начало сайта показывает два основных входа. | Большая архитектурная схема всё ещё нуждается в упрощении для первого знакомства. |
 
 Остальные пункты §3 и соответствующие сценарии §11 остаются открытыми. Изменения первого
@@ -2274,3 +2274,68 @@ OpenAPI reference регенерирован без изменения марш�
 B/E architecture diagram. Новые endpoints, настройки и engine gates не добавлены.
 Короткий scripted network fault не закрывает model judgments, многочасовые сеансы
 или интерактивные разрешения Codex/Claude клиентов.
+
+## 50. OB-10/12: неполные подтверждения записи и canonical generation
+
+**2026-10-01.** После transport recovery из §49 проверены ответы, которые дошли
+до MCP, но не подтвердили результат. При over-cap POST прежняя подсказка
+«Use a narrower API query» предлагала менять запрос. HTTP 200 с повреждённым JSON
+выдавался как successful text body; 5xx не объяснял возможную принятую запись.
+До исправления **19** направленных regression checks упали, **6** compatibility
+checks прошли.
+
+Теперь запись с **5xx**, invalid JSON **2xx** или over-cap **2xx** получает
+`code=request_outcome_unknown`, `outcome=unknown`. Сохраняются настоящий HTTP status
+и причина (`server_error`, `invalid_json`, `response_too_large`); transport loss
+из §49 имеет `reason=transport_error`. Общая подсказка ведёт к original receipts,
+state/checkpoints и exact retry с тем же key/action ID. Новые идентификаторы
+не подставляются, retries не запускаются автоматически. HTTP 200 само по себе
+не подтверждает принятие durable command.
+
+Bounded 5xx body сохранён; over-cap и malformed success body не выдаются за
+квитанцию. Generic GET сохраняет text body. Empty 204/205 writes поддерживаются;
+validation 4xx сохраняют status/body. Over-cap read получает
+`response_incomplete`/`unavailable` с narrower-query advice. Typed `run_progress`
+и `command_receipt` отклоняют HTTP-200 не-object ответы (HTML, JSON null/list).
+Это проверка envelope, не полная проверка domain schema или permission на действие.
+
+### Три настоящих прогона с повреждением reply после server acceptance
+
+Owned loopback proxy сначала получает upstream **200** для first candidate и
+его русской result interpretation; затем возвращает агенту выбранный fault:
+
+| `--response-fault` | Что получает MCP | Проверенный исход |
+| --- | --- | --- |
+| `invalid_json` | HTML с HTTP 200 | Unknown outcome; original receipt и summary прочитаны, exact retries не дублируют node/commentary |
+| `oversized` | JSON **262158 bytes** с HTTP 200, больше **256 KiB** | Body отсутствует, `truncated=true`; recovery использует исходную квитанцию и тот же ключ |
+| `server_error` | HTTP 503 после настоящего upstream 200 | Status/body сохранены вместе с unknown outcome; retry возвращает исходную команду |
+
+В каждом run также теряется настоящий GET reply, затем MCP завершается и UI
+перезапускается. Reads не запускают работу; второй candidate подаётся явно,
+run явно завершается. Ровно **два** protected CPU SGD score executions,
+**один** engine process и **три** commentary rows. MSE **0.13721179500378475**
+и **0.01337676906957059**, scorer bytes неизменны; `inspect`/`replay` проходят.
+Fault payloads не являются ML evidence. Пользовательский server не затронут.
+
+Proofs: `.tmp/external-ack-invalid_json-proof-2/acceptance.json`,
+`.tmp/external-ack-oversized-proof-1/acceptance.json`,
+`.tmp/external-ack-server_error-proof-1/acceptance.json`. Для воспроизведения
+к команде §49 добавить `--response-fault` с одним из этих значений и новый out dir.
+Default `disconnect` сохраняет прежнюю проверку разрыва TCP.
+
+Отдельно найдена ошибка `connection_check`: допустимый uppercase hex digest
+сравнивался case-sensitive, хотя server generation fences принимают обе формы.
+Две regression проверки сначала упали. Теперь digest нормализуется в lowercase
+перед comparison и следующими reads. Разные digests по-прежнему отказываются
+до handoff/progress. Run IDs, action IDs и keys не меняются. Повторный live
+`invalid_json` probe подключается с uppercase handoff до и после restart UI;
+`uppercase_handoff_canonicalized=true` в proof.
+
+Перед изменением прошли **193 replay** проверки. После — **198 backend/MCP**,
+включая новые response/generation и прежние refusal/receipt/notice проверки.
+Также прошли **31 docs/diagram** проверка и `mkdocs build --strict`;
+OpenAPI reference регенерирован без изменения маршрутов.
+Обновлены guide, MCP instructions/help, capability manifest и full B/E diagram;
+маршруты, settings, response cap и engine gates не менялись. Граница: эти короткие
+scripted probes не закрывают многочасовую работу, model judgments или интерактивные
+разрешения клиентов.

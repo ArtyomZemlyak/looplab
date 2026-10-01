@@ -1,6 +1,7 @@
-"""Owned loopback proxy: lose replies only AFTER the private UI has answered.
+"""Owned loopback proxy: lose or replace replies AFTER the private UI has answered.
 
-No request retry, response synthesis, token logging or production server changes.
+No request retry, token logging or production server changes. Replacement responses
+are explicit fixture faults; they never count as measured evidence.
 Used by the real SGD/MCP acceptance fixture, never by LoopLab at runtime.
 """
 from http.client import HTTPConnection
@@ -8,10 +9,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import socket
 import threading
 from urllib.parse import urlsplit
+from looplab.harness.mcp_server import MAX_RESPONSE_BYTES
 
 
 class ResponseLossProxy:
-    def __init__(self, upstream):
+    def __init__(self, upstream, mode="disconnect"):
+        assert mode in ("disconnect", "invalid_json", "oversized", "server_error")
         target = urlsplit(upstream)
         assert target.hostname == "127.0.0.1"
         self.drop_next_read = False
@@ -43,6 +46,19 @@ class ResponseLossProxy:
                             fixture.dropped.append({"method": self.command, "route": self.path.rsplit("/", 1)[-1].split("?", 1)[0],
                                                     "upstream_status": response.status})
                             self.close_connection = True
+                            if lose_write and mode != "disconnect":
+                                if mode == "invalid_json":
+                                    payload = b"<html>Disposable invalid acknowledgement</html>"
+                                elif mode == "oversized":
+                                    payload = b'{"padding":"' + b"x" * MAX_RESPONSE_BYTES + b'"}'
+                                else:
+                                    payload = b'{"detail":"Disposable proxy error after upstream acceptance"}'
+                                self.send_response(503 if mode == "server_error" else 200)
+                                self.send_header("Content-Length", str(len(payload)))
+                                self.send_header("Content-Type", "text/html" if mode == "invalid_json" else "application/json")
+                                self.end_headers()
+                                self.wfile.write(payload)
+                                return
                             self.connection.shutdown(socket.SHUT_RDWR)
                             return
                     self.send_response(response.status)

@@ -85,6 +85,22 @@ def test_connection_stale_handoff_never_reads_replacement_context():
     assert len(seen)==1
 
 
+@pytest.mark.parametrize("state_uppercase", [False, True])
+def test_connection_hex_case_does_not_misidentify_the_same_generation(state_uppercase):
+    seen = []
+    def handler(request):
+        seen.append(request)
+        value = response(request.url.path)
+        if state_uppercase and request.url.path.endswith("/state"):
+            value["generation"] = GEN.upper()
+        return httpx.Response(200, json=value)
+    api = HarnessAPI("http://localhost", transport=httpx.MockTransport(handler))
+    checked = api.connection_check("demo", GEN.upper())
+    assert checked["ok"] and checked["generation"] == GEN
+    assert len(seen) == 3
+    assert all(r.url.params["expected_generation"] == GEN for r in seen[1:])
+
+
 @pytest.mark.parametrize("run_id,generation", [("../other", ""), ("demo","stale"),("","")])
 def test_connection_invalid_identity_never_opens_transport(run_id,generation):
     api=HarnessAPI("http://localhost",transport=httpx.MockTransport(lambda _:pytest.fail("unexpected HTTP")))
