@@ -303,8 +303,8 @@ Keep that run process open while the coding agent sends commands from another te
 
 Configure your coding agent's MCP client to launch `looplab harness-mcp` over stdio,
 with **only** `LOOPLAB_HARNESS_TOKEN` and, if the server is elsewhere,
-`LOOPLAB_HARNESS_URL=http://127.0.0.1:8765`. The process offers ten tools:
-`capabilities`, `phases`, `phase_info`, `settings_keys`, `setting_info`, `operations`,
+`LOOPLAB_HARNESS_URL=http://127.0.0.1:8765`. The process offers eleven tools:
+`capabilities`, `connection_check`, `phases`, `phase_info`, `settings_keys`, `setting_info`, `operations`,
 `operation_schema`, `run_progress`, `command_receipt` and `api_request`. The latter
 forwards to the same authenticated HTTP API as the UI. It never writes directly to
 the event log. Use the live `operations` catalog to discover read, settings,
@@ -312,6 +312,19 @@ task, evidence, artifact and control routes, and `operation_schema` for a route'
 OpenAPI definition. `settings_keys` and `setting_info` expose all Settings, including
 advanced fields omitted from the UI form. `looplab harness --settings` returns the full Settings schema
 and curated field help without a server.
+
+`operations` and `operation_schema` each read the authenticated **live** OpenAPI
+catalog once, then select matching routes or a route's referenced schemas. They
+make no automatic retry and use no cached fallback. Inspect `code`/`outcome`:
+transport loss returns `status: null`, `code: api_unreachable`, `outcome: unavailable`,
+`at: openapi`. A non-200 response keeps its status with `code: api_read_failed`;
+invalid JSON or malformed paths/components returns HTTP-200 `response_incomplete`,
+`reason: invalid_response`. Error bodies, exception text and URLs are omitted.
+Unavailable discovery supplies neither a matches list nor route schemas; it does
+not establish absence of capabilities. Repeat discovery explicitly after recovery.
+A valid empty matches list remains distinct from failure. The full catalog is
+read before local selection, so the individual API-reply 256 KiB cap does not apply
+to it. This checks catalog structure, not every OpenAPI/domain schema constraint.
 
 Read the launched task snapshot through `GET /api/runs/{run_id}/artifact` with
 `root=run`, `path=task.snapshot.json`, and `expected_generation=TOKEN` from
@@ -996,6 +1009,12 @@ the original command receipt; the former targets progress. MCP must return
 `response_context_mismatch` despite HTTP 200, omit the body and leave work unchanged.
 Explicit fresh reads then recover the correct evidence. Each case needs a new out
 directory; write faults and read faults are independent fixture options.
+Add `--discovery-fault disconnect`, `invalid_json` or `invalid_catalog` to fault
+both live discovery tools before the first candidate. The proxy receives upstream
+200, then disconnects or substitutes HTML/JSON with malformed `paths`. Each tool
+must return unavailable evidence without claiming an empty catalog; its next
+explicit read must recover the real command route/schema. Discovery changes no
+events or work. The remaining protected SGD/reconnect checks still apply.
 
 ## Delegating only code editing
 

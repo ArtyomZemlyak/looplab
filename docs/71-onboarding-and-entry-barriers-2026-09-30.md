@@ -594,9 +594,9 @@ External run здесь намеренно не получал кандидат�
 | OB-07 | Частично | Composer показывает активные права и понятное пояснение; четыре варианта раскрываются по запросу, выбор возвращает фокус на видимый переключатель. | Проверить понимание режимов с новым пользователем. |
 | OB-08 | Частично | Essential открывается с модели, показывает 13 полей ресурсов и лимитов с короткими пояснениями; технические детали и runtime permissions раскрываются отдельно. | Проверить подключение модели и понимание лимитов с новым пользователем. |
 | OB-09 | Частично | Run workspace и Agent cycle показывают next step; списки различают внешний режим и engine, attention открывает текущие вопросы (§34–36). Гибель MCP и pause/resume проверены (§37–38). §47 показывает последнее успешное scoped progress чтение. | Активность запросов не доказывает живость агента; многочасовой сценарий OB-10 ещё открыт. |
-| OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–51 проверяют MCP/UI recovery, pause/resume, engine loss, obligations, monitor, deadline и ASHA. §47–51 — request activity, auth configuration, потерянные/неполные ответы, canonical generation и соответствие typed reads запросу. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
-| OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. §39/41 исправляют ссылки checkpoint и concept base на реальные MCP-фазы. | Проверены контракт, subprocess-кандидаты, desktop и discovery из серверной подсказки; подключение нового клиента относится к OB-10. |
-| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–51: source health, lifecycle verdict, engine recovery, obligations, monitor, retarget, idle recovery, request activity, unknown acknowledgement и проверка identity полученной квитанции. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. §49–51 повреждают реальные replies после принятия command/commentary. Наблюдение запросов не измеряет живость агента. |
+| OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–52 проверяют MCP/UI recovery, pause/resume, engine loss, obligations, monitor, deadline и ASHA. §47–52 — request activity, auth configuration, потерянные/неполные ответы, canonical generation, соответствие typed reads запросу и live discovery recovery. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
+| OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. §39/41 исправляют ссылки checkpoint и concept base на реальные MCP-фазы; §52 различает unavailable discovery и пустой catalog. | Проверены контракт, subprocess-кандидаты, desktop и discovery из серверной подсказки; подключение нового клиента относится к OB-10. |
+| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–52: source health, lifecycle verdict, engine recovery, obligations, monitor, retarget, idle recovery, request activity, unknown acknowledgement, identity полученной квитанции и live catalog recovery. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. §49–52 повреждают реальные replies, включая discovery. Наблюдение запросов не измеряет живость агента. |
 | OB-14 | Частично | Начало сайта показывает два основных входа. | Большая архитектурная схема всё ещё нуждается в упрощении для первого знакомства. |
 
 Остальные пункты §3 и соответствующие сценарии §11 остаются открытыми. Изменения первого
@@ -2397,3 +2397,64 @@ MkDocs прошла, API reference регенерирован без измен�
 manifest, MCP instructions/help, guide и full B/E diagram. Settings и runtime
 gates не менялись. Model judgments, интерактивные разрешения клиентов и
 многочасовые сеансы остаются открытыми в OB-10.
+
+## 52. OB-10/11/12: unavailable discovery не превращается в пустой catalog
+
+**2026-10-01.** После §51 проверены оставшиеся live reads MCP: `operations` и
+`operation_schema`. Они читали OpenAPI напрямую с `raise_for_status`/`response.json`,
+обходя recovery diagnostics. Transport/HTTP/JSON failures выбрасывали исключение;
+JSON object без `paths` мог молча выдавать zero capabilities, malformed nested
+objects — AttributeError или неполную схему. До исправления **34** направленных
+regression checks упали, **2** compatibility checks прошли.
+
+Общий `_openapi` теперь делает один authenticated GET и проверяет структуру
+catalog до поиска маршрутов/сбора referenced schemas. Это не полный OpenAPI
+validator. Исправление не добавляет cache fallback, retry, model call или работу
+engine. Programming errors продолжают выбрасываться, а не маскироваться как
+network loss. Invalid API path по-прежнему отказывается до transport.
+
+| Discovery failure | Ответ агента |
+| --- | --- |
+| Transport loss | `status=null`, `code=api_unreachable`, `outcome=unavailable`, `at=openapi` |
+| HTTP не 200, включая redirect/refused access | Настоящий status, `code=api_read_failed`, `outcome=unavailable`, `at=openapi` |
+| Invalid JSON, malformed paths/operations/components | `status=200`, `code=response_incomplete`, `reason=invalid_response`, `outcome=unavailable`, `at=openapi` |
+
+Диагностика фиксированная, без raw body, exception, URL или secret. Error response
+не выдаёт `matches`/`operations`/`components` как будто catalog успешно прочитан.
+Агенту надо явно повторить discovery после восстановления. Успешные response
+shapes сохранены; valid empty matches отличаются от unavailable read. Весь live
+catalog читается до local selection и не ограничивается individual API-reply
+cap **256 KiB**. Отдельная проверка сохраняет large catalog, path-level parameters,
+extensions и recursive referenced schemas, исключая unrelated definitions.
+
+### Три настоящих live discovery recovery прогона
+
+`external_idle_recovery_smoke --case agent_loss --drop-command-response` расширен
+опцией `--discovery-fault disconnect|invalid_json|invalid_catalog`. Перед первым
+candidate owned loopback proxy для каждого из двух discovery tools получает
+upstream **200**, затем закрывает TCP, возвращает HTML или JSON `{"paths":[]}`.
+MCP доставляет unavailable diagnostics; следующий явный read каждого инструмента
+находит настоящий POST command route и его referenced schema. Event log до/после
+этих четырёх reads совпадает. Ничего не запускается от discovery.
+
+Далее в каждом run теряются accepted candidate/commentary replies, exact retries
+сохраняют original receipt и summary; теряется progress reply, завершается MCP,
+перезапускается собственный UI и происходит reconnect. Второй candidate подаётся
+явно, run явно завершается. Ровно **два** protected CPU SGD score executions,
+**один** engine process и **три** русских commentary rows. MSE
+**0.13721179500378475** и **0.01337676906957059**, scorer bytes неизменны;
+CLI `inspect`/`replay` проходят. Пользовательский server не затронут.
+
+Proofs: `.tmp/external-discovery-disconnect-proof-1/acceptance.json`,
+`.tmp/external-discovery-invalid_json-proof-1/acceptance.json` и
+`.tmp/external-discovery-invalid_catalog-proof-1/acceptance.json`.
+Fault payloads не считаются ML evidence. Owned процессы/proxy закрываются cleanup.
+
+Перед изменением прошли **193 replay** проверки. После первого исправления —
+**222 backend/MCP**, финальный набор — **251 passed**, включая **37** discovery
+checks и прежние receipt/handoff/refusal/notice/layering проверки. Ещё **31 docs/diagram**
+checks и `mkdocs build --strict` прошли; API reference регенерирован без изменения маршрутов.
+Обновлены guide, manifest, MCP instructions/help и full B/E diagram; в guide
+исправлен список **11** MCP tools, включая `connection_check`. Настройки,
+endpoints, engine gates и индивидуальный reply cap не менялись. Model judgments,
+интерактивные разрешения клиентов и многочасовые сеансы остаются открытыми в OB-10.

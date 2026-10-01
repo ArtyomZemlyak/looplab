@@ -37,7 +37,7 @@ from looplab.serve.server import make_app
 CASES = ("agent_loss", "engine_loss")
 
 
-def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, response_fault="disconnect", read_fault="disconnect"):
+def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, response_fault="disconnect", read_fault="disconnect", discovery_fault="none"):
     root.mkdir(parents=True, exist_ok=False)
     runs = root / "runs"; runs.mkdir()
     source = root / "source"; source.mkdir()
@@ -68,6 +68,7 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
     if drop_command_response:
         proof["response_fault"] = response_fault
         proof["read_fault"] = read_fault
+        proof["discovery_fault"] = discovery_fault
     log = (root / "engine.log").open("w", encoding="utf8")
 
     def start_ui():
@@ -138,6 +139,25 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
         assert progress["next_step"]["code"] == "choose_direction"
 
     async def first(client):
+        if discovery_fault != "none":
+            before = (runs / "demo" / "events.jsonl").read_bytes()
+            proof["discovery_failures"] = []
+            for tool, args in (("operations", {"query": "commands"}),
+                               ("operation_schema", {"path": "/api/runs/{run_id}/commands"})):
+                proxy.catalog_fault = discovery_fault
+                lost = await client.call(tool, args)
+                assert lost["status"] == (None if discovery_fault == "disconnect" else 200)
+                assert lost["code"] == ("api_unreachable" if discovery_fault == "disconnect" else "response_incomplete")
+                assert lost["outcome"] == "unavailable" and lost["at"] == "openapi"
+                assert not any(key in lost for key in ("body", "matches", "operations"))
+                proof["discovery_failures"].append({"tool": tool, **lost})
+                recovered = await client.call(tool, args)
+                if tool == "operations":
+                    assert any(row["method"] == "POST" and row["path"] == "/api/runs/{run_id}/commands" for row in recovered["matches"])
+                else:
+                    assert "post" in recovered["operations"] and recovered["components"]
+            assert (runs / "demo" / "events.jsonl").read_bytes() == before
+            proof["discovery_reads_changed_no_work"] = True
         await candidate(client, 0, 16)
         proof["original_receipt"] = (await client.receipt("idle:candidate:0"))["command"]["id"]
         if proxy is not None:
@@ -296,7 +316,9 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
         proof.update(protected_scorer_unchanged=True, score_executions=len(starts),
                      engine_processes=len(owned_engines), inspect_replay="passed")
         if proxy is not None:
-            assert proxy.dropped == [{"method": "POST", "route": "commands", "upstream_status": 200},
+            catalog_reads = ([{"method": "GET", "route": "openapi.json", "upstream_status": 200}] * 2
+                             if discovery_fault != "none" else [])
+            assert proxy.dropped == catalog_reads + [{"method": "POST", "route": "commands", "upstream_status": 200},
                                      {"method": "POST", "route": "result-notices", "upstream_status": 200},
                                      {"method": "GET", "route": "command-receipt" if read_fault == "wrong_receipt" else "harness-progress", "upstream_status": 200}]
             assert proof["exact_retry_receipt"] == proof["original_receipt"]
@@ -332,6 +354,8 @@ def main():
                         default="disconnect", help="Replace accepted write replies instead of disconnecting; requires --drop-command-response.")
     parser.add_argument("--read-fault", choices=["disconnect", "stale_generation", "wrong_receipt"],
                         default="disconnect", help="Replace one successful read with mismatched identity; requires --drop-command-response.")
+    parser.add_argument("--discovery-fault", choices=["none", "disconnect", "invalid_json", "invalid_catalog"],
+                        default="none", help="Fault both live discovery tools before the first candidate; requires --drop-command-response.")
     args = parser.parse_args()
     if not 0 <= args.quiet_hold_seconds <= 14400:
         parser.error("quiet hold must be between zero and four hours")
@@ -341,8 +365,10 @@ def main():
         parser.error("response fault requires --drop-command-response")
     if args.read_fault != "disconnect" and not args.drop_command_response:
         parser.error("read fault requires --drop-command-response")
+    if args.discovery_fault != "none" and not args.drop_command_response:
+        parser.error("discovery fault requires --drop-command-response")
     root = args.out.resolve(); root.mkdir(parents=True, exist_ok=False)
-    proof = [run_case(root / name, name, args.quiet_hold_seconds, args.drop_command_response, args.response_fault, args.read_fault)
+    proof = [run_case(root / name, name, args.quiet_hold_seconds, args.drop_command_response, args.response_fault, args.read_fault, args.discovery_fault)
              for name in CASES if args.case in ("all", name)]
     (root / "acceptance.json").write_text(json.dumps(proof, ensure_ascii=False, indent=2), encoding="utf8")
 

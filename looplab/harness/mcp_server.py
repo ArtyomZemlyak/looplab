@@ -37,6 +37,7 @@ MCP_INSTRUCTIONS = (
     "Client tool approval may still be required. Inspect isError/is_error, permission_denials and HTTP status; exit 0 is not an applied command receipt. "
     "Transport loss returns status=null. A write acknowledgement can also be unknown after 5xx, oversized or invalid JSON responses, even with HTTP 200. Inspect outcome/code and original receipts before any exact retry, never recover by inventing a new key. "
     "Typed progress/receipt reads verify the returned generation and receipt command ID; response_context_mismatch is unavailable evidence even at HTTP 200. Refresh state/original receipts before acting. "
+    "Live operations/operation_schema discovery can also be unavailable. Check code/outcome before choosing routes; a failed catalog read is not an empty capability list. "
     "Follow enabled admission/finish obligations. A trainer exit is not terminal evaluation. "
     "After each terminal node and finalized run, read generation-fenced result-notices and POST "
     "a brief interpretation in the user's language with receipt_id, evidence_token and a stable "
@@ -125,10 +126,41 @@ class HarnessAPI:
             return self._unknown_write(result, "server_error")
         return result
 
+    def _openapi(self) -> tuple[dict | None, dict | None]:
+        # Discovery reads the full live catalog, then narrows locally. Do not apply
+        # the individual API-reply cap here: the real catalog spans many routes.
+        # Refused/incomplete discovery must not masquerade as zero capabilities.
+        try:
+            response = self.client.get("openapi.json")
+        except httpx.TransportError:
+            return None, {"status": None, "code": "api_unreachable", "outcome": "unavailable", "at": "openapi",
+                          "message": "Live OpenAPI response unavailable. Check the UI/server and explicitly repeat discovery; no retry or work was started."}
+        if response.status_code != 200:
+            return None, {"status": response.status_code, "code": "api_read_failed", "outcome": "unavailable", "at": "openapi",
+                          "message": "Live OpenAPI read refused. Check the server/access before explicitly repeating discovery; no work was started."}
+        invalid = {"status": 200, "code": "response_incomplete", "outcome": "unavailable",
+                   "at": "openapi", "reason": "invalid_response",
+                   "message": "Live OpenAPI catalog is incomplete. Inspect the server and repeat discovery before choosing routes; this is not an empty capability catalog."}
+        try:
+            spec = response.json()
+        except ValueError:
+            return None, invalid
+        if not isinstance(spec, dict) or not isinstance(spec.get("paths"), dict):
+            return None, invalid
+        for methods in spec["paths"].values():
+            if not isinstance(methods, dict) or any(
+                    not isinstance(value, dict) for method, value in methods.items()
+                    if method in ("get", "post", "put", "patch", "delete")):
+                return None, invalid
+        components = spec.get("components", {})
+        if not isinstance(components, dict) or not isinstance(components.get("schemas", {}), dict):
+            return None, invalid
+        return spec, None
+
     def operations(self, query: str = "", limit: int = 50) -> dict:
-        response = self.client.get("openapi.json")
-        response.raise_for_status()
-        schema = response.json()
+        schema, error = self._openapi()
+        if error is not None:
+            return error
         matches = []
         needle = query.casefold().strip()
         for path, methods in (schema.get("paths") or {}).items():
@@ -144,9 +176,9 @@ class HarnessAPI:
 
     def schema(self, path: str) -> dict:
         route = "/" + self._path(path).split("?", 1)[0]
-        response = self.client.get("openapi.json")
-        response.raise_for_status()
-        spec = response.json()
+        spec, error = self._openapi()
+        if error is not None:
+            return error
         operations = (spec.get("paths") or {}).get(route)
         definitions = spec.get("components", {}).get("schemas", {})
         needed: dict = {}
@@ -408,12 +440,18 @@ def build_server(api: HarnessAPI):
 
     @mcp.tool()
     def operations(query: str = "", limit: int = 50) -> dict:
-        """Search the live LoopLab OpenAPI catalog for reads, settings and controls."""
+        """Search the live LoopLab OpenAPI catalog for reads, settings and controls.
+        One authenticated GET, no automatic retry/cache fallback. Check code/outcome:
+        transport, HTTP or malformed catalog failures return unavailable evidence,
+        not an empty matches list. Repeat discovery explicitly after recovery."""
         return api.operations(query, limit)
 
     @mcp.tool()
     def operation_schema(path: str) -> dict:
-        """Get a route's input/output schema before calling it."""
+        """Get a route's input/output schema before calling it.
+        One authenticated live catalog GET, no automatic retry/cache fallback.
+        Check code/outcome before using operations/components: unavailable discovery
+        is not evidence that a route is absent. Repeat explicitly after recovery."""
         return api.schema(path)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
