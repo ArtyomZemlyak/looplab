@@ -2,6 +2,19 @@ const token = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
 const metric = value => value === null || typeof value === 'number' && Number.isFinite(value)
 const integer = value => Number.isSafeInteger(value) && value >= 0
 
+const CAVEAT_TEXT = {
+  salvaged: ['metric salvaged after a failed evaluation', 'метрика восстановлена после неудачной оценки'],
+  trust_flagged: ['possible data leakage or reward hacking', 'есть сигнал утечки данных или обхода оценки'],
+  params_overridden: ['executed parameters differ from the experiment record', 'фактические параметры отличаются от записи эксперимента'],
+  mixed_comparability: ['evaluation conditions differ; rankings may not be comparable', 'условия оценки отличаются; порядок результатов может быть несопоставим'],
+  merged_coordinates: ['weights were averaged; declared parameters were not trained as a separate configuration', 'веса усреднены; указанные параметры не обучались как отдельная конфигурация'],
+  retargeted_objective: ['the target metric was changed', 'целевая метрика изменена'],
+}
+export function resultCaveatText(code, language = 'en') {
+  return CAVEAT_TEXT[code]?.[language === 'ru' ? 1 : 0]
+    || (language === 'ru' ? `Неизвестное ограничение: ${code}` : `Unrecognized caveat: ${code}`)
+}
+
 export function validResultNotices(value, generation) {
   if (value?.version !== 1 || value.generation !== generation || !token(generation)
       || !integer(value.total) || !Array.isArray(value.items) || value.items.length > 200
@@ -34,7 +47,15 @@ export function resultNoticeText(row, language = 'en') {
   const score = row.confirmed_mean ?? row.score
   const label = row.confirmed_mean !== null ? ru ? 'среднее повторных запусков' : 'confirmation mean' : ru ? 'оценка' : 'score'
   const direction = row.direction === 'min' ? ru ? 'меньше лучше' : 'lower is better' : ru ? 'больше лучше' : 'higher is better'
-  let title, outcome, next
+  let title, outcome, next, comparison = ''
+  const stateLabel = row.kind === 'run' ? ru ? 'Завершён' : 'Finished'
+    : row.status === 'failed' ? ru ? 'Ошибка' : 'Failed'
+    : row.status === 'aborted' ? ru ? 'Остановлен' : 'Stopped'
+    : score === null ? ru ? 'Нет метрики' : 'No metric'
+    : row.salvaged ? ru ? 'Восстановлено' : 'Recovered' : ru ? 'Измерено' : 'Measured'
+  const actionLabel = row.kind === 'run' ? ru ? 'Открыть отчёт' : 'Open Report'
+    : ['failed', 'aborted'].includes(row.status) ? ru ? 'Открыть логи' : 'Open logs'
+    : ru ? 'Открыть метрики' : 'Open metrics'
   if (row.kind === 'run') {
     title = ru ? 'Запуск завершён' : 'Run finished'
     outcome = ru ? `Оценено: ${row.evaluated}; ошибок: ${row.failed}.`
@@ -42,7 +63,9 @@ export function resultNoticeText(row, language = 'en') {
     if (row.selected_node !== null && score !== null) outcome += ru
       ? ` Выбран #${row.selected_node}: ${label} ${number(score)} (${direction}).`
       : ` Selected #${row.selected_node}: ${label} ${number(score)} (${direction}).`
-    else outcome += ru ? ' Допустимый результат не выбран.' : 'No eligible result selected.'
+    else outcome += ru ? ' Допустимый результат не выбран.' : ' No eligible result selected.'
+    if (row.selected_node !== null && row.confirmed_mean !== null && row.score !== null) outcome += ru
+      ? ` Основная оценка: ${number(row.score)}.` : ` Evaluation score: ${number(row.score)}.`
     if (row.reason) outcome += ru ? ` Причина остановки: ${{ aborted: 'завершено вручную', done: 'задача завершена', error: 'ошибка', budget: 'лимит ресурсов' }[row.reason] || row.reason}.` : ` Stop reason: ${row.reason}.`
     next = ru ? 'Откройте Report: итог, ограничения и файлы решения.' : 'Open Report for the result, caveats and solution files.'
   } else {
@@ -53,6 +76,8 @@ export function resultNoticeText(row, language = 'en') {
         : `Evaluation failed${row.failure ? ': ' + row.failure : '.'}`
       : score === null ? ru ? 'Оценка завершена без пригодной метрики.' : 'Evaluation ended without a usable metric.'
       : `${ru && row.objective === 'task metric' ? 'Метрика задачи' : row.objective}: ${label} ${number(score)} (${direction}).`
+    if (row.status === 'evaluated' && row.confirmed_mean !== null && row.score !== null) outcome += ru
+      ? ` Основная оценка: ${number(row.score)}.` : ` Evaluation score: ${number(row.score)}.`
     if (row.status === 'evaluated' && (!row.feasible || row.violations > 0 || row.trust_flagged)) outcome += ru
       ? ' Есть ограничения или сигналы Trust; проверьте допустимость.' : 'Constraints or Trust signals recorded; check eligibility.'
     if (row.salvaged && row.score !== null) outcome += ru
@@ -61,12 +86,29 @@ export function resultNoticeText(row, language = 'en') {
     if (row.status === 'evaluated' && parent && row.score !== null && parent.score !== null) {
       if (parent.comparability === 'same' && row.feasible && !row.trust_flagged && !row.salvaged && row.violations === 0) {
         const gain = (row.score - parent.score) * (row.direction === 'min' ? -1 : 1)
-        outcome += ru ? ` Оценка ${gain === 0 ? 'такая же, как' : gain > 0 ? 'лучше, чем' : 'хуже, чем'} у родителя #${parent.node_id} (${number(parent.score)}).`
-          : `Score ${gain === 0 ? 'ties' : gain > 0 ? 'improves on' : 'is worse than'} parent #${parent.node_id} (${number(parent.score)}).`
-      } else outcome += ru ? ` Родитель #${parent.node_id}: оценка ${number(parent.score)}; улучшение не установлено.`
+        comparison = ru ? `Основная оценка ${number(row.score)} ${gain === 0 ? 'такая же, как' : gain > 0 ? 'лучше, чем' : 'хуже, чем'} у исходного эксперимента #${parent.node_id} (${number(parent.score)}).`
+          : `Evaluation score ${number(row.score)} ${gain === 0 ? 'ties' : gain > 0 ? 'improves on' : 'is worse than'} parent #${parent.node_id} (${number(parent.score)}).`
+      } else {
+        comparison = ru ? `Исходный эксперимент #${parent.node_id}: оценка ${number(parent.score)}; улучшение не установлено.`
         : `Parent #${parent.node_id}: score ${number(parent.score)}; improvement not established.`
+        const reason = parent.comparability === 'different'
+          ? ru ? ' Условия оценки отличаются.' : ' Evaluation conditions differ.'
+          : parent.comparability === 'unknown'
+            ? ru ? ' Сопоставимость условий оценки не подтверждена.' : 'Comparable evaluation conditions are not established.'
+            : ru ? ' Сначала проверьте ограничения и надёжность оценки.' : 'Review eligibility and metric provenance first.'
+        comparison += reason
+      }
+      if (row.confirmed_mean !== null) comparison += ru
+        ? ' Здесь сравниваются основные оценки, а не средние повторных запусков.'
+        : ' This compares evaluation scores, not confirmation means.'
+    } else if (row.status === 'evaluated' && score !== null) {
+      comparison = row.score === null
+        ? ru ? 'Основная оценка этой попытки отсутствует; сравнение с исходным экспериментом невозможно.' : 'This attempt has no evaluation score to compare with its parent.'
+        : row.parents.length > 1
+        ? ru ? 'Несколько исходных экспериментов. Единой оценки для сравнения нет.' : 'Multiple parents; no single comparison baseline.'
+        : ru ? 'Нет пригодной оценки исходного эксперимента для сравнения.' : 'No usable parent score is available for comparison.'
     }
-    next = row.status === 'failed' ? ru ? 'Откройте Trace и логи перед исправлением.' : 'Open Trace and logs before repairing.'
+    next = ['failed', 'aborted'].includes(row.status) ? ru ? 'Проверьте логи и причину остановки перед повторным запуском.' : 'Review logs and the stop cause before retrying.'
       : ru ? 'Откройте Metrics и Trust; следующий эксперимент выбирает агент.' : 'Review Metrics and Trust; the agent chooses the next experiment.'
   }
   const caution = score !== null && row.status !== 'aborted' ? row.confirmed_mean === null
@@ -74,16 +116,22 @@ export function resultNoticeText(row, language = 'en') {
     : Number.isSafeInteger(row.confirmed_seeds) && row.confirmed_seeds >= 2
       ? ru ? `Успешных повторных запусков: ${row.confirmed_seeds}; проверьте разброс оценок.` : `${row.confirmed_seeds} confirmation seeds; check spread.`
       : ru ? 'Среднее записано; несколько успешных повторных запусков не подтверждены.' : 'Mean recorded; multiple successful seeds not established.' : ''
-  return { title, outcome, caution, next }
+  return { title, stateLabel, actionLabel, outcome, comparison, caution, next }
 }
 
 export function resultNoticeQuestion(row, language = 'en') {
   const ru = language === 'ru'
   const target = row.kind === 'run' ? ru ? 'итог этого запуска' : 'this run’s result'
     : ru ? `эксперимент #${row.node_id}, попытку ${row.attempt}` : `experiment #${row.node_id}, attempt ${row.attempt}`
+  if (row.kind === 'run') return ru
+    ? `Разбери ${target}: прочитай Report, объясни выбранный результат, ограничения и причину завершения. Сравни с первым пригодным результатом только при сопоставимых условиях; не смешивай основные оценки со средними повторных запусков. Предложи следующий шаг. Не запускай новые эксперименты и не меняй настройки.`
+    : `Explain ${target}: read Report, explain the selected result, caveats and stop reason. Compare with the first eligible result only under comparable conditions; keep evaluation scores separate from confirmation means. Propose a next step. Do not start experiments or change settings.`
   if (row.status === 'failed') return ru
     ? `Разбери ${target}: прочитай Trace и логи этой попытки, объясни причину ошибки и предложи минимальное исправление. Отдели подтверждённые факты от предположений. Не запускай новые эксперименты и не меняй настройки.`
     : `Explain ${target}: read this attempt’s Trace and logs, identify the failure cause, and propose a minimal repair. Separate recorded facts from assumptions. Do not start experiments or change settings.`
+  if (row.status === 'aborted') return ru
+    ? `Разбери ${target}: прочитай Trace и логи этой попытки, объясни причину остановки и что нужно для повторного запуска. Завершённой метрики у этой попытки нет. Не запускай новые эксперименты и не меняй настройки.`
+    : `Explain ${target}: read this attempt’s Trace and logs, explain why it stopped and what is needed to retry. This attempt has no completed metric. Do not start experiments or change settings.`
   return ru
     ? `Разбери ${target}: что измерено, что изменилось относительно родителя, насколько надёжен результат и что делать дальше. Сначала прочитай фактические данные этой попытки и ограничения. Не запускай новые эксперименты и не меняй настройки.`
     : `Explain ${target}: what was measured, what changed relative to the parent, how reliable the result is, and what to do next. Read the recorded evidence for this attempt and its caveats first. Do not start experiments or change settings.`

@@ -1,7 +1,8 @@
 import React from 'react'
 import { fmt } from './util.js'
 import { terminalReady, sourceIncomplete, sourceIntegrityNotice,
-  bestMetricCaveats, bestMetricCaveatLabel, bestMetricCaveatNotice } from './runIndex.js'
+  bestMetricCaveats, bestMetricCaveatNotice } from './runIndex.js'
+import { resultCaveatText } from './resultNoticeModel.js'
 import { hashWithRunRouteState } from './runRouteState.js'
 import { useAssistantLanguage } from './useAssistantLanguage.js'
 import './assistant-run-result.css'
@@ -43,14 +44,17 @@ export default function AssistantRunResult({ run, onOpen, onAsk, onReady, askDis
       <dl><div><dt>{text('First eligible experiment', 'Первый пригодный для сравнения эксперимент')} · #{first.node_id} · {first.confirmed ? text('mean', 'среднее') : text('score', 'оценка')}</dt><dd>{fmt(first.value)}</dd></div>
         <div><dt>{text('Selected result', 'Выбранный результат')} · #{selected.node_id} · {selected.confirmed ? text('mean', 'среднее') : text('score', 'оценка')}</dt><dd>{fmt(selected.value)}</dd></div></dl>
       <p>{sameNode ? text('The selected result is the first eligible experiment.', 'Выбран результат первого пригодного для сравнения эксперимента.')
-        : text('Read Report to compare these values, their evaluation conditions, and confirmation.', 'В отчёте сравните значения, условия оценки и подтверждение результата.')}</p>
+        : first.confirmed !== selected.confirmed
+          ? text('These values use different measurement types: an evaluation score and a confirmation mean. They do not establish improvement. Read Report for evaluation conditions, and confirmation.',
+            'Здесь разные типы измерений: основная оценка и среднее повторных запусков. По этим числам улучшение не установлено. Проверьте условия оценки в отчёте.')
+          : text('Read Report to compare these values, their evaluation conditions, and confirmation.', 'В отчёте сравните значения, условия оценки и подтверждение результата.')}</p>
       <p className="asst-run-result-caution">{selected.confirmed
         ? Number.isSafeInteger(selected.seeds) && selected.seeds >= 2
           ? text(`Selected mean from ${selected.seeds} seeds. Check spread and trust evidence in Report.`, `Среднее по ${selected.seeds} случайным инициализациям. Проверьте разброс и надёжность оценки в отчёте.`)
           : text('Confirmation mean recorded; multiple successful seeds are not established.', 'Среднее сохранено; несколько успешных случайных инициализаций не подтверждены.')
         : text('Selected result has no multi-seed confirmation. Treat it as exploratory.', 'Результат не подтверждён на нескольких случайных инициализациях. Это предварительная оценка.')}</p>
       {caveats.length > 0 && <p className="asst-run-result-caution" title={bestMetricCaveatNotice(run)}>
-        {text('Recorded caveats:', 'Ограничения:')} {caveats.map(bestMetricCaveatLabel).join(' · ')}. {text('Review Report and Trust.', 'Проверьте отчёт и раздел Trust.')}
+        {text('Recorded caveats:', 'Ограничения:')} {caveats.map(code => resultCaveatText(code, language)).join(' · ')}. {text('Review Report and Trust.', 'Проверьте отчёт и раздел Trust.')}
       </p>}
     </> : <p className="asst-run-result-caution">{sourceIncomplete(run)
       ? sourceIntegrityNotice(run) : text('No complete result summary is available. Open Report to inspect the recorded evidence.', 'Полного итога пока нет. Откройте отчёт и проверьте сохранённые данные.')}</p>}

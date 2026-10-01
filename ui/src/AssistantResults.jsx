@@ -3,7 +3,7 @@ import { get, runApiPath } from './util.js'
 import { useAssistantLanguage } from './useAssistantLanguage.js'
 import { useScopedResource } from './useScopedResource.js'
 import { hashWithRunRouteState } from './runRouteState.js'
-import { resultNoticeQuestion, resultNoticeText, validResultNotices } from './resultNoticeModel.js'
+import { resultCaveatText, resultNoticeQuestion, resultNoticeText, validResultNotices } from './resultNoticeModel.js'
 import './assistant-run-result.css'
 
 export default function AssistantResults({ runId, generation, onOpen, onReady, onAsk, askDisabled, askDisabledReason }) {
@@ -23,24 +23,26 @@ export default function AssistantResults({ runId, generation, onOpen, onReady, o
     const base = `#/run/${encodeURIComponent(runId)}`
     const href = hashWithRunRouteState(base, row.kind === 'run' ? { generation, view: 'report' }
       : { generation, nodeId: row.node_id, nodeGeneration: row.attempt,
-        inspectTab: row.status === 'failed' ? 'Trace' : 'Metrics' })
+        inspectTab: ['failed', 'aborted'].includes(row.status) ? 'Trace' : 'Metrics' })
     return <article key={row.id} className="asst-result-notice">
       <div className="asst-run-result-head"><strong>{text.title}</strong>
-        <span>{ru ? 'Ассистент · запись LoopLab' : 'Assistant · LoopLab record'}</span></div>
+        <span className={`asst-result-status ${row.status}`}>{text.stateLabel}</span></div>
       <p>{text.outcome}</p>
-      {text.caution && <p className="asst-run-result-caution">{text.caution}</p>}
+      {text.comparison && <p className="asst-result-comparison"><strong>{ru ? 'Сравнение: ' : 'Comparison: '}</strong>{text.comparison}</p>}
+      {text.caution && <p className="asst-run-result-caution"><strong>{ru ? 'Надёжность: ' : 'Reliability: '}</strong>{text.caution}</p>}
       {row.kind === 'run' && row.caveats.length > 0 && <p className="asst-run-result-caution">
-        {ru ? 'Ограничения: ' : 'Caveats: '}{row.caveats.join(' · ')}</p>}
+        {ru ? 'Ограничения: ' : 'Caveats: '}{row.caveats.map(code => resultCaveatText(code, language)).join(' · ')}</p>}
       {row.commentary && <div className="asst-result-commentary">
         <strong>{ru ? 'Внешний агент · интерпретация' : 'External agent · interpretation'}</strong>
         <p>{row.commentary}</p></div>}
+      <p className="asst-result-next"><strong>{ru ? 'Дальше: ' : 'Next: '}</strong>{text.next}</p>
       <div className="asst-run-result-actions">
         {onAsk && <button className="btn sm ghost" disabled={askDisabled}
           title={askDisabled ? askDisabledReason : ru ? 'Подготовить вопрос в поле сообщения' : 'Prepare a question in the composer'}
           onClick={() => onAsk(resultNoticeQuestion(row, language))}>
-          {ru ? row.status === 'failed' ? 'Разобрать ошибку в чате' : 'Объяснить результат в чате'
-            : row.status === 'failed' ? 'Discuss failure in chat' : 'Explain result in chat'}</button>}
-        <a href={href} onClick={onOpen ? event => onOpen(event, href) : undefined}>{text.next}</a>
+          {ru ? row.status === 'failed' ? 'Разобрать ошибку в чате' : row.status === 'aborted' ? 'Разобрать остановку в чате' : 'Объяснить результат в чате'
+            : row.status === 'failed' ? 'Discuss failure in chat' : row.status === 'aborted' ? 'Discuss stop in chat' : 'Explain result in chat'}</button>}
+        <a className="btn sm ghost" href={href} onClick={onOpen ? event => onOpen(event, href) : undefined}>{text.actionLabel}</a>
       </div>
     </article>
   }

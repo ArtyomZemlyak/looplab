@@ -27,6 +27,7 @@ test('result is free to read, and navigation retains generation and exact node a
     assert.match(container.textContent, /higher is better/)
     assert.match(container.textContent, /mean from 3 seeds/)
     assert.match(container.textContent, /evaluation conditions, and confirmation/)
+    assert.match(container.textContent, /different measurement types.*do not establish improvement/)
     assert.doesNotMatch(container.textContent, /Improvement:|robust|verified/)
     const code = [...container.querySelectorAll('a')].find(a => a.textContent === 'Open selected code')
     const target = parseRunRouteState(code.getAttribute('href')).state
@@ -44,6 +45,7 @@ test('result is free to read, and navigation retains generation and exact node a
     await mounted.rerender({ run: { ...row, result_summary: {
       ...receipt, selected: { ...receipt.selected, confirmed: false, seeds: null } } } })
     assert.match(container.textContent, /no multi-seed confirmation/)
+    assert.doesNotMatch(container.textContent, /different measurement types/)
   } finally { await mounted.unmount() }
 })
 

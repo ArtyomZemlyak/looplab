@@ -45,3 +45,36 @@ test('completion messages reconnect once, use safe prose and withdraw stale evid
     await harness.close()
   }
 })
+
+test('measured, stopped and run summaries separate comparison, reliability and next steps', async () => {
+  const harness = await mountLive()
+  const { default: Results } = await harness.load('/src/AssistantResults.jsx')
+  const stopped = { ...node, id: 'node:3:0', node_id: 3, attempt: 0, status: 'aborted', score: null,
+    confirmed_mean: null, parents: [] }
+  const measured = { ...node, confirmed_mean: 0.8, confirmed_seeds: 3, score: 0.3,
+    parents: [{ ...node.parents[0], comparability: 'same' }] }
+  const finished = { id: 'run', kind: 'run', status: 'finished', objective: 'accuracy', direction: 'max',
+    evaluated: 1, failed: 1, selected_node: 2, attempt: 1, score: 0.3, confirmed_mean: 0.8,
+    confirmed_seeds: 3, caveats: ['mixed_comparability'], reason: 'done', commentary: null,
+    evidence_token: 'd'.repeat(64) }
+  const backend = fetchStub({ 'GET /api/runs/demo/result-notices': payload([measured, stopped, finished]) })
+  globalThis.fetch = backend
+  localStorage.clear(); localStorage.setItem('looplab.language', 'ru')
+  const asked = []
+  const mounted = await harness.mount(Results, { runId: 'demo', generation, onAsk: value => asked.push(value) })
+  try {
+    await until(() => mounted.container.querySelectorAll('article').length === 3, 'structured results')
+    const [result, abort, run] = mounted.container.querySelectorAll('article')
+    assert.match(result.textContent, /Сравнение:.*хуже.*Надёжность:.*Дальше:/)
+    assert.match(result.querySelector('a').textContent, /^Открыть метрики$/)
+    assert.match(abort.textContent, /Остановлен.*Завершённого результата нет/)
+    const target = parseRunRouteState(abort.querySelector('a').getAttribute('href')).state
+    assert.equal(target.nodeId, 3); assert.equal(target.nodeGeneration, 0); assert.equal(target.inspectTab, 'Trace')
+    await click(abort.querySelector('button'))
+    assert.match(asked[0], /причину остановки.*Завершённой метрики.*Не запускай/)
+    assert.match(run.textContent, /условия оценки отличаются/)
+    await click(run.querySelector('button'))
+    assert.match(asked[1], /прочитай Report.*не смешивай основные оценки/)
+    assert.equal(backend.calls.some(call => call.method !== 'GET'), false)
+  } finally { await mounted.unmount(); await harness.close() }
+})

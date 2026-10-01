@@ -18,6 +18,12 @@ Existing model replies and external agent interpretations keep their original te
 Switching language does not send a message or call a model. Retrying an interrupted
 message keeps that message's original language. Earlier results and the detailed selected-result
 comparison are expandable. These reads do not call a model or start work.
+Each brief separates **Comparison**, **Reliability** and **Next**. Comparison names
+the evaluation scores it uses and explains missing or incompatible evidence;
+confirmation means remain separate. Recovered metrics are labelled **Recovered**,
+not **Measured**. Caveat codes have plain-language explanations. Short **Open metrics**,
+**Open logs** and **Open Report** links retain the exact run generation and attempt.
+Stopped attempts link to logs and offer **Discuss stop in chat** without claiming a metric.
 **Explain result in chat** and **Discuss failure in chat** prepare an evidence-focused
 question about that exact attempt. They preserve an existing draft; sending is explicit.
 For a complete first-run example, see the [Assistant quickstart](quickstart.md#assistant-in-the-web-ui).

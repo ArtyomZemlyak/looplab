@@ -97,8 +97,11 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // 2026-10-01 Assistant language: 602,939 B JS / 58,337 B CSS. +3,686 B JS buys
     // persistent Auto/English/Russian, translated chat controls and pinned-turn recovery.
     // Initial shell: 82,969 B (+57 B); result bodies remain lazy, forbidden closures pass.
-    js: { gzip: 590 * KIB },
-    css: { gzip: 57 * KIB },
+    // 2026-10-01 clearer briefs: 604,971 B JS / 58,402 B CSS. +2,032 B JS makes
+    // score/mean comparisons explicit, explains caveats and routes stopped attempts to logs.
+    // All additions stay in lazy result chunks; owner route/reachability ceilings unchanged.
+    js: { gzip: 591 * KIB },
+    css: { gzip: 57.25 * KIB },
   },
   individual: {
     js: { raw: 450 * KIB, gzip: 110 * KIB },

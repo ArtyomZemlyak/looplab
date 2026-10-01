@@ -65,6 +65,10 @@ language selector (Auto / English / Русский) controls new Assistant repli
 these briefs; it does not translate existing model/agent prose. The browser choice
 does not change the external agent's contract: publish interpretations in the
 user's language.
+Briefs separate comparison, reliability and next steps. Evaluation scores and
+confirmation means are distinct; unknown/different comparison conditions explain
+why improvement is not established. Stopped attempts link to Trace rather than
+Metrics. Recovered metrics are explicitly labelled and caveats are explained.
 
 External agents should add a short interpretation after each completion:
 
