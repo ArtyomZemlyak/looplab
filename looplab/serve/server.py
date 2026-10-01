@@ -40,6 +40,7 @@ from looplab.serve.protocol import CONTROL_EVENTS, POLL_SECONDS  # noqa: F401 �
 # tooling) monkeypatch `looplab.server.make_llm_client`, and every router resolves it late through
 # this module (`AppState.make_llm_client`), so the single historical patch point still covers them.
 from looplab.adapters.tasks import make_llm_client  # noqa: F401 — patchable re-export
+from looplab.core.errors import EnvironmentRefusal
 from looplab.serve.engine_proc import (  # noqa: F401 — _engine_alive/_kill_process_tree re-exported
     _engine_alive, _kill_process_tree, _on_shared_hub, install_reap_hooks,
     install_resume_reconcile_hooks, sweep_stale_lifecycle_locks)
@@ -549,6 +550,11 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
     # any same-origin page. That module states why, and what it costs.
     ui_token, ui_token_source = resolve_owner_token(bind_host)
     harness_token = os.environ.get("LOOPLAB_HARNESS_TOKEN", "")
+    if harness_token and not ui_token:
+        # The scoped middleware denies anonymous owner reads. Reject this configuration
+        # before serving a UI whose auth/status would otherwise promise anonymous access.
+        raise EnvironmentRefusal("LOOPLAB_HARNESS_TOKEN requires a distinct LOOPLAB_UI_TOKEN "
+                                 "for the operator UI; set both credentials and restart the server")
     if harness_token and ui_token and hmac.compare_digest(harness_token, ui_token):
         raise ValueError("LOOPLAB_HARNESS_TOKEN must differ from LOOPLAB_UI_TOKEN")
 

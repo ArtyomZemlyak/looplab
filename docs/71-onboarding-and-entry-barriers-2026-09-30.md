@@ -594,7 +594,7 @@ External run здесь намеренно не получал кандидат�
 | OB-07 | Частично | Composer показывает активные права и понятное пояснение; четыре варианта раскрываются по запросу, выбор возвращает фокус на видимый переключатель. | Проверить понимание режимов с новым пользователем. |
 | OB-08 | Частично | Essential открывается с модели, показывает 13 полей ресурсов и лимитов с короткими пояснениями; технические детали и runtime permissions раскрываются отдельно. | Проверить подключение модели и понимание лимитов с новым пользователем. |
 | OB-09 | Частично | Run workspace и Agent cycle показывают next step; списки различают внешний режим и engine, attention открывает текущие вопросы (§34–36). Гибель MCP и pause/resume проверены (§37–38). §47 показывает последнее успешное scoped progress чтение. | Активность запросов не доказывает живость агента; многочасовой сценарий OB-10 ещё открыт. |
-| OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–47 проверяют MCP/UI recovery, pause/resume, engine loss, obligations, monitor, deadline и ASHA. §47 — реальные 121 секунды без MCP-запросов и сброс наблюдения при restart UI. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. Harness-only auth configuration требует исправления (§47). |
+| OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–48 проверяют MCP/UI recovery, pause/resume, engine loss, obligations, monitor, deadline и ASHA. §47 — реальные 121 секунды без MCP-запросов; §48 — понятный отказ при неверной auth configuration. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
 | OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. §39/41 исправляют ссылки checkpoint и concept base на реальные MCP-фазы. | Проверены контракт, subprocess-кандидаты, desktop и discovery из серверной подсказки; подключение нового клиента относится к OB-10. |
 | OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–47: source health, lifecycle verdict, engine recovery, obligations, deadline, training/ASHA monitor, retarget, idle recovery и scoped request activity. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. Наблюдение запросов не измеряет живость внешнего агента. |
 | OB-14 | Частично | Начало сайта показывает два основных входа. | Большая архитектурная схема всё ещё нуждается в упрощении для первого знакомства. |
@@ -2182,3 +2182,37 @@ CSS, initial shell и структурные бюджеты не изменен�
 При preview найден следующий onboarding defect: harness token без owner token
 на private server даёт `auth/status.required=false`, но owner run reads — 401;
 UI зависает на загрузке. Это отдельный следующий пункт исправления auth contract.
+
+## 48. OB-10: понятный startup refusal вместо вечной загрузки UI
+
+**2026-10-01.** Исправлена configuration из §47: `LOOPLAB_HARNESS_TOKEN` задан,
+а resolved owner token отсутствует. Ранее `/api/auth/status` обещал anonymous
+access, хотя auth middleware отклонял owner run reads с 401. Две regression
+проверки сначала упали: отсутствие и пустое значение `LOOPLAB_UI_TOKEN`.
+
+Теперь `make_app` отказывает до запуска HTTP listener с `EnvironmentRefusal`:
+нужен отдельный `LOOPLAB_UI_TOKEN`, затем restart сервера. Настоящий
+`python -m looplab.cli ui --no-build` проверен subprocess-тестом: exit **2**,
+понятная инструкция, без traceback и значения harness secret. Значение токена
+не включается в сообщение. Это refusal конфигурации, не изменение scope агента.
+
+Private UI без обоих credentials сохраняет anonymous mode. При двух разных
+credentials браузер требует owner unlock; harness credential не проходит
+owner unlock и не получает permission на `/api/start`. Existing shared-origin
+policy может разрешить сохранённый или minted owner token; этот сценарий
+проверен с приватным token file. Explicit `LOOPLAB_UI_ANONYMOUS=true` вместе
+с harness token также отказывает. Документированный operator setup требует
+двух credentials; MCP получает только harness token.
+
+Обновлены external guide и B/E diagram. Финальные **39 auth/owner/layering**
+проверок прошли; **2** existing POSIX-only проверки skipped. Ещё **2** existing
+symlink fixture проверки deselected после воспроизведённого `WinError 1314`
+на этой Windows-машине: ошибка создания ссылки происходит до production code,
+поэтому их security assertions здесь не подтверждены. Тесты не изменены.
+Первый расширенный набор: **218 passed**, те же **2 fixture failures**, **2 skipped**.
+После выбора `EnvironmentRefusal` финальный scoped backend/MCP/CLI набор —
+**211 passed, 1 skipped**. **31 docs/diagram** проверка и `mkdocs build --strict`
+прошли; API reference регенерирован, маршруты не менялись.
+
+Граница: auth configuration исправлена; многочасовые сеансы, model judgments
+и интерактивные разрешения клиентов остаются отдельными открытыми пунктами OB-10.

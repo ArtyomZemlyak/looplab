@@ -244,6 +244,14 @@ export LOOPLAB_HARNESS_TOKEN='choose-a-different-agent-token'
 looplab ui --run-root runs --host 127.0.0.1 --port 8765
 ```
 
+The server needs a distinct resolved owner credential whenever a harness token is
+configured. On a local private origin, set both variables above; setting only
+`LOOPLAB_HARNESS_TOKEN` refuses startup with instructions to set `LOOPLAB_UI_TOKEN`
+and restart. The existing shared-origin policy may resolve a minted owner token.
+Anonymous opt-out cannot be combined with a scoped harness credential. A local UI
+without either token keeps its usual anonymous mode. Supply only the harness token
+to the external MCP process; use the owner token to unlock the browser.
+
 Launch a run with LoopLab's offline roles; they are never asked to propose or repair
 in external mode. The task's declared eval command still runs in LoopLab's sandbox.
 Choose the mode at launch; per-run configuration edits cannot switch an existing
