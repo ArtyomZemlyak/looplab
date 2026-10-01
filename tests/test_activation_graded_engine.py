@@ -591,3 +591,87 @@ def test_a_stage_manifest_only_change_is_a_code_change(tmp_path):
     [terminal] = _types(events, "node_evaluated", "node_failed")
     assert terminal.type == "node_failed" and terminal.data["reason"] == "inert_path"
     assert "no code anywhere prints it" in dev.errors[0]
+
+
+
+# BLOCKER 9: the class is the LINEAGE's. The parent wrote the guarded new path; the child only flips
+# the flag in the config. Measured against the parent the child read as config-only, its `USE_NEW=1`
+# became a satisfied env entry, and the swallowed fallback scored.
+
+def _lineage_run(tmp_path, mode="graded"):
+    """Parent node 0 (the new path, `_P1_MAIN`) and child node 1 (improve: the flag set too, its
+    files the cumulative overlay as the repo Developer hands them); evaluate the child."""
+    src, run_dir = tmp_path / "src", tmp_path / "run"
+    for rel, body in {**_ENTRY, "conf/run.env": "USE_NEW=0\n", "run.py": _ENTRY["run.py"]}.items():
+        (src / rel).parent.mkdir(parents=True, exist_ok=True)
+        (src / rel).write_text(body)
+    task = RepoTask(id="r", direction="max", editable_path=str(src), edit_surface=["*"],
+                    eval=EvalSpec(command=[PY, "run.py"],
+                                  metric={"kind": "stdout_json", "key": "metric"}, cwd="."))
+    child = {"main.py": _P1_MAIN, "conf/run.env": "USE_NEW=1\n", **_manifest(["USE_NEW=1"])}
+    dev = _Dev(child, [])
+    eng = Engine(run_dir, task=task, researcher=_Researcher(), developer=dev,
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=2),
+                 auto_install_deps=False, inline_repair=True, inline_repair_attempts=3,
+                 activation_check=mode)
+    eng.store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "max"})
+    eng.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}, "rationale": "seed"}, "code": "",
+        "files": {"main.py": _P1_MAIN}})
+    eng.store.append("node_created", {
+        "node_id": 1, "parent_ids": [0], "operator": "improve",
+        "idea": {"operator": "improve", "params": {}, "rationale": "enable"}, "code": "",
+        "files": dict(child)})
+
+    async def _bounded() -> bool:
+        with anyio.move_on_after(300) as scope:
+            await eng._evaluate(1, anyio.CapacityLimiter(1), None)
+        return scope.cancelled_caught
+
+    assert not anyio.run(_bounded), "the eval did not terminate"
+    return [e for e in EventStore(run_dir / "events.jsonl").read_all()
+            if e.data.get("node_id") == 1], dev
+
+
+def test_a_child_that_only_sets_the_flag_its_parent_s_new_path_reads_is_not_config_only(tmp_path):
+    """Critic BLOCKER 9 (probe test_lineage): graded scored the child 1.004 as
+    {ok, weak, env, config_only}; strict withheld it. The lineage is a CODE change, the marker stays
+    the log marker the new path prints, and it never appeared. MUTATION: measure the class against
+    the parent -> node_evaluated."""
+    events, dev = _lineage_run(tmp_path)
+    [terminal] = _types(events, "node_evaluated", "node_failed")
+    assert terminal.type == "node_failed" and terminal.data["reason"] == "inert_path"
+    assert "change class: code" in dev.errors[0]
+    events, _dev = _lineage_run(tmp_path / "strict", mode="strict")
+    assert _types(events, "node_failed")[0].data["reason"] == "inert_path"
+
+
+def test_the_lint_measures_the_lineage_against_the_base_not_the_parent(tmp_path, monkeypatch):
+    """BLOCKER 9, the lint path: an improve session starts from its parent's files (the new path
+    already there) and changes only the config. Against the parent it is config-only and the marker
+    was rewritten to env; against the base it is a code change, and the marker stays a log marker
+    the new path prints. MUTATION: class from `before` (the parent) -> env in the manifest."""
+    from looplab.engine.repair_verify import activation_declaration_lint
+    parent = {"main.py": _P1_MAIN}
+    written = {"main.py": _P1_MAIN, "conf/run.env": "USE_NEW=1\n"}       # cumulative overlay
+    base = {"conf/run.env": "USE_NEW=0\n"}
+    lint = activation_declaration_lint(["USE_NEW=1"], written,
+                                       before=lambda p: parent.get(p, base.get(p)), base=base.get,
+                                       originals=base)
+    assert lint.change_class == act.CHANGE_CODE
+    assert list(lint.entries) == [{"kind": "log", "text": "USE_NEW=1"}]
+    # …and through the real Developer: a build over a repo whose session STARTED from the parent
+    import looplab.adapters.repo_developer as rd
+    real_lint = rd.LLMRepoDeveloper._activation_lint
+
+    def from_parent(self, declared, write):
+        write.started_from = lambda p: parent.get(p) if p in parent else write.original(p)
+        return real_lint(self, declared, write)
+
+    monkeypatch.setattr(rd.LLMRepoDeveloper, "_activation_lint", from_parent)
+    events, _dev, _, _refusals, files = _lint_then_run(
+        tmp_path, monkeypatch, base=dict(_ENTRY, **base), markers=["USE_NEW=1"],
+        writes=written)
+    assert json.loads(files[act.ACTIVATION_MANIFEST_NAME]) == {"markers": ["USE_NEW=1"]}
+    assert _types(events, "node_failed")[0].data["reason"] == "inert_path"

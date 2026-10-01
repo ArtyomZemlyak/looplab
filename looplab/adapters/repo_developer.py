@@ -1531,13 +1531,16 @@ class LLMRepoDeveloper:
                 if getattr(self, "_activation_graded", False) else self._ACTIVATION_MARKERS_PROPERTY)
 
     def _activation_lint(self, declared, write):
-        """`repair_verify.activation_declaration_lint` over this session's tree: the staged files,
-        what they started from (`write.started_from`, else the originals), and the editable roots."""
+        """`repair_verify.activation_declaration_lint` over this session's tree: the staged files
+        (cumulative: an improve/merge preloads its parent's), the base originals on disk -- what the
+        change CLASS is measured against, the node's whole lineage (critic BLOCKER 9) -- what this
+        session started from (`write.started_from`, for "lines THIS change added"), and the roots."""
         from looplab.engine.repair_verify import activation_declaration_lint
         originals, complete = write.original_texts()
         return activation_declaration_lint(
             declared, write.files, before=getattr(write, "started_from", None) or write.original,
-            originals=originals, originals_complete=complete, deleted=list(write.deleted))
+            base=write.original, originals=originals, originals_complete=complete,
+            deleted=list(write.deleted))
 
     def _record_activation(self, args, write, *, report: bool = True) -> str:
         """Persist the `activation_markers` a `done` declared, then return its summary.

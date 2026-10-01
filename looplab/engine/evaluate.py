@@ -1993,10 +1993,6 @@ class EvaluateMixin:
     # are the engine half of `engine/activation.py`: the verdict (in a worker thread, it walks the
     # tree), applying it to the attempt, and re-check without re-run after a manifest-only repair.
 
-    def _activation_parents(self, a: "EvalAttempt") -> list:
-        nodes = getattr(a.state, "nodes", None) or {}
-        return [nodes.get(p) for p in (getattr(a.node, "parent_ids", None) or []) if p is not None]
-
     def _activation_verdict(self, a: "EvalAttempt", entries) -> tuple:
         """`(ActivationVerdict, evidence)` for THIS attempt's declaration `entries`. Worker thread.
 
@@ -2008,7 +2004,16 @@ class EvaluateMixin:
         for `_activation_recheck`, else None."""
         from looplab.engine import activation as act
         mode = getattr(self, "_activation_check", "graded")
-        changed, code_changed = act.node_change(a.node, self._activation_parents(a))
+        # WHAT THE NODE CHANGED IS ITS WHOLE LINEAGE AGAINST THE BASE TREE, never the step from its
+        # immediate parent: `node.files` is the cumulative overlay the workspace materializes on the
+        # base (`engine/workspace.py::WorkspaceSeeder.materialize`: seed, then the node's files), so
+        # it holds what an improve or a merge inherited as well as what it added, and `node.code` is
+        # the solution file itself. Measured against the parent, a child that only flipped
+        # `USE_NEW=1` in a config read as `config_only` although its parent had written the guarded
+        # new path -- the assignment rule then made its marker a satisfied env entry and scored a
+        # swallowed fallback (critic BLOCKER 9). The class recorded on the `activation` record is
+        # this one: the class that gated every decision below.
+        changed, code_changed = act.node_change(a.node, ())
         cls = act.change_class(changed, code_changed)
         if mode == "graded" and cls == act.CHANGE_CONFIG_ONLY:
             # An assignment-shaped marker a CONFIG-ONLY change's own config sets IS an env entry,
@@ -2133,7 +2138,7 @@ class EvaluateMixin:
             return None
         if act.changed_code_digest(a.workdir, evidence["changed"]) != evidence["digest"]:
             return None
-        changed, code_changed = act.node_change(a.node, self._activation_parents(a))
+        changed, code_changed = act.node_change(a.node, ())   # the lineage, as in the verdict
         scan = act.scan_emitters(a.workdir, [e["text"] for e in entries])
         emitters = {}
         for e in entries:

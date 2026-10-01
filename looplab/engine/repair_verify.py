@@ -1729,12 +1729,14 @@ def _changed_paths(written: dict, before) -> set:
     return out
 
 
-def activation_declaration_lint(markers, written: dict, *, before=None, originals=None,
+def activation_declaration_lint(markers, written: dict, *, before=None, base=None, originals=None,
                                 originals_complete: bool = True, deleted=()) -> ActivationLint:
     """The GRADED declaration-time check of `markers` against the evaluated tree. Pure and total.
 
     `written` is the session's staged files, `before(path)` the content it started from (the
     parent's file, else the original on disk -- the same callable `silent_broad_fallbacks` takes),
+    `base(path)` the BASE original the change class is measured against (the lineage; default
+    `before`),
     `originals` the rest of the evaluated tree as `{path: text}` (a staged file wins over its
     original). Per `log` text entry:
 
@@ -1758,7 +1760,14 @@ def activation_declaration_lint(markers, written: dict, *, before=None, original
         return ActivationLint(entries=())
     changed = _changed_paths(written, before) | {
         str(d).replace("\\", "/") for d in (deleted or ())}
-    cls = change_class(changed)
+    # THE CLASS IS THE LINEAGE'S, measured against the BASE originals (`base`, default `before`),
+    # never against the parent's file this session started from: a child that only flips a flag its
+    # parent's new code reads is not config-only (critic BLOCKER 9 -- the assignment rule below then
+    # read the new path's own print as "the value is set"). `changed` above stays the SESSION's
+    # edits, which is what "lines your change added" in the unconditional-echo warning means.
+    lineage = (_changed_paths(written, base) if base is not None else set(changed)) | {
+        str(d).replace("\\", "/") for d in (deleted or ())}
+    cls = change_class(lineage)
     # The engine's own declarations are not the tree: the manifest is a `.json` holding every
     # marker verbatim, and would otherwise be named the FILE an env entry is checked in.
     tree = {p: b for p, b in (originals or {}).items()
@@ -1775,7 +1784,7 @@ def activation_declaration_lint(markers, written: dict, *, before=None, original
     notes: list = []
     if cls == CHANGE_CONFIG_ONLY:
         entries, rewritten = normalize_config_assignments(
-            entries, {p: tree[p] for p in changed if p in tree and is_config_path(p)})
+            entries, {p: tree[p] for p in lineage if p in tree and is_config_path(p)})
         notes = [f"{t!r} is a value this change's config file sets, not a line any code prints; "
                  "recorded as an env entry the engine checks statically. Do not add an echo for "
                  "the check." for t in rewritten]
