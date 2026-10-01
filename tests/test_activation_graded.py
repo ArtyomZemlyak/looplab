@@ -294,3 +294,133 @@ def test_the_settings_vocabulary_is_the_engine_s_and_an_old_snapshot_resumes_str
     assert settings_from_snapshot({}).activation_check == "strict"       # a pre-field snapshot
     assert settings_from_snapshot({"activation_check": "graded"}).activation_check == "graded"
     assert EngineOptions.from_settings(Settings(activation_check="off")).activation_check == "off"
+
+
+# ------------------------------------------------------------ 2. the declaration lint
+
+from looplab.engine.repair_verify import (activation_declaration_lint,  # noqa: E402
+                                          activation_markers_not_in_code)
+
+_INCIDENT_MARKERS = ["SFT_EVAL_SAMPLE=-2", "SFT_RESUME_EVERY_MIN=0"]
+_INCIDENT_WRITTEN = {"MiniOneRec/looplab/experiment.env": INCIDENT_ENV,
+                     act.ACTIVATION_MANIFEST_NAME: act.manifest_text(_INCIDENT_MARKERS)}
+_ORIGINALS = {"MiniOneRec/looplab/run_experiment.sh":
+              "set -a; . \"$(dirname \"$0\")/experiment.env\"; set +a\npython sft.py\n",
+              "MiniOneRec/sft.py": "import os\nn = int(os.environ['SFT_EVAL_SAMPLE'])\n"}
+
+
+def test_the_incident_s_markers_are_rewritten_to_env_instead_of_passing():
+    """minionerec-lora-v1 node 2: the historical lint took the `.env` whole and PASSED both markers;
+    the graded lint knows a config file prints nothing and records what the file sets instead.
+    MUTATION: count a config occurrence as an emitter -> the markers stay `log` and pass."""
+    assert activation_markers_not_in_code(_INCIDENT_MARKERS, _INCIDENT_WRITTEN) == ""  # the defect
+    lint = activation_declaration_lint(_INCIDENT_MARKERS, _INCIDENT_WRITTEN, originals=_ORIGINALS)
+    assert lint.change_class == act.CHANGE_CONFIG_ONLY
+    assert list(lint.entries) == [
+        {"kind": "env", "name": "SFT_EVAL_SAMPLE", "equals": "-2",
+         "file": "MiniOneRec/looplab/experiment.env"},
+        {"kind": "env", "name": "SFT_RESUME_EVERY_MIN", "equals": "0",
+         "file": "MiniOneRec/looplab/experiment.env"}]
+    assert lint.bounce == "" and lint.warning == ""
+    assert all("not a line any code prints" in n and "Do not add an echo" in n for n in lint.notes)
+
+
+def test_the_manifest_itself_is_never_the_file_an_env_entry_is_checked_in():
+    """The manifest is a `.json` holding every marker verbatim; a config value the change did not
+    set in a file of its own must not be pinned to it (`MiniOneRec/...` sorts after it)."""
+    written = {act.ACTIVATION_MANIFEST_NAME: act.manifest_text(["Z_FLAG=1"])}
+    lint = activation_declaration_lint(["Z_FLAG=1"], written, originals={"z/conf.env": "Z_FLAG=1\n"})
+    assert list(lint.entries) == [{"kind": "env", "name": "Z_FLAG", "equals": "1",
+                                   "file": "z/conf.env"}]
+
+
+def test_a_marker_nothing_prints_is_none_on_a_config_change_and_bounced_on_a_code_change():
+    config_only = activation_declaration_lint(["LORA ON"], {"conf/a.yaml": "lora: true\n"})
+    assert [e["kind"] for e in config_only.entries] == ["none"] and not config_only.bounce
+    code = activation_declaration_lint(["LORA ON"], {"train.py": "print('lora')\n"})
+    assert [e["kind"] for e in code.entries] == ["log"]
+    assert "'LORA ON'" in code.bounce and "Do not add an echo" in code.bounce
+
+
+def test_a_printer_in_code_the_session_never_touched_keeps_the_marker():
+    """TP2's declaration: the change sets a flag, existing code prints when the path runs. The whole
+    tree is searched, so the marker stays a log entry the settle check holds to."""
+    originals = {"svc/engine.py": "def go(fast):\n    if fast:\n        print('FAST PATH ON')\n"}
+    lint = activation_declaration_lint(["FAST PATH ON"], {"conf/run.env": "FAST=1\n"},
+                                       originals=originals)
+    assert list(lint.entries) == [{"kind": "log", "text": "FAST PATH ON"}]
+    assert not lint.bounce and not lint.warning
+    # …and an unreadable tree never bounces what it could not search
+    unread = activation_declaration_lint(["FAST PATH ON"], {"svc/new.py": "x = 1\n"},
+                                         originals={}, originals_complete=False)
+    assert not unread.bounce and [e["kind"] for e in unread.entries] == ["log"]
+
+
+def test_an_unconditional_echo_added_for_the_check_is_warned():
+    """69.8: an `echo` the change added outside every branch proves the script ran, never the path."""
+    lint = activation_declaration_lint(
+        ["SFT_EVAL_SAMPLE=-2"],
+        {"run.sh": 'echo "SFT_EVAL_SAMPLE=-2" >&2\npython sft.py\n'},
+        before=lambda p: "python sft.py\n")
+    assert [e["kind"] for e in lint.entries] == ["log"]
+    assert "outside any branch" in lint.warning.replace("OUTSIDE", "outside") and not lint.bounce
+    guarded = activation_declaration_lint(
+        ["FAST ON"], {"run.sh": 'if [ "$FAST" = 1 ]; then\n  echo "FAST ON"\nfi\n'})
+    assert not guarded.warning
+
+
+def _graded_build(monkeypatch, tmp_path, done_args, writes, validate_refusals=None):
+    """A REAL `LLMRepoDeveloper.implement()` with `activation_graded=True`, writing `writes` and then
+    emitting `done_args`; returns its files."""
+    import sys
+    import looplab.agents.agent as agent_mod
+    from looplab.adapters.repo_task import EvalSpec, LLMRepoDeveloper, RepoTask
+    from looplab.core.models import Idea
+
+    def fake_loop(client, tools, messages, emit_spec, *, finalize, fallback, **opts):
+        name = emit_spec["function"]["name"]
+        if name == "declare_stages":
+            return finalize({"stages": []})
+        if name == "propose_plan":
+            return finalize({"steps": []})
+        for path, content in writes.items():
+            tools.execute("write_file", {"path": path, "content": content})
+        validate = opts.get("validate")
+        if validate is not None and validate_refusals is not None:
+            refusal = validate(dict(done_args))
+            if refusal:
+                validate_refusals.append(refusal)
+        return finalize(dict(done_args))
+
+    monkeypatch.setattr(agent_mod, "drive_tool_loop", fake_loop)
+    repo = tmp_path / "repo"
+    (repo / "looplab").mkdir(parents=True)
+    (repo / "looplab" / "experiment.env").write_text("SFT_EVAL_SAMPLE=0\n")
+    (repo / "train.py").write_text("import os\nprint(os.environ.get('SFT_EVAL_SAMPLE'))\n")
+    task = RepoTask(id="r", goal="g", direction="max", editable_path=str(repo),
+                    edit_surface=["*.py", "*.env", "looplab/*.env"], protect=[],
+                    eval=EvalSpec(command=[sys.executable, "train.py"],
+                                  metric={"kind": "stdout_json", "key": "metric"}))
+    dev = LLMRepoDeveloper(object(), task, plan_decompose=False, activation_graded=True)
+    spec = dev._emit_spec()["function"]["parameters"]["properties"]["activation_markers"]
+    assert "oneOf" in spec["items"] and "a flag" not in spec["description"]
+    dev.implement(Idea(operator="draft", params={}, rationale="x"))
+    return dev.last_files
+
+
+def test_the_graded_developer_writes_the_rewritten_declaration(monkeypatch, tmp_path):
+    refusals: list = []
+    files = _graded_build(monkeypatch, tmp_path,
+                          {"summary": "s", "activation_markers": ["SFT_EVAL_SAMPLE=-2"]},
+                          {"looplab/experiment.env": "SFT_EVAL_SAMPLE=-2\n"}, refusals)
+    assert refusals == []                                   # a config value is rewritten, not bounced
+    assert json.loads(files[act.ACTIVATION_MANIFEST_NAME]) == {"markers": [
+        {"kind": "env", "name": "SFT_EVAL_SAMPLE", "equals": "-2",
+         "file": "looplab/experiment.env"}]}
+
+
+def test_the_historical_developer_is_unchanged(monkeypatch):
+    from looplab.adapters.repo_task import LLMRepoDeveloper
+    dev = LLMRepoDeveloper.__new__(LLMRepoDeveloper)          # never ran __init__: historical
+    prop = dev._emit_spec()["function"]["parameters"]["properties"]["activation_markers"]
+    assert prop == LLMRepoDeveloper._ACTIVATION_MARKERS_PROPERTY

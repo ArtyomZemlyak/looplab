@@ -609,6 +609,14 @@ _REPO_DEV_PLAN_WORKING_SET = (
     "shows the repository as seeded): {files}")
 
 
+def activation_graded_enabled(settings) -> bool:
+    """`Settings.activation_check == "graded"` as `LLMRepoDeveloper(activation_graded=)` — the ONE
+    reader. It changes the `done` schema and description and the declaration lint
+    (minionerec-lora-v1 node 2, 2026-10-01), so anything else — a settings object without the field,
+    `strict`, `off` — is the historical prompt byte for byte."""
+    return getattr(settings, "activation_check", "strict") == "graded"
+
+
 def phase_context_enabled(settings) -> bool:
     """`Settings.developer_phase_context` as the constructor argument `LLMRepoDeveloper` takes.
 
@@ -1163,7 +1171,7 @@ class LLMRepoDeveloper:
                  step_feedback_command: str = "", established=None,
                  evidence_envelope: bool = False, prompt_truths: bool = False,
                  phase_context: bool = False, scorer_status: bool = False,
-                 claim_decisions: bool = False):
+                 claim_decisions: bool = False, activation_graded: bool = False):
         self.client = client
         self.task = task
         self.parser = parser
@@ -1204,6 +1212,13 @@ class LLMRepoDeveloper:
         # 69.21b). OFF at the constructor (it changes what a tool returns); `agents/developer_backends.py`
         # passes `Settings.lesson_prior_claim_decisions`.
         self._claim_decisions = bool(claim_decisions)
+        # THE GRADED ACTIVATION DECLARATION (minionerec-lora-v1 node 2, 2026-10-01): ON, both `done`s
+        # accept typed `activation_markers` entries and say what a marker IS, and the declaration is
+        # linted against the whole evaluated tree with config values rewritten to `env`
+        # (`engine/repair_verify.py::activation_declaration_lint`). OFF at the constructor because it
+        # changes a prompt (CLAUDE.md); `agents/developer_backends.py` passes
+        # `Settings.activation_check == "graded"`.
+        self._activation_graded = bool(activation_graded)
         self._memory_state = None
         # Coerced at the BOUNDARY (doc 25 AG-01) so an unknown option name raises here, in the
         # ctor, rather than surviving as dead weight in a dict until the drive call swallows it.
@@ -1476,6 +1491,54 @@ class LLMRepoDeveloper:
             "description": "When not as_proposed: one sentence on what you built instead and why."},
     }
 
+    # …and the GRADED contract (`Settings.activation_check` = "graded"). minionerec-lora-v1 node 2,
+    # 2026-10-01: the property above lists "a flag" among the reasons to declare a marker, and the
+    # node declared two env ASSIGNMENTS from the config file it changed -- text no code prints -- so
+    # a 6.8 h metric was withheld and the repair added `echo` lines for the check. A marker is a line
+    # the NEW CODE prints; a config-only change declares none, or an `env` entry the engine checks
+    # statically. Items are a string (a printed fragment, as before) or one typed object.
+    _ACTIVATION_MARKERS_PROPERTY_GRADED = {
+        "type": "array",
+        "items": {"oneOf": [
+            {"type": "string"},
+            {"type": "object", "properties": {
+                "kind": {"type": "string", "enum": ["log", "env", "file", "none"]},
+                "text": {"type": "string"}, "regex": {"type": "string"},
+                "name": {"type": "string"}, "equals": {"type": "string"}, "file": {"type": "string"},
+                "path": {"type": "string"}, "json_eq": {"type": "object"},
+                "fresh": {"type": "boolean"}, "why": {"type": "string"}},
+             "required": ["kind"]}]},
+        "description": (
+            "OPTIONAL, and worth it whenever your NEW CODE can be switched off or fall back -- a "
+            "try/except around new code, a capability check, a branch your change adds. List 1-3 "
+            "exact text fragments YOUR NEW CODE prints (stdout or stderr) ONLY when that new path "
+            "actually runs, e.g. print('prefix cache: ON'). After the evaluation the engine checks "
+            "that each one appeared; if one did not, the metric is withheld -- it measured the old "
+            "path, not your change -- and the node comes back to you for repair with that marker "
+            "named. A change that only sets config or environment values needs NO marker: a "
+            "`NAME=value` line is not printed by anything -- declare none, or "
+            "{\"kind\": \"env\", \"name\": NAME, \"equals\": value, \"file\": path} and the "
+            "engine reads the file. Do not add an echo just for the check: a line that prints "
+            "whatever happens proves nothing. Other kinds: {\"kind\": \"file\", \"path\": p} (an "
+            "artefact this run writes), {\"kind\": \"none\", \"why\": reason}. This replaces any "
+            "declaration the node inherited; pass [] to declare none.")}
+
+    def _activation_markers_property(self) -> dict:
+        """The `activation_markers` property both `done`s carry: the graded one under
+        `activation_graded`, the historical one byte for byte otherwise (and on an instance that
+        never ran `__init__`)."""
+        return (self._ACTIVATION_MARKERS_PROPERTY_GRADED
+                if getattr(self, "_activation_graded", False) else self._ACTIVATION_MARKERS_PROPERTY)
+
+    def _activation_lint(self, declared, write):
+        """`repair_verify.activation_declaration_lint` over this session's tree: the staged files,
+        what they started from (`write.started_from`, else the originals), and the editable roots."""
+        from looplab.engine.repair_verify import activation_declaration_lint
+        originals, complete = write.original_texts()
+        return activation_declaration_lint(
+            declared, write.files, before=getattr(write, "started_from", None) or write.original,
+            originals=originals, originals_complete=complete, deleted=list(write.deleted))
+
     def _record_activation(self, args, write, *, report: bool = True) -> str:
         """Persist the `activation_markers` a `done` declared, then return its summary.
 
@@ -1485,7 +1548,19 @@ class LLMRepoDeveloper:
         is presumably still in the code). An explicit [] writes an EMPTY declaration rather than
         deleting the file, so no deletion semantics are needed to retract one."""
         args = args if isinstance(args, dict) else {}
-        if "activation_markers" in args:
+        if "activation_markers" in args and getattr(self, "_activation_graded", False):
+            # GRADED: the declaration as the lint rewrote it -- a config value becomes the `env`
+            # entry the engine checks statically, never a marker the repair will `echo` for
+            # (minionerec-lora-v1 node 2, 2026-10-01). The rewrite is recorded on the span.
+            from looplab.core import tracing
+            from looplab.engine.activation import ACTIVATION_MANIFEST_NAME, manifest_text
+            lint = self._activation_lint(args.get("activation_markers"), write)
+            write.files[ACTIVATION_MANIFEST_NAME] = manifest_text(lint.entries)
+            if lint.notes:
+                with tracing.operation("activation_declaration_rewritten",
+                                       detail=" | ".join(lint.notes)[:600]):
+                    pass
+        elif "activation_markers" in args:
             from looplab.engine.activation import (ACTIVATION_MANIFEST_NAME, manifest_text,
                                                    normalize_markers)
             write.files[ACTIVATION_MANIFEST_NAME] = manifest_text(
@@ -1508,7 +1583,7 @@ class LLMRepoDeveloper:
                         "Call once the file(s) are written and the eval command would run and print "
                         "its metric. Briefly summarize what you wrote.",
                         {"summary": {"type": "string"},
-                         "activation_markers": self._ACTIVATION_MARKERS_PROPERTY,
+                         "activation_markers": self._activation_markers_property(),
                          **self._IDEA_FIDELITY_PROPERTIES}, [])
 
     def _repair_emit_spec(self) -> dict:
@@ -1525,7 +1600,7 @@ class LLMRepoDeveloper:
                         "Call once the repair is written and the eval would run. Briefly summarize "
                         "what you changed.",
                         {"summary": {"type": "string"},
-                         "activation_markers": self._ACTIVATION_MARKERS_PROPERTY,
+                         "activation_markers": self._activation_markers_property(),
                          **self._IDEA_FIDELITY_PROPERTIES,
                          # The Developer's ONLY way to say "the stage that broke is not the stage
                          # that is wrong". Everything the engine does with it is in
@@ -3169,6 +3244,9 @@ class LLMRepoDeveloper:
                     return base.get(path)
                 return write.original(path)
 
+            # The graded activation lint reads the same BEFORE side (`_activation_lint`).
+            write.started_from = _started_from
+
             def _silent_fallback_refusal() -> str:
                 from looplab.engine.repair_verify import silent_broad_fallbacks
                 return silent_broad_fallbacks(write.files, before=_started_from)
@@ -3191,6 +3269,13 @@ class LLMRepoDeveloper:
                             "markers")
                     except (ValueError, AttributeError):
                         declared = None
+                if getattr(self, "_activation_graded", False):
+                    # GRADED (minionerec-lora-v1 node 2, 2026-10-01): a config value is not a printer
+                    # and is rewritten at `_record_activation`, never bounced; what bounces is a
+                    # marker no code anywhere prints on a code change, or one only an unconditional
+                    # line this change added prints.
+                    lint = self._activation_lint(declared, write)
+                    return lint.bounce or lint.warning
                 return activation_markers_not_in_code(declared, write.files)
 
             def _validate_build(_args):
@@ -3645,7 +3730,9 @@ class LLMRepoDeveloper:
             declared = _json.loads(write.files.get(ACTIVATION_MANIFEST_NAME) or "{}").get("markers")
         except (ValueError, AttributeError):
             return
-        refusal = activation_markers_not_in_code(declared, write.files)
+        refusal = (self._activation_lint(declared, write).bounce
+                   if getattr(self, "_activation_graded", False)
+                   else activation_markers_not_in_code(declared, write.files))
         if not refusal:
             return
         self.last_budget_exhausted = ""

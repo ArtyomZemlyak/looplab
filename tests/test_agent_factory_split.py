@@ -107,7 +107,7 @@ def test_neither_module_is_a_god_module_again():
     file down. A cap is only a decision if it can move either way for a stated reason.
     """
     for rel, cap in (("adapters/tasks.py", 233), ("agents/factory.py", 402),
-                     ("agents/developer_backends.py", 201),
+                     ("agents/developer_backends.py", 203),
                      ("adapters/task_schema.py", 231)):
     #
     # 2026-08-29, MERGE with master: master's 530 is KEPT and not raised. The merged file is 529
@@ -222,6 +222,12 @@ def test_neither_module_is_a_god_module_again():
     # keyword now reads the switch's ONE reader, `core/config.py::claim_decisions_enabled`, as the
     # six builders it reaches do — its module-level import is the line. 199 -> 200 measured; the
     # raise pays for exactly that line and keeps one line of headroom.
+    #
+    # 201 -> 203, 2026-10-01, the graded activation declaration (minionerec-lora-v1 node 2): ONE
+    # keyword on the `LLMRepoDeveloper` construction, `activation_graded=activation_graded_enabled(
+    # settings)` — its reader lives in `adapters/repo_developer.py` beside `phase_context_enabled` —
+    # and that reader joining the function-local import, which wraps. 200 -> 202 measured; the raise
+    # pays for exactly those two lines and keeps one line of headroom.
     #
     # 399 -> 402, 2026-09-23, review 2026-09-23 Q-2 (the script Developer starts from its parent):
     # `Settings.developer_parent_code` reaches the one LLM script Developer `make_roles` builds — the
