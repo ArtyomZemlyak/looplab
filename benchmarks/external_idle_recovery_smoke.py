@@ -28,6 +28,7 @@ import uvicorn
 from benchmarks.claude_harness_smoke import wait_for
 from benchmarks.external_asha_smoke import SCORER
 from benchmarks.external_session_smoke import Client, until
+from benchmarks._external_response_loss import ResponseLossProxy
 from looplab.events.eventstore import EventStore
 from looplab.harness.mcp_server import HarnessAPI
 from looplab.serve.server import make_app
@@ -36,7 +37,7 @@ from looplab.serve.server import make_app
 CASES = ("agent_loss", "engine_loss")
 
 
-def run_case(root, name, quiet_hold_seconds=0):
+def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False):
     root.mkdir(parents=True, exist_ok=False)
     runs = root / "runs"; runs.mkdir()
     source = root / "source"; source.mkdir()
@@ -60,6 +61,7 @@ def run_case(root, name, quiet_hold_seconds=0):
         bind.bind(("127.0.0.1", 0)); port = bind.getsockname()[1]
     url = f"http://127.0.0.1:{port}"
     server = thread = engine = None
+    proxy = None
     owned_engines = []
     proof = {"case": name, "model_judgment_tested": False, "agent_connection": "not_measured",
              "metrics": [], "read_steps": []}
@@ -88,14 +90,42 @@ def run_case(root, name, quiet_hold_seconds=0):
         await client.progress()
         await client.call("phases", {"query": "implementation"})
         await client.call("phase_info", {"phase_id": "implementation"})
-        await client.command("inject_node", {"idea": {"operator": "draft", "footprint": {"gpus": 0},
+        data = {"idea": {"operator": "draft", "footprint": {"gpus": 0},
             "rationale": "Measure the declared training steps with the protected SGD scorer."},
-            "files": {"config.json": json.dumps({"steps": steps, "lr": .1, "delay": 0., "delay_from": 1})}},
-            f"idle:candidate:{nid}")
+            "files": {"config.json": json.dumps({"steps": steps, "lr": .1, "delay": 0., "delay_from": 1})}}
+        key = f"idle:candidate:{nid}"
+        if proxy is not None and nid == 0:
+            lost = await client.call("api_request", {"method": "POST", "path": "/api/runs/demo/commands",
+                "body": {"expected_generation": client.generation, "type": "inject_node", "data": data},
+                "idempotency_key": key})
+            assert lost["status"] is None and lost["outcome"] == "unknown"
+            assert lost["code"] == "request_outcome_unknown"
+            receipt = await until(lambda: client.receipt(key), lambda row: row["command"]["status"] == "succeeded")
+            replay = await client.command("inject_node", data, key)
+            assert replay["command"]["id"] == receipt["command"]["id"]
+            proof.update(lost_write=lost, exact_retry_receipt=receipt["command"]["id"])
+        else:
+            await client.command("inject_node", data, key)
         node = await client.terminal(nid)
         proof["metrics"].append(node["metric"])
-        await client.commentary("node", f"idle:summary:{nid}",
-            "SGD и защищённый scoring завершены; результат измерен движком. Прочитайте исходную квитанцию при переподключении и явно выберите следующий эксперимент. Одного запуска недостаточно для вывода о повторяемости.", nid)
+        summary = "SGD и защищённый scoring завершены; результат измерен движком. Прочитайте исходную квитанцию при переподключении и явно выберите следующий эксперимент. Одного запуска недостаточно для вывода о повторяемости."
+        if proxy is not None and nid == 0:
+            await client.progress()
+            await client.call("phases", {"query": "result_summary"})
+            await client.call("phase_info", {"phase_id": "result_summary"})
+            row = next(r for r in (await client.read("result-notices"))["items"]
+                       if r["kind"] == "node" and r.get("node_id") == nid)
+            body = {"expected_generation": client.generation, "receipt_id": row["id"],
+                    "evidence_token": row["evidence_token"], "action_id": f"idle:summary:{nid}", "summary": summary}
+            proxy.drop_next_write = "/api/runs/demo/result-notices"
+            lost = await client.call("api_request", {"method": "POST", "path": "/api/runs/demo/result-notices", "body": body})
+            assert lost["status"] is None and lost["outcome"] == "unknown"
+            saved = next(r for r in (await client.read("result-notices"))["items"] if r["id"] == row["id"])
+            assert saved["commentary"] == summary
+            assert (await client.request("POST", "result-notices", body))["replayed"]
+            proof.update(lost_commentary=lost, commentary_exact_retry=True)
+        else:
+            await client.commentary("node", f"idle:summary:{nid}", summary, nid)
         progress = await client.progress()
         assert progress["finish_pending_nodes"] == [] and progress["pending_checkpoint_count"] == 0
         assert progress["next_step"]["code"] == "choose_direction"
@@ -103,6 +133,15 @@ def run_case(root, name, quiet_hold_seconds=0):
     async def first(client):
         await candidate(client, 0, 16)
         proof["original_receipt"] = (await client.receipt("idle:candidate:0"))["command"]["id"]
+        if proxy is not None:
+            before = (runs / "demo" / "events.jsonl").read_bytes()
+            proxy.drop_next_read = True
+            lost = await client.call("run_progress", {"run_id": "demo", "expected_generation": generation})
+            assert lost["status"] is None and lost["code"] == "api_unreachable"
+            assert lost["outcome"] == "unavailable"
+            assert (await client.progress())["complete"]
+            assert (runs / "demo" / "events.jsonl").read_bytes() == before
+            proof.update(lost_read=lost, failed_read_changed_no_work=True)
 
     async def recovered(client):
         rd = runs / "demo"
@@ -148,7 +187,7 @@ def run_case(root, name, quiet_hold_seconds=0):
         wrapper = "import os;from pathlib import Path;from looplab.harness.mcp_server import run_stdio;" + \
             f"Path({str(pid_file)!r}).write_text(str(os.getpid()));run_stdio()"
         params = StdioServerParameters(command=sys.executable, args=["-c", wrapper],
-            env={**child_env, "LOOPLAB_HARNESS_URL": url, "LOOPLAB_HARNESS_TOKEN": token})
+            env={**child_env, "LOOPLAB_HARNESS_URL": proxy.url if proxy else url, "LOOPLAB_HARNESS_TOKEN": token})
         async with stdio_client(params) as (reader, writer), ClientSession(reader, writer) as mcp:
             await mcp.initialize()
             client = Client(mcp, generation)
@@ -163,6 +202,8 @@ def run_case(root, name, quiet_hold_seconds=0):
                 os.kill(int(pid_file.read_text()), signal.SIGTERM)
 
     try:
+        if drop_command_response:
+            proxy = ResponseLossProxy(url)
         server, thread = start_ui()
         flags = {"external_harness": True, "deep_research_every": -1, "report_every": 0, "novelty_mode": "off",
             "foresight": False, "track_hypotheses": False, "concept_pivot": False, "concept_run_base": False,
@@ -235,10 +276,20 @@ def run_case(root, name, quiet_hold_seconds=0):
             (root / f"{operation}.txt").write_text(result.stdout, encoding="utf8")
         proof.update(protected_scorer_unchanged=True, score_executions=len(starts),
                      engine_processes=len(owned_engines), inspect_replay="passed")
+        if proxy is not None:
+            assert proxy.dropped == [{"method": "POST", "route": "commands", "upstream_status": 200},
+                                     {"method": "POST", "route": "result-notices", "upstream_status": 200},
+                                     {"method": "GET", "route": "harness-progress", "upstream_status": 200}]
+            assert proof["exact_retry_receipt"] == proof["original_receipt"]
+            assert len((rd / "result_commentary.jsonl").read_text(encoding="utf8").splitlines()) == 3
+            proof["commentary_count"] = 3
+            proof["dropped_responses"] = proxy.dropped
         (root / "acceptance.json").write_text(json.dumps(proof, ensure_ascii=False, indent=2), encoding="utf8")
         print(json.dumps(proof), flush=True)
         return proof
     finally:
+        if proxy is not None:
+            proxy.close()
         for child in owned_engines:
             if child.poll() is None:
                 child.terminate(); child.wait(timeout=10)
@@ -256,11 +307,16 @@ def main():
     parser.add_argument("--case", choices=["all", *CASES], default="all")
     parser.add_argument("--quiet-hold-seconds", type=float, default=0,
                         help="Real idle hold after owned MCP death; >=120 tests quiet activity without agent calls.")
+    parser.add_argument("--drop-command-response", action="store_true",
+                        help="Lose accepted command/commentary replies and one read reply through an owned TCP proxy.")
     args = parser.parse_args()
     if not 0 <= args.quiet_hold_seconds <= 14400:
         parser.error("quiet hold must be between zero and four hours")
+    if args.drop_command_response and args.case != "agent_loss":
+        parser.error("response-loss acceptance requires --case agent_loss")
     root = args.out.resolve(); root.mkdir(parents=True, exist_ok=False)
-    proof = [run_case(root / name, name, args.quiet_hold_seconds) for name in CASES if args.case in ("all", name)]
+    proof = [run_case(root / name, name, args.quiet_hold_seconds, args.drop_command_response)
+             for name in CASES if args.case in ("all", name)]
     (root / "acceptance.json").write_text(json.dumps(proof, ensure_ascii=False, indent=2), encoding="utf8")
 
 

@@ -28,6 +28,7 @@ MCP_INSTRUCTIONS = (
     "Quiet logs do not prove agent or engine liveness. "
     "MCP Connected proves stdio only; use connection_check for live run reads. "
     "Client tool approval may still be required. Inspect isError/is_error, permission_denials and HTTP status; exit 0 is not an applied command receipt. "
+    "Transport loss returns status=null; a write outcome is unknown. Inspect original receipts before any exact retry, never recover by inventing a new key. "
     "Follow enabled admission/finish obligations. A trainer exit is not terminal evaluation. "
     "After each terminal node and finalized run, read generation-fenced result-notices and POST "
     "a brief interpretation in the user's language with receipt_id, evidence_token and a stable "
@@ -127,7 +128,17 @@ class HarnessAPI:
                                  or len(json.dumps(body).encode("utf-8")) > MAX_REQUEST_BYTES):
             raise ValueError("body must be a JSON object of at most 1 MiB")
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
-        response = self.client.request(verb, self._path(path), json=body, headers=headers)
+        route = self._path(path)
+        try:
+            response = self.client.request(verb, route, json=body, headers=headers)
+        except httpx.TransportError:
+            # Never echo transport exception text: it may contain sensitive URLs.
+            # Even a timeout after sending a write can hide an accepted command.
+            if verb == "GET":
+                return {"status": None, "code": "api_unreachable", "outcome": "unavailable",
+                        "message": "API read response unavailable. Check the UI/server and read again explicitly; missing evidence does not prove no action occurred."}
+            return {"status": None, "code": "request_outcome_unknown", "outcome": "unknown",
+                    "message": "API write response unavailable; the server may already have applied it. Read original receipts and current state/checkpoints before retrying. For commands, use command_receipt with the original Idempotency-Key and generation; preserve the exact body/key. For other actions preserve their original action_id and exact body. Do not create a new key or action_id to recover a lost response. No automatic retry was made."}
         return self._result(response)
 
     def run_progress(self, run_id: str, expected_generation: str) -> dict:
@@ -156,6 +167,7 @@ class HarnessAPI:
             status = result["status"]
             if status != 200:
                 code, message = {
+                    None: ("api_unreachable", "UI/API request failed. Check the server URL, network and running UI."),
                     401: ("credential_refused", "API rejected the credential. Ask the operator for the scoped token."),
                     403: ("access_refused", "API refused this read. Check the credential and launched run mode."),
                     404: ("run_not_found", "Run not found on this server. Check the URL, run root and literal run ID."),
@@ -355,7 +367,9 @@ def build_server(api: HarnessAPI):
         """Call a live /api route using UI authorization and validation. Commands require
         a unique Idempotency-Key and the run's expected_generation in the JSON body;
         reuse the same key only for an exact lost-response retry. HTTP errors are returned
-        with their status and body so the agent can handle stale state explicitly."""
+        with their status and body so the agent can handle stale state explicitly.
+        Transport loss returns status=null: a write has outcome=unknown, not failed.
+        Inspect saved receipts before an exact retry; this tool never retries itself."""
         return api.request(method, path, body, idempotency_key)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,

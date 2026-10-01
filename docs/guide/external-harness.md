@@ -187,7 +187,18 @@ remain necessary; the diagnostic never completes that reset itself.
 
 The result distinguishes unreachable UI/API, refused credentials/access, a missing
 run, changed context, missing server harness credential and incomplete responses.
-Errors omit raw HTTP bodies, exception details and URLs. On success it returns server
+For `api_request`, `run_progress` and `command_receipt`, an HTTP transport failure
+returns `status: null` with fixed diagnostics. A GET has `code: api_unreachable`,
+`outcome: unavailable`; this is unavailable evidence, not proof of a missing receipt.
+A mutation has `code: request_outcome_unknown`, `outcome: unknown`: the server may
+already have accepted or applied it. No automatic retry is made. Read saved command
+receipts using the original Idempotency-Key/current generation, then state and
+checkpoints, before choosing an exact retry. For checkpoint or result commentary
+writes preserve the original `action_id` and exact body. Do not recover by inventing
+a new key. HTTP responses, including 4xx/5xx, retain their original status/body;
+`status: null` never means an applied command. MCP delivering this diagnostic is
+successful tool transport, so inspect the returned fields even when `isError` is false.
+Connection-check errors omit raw HTTP bodies, exception details and URLs. On success it returns server
 paths, last-read engine status, source health, `evidence_complete` and the next step.
 `ok: true` means these reads succeeded; incomplete journals remain explicit, and
 admission/checkpoint/report obligations still apply. It does not prove credential
@@ -932,6 +943,21 @@ for more than the activity threshold. Operator reads then see `quiet`; the measu
 result and event log remain unchanged. UI restart shows `not_observed`, and a new
 MCP progress read establishes a new observation. A quiet/forgotten observation
 never resumes the run or becomes a verdict that the agent died.
+
+For real lost responses after server acceptance, use a new disposable output:
+
+```sh
+python -m benchmarks.external_idle_recovery_smoke --out .tmp/new-transport-proof --case agent_loss --drop-command-response
+```
+
+An owned loopback TCP proxy forwards the first candidate and node commentary,
+receives the UI's successful responses, then closes each connection without sending
+the reply to MCP. The agent observes unknown write outcomes, reads the saved receipts
+and retries the exact bodies/identifiers. A progress GET reply is also lost: unavailable
+evidence changes no work. Recovery, UI restart and a second measured candidate still
+produce exactly two score executions and three commentary rows (two nodes and one
+explicitly finalized run). This exercises real transport/protocol recovery with short
+protected SGD, not model decisions or interactive client approval.
 
 ## Delegating only code editing
 

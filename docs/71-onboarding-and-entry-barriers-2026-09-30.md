@@ -596,7 +596,7 @@ External run здесь намеренно не получал кандидат�
 | OB-09 | Частично | Run workspace и Agent cycle показывают next step; списки различают внешний режим и engine, attention открывает текущие вопросы (§34–36). Гибель MCP и pause/resume проверены (§37–38). §47 показывает последнее успешное scoped progress чтение. | Активность запросов не доказывает живость агента; многочасовой сценарий OB-10 ещё открыт. |
 | OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–48 проверяют MCP/UI recovery, pause/resume, engine loss, obligations, monitor, deadline и ASHA. §47 — реальные 121 секунды без MCP-запросов; §48 — понятный отказ при неверной auth configuration. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
 | OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. §39/41 исправляют ссылки checkpoint и concept base на реальные MCP-фазы. | Проверены контракт, subprocess-кандидаты, desktop и discovery из серверной подсказки; подключение нового клиента относится к OB-10. |
-| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–47: source health, lifecycle verdict, engine recovery, obligations, deadline, training/ASHA monitor, retarget, idle recovery и scoped request activity. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. Наблюдение запросов не измеряет живость внешнего агента. |
+| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–49: source health, lifecycle verdict, engine recovery, obligations, monitor, retarget, idle recovery, scoped request activity и transport outcome unknown. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. §49 теряет настоящие TCP replies после принятия command/commentary. Наблюдение запросов не измеряет живость агента. |
 | OB-14 | Частично | Начало сайта показывает два основных входа. | Большая архитектурная схема всё ещё нуждается в упрощении для первого знакомства. |
 
 Остальные пункты §3 и соответствующие сценарии §11 остаются открытыми. Изменения первого
@@ -2216,3 +2216,61 @@ symlink fixture проверки deselected после воспроизведё�
 
 Граница: auth configuration исправлена; многочасовые сеансы, model judgments
 и интерактивные разрешения клиентов остаются отдельными открытыми пунктами OB-10.
+
+## 49. OB-10/12: потерянный HTTP-ответ не означает неисполненную команду
+
+**2026-10-01.** MCP `api_request` прежде выбрасывал transport exception без
+краткой инструкции recovery. После timeout или обрыва соединения сервер мог уже
+принять команду, а агент видел обычную ошибку инструмента. До изменения **21**
+направленная regression проверка упала; проверка propagation programming error
+проходила и сохранена.
+
+Теперь `api_request`, `run_progress` и `command_receipt` при `httpx.TransportError`
+возвращают фиксированную диагностику без текста exception, URL, тела или ключа:
+
+| Запрос | Наблюдаемый результат |
+| --- | --- |
+| GET | `status=null`, `code=api_unreachable`, `outcome=unavailable`; отсутствие ответа не доказывает отсутствие receipt |
+| POST/PUT/PATCH/DELETE | `status=null`, `code=request_outcome_unknown`, `outcome=unknown`; запись могла быть принята или применена |
+
+Автоматического retry нет. Для command надо читать `command_receipt` с исходным
+Idempotency-Key и current generation, затем state/checkpoints, прежде чем выбирать
+exact retry. Для других guarded actions сохраняются исходный `action_id` и тело.
+Новый идентификатор не становится recovery старого ответа. Programming errors
+продолжают выбрасываться; HTTP 4xx/5xx сохраняют status/body. `connection_check`
+сохраняет прежний fixed `api_unreachable`. Это диагностическая доставка MCP:
+`isError=false` не делает `status=null` доказательством applied command.
+
+### Реальные TCP обрывы после принятия двух записей
+
+Приватный `external_idle_recovery_smoke --case agent_loss --drop-command-response`
+использует owned loopback proxy. Он пересылает запрос UI, получает реальный **200**,
+затем закрывает клиентский TCP socket, не отправляя ответ MCP:
+
+1. Первый `inject_node`: агент получает unknown, читает сохранённую receipt по
+   исходному key и повторяет точное тело/key. Receipt ID совпадает; второго node нет.
+2. Русская node result interpretation: агент получает unknown, читает сохранённый
+   текст и повторяет исходные evidence/action fields. Ответ replayed; дубля в чате нет.
+3. `run_progress` GET: ответ теряется после server read. Агент видит unavailable;
+   следующий явный read проходит, event log остаётся неизменным.
+
+Затем fixture завершает свой MCP, перезапускает свой UI и reconnects. Три reads
+ничего не запускают. Второй candidate подаётся явно; run явно завершается.
+Ровно **два** protected CPU SGD score executions, **один** engine process и
+**три** commentary rows (два node и run). MSE **0.13721179500378475** и
+**0.01337676906957059**, protected scorer bytes неизменны, CLI `inspect`/`replay`
+проходят. Пользовательский server и credentials не меняются.
+
+Proof: `.tmp/external-transport-proof-3/acceptance.json`. Первый probe проверил
+command/GET loss; расширенная вторая попытка исправлена: public `commentary`
+является строкой summary, а не объектом с action ID. Это ошибка fixture; exact
+retry теперь проверяется через настоящий POST receipt, строки ledger считаются
+отдельно. Все owned процессы и proxy закрываются в fixture cleanup.
+
+Перед изменением прошли **193 replay** проверки; после — **171 backend/MCP**.
+Также прошли **31 docs/diagram** проверка и `mkdocs build --strict`;
+OpenAPI reference регенерирован без изменения маршрутов.
+Обновлены capability manifest, MCP instructions/tool help, external guide и full
+B/E architecture diagram. Новые endpoints, настройки и engine gates не добавлены.
+Короткий scripted network fault не закрывает model judgments, многочасовые сеансы
+или интерактивные разрешения Codex/Claude клиентов.
