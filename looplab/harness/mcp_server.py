@@ -368,7 +368,7 @@ class HarnessAPI:
         if result.get("status") == 200 and not result.get("code"):
             page = result["body"]
             active, candidates = page.get("active_base"), page.get("candidates")
-            valid = (page.get("version") == 1 and type(page.get("enabled")) is bool and type(page.get("engine_running")) is bool
+            valid = (type(page.get("version")) is int and page["version"] == 1 and type(page.get("enabled")) is bool and type(page.get("engine_running")) is bool
                 and page.get("source_health") == {"events": "complete"} and isinstance(page.get("history"), list)
                 and len(page["history"]) <= limit and "next_offset" in page
                 and (page["next_offset"] is None or type(page["next_offset"]) is int and page["next_offset"] == offset + limit)
@@ -393,7 +393,7 @@ class HarnessAPI:
             receipt = result.get("body")
             expected = {"proposals": {"upstream_proposed", "upstream_proposal_failed"},
                         "check": {"upstream_gate_finished", "upstream_gate_abandoned"}, "advance": {"base_advanced"}}[operation]
-            valid = (isinstance(receipt, dict) and receipt.get("version") == 1
+            valid = (isinstance(receipt, dict) and type(receipt.get("version")) is int and receipt["version"] == 1
                 and receipt.get("action_id") == body.get("action_id") and receipt.get("request_hash") == digest(normalize_request("propose" if operation == "proposals" else operation, body))
                 and receipt.get("event_type") in expected and receipt.get("status") in ("succeeded", "failed")
                 and type(receipt.get("seq")) is int and receipt["seq"] >= 0
@@ -408,8 +408,19 @@ class HarnessAPI:
             if valid:
                 valid = event(receipt, receipt["event_type"]) and receipt["status"] == (
                     "failed" if receipt["event_type"] == "upstream_proposal_failed" or receipt["event_type"] == "upstream_gate_finished" and receipt["result"]["passed"] is False else "succeeded")
+            if valid and operation != "proposals":
+                valid = receipt["proposal_id"] == body.get("proposal_id")
+            if valid and operation == "proposals":
+                valid = receipt["proposal_id"] == "up_" + digest(body["action_id"])[:24]
+                if valid and receipt["event_type"] == "upstream_proposed":
+                    valid = (receipt["source_node_id"] == body.get("source_node_id")
+                        and receipt["expected_base_revision"] == body.get("expected_base_revision")
+                        and receipt["flag"] == body.get("flag") and receipt["critic"] == body.get("critic"))
+            if valid and operation == "advance":
+                valid = (receipt["from_revision"] == body.get("expected_base_revision")
+                    and receipt["evidence_token"] == body.get("evidence_token"))
             if not valid:
-                return self._unknown_write(result, "invalid_upstream_receipt")
+                return self._unknown_write({"status": result["status"]}, "invalid_upstream_receipt")
         return result
 
     def connection_check(self, run_id: str, expected_generation: str = "") -> dict:

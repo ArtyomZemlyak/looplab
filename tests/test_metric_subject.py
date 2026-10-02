@@ -21,6 +21,7 @@ from looplab.engine.metric_salvage import SALVAGE_VIOLATION, unbound_subject_vio
 from looplab.events.replay import fold
 from looplab.runtime import landlock, metric_subject as ms, read_allowlist
 from looplab.runtime.command_eval import run_command_eval
+from tests._symlinks import create_symlink
 
 _METRIC = {"kind": "stdout_json", "key": "metric"}
 
@@ -262,7 +263,7 @@ def test_a_match_reached_through_a_symlink_out_of_the_workdir_escapes(tmp_path):
     wd = tmp_path / "wd"
     wd.mkdir()
     (wd / "s.py").write_text("import json; print(json.dumps({'metric': 0.5}))\n", encoding="utf-8")
-    os.symlink(str(outside), str(wd / "experiments"))
+    create_symlink(outside, wd / "experiments", is_directory=True)
     res = run_command_eval([sys.executable, "s.py"], str(wd), 60, _METRIC,
                            subject_glob=["experiments/*/final/model.safetensors"])
     assert res.metric == 0.5
@@ -284,7 +285,7 @@ def test_an_escaping_match_beside_a_legitimate_one_is_ambiguous_and_not_quietly_
     (wd / "s.py").write_text("import json; print(json.dumps({'metric': 0.5}))\n", encoding="utf-8")
     (wd / "experiments" / "mine_rubert-tiny-lite" / "final").mkdir(parents=True)
     (wd / "experiments" / "mine_rubert-tiny-lite" / "final" / "model.safetensors").write_bytes(b"m")
-    os.symlink(str(outside), str(wd / "experiments" / "theirs_rubert-tiny-lite"))
+    create_symlink(outside, wd / "experiments" / "theirs_rubert-tiny-lite", is_directory=True)
     res = run_command_eval([sys.executable, "s.py"], str(wd), 60, _METRIC,
                            subject_glob=["experiments/*/final/model.safetensors"])
     prov = res.metric_subject
@@ -1205,10 +1206,12 @@ def test_the_un_injected_confine_is_the_SAME_rule_the_engine_binds_with(tmp_path
     (wd / "out").mkdir(parents=True)
     (wd / "out" / "model.bin").write_bytes(b"weights")
     (tmp_path / "escape.bin").write_bytes(b"somebody else's checkpoint")
-    (wd / "loop").mkdir()
-    (wd / "loop" / "a").symlink_to(wd / "loop" / "b")      # …and b points back at a: a real loop
-    (wd / "loop" / "b").symlink_to(wd / "loop" / "a")
-    (wd / "link_out").symlink_to(tmp_path)                  # a symlink OUT of the workdir
+    if rel == "loop/a":
+        (wd / "loop").mkdir()
+        create_symlink(wd / "loop" / "b", wd / "loop" / "a")
+        create_symlink(wd / "loop" / "a", wd / "loop" / "b")
+    elif rel == "link_out/model.bin":
+        create_symlink(tmp_path, wd / "link_out", is_directory=True)
 
     assert ms._fallback_confine(str(wd), rel) == _confined(str(wd), rel), (
         "the un-injected containment answered differently from the one the engine injects")
@@ -1222,8 +1225,8 @@ def test_a_symlink_loop_inside_the_workdir_fails_the_node_rather_than_the_run(tm
     terminal. Here it must be an ordinary unbound record."""
     wd = tmp_path / "wd"
     wd.mkdir()
-    (wd / "a").symlink_to(wd / "b")
-    (wd / "b").symlink_to(wd / "a")
+    create_symlink(wd / "b", wd / "a")
+    create_symlink(wd / "a", wd / "b")
     row = ms.bind_one(str(wd), "a")                         # no `confine=` — the fallback path
     assert row["bound"] is False and row["reason"] == "escapes"
     assert ms.bind(["a"], str(wd), since=None)["unbound_reason"] == "escapes"

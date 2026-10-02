@@ -22,6 +22,7 @@ from looplab.engine.seed_from_run import resolve_seed, seed_intent, seed_verdict
 from looplab.events.eventstore import EventStore
 from looplab.events.node_import import node_import_payload
 from looplab.events.replay import fold
+from tests._symlinks import create_symlink
 
 _RUN = ["run", "--no-genesis", "--kind", "quadratic", "--goal", "min (x-3)^2", "--direction", "min",
         "--backend", "toy"]
@@ -358,7 +359,7 @@ def test_the_receipt_is_the_sources_resolved_identity(isolated):
     map read as a sibling run."""
     runs = isolated / "runs"
     src = _crafted(runs, "prior", {"id": 0, "metric": 1.0})
-    os.symlink(src, runs / "latest")
+    create_symlink(src, runs / "latest", is_directory=True)
     task = {"kind": "quadratic", "direction": "min"}
     facts = dict(direction="min", eval_env={}, holdout_fraction=None)
     payload, _v, _n = seed_intent(resolve_seed(str(runs / "latest"), runs / "new"),

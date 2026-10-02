@@ -1,7 +1,8 @@
 """Measured upstream equivalence, artifact regression and real trigger checks.
 
-Uses the evaluator's actual stage resolver. Every repetition is an explicit fresh
-workspace; no node score is edited. Observable scope is operator declared, never
+Uses the node pipeline and live timeouts, stall/divergence and subject policy.
+Every repetition uses a fresh workspace; no node score is edited.
+Observable scope is operator declared, never
 an assertion of equivalence for unspecified recipes or environments.
 """
 from __future__ import annotations
@@ -20,8 +21,7 @@ from looplab.core.errors import UpstreamRefusal
 from looplab.core.node_evidence import read_bounded_regular_file
 from looplab.core.scorer_boundary import BoundaryCapture
 from looplab.engine.seed_base import selected_seed_base
-from looplab.engine.upstream_state import digest, node_signature
-from looplab.events.eventstore import EventStore
+from looplab.engine.upstream_state import digest, events_for, node_signature
 from looplab.events.replay import fold
 from looplab.engine.upstream_workspace import checked_overlay, write_overlay, owned_path
 from looplab.engine.workspace_seed import seed_candidate_workspace, seeded_base_revision
@@ -42,7 +42,7 @@ def boundary_at(work, declaration):
 
 
 def input_identity(task, settings, source, proposal):
-    """Bind actual archives, inputs and interpreter, plus all execution declarations."""
+    """Bind archives, inputs and interpreter, including the effective live eval spec."""
     spec = task.repo_spec()
     if settings.trust_mode != "trusted_local":
         raise UpstreamRefusal("upstream_scope_unsupported", "This upstream gate requires trusted_local execution; it never bypasses a sandbox")
@@ -83,16 +83,30 @@ def input_identity(task, settings, source, proposal):
         if raw is None or len(raw) > 2 * 1024 * 1024:
             raise UpstreamRefusal("upstream_snapshot_unavailable", "Task/config snapshot is missing or unreadable")
         snapshots[name] = hashlib.sha256(raw).hexdigest()
+    context = evaluation_context(task, settings, events_for(Path(proposal["selector"]["run_dir"])))
+    from looplab.engine.shared import effective_eval_spec
     return digest({"task": task.model_dump(), "settings": settings.model_dump(), "snapshots": snapshots,
+                   "effective_eval_spec": effective_eval_spec(context),
                    "source": node_signature(source), "proposal": proposal,
                    "inputs": inputs, "environment": env, "process_env": dict(os.environ)})
 
 
+def evaluation_context(task, settings, events):
+    """Use the node pipeline's single derivation, without engine setup or work."""
+    from looplab.engine.eval_stages import EvalStagesMixin
+    context = EvalStagesMixin()
+    context._eval_spec = task.eval_spec()
+    context._eval_timeout_override = command_eval.eval_timeout_override(fold(events).budget_overrides)
+    context._strategy_fidelity = None
+    context.max_eval_timeout = settings.max_eval_timeout
+    context.metric_subject = settings.metric_subject
+    return context
+
+
 def execute_gate(rd, task, settings, source, proposal, manifest, action_id, charge):
     from looplab.core.envsafe import merge_env
-    from looplab.engine.eval_stages import EvalStagesMixin
+    from looplab.engine.shared import effective_eval_spec, effective_max_eval_timeout
     spec, declaration = task.repo_spec(), task.upstream
-    es = task.eval_spec()
     before = input_identity(task, settings, source, proposal)
     old_archive, _ = selected_seed_base(proposal["old_selector"])
     baseline_boundary = boundary_at(old_archive, spec["scorer_boundary"])
@@ -111,27 +125,34 @@ def execute_gate(rd, task, settings, source, proposal, manifest, action_id, char
         if boundary_at(work, spec["scorer_boundary"]) != baseline_boundary:
             raise UpstreamRefusal("upstream_scorer_changed", "Gate workspace changed declared scorer bytes")
         env = merge_env(settings.eval_env, spec.get("eval_env", {}), {"PYTHONDONTWRITEBYTECODE": "1"})
+        events = events_for(Path(rd))
+        context = evaluation_context(task, settings, events)
+        es = effective_eval_spec(context)
         if probe:
             argv, timeout, metric, stages = probe["command"], probe["timeout"], {"kind": "stdout_regex", "pattern": "NEVER_A_SCORE=(.*)"}, None
             cwd = str(work)
         else:
-            argv, timeout = command_eval.build_command(es, source.idea.params, "full")
-            stages = EvalStagesMixin()._resolve_stages(work, es, source.idea.params, argv, timeout)
+            argv, timeout, stages, _ = context._eval_pipeline(source, work, "full")
             metric, cwd = es["metric"], str(work / (es.get("cwd") or "."))
             if Path(es.get("cwd") or ".").is_absolute():
                 raise UpstreamRefusal("upstream_scope_unsupported", "Upstream evaluator cwd must be workspace relative")
-        state = fold(EventStore(Path(rd) / "events.jsonl").read_all())
+        state = fold(events)
         ceiling = state.budget_overrides.get("max_eval_seconds", settings.max_eval_seconds)
         if ceiling is not None:
             remaining = ceiling - state.total_eval_seconds
             required = sum(float(s.get("timeout", timeout)) for s in stages) if stages else timeout
             if remaining <= 0 or required > remaining:
                 raise UpstreamRefusal("upstream_budget_exhausted", "Extend the explicit evaluation budget before buying the next gate execution")
-        if timeout > settings.max_eval_timeout or any(float(s.get("timeout", timeout)) > settings.max_eval_timeout for s in stages or []):
+        ceiling = effective_max_eval_timeout(context)
+        if timeout > ceiling or any(float(s.get("timeout", timeout)) > ceiling for s in stages or []):
             raise UpstreamRefusal("upstream_timeout_exceeded", "Gate execution exceeds the run's declared per-evaluation timeout ceiling")
         start = time.monotonic()
         result = command_eval.run_command_eval(argv, cwd, timeout, metric, env=env,
             stages=stages, log_dir=str(work / ".gate-logs"),
+            stall_cap=settings.eval_stall_timeout_s,
+            divergence_watch=settings.single_command_divergence_watch,
+            subject=es["metric"].get("subject") if not probe and settings.metric_subject != "off" else None,
+            subject_glob=es["metric"].get("subject_glob") if not probe and settings.metric_subject != "off" else None,
             cross_check=es.get("cross_check") if not probe else None,
             drift_tolerance=float(es.get("drift_tolerance", 1e-6)),
             enforce_drift=settings.eval_trust_mode == "ratify_freeze_drift" and not probe,
@@ -145,6 +166,10 @@ def execute_gate(rd, task, settings, source, proposal, manifest, action_id, char
                "stages": result.stages, "artifacts": {}, "valid": False}
         executions.append(row)
         valid = not (result.timed_out or result.stalled or result.diverged or result.drift or result.violations or result.failed_stage)
+        if not probe and settings.metric_subject != "off":
+            from looplab.engine.metric_salvage import unbound_subject_violation_rows
+            row["metric_subject"] = result.metric_subject or command_eval.absent_metric_subject()
+            valid = valid and not unbound_subject_violation_rows(row["metric_subject"], result.metric, settings.metric_subject)
         try:
             if boundary_at(work, spec["scorer_boundary"]) != baseline_boundary:
                 raise UpstreamRefusal("upstream_scorer_changed", "Execution changed the declared scorer boundary")
@@ -163,13 +188,16 @@ def execute_gate(rd, task, settings, source, proposal, manifest, action_id, char
     for probe in declaration["tests"]:
         r = run("test-" + probe["name"], proposal["selector"], probe["files"], probe=probe)
         checks.append({"kind": "test", "name": probe["name"], "passed": r["valid"] and r["exit_code"] == 0})
-    for probe in declaration["regressions"] + (declaration["repair_probes"] if proposal["repair_trigger_nodes"] else []):
-        repair = probe in declaration["repair_probes"]
+    probes = [("regression", p) for p in declaration["regressions"]]
+    if proposal["repair_trigger_nodes"]:
+        probes += [("repair", p) for p in declaration["repair_probes"]]
+    for kind, probe in probes:
+        repair = kind == "repair"
         old = run("old-" + probe["name"], proposal["old_selector"], probe["files"], probe=probe, failed_artifacts_ok=repair)
         new = run("new-" + probe["name"], proposal["selector"], probe["files"], probe=probe)
         passed = old["valid"] and new["valid"] and new["exit_code"] == 0
         passed = passed and (old["exit_code"] != 0 if repair else old["exit_code"] == 0 and old["artifacts"] == new["artifacts"])
-        checks.append({"kind": "repair" if repair else "regression", "name": probe["name"], "passed": bool(passed)})
+        checks.append({"kind": kind, "name": probe["name"], "passed": bool(passed)})
     if proposal["repair_trigger_nodes"] and not declaration["repair_probes"]:
         checks.append({"kind": "repair", "passed": False, "reason": "Declare a real old-fail/new-pass trigger probe"})
     values = [[], []]

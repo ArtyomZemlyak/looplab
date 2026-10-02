@@ -1112,3 +1112,72 @@ symlink cases в первом широком запуске получили Win
 skip **только** при отсутствующей directory-symlink privilege, остальные OSError
 продолжают падать. Production guards не ослаблены. Это CPU protocol acceptance;
 GPU и произвольные undeclared recipes ею не покрыты.
+
+### 18.8 Полное ревью реализации и оставшихся границ (2026-10-02)
+
+Реализован весь explicit opt-in путь §17: nomination → approved Maintainer patch →
+measured gate → CAS → следующий lifecycle → provenance. Качество этого пути
+проверяется исполнениями и отказами, а не количеством tools или названий событий.
+Исторические «ещё открыты» в §16 описывают состояние до §18, не текущий tracker.
+
+| Область | Итог ревью |
+| --- | --- |
+| Реальные bytes и Git worktrees | Archive остаётся authority; ignored/CRLF/filter cases, полный approved patch и несколько баз проверяются отдельно от Git refs. |
+| Научный смысл gate | Full old/new repetitions, воспроизведение source score, SEM, прежний default/artifacts и original repair trigger; только declared observable scope. |
+| Контракт выполнения | Найдено расхождение live timeout и metric-subject enforcement; исправлено через общий node pipeline и действующие runtime policies. |
+| MCP evidence | Найден приём неполного passing result при совпадающем hash; исправлена семантическая проверка всех gate legs, пар и статистики. |
+| Retry, CAS и recovery | Exact ACK не покупает исполнения. Новый request проверяет актуальные inputs и effective timeout; crashed claim требует operator recovery и новый action ID. |
+| Overlay, reset и confirmation | Pending migration сохраняет scientific recipe; conflict сохраняет целую старую базу; terminal repetition использует primary historical implementation. |
+| Assistant, UI и внешняя авторизация | Shared transaction, полное approval-body binding, scoped external writes, owner-only declaration/recovery; никакого скрытого Maintainer job. |
+| Replay и экспорт | Events и immutable archives сохраняют историю; gate cost отдельно от Node.metric. Export не запускает оценку и не архивирует undeclared environment автоматически. |
+
+Подтверждённые ошибки этого ревью и правки:
+
+1. Typed MCP принимал passing ACK/history без equivalence leg, полных пар, SEM,
+   корректных means или source reproduction. Пересчитанный digest не выявлял
+   неполноту. Проверяются обязательные test/regression/equivalence, количества и
+   identities actual executions, совпадение samples с terminal metrics,
+   means/SEM/delta и finite numerical fields. ACK сверяется с requested proposal;
+   advance — также с requested from-revision/evidence-token. Boolean version не
+   принимается за integer v1. Invalid reply возвращает unknown/unavailable без
+   body и без автоматического повторного исполнения. Complete failed partial
+   comparison остаётся диагностикой и не разрешает advancement. Admission уже
+   требовал operator tests: отсутствие tests отказывает до proposal work.
+2. Gate строил pipeline из launch-time spec и игнорировал live `eval_timeout`.
+   Реальные проверки с лимитами 5/30 вместо 10 воспроизвели расхождение; смена
+   лимита после pass позволяла старый CAS. Gate теперь вызывает общий
+   `_eval_pipeline`, включая resolved developer-stage leashes, и bind включает
+   effective spec. Изменение effective timeout требует fresh check; exact ACK
+   сохраняет исходную identity. Operator override также учитывается в ceiling.
+3. Gate обходил `metric_subject=require`: отсутствие declaration/artifact не
+   блокировало pass. Actual SGD cases подтвердили оба дефекта. Теперь полный
+   source eval связывает subject/subject_glob; unbound subject при require делает
+   repetition invalid. Bound artifact проходит. Audit/off сохраняют их прежнюю
+   семантику. Настроенные stall cap и single-command divergence watch также
+   передаются в runtime; node checkpoints не превращаются в скрытое ожидание gate.
+4. Одинаковый probe в regression и repair declarations ошибочно считался repair
+   даже для idea без repair-trigger: сравнение dictionary membership меняло
+   ожидаемый old-pass в old-fail. Actual SGD case сначала упал. Gate теперь
+   переносит тип из declaration list, а не угадывает его по равенству содержимого;
+   неактивные repair probes не меняют обычную regression.
+
+Границы §18.4 остаются частью результата: это законченный CPU protocol path для
+trusted-local self-contained evaluator, не обещание arbitrary GPU reproducibility,
+Docker/host-scorer parity или независимого paid Maintainer/critic workflow.
+
+Финальная приёмка этого ревью: 891 Python tests passed, 31 platform/optional skips;
+1814 UI tests passed. Docs/API/event/layout/containment/diagram guards — 968 passed,
+последние изменённые docs/diagram/layering повторно — 34 passed. UI staging build,
+size/reachability bundle gates, strict MkDocs, Ruff и whitespace check прошли.
+Первый широкий прогон имел 12 WinError 1314 при создании test symlinks. Fixtures
+теперь skip только при отсутствующей Windows privilege, остальные ошибки не
+подавляются; четыре обычных containment cases больше не требуют ненужных ссылок.
+Production path guards не ослаблены. Финальный широкий прогон не имеет failures.
+
+`.tmp/doc72-mega-verified-acceptance/acceptance.json`: actual private server и
+scoped stdio MCP, 2 primary SGD trainings, 7 gate executions, 3 confirmation seeds
+на исходной реализации, exact ACK recovery без extra execution, replay/export и
+неизменные owner/scorer bytes. Это CPU protocol acceptance, не ML benchmark.
+Ранее записанные ACK не переписываются: новый input binding может потребовать
+fresh gate перед новым CAS; exact retry подтверждает прежний ACK, не новую
+сертификацию. Изменений launch defaults или автоматического resume нет.

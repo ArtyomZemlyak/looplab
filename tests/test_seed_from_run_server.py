@@ -16,6 +16,7 @@ import shutil
 from pathlib import Path
 
 import pytest
+from tests._symlinks import create_symlink
 
 pytest.importorskip("fastapi")
 
@@ -528,7 +529,7 @@ def test_the_launch_route_opens_a_source_only_by_the_servers_own_run_rule(root):
     assert _run(src, "--max-nodes", "2").exit_code == 0
     linked = root / "linked"
     linked.mkdir()
-    os.symlink(src / "events.jsonl", linked / "events.jsonl")
+    create_symlink(src / "events.jsonl", linked / "events.jsonl")
     quarantine = root / ".looplab-delete-quarantine-0123"
     shutil.copytree(src, quarantine)
     client = TestClient(make_app(root))
@@ -631,12 +632,12 @@ def test_the_locator_is_the_servers_whole_run_rule(root, tmp_path):
     linked = root / "linkedcmds"
     shutil.copytree(src, linked)
     shutil.rmtree(linked / ".commands", ignore_errors=True)
-    os.symlink(tmp_path, linked / ".commands")
+    create_symlink(tmp_path, linked / ".commands", is_directory=True)
     client = TestClient(make_app(root))
     verdict = client.post("/api/validate", json=_launch("linkedcmds")).json()
     assert verdict["ready"] is False and verdict["code"] == "invalid_seed", verdict
     alias = tmp_path / "alias-root"
-    os.symlink(root, alias)
+    create_symlink(root, alias, is_directory=True)
     via_alias = TestClient(make_app(alias))
     # Spelled either way, through either root: only a RESOLVED parent is the same directory.
     for server in (via_alias, client):

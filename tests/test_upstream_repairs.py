@@ -72,3 +72,14 @@ def test_post_terminal_repair_cannot_nominate_an_unchanged_scientific_recipe(tmp
         "idea": Idea(operator="improve").model_dump(), "files": {"recipe.env": "MOMENTUM=0.2\n"}})
     row, = [r for r in lane.read(generation)["candidates"]["rows"] if r["path"] == "recipe.env"]
     assert row["origin"] == "idea" and row["classification"] == "recipe" and row["pending_trigger_nodes"] == []
+def test_unused_identical_repair_probe_cannot_change_a_regression(tmp_path):
+    """Probe membership is its declared lane, not dictionary equality across lists."""
+    probe = {"name": "old_recipe", "command": [sys.executable, "train.py"], "artifacts": ["predictions.json"]}
+    lane, store, generation, proposal = fixture(tmp_path, upstream_policy={"repeats": 2,
+        "tests": [{"name": "syntax", "command": [sys.executable, "-m", "py_compile", "train.py"]}],
+        "regressions": [probe], "repair_probes": [dict(probe)]})
+    made = lane.propose(proposal)
+    assert made["repair_trigger_nodes"] == []
+    checked = lane.check({"expected_generation": generation, "action_id": "separate-probe-lanes", "proposal_id": made["proposal_id"]})
+    assert checked["status"] == "succeeded", checked
+    assert [c["kind"] for c in checked["result"]["checks"]] == ["test", "regression", "equivalence"]

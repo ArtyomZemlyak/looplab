@@ -1408,8 +1408,18 @@ evidence, including after resume. A started claim with no verdict is unresolved;
 inspect its logs before asking the operator to abandon it through
 `POST /api/runs/{run_id}/upstream/recover`. Recovery grants no pass or resume. A new
 check requires a new action ID. Damaged event sources refuse even old ACK reads.
-Typed MCP validates complete page/receipt identities, gates and numerical costs;
-incomplete HTTP 200 is unavailable/unknown. Read explicitly before recovery.
+Typed MCP validates complete page/receipt identities, every passing gate leg,
+paired full samples, their means/SEM/delta and corresponding executions and costs.
+An ACK must match the requested proposal and CAS evidence. A matching digest alone
+does not certify complete evidence. Incomplete HTTP 200 is unavailable/unknown,
+without a verdict body; read explicitly before recovery. A complete failed gate,
+including partial measurements, remains readable and grants no advancement.
+
+Full gate evaluations use the node pipeline's live `budget_extend{eval_timeout}`,
+stall/divergence settings and `metric_subject` policy. Changing the effective
+timeout after a gate requires a fresh check/action ID before CAS; exact retries
+still recover the original evidence. Probe-specific timeouts remain operator
+declared. These bounded gate executions do not open node monitor questions.
 
 The scoped token may write this lane on external runs; internal runs require the
 owner credential. Task declarations and interrupted-claim recovery are owner-only.
