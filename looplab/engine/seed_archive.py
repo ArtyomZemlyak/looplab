@@ -21,15 +21,22 @@ from looplab.core.pathsafe import contained_member, is_reparse, resolve_settled
 ARCHIVE_DIR = "base_snapshots"
 
 
-def _matches(path, receipt):
+def _destination_exists(exc):
+    # The canonical Win32 writer raises OSError(native_code, ...), not
+    # ctypes.WinError: ERROR_ALREADY_EXISTS(183) is not FileExistsError.
+    return isinstance(exc, FileExistsError) or (os.name == "nt" and
+        (exc.errno in (80, 183) or getattr(exc, "winerror", None) in (80, 183)))
+
+
+def _matches(path, receipt, *, on_file=None):
     from looplab.engine.workspace_seed import seeded_base_revision
-    observed = seeded_base_revision(path)
+    observed = seeded_base_revision(path, on_file=on_file)
     return observed["complete"] and all(observed[k] == receipt.get(k)
                                         for k in ("version", "scope", "digest", "file_count", "bytes"))
 
 
-def verified_seed_archive(run_dir, receipt) -> Path | None:
-    """Return a bounded, content-verified archive; never trust a supplied filesystem path."""
+def seed_archive_digest(receipt) -> str | None:
+    """The recorded archive's canonical identity, or None for an unusable reference."""
     if not isinstance(receipt, dict) or receipt.get("complete") is not True:
         return None
     if (type(receipt.get("version")) is not int or receipt["version"] != 1
@@ -43,6 +50,14 @@ def verified_seed_archive(run_dir, receipt) -> Path | None:
             or archive.get("status") != "stored"
             or archive.get("path") != f"{ARCHIVE_DIR}/{digest}"):
         return None
+    return digest
+
+
+def verified_seed_archive(run_dir, receipt, *, on_file=None) -> Path | None:
+    """Return a bounded, content-verified archive; never trust a supplied filesystem path."""
+    digest = seed_archive_digest(receipt)
+    if digest is None:
+        return None
     try:
         root = Path(run_dir) / ARCHIVE_DIR
         path = root / digest
@@ -50,7 +65,7 @@ def verified_seed_archive(run_dir, receipt) -> Path | None:
             return None
         if resolve_settled(path).parent != resolve_settled(root):
             return None
-        return path if _matches(path, receipt) else None
+        return path if _matches(path, receipt, on_file=on_file) else None
     except OSError:
         return None
 
@@ -68,7 +83,9 @@ class SeedArchive:
                 try:
                     try:
                         durable_no_replace_rename(initial, self.root, label="seed archive root")
-                    except FileExistsError:
+                    except OSError as exc:
+                        if not _destination_exists(exc):
+                            raise
                         strict_fsync_parent(self.root)
                 finally:
                     if initial.exists():
@@ -108,7 +125,9 @@ class SeedArchive:
             try:
                 durable_no_replace_rename(self.stage, destination, label="seed base archive")
                 self.stage = None
-            except FileExistsError:
+            except OSError as exc:
+                if not _destination_exists(exc):
+                    raise
                 if not _matches(destination, receipt):
                     return {**unavailable, "reason": "archive_conflict"}
                 strict_fsync_parent(destination)  # re-establish an indeterminate POSIX rename
@@ -135,5 +154,32 @@ def capture_seed_archive(workdir, root):
     try:
         receipt = seeded_base_revision(workdir, on_file=writer.add)
         return {**receipt, "archive": writer.publish(receipt)}
+    finally:
+        writer.close()
+
+
+def copy_seed_archive(run_dir, out_dir, receipt):
+    """Copy only a verified recorded base, checking the read bytes before publication.
+
+    Returns (archive status, member names). Never fall back to the live repo;
+    changed reads and storage errors publish no new partially matching tree.
+    """
+    from looplab.engine.workspace_seed import seeded_base_revision
+    unavailable = {"version": 1, "status": "unavailable", "path": None,
+                   "reason": "archive_source_unavailable"}
+    source = verified_seed_archive(run_dir, receipt)
+    if source is None:
+        return unavailable, []
+    writer, names = SeedArchive(Path(out_dir) / ARCHIVE_DIR), []
+    try:
+        def add(name, data, executable):
+            writer.add(name, data, executable)
+            names.append(name)
+        observed = seeded_base_revision(source, on_file=add)
+        if not observed["complete"] or any(observed[k] != receipt[k]
+                for k in ("version", "scope", "digest", "file_count", "bytes")):
+            return {**unavailable, "reason": "archive_source_changed"}, []
+        status = writer.publish(observed)
+        return status, sorted(names) if status["status"] == "stored" else []
     finally:
         writer.close()

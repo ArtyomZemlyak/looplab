@@ -21,10 +21,12 @@ against what the run wrote:
     Mislead pair, the seeds, the champion's official report and the extras sidecars when present;
   * `nodes/node_<id>/mlebench_report.json`, `mlebench_extras.json`, `bait_audit.json` — the graded
     report and the audit sidecars, copied when the run has them.
+  * `base_snapshots/` — only recorded, verified copied bases; index.json binds each seed/terminal
+    reference to its export-time outcome, including explicit unavailable archives (doc 72).
 
 What is deliberately NOT in the bundle: node workdirs (data mounts and checkpoints are the box's,
 and the code is already here), the cross-run stores (they are not this run's record), and anything
-re-computed at export time beyond the summary row — a bundle is evidence, and evidence that was
+re-computed at export time beyond the summary row and archive availability — a bundle is evidence, and evidence that was
 derived at packaging time cannot be checked against the log.
 """
 from __future__ import annotations
@@ -36,7 +38,7 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-from looplab.core.pathsafe import contained_member
+from looplab.core.pathsafe import contained_member, resolve_settled
 
 RO_CRATE_CONTEXT = "https://w3id.org/ro/crate/1.1/context"
 RO_CRATE_METADATA = "ro-crate-metadata.json"
@@ -103,6 +105,9 @@ def export_bundle(run_dir, out_dir) -> dict:
     from looplab.events.replay import fold
 
     run_dir, out_dir = Path(run_dir), Path(out_dir)
+    source_bases, destination = resolve_settled(run_dir / "base_snapshots"), resolve_settled(out_dir)
+    if destination == resolve_settled(run_dir) or destination == source_bases or source_bases in destination.parents:
+        raise ValueError("bundle output must not overwrite the run or its source base archives")
     if not (run_dir / "events.jsonl").is_file():
         raise FileNotFoundError(f"no events.jsonl under {run_dir}")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -160,6 +165,10 @@ def export_bundle(run_dir, out_dir) -> dict:
     (out_dir / "claims.json").write_text(json.dumps(claims, indent=1, ensure_ascii=False), encoding="utf-8")
     members.append(("claims.json", "every research memo's claims with their evidence ids, and the plan"))
     summary = bundle_summary(run_dir, state, events)
+    from looplab.engine.bundle_bases import export_seed_archives
+    bases = export_seed_archives(run_dir, out_dir, events, members)
+    if bases is not None:
+        summary["seed_archives"] = bases
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=1, ensure_ascii=False), encoding="utf-8")
     members.append(("summary.json", "the run row a reviewer reads first: number, caveats, Mislead pair, seeds"))
     metadata = crate_metadata(out_dir, members, summary)
@@ -186,13 +195,15 @@ def crate_metadata(out_dir: Path, members, summary: dict) -> dict:
                if summary.get("objective_key") else {}),
             "looplab:mislead_gap": (summary.get("mislead_gap") or {}).get("gap") if summary.get("mislead_gap") else None,
             "looplab:seeds": summary.get("seeds")}
+    if "seed_archives" in summary:
+        root["looplab:seed_archives"] = summary["seed_archives"]
     descriptor = {"@id": RO_CRATE_METADATA, "@type": "CreativeWork",
                   "conformsTo": {"@id": "https://w3id.org/ro/crate/1.1"}, "about": {"@id": "./"}}
     return {"@context": RO_CRATE_CONTEXT, "@graph": [descriptor, root, *files]}
 
 
 def verify_bundle(out_dir) -> list[str]:
-    """Every File entity in the crate exists with the recorded size and digest; the defects, if any."""
+    """File sizes/digests plus recorded base identities, executable bits and event bindings."""
     out_dir = Path(out_dir)
     try:
         meta = json.loads((out_dir / RO_CRATE_METADATA).read_text(encoding="utf-8"))
@@ -202,7 +213,10 @@ def verify_bundle(out_dir) -> list[str]:
     for entity in meta.get("@graph", []):
         if entity.get("@type") != "File":
             continue
-        path = out_dir / entity["@id"]
+        path = contained_member(out_dir, entity["@id"])
+        if path is None:
+            defects.append(f"unsafe file reference {entity['@id']}")
+            continue
         if not path.is_file():
             defects.append(f"missing {entity['@id']}")
             continue
@@ -210,4 +224,6 @@ def verify_bundle(out_dir) -> list[str]:
             defects.append(f"size mismatch {entity['@id']}")
         elif _sha256(path) != entity.get("sha256"):
             defects.append(f"digest mismatch {entity['@id']}")
-    return defects
+    from looplab.engine.bundle_bases import verify_seed_archives
+    return defects + verify_seed_archives(out_dir, {
+        entity["@id"] for entity in meta.get("@graph", []) if entity.get("@type") == "File"})

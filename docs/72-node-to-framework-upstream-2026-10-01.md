@@ -29,7 +29,7 @@
 | Что потеряно на узле 2 | 15 ч 26 мин стены, из них 8.07 ч — четыре упавших или задержанных оценки; три из четырёх причин — общие дефекты пайплайна, не наука узла | 1.2 |
 | Кто ещё ударился бы о те же дефекты | Семь черновиков-соседей (3, 6, 7, 10, 12, 13, 20) несут оба триггера и не могут унаследовать фикс соседа | 1.2 |
 | Узел 19 | Плечо исследователя реализовано одноразовым сценарием на 156 строк, который копирует общий раннер и в третий раз переписывает фикс узла 2; по диффам env это плечо выражалось рецептом поверх общего раннера | 1.3 |
-| Что уже реализовано | 72.2: receipt скопированной базы; prerequisite 72.1: bounded архив её regular files. Переноса в базу пока нет | 8, 10 |
+| Что уже реализовано | 72.2: receipt скопированной базы; prerequisites 72.1: bounded архив и проверяемый export-bundle. Переноса в базу пока нет | 8, 10, 12 |
 | Предложение | «Полоса upstream»: классификация диффа узла на РЕЦЕПТ и ВОЗМОЖНОСТЬ, роль Maintainer в worktree БАЗЫ (по одному на кандидата), гейт эквивалентности/регрессии, журналируемое `base_advanced` | 3 |
 | Главный риск | Контракт оценки декларативен: он не видит байтов скорера, а в этой задаче скорер и тренер — один файл без защиты (`protect: []`) | 3.4, 4 |
 | Открытые пункты | Шесть маркеров с фальсификаторами; 72.2 закрыт в описанном scope | 5, 8 |
@@ -555,7 +555,7 @@ public MCP receipt, включая `experiment.env` и неизменный scor
 Это не повтор полной удалённой ML-задачи и не доказательство model judgment.
 
 72.1 остаётся открытым:
-следующий шаг — archive export и operator-owned scorer boundary, затем pinned
+Archive export реализован в §12; следующий шаг — operator-owned scorer boundary, затем pinned
 base selection, gate/CAS advancement. 67.12 частично реализован, universal replay
 и работа со старым неподтверждённым base не заявляются.
 
@@ -590,3 +590,50 @@ probe переносит обе базы, проверяет crate и испол
 
 72.1 остаётся открытым: следующим будет operator-owned scorer boundary, затем
 pinned base selection и gate/CAS advancement. Data/environment не включаются.
+
+## 12. Export-bundle: реализация prerequisite 72.1
+
+`engine/bundle_bases.py` собирает receipts из всех записанных seed/terminal events,
+сохраняя event sequence, node/generation и исходный receipt. `index.json` имеет
+version 1 и отдельный export outcome; его бюджет проверки — 32 MiB. Valid identical
+identities копируются один раз. Unknown/missing/corrupt архивы отмечаются unavailable;
+live repo не используется. `copy_seed_archive` проверяет actual read bytes против
+ожидаемого receipt до публикации, сохраняя executable bits. RO-Crate перечисляет
+index и все перенесённые файлы. Legacy bundle без receipts остаётся прежним.
+
+`verify_bundle` связывает index с неизменённым event log, проверяет членство файлов
+в crate и whole-base identity, а не только byte checksums. Неизвестные receipts
+не становятся исполненными узлами или архивами. CLI показывает число distinct
+archives, exported/unavailable receipts. Source run/archives нельзя выбрать как
+output, linked archive root не используется для записи. Не добавлено новой оценки
+узла, публикации метрики или engine wait.
+
+Ревью сохранено отдельно в `d1b5fb34d`, до реализации. Повтор concurrency приёмки
+обнаружил native Windows `OSError(183)` от durable rename: этот исход теперь
+распознаётся отдельно от storage failure, с проверкой существующего победителя.
+Replacing fallback не добавлен. Два deterministic native-error случая покрывают
+публикацию корня и digest directory.
+
+Финальное ревью также воспроизвело пропуск alias member в crate: сравнение только
+количества файлов принимало `//score.py` вместо canonical member. Теперь точный
+набор имён берётся из тех же bytes, которыми проверяется digest, и сравнивается
+с crate; отдельный regression test подтверждает отказ.
+
+Приёмка: первоначальный replay набор — 193 passed; runtime/package/layering/
+containment — 884 passed / 6 skipped. После alias fix archive/bundle/seed набор
+повторён: 52 passed / 6 skipped. Docs/API/events/diagram contracts — 50 passed;
+`mkdocs build --strict` прошёл. Пропуски — POSIX mode semantics и недоступные
+Windows symlink privileges; эти случаи здесь не заявлены исполненными.
+
+Живые `agent_loss` и `engine_loss` прошли в
+`.tmp/doc72bundle-live-proof/acceptance.json`: в каждом два измеренных protected
+SGD evaluation, затем удалены private source и node workdirs, экспортированы и
+проверены обе базы. Один отдельный export-validation execution воспроизводит
+метрику второго узла `0.01337676906957059`; он не добавляет engine evaluation,
+метрику или событие. Raw run log и его bundle copy побайтно совпадают. Обе crate
+проверены повторно финальным verifier после alias fix. Model judgment не проверялся.
+
+Следующий шаг 72.1/72.6 — явная
+operator-owned scorer boundary; затем pinned base selection и evidence-bound
+gate/CAS advancement. Архив regular files не заменяет data/environment и не
+доказывает эквивалентность изменений.

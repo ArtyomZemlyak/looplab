@@ -72,6 +72,20 @@ def test_occupied_archive_root_does_not_change_operator_file(tmp_path):
     assert blocker.read_text() == "operator file"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="native Win32 rename error shape")
+@pytest.mark.parametrize("label", ["seed archive root", "seed base archive"])
+def test_native_already_exists_error_recovers_a_verified_winner(tmp_path, monkeypatch, label):
+    _, run, _, seeder = _seeder(tmp_path)
+    real = seed_archive.durable_no_replace_rename
+    def rename(source, destination, **kwargs):
+        real(source, destination, **kwargs)
+        if kwargs["label"] == label:
+            raise OSError(183, "Already exists")
+    monkeypatch.setattr(seed_archive, "durable_no_replace_rename", rename)
+    receipt = seeder.materialize(_node(), run / "nodes" / "node_0")
+    assert verified_seed_archive(run, receipt) is not None
+
+
 def test_unknown_seed_publishes_no_partial_archive(tmp_path, monkeypatch):
     _, run, _, seeder = _seeder(tmp_path)
     monkeypatch.setattr(workspace_seed, "MAX_BASE_REVISION_BYTES", 1)

@@ -1105,6 +1105,11 @@ seed event and generation, and requires exactly two protected training execution
 It verifies seed provenance and the old/new run-owned archives, including their
 protected scorer bytes. It makes no claim of upstream advancement or complete
 archived-base replay (data and environment remain outside the snapshot).
+After the two evaluations finish, this option removes its disposable source and
+node workdirs, exports both bases via the CLI and verifies the crate. One separate
+export-validation SGD execution reapplies the recorded second recipe and compares
+its result. The proof reports it separately from the two engine evaluations;
+export/validation leave the event log unchanged.
 
 The offline scenario runs three real CPU training configurations with a protected
 scorer. It kills its own MCP process, restarts its private UI server, withholds two

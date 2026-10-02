@@ -816,7 +816,11 @@ archive retains executable bits; data/reference mounts, task assets, node overla
 empty directories and full permission metadata remain outside its scope.
 `engine.seed_archive.verified_seed_archive` verifies the receipt and content before
 returning a usable path. Archive creation does not select a pinned base or execute
-anything; data/environment/scorer closure and export-bundle inclusion remain pending.
+anything; data/environment/scorer closure remains pending. `export-bundle` now
+copies verified bases named by seed/terminal receipts, including historical node
+generations. It deduplicates content and records export-time availability in
+`base_snapshots/index.json`; the CLI names unavailable receipts. Verification
+checks archive identity, executable bits and event bindings as well as file hashes.
 The archive is an explicit run artifact: event replay retains its recorded receipt,
 but does not recreate missing files. `stored` records publication at capture time;
 current availability requires verification again.

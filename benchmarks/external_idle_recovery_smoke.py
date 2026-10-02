@@ -743,6 +743,38 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
             (root / f"{operation}.txt").write_text(result.stdout, encoding="utf8")
         proof.update(protected_scorer_unchanged=True, score_executions=len(starts),
                      engine_processes=len(owned_engines), inspect_replay="passed")
+        if seed_base_recovery:
+            from looplab.core.atomicio import rmtree_readonly_aware
+            from looplab.engine.bundle import verify_bundle
+            from looplab.engine.seed_archive import verified_seed_archive
+            import shutil
+            # Deliberate export validation after both engine evaluations ended.
+            # Source/workdirs are disposable fixture paths; retain the event record.
+            before = (rd / "events.jsonl").read_bytes()
+            rmtree_readonly_aware(source)
+            rmtree_readonly_aware(rd / "nodes")
+            bundle = root / "bundle"
+            exported = subprocess.run([sys.executable, "-m", "looplab.cli", "export-bundle",
+                str(rd), "--out", str(bundle)], cwd=root, env=child_env,
+                capture_output=True, text=True, encoding="utf8", timeout=30)
+            assert exported.returncode == 0, exported.stderr
+            assert "2 archive(s)" in exported.stdout and verify_bundle(bundle) == []
+            for revision in proof["base_revisions"]:
+                assert verified_seed_archive(bundle, revision) is not None
+            validation = root / "export-validation"
+            shutil.copytree(verified_seed_archive(bundle, proof["base_revisions"][1]), validation)
+            created = next(row for row in events if row.type == "node_created" and row.data["node_id"] == 1)
+            (validation / "config.json").write_text(created.data["files"]["config.json"], encoding="utf8")
+            assert hashlib.sha256((validation / "score.py").read_bytes()).hexdigest() == digest
+            scored = subprocess.run([sys.executable, "score.py"], cwd=validation, env=child_env,
+                capture_output=True, text=True, encoding="utf8", timeout=20)
+            assert scored.returncode == 0, scored.stderr
+            measured = json.loads(scored.stdout.splitlines()[-1])["metric"]
+            assert abs(measured - proof["metrics"][1]) < 1e-12
+            assert before == (rd / "events.jsonl").read_bytes() == (bundle / "events.jsonl").read_bytes()
+            proof.update(bundle_verified_after_source_workdir_loss=True,
+                         export_validation_executions=1, export_validation_metric=measured,
+                         export_validation_changed_no_events=True)
         if result_backlog:
             assert len((rd / "result_commentary.jsonl").read_text(encoding="utf8").splitlines()) == 3
             proof["commentary_count"] = 3

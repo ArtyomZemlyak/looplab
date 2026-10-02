@@ -3058,8 +3058,20 @@ looplab export-notebook RUN_DIR [--out champion.ipynb]
 Package ONE run for a REVIEWER as an RO-Crate (doc 52 row 23): the event log and trace, the launch
 snapshots, the champion's code off the folded record, every memo's claims, the summary row (number,
 caveats, the Mislead pair, seeds) and the audit sidecars, each described with its size and SHA-256 in
-`ro-crate-metadata.json`. It copies the run's own record and derives nothing but the summary row
-(`engine/bundle.py`).
+`ro-crate-metadata.json`. It copies the run's record without rewriting events, plus
+verified regular-file bases named by seed/terminal receipts (`engine/bundle.py`).
+`base_snapshots/index.json` links every recorded reference, including prior node
+generations, to `exported` or `unavailable` with a reason. Identical bases are copied
+once; unreferenced directories and current source code are never substituted.
+Legacy runs without base receipts retain the previous bundle format.
+
+The CLI prints archive/receipt counts and omissions. Verification checks file hashes,
+whole-base digest, executable bits and index/event bindings; unavailable receipts
+remain explicit omissions, not verified available bases. Source drift during copy
+does not publish a different base under the requested identity. Data, mounts,
+environment and scorer dependency closure are outside this archive; a valid crate
+does not certify complete ML replay. The index verification budget is 32 MiB.
+Output over the source run or inside its base archives is refused before writing.
 
 ```bash
 looplab export-bundle RUN_DIR [--out DIR] [--verify/--no-verify]
@@ -3069,7 +3081,7 @@ looplab export-bundle RUN_DIR [--out DIR] [--verify/--no-verify]
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run directory to bundle |
 | `--out DIR` | `<run>/bundle` | Bundle directory |
-| `--verify / --no-verify` | `--verify` | Re-check every packaged file against the crate's digests |
+| `--verify / --no-verify` | `--verify` | Re-check file digests, recorded base identities, executable bits and event bindings |
 
 ## `harden`
 
