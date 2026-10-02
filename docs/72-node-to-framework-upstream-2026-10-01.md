@@ -1247,3 +1247,30 @@ Ruff, whitespace check и strict MkDocs прошли.
 MCP, 2 primary trainings, 7 gate executions, 3 confirmation seeds на original
 base/files; exact retries без extra execution, replay/export и неизменные
 owner/scorer bytes. Никакой merge не заменяет measured result и необходимый repair.
+
+### 18.11 Новые helpers не могут быть замаскированы probe (2026-10-02)
+
+Воспроизведён false passing gate на actual SGD. Generalization добавляла новый
+`runner_support.py`: source recipe с momentum=0.2 воспроизводилась, но старый
+default=0.0 менялся на 0.8. Operator regression probe подставлял исправный helper
+поверх ошибочного shared helper. Gate проходил; без подмены regression падал при
+том же passing source equivalence. Admission проверяла только nominated paths,
+поэтому новый helper не попадал в anti-masking boundary.
+
+Теперь дополнительные non-config implementation paths входят в capability paths
+для обычных ideas, как и для repair. Probe overlays и source recipe не могут
+перезаписывать shared non-config patch, включая helper, объявленный documentation.
+Проверка идёт до proposal claim, worktree и любой оценки. Operator-declared
+scientific config recipes сохраняют прежнюю семантику; scoring boundary не меняется.
+Новый guard проверяет actual отказ с неизменным event log и отсутствующим worktree;
+unmasked control по-прежнему честно fails regression и passes source equivalence.
+
+Приёмка: red actual SGD — 1 failed/1 passed (masked gate ложно succeeded);
+после правки 5 helper cases passed, включая probe/recipe/documentation обходы.
+Связанные upstream/seed/workspace/confirmation/export/MCP guards — 596 passed,
+14 platform/optional skips; docs/diagram/layering/containment — 108 passed.
+Replay first (193 passed), Ruff, whitespace check и strict MkDocs прошли.
+`.tmp/doc72-helper-acceptance/acceptance.json`: private server + scoped stdio MCP,
+2 primary trainings, 7 gate executions и 3 confirmation seeds; original
+confirmation base/files, exact retries без reexecution, replay/export и
+неизменные owner/scorer bytes подтверждены.

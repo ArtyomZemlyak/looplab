@@ -146,12 +146,16 @@ class UpstreamLane:
             from looplab.engine.activation import is_config_path
             repair_recipes = {r["path"] for r in rows if r["origin"] == "repair" and r["pending_trigger_nodes"] and is_config_path(r["path"])}
             implementation = (nominated_paths - repair_recipes) | {p for p in patch_paths
-                if repair_recipes and not is_config_path(p) and p != body["documentation_path"]}
-            if not implementation or not implementation <= patch_paths or implementation & (set(body["recipe_files"]) | set(body.get("recipe_deleted", []))):
+                if not is_config_path(p) and p != body["documentation_path"]}
+            # Generalization can add helpers absent from the nominated source.
+            # Neither a probe nor the source recipe may replace those shared bytes;
+            # naming code as documentation does not exempt it from this boundary.
+            shared_patch = implementation | {p for p in patch_paths if not is_config_path(p)}
+            if not implementation or not implementation <= patch_paths or shared_patch & (set(body["recipe_files"]) | set(body.get("recipe_deleted", []))):
                 raise UpstreamRefusal("upstream_capability_not_absorbed", "Implement the nominated capability in the base; the source recipe cannot overwrite its implementation")
             probes = sum((self.task.upstream[k] for k in ("tests", "regressions", "repair_probes")), [])
-            if any(implementation & set(probe["files"]) for probe in probes):
-                raise UpstreamRefusal("upstream_probe_masks_capability", "Probes cannot replace the nominated implementation; exercise the actual old/new base")
+            if any(shared_patch & set(probe["files"]) for probe in probes):
+                raise UpstreamRefusal("upstream_probe_masks_capability", "Probes cannot replace the shared implementation; exercise the actual old/new base")
             for row in rows:
                 if row["pending_trigger_nodes"] and row["origin"] == "repair":
                     if not any(all(any(token in list(map(str.strip, probe["files"].get(path, "").splitlines())) for token in tokens)

@@ -1381,6 +1381,10 @@ is advice; a completed source must have its current primary score and seed recei
    approved patch. Do not amend a retained worktree or snapshot behind its request;
    unexpected additions, rewrites or deletions refuse publication before any gate.
    Inspect the failed claim and submit a fresh corrected body under a new action ID.
+   New non-config helpers belong to the shared implementation too, even when they
+   did not exist in the nominated source. Probes and source recipes cannot replace
+   shared non-config patch files; calling a helper `documentation_path` grants no
+   exception. Such masking refuses admission before a claim or worktree is created.
 3. Explicitly call `upstream_check` with `expected_generation`, new `action_id` and
    `proposal_id`. This buys actual operator tests, old-recipe artifact regressions,
    paired full source repetitions and any required original repair trigger.
