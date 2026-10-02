@@ -139,6 +139,28 @@ def snapshot_worktree(work, destination):
     return destination
 
 
+def verify_approved_candidate(selector, files, deleted, actual):
+    """Bind the whole candidate to its approved request, without another full copy."""
+    import hashlib
+    from looplab.engine.workspace_seed import seeded_base_revision, seeded_base_digest
+    archive, receipt = selected_seed_base(selector)
+    members = {}
+    def add(name, data, executable):
+        members[name] = (executable, hashlib.sha256(data).hexdigest(), len(data))
+    original = seeded_base_revision(archive, on_file=add)
+    if not original["complete"] or original["digest"] != receipt["digest"]:
+        raise UpstreamRefusal("upstream_source_unavailable", "Original archive changed while binding the approved request")
+    for name in deleted:
+        members.pop(name, None)
+    for name, text in files.items():
+        data = text.encode()
+        members[name] = (members.get(name, (0,))[0], hashlib.sha256(data).hexdigest(), len(data))
+    expected = seeded_base_digest([[name, row[0], row[1]] for name, row in members.items()])
+    if (not actual["complete"] or actual["digest"] != expected
+            or actual["file_count"] != len(members) or actual["bytes"] != sum(r[2] for r in members.values())):
+        raise UpstreamRefusal("upstream_candidate_changed", "Candidate snapshot differs from the approved request; inspect the worktree and author a fresh proposal")
+
+
 def merge_text(old, new, overlay):
     if overlay == old or overlay == new:
         return new

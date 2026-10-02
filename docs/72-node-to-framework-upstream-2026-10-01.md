@@ -379,6 +379,9 @@ The current contract and limitations are §18, not those earlier intermediate st
 
 ## 6. Рекомендуемый порядок
 
+Исторический порядок первоначальной реализации. Статусы отдельных этапов в
+§7–17 сохранены как журнал; текущие закрытие и приёмка находятся в §5 и §18.
+
 1. **72.2 — выполнен в scope §7–8.** Без базы на засеве продвижение не проверяемо.
 2. **72.1** вместе с 67.12 (`repo-base-tree-not-archived`) — приколачивание базы к коммиту и событие
    продвижения; сначала сохранение snapshot и проверяемая граница scorer, затем
@@ -1030,3 +1033,31 @@ Engine/stdio MCP приёмка: `.tmp/doc72-git-worktree-complete/acceptance.js
 базе, exact ACK retries, replay/export; owner bytes сохранились. Strict MkDocs
 прошёл. Это проверка новых private worktrees; повреждённая старая Git projection
 отказывает и требует явного восстановления, а не молча переписывается.
+
+### 18.6 Ревью привязки candidate bytes к approved patch (2026-10-02)
+
+Сверка manifest hash с request не доказывала, что изменяемый worktree содержит
+ровно согласованные bytes. Real-Git regression воспроизвела три отказа проверки:
+посторонний файл, другая документация на разрешённом пути и исчезнувший recipe
+проходили proposal publication (`.tmp/doc72-candidate-red.log`). Gate проверял
+фактический snapshot, но не исправлял расхождение с авторизованным запросом.
+
+Правка: построить ожидаемую полную identity из verified original archive и exact
+patch/deletions, сохраняя executable bits существующих файлов. Сравнить её с
+identity **реально сохранённого** same-read archive до публикации candidate
+seed/proposal; один более ранний snapshot read не закрывает drift при capture.
+Использовать тот же
+digest encoding, что и обычный seed; не материализовать ещё одну копию базы.
+Любое отличие сохраняет failed claim и worktree для review, покупает ноль gate
+executions и не даёт `base_advanced`. Archive остаётся authority; Git не заменяет
+ни точный request, ни измеренное evidence.
+
+Приёмка: 5 candidate-binding cases, включая drift непосредственно при archive
+capture и согласованное добавление/удаление с 7 настоящими gate executions.
+Повтор failed proposal возвращает исходный ACK, не новый worktree. Общий прогон
+binding/Git/seed: 26 passed, 1 platform skip; остальные targeted gate/API/repair
+проверки: 25 passed. Docs/layout/containment/diagram guards: 867 passed, strict
+MkDocs прошёл. Engine/stdio MCP повторно выполнил 2 SGD experiments и 7 gate
+executions: `.tmp/doc72-candidate-complete/acceptance.json`, следующий lifecycle
+на новой базе, exact retries, replay/export и неизменные owner/scorer bytes.
+Seed digest encoding не изменён: старые архивы и provenance остаются проверяемыми.

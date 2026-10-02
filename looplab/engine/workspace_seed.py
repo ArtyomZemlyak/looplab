@@ -44,6 +44,14 @@ MAX_BASE_REVISION_ENTRIES = 20_000
 MAX_BASE_REVISION_BYTES = 64 * 1024 * 1024
 
 
+def seeded_base_digest(rows) -> str:
+    """One version-1 encoding for observed seeds and validated virtual patches."""
+    import hashlib
+    import json
+    preimage = json.dumps([1, "seeded_editables_before_mounts_and_overlay", sorted(rows)], ensure_ascii=True)
+    return hashlib.sha256(preimage.encode("ascii")).hexdigest()
+
+
 def seeded_base_revision(root, *, on_file=None) -> dict:
     """Doc 72.2: effective seed before mounts/overlay/assets, not live source HEAD.
 
@@ -54,7 +62,6 @@ def seeded_base_revision(root, *, on_file=None) -> dict:
     storage errors so failed archiving does not erase the observed seed identity.
     """
     import hashlib
-    import json
     from looplab.core.atomicio import file_identity
     from looplab.core.node_evidence import read_bounded_regular_file
     from looplab.core.pathsafe import is_reparse
@@ -103,8 +110,7 @@ def seeded_base_revision(root, *, on_file=None) -> dict:
                     receipt["bytes"] += len(data)
     except OSError:
         return fail("unreadable_seed")
-    preimage = json.dumps([receipt["version"], receipt["scope"], sorted(rows)], ensure_ascii=True)
-    return {**receipt, "complete": True, "digest": hashlib.sha256(preimage.encode("ascii")).hexdigest(),
+    return {**receipt, "complete": True, "digest": seeded_base_digest(rows),
             "reason": None}
 
 

@@ -21,7 +21,7 @@ from looplab.engine.seed_base import selected_seed_base
 from looplab.engine.upstream_gate import boundary_at, execute_gate, input_identity
 from looplab.engine.upstream_spec import normalize_request
 from looplab.engine.upstream_state import active_base, digest, events_for, node_signature, source_node, upstream_candidates
-from looplab.engine.upstream_workspace import checked_overlay, git_at, maintainer_worktree, snapshot_worktree, write_overlay, owned_path
+from looplab.engine.upstream_workspace import checked_overlay, git_at, maintainer_worktree, snapshot_worktree, verify_approved_candidate, write_overlay, owned_path
 from looplab.events.eventstore import EventStore, interprocess_lock
 from looplab.events.replay import fold
 from looplab.events.run_generation import run_generation_token
@@ -177,6 +177,7 @@ class UpstreamLane:
                 capture = BoundaryCapture(spec["scorer_boundary"])
                 base = capture_seed_archive(snapshot, self.rd / "base_snapshots", on_file=capture.add)
                 base["scorer_boundary"] = capture.receipt(base)
+                verify_approved_candidate(active["selector"], body["files"], body["deleted"], base)
                 if verified_seed_archive(self.rd, base) is None or base["digest"] == receipt["digest"]:
                     raise UpstreamRefusal("upstream_candidate_unavailable", "Candidate archive is unavailable or duplicates the old base")
                 strict_atomic_write_bytes(work.parent / "manifest.json", json.dumps(body, ensure_ascii=False).encode())

@@ -1377,6 +1377,10 @@ is advice; a completed source must have its current primary score and seed recei
    `recipe_files`/`recipe_deleted`, `summary`, `flag:{name,default,enabled}`,
    `documentation_path`, and `critic:{verdict:"pass",reason,reviewer}`.
    The flag preserves the prior default. Scoring boundaries remain protected.
+   The whole saved candidate must match the original archive plus this exact
+   approved patch. Do not amend a retained worktree or snapshot behind its request;
+   unexpected additions, rewrites or deletions refuse publication before any gate.
+   Inspect the failed claim and submit a fresh corrected body under a new action ID.
 3. Explicitly call `upstream_check` with `expected_generation`, new `action_id` and
    `proposal_id`. This buys actual operator tests, old-recipe artifact regressions,
    paired full source repetitions and any required original repair trigger.
