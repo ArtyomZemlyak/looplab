@@ -558,3 +558,35 @@ public MCP receipt, включая `experiment.env` и неизменный scor
 следующий шаг — archive export и operator-owned scorer boundary, затем pinned
 base selection, gate/CAS advancement. 67.12 частично реализован, universal replay
 и работа со старым неподтверждённым base не заявляются.
+
+## 11. Ревью export-bundle перед реализацией
+
+Экспорт должен переносить только base receipts из `workspace_seeded` и
+`node_evaluated.metric_provenance`, включая историю вытесненных generations.
+Не сканировать все каталоги архивов: unreferenced и staging не являются evidence.
+Одинаковые базы копировать один раз, а ссылки на события сохранять отдельно.
+Raw events не переписывать. Legacy без receipt сохраняет прежний формат bundle.
+
+`base_snapshots/index.json` связывает исходный receipt/event sequence с результатом
+экспорта (`exported` / `unavailable` + reason), который не заменяет исторический
+`archive.status`. Missing, corrupt, unknown или неподдерживаемая база не получает
+подтверждение. Не подставлять нынешний source repo. Проверить копируемые bytes
+относительно ожидаемого receipt **до публикации**: предварительная проверка source
+не закрывает drift между проверкой и копированием.
+
+RO-Crate перечисляет каждый перенесённый файл и index с SHA-256. Verification
+также связывает index с скопированным event log и проверяет whole-base digest и
+executable bits; per-file bytes checksum один не обнаруживает потерю режима.
+CLI отдельно называет количество перенесённых и недоступных receipts. Correct
+package с явными omissions не означает полностью воспроизводимую ML-задачу.
+
+Output внутри исходных base archives или поверх run directory должен быть
+отклонён до записи; linked archive output не должен вести запись наружу.
+Приёмка: export после удаления source/workdirs; два base digest и reset history;
+дедупликация; unavailable/corrupt receipts; source drift при копии; tamper/missing
+файлы и mode; опасные output/reference paths; legacy compatibility. Живой SGD
+probe переносит обе базы, проверяет crate и исполняет сохранённый scorer отдельно
+как export validation (это не новая измеренная оценка узла).
+
+72.1 остаётся открытым: следующим будет operator-owned scorer boundary, затем
+pinned base selection и gate/CAS advancement. Data/environment не включаются.
