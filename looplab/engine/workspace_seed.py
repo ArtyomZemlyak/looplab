@@ -44,12 +44,14 @@ MAX_BASE_REVISION_ENTRIES = 20_000
 MAX_BASE_REVISION_BYTES = 64 * 1024 * 1024
 
 
-def seeded_base_revision(root) -> dict:
+def seeded_base_revision(root, *, on_file=None) -> dict:
     """Doc 72.2: effective seed before mounts/overlay/assets, not live source HEAD.
 
     Full regular-file content and executable bits; no suffix filter (env is code
     provenance too), no symlink traversal or partial digest. This bounded read
     cannot reject evaluation or certify an atomic source snapshot/reproducibility.
+    Optional on_file consumes these exact hashed bytes; it must contain its own
+    storage errors so failed archiving does not erase the observed seed identity.
     """
     import hashlib
     import json
@@ -95,6 +97,8 @@ def seeded_base_revision(root) -> dict:
                         return fail("unstable_seed")
                     rows.append([path.relative_to(base).as_posix(), before.st_mode & 0o111,
                                  hashlib.sha256(data).hexdigest()])
+                    if on_file is not None:
+                        on_file(rows[-1][0], data, rows[-1][1])
                     receipt["file_count"] += 1
                     receipt["bytes"] += len(data)
     except OSError:
@@ -481,7 +485,8 @@ class SeedOps:
 
 
 def seed_candidate_workspace(repo_spec, workdir, *, seed_mode: str = "auto", ignore=None,
-                             ops: "SeedOps | None" = None, capture_base_revision=False) -> list[dict]:
+                             ops: "SeedOps | None" = None, capture_base_revision=False,
+                             base_archive_dir=None) -> list[dict]:
     """Materialize `repo_spec` into `workdir` in the ONE order (module docstring), and RECEIPT it.
 
     Returns one row per thing materialized, in the order it happened — the ingredients each caller
@@ -501,6 +506,7 @@ def seed_candidate_workspace(repo_spec, workdir, *, seed_mode: str = "auto", ign
 
     Engine-only `capture_base_revision` adds the copied editable/protected digest to the first
     editable row, before mounts. Other consumers keep the existing receipts and read cost.
+    `base_archive_dir`, when supplied, preserves those same bytes in a run-owned archive.
 
     Raises `MountCollision`; see that class for what it prevents. Everything the two callers do NOT
     share — the tracing span, the domain event, the overlay of the Developer's staged edits — stays
@@ -583,7 +589,11 @@ def seed_candidate_workspace(repo_spec, workdir, *, seed_mode: str = "auto", ign
     # before mounted inputs can be mistaken for base bytes. Developer/tools keep
     # their existing receipt/cost. This does not inspect the operator tree again.
     if capture_base_revision and editables:
-        rows[0]["base_revision"] = seeded_base_revision(work)
+        if base_archive_dir is None:
+            rows[0]["base_revision"] = seeded_base_revision(work)
+        else:
+            from looplab.engine.seed_archive import capture_seed_archive
+            rows[0]["base_revision"] = capture_seed_archive(work, base_archive_dir)
 
     for ref in references:
         if not ref.get("mount"):                 # context-only reference: nothing is materialized

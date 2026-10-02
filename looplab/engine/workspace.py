@@ -330,6 +330,7 @@ class WorkspaceSeeder:
         sp = (self._e.tracer.span("seed_workspace") if self._e.tracer is not None
               else __import__("contextlib").nullcontext(None))
         with sp as _h:
+            archive_run = getattr(self._e, "run_dir", None)
             # THE ORDER lives in `workspace_seed.seed_candidate_workspace` (its docstring holds the
             # safety argument for it, and `MountCollision` the one for the guard), because the
             # Developer's disposable candidate has to be materialized the same way and had a second
@@ -340,6 +341,7 @@ class WorkspaceSeeder:
             rows = seed_candidate_workspace(
                 self._e._repo_spec, wd, seed_mode=(self._e._seed_mode or "auto"),
                 capture_base_revision=True,
+                base_archive_dir=Path(archive_run) / "base_snapshots" if archive_run is not None else None,
                 ops=SeedOps(seed_repo_tree=self._e._seed_repo_tree,
                             seed_protected_files=self.seed_protected_files,
                             link_input=self._e._link_input,

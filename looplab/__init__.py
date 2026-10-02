@@ -500,6 +500,7 @@ _LAYOUT = {
     "web": "tools",
     "workspace": "engine",
     "workspace_seed": "engine",  # shared eval/Developer candidate filesystem primitives
+    "seed_archive": "engine",  # run-owned verified copied-base bytes
     "write_tools": "tools",
 }
 

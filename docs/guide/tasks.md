@@ -802,10 +802,24 @@ a new receipt. Source edits after seeding do not change the saved base.
 The read is bounded to 20,000 entries and 64 MiB. Unreadable, unstable,
 unsupported or oversized trees return `complete:false`, `digest:null` and a
 reason; missing historical/recovery receipts remain unknown. The receipt is a
-diagnostic, with no new evaluation wait or refusal. It neither archives the tree
-nor certifies equivalence or comparability; the existing live `substrate` rule
+diagnostic, with no new evaluation wait or refusal. The identity receipt alone does not archive the tree
+or certify equivalence or comparability; the existing live `substrate` rule
 above remains separate. Confirmation seed diagnostics do not gain a separate
 score-bound receipt in this step. See [the upstream plan](../72-node-to-framework-upstream-2026-10-01.md).
+
+The engine now also saves those same read bytes under the run's
+`base_snapshots/<digest>/`. `base_revision.archive` reports `stored` or
+`unavailable`, a reason and a run-relative path. Partial/unknown seeds are never
+published; storage errors leave evaluation available. Existing snapshots are
+reused only after content verification and never silently replaced. The private
+archive retains executable bits; data/reference mounts, task assets, node overlay,
+empty directories and full permission metadata remain outside its scope.
+`engine.seed_archive.verified_seed_archive` verifies the receipt and content before
+returning a usable path. Archive creation does not select a pinned base or execute
+anything; data/environment/scorer closure and export-bundle inclusion remain pending.
+The archive is an explicit run artifact: event replay retains its recorded receipt,
+but does not recreate missing files. `stored` records publication at capture time;
+current availability requires verification again.
 
 **The protocol: the ruler, per facet.** Since 2026-09-26 the record also carries `protocol` — a map of
 refuse-only facets, each a digest, describing the conditions the number was measured under

@@ -29,7 +29,7 @@
 | Что потеряно на узле 2 | 15 ч 26 мин стены, из них 8.07 ч — четыре упавших или задержанных оценки; три из четырёх причин — общие дефекты пайплайна, не наука узла | 1.2 |
 | Кто ещё ударился бы о те же дефекты | Семь черновиков-соседей (3, 6, 7, 10, 12, 13, 20) несут оба триггера и не могут унаследовать фикс соседа | 1.2 |
 | Узел 19 | Плечо исследователя реализовано одноразовым сценарием на 156 строк, который копирует общий раннер и в третий раз переписывает фикс узла 2; по диффам env это плечо выражалось рецептом поверх общего раннера | 1.3 |
-| Что уже реализовано | 72.2: receipt фактически скопированной базы засева, связанный с результатом. Переноса в базу пока нет | 8 |
+| Что уже реализовано | 72.2: receipt скопированной базы; prerequisite 72.1: bounded архив её regular files. Переноса в базу пока нет | 8, 10 |
 | Предложение | «Полоса upstream»: классификация диффа узла на РЕЦЕПТ и ВОЗМОЖНОСТЬ, роль Maintainer в worktree БАЗЫ (по одному на кандидата), гейт эквивалентности/регрессии, журналируемое `base_advanced` | 3 |
 | Главный риск | Контракт оценки декларативен: он не видит байтов скорера, а в этой задаче скорер и тренер — один файл без защиты (`protect: []`) | 3.4, 4 |
 | Открытые пункты | Шесть маркеров с фальсификаторами; 72.2 закрыт в описанном scope | 5, 8 |
@@ -368,7 +368,8 @@ PR/MR для человека; движок туда не пушит.
   скопированные editable/protected файлы до mounts/overlay/assets. Primary terminal
   сохраняет этот receipt в `metric_provenance.base_revision`, связывая его с
   `seed_event_seq`, `node_id` и generation. Старый `comparability.substrate` остаётся
-  отдельным live discriminator; фильтрация UI, archive и equivalence ещё не реализованы.
+  отдельным live discriminator; фильтрация UI и equivalence ещё не реализованы.
+  Bounded архив добавлен в §10; data/environment и scorer closure он не сохраняет.
   При недоступной полной идентичности — unknown, а не частичный digest. Приёмка: §8.
 - **72.3** OPEN[repair-fix-never-reaches-the-base] фикс ремонта инфраструктурного отказа остаётся в
   оверлее одного узла; `RunState.repair_candidates` только ранжирует (и при одном заплатившем узле
@@ -429,7 +430,7 @@ drift после seed; reset/repair; unreadable/unstable/over-budget → unknown
 protected training probe должен связать receipt засева с настоящим terminal,
 изменить source после seed и показать отсутствие повторного обучения.
 
-## 8. Реализация первого шага и границы проверки
+## 8. Первый шаг (коммит `1ef15258c`) и границы его проверки
 
 Ревью и правки плана сохранены отдельно в `07530afd0`, до реализации.
 `workspace_seed.seeded_base_revision` полностью хеширует regular files полученного
@@ -470,7 +471,7 @@ replay/comparability наборе; после ужесточения directory b
 114 passed. Documentation/API/diagram contracts: 31 passed. `mkdocs build
 --strict` прошёл; шесть оставшихся `proof:` проверены через `predicate_holds`.
 
-**Следующий шаг по цели — 72.1 вместе с 67.12:** доступный архив полученной базы
+**Следующий шаг после 72.2 — 72.1 вместе с 67.12:** доступный архив полученной базы
 и scorer boundary до любого продвижения. Сам digest не хранит bytes, data или
 environment, не доказывает equivalence и не меняет сравнимость. Классификация
 ханков, Maintainer, gate/CAS advancement и UI остаются шестью открытыми пунктами.
@@ -503,3 +504,57 @@ untracked protect; исключение overlay/mount; одинаковая ба
 в export bundle, выбор pinned base и gate/CAS advancement требуют следующих
 изменений. Event replay уже существует; повторное исполнение требует ещё
 data/reference/environment identities и защищённого evaluation boundary.
+
+## 10. Архив засева: реализация prerequisite 72.1
+
+`engine/seed_archive.py` сохраняет regular files под `base_snapshots/<digest>/`
+в run directory, до overlay/mount/assets. Запись получает bytes из прохода 72.2,
+а не копирует source заново. Содержимое staging проверяется тем же bounded digest;
+файлы и directory entries синхронизируются перед durable no-replace publication.
+Существующий архив принимается только при совпадении содержимого; конфликт не
+перезаписывается. Параллельные одинаковые seed используют один архив.
+
+`base_revision.archive` имеет version, status (`stored` / `unavailable`), reason
+и только run-relative path. Unknown seed, ошибка чтения/записи/sync/rename или
+повреждение существующего архива не дают `stored`; известный seed digest и
+материализация остаются доступны. Ошибка файла не публикует частичный архив.
+При обрыве до публикации staging может остаться; `.pending-*` не является
+подтверждённым архивом и не выбирается для выполнения. Права файлов приватные,
+executable bits сохраняются. POSIX permissions, пустые директории, mounts и
+environment не входят в эту идентичность. На filesystem без durable no-replace
+архив объявляется недоступным; replacing fallback не применяется.
+
+`verified_seed_archive(run_dir, receipt)` проверяет format/path и все содержимое
+перед выдачей пути. Directory name сам по себе не доказательство; escape, reparse,
+missing/corrupt archive возвращают unavailable. Это библиотечный reader основы
+upstream; отдельной команды restore/execute и переключения базы пока нет.
+`stored` — результат публикации в момент capture, не live health. Event replay
+сохраняет receipt, но не восстанавливает отсутствующий архив; перед использованием
+нужна новая проверка bytes.
+
+Ревью сохранено до реализации в `1f46c508f`. Приёмка: 66 passed / 4 skipped
+в archive/seed/Developer/multi/protected наборе; 844 passed / 3 skipped при
+проверке package aliases и materialization seams; 85 passed в evaluation/replay
+наборе; 50 passed в API/events/diagram/docs contracts. После финального ревью:
+68 passed / 1 skipped в archive/layering/containment/docs наборе. Пропуски —
+явные platform/privilege ограничения; POSIX executable/umask case на этой
+Windows машине не исполнен. `mkdocs build --strict` прошёл.
+
+Native Windows проверка выявила `fsync` на read-only descriptor; он заменён
+write-capable дескриптором. Root archive directory публикуется отдельным
+durable rename; вложенные parents — canonical strict writer. Ошибки sync/rename
+сохраняют `unavailable`, не фиктивное подтверждение.
+
+Живой `--case all --seed-base-recovery` повторён на финальном коде в
+`.tmp/doc72archive-verified-proof/acceptance.json`: агент потерян/подключён заново
+и движок остановлен/явно resumed. В каждом два protected SGD execution, без
+повторного обучения от reconnect. Старый/новый seed archives проверены из
+public MCP receipt, включая `experiment.env` и неизменный scorer; generation
+и sequence совпадают, `inspect`/`replay` проходят. Отдельный тест удаляет source
+и node workdir, затем читает архив и выполняет сохранённый простой scorer.
+Это не повтор полной удалённой ML-задачи и не доказательство model judgment.
+
+72.1 остаётся открытым:
+следующий шаг — archive export и operator-owned scorer boundary, затем pinned
+base selection, gate/CAS advancement. 67.12 частично реализован, universal replay
+и работа со старым неподтверждённым base не заявляются.

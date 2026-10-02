@@ -170,6 +170,12 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
             assert revision["node_id"] == nid and revision["generation"] == 0 and revision["complete"]
             expected = "BASE=old\n" if nid == 0 else "BASE=new\n"
             assert (runs / "demo" / "nodes" / f"node_{nid}" / "experiment.env").read_text(encoding="utf8") == expected
+            from looplab.engine.seed_archive import verified_seed_archive
+            archived = verified_seed_archive(runs / "demo", revision)
+            assert archived is not None
+            assert (archived / "experiment.env").read_text(encoding="utf8") == expected
+            assert hashlib.sha256((archived / "score.py").read_bytes()).hexdigest() == digest
+            proof.setdefault("archived_seeds_verified", []).append(nid)
             proof.setdefault("base_revisions", []).append(revision)
             if nid == 1:
                 assert proof["base_revisions"][0]["digest"] != revision["digest"]

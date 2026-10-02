@@ -1102,8 +1102,9 @@ python -m benchmarks.external_idle_recovery_smoke --out .tmp/activity-proof --ca
 git fixture. It changes the source after the first seed and before its terminal,
 checks the old/new copied-base receipts through public MCP, joins each to its
 seed event and generation, and requires exactly two protected training executions.
-It verifies seed provenance (doc 72.2), with no claim of upstream advancement or
-archived-base replay.
+It verifies seed provenance and the old/new run-owned archives, including their
+protected scorer bytes. It makes no claim of upstream advancement or complete
+archived-base replay (data and environment remain outside the snapshot).
 
 The offline scenario runs three real CPU training configurations with a protected
 scorer. It kills its own MCP process, restarts its private UI server, withholds two
