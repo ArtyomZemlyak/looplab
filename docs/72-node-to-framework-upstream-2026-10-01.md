@@ -1,6 +1,6 @@
 # 72 — Из ноды во фреймворк: upstream возможностей, найденных в прогоне (2026-10-01)
 
-> **Статус: upstream — предложение; 72.2 и archive/export prerequisites реализованы (§8–12).** Ни один
+> **Статус: upstream — предложение; 72.2 и archive/export/scorer prerequisites реализованы (§8–14).** Ни один
 > дефолт не переключён. Исторические свидетельства ниже:
 > каждое исходное утверждение о коде сверено с `master` @ `65551da0` (2026-10-01) и цитируется как
 > `<модуль>.py::<символ>`; каждый `proof:` из раздела 5 прогнан через
@@ -29,7 +29,7 @@
 | Что потеряно на узле 2 | 15 ч 26 мин стены, из них 8.07 ч — четыре упавших или задержанных оценки; три из четырёх причин — общие дефекты пайплайна, не наука узла | 1.2 |
 | Кто ещё ударился бы о те же дефекты | Семь черновиков-соседей (3, 6, 7, 10, 12, 13, 20) несут оба триггера и не могут унаследовать фикс соседа | 1.2 |
 | Узел 19 | Плечо исследователя реализовано одноразовым сценарием на 156 строк, который копирует общий раннер и в третий раз переписывает фикс узла 2; по диффам env это плечо выражалось рецептом поверх общего раннера | 1.3 |
-| Что уже реализовано | 72.2: receipt скопированной базы; prerequisites 72.1: bounded архив и проверяемый export-bundle. Переноса в базу пока нет | 8, 10, 12 |
+| Что уже реализовано | 72.2: receipt скопированной базы; prerequisites 72.1: bounded архив, export-bundle и byte evidence явно объявленной границы скорера. Переноса в базу пока нет | 8, 10, 12, 14 |
 | Предложение | «Полоса upstream»: классификация диффа узла на РЕЦЕПТ и ВОЗМОЖНОСТЬ, роль Maintainer в worktree БАЗЫ (по одному на кандидата), гейт эквивалентности/регрессии, журналируемое `base_advanced` | 3 |
 | Главный риск | Контракт оценки декларативен: он не видит байтов скорера, а в этой задаче скорер и тренер — один файл без защиты (`protect: []`) | 3.4, 4 |
 | Открытые пункты | Шесть маркеров с фальсификаторами; 72.2 закрыт в описанном scope | 5, 8 |
@@ -555,8 +555,8 @@ public MCP receipt, включая `experiment.env` и неизменный scor
 Это не повтор полной удалённой ML-задачи и не доказательство model judgment.
 
 72.1 остаётся открытым:
-Archive export реализован в §12; следующий шаг — operator-owned scorer boundary, затем pinned
-base selection, gate/CAS advancement. 67.12 частично реализован, universal replay
+Archive export реализован в §12, declared scorer boundary — в §14; следующий шаг — pinned
+base selection, gate/CAS advancement. 67.12 реализован в bounded scope, universal replay
 и работа со старым неподтверждённым base не заявляются.
 
 ## 11. Ревью export-bundle перед реализацией
@@ -677,3 +677,49 @@ identity compatibility; replay/export preservation; два реальных бы
 SGD сценария восстановления с декларацией и unchanged scorer. Никакой новой
 оценки, hidden wait, автоматического продвижения или equivalence verdict этот
 шаг не вводит. 72.1/72.6 остаются открытыми; далее pinned selection и gate/CAS.
+
+## 14. Реализация declared scorer boundary: prerequisite 72.1/72.6
+
+Ревью сохранено до реализации в `3b8b580a7`. `EvalSpec.scorer_boundary` принимает
+`{files: [...]}`; `core/scorer_boundary.py` валидирует portable literal paths и
+принадлежность editable, не вычисляя import closure. `_editable_mounts` добавляет
+этот набор к protect владельца. Данные/reference inputs исключаются и при root
+editable; named editable выигрывает при разрешении workspace-relative пути.
+Submit требует regular source files без links; reload сохраняет защиту имён,
+даже когда source больше нет. Partial protected regions не добавлены.
+
+`BoundaryCapture` получает bytes из callback полного base read; архивный writer
+потребляет те же bytes. Receipt хранится в `base_revision.scorer_boundary` и
+primary terminal provenance: version 1, scope `operator_declared_seed_files`,
+declared_files, complete/digest/reason и per-member path/SHA-256/bytes/executable.
+При unknown seed или missing file нет partial confirmation. Для legacy без
+declaration ключ отсутствует в task dumps, repo_spec и receipt; serializer
+совместим с поддерживаемым Pydantic floor. Настройки и дефолты не переключены.
+
+Живой MCP probe выявил, что публичный `/state` рекурсивно скрывает ключ `files`
+как raw исходники. Metadata называется `members`, поэтому доступна агенту вместе
+с digest и declared_files; существующий raw-code фильтр не ослаблен. Тест проверяет
+полный публичный receipt, а live проверка читает его через MCP. После source drift
+base digest изменяется, но scorer digest сохраняется, если scorer bytes те же.
+
+Приёмка: первым выполнен replay — 193 passed. Repo/task/surface/protected-seed/
+archive/bundle/package/layering/containment набор — 1067 passed / 10 skipped.
+После финального ревью и metadata correction: scorer-boundary/archive/bundle —
+58 passed / 5 skipped. API/events/diagram/docs contracts — 50 passed;
+`mkdocs build --strict` прошёл. Platform/privilege пропуски не считаются покрытием
+POSIX executable semantics или Windows symlinks без нужной привилегии.
+
+`.tmp/doc72scorer-verified-proof/acceptance.json`: `agent_loss` и `engine_loss`
+прошли с `protect:[]`, `protect_entrypoint:false` и explicit boundary `[score.py]`.
+В каждом два real CPU protected SGD evaluation; terminal/MCP receipt совпадает
+с seed, source drift не подменяет scorer hash. Reconnect не вызывает повторного
+обучения. После удаления private source/workdirs обе базы экспортированы и
+проверены; один отдельно учтённый export-validation execution воспроизводит
+метрику второго узла, не меняя run log. `inspect` и `replay` прошли. Model judgment
+и полнота произвольных scorer dependencies здесь не проверены.
+
+72.1/72.6 остаются открытыми. Следующий шаг — выбор run-owned pinned base для новых
+жизненных циклов; затем evidence-bound equivalence/regression gate и advancement
+с CAS. Этот receipt фиксирует байты declared set до исполнения; сам по себе он
+не доказывает неизменность во время исполнения, эквивалентность или permission
+для продвижения. Host scorers, mounts и environment требуют отдельной идентичности.

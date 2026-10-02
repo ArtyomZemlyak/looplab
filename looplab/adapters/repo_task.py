@@ -23,7 +23,7 @@ import random
 import re
 from typing import NamedTuple, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator, model_serializer
 
 from looplab.core.comparison import ComparisonContract
 from looplab.core.models import Idea, Node, RunState, validate_direction
@@ -1252,6 +1252,22 @@ class EvalSpec(BaseModel):
     # printed number is recorded as the node's `self_metric`, and a `stages` entry named `score` is
     # refused (the host scorer is the score stage).
     host_scorer: Optional[HostScorerSpec] = None
+    # Explicit operator-owned files, workspace-relative; never an inferred dependency closure.
+    scorer_boundary: Optional[dict] = None
+
+    @field_validator("scorer_boundary", mode="before")
+    @classmethod
+    def _scorer_boundary_valid(cls, value):
+        from looplab.core.scorer_boundary import normalize_scorer_boundary
+        return normalize_scorer_boundary(value)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_scorer_boundary(self, handler):
+        # Pydantic 2.6-compatible: old snapshots/setup hashes must retain their shape.
+        payload = handler(self)
+        if self.scorer_boundary is None and isinstance(payload, dict):
+            payload.pop("scorer_boundary", None)
+        return payload
     # THE EVAL CANARY (`CanarySpec`): the env that makes this eval tiny + its wall-clock cap. Read
     # only under `Settings.eval_canary`; None (the default) = no canary, whatever the setting says.
     canary: Optional[CanarySpec] = None
@@ -2174,6 +2190,9 @@ class RepoTask(BaseModel):
         scorer that reads its checkpoint path from an editable config can still be pointed
         somewhere else.
 
+        `cmd.scorer_boundary` can explicitly protect additional operator-owned files;
+        `_editable_mounts` adds that declared set separately, without import inference.
+
         What closes THAT is `runtime/read_fence.py`. This docstring used to name the stage `expect`
         contract and the Developer prompt instead, and both were measured NOT to close it: `expect`
         checks what a stage WRITES and never what it READS, so `runs/rubertlite-dr-unified-v6`
@@ -2219,16 +2238,31 @@ class RepoTask(BaseModel):
         return out
 
     def _editable_mounts(self) -> list[dict]:
-        """`_declared_editable_mounts` plus the DERIVED protection of the eval entrypoint (see
-        `_entrypoint_protect`), folded into the owning repo's `protect` so every consumer of a
+        """`_declared_editable_mounts` plus entrypoint and explicit scorer-boundary protection,
+        folded into the owning repo's `protect` so every consumer of a
         mount — the write gates, the agent brief, workspace seeding — sees one list and cannot
         disagree about what the operator owns."""
         mounts = self._declared_editable_mounts()
         derived = self._entrypoint_protect(mounts)
+        from looplab.core.scorer_boundary import boundary_protection
+        boundary = boundary_protection(mounts, self.eval.scorer_boundary if self.eval else None,
+            reserved=[*self.data, *(r.name for r in self.references if r.mount)])
         for ed in mounts:
-            ed["protect"] = ed["protect"] + [p for p in derived.get(ed["name"], [])
+            additions = dict.fromkeys((*derived.get(ed["name"], []), *boundary.get(ed["name"], [])))
+            ed["protect"] = ed["protect"] + [p for p in additions
                                              if p not in ed["protect"]]
         return mounts
+
+    @model_validator(mode="after")
+    def _scorer_boundary_sources(self, info: ValidationInfo):
+        from looplab.core.scorer_boundary import boundary_protection, validate_boundary_sources
+        declaration = self.eval.scorer_boundary if self.eval else None
+        mounts = self._declared_editable_mounts()
+        reserved = [*self.data, *(r.name for r in self.references if r.mount)]
+        boundary_protection(mounts, declaration, reserved=reserved)  # ownership on resume too
+        if not _grandfathered(info):
+            validate_boundary_sources(mounts, declaration, reserved=reserved)
+        return self
 
     def eval_spec(self) -> dict:
         return self.eval.model_dump() if self.eval else {}
@@ -2439,6 +2473,8 @@ class RepoTask(BaseModel):
             "editables": mounts,                         # Phase 4: every editable repo + mount
             "edit_surface": surface,                     # namespaced union over all repos
             "protected_names": self._protected_names(),
+            **({"scorer_boundary": self.eval.scorer_boundary}
+               if self.eval and self.eval.scorer_boundary is not None else {}),
             "references": [r.model_dump() for r in self.references],
             "data": {name: spec.model_dump() for name, spec in self.data.items()},
             "developer_commands": [spec.model_dump() for spec in self.developer_commands],

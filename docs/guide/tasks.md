@@ -175,7 +175,7 @@ logs a WARNING naming the file and why, once per refused file.
 
 ### Host-side scoring (`cmd.host_scorer`)
 
-A protected `cmd` freezes the scorer's **entry file** — and nothing else. Everything it imports,
+By default, a protected `cmd` freezes the scorer's **entry file**. Everything it imports,
 every config it reads and the split it scores on live inside the editable tree the candidate
 rewrites, so on the repo family the number every candidate was ranked by was, in the end, a number
 the candidate's own code printed. `cmd.host_scorer` (2026-09-06, doc 52 row 10a — AIRA₂'s
@@ -824,6 +824,41 @@ checks archive identity, executable bits and event bindings as well as file hash
 The archive is an explicit run artifact: event replay retains its recorded receipt,
 but does not recreate missing files. `stored` records publication at capture time;
 current availability requires verification again.
+
+### Declare the scorer's protected files
+
+For a repo-local scorer with helper modules or small split/filter rules, the operator
+can explicitly protect its file boundary (doc 72 §13):
+
+```yaml
+cmd:
+  command: [python, eval/score.py]
+  metric: {reader: stdout_json, key: metric}
+  scorer_boundary:
+    files: [eval/score.py, eval/rules.py, eval/split.json]
+```
+
+Each path is relative to the **node workspace root**, including the name of a
+multi-editable mount; it is independent of `cmd.cwd`. Declare 1–128 existing regular
+files inside the editables. Globs, duplicate/case aliases, escapes and linked source
+files are refused at submit. Data/reference inputs and host scorer paths outside
+the editables are not supported by this file boundary. Enumerating a small split
+rule does not archive a mounted dataset.
+
+These files join the owning editable's `protect`, so write/delete gates and protected
+seeding apply even with `seed_mode=none` or `protect_entrypoint=false`. The declaration
+comes from the operator's task snapshot. A candidate cannot declare its own boundary.
+For a combined training/scoring script, protecting the entire file forbids editing
+its training portion too; partial protected regions are not supported.
+
+The engine records `base_revision.scorer_boundary`: version, declared paths,
+`complete`, digest, reason and `members` (path, SHA-256, byte count, executable bits).
+It observes the same bytes as the bounded base read, before mounts/overlay/assets.
+An incomplete seed or missing declared file yields unknown evidence without a
+partial digest. Resume keeps recorded protection even when source files disappear.
+No declaration preserves legacy snapshots and receipts. This is evidence about the
+**declared set**, not proof of full import closure, immutable execution, environment
+identity, equivalence or permission to advance the base. It adds no training or wait.
 
 **The protocol: the ruler, per facet.** Since 2026-09-26 the record also carries `protocol` — a map of
 refuse-only facets, each a digest, describing the conditions the number was measured under

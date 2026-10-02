@@ -148,11 +148,15 @@ class SeedArchive:
             pass  # orphan staging is not a published archive and grants no evidence
 
 
-def capture_seed_archive(workdir, root):
+def capture_seed_archive(workdir, root, *, on_file=None):
     from looplab.engine.workspace_seed import seeded_base_revision
     writer = SeedArchive(root)
     try:
-        receipt = seeded_base_revision(workdir, on_file=writer.add)
+        def add(name, data, executable):
+            writer.add(name, data, executable)
+            if on_file is not None:
+                on_file(name, data, executable)
+        receipt = seeded_base_revision(workdir, on_file=add)
         return {**receipt, "archive": writer.publish(receipt)}
     finally:
         writer.close()

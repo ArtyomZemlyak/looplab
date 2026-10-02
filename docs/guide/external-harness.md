@@ -1110,6 +1110,10 @@ node workdirs, exports both bases via the CLI and verifies the crate. One separa
 export-validation SGD execution reapplies the recorded second recipe and compares
 its result. The proof reports it separately from the two engine evaluations;
 export/validation leave the event log unchanged.
+This variant declares `cmd.scorer_boundary.files: [score.py]`, with manual `protect`
+empty and entrypoint inference disabled. It verifies the declared scorer's hash
+and complete boundary receipt through MCP after each terminal and reconnect.
+The boundary covers the listed files; it does not certify dependency closure.
 
 The offline scenario runs three real CPU training configurations with a protected
 scorer. It kills its own MCP process, restarts its private UI server, withholds two

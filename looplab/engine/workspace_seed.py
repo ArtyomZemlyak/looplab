@@ -589,11 +589,17 @@ def seed_candidate_workspace(repo_spec, workdir, *, seed_mode: str = "auto", ign
     # before mounted inputs can be mistaken for base bytes. Developer/tools keep
     # their existing receipt/cost. This does not inspect the operator tree again.
     if capture_base_revision and editables:
+        from looplab.core.scorer_boundary import BoundaryCapture
+        boundary = BoundaryCapture(repo_spec["scorer_boundary"]) if repo_spec.get("scorer_boundary") else None
+        observer = boundary.add if boundary is not None else None
         if base_archive_dir is None:
-            rows[0]["base_revision"] = seeded_base_revision(work)
+            receipt = seeded_base_revision(work, on_file=observer)
         else:
             from looplab.engine.seed_archive import capture_seed_archive
-            rows[0]["base_revision"] = capture_seed_archive(work, base_archive_dir)
+            receipt = capture_seed_archive(work, base_archive_dir, on_file=observer)
+        if boundary is not None:
+            receipt["scorer_boundary"] = boundary.receipt(receipt)
+        rows[0]["base_revision"] = receipt
 
     for ref in references:
         if not ref.get("mount"):                 # context-only reference: nothing is materialized

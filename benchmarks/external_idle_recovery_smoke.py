@@ -56,6 +56,10 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
             "metric": {"reader": "stdout_json", "key": "metric"},
             "stages": [{"name": "train_eval", "role": "training",
                         "command": [sys.executable, "score.py"], "check": False}]}}
+    if seed_base_recovery:
+        task["protect"] = []  # protection comes from the operator declaration in this probe
+        task["cmd"]["protect_entrypoint"] = False
+        task["cmd"]["scorer_boundary"] = {"files": ["score.py"]}
     task_path = root / "task.json"; task_path.write_text(json.dumps(task), encoding="utf8")
     token, owner = secrets.token_hex(32), secrets.token_hex(32)
     env_before = dict(os.environ)
@@ -175,6 +179,11 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
             assert archived is not None
             assert (archived / "experiment.env").read_text(encoding="utf8") == expected
             assert hashlib.sha256((archived / "score.py").read_bytes()).hexdigest() == digest
+            boundary = revision["scorer_boundary"]
+            assert boundary["complete"] and boundary["declared_files"] == ["score.py"]
+            assert boundary["members"][0]["sha256"] == digest
+            assert boundary == seed.data["base_revision"]["scorer_boundary"]
+            proof["declared_scorer_boundary_verified"] = True
             proof.setdefault("archived_seeds_verified", []).append(nid)
             proof.setdefault("base_revisions", []).append(revision)
             if nid == 1:
