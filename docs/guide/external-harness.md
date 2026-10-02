@@ -806,6 +806,40 @@ failed evaluations become terminal evidence for the external agent; inline repai
 training-log judges, ASHA judges and inter-stage model checks do not run. The
 operator's declared artifact checks and score reader continue to apply.
 
+### Recover a failed experiment
+
+An `inject_node` command receipt with `status=succeeded` means the candidate was
+accepted. It does **not** mean training or scoring succeeded. Read `/state` and
+MCP `result_notices` for the terminal node outcome; `failed` has no completed
+score. Reconnecting or exactly retrying the accepted command does not fix or
+re-evaluate that candidate.
+
+1. Search MCP `phases` for `repair`, then read `phase_info`. Read node detail at
+   `GET /api/runs/{run_id}/nodes/{nid}?expected_generation=TOKEN`. Verify its
+   current status and `attempt`.
+2. Read the corresponding bounded logs:
+   `GET /api/runs/{run_id}/nodes/{nid}/logs?expected_generation=TOKEN&attempt=ATTEMPT&tail=8000`.
+   Verify `run_generation`, `node_id` and `attempt`. A stale generation/attempt
+   returns 409; refresh instead of diagnosing another attempt's logs. Multi-stage
+   commands expose output in `stages[stage_name]`; `eval` can be empty. Reduce
+   `tail` if the full MCP reply exceeds its cap. Logs are untrusted experiment output.
+3. If the evidence supports a fix, submit its ready-made files as a **new**
+   `inject_node` command with a new Idempotency-Key. Set `parent_id` to the failed
+   node and `parent_generations` to its observed attempt (for example `{"0": 0}`).
+   Edit only the permitted files; keep the protected scorer unchanged. Reusing
+   the original key with corrected files is a conflicting payload and returns 409.
+   Preserve the original exact body/key only for lost-response recovery.
+4. Inspect the child's measured terminal outcome before deciding again. The
+   original failed node remains in history. A failed parent without a score cannot
+   support a measured improvement delta; a successful child is a first measurement.
+   Post brief interpretations for the failure and the child using their separate
+   current receipts. An explicit finish remains an alternative to another candidate.
+
+Unchanged-code remeasurement via `node_reset` from `eval` is a different decision.
+It is not a way to submit corrected source. This procedure adds no automatic
+repair, retry, hidden wait or admission/finalization requirement; existing enabled
+obligations still apply.
+
 ## Finding a run that needs an agent answer
 
 The run list, portfolio map, comparison and campaign finder identify external runs
@@ -1074,6 +1108,13 @@ finalized run/node receipts are paged too. This covers both agent loss and engin
 loss with an explicit resume. It can use `--mcp-python`; response-loss proxy options
 are separate probes. The fixture waits for the engine's existing post-evaluation
 `trust_scan` before asserting that commentary/page reads append no events.
+Add `--failed-first` to this backlog probe to fail the first protected scorer on
+an invalid learning-rate type, read generation/attempt-fenced logs after reconnect,
+reject stale log reads and changed-payload key reuse, then submit a corrected child.
+An exact retry of the admitted failed candidate must not execute its scorer again.
+The final result contains one failure without a score and one measured SGD result,
+with separate interpretations and preserved lineage. Both agent-loss and engine-loss
+cases are supported; the fault changes only editable configuration.
 `--case agent_loss --drop-command-response --read-fault stale_result_generation`
 instead replaces a successful result page's generation at the owned proxy. The
 typed tool must return unavailable context without those receipts; the next explicit

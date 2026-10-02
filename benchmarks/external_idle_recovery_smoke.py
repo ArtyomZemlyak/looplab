@@ -37,7 +37,7 @@ from looplab.serve.server import make_app
 CASES = ("agent_loss", "engine_loss")
 
 
-def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, response_fault="disconnect", read_fault="disconnect", discovery_fault="none", mcp_python=None, result_backlog=False):
+def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, response_fault="disconnect", read_fault="disconnect", discovery_fault="none", mcp_python=None, result_backlog=False, failed_first=False):
     root.mkdir(parents=True, exist_ok=False)
     runs = root / "runs"; runs.mkdir()
     source = root / "source"; source.mkdir()
@@ -96,13 +96,22 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
         wait_for(lambda: value.started, bool)
         return value, worker
 
+    def candidate_data(nid, steps):
+        data = {"idea": {"operator": "draft", "footprint": {"gpus": 0},
+            "rationale": "Measure the declared training steps with the protected SGD scorer."},
+            "files": {"config.json": json.dumps({"steps": steps,
+                "lr": "invalid" if failed_first and nid == 0 else .1, "delay": 0., "delay_from": 1})}}
+        if failed_first and nid == 1:
+            data.update(parent_id=0, parent_generations={"0": 0})
+            data["idea"]["operator"] = "improve"
+            data["idea"]["rationale"] = "Correct the invalid learning-rate type observed in the failed parent's stage log."
+        return data
+
     async def candidate(client, nid, steps):
         await client.progress()
         await client.call("phases", {"query": "implementation"})
         await client.call("phase_info", {"phase_id": "implementation"})
-        data = {"idea": {"operator": "draft", "footprint": {"gpus": 0},
-            "rationale": "Measure the declared training steps with the protected SGD scorer."},
-            "files": {"config.json": json.dumps({"steps": steps, "lr": .1, "delay": 0., "delay_from": 1})}}
+        data = candidate_data(nid, steps)
         key = f"idle:candidate:{nid}"
         if proxy is not None and nid == 0:
             lost = await client.call("api_request", {"method": "POST", "path": "/api/runs/demo/commands",
@@ -119,7 +128,11 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
             proof.update(lost_write=lost, exact_retry_receipt=receipt["command"]["id"])
         else:
             await client.command("inject_node", data, key)
-        node = await client.terminal(nid)
+        node = await client.terminal(nid, "failed" if failed_first and nid == 0 else "evaluated")
+        if failed_first and nid == 0:
+            assert node["metric"] is None
+        if failed_first and nid == 1:
+            assert node["parent_ids"] == [0] and node["attempt"] == 0
         proof["metrics"].append(node["metric"])
         summary = "SGD и защищённый scoring завершены; результат измерен движком. Прочитайте исходную квитанцию при переподключении и явно выберите следующий эксперимент. Одного запуска недостаточно для вывода о повторяемости."
         if result_backlog:
@@ -218,6 +231,27 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
         assert (rd / "events.jsonl").read_bytes() == before
         assert len(owned_engines) == 1
         proof["reconnect_reads_started_no_work"] = True
+        if failed_first:
+            await client.call("phases", {"query": "repair"})
+            phase = await client.call("phase_info", {"phase_id": "repair"})
+            assert phase["write_access"]["command:inject_node"] == "external_agent"
+            node = await client.read("nodes/0")
+            assert node["status"] == "failed" and node["metric"] is None and node["attempt"] == 0
+            suffix = f"nodes/0/logs?expected_generation={generation}&attempt=0&tail=8000"
+            logs = await client.request("GET", suffix)
+            assert logs["run_generation"] == generation and logs["node_id"] == 0 and logs["attempt"] == 0
+            assert "TypeError" in logs["stages"]["train_eval"]
+            await client.request("GET", suffix.replace("attempt=0", "attempt=1"), status=409)
+            await client.request("GET", suffix.replace(generation, "f" * 64), status=409)
+            # Accepted inject != successful training. An exact retry restores its
+            # original receipt; changed code needs a new command key and new node.
+            repeated = await client.command("inject_node", candidate_data(0, 16), "idle:candidate:0")
+            assert repeated["command"]["id"] == proof["original_receipt"]
+            await client.request("POST", "commands", {"expected_generation": generation,
+                "type": "inject_node", "data": candidate_data(1, 32)}, "idle:candidate:0", status=409)
+            assert (rd / "events.jsonl").read_bytes() == before
+            proof.update(failed_parent_logs_read=True, stale_logs_refused=True,
+                         failed_command_exact_retry_no_work=True, changed_command_key_refused=True)
         if name == "engine_loss":
             await client.command("resume", {}, "idle:resume")
             await until(client.progress, lambda row: row["execution"]["engine_running"] is True)
@@ -243,9 +277,17 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
                 row, = page["items"]
                 assert row["kind"] == "node" and row["commentary"] is None
                 seen.append(row["node_id"])
+                summary = "Результат SGD измерен защищённым scorer и восстановлен после reconnect. Это один запуск; повторяемость ещё не проверена. Следующий эксперимент выберите по измеренным данным."
+                if failed_first:
+                    if row["node_id"] == 0:
+                        assert row["status"] == "failed" and row["score"] is None
+                        summary = "Scorer завершился с ошибкой типа learning rate, метрика отсутствует. После чтения лога исправление подано отдельным дочерним узлом; исходная неудача сохранена. Это не завершённое обучение."
+                    else:
+                        assert row["parents"] == []
+                        summary = "Исправленный дочерний SGD измерен защищённым scorer после reconnect. У failed-родителя нет метрики, поэтому сравнение улучшения не поддерживается. Для проверки повторяемости нужны независимые seeds."
                 body = {"expected_generation": generation, "receipt_id": row["id"],
                     "evidence_token": row["evidence_token"], "action_id": f"idle:summary:{row['node_id']}",
-                    "summary": "Результат SGD измерен защищённым scorer и восстановлен после reconnect. Это один запуск; повторяемость ещё не проверена. Следующий эксперимент выберите по измеренным данным."}
+                    "summary": summary}
                 assert not (await client.request("POST", "result-notices", body))["replayed"]
                 assert (await client.request("POST", "result-notices", body))["replayed"]
                 cursor = page["next_cursor"]
@@ -261,13 +303,16 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
         await client.call("phase_info", {"phase_id": "recovery"})
         await client.command("run_abort", {"reason": "Completed disposable idle recovery acceptance."}, "idle:finish")
         await client.commentary("run", "idle:summary:run",
-            "Проверка явно завершена. Разрыв MCP сохранил измеренный результат и квитанцию. Чтения ничего не запускали; следующий кандидат оценён после явного продолжения. Это короткая проверка протокола, не оценка живости удалённого агента.")
+            "Run явно завершён: исходный узел failed без метрики, исправленный дочерний узел измерен. История неудачи и логи сохранены. Повтор старой команды ничего не переобучал; исправление подано новым ключом. Это один успешный seed, повторяемость ещё не проверена."
+            if failed_first else "Проверка явно завершена. Разрыв MCP сохранил измеренный результат и квитанцию. Чтения ничего не запускали; следующий кандидат оценён после явного продолжения. Это короткая проверка протокола, не оценка живости удалённого агента.")
         if result_backlog:
             cursor, seen = None, []
             while True:
                 page = await client.notices(limit=1, cursor=cursor)
                 row, = page["items"]
                 assert row["commentary"]
+                if failed_first and row["kind"] == "run":
+                    assert row["failed"] == row["evaluated"] == 1 and row["selected_node"] == 1
                 seen.append(row["id"])
                 cursor = page["next_cursor"]
                 if cursor is None:
@@ -383,7 +428,13 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
         events = EventStore(rd / "events.jsonl").read_all()
         terminals = [r for r in events if r.type in ("node_evaluated", "node_failed")]
         assert len(terminals) == 2 and sorted(r.data["node_id"] for r in terminals) == [0, 1]
-        assert all(r.type == "node_evaluated" for r in terminals)
+        assert [r.type for r in terminals] == (["node_failed", "node_evaluated"] if failed_first else ["node_evaluated"] * 2)
+        if failed_first:
+            assert not (rd / "nodes" / "node_0" / "weights.json").exists()
+            child, = [r for r in events if r.type == "node_created" and r.data["node_id"] == 1]
+            assert child.data["parent_ids"] == [0] and child.data["parent_generations"] == {"0": 0}
+            proof.update(failed_first=True, measured_score_count=1, failed_score_count=1,
+                         failed_has_no_weights=True)
         starts = [r for r in events if r.type == "phase_progress" and r.data.get("phase") == "stage"
                   and r.data.get("status") == "started"]
         assert len(starts) == 2 and all(r.data["name"] == "train_eval" for r in starts)
@@ -444,6 +495,8 @@ def main():
                         help="Use a separate harness-only interpreter with FastAPI absent and UI imports blocked; server/engine stay on this interpreter.")
     parser.add_argument("--result-backlog", action="store_true",
                         help="Defer node commentary across reconnect, then drain result pages and publish/retry each summary.")
+    parser.add_argument("--failed-first", action="store_true",
+                        help="Fail the first scorer on invalid learning rate; inspect fenced logs and submit a corrected child. Requires --result-backlog.")
     args = parser.parse_args()
     if not 0 <= args.quiet_hold_seconds <= 14400:
         parser.error("quiet hold must be between zero and four hours")
@@ -457,11 +510,13 @@ def main():
         parser.error("discovery fault requires --drop-command-response")
     if args.result_backlog and args.drop_command_response:
         parser.error("result backlog uses deferred summaries; run response-loss probes separately")
+    if args.failed_first and not args.result_backlog:
+        parser.error("failed-first requires --result-backlog")
     root = args.out.resolve(); root.mkdir(parents=True, exist_ok=False)
     mcp_python = str(args.mcp_python.resolve()) if args.mcp_python else None
     if mcp_python and not Path(mcp_python).is_file():
         parser.error("MCP interpreter does not exist")
-    proof = [run_case(root / name, name, args.quiet_hold_seconds, args.drop_command_response, args.response_fault, args.read_fault, args.discovery_fault, mcp_python, args.result_backlog)
+    proof = [run_case(root / name, name, args.quiet_hold_seconds, args.drop_command_response, args.response_fault, args.read_fault, args.discovery_fault, mcp_python, args.result_backlog, args.failed_first)
              for name in CASES if args.case in ("all", name)]
     (root / "acceptance.json").write_text(json.dumps(proof, ensure_ascii=False, indent=2), encoding="utf8")
 

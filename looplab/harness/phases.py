@@ -130,7 +130,7 @@ PHASES: tuple[Phase, ...] = (
           ("GET /api/runs/{run_id}/config", "GET /api/runs/{run_id}/artifacts"),
           ("command:inject_node",), ("developer_system",)),
     Phase("repair", "Node/Failure", "engine/crash_repair.py; adapters/repo_developer.py",
-          "Diagnose a failed build/evaluation and submit a corrected child.",
+          "Diagnose a terminal failure: read node detail with expected_generation, then bounded logs with expected_generation and the current attempt. An accepted inject receipt is not training success. Exact retry does not repair code; submit a corrected child with a new key and parent generation, or explicitly finish. Never claim a delta against a failed parent without a measured score.",
           ("GET /api/runs/{run_id}/nodes/{nid}/logs", "GET /api/runs/{run_id}/nodes/{nid}"),
           ("command:inject_node",), ("developer_repair_prefix", "triage_system",
                                       "triage_look_invitation", "triage_findings_invitation",

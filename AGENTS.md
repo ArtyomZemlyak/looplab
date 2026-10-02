@@ -13,6 +13,11 @@ command. Never edit protected scoring files, manufacture a metric, or treat a pa
 as a completed run. LoopLab owns patch validation, stage execution, score provenance, event
 history and replay.
 
+An `inject_node` command receipt marked `succeeded` proves admission, not successful
+training. For a failed node, read current generation/attempt-bound logs before
+submitting a corrected child with a new key and parent generation. An exact retry
+only recovers the original command; a failed parent without a score supports no delta.
+
 For an externally driven run, start with `looplab harness` and connect
 `looplab harness-mcp` to the running UI. Launch with `--backend toy -s
 external_harness=true`. Read live state, task and config through MCP, submit
