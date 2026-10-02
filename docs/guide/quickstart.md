@@ -16,7 +16,10 @@ and LoopLab's internal research roles. For setup from a fresh checkout, use
    saved values alone do not prove the model is reachable. The first-run Assistant shows
    the saved model and the last explicit test result on this page. **Check connection…**
    opens the same explicit **Test active LLM** control beside your draft; opening it only
-   reads settings. If a prior request has no verified outcome, **Check previous result**
+   reads settings. **How do I connect a model?** explains Model, Base URL, keys and
+   the server meaning of `localhost`; see [model setup](llm-and-agents.md#connect-assistant-in-the-ui).
+   The check panel follows the Assistant language choice (English or Russian).
+   If a prior request has no verified outcome, **Check previous result**
    recovers its receipt without starting another provider call. Return to
    Runs after saving. **Experiments & resources** and **Time & model budgets** set defaults
    for new runs. Blank time limits and zero model budgets mean no cap. Cost budgets

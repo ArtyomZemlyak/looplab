@@ -33,7 +33,7 @@ py -3.11 -m venv .venv
 
 Use any installed Python version ≥3.11 for the venv; `py -3.11` selects one common
 Windows installation. Open `http://127.0.0.1:8765`. The server uses `./runs` by default.
-For the first model-backed chat, open **LoopLab → Settings → LLM** in the UI,
+For the first model-backed chat, open **LoopLab → Settings → Essential → Model** in the UI,
 save the endpoint/model and explicitly test the active connection. The test makes one
 provider request and may be billed. Then follow the [Assistant quickstart](quickstart.md#assistant-in-the-web-ui).
 If you have no model yet, the [offline CLI walkthrough](cli-walkthrough.md)

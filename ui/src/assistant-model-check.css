@@ -3,3 +3,6 @@
 .asst-model-check p { margin: 6px 0 10px; font-size: 13px; line-height: 1.5; }
 .asst-model-check .llm-health-detail, .asst-model-check .llm-health-note { font-size: 12px; line-height: 1.5; white-space: normal; }
 .asst-model-check .llm-health-result { flex-basis: 100%; }
+.asst-model-check details { margin: 8px 0 12px; font-size: 13px; line-height: 1.5; }
+.asst-model-check summary { cursor: pointer; color: var(--fg); }
+.asst-model-check li { margin: 8px 0; }

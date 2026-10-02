@@ -1,5 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { deadlineGet } from './util.js'
+import { ruHealthCopy } from './llmHealthCopy.js'
 import { LlmHealth, readHealthRecovery } from './LlmHealth.jsx'
 import { loadSettingsSchema } from './settingsSchema.js'
 import { validateSettingsResource } from './settingsModel.js'
@@ -8,7 +9,8 @@ import { claimPublisher, releasePublisher, captureAuthoritativeRead,
 
 // Same saved configuration, provider operation and recovery record as Settings.
 // This surface never edits settings or credentials, and opening it never calls a model.
-export default function AssistantModelCheck({ onSettings }) {
+export default function AssistantModelCheck({ onSettings, language = 'auto' }) {
+  const ru = language === 'ru'
   const ownerRef = useRef(null)
   const rootRef = useRef(null)
   const requestRef = useRef(null)
@@ -80,17 +82,29 @@ export default function AssistantModelCheck({ onSettings }) {
     mutationRef.current = null
     if (mountedRef.current) setBusy('')
   }
-  return <div ref={rootRef} className="asst-model-check" role="region" tabIndex={-1} aria-label="Model connection check">
-    <p>Checks the server-resolved active model. Your message stays in the composer.
-      A provider request may be billed. Leaving does not stop provider work or billing.</p>
-    {loading && <p role="status">Reading saved model settings…</p>}
-    {error && <div role="alert"><p>{error}</p>
-      <button type="button" className="btn sm" disabled={loading} onClick={() => load(true)}>Refresh saved settings</button>
+  return <div ref={rootRef} className="asst-model-check" role="region" tabIndex={-1}
+    aria-label={ru ? 'Проверка связи с моделью' : 'Model connection check'}>
+    <p>{ru ? 'Проверка использует настройки модели на сервере. Сообщение останется в поле. Запрос к модели может оплачиваться; уход со страницы его не отменяет.'
+      : 'Checks the model configured on the server. Your message stays in the composer. A provider request may be billed; leaving does not cancel it.'}</p>
+    <details>
+      <summary>{ru ? 'Как подключить модель?' : 'How do I connect a model?'}</summary>
+      <ol>
+        <li>{ru ? 'Выберите уже работающую локальную модель или API провайдера. LoopLab не устанавливает модель при сохранении настроек.'
+          : 'Choose a running local model or a provider API. Saving settings does not install a model.'}</li>
+        <li>{ru ? 'В Settings → Essential → Model укажите Model (точный ID модели) и Base URL (адрес API). Адрес должен быть доступен с сервера LoopLab; localhost означает этот сервер.'
+          : 'In Settings → Essential → Model, enter Model (the exact model ID) and Base URL (the API address). It must be reachable from the LoopLab server; localhost means that server.'}</li>
+        <li>{ru ? 'Укажите API key, если он нужен провайдеру, и нажмите Save. Затем вернитесь сюда и явно проверьте связь. При изменении настроек прежняя проверка перестаёт подтверждать текущую связь. Переменные окружения и .env могут переопределять сохранённые значения.'
+          : 'Enter an API key if your provider requires one, then Save. Return here and explicitly check the connection. A check of older settings does not verify the current connection. Environment and .env values may override saved settings.'}</li>
+      </ol>
+    </details>
+    {loading && <p role="status">{ru ? 'Читаем сохранённые настройки модели…' : 'Reading saved model settings…'}</p>}
+    {error && <div role="alert"><p>{ru ? 'Не удалось подтвердить сохранённые настройки. Обновите их здесь или откройте Model в Settings. Это чтение не отправляло запрос к модели.' : error}</p>
+      <button type="button" className="btn sm" disabled={loading} onClick={() => load(true)}>{ru ? 'Обновить настройки' : 'Refresh saved settings'}</button>
     </div>}
     <LlmHealth savedSettingsRevision={snapshot?.settings_revision}
       savedSecretRevision={snapshot?.secret_revision} actionBlocked={loading || !!error}
       actionKind={busy} beginAction={beginAction} finishAction={finishAction}
-      reloadSavedSettings={() => load(true)} onRecoveryChange={setRecovery} />
-    <p><button type="button" className="btn sm ghost" onClick={onSettings}>Edit model settings</button></p>
+      reloadSavedSettings={() => load(true)} onRecoveryChange={setRecovery} copy={ru ? ruHealthCopy : undefined} />
+    <p><button type="button" className="btn sm ghost" onClick={onSettings}>{ru ? 'Настроить модель' : 'Edit model settings'}</button></p>
   </div>
 }

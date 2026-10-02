@@ -129,8 +129,12 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // Code/data drafts and translated model status load only with their Assistant surfaces.
     // Common proposal labels add ~200 B to owner closures; structural exclusions are unchanged.
     // 604 KiB leaves 900 B above this measured total.
-    js: { gzip: 604 * KIB },
-    css: { gzip: 58 * KIB },
+    // 2026-10-02 inline model setup: 617,596 -> 620,183 B JS (+2,587 B), CSS 59,436 B.
+    // RU setup/recovery copy is confined to lazy AssistantModelCheck, guarded below. Moving it
+    // out of shared LlmHealth keeps every existing route ceiling. Only measured totals change:
+    // 606.5 KiB leaves 873 B JS; 58.125 KiB leaves 84 B CSS. Initial shell is 83,030 B JS.
+    js: { gzip: 606.5 * KIB },
+    css: { gzip: 58.125 * KIB },
   },
   individual: {
     js: { raw: 450 * KIB, gzip: 110 * KIB },
@@ -316,6 +320,12 @@ export const DEFAULT_BUDGETS = Object.freeze({
     },
   ],
   forbidden: [
+    {
+      name: 'run routes defer Assistant model setup',
+      roots: [entry, ownerChrome, source('src/RunView.jsx'), source('src/ConceptView.jsx')],
+      targets: [source('src/AssistantModelCheck.jsx')],
+      requireTargets: true,
+    },
     {
       name: 'owner chrome defers new-run examples',
       roots: [entry, ownerChrome],

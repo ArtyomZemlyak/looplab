@@ -28,7 +28,7 @@ const backend = health => fetchStub({
   'POST /api/llm/health': health,
 })
 const providerButton = container => [...container.querySelectorAll('button')]
-  .find(button => /Test active LLM|Check previous result/.test(button.textContent))
+  .find(button => /Test active LLM|Check previous result|Проверить связь|Проверить предыдущий результат/.test(button.textContent))
 
 test('opening the inline check only reads saved settings; a double click starts one provider operation', async () => {
   let release
@@ -80,6 +80,78 @@ test('leaving an in-flight check retains its recovery ID and remount only replay
   } finally { await mounted.unmount() }
 })
 
+test('Russian setup help and language switching only read settings and retain a live operation', async () => {
+  let release
+  const calls = backend(({ init }) => new Promise(resolve => {
+    release = () => resolve(jsonResponse(response(JSON.parse(init.body))))
+  }))
+  globalThis.fetch = calls
+  let settingsOpened = 0
+  const props = { language: 'ru', onSettings: () => { settingsOpened += 1 } }
+  const mounted = await harness.mount(Check, props)
+  try {
+    await until(() => providerButton(mounted.container)?.disabled === false, 'saved settings in Russian')
+    const help = mounted.container.querySelector('details')
+    await click(help.querySelector('summary'))
+    assert.match(help.textContent, /localhost означает этот сервер/)
+    assert.match(help.textContent, /не устанавливает модель/)
+    assert.equal(calls.calls.some(call => call.method === 'POST'), false)
+    await click([...mounted.container.querySelectorAll('button')].find(button => button.textContent === 'Настроить модель'))
+    assert.equal(settingsOpened, 1)
+    await click(providerButton(mounted.container))
+    await until(() => mounted.container.textContent.includes('Проверяем связь…'), 'Russian in-flight state')
+    await mounted.rerender({ ...props, language: 'en' })
+    assert.match(mounted.container.textContent, /Testing active LLM/)
+    await mounted.rerender(props)
+    assert.equal(calls.calls.filter(call => call.method === 'POST').length, 1)
+    release()
+    await until(() => mounted.container.textContent.includes('Связь подтверждена'), 'Russian verified receipt')
+    assert.equal(guard.getSnapshot().blocked, false)
+  } finally { await mounted.unmount() }
+})
+
+test('Russian remount restores the previous operation and requests only its receipt', async () => {
+  const calls = backend(({ init }) => {
+    const body = JSON.parse(init.body)
+    return body.replay_only ? jsonResponse(response(body)) : unanswered(init)
+  })
+  globalThis.fetch = calls
+  let mounted = await harness.mount(Check, { language: 'ru' })
+  try {
+    await until(() => providerButton(mounted.container)?.disabled === false, 'Russian configuration')
+    await click(providerButton(mounted.container))
+    const first = calls.calls.find(call => call.method === 'POST')
+    await mounted.unmount()
+    mounted = await harness.mount(Check, { language: 'ru' })
+    await until(() => providerButton(mounted.container)?.textContent === 'Проверить предыдущий результат', 'Russian recovery')
+    assert.match(mounted.container.textContent, /не отправляет новый запрос/)
+    assert.equal(calls.calls.filter(call => call.method === 'POST').length, 1)
+    await click(providerButton(mounted.container))
+    await until(() => mounted.container.textContent.includes('Связь подтверждена'), 'Russian replay')
+    const posts = calls.calls.filter(call => call.method === 'POST')
+    assert.equal(posts.length, 2)
+    assert.equal(JSON.parse(posts[1].body).operation_id, JSON.parse(first.body).operation_id)
+    assert.equal(JSON.parse(posts[1].body).replay_only, true)
+  } finally { await mounted.unmount() }
+})
+
+test('a definite credential refusal explains the next step in Russian without retrying', async () => {
+  const calls = backend(({ init }) => ({ ...response(JSON.parse(init.body)), ok: false,
+    error_kind: 'credentials', error: 'Authentication failed.' }))
+  globalThis.fetch = calls
+  const mounted = await harness.mount(Check, { language: 'ru' })
+  try {
+    await until(() => providerButton(mounted.container)?.disabled === false, 'saved settings')
+    await click(providerButton(mounted.container))
+    await until(() => mounted.container.textContent.includes('Провайдер отклонил доступ'), 'definite refusal')
+    assert.match(mounted.container.textContent, /API key и его привязку/)
+    assert.doesNotMatch(mounted.container.textContent, /Исход запроса к модели неизвестен/)
+    assert.doesNotMatch(mounted.container.textContent, /Связь подтверждена/)
+    assert.equal(calls.calls.filter(call => call.method === 'POST').length, 1)
+    assert.equal(providerButton(mounted.container).disabled, false)
+  } finally { await mounted.unmount() }
+})
+
 test('an incomplete saved configuration cannot enable a provider test', async () => {
   const calls = fetchStub({
     'GET /api/settings': { settings_revision: 'r', secret_revision: 's', settings: {} },
@@ -91,6 +163,9 @@ test('an incomplete saved configuration cannot enable a provider test', async ()
     await until(() => mounted.container.querySelector('[role="alert"]'), 'the read failure')
     assert.equal(providerButton(mounted.container).disabled, true)
     assert.equal(calls.calls.some(call => call.method === 'POST'), false)
+    await mounted.rerender({ language: 'ru' })
+    assert.match(mounted.container.textContent, /Не удалось подтвердить сохранённые настройки/)
+    assert.equal(providerButton(mounted.container).disabled, true)
   } finally { await mounted.unmount() }
 })
 
@@ -110,5 +185,18 @@ test('a terminal unknown outcome blocks an ordinary new check and stays explicit
     assert.match(mounted.container.textContent, /Start new check \(may bill\)/)
     assert.equal(calls.calls.filter(call => call.method === 'POST').length, 1,
       'an unknown response cannot cause an automatic provider retry')
+    await mounted.rerender({ language: 'ru' })
+    assert.match(mounted.container.textContent, /Исход запроса к модели неизвестен/)
+    assert.doesNotMatch(mounted.container.textContent, /Связь подтверждена/)
+    const originalConfirm = window.confirm
+    let confirmation = ''
+    window.confirm = message => { confirmation = message; return false }
+    try {
+      await click([...mounted.container.querySelectorAll('button')]
+        .find(button => button.textContent === 'Новая проверка (может оплачиваться)'))
+      assert.match(confirmation, /оплачиваться повторно/)
+      assert.equal(calls.calls.filter(call => call.method === 'POST').length, 1)
+      assert.equal(guard.getSnapshot().blocked, true)
+    } finally { window.confirm = originalConfirm }
   } finally { await mounted.unmount() }
 })

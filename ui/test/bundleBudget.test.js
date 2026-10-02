@@ -110,7 +110,7 @@ test('the default policy is satisfiable by a fully split route and interaction g
   const sources = [
     'RunList.jsx', 'RunCompare.jsx', 'OwnerChrome.jsx', 'RunView.jsx', 'Dag.jsx',
     'Dock.jsx', 'Inspector.jsx', 'ConceptChipBar.jsx', 'ConceptView.jsx', 'panels.jsx',
-    'SharedAssistant.jsx', 'Report.jsx', 'ClaimsCuration.jsx',
+    'SharedAssistant.jsx', 'Report.jsx', 'ClaimsCuration.jsx', 'NewRunStarter.jsx', 'AssistantModelCheck.jsx',
   ]
   const graph = {
     'index.html': {
@@ -144,7 +144,7 @@ test('the default policy is satisfiable by a fully split route and interaction g
 
   const result = evaluateBundle({ manifest: graph, assetStats: measured })
   assert.deepEqual(result.violations, [])
-  assert.equal(result.reachability.length, 7)
+  assert.equal(result.reachability.length, 9)
   assert.ok(result.reachability.every(item => item.paths.length === 0))
 
   for (const [root, target] of [
@@ -157,6 +157,21 @@ test('the default policy is satisfiable by a fully split route and interaction g
     assert.ok(blocked.violations.some(item => item.code === 'forbidden_reachability'
       && item.message.includes('valid review and comments exclude owner-only surfaces')),
     `${root} must not pull ${target} into a review route`)
+  }
+
+  for (const [root, target, policy] of [
+    ['src/OwnerChrome.jsx', 'src/NewRunStarter.jsx', 'owner chrome defers new-run examples'],
+    ['src/RunView.jsx', 'src/AssistantModelCheck.jsx', 'run routes defer Assistant model setup'],
+  ]) {
+    const poisoned = structuredClone(graph)
+    poisoned[root].imports = [target]
+    assert.ok(evaluateBundle({ manifest: poisoned, assetStats: measured }).violations
+      .some(item => item.code === 'forbidden_reachability' && item.message.includes(policy)))
+    const missing = structuredClone(graph)
+    delete missing[target]
+    missing['index.html'].dynamicImports = missing['index.html'].dynamicImports.filter(key => key !== target)
+    assert.ok(evaluateBundle({ manifest: missing, assetStats: measured }).violations
+      .some(item => item.code === 'missing_forbidden_target' && item.message.includes(policy)))
   }
 })
 

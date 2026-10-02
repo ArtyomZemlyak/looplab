@@ -37,7 +37,7 @@ export default function FirstRunModelStatus({ onSettings, language = 'auto' }) {
     {!showCheck && <button type="button" className="btn sm ghost" onClick={() => setShowCheck(true)}>
       {ru ? 'Проверить связь…' : 'Check connection…'}</button>}
     {showCheck && <React.Suspense fallback={<span role="status">{ru ? 'Открываем проверку связи…' : 'Opening connection check…'}</span>}>
-      <AssistantModelCheck onSettings={onSettings} />
+      <AssistantModelCheck onSettings={onSettings} language={language} />
     </React.Suspense>}
   </div>
 }

@@ -75,7 +75,10 @@ export function LlmHealth({
   reloadSavedSettings,
   onRecoveryChange,
   providerBlockedReason = '',
+  copy,
 }) {
+  const text = value => copy?.text(value) ?? value
+  const recoveryHelp = status => copy?.recoveryHelp(status) ?? status.error
   const noteId = useId()
   const actionNoteId = `${noteId}-action`
   const blockNoteId = `${noteId}-block`
@@ -252,6 +255,7 @@ export function LlmHealth({
               ok: false,
               previousConfiguration: active.previousConfiguration,
               notStarted: !providerAttempted,
+              errorKind: value.error_kind,
               error: value.message || value.error
                 || 'The active LLM check did not complete successfully.',
             } })
@@ -332,19 +336,19 @@ export function LlmHealth({
   const startNewAfterUnknown = () => {
     if (actionBlocked || providerBlockedReason || requestRef.current
         || !revisionsReady || !visibleStatus?.terminalUnknown) return
-    if (!window.confirm('The previous provider outcome is unresolved and may already be billed. Start a new active LLM check that may bill again?')) return
+    if (!window.confirm(text('The previous provider outcome is unresolved and may already be billed. Start a new active LLM check that may bill again?'))) return
     // `startCheck` replaces the old recovery record only after it owns the shared mutation token.
     // If another same-tick action won that token, keep the terminal warning and its UUID intact.
     startCheck(false)
   }
   const dismissRecovery = () => {
     if (actionBlocked || requestRef.current || !visibleStatus?.unresolved) return
-    if (!window.confirm('Acknowledge and dismiss this unresolved provider outcome? A later Test active LLM action will create a new provider operation and may bill again.')) return
+    if (!window.confirm(text('Acknowledge and dismiss this unresolved provider outcome? A later Test active LLM action will create a new provider operation and may bill again.'))) return
     clearHealthRecovery(visibleStatus.operationId)
     setStatus(null)
   }
 
-  const buttonTitle = busy
+  const englishButtonTitle = busy
     ? 'An active provider check is in progress. Leaving may not stop provider work or billing.'
     : reloading
       ? 'Reloading the saved configuration without contacting the provider.'
@@ -365,16 +369,20 @@ export function LlmHealth({
   const providerActionBlocked = !!providerBlockedReason
     && !visibleStatus?.configurationChanged && !visibleStatus?.reconcilable
   const healthActionNote = reloading || visibleStatus?.configurationChanged
-    ? 'Reload only · no provider request'
+    ? text('Reload only · no provider request')
     : activeReplayOnly || visibleStatus?.reconcilable
-      ? 'Replay only · no new provider request'
+      ? text('Replay only · no new provider request')
       : visibleStatus?.terminalUnknown
-        ? 'A new check requires confirmation and may bill again'
+        ? text('A new check requires confirmation and may bill again')
         : busy
-          ? 'Provider check in progress and may be billed'
+          ? text('Provider check in progress and may be billed')
           : providerBlockedReason
-            ? 'Provider test blocked by credential state'
-            : 'One provider request may be billed'
+            ? text('Provider test blocked by credential state')
+            : text('One provider request may be billed')
+  const buttonTitle = copy
+    ? !revisionsReady ? copy.unloadedTitle
+      : providerBlockedReason || healthActionNote
+    : englishButtonTitle
   const healthDescription = [actionNoteId,
     providerBlockedReason ? blockNoteId : '',
     unsavedCount > 0 ? draftNoteId : ''].filter(Boolean).join(' ')
@@ -384,57 +392,59 @@ export function LlmHealth({
               || providerActionBlocked}
             onClick={check} title={buttonTitle}
             aria-describedby={healthDescription}>
-      {busy ? (activeReplayOnly ? 'Checking previous result…' : 'Testing active LLM…')
-        : reloading ? 'Reloading settings…'
-        : visibleStatus?.configurationChanged ? 'Reload saved settings'
-        : visibleStatus?.terminalUnknown ? 'Outcome unresolved'
-        : visibleStatus?.reconcilable ? 'Check previous result'
-        : <><OpIcon name="bolt" className="t-ic" /> Test active LLM</>}
+      {busy ? (activeReplayOnly ? text('Checking previous result…') : text('Testing active LLM…'))
+        : reloading ? text('Reloading settings…')
+        : visibleStatus?.configurationChanged ? text('Reload saved settings')
+        : visibleStatus?.terminalUnknown ? text('Outcome unresolved')
+        : visibleStatus?.reconcilable ? text('Check previous result')
+        : <><OpIcon name="bolt" className="t-ic" /> {text('Test active LLM')}</>}
     </button>
     {visibleStatus?.terminalUnknown && <button type="button" className="btn sm warn"
       disabled={actionBlocked || !!providerBlockedReason || busy || !revisionsReady}
       onClick={startNewAfterUnknown}
       aria-describedby={actionNoteId}
-      title="Requires confirmation because this creates a new provider operation that may be billed.">
-      Start new check (may bill)
+      title={text('Requires confirmation because this creates a new provider operation that may be billed.')}>
+      {text('Start new check (may bill)')}
     </button>}
     {visibleStatus?.unresolved && <button type="button" className="btn sm ghost"
       disabled={actionBlocked || busy} onClick={dismissRecovery}
-      title="Acknowledge the unknown outcome and remove its recovery gate without contacting the provider.">
-      Dismiss warning
+      title={text('Acknowledge the unknown outcome and remove its recovery gate without contacting the provider.')}>
+      {text('Dismiss warning')}
     </button>}
     <span id={actionNoteId} className="llm-health-note">{healthActionNote}</span>
     {providerBlockedReason && <span id={blockNoteId} className="llm-health-note is-blocked">
       {providerBlockedReason}
     </span>}
     {unsavedCount > 0 && <span id={draftNoteId} className="llm-health-note">
-      {countLabel(unsavedCount, 'draft change')} excluded
+      {copy ? copy.draftNote(unsavedCount) : `${countLabel(unsavedCount, 'draft change')} excluded`}
     </span>}
     {visibleStatus && <span className="llm-health-result" role="status" aria-live="polite">
       <span className={'chip llm-health-status ' + (visibleStatus.ok ? 'ok'
         : visibleStatus.unresolved || visibleStatus.configurationChanged || visibleStatus.anotherCheckBusy
           ? 'warn' : 'alarm')}
                        title={visibleStatus.ok
-                         ? visibleStatus.previousConfiguration
+                         ? copy ? text(visibleStatus.previousConfiguration ? 'Previous LLM responded' : 'Active LLM responded')
+                           : visibleStatus.previousConfiguration
                            ? 'The previous saved LLM configuration responded successfully; the current active configuration was not contacted.'
                            : 'The server-resolved active LLM responded successfully.'
-                         : visibleStatus.error || 'Check the active provider configuration and network access.'}>
+                         : recoveryHelp(visibleStatus) || 'Check the active provider configuration and network access.'}>
         {visibleStatus.ok ? '✓' : visibleStatus.unresolved || visibleStatus.configurationChanged
           || visibleStatus.anotherCheckBusy ? '!' : '×'} {visibleStatus.configurationChanged
-          ? 'Reload saved settings'
-          : visibleStatus.replayUnavailable ? 'Previous result unavailable'
-          : visibleStatus.terminalUnknown ? 'Provider outcome unresolved'
-          : visibleStatus.reconcilable ? 'Previous result pending'
-          : visibleStatus.anotherCheckBusy ? 'Another check is running'
+          ? text('Reload saved settings')
+          : visibleStatus.replayUnavailable ? text('Previous result unavailable')
+          : visibleStatus.terminalUnknown ? text('Provider outcome unresolved')
+          : visibleStatus.reconcilable ? text('Previous result pending')
+          : visibleStatus.anotherCheckBusy ? text('Another check is running')
           : visibleStatus.ok ? visibleStatus.previousConfiguration
-            ? 'Previous LLM responded' : 'Active LLM responded'
-          : visibleStatus.notStarted ? 'Check not started'
-          : visibleStatus.previousConfiguration ? 'Previous LLM failed' : 'Active LLM failed'}
+            ? text('Previous LLM responded') : text('Active LLM responded')
+          : visibleStatus.notStarted ? text('Check not started')
+          : visibleStatus.previousConfiguration ? text('Previous LLM failed') : text('Active LLM failed')}
       </span>
       {visibleStatus.previousConfiguration && <span className="llm-health-detail">
-        Result belongs to the previous saved configuration; the current active LLM was not contacted.
+        {copy ? copy.previousConfiguration
+          : 'Result belongs to the previous saved configuration; the current active LLM was not contacted.'}
       </span>}
-      {!visibleStatus.ok && visibleStatus.error && <span className="llm-health-detail">{visibleStatus.error}</span>}
+      {!visibleStatus.ok && visibleStatus.error && <span className="llm-health-detail">{recoveryHelp(visibleStatus)}</span>}
     </span>}
   </span>
 }

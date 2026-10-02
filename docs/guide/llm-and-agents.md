@@ -20,6 +20,33 @@ unchanged.
 
 ## Using a live LLM
 
+### Connect Assistant in the UI
+
+Use a running local model server or a hosted provider with an OpenAI-compatible API.
+In **LoopLab → Settings → Essential → Model**, set:
+
+| Field | What to enter |
+|---|---|
+| **Model** | The exact model ID accepted by that server or provider. |
+| **Base URL** | The API address reachable from the **LoopLab server**. `localhost` refers to that server, even when you open the UI on another computer. |
+| **API key** | A key if the endpoint requires one. Local endpoints may need no key. |
+
+Choose **Save**, return to Assistant and open **Check connection…**.
+**How do I connect a model?** explains these steps beside your draft; opening the
+help or check panel sends no provider request. The explicit **Test active LLM**
+button sends one request, which may be billed. Saving settings does not install or
+start a model. A successful check applies to that saved configuration; changes
+require a fresh check. Environment and `.env` values may override saved settings.
+
+If the browser loses the reply, **Check previous result** reads the same operation's
+receipt without sending a new provider request. An unresolved provider outcome may
+already have been billed. **Start new check (may bill)** requires confirmation;
+dismissing the warning acknowledges uncertainty and does not prove connectivity.
+For a definite failure, check the server-reported error, model ID, endpoint access
+and credentials before testing again. Do not automatically repeat an unknown result.
+
+### Configure from the CLI
+
 Point LoopLab at any OpenAI-compatible `/v1` endpoint:
 
 ```bash
