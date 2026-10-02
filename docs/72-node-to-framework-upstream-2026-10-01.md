@@ -1,6 +1,6 @@
 # 72 — Из ноды во фреймворк: upstream возможностей, найденных в прогоне (2026-10-01)
 
-> **Статус: upstream — предложение; 72.2 и archive/export/scorer prerequisites реализованы (§8–14).** Ни один
+> **Статус: upstream — предложение; 72.2 и archive/export/scorer/initial-pin prerequisites реализованы (§8–16).** Ни один
 > дефолт не переключён. Исторические свидетельства ниже:
 > каждое исходное утверждение о коде сверено с `master` @ `65551da0` (2026-10-01) и цитируется как
 > `<модуль>.py::<символ>`; каждый `proof:` из раздела 5 прогнан через
@@ -29,7 +29,7 @@
 | Что потеряно на узле 2 | 15 ч 26 мин стены, из них 8.07 ч — четыре упавших или задержанных оценки; три из четырёх причин — общие дефекты пайплайна, не наука узла | 1.2 |
 | Кто ещё ударился бы о те же дефекты | Семь черновиков-соседей (3, 6, 7, 10, 12, 13, 20) несут оба триггера и не могут унаследовать фикс соседа | 1.2 |
 | Узел 19 | Плечо исследователя реализовано одноразовым сценарием на 156 строк, который копирует общий раннер и в третий раз переписывает фикс узла 2; по диффам env это плечо выражалось рецептом поверх общего раннера | 1.3 |
-| Что уже реализовано | 72.2: receipt скопированной базы; prerequisites 72.1: bounded архив, export-bundle и byte evidence явно объявленной границы скорера. Переноса в базу пока нет | 8, 10, 12, 14 |
+| Что уже реализовано | 72.2: receipt скопированной базы; prerequisites 72.1: bounded архив, export-bundle, byte evidence объявленной границы скорера и immutable initial pin новой задачи. Переноса в базу пока нет | 8, 10, 12, 14, 16 |
 | Предложение | «Полоса upstream»: классификация диффа узла на РЕЦЕПТ и ВОЗМОЖНОСТЬ, роль Maintainer в worktree БАЗЫ (по одному на кандидата), гейт эквивалентности/регрессии, журналируемое `base_advanced` | 3 |
 | Главный риск | Контракт оценки декларативен: он не видит байтов скорера, а в этой задаче скорер и тренер — один файл без защиты (`protect: []`) | 3.4, 4 |
 | Открытые пункты | Шесть маркеров с фальсификаторами; 72.2 закрыт в описанном scope | 5, 8 |
@@ -732,7 +732,8 @@ POSIX executable semantics или Windows symlinks без нужной прив�
 repo-задачи: `seed_base: {run_dir, event_seq, digest}`. Это ссылка на конкретный
 `workspace_seeded.base_revision` существующего run или экспортированного bundle,
 а не supplied receipt, terminal score, workdir или произвольный repo path.
-Digest ожидается полностью, sequence типизирован; отсутствующий, damaged или
+Digest ожидается полностью, sequence — неотрицательный integer (журнал начинается
+с нуля; bool недопустим); отсутствующий, damaged или
 изменившийся event source и unverified archive отказываются без fallback.
 
 Одна aggregate копия selected archive должна попадать в candidate workspace,
@@ -767,3 +768,66 @@ existing destination refusal; source cwd mapping; legacy serialization/seeding;
 replay/export metadata и реальные быстрые CPU SGD восстановления. Декларация
 не может поступить через candidate injection. Live advancement, CAS и gate
 verdict ещё не реализованы; 72.1/72.6 остаются открытыми.
+
+## 16. Реализация immutable initial pin и приёмка
+
+Ревью сохранено до кода в `86a25d7cc`. Новый opt-in `RepoTask.seed_base` — точная
+ссылка `{run_dir, event_seq, digest}`. `engine/seed_base.py` требует absolute origin,
+неотрицательную event sequence и полный lowercase SHA-256; bool, supplied receipt,
+лишние/неполные поля и относительный путь не принимаются. Журнал читается bounded
+regular-file reader (32 MiB), проверяется целиком, включая dense sequence с нуля,
+atomic batch envelopes и tail после выбранного события. Только реальный
+`workspace_seeded.base_revision` со stored verified archive разрешает копию.
+
+`pinned_editables` направляет scout/Developer/probe на этот архив, сохраняя
+`origin_path` для cwd remap. Общий `seed_candidate_workspace` копирует aggregate
+bytes один раз в пустой plain destination; отдельного live protected seed, git
+discovery или повторного ignore/seed_mode filter нет. Callback копии и отдельная
+проверка destination должны совпасть с recorded version/scope/digest/count/bytes.
+Ошибка или drift не разрешают evaluation. Namespace ownership и существующая
+защита scorer сохраняются; mounts, overlay и assets идут после base receipt.
+Для pinned задачи cwd вне workspace/remappable editable и абсолютные source argv
+отказываются; opaque command dependencies этим не сертифицируются.
+
+`run_started.seed_base` связывает выбор с запуском. На обоих reentry boundaries
+и перед workspace cleanup проверяются неизменность выбора и наличие verified
+origin. Отказ сохраняет journal bytes и старый candidate directory. Повторный
+seed тоже проверяется; lost origin требует восстановления именно выбранной
+истории/архива или явно новой задачи. Ни live repo, ни current-run archive не
+становятся implicit fallback. Текущий seed/primary terminal хранит
+`base_revision.selection`, сохраняя current-run `seed_event_seq`, и публикует
+собственный архив для export. Legacy без выбора сохраняет отсутствие нового
+ключа в dumps/repo_spec/run_started и прежний путь засева.
+
+Проверка обнаружила две ошибки реализации/fixture: reader ошибочно ожидал seq=1
+в начале журнала; заключительная fixture-проверка пыталась читать уже намеренно
+удалённый source scorer. Reader использует native numbering с нуля, проверка
+сверяет scorer выбранного origin и оба узла. Добавлены event-zero/non-seed,
+atomic-batch/gap, whole-log/budget и реальные Developer command tests; pin drift
+и lost origin проверены через настоящий Engine до journal writes/cleanup.
+Широкий gate также выявил существующий private import lifecycle decoder в result
+notices: seam зарегистрирован с объяснением, без второй копии generation rule.
+
+Приёмка: первым replay — 193 passed. Финальный repo/task/Developer/seed/archive/
+bundle/setup/resume/package/layering/private-seam/engine-attribute набор —
+1032 passed / 11 skipped. Docs/API/event/diagram/containment contracts — 90 passed;
+API/events reference regenerated, `mkdocs build --strict` и `git diff --check`
+прошли. Первый широкий запуск включал два Windows symlink tests без privilege и
+два «non-repo» setup fixtures внутри checkout: git находил родительский репозиторий.
+Setup fixtures перепроверены вне checkout и прошли; symlink/POSIX privilege gaps
+не объявляются покрытыми. Они не исправлялись ослаблением production guards.
+
+`.tmp/doc72pin-final-proof/acceptance.json`: `agent_loss` и `engine_loss` прошли
+через production HTTP/MCP, каждый с двумя настоящими CPU protected SGD evaluation.
+Source меняется до первого terminal и удаляется до второго кандидата; оба receipt
+сохраняют исходный digest/selection и complete declared scorer boundary. Reconnect
+не начинает работу и не дублирует training; явное engine resume использует pin.
+После удаления node workdirs CLI экспортирует один deduplicated archive;
+отдельно учтённый export-validation execution воспроизводит второй результат и
+не меняет run log. `inspect`/`replay`, result notices/commentary и неизменность
+scorer проверены. Origin fixture сохраняется как required input.
+
+72.1/72.6 ещё открыты. Следующий контракт — evidence-bound equivalence/regression
+gate и advancement с CAS; далее Maintainer lane и UI. Initial pin не продвигает
+возможности из Node.files в базу, не сравнивает шкалы разных задач и не заменяет
+идентичность data/environment/host scorer или полноту объявленных dependencies.

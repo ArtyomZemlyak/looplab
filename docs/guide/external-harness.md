@@ -1094,6 +1094,8 @@ python -m benchmarks.external_asha_smoke --out .tmp/asha-proof
 python -m benchmarks.external_idle_recovery_smoke --out .tmp/idle-proof
 # Record copied-base provenance while the operator source changes during training.
 python -m benchmarks.external_idle_recovery_smoke --out .tmp/seed-base-proof --case all --seed-base-recovery
+# Keep a selected archived base across recovery after removing the owned source.
+python -m benchmarks.external_idle_recovery_smoke --out .tmp/pinned-base-proof --case all --seed-base-recovery --pinned-seed
 # Observe actual request silence after MCP death, without owner polling refreshing it.
 python -m benchmarks.external_idle_recovery_smoke --out .tmp/activity-proof --case agent_loss --quiet-hold-seconds 121
 ```
@@ -1114,6 +1116,19 @@ This variant declares `cmd.scorer_boundary.files: [score.py]`, with manual `prot
 empty and entrypoint inference disabled. It verifies the declared scorer's hash
 and complete boundary receipt through MCP after each terminal and reconnect.
 The boundary covers the listed files; it does not certify dependency closure.
+
+`--pinned-seed` first records a private seed archive, then selects that exact
+`workspace_seeded` sequence and digest in the operator's task. After the first
+terminal it removes its owned source, reconnects or explicitly resumes the engine,
+and submits the second recipe. Both terminal/MCP receipts must retain the same
+base digest and origin selection. Each case still runs exactly two engine SGD
+evaluations and one separately counted export-validation execution. Export verifies
+one deduplicated base after source/workdir loss; `inspect`/`replay` and protected
+scorer checks remain required. The selected origin is retained as a required input;
+origin loss refuses future seeds/resume. This tests immutable **initial** selection,
+not live advancement or model-authored equivalence judgments. See
+[task setup](tasks.md#start-a-new-task-from-a-recorded-base) for the operator field;
+candidate injection cannot set or change it.
 
 The offline scenario runs three real CPU training configurations with a protected
 scorer. It kills its own MCP process, restarts its private UI server, withholds two

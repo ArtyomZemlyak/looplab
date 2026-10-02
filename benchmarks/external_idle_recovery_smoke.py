@@ -38,7 +38,7 @@ from looplab.serve.server import make_app
 CASES = ("agent_loss", "engine_loss")
 
 
-def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, response_fault="disconnect", read_fault="disconnect", discovery_fault="none", mcp_python=None, result_backlog=False, failed_first=False, obligations=False, damaged_journals=False, value_recovery=False, damaged_events=False, knowledge_recovery=False, seed_base_recovery=False):
+def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, response_fault="disconnect", read_fault="disconnect", discovery_fault="none", mcp_python=None, result_backlog=False, failed_first=False, obligations=False, damaged_journals=False, value_recovery=False, damaged_events=False, knowledge_recovery=False, seed_base_recovery=False, pinned_seed=False):
     root.mkdir(parents=True, exist_ok=False)
     runs = root / "runs"; runs.mkdir()
     source = root / "source"; source.mkdir()
@@ -60,6 +60,16 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
         task["protect"] = []  # protection comes from the operator declaration in this probe
         task["cmd"]["protect_entrypoint"] = False
         task["cmd"]["scorer_boundary"] = {"files": ["score.py"]}
+    if pinned_seed:
+        from looplab.engine.workspace_seed import seed_candidate_workspace
+        origin = root / "origin"; origin.mkdir()
+        copied = seed_candidate_workspace({"editables": [{"name": ".", "path": str(source), "protect": ["score.py"]}]},
+            origin / "seed", capture_base_revision=True, base_archive_dir=origin / "base_snapshots")
+        revision = copied[0]["base_revision"]
+        journal = EventStore(origin / "events.jsonl")
+        journal.append("run_started", {"run_id": "origin", "task_id": "fixture", "goal": "capture", "direction": "min"})
+        seeded = journal.append("workspace_seeded", {"node_id": None, "materialized": [], "base_revision": revision})
+        task["seed_base"] = {"run_dir": str(origin), "event_seq": seeded.seq, "digest": revision["digest"]}
     task_path = root / "task.json"; task_path.write_text(json.dumps(task), encoding="utf8")
     token, owner = secrets.token_hex(32), secrets.token_hex(32)
     env_before = dict(os.environ)
@@ -172,7 +182,7 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
             assert revision["digest"] == seed.data["base_revision"]["digest"]
             assert revision["file_count"] == seed.data["base_revision"]["file_count"] == 3
             assert revision["node_id"] == nid and revision["generation"] == 0 and revision["complete"]
-            expected = "BASE=old\n" if nid == 0 else "BASE=new\n"
+            expected = "BASE=old\n" if nid == 0 or pinned_seed else "BASE=new\n"
             assert (runs / "demo" / "nodes" / f"node_{nid}" / "experiment.env").read_text(encoding="utf8") == expected
             from looplab.engine.seed_archive import verified_seed_archive
             archived = verified_seed_archive(runs / "demo", revision)
@@ -186,7 +196,17 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
             proof["declared_scorer_boundary_verified"] = True
             proof.setdefault("archived_seeds_verified", []).append(nid)
             proof.setdefault("base_revisions", []).append(revision)
-            if nid == 1:
+            if pinned_seed:
+                assert revision["selection"] == {"kind": "recorded_seed", **task["seed_base"]}
+                assert revision["digest"] == task["seed_base"]["digest"]
+                if nid == 0:
+                    from looplab.core.atomicio import rmtree_readonly_aware
+                    rmtree_readonly_aware(source)
+                    proof["source_removed_before_second_node"] = True
+                if nid == 1:
+                    assert proof["base_revisions"][0]["digest"] == revision["digest"]
+                    proof["pinned_base_verified_after_recovery"] = True
+            elif nid == 1:
                 assert proof["base_revisions"][0]["digest"] != revision["digest"]
         if failed_first and nid == 0:
             assert node["metric"] is None
@@ -743,7 +763,8 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
         starts = [r for r in events if r.type == "phase_progress" and r.data.get("phase") == "stage"
                   and r.data.get("status") == "started"]
         assert len(starts) == 2 and all(r.data["name"] == "train_eval" for r in starts)
-        for directory in (source, rd / "nodes" / "node_0", rd / "nodes" / "node_1"):
+        source_scorer = origin / revision["archive"]["path"] if pinned_seed else source
+        for directory in (source_scorer, rd / "nodes" / "node_0", rd / "nodes" / "node_1"):
             assert hashlib.sha256((directory / "score.py").read_bytes()).hexdigest() == digest
         for operation in ("inspect", "replay"):
             result = subprocess.run([sys.executable, "-m", "looplab.cli", operation, str(rd)], cwd=root,
@@ -760,14 +781,15 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
             # Deliberate export validation after both engine evaluations ended.
             # Source/workdirs are disposable fixture paths; retain the event record.
             before = (rd / "events.jsonl").read_bytes()
-            rmtree_readonly_aware(source)
+            if source.exists():
+                rmtree_readonly_aware(source)
             rmtree_readonly_aware(rd / "nodes")
             bundle = root / "bundle"
             exported = subprocess.run([sys.executable, "-m", "looplab.cli", "export-bundle",
                 str(rd), "--out", str(bundle)], cwd=root, env=child_env,
                 capture_output=True, text=True, encoding="utf8", timeout=30)
             assert exported.returncode == 0, exported.stderr
-            assert "2 archive(s)" in exported.stdout and verify_bundle(bundle) == []
+            assert f"{1 if pinned_seed else 2} archive(s)" in exported.stdout and verify_bundle(bundle) == []
             for revision in proof["base_revisions"]:
                 assert verified_seed_archive(bundle, revision) is not None
             validation = root / "export-validation"
@@ -849,7 +871,10 @@ def main():
                         help="Publish a protocol lesson/skill with lost ACKs and damaged source recovery. Requires backlog/obligations, excludes failed-first/response-loss.")
     parser.add_argument("--seed-base-recovery", action="store_true",
                         help="Record a tracked seed; change the owned source before terminal and verify a later seed after recovery.")
+    parser.add_argument("--pinned-seed", action="store_true", help="Choose an immutable recorded initial seed; requires --seed-base-recovery.")
     args = parser.parse_args()
+    if args.pinned_seed and not args.seed_base_recovery:
+        parser.error("pinned-seed requires --seed-base-recovery")
     if not 0 <= args.quiet_hold_seconds <= 14400:
         parser.error("quiet hold must be between zero and four hours")
     if args.drop_command_response and args.case != "agent_loss":
@@ -880,7 +905,7 @@ def main():
     mcp_python = str(args.mcp_python.resolve()) if args.mcp_python else None
     if mcp_python and not Path(mcp_python).is_file():
         parser.error("MCP interpreter does not exist")
-    proof = [run_case(root / name, name, args.quiet_hold_seconds, args.drop_command_response, args.response_fault, args.read_fault, args.discovery_fault, mcp_python, args.result_backlog, args.failed_first, args.obligations, args.damaged_journals, args.value_recovery, args.damaged_events, args.knowledge_recovery, args.seed_base_recovery)
+    proof = [run_case(root / name, name, args.quiet_hold_seconds, args.drop_command_response, args.response_fault, args.read_fault, args.discovery_fault, mcp_python, args.result_backlog, args.failed_first, args.obligations, args.damaged_journals, args.value_recovery, args.damaged_events, args.knowledge_recovery, args.seed_base_recovery, args.pinned_seed)
              for name in CASES if args.case in ("all", name)]
     (root / "acceptance.json").write_text(json.dumps(proof, ensure_ascii=False, indent=2), encoding="utf8")
 

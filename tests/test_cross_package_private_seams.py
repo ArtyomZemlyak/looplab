@@ -162,6 +162,10 @@ CROSS_PACKAGE_PRIVATE_IMPORTS: dict[str, dict[str, tuple[str, ...]]] = {
     },
     "serve": {
         "looplab.agents.roles": ("_CONCEPT_AUTHORING_GUIDANCE",),
+        # Completion receipts already share occupancy's strict node/generation decoder (doc 72
+        # prerequisite review). Preserve this read-only seam until the lifecycle view is public;
+        # a rename must fail here instead of silently losing current result notices.
+        "looplab.events.eval_occupancy": ("_lifecycle",),
         # The governed task-facets read route reads the store through its own strict row reader
         # (master's `/api/cross-run/task-facets`); a lenient re-read would serve rows it refuses.
         "looplab.engine.task_facets": ("_read_task_facet_rows",),

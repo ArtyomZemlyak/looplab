@@ -325,6 +325,9 @@ class WorkspaceSeeder:
         tasks. Returns the copied base receipt plus its seed event sequence when measured."""
         if not self._e._repo_spec:
             return
+        if (self._e._repo_spec or {}).get("seed_base") is not None:
+            from looplab.engine.seed_base import enforce_initial_seed_base
+            enforce_initial_seed_base(self._e.store.read_all(), self._e._repo_spec["seed_base"])
         from looplab.engine.workspace_seed import SeedOps, seed_candidate_workspace
         wd = Path(workdir)
         sp = (self._e.tracer.span("seed_workspace") if self._e.tracer is not None
@@ -431,13 +434,13 @@ class WorkspaceSeeder:
             return str((wd / cwd_spec).resolve())
         ap = p.resolve()
         for ed in (self._e._repo_spec or {}).get("editables", []):
-            src = Path(ed["path"]).resolve()
             base = wd if ed["name"] in (".", "") else wd / ed["name"]
-            try:
-                rel = ap.relative_to(src)
-            except ValueError:
-                continue
-            return str((base / rel).resolve())
+            for source in (ed["path"], ed.get("origin_path", ed["path"])):
+                try:
+                    rel = ap.relative_to(Path(source).resolve())
+                except ValueError:
+                    continue
+                return str((base / rel).resolve())
         return str(ap)
 
     def materialize(self, node, workdir) -> dict | None:
@@ -450,6 +453,9 @@ class WorkspaceSeeder:
         from looplab.core.atomicio import rmtree_readonly_aware
         from looplab.core.pathsafe import resolve_settled
 
+        if (self._e._repo_spec or {}).get("seed_base") is not None:
+            from looplab.engine.seed_base import enforce_initial_seed_base
+            enforce_initial_seed_base(self._e.store.read_all(), self._e._repo_spec["seed_base"])
         # SETTLED, not a bare `resolve()` (review 2026-09-22, WIN-4): concurrent sibling evals reach
         # this line together, and the first to write creates `run/nodes`. On Windows a resolve of a
         # workdir that does not exist yet, straddling that creation, keeps its `\\?\` prefix, so

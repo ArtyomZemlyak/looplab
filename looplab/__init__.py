@@ -502,6 +502,7 @@ _LAYOUT = {
     "workspace_seed": "engine",  # shared eval/Developer candidate filesystem primitives
     "seed_archive": "engine",  # run-owned verified copied-base bytes
     "scorer_boundary": "core",  # explicit operator files and same-read seed evidence
+    "seed_base": "engine",  # immutable initial selection of a recorded run/bundle seed
     "bundle_bases": "engine",  # evidence-bound copied bases in reviewer bundles
     "write_tools": "tools",
 }

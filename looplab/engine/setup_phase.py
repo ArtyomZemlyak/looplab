@@ -220,6 +220,8 @@ class SetupPhaseMixin:
                             # own task against (`reentry.py::_record_task_change`, doc 69 69.19).
                             "task_identity": task_identity(self.task),
                             "workspace": wf,
+                            **({"seed_base": dict(self._repo_spec["seed_base"])}
+                               if self._repo_spec.get("seed_base") is not None else {}),
                             # P0-5 environment identity: pin the interpreter + key-lib versions so a
                             # resume can flag a library upgrade that breaks bit-reproducibility.
                             "env": self._env_fingerprint(),

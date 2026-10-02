@@ -456,8 +456,11 @@ def preflight_mount_collision(repo_spec, *, seed_mode: str = "auto", ignore=None
                                  if r.get("mount")] + list(repo_spec.get("data") or {})) if name]
     if not mounts:
         return
-    tops = set(root_seed_top_level(root["path"], seed_mode=root.get("seed_mode") or seed_mode
-                                   or "auto", ignore=ignore))
+    if repo_spec.get("seed_base") is not None:
+        tops = {p.name for p in Path(root["path"]).iterdir()}
+    else:
+        tops = set(root_seed_top_level(root["path"], seed_mode=root.get("seed_mode") or seed_mode
+                                      or "auto", ignore=ignore))
     clash = next((name for name in mounts if name in tops), None)
     if clash is not None:
         raise MountCollision(clash, root.get("path", ""))
@@ -531,7 +534,11 @@ def seed_candidate_workspace(repo_spec, workdir, *, seed_mode: str = "auto", ign
     def _target(editable):
         return work if editable.get("name") in (".", "") else work / editable["name"]
 
-    for editable in editables:
+    pin = repo_spec.get("seed_base")
+    if pin is not None:
+        from looplab.engine.seed_base import seed_pinned_workspace
+        rows.extend(seed_pinned_workspace(pin, editables, work))
+    for editable in (() if pin is not None else editables):
         mode = editable.get("seed_mode") or seed_mode or "auto"
         count = _seed_tree(editable["path"], _target(editable), ignore, mode)
         # The name is the DECLARED one, verbatim: each caller renders it its own way (the engine
@@ -577,7 +584,7 @@ def seed_candidate_workspace(repo_spec, workdir, *, seed_mode: str = "auto", ign
     # editable (whose files land at the workspace root, where the mounts also live); a non-root
     # editable mounts under its own subdir, which `_names_distinct_and_safe` already keeps
     # disjoint from every mount name.
-    for editable in editables:
+    for editable in (() if pin is not None else editables):
         protected = _seed_protected(
             editable["path"], _target(editable), editable.get("protect"),
             reserved_top=(set(mounts) if editable.get("name") in (".", "") else set()))
@@ -599,6 +606,11 @@ def seed_candidate_workspace(repo_spec, workdir, *, seed_mode: str = "auto", ign
             receipt = capture_seed_archive(work, base_archive_dir, on_file=observer)
         if boundary is not None:
             receipt["scorer_boundary"] = boundary.receipt(receipt)
+        if pin is not None:
+            if not receipt["complete"] or receipt["digest"] != pin["digest"]:
+                from looplab.core.errors import ConfigRefusal
+                raise ConfigRefusal("seed_base no longer matches the copied candidate; no evaluation permitted")
+            receipt["selection"] = {"kind": "recorded_seed", **pin}
         rows[0]["base_revision"] = receipt
 
     for ref in references:

@@ -2297,7 +2297,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "eval_env", "eval_env_absent_from_task", "eval_parallel", "explicit_settings", "goal",
             "holdout_fraction", "holdout_select", "llm_parallel", "reference_score",
             "require_approval", "run_id",
-            "run_uid", "select_verifier", "select_verifier_contract", "select_verifier_samples",
+            "run_uid", "seed_base", "select_verifier", "select_verifier_contract", "select_verifier_samples",
             "speculation_calibration_gpu_inventory", "speculation_calibration_profile_digest",
             "speculation_calibration_seed", "speculation_depth", "speculation_depth_auto",
             "speculation_gate_receipt_digest", "speculation_implementation_digest",

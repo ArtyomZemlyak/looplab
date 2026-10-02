@@ -860,6 +860,52 @@ No declaration preserves legacy snapshots and receipts. This is evidence about t
 **declared set**, not proof of full import closure, immutable execution, environment
 identity, equivalence or permission to advance the base. It adds no training or wait.
 
+### Start a new task from a recorded base
+
+To keep the initial source fixed across nodes, select a complete archived seed
+from an existing run or exported bundle (doc 72 §15–16):
+
+```yaml
+repo: /absolute/path/to/original/repo
+seed_base:
+  run_dir: /absolute/path/to/previous/run-or-bundle
+  event_seq: 1
+  digest: "<complete 64-character lower-case digest from workspace_seeded.base_revision>"
+cmd:
+  command: [python, score.py]
+  metric: {reader: stdout_json, key: metric}
+  scorer_boundary: {files: [score.py]}
+```
+
+Use the sequence of the **workspace_seeded event** and its stored base digest,
+not a node ID, terminal sequence or current workdir hash. Event numbering starts
+at zero. LoopLab verifies the complete origin event log (up to 32 MiB) and the
+recorded archive, then copies its regular files and executable bits. This preserves
+the realized snapshot: `seed_mode`, git discovery and ignore rules do not filter
+it again. Developer/scout/probe and evaluation read the same selected base. The
+existing editable names, surfaces and protections still apply; mounts, candidate
+overlays and task assets follow the copied base in their usual order.
+
+The original `repo`/editable paths remain labels for namespace and absolute `cwd`
+remapping; their source bytes can disappear. Commands must use workspace-relative
+paths to editable source files. An absolute `cwd` inside an original editable is
+remapped to the candidate; unrelated absolute directories and parent escapes are
+refused. Declare datasets and other runtime inputs separately through mounts.
+
+The selection is recorded in `run_started.seed_base` and cannot be added, removed
+or changed on resume. Each seed records `base_revision.selection`; its
+`seed_event_seq` still names the current run's seed event. The current run archives
+and exports its own copy, while the **selected origin log and archive remain required
+for future seeds and resume**. If they are lost or damaged, restore that origin or
+explicitly launch a new task selecting a verified bundle. There is no automatic
+fallback to the live repository or another archive.
+
+This selects an initial base for a new run. It grants no live base advancement,
+metric equivalence or regression verdict, and adds no training or waiting phase.
+Dataset, environment, opaque command dependencies and task assets are outside the
+base receipt. Without `seed_base`, existing task serialization and live seeding stay
+unchanged.
+
 **The protocol: the ruler, per facet.** Since 2026-09-26 the record also carries `protocol` — a map of
 refuse-only facets, each a digest, describing the conditions the number was measured under
 (`engine/comparability.py::protocol_record`):

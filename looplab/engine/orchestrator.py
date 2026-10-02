@@ -1751,6 +1751,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # log. Making a resume visible needs a channel that is NOT the event log — see the note in
         # `events/types.py::PROGRESS_STAGES`, which is why that vocabulary has one stage and not two.
         events = self.store.read_all()
+        from looplab.engine.seed_base import enforce_initial_seed_base
+        enforce_initial_seed_base(events, self._repo_spec.get("seed_base"))
         # THIS PROCESS'S ENTRY BOUNDARY, from the log it reads first: every `card_build_attempted`
         # receipt at or below it was written by an earlier process, which is the one fact that lets a
         # quarantine close call itself a restart's (`speculation.py::_attempt_predates_this_process`).

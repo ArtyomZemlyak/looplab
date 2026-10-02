@@ -846,8 +846,9 @@ def eval_source_tree_command_paths(task) -> list[str]:
     """
     if not isinstance(task, RepoTask) or task.eval is None:
         return []
-    roots = [(ed.get("name") or ".", ed.get("path"))
-             for ed in (task.repo_spec() or {}).get("editables", []) if ed.get("path")]
+    roots = [(ed.get("name") or ".", path)
+             for ed in (task.repo_spec() or {}).get("editables", [])
+             for path in dict.fromkeys((ed.get("path"), ed.get("origin_path"))) if path]
     if not roots:
         return []
     argvs = [("cmd.command", task.eval.command or [])]
@@ -1939,8 +1940,22 @@ class RepoTask(BaseModel):
     editable_path: str = ""                   # the repo the agent may modify (mounts at root)
     edit_surface: list[str] = Field(default_factory=lambda: ["**/*.py"])
     protect: list[str] = Field(default_factory=list)   # paths the agent must NOT overwrite
+    # How the root editable_path is materialized per node; see EditableSpec.seed_mode.
     seed_mode: str = ""                        # "" -> Settings.seed_mode | auto | tracked | all
-    #  (how the root editable_path is materialized per node; see EditableSpec.seed_mode)
+    seed_base: Optional[dict] = None           # immutable initial run/bundle seed reference (doc 72)
+
+    @field_validator("seed_base", mode="before")
+    @classmethod
+    def _seed_base_valid(cls, value):
+        from looplab.engine.seed_base import normalize_seed_base
+        return normalize_seed_base(value)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_seed_base(self, handler):
+        payload = handler(self)
+        if self.seed_base is None and isinstance(payload, dict):
+            payload.pop("seed_base", None)
+        return payload
     # Multi-repo workspace (Phase 4): additional editable repos, each mounted at its `name`
     # subdir with its own surface/protect. Use this (optionally with editable_path for a
     # root repo) to let the agent edit across several repos in one experiment.
@@ -2155,6 +2170,9 @@ class RepoTask(BaseModel):
             out.append({"name": e.name, "path": e.path,
                         "surface": list(e.surface), "protect": list(e.protect),
                         "seed_mode": (e.seed_mode or self.seed_mode)})
+        if self.seed_base is not None:
+            from looplab.engine.seed_base import pinned_editables
+            out = pinned_editables(out, self.seed_base)
         return out
 
     def _entrypoint_protect(self, mounts: list[dict]) -> dict[str, list[str]]:
@@ -2262,6 +2280,32 @@ class RepoTask(BaseModel):
         boundary_protection(mounts, declaration, reserved=reserved)  # ownership on resume too
         if not _grandfathered(info):
             validate_boundary_sources(mounts, declaration, reserved=reserved)
+        return self
+
+    @model_validator(mode="after")
+    def _pinned_cwd_valid(self):
+        if self.seed_base is not None and self.eval is not None:
+            from pathlib import PureWindowsPath
+            cwd = str(self.eval.cwd or ".").replace("\\", "/")
+            mounts = self._declared_editable_mounts()
+            roots = [Path(p).resolve() for ed in mounts for p in (ed["path"], ed["origin_path"])]
+            if Path(cwd).is_absolute():
+                path = Path(cwd).resolve()
+                if not any(path == root or root in path.parents for root in roots):
+                    raise ValueError("seed_base cmd.cwd must be inside the workspace or remappable editable")
+            elif PureWindowsPath(cwd).drive or ".." in cwd.split("/"):
+                raise ValueError("seed_base requires cmd.cwd without drive or parent escapes")
+            argvs = [self.eval.command, *(st.get("command", []) for st in self.eval.stages)]
+            for argv in argvs:
+                for i, tok in enumerate(argv):
+                    if i == 0 and _PY_ARGV0.fullmatch(Path(tok).name):
+                        continue  # interpreter/environment identity is outside the copied base
+                    value = tok.split("=", 1)[-1] if tok.startswith("--") else tok
+                    path = Path(value)
+                    if path.is_absolute():
+                        path = path.resolve()
+                        if any(path == root or root in path.parents for root in roots):
+                            raise ValueError("seed_base commands must use workspace-relative source paths; declare inputs as data mounts")
         return self
 
     def eval_spec(self) -> dict:
@@ -2473,6 +2517,7 @@ class RepoTask(BaseModel):
             "editables": mounts,                         # Phase 4: every editable repo + mount
             "edit_surface": surface,                     # namespaced union over all repos
             "protected_names": self._protected_names(),
+            **({"seed_base": dict(self.seed_base)} if self.seed_base is not None else {}),
             **({"scorer_boundary": self.eval.scorer_boundary}
                if self.eval and self.eval.scorer_boundary is not None else {}),
             "references": [r.model_dump() for r in self.references],
