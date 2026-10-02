@@ -28,11 +28,11 @@ from looplab.runtime.command_eval import run_command_eval
 
 
 
-def fixture(tmp_path, *, base_train=TRAIN, source_files=None, upstream_policy=None, repair_from=None):
+def fixture(tmp_path, *, base_train=TRAIN, source_files=None, upstream_policy=None, repair_from=None, base_files=None):
     src, origin, rd = (tmp_path / name for name in ("owner", "origin", "run"))
     for p in (src, origin, rd):
         p.mkdir()
-    for name, text in {"train.py": base_train, "score.py": SCORE, "recipe.env": "MOMENTUM=0.0\n", "README.md": "Runner\n"}.items():
+    for name, text in {"train.py": base_train, "score.py": SCORE, "recipe.env": "MOMENTUM=0.0\n", "README.md": "Runner\n", **(base_files or {})}.items():
         (src / name).write_text(text, encoding="utf8")
     base = capture_seed_archive(src, origin / "base_snapshots")
     origin_store = EventStore(origin / "events.jsonl")

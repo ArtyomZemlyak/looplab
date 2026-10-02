@@ -1005,3 +1005,28 @@ Origin log/archive, inputs и interpreter остаются required dependencies
 export переносит actual base bytes и provenance, не объявляет environment/data
 архивированными и не переназначает absolute origin молча. POSIX/Windows symlink
 привилегии и arbitrary GPU reproducibility не объявлены покрытыми CPU-прогоном.
+
+### 18.5 Ревью настоящих Git worktrees (2026-10-02)
+
+Дополнительный real-Git прогон обнаружил две ошибки проекции: `git add -A`
+терял записанные ignored files, а `.gitattributes` менял CRLF/LF при checkout.
+Изменённый base ref также принимался без сверки с immutable archive. Четыре
+новых regression cases сначала упали (`.tmp/doc72-worktree-red.log`).
+
+Правка: private Git не наследует ambient config; hooks/fsmonitor выключены,
+приоритетные info attributes отключают byte transforms, staging включает ignored
+members. Каждый новый worktree до authoring сравнивается с записанной базой.
+Git metadata в seed запрещена до `git init`; она не может перенаправить repository.
+Git остаётся review projection: immutable archive и measured gate сохраняют
+авторитет, изменение ref или worktree само по себе не разрешает advancement.
+
+После правки: 8 real-Git scenarios проверяют ignored members, CRLF/LF, `$Id$`,
+UTF-16, sibling worktrees, ref drift, seed metadata refusal, отсутствие запуска
+ambient filter и настоящий gate/advance с ignored candidate file. Targeted
+upstream suite — 33 passed, документационные guards — 867 passed; новые Git
+cases и geometry/budgets повторно прошли после дополнения схемы. Повторная полная
+Engine/stdio MCP приёмка: `.tmp/doc72-git-worktree-complete/acceptance.json`,
+2 реальных SGD experiments, 7 gate executions, следующий lifecycle на новой
+базе, exact ACK retries, replay/export; owner bytes сохранились. Strict MkDocs
+прошёл. Это проверка новых private worktrees; повреждённая старая Git projection
+отказывает и требует явного восстановления, а не молча переписывается.

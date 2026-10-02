@@ -67,12 +67,29 @@ def write_overlay(work, files, deleted=()):
 
 def git_at(root, *argv):
     from looplab.runtime.sandbox import git_subprocess_env
+    # A private review projection cannot inherit filters/config that execute code
+    # or change the archived bytes. Keep the credential scrubber and identities.
+    env = {k: v for k, v in git_subprocess_env().items() if not k.startswith("GIT_CONFIG_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
     result = subprocess.run(["git", "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false",
-                             "-C", str(root), *argv], env=git_subprocess_env(),
+                             "-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + os.devnull,
+                             "-c", "core.attributesFile=" + os.devnull,
+                             "-C", str(root), *argv], env=env,
                             capture_output=True, timeout=30)
     if result.returncode:
         raise UpstreamRefusal("upstream_git_unavailable", "Maintainer git operation failed; inspect run-owned worktree")
     return result.stdout.decode("utf8").strip()
+
+
+def raw_git_attributes(rd):
+    """Highest-precedence attributes keep this Git projection byte preserving."""
+    path = owned_path(rd, "upstream/git/.git/info/attributes")
+    expected = b"* -text -filter -ident -working-tree-encoding\n"
+    if path.exists():
+        if read_bounded_regular_file(path, len(expected) + 1) != expected:
+            raise UpstreamRefusal("upstream_git_unavailable", "Restore private Git byte-preserving attributes before authoring")
+    else:
+        atomic_write_bytes(path, expected, mode=0o600)
 
 
 def maintainer_worktree(rd, spec, selector, proposal_id):
@@ -82,16 +99,26 @@ def maintainer_worktree(rd, spec, selector, proposal_id):
     if not root.exists():
         root.mkdir(parents=True)
         seed_pinned_workspace(selector, spec["editables"], root)
+        if any(p.name.casefold() == ".git" for p in root.rglob("*")):
+            raise UpstreamRefusal("upstream_git_unavailable", "Recorded seed contains Git metadata; it cannot initialize a private repository")
         git_at(root, "init", "--template=")
+        raw_git_attributes(rd)
         git_at(root, "config", "user.name", "LoopLab Maintainer")
         git_at(root, "config", "user.email", "maintainer@looplab.invalid")
         hooks = root.parent / "empty-hooks"; hooks.mkdir()
         git_at(root, "config", "core.hooksPath", str(hooks))
-        git_at(root, "add", "-A")
+        git_at(root, "add", "-f", "-A")
         git_at(root, "commit", "--allow-empty", "-m", "Recorded seed " + selector["digest"])
         git_at(root, "update-ref", base_ref, "HEAD")
+    raw_git_attributes(rd)
     work.parent.mkdir(parents=True, exist_ok=False)
     git_at(root, "worktree", "add", "-b", "proposal/" + proposal_id, str(work), base_ref)
+    from looplab.engine.workspace_seed import seeded_base_revision
+    _, receipt = selected_seed_base(selector)
+    actual = seeded_base_revision(snapshot_worktree(work, work.parent / "base-check"))
+    if not actual["complete"] or any(actual[k] != receipt[k]
+        for k in ("version", "scope", "digest", "file_count", "bytes")):
+        raise UpstreamRefusal("upstream_git_unavailable", "Maintainer worktree differs from its recorded base; inspect Git refs and restore the projection")
     return work
 
 

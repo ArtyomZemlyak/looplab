@@ -170,7 +170,7 @@ class UpstreamLane:
                 write_overlay(work, body["files"], body["deleted"])
                 if boundary_at(work, spec["scorer_boundary"]) != boundary_at(source_archive, spec["scorer_boundary"]):
                     raise UpstreamRefusal("upstream_scorer_changed", "Maintainer changed the declared scorer")
-                git_at(work, "add", "-A")
+                git_at(work, "add", "-f", "-A")
                 git_at(work, "commit", "-m", body["summary"][:500])
                 commit = git_at(work, "rev-parse", "HEAD")
                 snapshot = snapshot_worktree(work, work.parent / "snapshot")
