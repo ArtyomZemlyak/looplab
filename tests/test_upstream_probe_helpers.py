@@ -8,15 +8,15 @@ from looplab.core.errors import UpstreamRefusal
 from tests.test_upstream_lane import fixture
 
 
-@pytest.mark.parametrize("mask", ["none", "probe", "documentation_probe", "recipe", "documentation_recipe"])
-def test_regression_cannot_mask_an_added_capability_helper(tmp_path, mask):
+def helper_fixture(tmp_path, mask):
     helper = "runner_support.py"
     good = "# MOMENTUM flag\ndef momentum(value): return float(value)\n"
     bad = "# MOMENTUM flag\ndef momentum(value): return 0.8 if float(value) == 0.0 else float(value)\n"
     policy = {"repeats": 2,
         "tests": [{"name": "syntax", "command": [sys.executable, "-m", "py_compile", "train.py"]}],
         "regressions": [{"name": "old_recipe", "command": [sys.executable, "train.py"],
-            "files": {helper: good} if "probe" in mask else {}, "artifacts": ["predictions.json"]}]}
+            "files": {helper.upper() if mask == "case_probe" else helper: good} if "probe" in mask else {},
+            "artifacts": ["predictions.json"]}]}
     lane, store, generation, body = fixture(tmp_path, upstream_policy=policy)
     lane.task.edit_surface.append(helper)
     (lane.rd / "task.snapshot.json").write_text(lane.task.model_dump_json(), encoding="utf8")
@@ -26,7 +26,17 @@ def test_regression_cannot_mask_an_added_capability_helper(tmp_path, mask):
     if "documentation" in mask:
         body["documentation_path"] = helper
     if "recipe" in mask:
-        body["recipe_files"][helper] = good
+        if mask == "case_recipe_deleted":
+            body["recipe_deleted"] = [helper.upper()]
+        else:
+            body["recipe_files"][helper.upper() if mask == "case_recipe" else helper] = good
+    return lane, store, generation, body
+
+
+@pytest.mark.parametrize("mask", ["none", "probe", "documentation_probe", "case_probe", "recipe",
+    "documentation_recipe", "case_recipe", "case_recipe_deleted"])
+def test_regression_cannot_mask_an_added_capability_helper(tmp_path, mask):
+    lane, store, generation, body = helper_fixture(tmp_path, mask)
     before = store.path.read_bytes()
     try:
         made = lane.propose(body)
@@ -38,7 +48,30 @@ def test_regression_cannot_mask_an_added_capability_helper(tmp_path, mask):
     checked = lane.check({"expected_generation": generation, "action_id": "helper-gate",
         "proposal_id": made["proposal_id"]})
     assert mask == "none", f"Probe replaced the new helper and bought a {checked['status']} gate"
-    assert helper in made["capability_paths"]
+    assert "runner_support.py" in made["capability_paths"]
     assert checked["status"] == "failed"
     assert next(c for c in checked["result"]["checks"] if c["kind"] == "regression")["passed"] is False
     assert checked["result"]["checks"][-1]["passed"] is True
+
+
+@pytest.mark.parametrize("operation", ["check", "advance"])
+def test_saved_masked_proposal_cannot_buy_new_work_or_advance_after_upgrade(tmp_path, monkeypatch, operation):
+    lane, store, generation, body = helper_fixture(tmp_path, "probe")
+    request = {"expected_generation": generation, "action_id": "historical-gate"}
+    # Model the prior admission bug only. All training, scorer and gate evidence
+    # are real; a saved false pass must not become permission after an upgrade.
+    with monkeypatch.context() as old:
+        old.setattr(lane, "_validate_shared_patch", lambda *args: None)
+        made = lane.propose(body)
+        request["proposal_id"] = made["proposal_id"]
+        gate = lane.check(request)
+        assert gate["status"] == "succeeded", gate
+    before = store.path.read_bytes()
+    assert lane.propose(body) == made and lane.check(request) == gate
+    fresh = {**request, "action_id": "after-upgrade"}
+    if operation == "advance":
+        fresh.update(expected_base_revision=body["expected_base_revision"], evidence_token=gate["evidence_token"])
+    with pytest.raises(UpstreamRefusal) as refusal:
+        getattr(lane, operation)(fresh)
+    assert refusal.value.code == "upstream_probe_masks_capability"
+    assert store.path.read_bytes() == before

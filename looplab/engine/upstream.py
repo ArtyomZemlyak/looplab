@@ -96,6 +96,20 @@ class UpstreamLane:
         return [e for e in events if e.type in ("upstream_proposal_started", "upstream_gate_started") and e.data.get("action_id") not in completed | abandoned
                 and (proposal_id is None or e.data.get("proposal_id") == proposal_id)]
 
+    def _validate_shared_patch(self, body, implementation):
+        from looplab.engine.activation import is_config_path
+        patch_paths = set(body["files"]) | set(body["deleted"])
+        shared_patch = set(implementation) | {p for p in patch_paths if not is_config_path(p)}
+        # Use the declaration's portable path identity across separate overlays;
+        # NTFS writes RUNNER.py onto runner.py. Retain exact request spelling.
+        shared_keys = {p.casefold() for p in shared_patch}
+        recipe_keys = {p.casefold() for p in set(body["recipe_files"]) | set(body.get("recipe_deleted", []))}
+        if shared_keys & recipe_keys:
+            raise UpstreamRefusal("upstream_capability_not_absorbed", "The source recipe cannot overwrite the shared implementation")
+        probes = sum((self.task.upstream[k] for k in ("tests", "regressions", "repair_probes")), [])
+        if any(shared_keys & {p.casefold() for p in probe["files"]} for probe in probes):
+            raise UpstreamRefusal("upstream_probe_masks_capability", "Probes cannot replace the shared implementation; exercise the actual old/new base")
+
     def _proposal(self, events, proposal_id):
         event = next((e for e in events if e.type == "upstream_proposed" and e.data.get("proposal_id") == proposal_id), None)
         if event is None:
@@ -108,6 +122,9 @@ class UpstreamLane:
         manifest = json.loads(raw)
         if digest(manifest) != p["manifest_hash"]:
             raise UpstreamRefusal("upstream_manifest_changed", "Proposal manifest changed; publish a new proposal")
+        # Fresh checks/CAS must revalidate proposals recorded before an admission
+        # fix. Exact ACK recovery returns earlier, preserving the saved receipt.
+        self._validate_shared_patch(manifest, p["capability_paths"])
         selected_seed_base(p["selector"])
         return p, manifest
 
@@ -150,12 +167,9 @@ class UpstreamLane:
             # Generalization can add helpers absent from the nominated source.
             # Neither a probe nor the source recipe may replace those shared bytes;
             # naming code as documentation does not exempt it from this boundary.
-            shared_patch = implementation | {p for p in patch_paths if not is_config_path(p)}
-            if not implementation or not implementation <= patch_paths or shared_patch & (set(body["recipe_files"]) | set(body.get("recipe_deleted", []))):
+            if not implementation or not implementation <= patch_paths:
                 raise UpstreamRefusal("upstream_capability_not_absorbed", "Implement the nominated capability in the base; the source recipe cannot overwrite its implementation")
-            probes = sum((self.task.upstream[k] for k in ("tests", "regressions", "repair_probes")), [])
-            if any(shared_patch & set(probe["files"]) for probe in probes):
-                raise UpstreamRefusal("upstream_probe_masks_capability", "Probes cannot replace the shared implementation; exercise the actual old/new base")
+            self._validate_shared_patch(body, implementation)
             for row in rows:
                 if row["pending_trigger_nodes"] and row["origin"] == "repair":
                     if not any(all(any(token in list(map(str.strip, probe["files"].get(path, "").splitlines())) for token in tokens)

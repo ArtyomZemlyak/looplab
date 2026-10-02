@@ -1274,3 +1274,30 @@ Replay first (193 passed), Ruff, whitespace check и strict MkDocs прошли.
 2 primary trainings, 7 gate executions и 3 confirmation seeds; original
 confirmation base/files, exact retries без reexecution, replay/export и
 неизменные owner/scorer bytes подтверждены.
+
+### 18.12 Case aliases и ранее сохранённые proposals (2026-10-02)
+
+Actual Windows SGD воспроизвёл ещё один false pass: probe с
+`RUNNER_SUPPORT.PY` заменял `runner_support.py` на NTFS, а пересечение shared patch
+и probe сравнивало строки case-sensitively. Новый guard использует portable
+casefold identity, уже применённую к отдельным path declarations, между overlays.
+Точные имена запроса, hashes и архивные bytes не переписываются. Recipe writes
+и deletions с case alias проходят через тот же отказ до claim/worktree/evaluation.
+
+Также воспроизведено, что persisted masked proposal с настоящим passing gate
+мог купить свежую оценку или пройти CAS после исправления admission. Shared guard
+теперь вызывается и при чтении bound manifest для fresh check/advance. Exact
+proposal/check ACK остаются исходными без event write или reexecution; исторический
+ACK не является новой сертификацией. Для исправленного proposal нужен новый body
+и action ID. Event schema, replay и существующие receipts не мигрируются.
+
+Приёмка: case-alias SGD guard сначала failed из-за ложного succeeded gate;
+два upgrade guards сначала failed (fresh check и CAS не отказали).
+После правки targeted helper/integrity/repair/transaction — 30 passed;
+связанные upstream/seed/workspace/confirmation/export/MCP — 601 passed,
+14 platform/optional skips; docs/diagram/layering/containment — 108 passed.
+Replay first (193 passed), Ruff, whitespace check и strict MkDocs прошли.
+`.tmp/doc72-case-acceptance/acceptance.json`: private server + scoped stdio MCP,
+2 primary trainings, 7 gate executions, 3 confirmation seeds на original
+base/files; exact retries без reexecution, replay/export и неизменные
+owner/scorer bytes подтверждены.

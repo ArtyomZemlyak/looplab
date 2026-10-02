@@ -1385,6 +1385,10 @@ is advice; a completed source must have its current primary score and seed recei
    did not exist in the nominated source. Probes and source recipes cannot replace
    shared non-config patch files; calling a helper `documentation_path` grants no
    exception. Such masking refuses admission before a claim or worktree is created.
+   The comparison rejects case aliases across overlays too (`RUNNER.py` versus
+   `runner.py`). Fresh checks and advancement revalidate saved proposals, including
+   ones admitted before an admission fix. Exact retries still return the original
+   ACK; that historical receipt does not grant permission for a fresh action.
 3. Explicitly call `upstream_check` with `expected_generation`, new `action_id` and
    `proposal_id`. This buys actual operator tests, old-recipe artifact regressions,
    paired full source repetitions and any required original repair trigger.
