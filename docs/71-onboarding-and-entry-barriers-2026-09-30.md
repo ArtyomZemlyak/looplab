@@ -594,9 +594,9 @@ External run здесь намеренно не получал кандидат�
 | OB-07 | Частично | Composer показывает активные права и понятное пояснение; четыре варианта раскрываются по запросу, выбор возвращает фокус на видимый переключатель. | Проверить понимание режимов с новым пользователем. |
 | OB-08 | Частично | Essential открывается с модели, показывает 13 полей ресурсов и лимитов с короткими пояснениями; технические детали и runtime permissions раскрываются отдельно. | Проверить подключение модели и понимание лимитов с новым пользователем. |
 | OB-09 | Частично | Run workspace и Agent cycle показывают next step; списки различают внешний режим и engine, attention открывает текущие вопросы (§34–36). Гибель MCP и pause/resume проверены (§37–38). §47 показывает последнее успешное scoped progress чтение. | Активность запросов не доказывает живость агента; многочасовой сценарий OB-10 ещё открыт. |
-| OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–63 проверяют MCP/UI recovery, pause/resume, engine loss, obligations, monitor, deadline и ASHA. §47–63 — request activity, auth, потерянные/неполные ответы, identity/discovery recovery, отдельный `[harness]` клиент и восстановление пропущенных интерпретаций результатов. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
-| OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. §39/41 исправляют ссылки checkpoint/concept base на реальные MCP-фазы; §52 различает unavailable discovery и пустой catalog; §53 убирает FastAPI dependency из `phase_info`; §54–55 дают cursor и typed MCP read для результатов; §56 — проверенный repair recipe; §57 — original ACK для superseded review/decision. §58 — source completeness для ACK, admission и finish. §59 — MCTS value ACK с исходной evidence revision и реальные policy switches; §60 — event source integrity for semantic reads, publications and replay ACK; §61 — typed completion page validation; §62 — lesson roles and knowledge ACK/source recovery; §63 — command receipt verdict validation. | Проверены контракт, subprocess-кандидаты, desktop и discovery из серверной подсказки; подключение нового клиента относится к OB-10. |
-| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–63: source health, lifecycle verdict, engine recovery, obligations, monitor, retarget, idle recovery, activity, unknown acknowledgement, identity квитанции, minimal client и пагинация результатов без дублей интерпретаций. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. §49–53 повреждают реальные replies, включая discovery. §54 восстанавливает сообщения после reconnect. Наблюдение запросов не измеряет живость агента. |
+| OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–64 проверяют MCP/UI recovery, pause/resume, engine loss, obligations, monitor, deadline и ASHA. §47–64 — request activity, auth, потерянные/неполные ответы, identity/discovery recovery, отдельный `[harness]` клиент и восстановление пропущенных интерпретаций результатов. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
+| OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. §39/41 исправляют ссылки checkpoint/concept base на реальные MCP-фазы; §52 различает unavailable discovery и пустой catalog; §53 убирает FastAPI dependency из `phase_info`; §54–55 дают cursor и typed MCP read для результатов; §56 — проверенный repair recipe; §57 — original ACK для superseded review/decision. §58 — source completeness для ACK, admission и finish. §59 — MCTS value ACK с исходной evidence revision и реальные policy switches; §60 — event source integrity for semantic reads, publications and replay ACK; §61 — typed completion page validation; §62 — lesson roles and knowledge ACK/source recovery; §63 — command receipt verdict validation; §64 — explicit progress health/gates and pending counts. | Проверены контракт, subprocess-кандидаты, desktop и discovery из серверной подсказки; подключение нового клиента относится к OB-10. |
+| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–64: source health, lifecycle verdict, engine recovery, obligations, monitor, retarget, idle recovery, activity, unknown acknowledgement, identity квитанции, minimal client и пагинация результатов без дублей интерпретаций. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. §49–53 повреждают реальные replies, включая discovery. §54 восстанавливает сообщения после reconnect. Наблюдение запросов не измеряет живость агента. |
 | OB-14 | Частично | Начало сайта показывает два основных входа. | Большая архитектурная схема всё ещё нуждается в упрощении для первого знакомства. |
 
 Остальные пункты §3 и соответствующие сценарии §11 остаются открытыми. Изменения первого
@@ -3172,6 +3172,89 @@ remote transfer остаются открытыми.
 валидация ради них не ослаблена. Targeted набор — **136 passed**, расширенный
 backend/MCP/recovery набор — **535 passed**. Перед изменением — **193 replay**
 проверки. Guide, AGENTS, MCP instructions, manifest и full B/E diagram обновлены.
+API reference регенерирован без изменения routes/settings/event schema.
+**31 docs/diagram** и ещё **56 MCP metadata/phase** checks прошли вместе;
+`mkdocs build --strict` прошёл.
+
+## 64. OB-10/11/12: неполный progress не означает отсутствие обязанностей
+
+**2026-10-02.** Typed `run_progress` раньше принимал HTTP 200 с одной правильной
+`generation`. `connection_check` мог возвращать `ok=true` с пустыми
+`source_health`/`next_step` и без admission/finish obligations. Идентичность
+контекста не доказывает полноту наблюдения. **51** проверки до изменения
+воспроизвели принятие неполного или противоречивого progress; уже существующие
+connection checks отказывали части malformed fields.
+
+Общий UI-free validator для обоих инструментов проверяет critical compact fields:
+run/evidence stamps, четыре named source receipts с boolean `read_complete`,
+aggregate `complete`, lifecycle/execution observations, explicit candidate blockers,
+decision minimums и requirements, finish reviews/report, pending nodes/questions
+с counts и truncation. Пустые obligations должны присутствовать явно. Missing или
+inconsistent field даёт `run_progress` HTTP 200 `response_incomplete`,
+`outcome=unavailable`, `reason=invalid_progress` без body. Connection check сохраняет
+свой `ok=false`/`invalid_response`, не экспортирует неполный context.
+Generation refusal priority и non-200 responses не менялись.
+
+Корректный `complete=false` сохраняет диагностику повреждённых sources. Он
+не становится transport failure и не разрешает admission; successful connection
+имеет `evidence_complete=false`. Extra fields, дополнительные named sources и
+future advice codes совместимы. Это проверка структуры наблюдения: correctness
+policy advice и source contents остаётся ответственностью server/domain reads.
+Нет новых endpoint/default/schema fields, gates, event writes, model calls,
+автоматического retry/resume или takeover.
+
+Реальная server projection поймала ошибку в первой версии нового validator:
+`candidate_decisions_per_idea` — словарь phase/minimum, не список. Два старых
+positive fixtures дополнены настоящими critical fields. Расширенная проверка
+с **22** current questions выявила допустимый server sentinel **claim_seq=-1**,
+когда invocation ещё не записан. Он сохранён как observation без новой authority;
+bool/string и значения ниже -1 отказаны. Integration checks читают реальные
+compact projections с claim/no-claim, truncated questions и healthy/damaged
+journals. Разрешённые verdicts всё равно читаются через полный checkpoint API.
+
+### Реальные MCP recovery probes
+
+`--case agent_loss --drop-command-response --read-fault incomplete_progress`
+удаляет только `candidate_decisions_per_idea` из двух настоящих successful
+progress replies. Generation и остальные поля сохранены. `run_progress` отказывает
+body; `connection_check` отказывает successful context. Только явные последующие
+reads восстанавливают gates. Events bytes не меняются, worker и scorer не запускаются
+заново. Lost accepted inject/commentary replies отдельно восстановлены exact retries.
+Два protected SGD evaluations: MSE **0.13721179500378475 / 0.01337676906957059**,
+один engine, два terminal nodes и три русских commentary. Proof:
+`.tmp/external-progress-shape-proof-1/acceptance.json`.
+
+`--case engine_loss --result-backlog --failed-first --obligations --damaged-journals`
+проверяет failed parent без score и исправленный measured child с MSE
+**0.01337676906957059**, UI restart и явный resume engine. Malformed decision/review
+sources остаются видимыми как incomplete diagnostics, semantic writes отказываются;
+после fixture recovery прежние ACK остаются superseded, свежие report/reviews
+выполняются отдельно. Исходный и один replacement engine, два scorer invocations,
+два terminal nodes, три commentary. Proof:
+`.tmp/external-progress-engine-proof-1/acceptance.json`.
+
+`external_session_smoke --monitor --obligations` дополнительно проверил живые
+checkpoint/monitor observations через typed progress. **Четыре** monitor questions
+сохранились через MCP/UI reconnect; advisory abort отказан в каждом случае.
+Повреждённый checkpoint journal не разрешал read/answer и оставлял evaluation
+pending до явного fixture recovery. Pause/resume не потерял вопрос и не повторил
+первый score stage. Reset node 1 создал новую попытку/вопрос, старый answer ACK
+не закрыл новую обязанность. MSE **0.7807408706494512 / 0.000012609385167897514**;
+attempt 1 повторно измерил тот же child score, последний отменённый узел без score.
+Recorded obligations: research=3, run_concepts=1, report=4, reviews=8.
+Protected scorer неизменен, `inspect`/`replay` проходят. Proof:
+`.tmp/external-progress-monitor-proof-1/acceptance.json`.
+
+В обоих recovery cases protected scorer неизменен, `inspect`/`replay` проходят.
+Отдельный minimal MCP client не имеет FastAPI, блокирует FastAPI/Uvicorn imports
+и читает **32** phases до/после reconnect. Эти локальные process/transport cases
+не закрывают модельные решения, interactive client approvals, многочасовые сеансы
+или physical remote transfer.
+
+Новый набор — **81** checks; после sentinel fix целевой progress/checkpoint/MCP
+набор — **210 passed**. Перед изменением прошли **193 replay** проверки.
+Финальный расширенный backend/MCP/recovery набор — **616 passed**.
+Guide, AGENTS, MCP instructions, manifest и full B/E diagram обновлены.
 API reference регенерирован без изменения routes/settings/event schema.
 **31 docs/diagram** и ещё **56 MCP metadata/phase** checks прошли вместе;
 `mkdocs build --strict` прошёл.

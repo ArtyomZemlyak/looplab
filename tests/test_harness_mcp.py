@@ -176,7 +176,8 @@ def test_api_refuses_redirect_to_avoid_forwarding_owner_token():
 @pytest.mark.parametrize("run_id", ["demo space", "mnist # %2F"])
 def test_compact_progress_is_one_fenced_authenticated_read(status, run_id):
     seen = []
-    payload = {"generation": "a" * 64, "receipt": "unchanged"} if status == 200 else {"receipt": "unchanged"}
+    from tests.test_harness_connection import progress
+    payload = {**progress(), "receipt": "unchanged"} if status == 200 else {"receipt": "unchanged"}
 
     def handler(request):
         seen.append(request)

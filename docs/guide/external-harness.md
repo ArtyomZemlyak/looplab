@@ -230,6 +230,20 @@ accept a different digest or reinterpret a run ID, key or action ID.
 The returned handoff must match the run ID, generation and external mode, with
 configured credential and valid server paths/engine observation. A malformed or
 mismatched handoff stops this check before progress is read.
+Both `run_progress` and `connection_check` validate critical compact progress fields:
+evidence stamps, explicit read completeness for events/decisions/reviews/checkpoints,
+the aggregate `complete`, lifecycle and engine observations, expansion/finish gates,
+and pending node/question counts with their bounded lists and truncation flags.
+Missing or inconsistent fields cannot mean empty obligations. `run_progress` returns
+HTTP 200 `response_incomplete`, `outcome=unavailable`, `reason=invalid_progress`
+without body; `connection_check` returns `ok=false`/`invalid_response` without
+exporting that context. Refresh explicitly before deciding; no automatic retry occurs.
+Structurally valid `complete=false` reads retain incomplete-source diagnostics;
+connection success then has `evidence_complete=false` and grants no permission to act.
+Extra fields/sources and future advice codes remain compatible. This checks the
+observation structure, not the correctness of policy advice or source contents.
+Recorded questions may retain `claim_seq=-1` when no invocation is recorded;
+this is observation, not verdict authority. Read the full current checkpoint before answering.
 Observation bypasses the ordinary state route's reconciliation of a pending
 operator reset. It can see an unfinished reset, so the subsequent generation fences
 remain necessary; the diagnostic never completes that reset itself.
@@ -1276,6 +1290,10 @@ submits an invalid hint, observes its real `rejected` record, and removes `termi
 from one successful receipt reply while preserving generation/ID. The typed read
 must refuse it; the next explicit read recovers `rejected`/`invalid_command` with
 no new event, automatic retry or worker restart. The protected SGD evaluations remain unchanged.
+`--read-fault incomplete_progress` removes the candidate decision requirements from
+two real successful progress replies, keeping generation and the other fields.
+Both typed `run_progress` and `connection_check` must refuse that context. Explicit
+subsequent reads recover the gates without event changes, work or automatic retries.
 Add `--knowledge-recovery` with `--result-backlog --obligations` to publish a
 protected-evaluation protocol lesson and candidate skill after two measured nodes.
 An owned proxy drops both accepted responses; exact retries must recover one lesson

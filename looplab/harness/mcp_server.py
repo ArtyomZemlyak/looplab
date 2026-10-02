@@ -51,6 +51,7 @@ MCP_INSTRUCTIONS = (
     "Commentary executes no actions and never replaces checkpoints or report obligations. "
     "Keep original lesson/skill bodies and action IDs. Exact retries acknowledge stored actions without refreshing signatures, restoring retired support or granting promotion; fresh writes check current evidence. Shared/researcher/developer lesson roles are retained. Damaged event/knowledge sources and fresh completed knowledge reviews refuse with a named source. Inspect refusal health and request operator recovery; no automatic repair/resume. "
     "Typed command_receipt also verifies v1 status/terminal consistency, control event, sequence, error_code and retryable fields. Incomplete HTTP 200 means unavailable without body, not a command verdict. Read again explicitly; a terminal rejected/failed receipt or succeeded inject still does not prove completed training. "
+    "Typed run_progress and connection_check validate critical progress fields, source completeness, explicit expansion/finish gates and pending counts. Missing fields are unavailable, not empty obligations. A structurally valid complete=false read retains source diagnostics; read success does not grant admission. Refresh explicitly; no automatic retry or work. "
     "Use only the scoped harness credential; owner-only workflows require the operator."
 )
 
@@ -232,8 +233,70 @@ class HarnessAPI:
 
     def run_progress(self, run_id: str, expected_generation: str) -> dict:
         self._run_identity(run_id, expected_generation)
-        return self._checked_generation(self.request("GET", f"/api/runs/{quote(run_id, safe='')}/harness-progress"
+        result = self._checked_generation(self.request("GET", f"/api/runs/{quote(run_id, safe='')}/harness-progress"
                             f"?expected_generation={expected_generation}&brief=true"), expected_generation)
+        if result["status"] == 200 and not result.get("code") and not self._valid_progress(result["body"]):
+            return {"status": 200, "code": "response_incomplete", "outcome": "unavailable",
+                    "reason": "invalid_progress",
+                    "message": "Progress fields are incomplete or inconsistent. Read current state and refresh progress explicitly before deciding; missing gates are not empty obligations. No retry or work was started."}
+        return result
+
+    @staticmethod
+    def _valid_progress(page: dict) -> bool:
+        # Validate the critical compact observation, not the server's decision
+        # policy. Incomplete sources remain useful diagnostics when explicitly
+        # represented. Missing health/gates cannot silently mean no obligations.
+        def count(value):
+            return type(value) is int and value >= 0
+        def strings(value):
+            return isinstance(value, list) and all(isinstance(item, str) and item for item in value)
+        health, step = page.get("source_health"), page.get("next_step")
+        execution, lifecycle = page.get("execution"), page.get("recorded_lifecycle")
+        requirements, blockers = page.get("candidate_requirements"), page.get("candidate_blockers_if_expanding")
+        decisions = page.get("candidate_decisions_per_idea")
+        if not (isinstance(page.get("run_uid"), str) and count(page.get("event_seq"))
+                and count(page.get("at_node")) and isinstance(page.get("evidence_revision"), str)
+                and re.fullmatch(r"[0-9a-fA-F]{64}", page["evidence_revision"]) is not None
+                and type(page.get("complete")) is bool and isinstance(health, dict)
+                and all(isinstance(health.get(name), dict) and type(health[name].get("read_complete")) is bool
+                        for name in ("events", "decisions", "reviews", "checkpoints"))
+                and all(isinstance(source, dict) and type(source.get("read_complete")) is bool
+                        for source in health.values())
+                and page["complete"] == all(source["read_complete"] for source in health.values())
+                and isinstance(step, dict) and step.get("owner") == "external_agent"
+                and all(isinstance(step.get(key), str) and step[key] for key in ("code", "title", "detail"))
+                and strings(step.get("reads")) and all(key in step and
+                    (step[key] is None or isinstance(step[key], str)) for key in ("action", "phase_id"))
+                and isinstance(lifecycle, dict) and all(type(lifecycle.get(key)) is bool for key in
+                                                      ("paused", "finished", "stop_requested"))
+                and isinstance(execution, dict) and "engine_running" in execution
+                and (execution["engine_running"] is None or type(execution["engine_running"]) is bool)
+                and execution.get("agent_connection") == "not_measured"
+                and isinstance(execution.get("recorded_node_counts"), dict)
+                and all(count(execution["recorded_node_counts"].get(key)) for key in
+                        ("building", "queued", "evaluating", "pending"))
+                and isinstance(requirements, dict) and all(type(requirements.get(key)) is bool for key in
+                                                          ("effective_concepts", "hypothesis_statement"))
+                and isinstance(blockers, list) and all(isinstance(row, dict) and all(
+                    isinstance(row.get(key), str) and row[key] for key in ("phase_id", "action")) for row in blockers)
+                and isinstance(decisions, dict) and all(isinstance(key, str) and key and count(value)
+                    and value > 0 for key, value in decisions.items()) and strings(page.get("finish_reviews_due"))
+                and type(page.get("finish_report_due")) is bool):
+            return False
+        for field, total_key in (("finish_pending_nodes", "finish_pending_node_count"),
+                                 ("pending_checkpoints", "pending_checkpoint_count")):
+            rows, total, truncated = page.get(field), page.get(total_key), page.get(field + "_truncated")
+            if not (isinstance(rows, list) and count(total) and len(rows) == min(total, 20)
+                    and type(truncated) is bool and truncated == (total > len(rows))):
+                return False
+        return (all(count(nid) for nid in page["finish_pending_nodes"])
+                and all(isinstance(row, dict) and all(isinstance(row.get(key), str) and row[key]
+                    for key in ("checkpoint_id", "phase_id")) and all(count(row.get(key)) for key in
+                    ("node_id", "node_generation"))
+                    # The server retains -1 for a recorded question with no
+                    # invocation claim. This is an observation, not abort authority.
+                    and type(row.get("claim_seq")) is int and row["claim_seq"] >= -1
+                    for row in page["pending_checkpoints"]))
 
     def result_notices(self, run_id: str, expected_generation: str,
                        limit: int = 50, cursor: str | None = None) -> dict:
@@ -363,10 +426,7 @@ class HarnessAPI:
         if progress.get("ok") is False:
             return progress
         progress = progress["body"]
-        if (progress.get("generation") != generation
-                or not isinstance(progress.get("source_health"), dict)
-                or not isinstance(progress.get("next_step"), dict)
-                or type(progress.get("complete")) is not bool):
+        if progress.get("generation") != generation or not self._valid_progress(progress):
             return {"ok": False, "status": 200, "code": "invalid_response", "at": "context",
                     "message": "Connection evidence does not match this external run. Request fresh context."}
         return {"ok": True, "status": 200, "code": "run_reads_succeeded", "run_id": run_id,
@@ -456,6 +516,9 @@ def build_server(api: HarnessAPI):
         the copied handoff generation to refuse a replaced run; otherwise discover it.
         Reports fixed diagnostics for refused access, missing run, stale context or
         unavailable API. Does not resume, submit, probe a model or certify agent liveness.
+        Progress must include consistent health, obligations and pending counts;
+        malformed evidence cannot produce ok=true. Valid incomplete-source diagnostics
+        remain readable with evidence_complete=false, not permission to act.
         """
         return api.connection_check(run_id, expected_generation)
 
@@ -557,7 +620,10 @@ def build_server(api: HarnessAPI):
         returns HTTP failures unchanged, and never retries or submits a candidate.
         Check code/outcome before body: even HTTP 200 can carry unavailable evidence
         when the reply is over cap, not a JSON object or lacks matching generation.
-        A different generation returns response_context_mismatch without its body."""
+        A different generation returns response_context_mismatch without its body.
+        Missing/inconsistent critical health, gates, lifecycle or pending counts return
+        invalid_progress/unavailable without body. Valid complete=false diagnostics
+        are retained; empty gates must be explicit, and advice grants no permission."""
         return api.run_progress(run_id, expected_generation)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,

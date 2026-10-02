@@ -7,6 +7,26 @@ from looplab.harness.mcp_server import HarnessAPI
 GEN = "a" * 64
 
 
+def progress():
+    """Critical fields of the server's compact progress, including empty gates."""
+    return {"generation": GEN, "run_uid": "incarnation", "event_seq": 3, "at_node": 0,
+        "evidence_revision": "b" * 64, "complete": True,
+        "source_health": {name: {"read_complete": True} for name in
+                          ("events", "decisions", "reviews", "checkpoints")},
+        "next_step": {"code": "choose_direction", "title": "Choose", "detail": "Read evidence",
+                      "owner": "external_agent", "reads": [], "action": None, "phase_id": None},
+        "recorded_lifecycle": {"paused": False, "finished": False, "stop_requested": False},
+        "execution": {"engine_running": False, "agent_connection": "not_measured",
+                      "recorded_node_counts": {name: 0 for name in
+                                               ("building", "queued", "evaluating", "pending")}},
+        "candidate_blockers_if_expanding": [], "candidate_decisions_per_idea": {},
+        "candidate_requirements": {"effective_concepts": False, "hypothesis_statement": False},
+        "finish_reviews_due": [], "finish_report_due": False,
+        "finish_pending_nodes": [], "finish_pending_node_count": 0,
+        "finish_pending_nodes_truncated": False, "pending_checkpoints": [],
+        "pending_checkpoint_count": 0, "pending_checkpoints_truncated": False}
+
+
 def response(path, run_id="demo"):
     if path.endswith("/state"):
         return {"generation": GEN, "state": {"run_uid": "incarnation"}}
@@ -15,8 +35,7 @@ def response(path, run_id="demo"):
                 "credential_configured": True,
                 "server_paths": {"run_dir": "/runs/demo", "run_root": "/runs", "token":"must-not-be-exported"},
                 "engine_running": False, "token": "must-not-be-exported"}
-    return {"generation": GEN, "complete": True, "source_health": {"events": {"complete": True}},
-            "next_step": {"kind": "research", "responsible": "external_agent"}}
+    return progress()
 
 
 def test_connection_reads_only_fenced_context_preserving_obligations_and_stopped_engine():
@@ -29,7 +48,7 @@ def test_connection_reads_only_fenced_context_preserving_obligations_and_stopped
     result = api.connection_check(run_id, GEN)
     assert result["ok"] and result["code"] == "run_reads_succeeded"
     assert result["engine_running"] is False and result["agent_connection"] == "not_measured"
-    assert result["next_step"]["kind"] == "research"
+    assert result["next_step"]["code"] == "choose_direction"
     assert "must-not-be-exported" not in str(result)
     assert [r.url.path for r in seen] == [f"/proxy/api/runs/{run_id}/{suffix}"
         for suffix in ("state", "harness-handoff", "harness-progress")]
@@ -125,13 +144,14 @@ def test_connection_keeps_incomplete_journal_evidence_explicit():
     def handler(request):
         value=response(request.url.path)
         if request.url.path.endswith("/harness-progress"):
-            value.update(complete=False, source_health={"reviews":{"read_complete":False}},
-                         next_step={"kind":"inspect_sources"})
+            value["complete"] = False
+            value["source_health"]["reviews"]["read_complete"] = False
+            value["next_step"]["code"] = "inspect_sources"
         return httpx.Response(200,json=value)
     api=HarnessAPI("http://localhost",transport=httpx.MockTransport(handler))
     result=api.connection_check("demo")
     assert result["ok"] and result["evidence_complete"] is False
-    assert result["next_step"]["kind"]=="inspect_sources"
+    assert result["next_step"]["code"]=="inspect_sources"
     assert result["source_health"]["reviews"]["read_complete"] is False
 
 

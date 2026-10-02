@@ -17,7 +17,7 @@ from looplab.harness.mcp_server import MAX_RESPONSE_BYTES
 class ResponseLossProxy:
     def __init__(self, upstream, mode="disconnect", read_mode="disconnect"):
         assert mode in ("disconnect", "invalid_json", "oversized", "server_error")
-        assert read_mode in ("disconnect", "stale_generation", "wrong_receipt", "incomplete_result_page", "incomplete_receipt")
+        assert read_mode in ("disconnect", "stale_generation", "wrong_receipt", "incomplete_result_page", "incomplete_receipt", "incomplete_progress")
         target = urlsplit(upstream)
         assert target.hostname == "127.0.0.1"
         self.drop_next_read = False
@@ -42,7 +42,9 @@ class ResponseLossProxy:
                     payload = response.read()
                     with fixture._lock:
                         lose_write = self.command == "POST" and self.path == fixture.drop_next_write
-                        lose_read = self.command == "GET" and fixture.drop_next_read
+                        lose_read = (self.command == "GET" and fixture.drop_next_read
+                                     and (read_mode != "incomplete_progress" or
+                                          self.path.split("?", 1)[0].endswith("/harness-progress")))
                         lose_catalog = self.command == "GET" and self.path == "/openapi.json" and fixture.catalog_fault is not None
                         if lose_write or lose_read or lose_catalog:
                             fixture.drop_next_read = False
@@ -74,6 +76,8 @@ class ResponseLossProxy:
                                     del value["items"]
                                 elif read_mode == "incomplete_receipt":
                                     del value["terminal"]
+                                elif read_mode == "incomplete_progress":
+                                    del value["candidate_decisions_per_idea"]
                                 else:
                                     value["command"]["id"] = "cmd_" + "f" * 32
                                 payload = json.dumps(value).encode("utf8")

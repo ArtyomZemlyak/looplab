@@ -34,7 +34,10 @@ settings impose obligations on the external agent. For a live run, also read
 `GET /api/runs/{run_id}/harness-progress`
 with `expected_generation` from `/state`: it lists current admission and finish
 requirements, pending evaluation questions, and paged decision/review/checkpoint
-history. Refresh after events or responses; inspect `source_health` if the event
+history. Typed MCP progress/connection reads require explicit health, gates and
+consistent pending counts; a missing field is unavailable, not an empty obligation.
+Valid incomplete-source diagnostics remain readable and grant no permission to act.
+Refresh after events or responses; inspect `source_health` if the event
 log or a sidecar journal is incomplete. Commands and measured results remain in
 the event timeline. External obligation settings are fixed for a launched run;
 change operational settings on resume or start another run to change obligations.
