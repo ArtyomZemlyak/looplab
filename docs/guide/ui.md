@@ -6,6 +6,15 @@ Install and launch the UI using the [source-install steps](installation.md#sourc
 Open **Runs**; Assistant is already visible on a desktop screen. Select **Start a new run**,
 describe your goal and where the code or data live, then review its launch card.
 **Validate** shows the effective task and settings; **Start run** begins the experiment.
+
+The launch card shows a **Next:** instruction in the Assistant language (**Дальше:**
+in Russian). Before validation, review the goal, metric direction and code/data
+paths. After validation, review the effective limits and cost warning before
+**Start run**. Editing the plan requires validation again; changing language keeps
+the checked plan. **Detailed status / Подробный статус** contains the precise
+technical message. A lost startup reply leads to **Check startup**, which reads
+the existing launch identity; it does not send a second Start. Confirmed startup
+means the run can be opened, not that its experiments have finished.
 The run opens with its current status, and **Report** shows the measured result and caveats.
 For the attached run, Assistant chat also shows free short briefs after each completed
 evaluation and after finalization. They include the score, confirmation/constraints and

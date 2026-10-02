@@ -133,8 +133,12 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // RU setup/recovery copy is confined to lazy AssistantModelCheck, guarded below. Moving it
     // out of shared LlmHealth keeps every existing route ceiling. Only measured totals change:
     // 606.5 KiB leaves 873 B JS; 58.125 KiB leaves 84 B CSS. Initial shell is 83,030 B JS.
-    js: { gzip: 606.5 * KIB },
-    css: { gzip: 58.125 * KIB },
+    // 2026-10-02 launch next steps: 620,183 -> 622,633 B JS (+2,450 B), CSS 59,576 B.
+    // Guidance prose/CSS load only for a launch card; a required forbidden target proves deferral.
+    // Language and phase wiring adds ~300 B to owner routes. Initial shell remains 83,031 B JS.
+    // The new measured total leaves 983 B JS and 72 B CSS headroom.
+    js: { gzip: 609 * KIB },
+    css: { gzip: 58.25 * KIB },
   },
   individual: {
     js: { raw: 450 * KIB, gzip: 110 * KIB },
@@ -259,7 +263,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-10-01: 265,223 B (+9 B): RunView passes the live sequence to the lazy agent panel.
       // 2026-10-01 Assistant language: 268,292 B; the same owner chrome increment.
       // 2026-10-02 same Assistant labels: measured 269,500 B; 324 B headroom.
-      limits: { js: { gzip: 263.5 * KIB }, css: { gzip: 43 * KIB } },
+      // 2026-10-02 launch next steps: 269,623 -> 269,917 B from shared phase/language wiring;
+      // the actual guidance remains lazy. 264 KiB leaves 419 B; other route ceilings are unchanged.
+      limits: { js: { gzip: 264 * KIB }, css: { gzip: 43 * KIB } },
     },
     {
       name: 'panel-hub increment',
@@ -320,6 +326,12 @@ export const DEFAULT_BUDGETS = Object.freeze({
     },
   ],
   forbidden: [
+    {
+      name: 'run routes defer launch guidance',
+      roots: [entry, ownerChrome, source('src/RunView.jsx'), source('src/ConceptView.jsx')],
+      targets: [source('src/LaunchGuidance.jsx')],
+      requireTargets: true,
+    },
     {
       name: 'run routes defer Assistant model setup',
       roots: [entry, ownerChrome, source('src/RunView.jsx'), source('src/ConceptView.jsx')],

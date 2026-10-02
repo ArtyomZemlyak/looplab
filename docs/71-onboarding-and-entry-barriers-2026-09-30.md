@@ -3391,3 +3391,55 @@ initial shell — **83030 bytes JS**. Только общие численные
 десктопную компоновку и доступность native disclosure в AX tree, а не полный
 accessibility audit. Весь Settings остаётся на английском; текущий шаг локализует
 проверку внутри Assistant. Полную русификацию Settings считать незакрытым барьером.
+
+## 68. Следующий шаг в карточке запуска
+
+Свежая проверка локального UI: русский чат показывает launch card с мелким
+английским статусом перед действиями. Новичку приходится расшифровывать
+`not validated`, `inherit` и `validated`, чтобы понять, что делать дальше.
+До изменений сохранён и просмотрен `.tmp/onboarding-launch/audit/01-before.jpg`.
+Карточка подготовлена локально и явно помечена как UI fixture: это не ответ модели.
+
+Добавлена читабельная инструкция **Next: / Дальше:** на языке Assistant:
+
+1. До проверки — цель, направление метрики и пути, затем бесплатная Validate.
+2. После полного authoritative preview — итоговые лимиты и стоимость, затем
+   Start run. Правка возвращает к проверке; смена языка сохраняет валидацию.
+3. При ошибке — отмеченные поля, при Settings recovery — соответствующее
+   предупреждение, при unknown startup — Check startup для прежнего запроса.
+   Успешный старт объясняется отдельно от завершения экспериментов.
+
+![Подсказка после бесплатной серверной проверки](assets/71-onboarding/28-launch-next-step.jpg)
+
+Исходный технический статус доступен в native disclosure **Подробный статус**.
+Предыдущая защита от показа устаревшего Settings notice сохранена. Инструкция
+не выбирает действия: phase выводится из тех же фактов LaunchCard; проверки
+fingerprint, settings fence, сохранения startup identity и результатов сервера
+сохранены. Copy/CSS загружаются лениво при показе карточки.
+
+Проверка: **50 UI tests** — реальные клики и изменение полей, delayed validation,
+полный/неполный preview, RU/EN без remount, повторная проверка после правки,
+unknown Start с единственным POST и последующим GET с исходным Idempotency-Key,
+Settings fence, ownership draft/provenance, streaming/memoization и bundle gates.
+В production UI на **1920×1080** бесплатная проверка дважды вернула реальные
+настройки: 3 experiments, run 30s, inherited seeds 3. Start стал доступен только
+после ответа. Смена языка сохранила готовность; изменение имени убрало preview
+и снова отключило Start. В server log — только два POST `/api/start/preflight`;
+нет POST `/api/start`, provider calls и `events.jsonl`. Обучение и генерация
+proposal моделью здесь не проверялись. До/после, RU/EN и правка сохранены в
+`.tmp/onboarding-launch/audit/`. Проверка AX/native disclosure и компоновки —
+ограниченная проверка доступности, не полный accessibility audit.
+
+Quickstart и UI guide описывают новый шаг. **26 documentation tests** и strict
+MkDocs прошли. Production build и настоящий size/reachability gate прошли.
+JS gzip **620183 → 622633 bytes** (+2450), CSS **59436 → 59576 bytes** (+140).
+Initial shell — **83031 bytes JS**. Общие измеренные потолки: 609 KiB JS,
+58.25 KiB CSS. Phase/language wiring добавил 294 bytes к owner Concepts closure;
+его потолок — 264 KiB с 419 bytes запаса. Другие route ceilings сохранены.
+Добавлен обязательный forbidden target LaunchGuidance; тесты проверяют как
+недопустимый eager import, так и исчезновение target. Структурные ограничения
+не ослаблены.
+
+Остаточный барьер: заголовки, поля и кнопки launch card пока английские.
+Русская инструкция использует их реальные названия, чтобы человек мог найти
+действие. Полную локализацию карточки считать отдельной незакрытой работой.

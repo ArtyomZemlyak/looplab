@@ -124,6 +124,7 @@ function Turn({
   launchSessionId, launchMessageId, launchMessageIndex, launchDrafts, launchDisclosures,
   onLaunchDraft, onLaunchDisclosure, onLaunchStarted,
   revertState,
+  language = 'auto',
 }) {
   const publicAudience = audience === 'public'
   const who = m.role === 'user' ? (publicAudience ? 'chat owner' : 'you') : 'assistant'
@@ -185,7 +186,7 @@ function Turn({
         return <LaunchCard key={draftKey} spec={sp} chat={launchChat} launchIdentity={draftKey}
           retainedDraft={launchDrafts?.[draftKey]}
           retainedConfigOpen={launchDisclosures?.[draftKey] === true}
-          onOpenSettings={onOpenSettings}
+          onOpenSettings={onOpenSettings} language={language}
           onDraftChange={draft => onLaunchDraft?.(draftKey, draft)}
           onConfigOpenChange={open => onLaunchDisclosure?.(draftKey, open)}
           onStarted={() => onLaunchStarted?.(draftKey)} />

@@ -1,0 +1,4 @@
+.asst-launch-guide { font-size: 13px; line-height: 1.5; color: var(--fg-dim); }
+.asst-launch-guide strong { color: var(--fg); }
+.asst-launch-guide p { margin: 4px 0; }
+.asst-launch-guide summary { cursor: pointer; font-size: 12px; }

@@ -184,6 +184,26 @@ async function sendFromComposer(container, text) {
   await click(send)
 }
 
+test('Assistant language reaches an existing launch card without remounting it or sending a command', async () => {
+  const chat = await mountRestoredChat({ transcript: GENESIS })
+  try {
+    const card = chat.container.querySelector('form.asst-launch')
+    assert.ok(card)
+    await until(() => card.textContent.includes('Next: check the proposal'), 'English launch guidance')
+    await React.act(async () => {
+      window.dispatchEvent(new CustomEvent('looplab:language', { detail: 'ru' }))
+    })
+    await until(() => card.textContent.includes('Дальше: проверить план'), 'Russian launch guidance')
+    assert.equal(chat.container.querySelector('form.asst-launch'), card)
+    await React.act(async () => {
+      window.dispatchEvent(new CustomEvent('looplab:language', { detail: 'en' }))
+    })
+    await until(() => card.textContent.includes('Next: check the proposal'), 'English restored guidance')
+    assert.equal(chat.container.querySelector('form.asst-launch'), card)
+    assert.equal(chat.backend.calls.some(row => row.method !== 'GET'), false)
+  } finally { await chat.unmount() }
+})
+
 // Send one message and stream its reply through the terminal frame. Returns how many fibers
 // `counted` accepts rendered from the first token through that frame.
 async function streamReply(chat, text, words, counted) {

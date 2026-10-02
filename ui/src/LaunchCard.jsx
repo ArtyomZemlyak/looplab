@@ -14,6 +14,7 @@ import {
 } from './settingsLaunchGuard.js'
 
 const structuredDetail = error => error?.detail && typeof error.detail === 'object' ? error.detail : null
+const LaunchGuidance = React.lazy(() => import('./LaunchGuidance.jsx'))
 const messageOf = error => String(error?.message || 'Could not validate this run')
 const actionableMessageOf = error => {
   const message = messageOf(error)
@@ -153,7 +154,7 @@ const booleanChoice = (parsedSettings, key) => {
 
 export default function LaunchCard({
   spec, chat = [], onStarted, retainedDraft = null, onDraftChange, launchIdentity = '',
-  retainedConfigOpen = false, onConfigOpenChange, onOpenSettings,
+  retainedConfigOpen = false, onConfigOpenChange, onOpenSettings, language = 'auto',
 }) {
   const original = useMemo(() => createLaunchDraft(spec), [spec])
   const transportIdentity = useMemo(() => String(
@@ -738,9 +739,16 @@ export default function LaunchCard({
       invalid: reviewSettingsInvalid || !!errors['settings.max_seconds'] || !!errors['settings.max_eval_seconds'] },
   ]
   const normalLaunchActions = !startedRunId && !damagedRecovery && !unknownStart
+  const guidancePhase = startedRunId ? 'started' : damagedRecovery ? 'damaged'
+    : unknownStart ? operationBusy ? 'pending' : 'recovery'
+    : settingsLaunchBlocked ? 'settings' : transportPending ? 'loading'
+    : validating ? 'validating' : starting ? 'pending' : storageBlocked ? 'storage'
+    : hasErrors ? 'errors' : validatedCurrent ? 'validated' : 'review'
   // On the first unblocked render, the effect below has not replaced the old blocking copy yet.
   // Keep that stale text out of the live region until the reconciled notice is ready.
   const settingsUnblockSettling = !settingsLaunchBlocked && settingsBlockedRef.current
+  const guidanceNotice = ((!settingsLaunchBlocked && !settingsUnblockSettling)
+    || unknownStart || startedRunId || damagedRecovery) ? notice : ''
   const costDisclosure = validatedCurrent && reviewedBackend === 'toy'
     ? 'The validated toy backend makes no model/provider call.'
     : validatedCurrent
@@ -975,9 +983,11 @@ export default function LaunchCard({
         </div>)}
       </dl>
     </section>
-    {((!settingsLaunchBlocked && !settingsUnblockSettling)
-      || unknownStart || startedRunId || damagedRecovery) && <div className="asst-launch-progress"
-      role="status" aria-live="polite" aria-atomic="true">{notice}</div>}
+    <div className="asst-launch-progress"
+      role="status" aria-live="polite" aria-atomic="true">
+      <React.Suspense fallback={guidanceNotice}><LaunchGuidance phase={guidancePhase}
+        language={language} notice={guidanceNotice} /></React.Suspense>
+    </div>
     {normalLaunchActions && <>
       <p className="asst-launch-cost"><strong>Validate is free:</strong> it makes no model/provider call and
         resolves inherited values in the review above.</p>

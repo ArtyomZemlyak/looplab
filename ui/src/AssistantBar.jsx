@@ -3527,7 +3527,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         {(m.context.refs || []).map(r => <span key={'r' + r} className="asst-ctx-i">#{r}</span>)}
         {(m.context.files || []).map(f => <span key={'f' + f} className="asst-ctx-i"><OpIcon name="clip" size={10} /> {f}</span>)}
       </div>}
-      <Turn m={m} runsById={runsById} readOnly={historical} onRevert={historical ? null : revertChange}
+      <Turn m={m} runsById={runsById} language={responseLanguage} readOnly={historical} onRevert={historical ? null : revertChange}
         onRetry={retryHandlers.face(i)}
         retryLabel={shareUnknown || shareVerifying
           ? shareVerifying ? 'Checking status…' : 'Verify status' : 'Retry'}
