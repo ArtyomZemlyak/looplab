@@ -18,10 +18,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import math
 import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,29 +89,57 @@ def git_subprocess_env() -> dict[str, str]:
     clean.update({str(key): str(value) for key, value in git_config_env().items()})
     return clean
 
+_LOG = logging.getLogger(__name__)
+
 # A sane wall-clock ceiling for any single subprocess run. A "timeout" larger than this is a
 # misconfiguration, not an intent, so it is clamped rather than trusted — one eval must not be able
 # to wedge the loop forever on a fat-fingered/hostile value.
 #
 # CONFIGURABLE since 2026-09-27, and only UPWARD. `MAX_TIMEOUT_S` stays the DEFAULT (and the floor);
-# the ceiling IN FORCE is `launch_timeout_ceiling()`, which `set_launch_timeout_ceiling` installs from
-# the run's `Settings.max_launch_timeout_s` in `cli/__init__.py::_engine` — the funnel every run,
-# resume and finalize (and so every UI spawn) goes through, before a role or a sandbox is built — at
-# most `LAUNCH_TIMEOUT_LIMIT_S`, a week (`core/numeric.py` holds the range, because `Settings` refuses
-# by it). PROCESS-WIDE on purpose, the shape `core/tracing.py::set_llm_capture` has: one engine
-# process drives one run, and every clamp that reads it — `finite_timeout` in `run_argv` and the
-# Docker tier, the eval/stage builders, `command_eval.eval_timeout_override` — is reached from code
-# that holds no Settings, so a per-call ceiling threaded through them would be one more argument each
-# call site could forget. The UI server installs none: it validates `budget_extend{eval_timeout}`
-# against the RUN's recorded value (`serve/control_validation.py::_run_launch_ceiling`), the same
-# value the run's engine installs here, so a request above it is refused rather than cut.
+# the ceiling IN FORCE is `launch_timeout_ceiling()`. PROCESS-WIDE on purpose, the shape
+# `core/tracing.py::set_llm_capture` has: one engine process drives one run, and every clamp that
+# reads it — `finite_timeout` in `run_argv` and the Docker tier, the eval/stage builders,
+# `command_eval.eval_timeout_override` — is reached from code that holds no Settings, so a per-call
+# ceiling threaded through them would be one more argument each call site could forget.
+#
+# WHO MOVES IT, since 2026-10-02. Three writers, all in the engine process, and only the first may
+# lower it:
+#   * `install_launch_timeout_ceiling` at engine start (`cli/__init__.py::_engine` — the funnel every
+#     run, resume and finalize, and so every UI spawn, goes through, before a role is built):
+#     `min(LAUNCH_TIMEOUT_LIMIT_S, max(Settings.max_launch_timeout_s, the largest wall clock the
+#     OPERATOR declared))`.
+#   * `raise_launch_timeout_ceiling` from the operator's live `budget_extend{eval_timeout|timeout}`
+#     (`engine/width_settling.py::lift_launch_ceiling`, at re-entry and on every turn).
+#   * `set_launch_timeout_ceiling`, the setting alone — the first step of the install above, and the
+#     direct library seam.
+# WHY THE OPERATOR'S NUMBER OUTRANKS THE SETTING (incident 2026-10-01, `minionerec-backbones-v11`):
+# the task declared `eval.timeout = 100800` (28 h), the ceiling was the 24 h default, nothing refused
+# or warned at submit or start, and a 24-hour Qwen3.5-4B training was SIGKILLed at 24 h during its
+# final eval — the day lost. For a number the operator wrote down, the ceiling was only a second copy
+# of a budget they had already declared, and the copy silently won. So the setting now bounds what an
+# AGENT may make a launch run for (a Developer-authored `looplab_stages.json` stage, which is
+# recorded-not-enforced against the budget and meets this clamp at the wall), and the operator's own
+# declarations lift it — up to `LAUNCH_TIMEOUT_LIMIT_S`, a week, which stays an ABSOLUTE limit for
+# everybody: `EvalSpec` refuses a declaration above it at submit (`adapters/repo_task.py::
+# _wall_clocks_within_launch_limit`), the server refuses such a `budget_extend`, and a recorded run
+# that already holds one is clamped with a loud warning rather than made unresumable.
+#
+# THE UI SERVER INSTALLS NONE and reads none: it validates `budget_extend{eval_timeout}` against the
+# constant `LAUNCH_TIMEOUT_LIMIT_S` (`serve/control_validation.py::_normalize_budget_extend`), because
+# any value up to it is one the run's engine will now honour by raising its own ceiling. A server
+# that read this global would be reading a default it never set.
 MAX_TIMEOUT_S = LAUNCH_TIMEOUT_DEFAULT_S    # 24 hours — the default ceiling, never lowered
 _launch_timeout_ceiling_s = MAX_TIMEOUT_S
+# Serializes the WRITERS (readers take the bare float). `raise_launch_timeout_ceiling` is a read-
+# compare-write, and "upward only" is a property of that whole step: two raises interleaved across
+# threads could otherwise store the smaller one last. Today every raise runs on the engine's loop
+# thread, so this costs nothing and guards the next caller that does not.
+_LAUNCH_CEILING_LOCK = threading.Lock()
 
 
 def launch_timeout_ceiling() -> float:
     """The wall-clock ceiling, in seconds, every subprocess deadline in THIS process is clamped to:
-    `MAX_TIMEOUT_S` unless `set_launch_timeout_ceiling` installed a longer one."""
+    `MAX_TIMEOUT_S` unless a longer one was installed or raised (see the block above)."""
     return _launch_timeout_ceiling_s
 
 
@@ -119,7 +150,6 @@ def set_launch_timeout_ceiling(seconds) -> float:
     `ConfigRefusal` instead of clamping it: `Settings.max_launch_timeout_s` already refuses that
     range at load, so a value arriving here outside it came from a direct library caller, and quietly
     narrowing it would be exactly the silent cut this ceiling is kept loud to prevent."""
-    import math
     try:
         if isinstance(seconds, bool):
             raise TypeError("bool")
@@ -131,8 +161,92 @@ def set_launch_timeout_ceiling(seconds) -> float:
             f"max_launch_timeout_s must be a number of seconds in [{LAUNCH_TIMEOUT_DEFAULT_S:.0f}, "
             f"{LAUNCH_TIMEOUT_LIMIT_S:.0f}] (24 hours to 7 days); got {seconds!r}")
     global _launch_timeout_ceiling_s
-    _launch_timeout_ceiling_s = value
+    with _LAUNCH_CEILING_LOCK:
+        _launch_timeout_ceiling_s = value
     return value
+
+
+def raise_launch_timeout_ceiling(seconds) -> float:
+    """Lift the process-wide ceiling to `seconds` — UPWARD ONLY, at most `LAUNCH_TIMEOUT_LIMIT_S` —
+    and return the ceiling in force afterwards.
+
+    For an OPERATOR's wall clock (a declared task timeout at engine start, a live
+    `budget_extend{eval_timeout}`), which is authoritative up to the week. Total over junk, unlike
+    `set_launch_timeout_ceiling`: a bool, NaN, non-positive or unparseable value moves nothing (its
+    readers already treat such a value as "no override"), and `+inf` or anything above the week lifts
+    to the week and no further — the CALLER says so loudly, because only the caller can name the
+    field. Never lowers: a smaller number later (an operator who shortens the budget) leaves the
+    ceiling where it is, since the ceiling only bounds, and the shorter budget is applied by the leash
+    rule (`command_eval.leashed_timeout`), not by cutting the bound under evaluations already sized
+    against it. A plain float rebinding, so a worker thread reading it mid-update sees either value."""
+    global _launch_timeout_ceiling_s
+    try:
+        if isinstance(seconds, bool):
+            raise TypeError("bool")
+        value = float(seconds)
+    except (TypeError, ValueError, OverflowError):
+        return _launch_timeout_ceiling_s
+    if math.isnan(value):
+        return _launch_timeout_ceiling_s
+    with _LAUNCH_CEILING_LOCK:
+        if value > _launch_timeout_ceiling_s:
+            _launch_timeout_ceiling_s = min(value, LAUNCH_TIMEOUT_LIMIT_S)
+        return _launch_timeout_ceiling_s
+
+
+def install_launch_timeout_ceiling(setting, declared=()) -> float:
+    """The engine-start install: the run's `Settings.max_launch_timeout_s`, lifted to the largest
+    OPERATOR-declared wall clock in `declared` (`[(label, seconds)]`, e.g.
+    `command_eval.operator_declared_timeouts`), never above `LAUNCH_TIMEOUT_LIMIT_S`. Returns the
+    ceiling installed.
+
+    `set_launch_timeout_ceiling(setting)` FIRST, so the value never carries over from an earlier
+    engine in the same process (a test, an embedder building two engines): each install is this run's
+    own. Then two operator-facing lines, each said once per engine start and only when true:
+      * a declaration ABOVE the week — refused at submit, so it reaches here only from a run recorded
+        before that refusal existed (or a hand-edited snapshot). The resume is NOT refused (a recorded
+        run must stay resumable, `adapters/repo_task.py::_grandfathered`); its launches are clamped to
+        the week, and this WARNING names every such field so the clamp is never silent.
+      * the ceiling RAISED above the setting — the value, the field that raised it and why, so an
+        operator reading the log knows agent-authored stages are now bounded by the larger number too.
+    WARNING level for both: the CLI's default level (`cli/__init__.py::DEFAULT_LOG_LEVEL`) drops an
+    INFO, and a line about the run's wall clock that reaches nobody is the defect this replaces."""
+    base = set_launch_timeout_ceiling(setting)
+    clean: list[tuple[str, float]] = []
+    for label, seconds in declared or ():
+        try:
+            if isinstance(seconds, bool):
+                continue
+            value = float(seconds)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        # FINITE only. A NaN/inf declaration never reaches a launch as itself — `finite_timeout`
+        # replaces it with the caller's fallback (600 s for an eval) — so it must neither lift the
+        # ceiling to the week nor be reported as "clamped to the week" (it is not; it runs at the
+        # fallback). The submit gate refuses `+inf` outright; this is the recorded-run side.
+        if math.isfinite(value) and value > 0:
+            clean.append((str(label), value))
+    over = [(label, value) for label, value in clean if value > LAUNCH_TIMEOUT_LIMIT_S]
+    if over:
+        _LOG.warning(
+            "this run declares a wall clock above the %.0f s (7 day) absolute launch limit: %s. Every "
+            "such launch is CLAMPED to %.0f s (a task declaring one is refused at submit; this run "
+            "recorded it before that refusal, or it is a setting, so it is clamped rather than "
+            "refused). Lower it to make the clamp explicit.",
+            LAUNCH_TIMEOUT_LIMIT_S,
+            ", ".join(f"{label} = {value:.0f} s" for label, value in over),
+            LAUNCH_TIMEOUT_LIMIT_S)
+    if not clean:
+        return base
+    label, top = max(clean, key=lambda item: item[1])
+    installed = raise_launch_timeout_ceiling(top)
+    if installed > base:
+        _LOG.warning(
+            "launch ceiling raised to %.0f s for this run (max_launch_timeout_s is %.0f s) because the "
+            "operator declared %s = %.0f s: an operator-declared wall clock is never cut by the "
+            "ceiling; agent-authored stages are bounded by %.0f s too.",
+            installed, base, label, top, installed)
+    return installed
 
 _DOCKER_NVIDIA_RUNTIME_CACHE: Optional[bool] = None
 
@@ -224,7 +338,8 @@ def docker_gpu_env(env: Optional[dict], *, gpu_args: list[str]) -> dict:
 
 def finite_timeout(value, default: float = 600.0) -> float:
     """Coerce a timeout into a FINITE, BOUNDED number of seconds, capped at the launch ceiling
-    (`launch_timeout_ceiling()`: `MAX_TIMEOUT_S` unless the run configured a longer one).
+    (`launch_timeout_ceiling()`: `MAX_TIMEOUT_S` unless the run's setting or an operator-declared wall
+    clock installed a longer one — see `install_launch_timeout_ceiling`).
 
     The fail-OPEN case is the only one that must be rewritten: a NaN/±inf deadline is NEVER reached,
     so `monotonic() >= start + timeout` stays False and a runaway never times out (arch-review §3
@@ -521,6 +636,11 @@ class RunResult:
     # Like `drift`, `metric` is then forced to None: the number measured the path the node meant to
     # replace, not its change. None on the normal path and on every node that declared no marker.
     inert_path: Optional[dict] = None
+    # THE GRADED ACTIVATION RECORD (`engine/activation.py::ActivationVerdict.record`), set by the
+    # engine on an eval that SETTLES under `activation_check=graded` with a declaration: its grade,
+    # and on a WARN (`activation_unverified`, minionerec-lora-v1 node 2, 2026-10-01) what could not
+    # be verified. Written onto `node_evaluated.activation`; never a violation, never the metric.
+    activation: Optional[dict] = None
     # A FAILED EVAL CANARY that its clock killed twice — at its cap and at the one mechanical retry's
     # doubled cap (`engine/eval_canary.py`, doc 69 69.10). Set only by `canary_failure_result`; read
     # by `triage._failure_reason`, which names it `canary_timeout`: the ENGINE's own clock, and no

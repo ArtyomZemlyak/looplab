@@ -297,6 +297,7 @@
   "node_concepts_authored": {},
   "nodes": {
     "0": {
+      "activation": null,
       "agent_report": null,
       "attempt": 0,
       "code": "import json, os, random\n# Generated solution. The objective below is the toy \"ground truth\" the\n# Researcher optimizes blindly via observed metrics only.\nx = 6.8884\ny = 5.1591\nloss = (x - 3.0) ** 2 + (y + 1.0) ** 2\nnoise = 0.0\nif noise:\n    # Seeded eval noise: lets the multi-seed confirmation phase (I12) measure\n    # variance. LOOPLAB_EVAL_SEED is unset (-> \"0\") during normal evaluation, so\n    # search stays deterministic; the confirm phase varies it across seeds.\n    rng = random.Random(int(os.environ.get(\"LOOPLAB_EVAL_SEED\", \"0\")))\n    loss += rng.gauss(0.0, noise)\nprint(json.dumps({\"metric\": loss}))\n",
@@ -366,6 +367,7 @@
       "violations": []
     },
     "1": {
+      "activation": null,
       "agent_report": null,
       "attempt": 0,
       "code": "import json, os, random\n# Generated solution. The objective below is the toy \"ground truth\" the\n# Researcher optimizes blindly via observed metrics only.\nx = -1.5886\ny = -4.8217\nloss = (x - 3.0) ** 2 + (y + 1.0) ** 2\nnoise = 0.0\nif noise:\n    # Seeded eval noise: lets the multi-seed confirmation phase (I12) measure\n    # variance. LOOPLAB_EVAL_SEED is unset (-> \"0\") during normal evaluation, so\n    # search stays deterministic; the confirm phase varies it across seeds.\n    rng = random.Random(int(os.environ.get(\"LOOPLAB_EVAL_SEED\", \"0\")))\n    loss += rng.gauss(0.0, noise)\nprint(json.dumps({\"metric\": loss}))\n",
@@ -435,6 +437,7 @@
       "violations": []
     },
     "2": {
+      "activation": null,
       "agent_report": null,
       "attempt": 0,
       "code": "import json, os, random\n# Generated solution. The objective below is the toy \"ground truth\" the\n# Researcher optimizes blindly via observed metrics only.\nx = 0.2255\ny = -1.9013\nloss = (x - 3.0) ** 2 + (y + 1.0) ** 2\nnoise = 0.0\nif noise:\n    # Seeded eval noise: lets the multi-seed confirmation phase (I12) measure\n    # variance. LOOPLAB_EVAL_SEED is unset (-> \"0\") during normal evaluation, so\n    # search stays deterministic; the confirm phase varies it across seeds.\n    rng = random.Random(int(os.environ.get(\"LOOPLAB_EVAL_SEED\", \"0\")))\n    loss += rng.gauss(0.0, noise)\nprint(json.dumps({\"metric\": loss}))\n",
@@ -507,6 +510,7 @@
       "violations": []
     },
     "3": {
+      "activation": null,
       "agent_report": null,
       "attempt": 0,
       "code": "import json, os, random\n# Generated solution. The objective below is the toy \"ground truth\" the\n# Researcher optimizes blindly via observed metrics only.\nx = 0.4047\ny = -2.7324\nloss = (x - 3.0) ** 2 + (y + 1.0) ** 2\nnoise = 0.0\nif noise:\n    # Seeded eval noise: lets the multi-seed confirmation phase (I12) measure\n    # variance. LOOPLAB_EVAL_SEED is unset (-> \"0\") during normal evaluation, so\n    # search stays deterministic; the confirm phase varies it across seeds.\n    rng = random.Random(int(os.environ.get(\"LOOPLAB_EVAL_SEED\", \"0\")))\n    loss += rng.gauss(0.0, noise)\nprint(json.dumps({\"metric\": loss}))\n",
@@ -581,6 +585,7 @@
       "violations": []
     },
     "4": {
+      "activation": null,
       "agent_report": null,
       "attempt": 0,
       "code": "import json, os, random\n# Generated solution. The objective below is the toy \"ground truth\" the\n# Researcher optimizes blindly via observed metrics only.\nx = -1.0835\ny = -1.7074\nloss = (x - 3.0) ** 2 + (y + 1.0) ** 2\nnoise = 0.0\nif noise:\n    # Seeded eval noise: lets the multi-seed confirmation phase (I12) measure\n    # variance. LOOPLAB_EVAL_SEED is unset (-> \"0\") during normal evaluation, so\n    # search stays deterministic; the confirm phase varies it across seeds.\n    rng = random.Random(int(os.environ.get(\"LOOPLAB_EVAL_SEED\", \"0\")))\n    loss += rng.gauss(0.0, noise)\nprint(json.dumps({\"metric\": loss}))\n",
@@ -652,6 +657,7 @@
       "violations": []
     },
     "5": {
+      "activation": null,
       "agent_report": null,
       "attempt": 0,
       "code": "import json, os, random\n# Generated solution. The objective below is the toy \"ground truth\" the\n# Researcher optimizes blindly via observed metrics only.\nx = 1.2187\ny = -2.5483\nloss = (x - 3.0) ** 2 + (y + 1.0) ** 2\nnoise = 0.0\nif noise:\n    # Seeded eval noise: lets the multi-seed confirmation phase (I12) measure\n    # variance. LOOPLAB_EVAL_SEED is unset (-> \"0\") during normal evaluation, so\n    # search stays deterministic; the confirm phase varies it across seeds.\n    rng = random.Random(int(os.environ.get(\"LOOPLAB_EVAL_SEED\", \"0\")))\n    loss += rng.gauss(0.0, noise)\nprint(json.dumps({\"metric\": loss}))\n",
@@ -726,6 +732,7 @@
       "violations": []
     },
     "6": {
+      "activation": null,
       "agent_report": null,
       "attempt": 0,
       "code": "import json, os, random\n# Generated solution. The objective below is the toy \"ground truth\" the\n# Researcher optimizes blindly via observed metrics only.\nx = 0.7221\ny = -2.2248\nloss = (x - 3.0) ** 2 + (y + 1.0) ** 2\nnoise = 0.0\nif noise:\n    # Seeded eval noise: lets the multi-seed confirmation phase (I12) measure\n    # variance. LOOPLAB_EVAL_SEED is unset (-> \"0\") during normal evaluation, so\n    # search stays deterministic; the confirm phase varies it across seeds.\n    rng = random.Random(int(os.environ.get(\"LOOPLAB_EVAL_SEED\", \"0\")))\n    loss += rng.gauss(0.0, noise)\nprint(json.dumps({\"metric\": loss}))\n",
@@ -801,6 +808,7 @@
       "violations": []
     },
     "7": {
+      "activation": null,
       "agent_report": null,
       "attempt": 0,
       "code": "import json, os, random\n# Generated solution. The objective below is the toy \"ground truth\" the\n# Researcher optimizes blindly via observed metrics only.\nx = 0.885\ny = -0.9026\nloss = (x - 3.0) ** 2 + (y + 1.0) ** 2\nnoise = 0.0\nif noise:\n    # Seeded eval noise: lets the multi-seed confirmation phase (I12) measure\n    # variance. LOOPLAB_EVAL_SEED is unset (-> \"0\") during normal evaluation, so\n    # search stays deterministic; the confirm phase varies it across seeds.\n    rng = random.Random(int(os.environ.get(\"LOOPLAB_EVAL_SEED\", \"0\")))\n    loss += rng.gauss(0.0, noise)\nprint(json.dumps({\"metric\": loss}))\n",

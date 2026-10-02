@@ -1642,35 +1642,16 @@ def silent_broad_fallbacks(written: dict, *, before=None) -> str:
 # contains: this asks that of the node's staged files, tests excluded -- the eval does not run them.
 
 def _is_test_file(path: str) -> bool:
-    parts = str(path).replace("\\", "/").split("/")
-    name = parts[-1]
-    return (any(p in ("tests", "test") for p in parts[:-1])
-            or name.startswith("test_") or name.endswith("_test.py") or name == "conftest.py")
+    # One spelling, shared with the settle-time emitter scan (`engine/activation.py::is_test_path`).
+    from looplab.engine.activation import is_test_path
+    return is_test_path(path)
 
 
 def _printable_text(path, body: str) -> str:
-    """What a staged file could PRINT: for Python, its string literals minus docstrings and bare
-    string statements (comments are not in the tree at all); any other file, or Python that does not
-    parse, is taken whole.
-
-    Measured 2026-09-24: a node declared `FP8_DECODE_MLP_FALLBACK`, a name its module docstring used
-    for the fallback, while the code printed `FP8_DECODE_MLP_ACTIVE`/`..._DISABLED`. A substring
-    search of the file found the docstring, the declaration passed, and the node was filed
-    `inert_path` although its new path had run."""
-    if not str(path).endswith(".py"):
-        return body
-    try:
-        tree = ast.parse(body)
-    except (SyntaxError, ValueError):
-        return body
-    prose: set = set()
-    for node in ast.walk(tree):
-        if (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
-                and isinstance(node.value.value, str)):
-            prose.add(id(node.value))
-    return "\n".join(n.value for n in ast.walk(tree)
-                     if isinstance(n, ast.Constant) and isinstance(n.value, str)
-                     and id(n) not in prose)
+    # One spelling, shared with the settle-time emitter scan (`engine/activation.py::printable_text`,
+    # where the FP8_DECODE_MLP_FALLBACK measurement that motivated it now lives).
+    from looplab.engine.activation import printable_text
+    return printable_text(path, body)
 
 
 def activation_markers_not_in_code(markers, written: dict) -> str:
@@ -1701,3 +1682,160 @@ def activation_markers_not_in_code(markers, written: dict) -> str:
             "PRINTS; text your service never prints makes the node `inert_path` and withholds its "
             "metric even when the new path ran. Declare the exact text your NEW path prints on the "
             "evaluated code path (a fragment of that print is enough), then call done again.")
+
+
+# ---------------------------------------------------------------------- the graded declaration lint
+#
+# minionerec-lora-v1 node 2, 2026-10-01. The node changed ONLY `MiniOneRec/looplab/experiment.env`
+# and declared `SFT_EVAL_SAMPLE=-2` / `SFT_RESUME_EVERY_MIN=0`. The rule above takes a non-`.py`
+# file WHOLE, found the text in the `.env` it had just written, and passed two markers no code could
+# ever print -- the false negative that let a 6.8 h metric be withheld at settle. Under
+# `Settings.activation_check` = "graded" the Developer runs THIS lint instead: an occurrence in a
+# config file (or on an assignment line) is not a printer, the printers are searched across the
+# whole evaluated tree (written files AND the originals the session started from), and a marker
+# that is only a config value is REWRITTEN to an `env` entry -- the engine checks the assignment
+# statically -- instead of being bounced into an `echo` added for the check (69.8, which proves the
+# script ran, never that the path did).
+
+@dataclass(frozen=True)
+class ActivationLint:
+    """What the graded declaration lint decided about one declaration.
+
+    `entries` is the declaration to WRITE (typed, `activation.normalize_entries` shape, rewrites
+    applied); `notes` says what was rewritten and why, one line each; `bounce` the refusal for a
+    marker declared on a code change that nothing anywhere could print (TP3), `warning` the one for a
+    marker only an unconditional line this change added prints -- "" for none; `change_class` the
+    class the lint read the change as."""
+
+    entries: tuple
+    notes: tuple = ()
+    bounce: str = ""
+    warning: str = ""
+    change_class: str = "code"
+
+
+def _changed_paths(written: dict, before) -> set:
+    from looplab.engine.activation import CHANGE_CLASS_IGNORED
+    out = set()
+    for path, body in (written or {}).items():
+        if path in CHANGE_CLASS_IGNORED or not isinstance(body, str):
+            continue
+        try:
+            old = before(path) if callable(before) else None
+        except (OSError, ValueError, TypeError, KeyError):   # an unreadable original is an absent one
+            old = None
+        if old != body:
+            out.add(str(path).replace("\\", "/"))
+    return out
+
+
+def activation_declaration_lint(markers, written: dict, *, before=None, base=None, originals=None,
+                                originals_complete: bool = True, deleted=()) -> ActivationLint:
+    """The GRADED declaration-time check of `markers` against the evaluated tree. Pure and total.
+
+    `written` is the session's staged files, `before(path)` the content it started from (the
+    parent's file, else the original on disk -- the same callable `silent_broad_fallbacks` takes),
+    `base(path)` the BASE original the change class is measured against (the lineage; default
+    `before`),
+    `originals` the rest of the evaluated tree as `{path: text}` (a staged file wins over its
+    original). Per `log` text entry:
+
+      * printed by code somewhere (tests, docstrings, comments, config files and assignment lines
+        excluded) -> kept; when every printer is an UNCONDITIONAL line this change added, bounced
+        once: such an echo proves the script ran, never that the path did;
+      * printed by nothing, but SET in a config file or on an assignment line, and spelled
+        `NAME=value` -> rewritten to `{"kind": "env", "name", "equals", "file"}`;
+      * printed by nothing, on a CONFIG-ONLY change -> rewritten to `{"kind": "none"}`: a config
+        change has nothing of its own to print;
+      * printed by nothing, on a CODE change -> bounced (TP3: declared, never written), unless the
+        tree could not be read whole -- then kept, and the settle-time check decides.
+
+    `regex`, `env`, `file` and `none` entries are kept as declared."""
+    from looplab.engine.activation import (CHANGE_CLASS_IGNORED, CHANGE_CONFIG_ONLY, KIND_LOG,
+                                           change_class, is_config_path,
+                                           normalize_config_assignments, normalize_entries,
+                                           scan_texts)
+    entries = normalize_entries(markers)
+    if not entries:
+        return ActivationLint(entries=())
+    changed = _changed_paths(written, before) | {
+        str(d).replace("\\", "/") for d in (deleted or ())}
+    # THE CLASS IS THE LINEAGE'S, measured against the BASE originals (`base`, default `before`),
+    # never against the parent's file this session started from: a child that only flips a flag its
+    # parent's new code reads is not config-only (critic BLOCKER 9 -- the assignment rule below then
+    # read the new path's own print as "the value is set"). `changed` above stays the SESSION's
+    # edits, which is what "lines your change added" in the unconditional-echo warning means.
+    lineage = (_changed_paths(written, base) if base is not None else set(changed)) | {
+        str(d).replace("\\", "/") for d in (deleted or ())}
+    cls = change_class(lineage)
+    # The engine's own declarations are not the tree: the manifest is a `.json` holding every
+    # marker verbatim, and would otherwise be named the FILE an env entry is checked in.
+    tree = {p: b for p, b in (originals or {}).items()
+            if isinstance(b, str) and p not in CHANGE_CLASS_IGNORED}
+    tree.update({str(p).replace("\\", "/"): b for p, b in (written or {}).items()
+                 if isinstance(b, str) and str(p) not in CHANGE_CLASS_IGNORED})
+    # FIRST, whatever any emitter says -- but ONLY on a CONFIG-ONLY change: an assignment-shaped
+    # marker the change's own config sets is the `env` entry (`activation.config_assignment_entry`;
+    # minionerec-lora-v1 node 2's `why_off = "SFT_RESUME_EVERY_MIN=0"` literal in sft_resume.py must
+    # not keep it a log marker). On a CODE change the same text is what the NEW code prints when
+    # its path runs (critic: a `USE_NEW=1` printed only by the guarded new path, behind a fallback
+    # that swallowed its exception, read as a satisfied env entry -- TP1 scored), so it stays a log
+    # marker and the settle-time matrix decides it (TP1/TP3).
+    notes: list = []
+    if cls == CHANGE_CONFIG_ONLY:
+        entries, rewritten = normalize_config_assignments(
+            entries, {p: tree[p] for p in lineage if p in tree and is_config_path(p)})
+        notes = [f"{t!r} is a value this change's config file sets, not a line any code prints; "
+                 "recorded as an env entry the engine checks statically. Do not add an echo for "
+                 "the check." for t in rewritten]
+    needles = [e["text"] for e in entries if e.get("kind") == KIND_LOG and e.get("text")]
+    scan = scan_texts(tree, needles, complete=originals_complete)
+    out, missing, unconditional = [], [], []
+    for entry in entries:
+        text = entry.get("text") if entry.get("kind") == KIND_LOG else None
+        if not text:
+            out.append(entry)
+            continue
+        found = scan.found.get(text) or []
+        if found:
+            out.append(entry)
+            if all(e.path in changed and not e.conditional for e in found):
+                unconditional.append((text, sorted({e.path for e in found})))
+            continue
+        # NO PRINTER FOUND. The declaration is KEPT as the log marker it is, never rewritten here:
+        #   * never to `env` off a file this change did not touch (critic: a base `USE_FUSED=1`
+        #     made an env entry that held whatever the node did) -- the touched-config rewrite
+        #     above is the only one;
+        #   * never to `none` on a config-only change: the settle-time matrix then records the
+        #     honest WARN `activation_unverifiable`, which `activation_unverified_gate` can act on
+        #     -- a `none` settles `ok` and left that gate unreachable for the repo Developer;
+        #   * and an INCOMPLETE tree proves no absence: settle decides on its own scan.
+        # Only a CODE change with a COMPLETE scan bounces (TP3: declared, never written).
+        out.append(entry)
+        if cls != CHANGE_CONFIG_ONLY and scan.complete:
+            missing.append(text)
+    final = normalize_entries(out)
+    bounce = warning = ""
+    if missing:
+        bounce = ("Your `done` declares activation marker(s) that no code the evaluation runs "
+                  "prints:\n" + "\n".join(f"  {m!r}" for m in missing) + "\n\nA marker is a line "
+                  "YOUR NEW CODE prints only when the new path works; it is checked against what the "
+                  "evaluation PRINTS, and text nothing prints makes the node `inert_path` and "
+                  "withholds its metric even when the new path ran. A config file or a `NAME=value` "
+                  "assignment prints nothing. Declare the exact text your new path prints (a "
+                  "fragment of that print is enough); a config or env-only change needs no marker "
+                  "(or a `{\"kind\": \"env\", ...}` entry). If a `NAME=value` marker is a value "
+                  "your change sets in a config file, declare it explicitly as {\"kind\": \"env\", "
+                  "\"name\": ..., \"equals\": ..., \"file\": ...}. Do not add an echo for the "
+                  "check. Then call done again.")
+    if unconditional:
+        listed = "\n".join(f"  {t!r} -- printed only by unconditional line(s) in {', '.join(p)}"
+                           for t, p in unconditional[:_MAX_LISTED_HANDLERS])
+        warning = ("Your activation marker(s) are printed only by lines your change added OUTSIDE "
+                  "any branch:\n" + listed + "\n\nSuch a line runs whether or not the new path does, "
+                  "so it proves the script ran, never that the path did. Print the marker inside the "
+                  "code that runs only when the new path is active, or declare none if the change "
+                  "is not switchable. If the line is deliberate, call done again unchanged; you will "
+                  "not be asked twice.")
+    return ActivationLint(entries=tuple(final), notes=tuple(notes), bounce=bounce,
+                          warning=warning, change_class=cls)

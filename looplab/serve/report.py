@@ -25,7 +25,7 @@ from looplab.engine.champion_caveats import (CHAMPION_CAVEAT_MERGED_COORDINATES,
                                              champion_metric_caveats)
 from looplab.events.digest import (experiments_digest, metric_scored_invalid, node_metric,
                                    node_theme)
-from looplab.core.models import NodeStatus, RunState
+from looplab.core.models import NodeStatus, RunState, activation_unverified
 
 
 class _ReportOut(BaseModel):
@@ -146,6 +146,18 @@ def _report_context(state: RunState) -> str:
         flags.append(f"{len(unbound)} evaluated node(s) recorded a metric that is bound to NO "
                      "subject — nothing says which artifact the number is about, so it cannot be "
                      "checked and is excluded from best. Declare `eval.metric.subject`")
+    # AN UNVERIFIED ACTIVATION (the graded check's WARN, minionerec-lora-v1 node 2, 2026-10-01): the
+    # node's metric STANDS — it is feasible, and under `activation_unverified_gate=gate` only barred
+    # from best and breeding — but nothing proved its declared change took effect: a config-only
+    # change whose markers no code prints. Said beside the exclusions because it is the same kind of
+    # fact about a number the operator is about to trust.
+    unverified = [n for n in state.evaluated_nodes() if activation_unverified(n)]
+    if unverified:
+        champion = best is not None and any(n.id == best.id for n in unverified)
+        flags.append(f"{len(unverified)} evaluated node(s) settled with their ACTIVATION "
+                     "UNVERIFIED — a config-only change whose declared markers no code prints, so "
+                     "nothing proved the change took effect"
+                     + (" (the champion among them)" if champion else ""))
     if best is not None and best.confirmed_mean is None:
         flags.append("the champion is single-seed (not multi-seed confirmed)")
     # THE CHAMPION'S OWN CAVEATS (doc 69 69.16): the engine's receipt on the number this report

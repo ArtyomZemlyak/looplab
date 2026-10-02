@@ -358,6 +358,11 @@ class RepoWriteTools:
         # Editable repo roots ({name,path}...) so edit_file can patch a file the node hasn't staged
         # yet: current content = staged overlay first, else the original file on disk.
         self._roots = [(e.get("name") or "", e.get("path")) for e in (editables or []) if e.get("path")]
+        # The BEFORE side of this session's edits, as the repo Developer defines it (the parent's file
+        # on an improve/merge, else the original on disk) — set by the Developer that builds this,
+        # read by the graded activation lint to tell what this node CHANGED. None = the originals.
+        self.started_from = None
+        self._original_texts = None
 
     def _current(self, p: str):
         """The file's CURRENT content for patching: the staged overlay wins (parent files pre-seeded
@@ -385,6 +390,29 @@ class RepoWriteTools:
             except OSError:
                 continue
         return None
+
+    def original_texts(self) -> tuple:
+        """`({path: text}, complete)`: every code and config file in the editable roots ON DISK,
+        keyed the way staged paths are (the editable's name in front in a multi-editable setup).
+
+        The rest of the evaluated tree for the graded activation lint
+        (`engine/repair_verify.py::activation_declaration_lint`): a marker's printer may live in code
+        this session never touched (minionerec-lora-v1 node 2, 2026-10-01). Bounded and link-free
+        (`engine/activation.py::tree_texts`), read once per session and cached -- the roots are the
+        operator's, not this session's to change."""
+        cached = getattr(self, "_original_texts", None)
+        if cached is not None:
+            return cached
+        from looplab.engine.activation import tree_texts   # engine: deferred, like every engine reach
+        out: dict = {}
+        complete = True
+        for name, root in self._roots:
+            texts, whole = tree_texts(root, prefix=name if name and name != "." else "")
+            complete = complete and whole
+            for rel, body in texts.items():
+                out.setdefault(rel, body)
+        self._original_texts = (out, complete)
+        return self._original_texts
 
     def exists(self, p: str) -> bool:
         """Is this repo-relative path readable in the workspace the node will actually run in?

@@ -46,7 +46,8 @@ from looplab.engine.orchestrator import (
 )
 from looplab.search.policy import make_policy, parse_model_arms, policy_knobs
 from looplab.search.speculation_calibration import speculation_runtime_scope_digest
-from looplab.runtime.sandbox import docker_tier_kwargs, make_sandbox, set_launch_timeout_ceiling
+from looplab.runtime.sandbox import (docker_tier_kwargs, install_launch_timeout_ceiling,
+                                     make_sandbox)
 from looplab.adapters.tasks import TaskAdapter, kinds, load_task, make_llm_client, make_roles
 from looplab.tools.vectorstore import make_embedder as _make_embedder
 from looplab.adapters.tasks import _make_abstractor as _make_lesson_abstractor
@@ -797,11 +798,26 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
     set_llm_capture(settings.trace_llm_io)
     # THE HARD LAUNCH CEILING, the same process-wide shape one axis over: every subprocess deadline
     # this process starts is clamped to it (`runtime/sandbox.py::finite_timeout`). Installed HERE —
-    # the one funnel run/resume/finalize and every UI spawn share — from the Settings this run loaded,
-    # and BEFORE the roles are built, because a repo Researcher's profile hint quotes it at
-    # construction (`adapters/repo_task.py::RepoTask._eval_profile_researcher_hint`). The server
-    # validates `budget_extend{eval_timeout}` against the same recorded value.
-    set_launch_timeout_ceiling(settings.max_launch_timeout_s)
+    # the one funnel run/resume/finalize and every UI spawn share — and BEFORE the roles are built,
+    # because a repo Researcher's profile hint quotes it at construction
+    # (`adapters/repo_task.py::RepoTask._eval_profile_researcher_hint`).
+    #
+    # `min(7 days, max(max_launch_timeout_s, the largest OPERATOR-declared wall clock))` since
+    # 2026-10-02 (incident 2026-10-01, `minionerec-backbones-v11`: the task declared a 28 h
+    # `eval.timeout`, the ceiling was the 24 h default, and the training was SIGKILLed at 24 h in its
+    # final eval with no word at submit or start). The operator's declarations are the task's eval
+    # spec (`command_eval.operator_declared_timeouts`) and the run's own per-eval `timeout` setting —
+    # the script-path counterpart of `eval.timeout`. A live `budget_extend{eval_timeout|timeout}` is
+    # the third, and lives in the log: the engine lifts the ceiling for it at re-entry and on every
+    # turn (`engine/width_settling.py::lift_launch_ceiling`). The install says, once, when it raised
+    # the ceiling above the setting and when a recorded declaration is above the week (clamped, not
+    # refused: a resume must not be).
+    from looplab.runtime.command_eval import operator_declared_timeouts
+    _eval_spec_of = getattr(task, "eval_spec", None)
+    install_launch_timeout_ceiling(
+        settings.max_launch_timeout_s,
+        operator_declared_timeouts(_eval_spec_of() if callable(_eval_spec_of) else None)
+        + [("timeout (the run's per-eval setting)", settings.timeout)])
     # The runtime-scope primitive is intentionally bounded to the calibration/public-receipt lane
     # (`max_nodes <= 64`).  Ordinary CLI runs may use the product's much larger node budgets and must
     # never cross this rollout-only validator.

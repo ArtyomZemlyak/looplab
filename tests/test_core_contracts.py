@@ -188,7 +188,13 @@ def test_every_closed_vocabulary_field_is_validated():
                        # `syscall_fence` (off|mutators|egress) joined 2026-09-06 (doc 52 row 28), the
                        # same shape as `landlock` one rung over: a mis-cased `syscall_fence="Egress"`
                        # would install no filter while the operator believes the eval cannot dial out.
-                       "syscall_fence"}
+                       "syscall_fence",
+                       # `activation_check` (off|strict|graded) and `activation_unverified_gate`
+                       # (audit|gate) joined 2026-10-01 (minionerec-lora-v1 node 2). A mis-cased
+                       # `activation_check="Strict"` would settle the engine's knob to `strict` while
+                       # the operator believes the graded matrix runs, and `gate` mis-cased would
+                       # leave an unverified node free to win.
+                       "activation_check", "activation_unverified_gate"}
 
 
 @pytest.mark.parametrize("field,bad", [

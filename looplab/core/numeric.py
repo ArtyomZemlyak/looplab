@@ -167,6 +167,10 @@ def parse_mem_bytes(spec) -> int | None:
 # The LIMIT is a week, the operator's own ask: a long SFT run's single eval stage trains past 24 h as
 # its data grows, and a week still bounds a fat-fingered or hostile value the way the 24 h literal did
 # — the clamp exists so one eval cannot wedge the loop forever, not to decide how long an operator's
-# training may be.
+# training may be. Since 2026-10-02 the LIMIT is the ONLY bound on an operator's own wall clock: a
+# declared task timeout or a live `budget_extend{eval_timeout}` lifts the installed ceiling past the
+# setting up to it (`runtime/sandbox.py::install_launch_timeout_ceiling` / `raise_launch_timeout_
+# ceiling`), the task boundary and the server refuse anything above it, and the setting bounds what an
+# agent-authored stage may run for. Two layers, still one number.
 LAUNCH_TIMEOUT_DEFAULT_S = 24 * 3600.0          # 86400 s
 LAUNCH_TIMEOUT_LIMIT_S = 7 * 24 * 3600.0        # 604800 s

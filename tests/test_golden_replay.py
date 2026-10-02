@@ -61,6 +61,9 @@ the diff that justified it:
   surface could show a node's task metric under a retarget). The diff was 8 insertions and 0
   deletions — one `"task_metric"` per evaluated node, equal to its `metric` because this log has no
   retarget — and no shared leaf changed.
+* 2026-10-01 — `Node.activation` (`core/models.py`, the graded activation check's record;
+  minionerec-lora-v1 node 2). The diff was 8 insertions and 0 deletions — one `"activation": null`
+  per node, what a `node_evaluated` row with no record folds to — and no shared leaf changed.
 """
 from __future__ import annotations
 

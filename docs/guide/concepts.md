@@ -1073,7 +1073,11 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   its three watchdogs' kills (`diverged`/`stalled`/`not_learning`), its cross-reader (`drift`), the
   return code of the setup command it ran (`setup`), its own `stat` of a stage's declared input
   and output (`needs_failed`/`expect_failed`), and its own check of a node's declared activation
-  markers against what the eval printed (`inert_path`). Everything else is diagnosed by an AGENT that can
+  markers against what the eval printed (`inert_path`; under `activation_check=graded`, the default
+  since 2026-10-01, a deterministic matrix: a missing marker whose printer exists in the node's changed
+  or existing code, or one declared on a code change with no printer, is still `inert_path`, while one
+  nothing could print on a config-only change settles the node flagged `activation unverified`).
+  Everything else is diagnosed by an AGENT that can
   read the dead eval's stage logs AND the code that wrote them, and that must cite the file, line or
   log record it stood on. Two of its answers exist because no out-of-band channel can produce them:
   `oom` (both text rules were deleted, and device-level free memory is sampled after the process is

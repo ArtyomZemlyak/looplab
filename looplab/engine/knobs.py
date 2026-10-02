@@ -211,6 +211,13 @@ class EngineKnobs:
     _inline_repair_same_failure_limit = Knob("inline_repair_same_failure_limit",
                                              lambda v: max(0, int(v)))
     _inline_repair_reasons = Knob("inline_repair_reasons", lambda v: tuple(v or ("crash",)))
+    # The graded activation check (minionerec-lora-v1 node 2, 2026-10-01; `engine/activation.py`).
+    # An unknown spelling settles to the REFUSING rule ("strict" / "audit"): `Settings` refuses it
+    # at construction, so only a hand-built `EngineOptions` can carry one.
+    _activation_check = Knob("activation_check",
+                             lambda v: v if v in ("off", "strict", "graded") else "strict")
+    _activation_unverified_gate = Knob("activation_unverified_gate",
+                                       lambda v: v if v in ("audit", "gate") else "audit")
     _inline_repair_retrain_cap = Knob("inline_repair_retrain_cap", lambda v: max(0, int(v)))
     _dep_install_timeout = Knob("dep_install_timeout", float)
     # Agent governance (Settings.agent_control): per-setting allow-list of which roles may change it

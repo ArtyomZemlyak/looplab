@@ -29,7 +29,7 @@ from looplab.core.models import (Event, Idea, Node, NodeStatus, RunState, Trial,
                      coerce_node_id as _coerce_node_id, objective_value, row_objective,
                      EXTRA_METRIC_DECLARED, normalize_extra_metric_backfill,
                      normalize_extra_metric_channels, normalize_extra_metric_directions, normalize_extra_metrics,
-                     normalize_researcher_footprint,
+                     normalize_activation_record, normalize_researcher_footprint,
                      run_setup_key, search_outcome)
 # No longer read here — the concept family's materializer inherits through it — but still readable
 # from this module as it always was (`tests/test_shared_identity_rules.py` derives the card ledger's
@@ -738,6 +738,9 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
             # which is what a measured metric means here.
             _prov = d.get("metric_provenance")
             n.metric_provenance = _prov if isinstance(_prov, dict) else None
+            # The graded activation record (minionerec-lora-v1 node 2, 2026-10-01): additive with a
+            # reader-side default, normalized so a hand-edited row cannot park anything else here.
+            n.activation = normalize_activation_record(d.get("activation"))
             # Intra-node sweep: per-trial results (audit/UI only; node.metric is already the
             # best trial, set by the engine). Coerce defensively per trial so one malformed
             # entry in a hand-edited/bring-your-own-script log can't crash the whole fold.

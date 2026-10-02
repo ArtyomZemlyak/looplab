@@ -1889,17 +1889,96 @@ def eval_spec_time_budget(eval_spec: Optional[dict]) -> Optional[float]:
     es = eval_spec or {}
     if not es:
         return None
-    vals = []
-    base = es.get("timeout")
-    if base is not None:
-        vals.append(base)
-    for prof in (es.get("profiles") or {}).values():
-        if isinstance(prof, dict) and "timeout" in prof:
-            vals.append(prof["timeout"])
+    vals = [raw for _label, raw in _budget_declarations(es)]
     if not vals:                        # spec active but no explicit budget -> build_command's default
         vals.append(600.0)
     cand = max((finite_timeout(v, 0.0) for v in vals), default=0.0)
     return cand if math.isfinite(cand) and cand > 0 else None
+
+
+def _budget_declarations(es: dict) -> list:
+    """`[(label, raw value)]` for the timeouts that make up the per-eval BUDGET — the base `timeout`
+    and every profile's — exactly as declared (unparsed, unclamped). The one walk both
+    `eval_spec_time_budget` (the budget) and `operator_declared_timeouts` (every operator wall clock)
+    read, so the two cannot come to disagree about which keys are the budget's."""
+    out: list = []
+    if es.get("timeout") is not None:
+        out.append(("eval.timeout", es["timeout"]))
+    profiles = es.get("profiles")
+    if isinstance(profiles, dict):
+        for name, prof in profiles.items():
+            if isinstance(prof, dict) and "timeout" in prof:
+                out.append((f"eval.profiles[{name!r}].timeout", prof["timeout"]))
+    return out
+
+
+def _declared_seconds(raw) -> Optional[float]:
+    """A declared timeout as seconds, UNCLAMPED, or None when it is not a usable wall clock (a bool,
+    unparseable, NaN, or <= 0 — the values `finite_timeout` already maps to a fallback). `+inf` is
+    KEPT: at submit it is a declaration above every limit and is refused as one, rather than dropped
+    as junk and silently run at a fallback. (The engine-start install skips it, because at a launch
+    `finite_timeout` really does run it at the fallback — see `sandbox.install_launch_timeout_ceiling`.)"""
+    if isinstance(raw, bool):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if math.isnan(value) or value <= 0:
+        return None
+    return value
+
+
+def operator_declared_timeouts(eval_spec: Optional[dict]) -> list:
+    """EVERY wall clock the OPERATOR declared in an eval spec, as `[(label, seconds)]`, UNCLAMPED.
+
+    THE ENUMERATION the launch ceiling is lifted by (incident 2026-10-01, `minionerec-backbones-v11`:
+    a declared 28 h `eval.timeout` was SIGKILLed at the 24 h default ceiling, and nothing said so at
+    submit or start). Two readers, one walk:
+      * engine start, `cli/__init__.py::_engine` -> `sandbox.install_launch_timeout_ceiling`: the
+        ceiling becomes at least the largest of these (at most the 7-day `LAUNCH_TIMEOUT_LIMIT_S`), so
+        no operator-declared launch is cut by a ceiling the operator never chose;
+      * submit, `adapters/repo_task.py::EvalSpec._wall_clocks_within_launch_limit`: any of these above
+        the week is REFUSED, naming it.
+
+    What is in it, and why each: the per-eval budget (`_budget_declarations` — base and profile
+    timeouts, the same walk `eval_spec_time_budget` takes), each operator-declared `stages[].timeout`
+    (`cmd.stages` — the stage is killed at its OWN declared timeout, `_run_stages`), the canary's
+    per-stage cap, the host scorer's and the holdout scorer's timeouts, and the `setup` /
+    `run_setup` timeouts — every one of them reaches `run_argv` through `finite_timeout`, so every one
+    of them could be cut. NOT in it: a Developer's `looplab_stages.json` (agent-authored, recorded
+    against the budget rather than enforced, and bounded by the ceiling by design), a Researcher's
+    `eval_timeout` (clamped by `max_eval_timeout`), and a live `budget_extend{eval_timeout}` (the
+    operator's too, but it lives in the log, not the spec — `engine/width_settling.py::
+    lift_launch_ceiling` raises the ceiling for it).
+
+    Values are kept as declared (`_declared_seconds`): a non-number is skipped, `+inf` kept (for the
+    submit gate; the install skips non-finite values), and nothing is clamped — this is the input the ceiling is derived from, so reading it through the
+    ceiling (`finite_timeout`) would only ever reproduce the old one. Defaults present in a dumped
+    spec (`setup_timeout` 600, `run_setup_timeout` 1800) are included; they are below every ceiling
+    and so never move it."""
+    es = eval_spec or {}
+    if not isinstance(es, dict) or not es:
+        return []
+    raw: list = list(_budget_declarations(es))
+    stages = es.get("stages")
+    if isinstance(stages, list):
+        for i, stage in enumerate(stages):
+            if isinstance(stage, dict) and stage.get("timeout") is not None:
+                raw.append((f"eval.stages[{stage.get('name', i)!r}].timeout", stage["timeout"]))
+    for key in ("canary", "host_scorer", "holdout_scorer"):
+        sub = es.get(key)
+        if isinstance(sub, dict) and sub.get("timeout") is not None:
+            raw.append((f"eval.{key}.timeout", sub["timeout"]))
+    for key in ("setup_timeout", "run_setup_timeout"):
+        if es.get(key) is not None:
+            raw.append((f"eval.{key}", es[key]))
+    out = []
+    for label, value in raw:
+        seconds = _declared_seconds(value)
+        if seconds is not None:
+            out.append((label, seconds))
+    return out
 
 
 # ------------------------------------------------------------------ the operator's LIVE eval budget
@@ -1917,14 +1996,15 @@ def eval_timeout_override(overrides, *, clamp: bool = True) -> Optional[float]:
     TOTAL over junk: the fold already refuses a non-finite/non-positive value, but a manually built
     or forward-version `RunState` reaches this too, and a poison ceiling must read as "no override",
     never as a NaN deadline that is never reached. Capped at the launch ceiling IN FORCE
-    (`sandbox.launch_timeout_ceiling()` — the run's `Settings.max_launch_timeout_s`, 24 h unless
-    configured) — the ceiling every launch is clamped to anyway (`finite_timeout`), so a larger
-    number would be announced to the roles and then not run.
+    (`sandbox.launch_timeout_ceiling()`) — the ceiling every launch is clamped to anyway
+    (`finite_timeout`), so a larger number would be announced to the roles and then not run.
 
-    `clamp=False` is the number the operator ASKED for, for the one reader that has to say when the
-    two differ (`engine/width_settling.py::_apply_control_overrides`): the server refuses a value
-    above the run's RECORDED ceiling, so a clamp here means this engine was started before that
-    ceiling was raised, and only a restart applies it."""
+    Since 2026-10-02 the engine LIFTS that ceiling to the override before it reads it here
+    (`engine/width_settling.py::lift_launch_ceiling`), so in the engine the cap bites only above the
+    7-day `LAUNCH_TIMEOUT_LIMIT_S`. The repo Developer reads this in the same process, after the same
+    lift. `clamp=False` is the number the operator ASKED for, for the one reader that has to say when
+    the two differ: the server refuses a value above the week, so a clamp here means the event
+    reached the log past the server (a hand edit, an older build)."""
     from looplab.runtime.sandbox import launch_timeout_ceiling
     if not isinstance(overrides, dict):
         return None

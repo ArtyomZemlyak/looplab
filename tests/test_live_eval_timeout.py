@@ -29,6 +29,7 @@ import anyio
 import pytest
 
 from looplab.adapters.repo_task import EvalSpec, RepoTask
+from looplab.core.numeric import LAUNCH_TIMEOUT_LIMIT_S
 from looplab.engine.orchestrator import Engine
 from looplab.engine.shared import (effective_eval_spec, effective_eval_time_budget,
                                    effective_max_eval_timeout,
@@ -138,10 +139,13 @@ def test_the_server_accepts_a_bounded_positive_number(tmp_path):
     assert _normalize(tmp_path / "a", {"eval_timeout": 43200})["eval_timeout"] == 43200.0
     assert _normalize(tmp_path / "b", {"eval_timeout": "600"})["eval_timeout"] == 600.0
     assert _normalize(tmp_path / "c", {"eval_timeout": MAX_TIMEOUT_S})["eval_timeout"] == MAX_TIMEOUT_S
+    # above the 24 h default ceiling too (2026-10-02): the run's engine lifts its ceiling to it
+    assert _normalize(tmp_path / "d", {"eval_timeout": MAX_TIMEOUT_S + 1})["eval_timeout"] == \
+        MAX_TIMEOUT_S + 1
 
 
-@pytest.mark.parametrize("bad", [0, -1, float("nan"), float("inf"), MAX_TIMEOUT_S + 1, True,
-                                 "abc", [1], {"s": 1}])
+@pytest.mark.parametrize("bad", [0, -1, float("nan"), float("inf"), LAUNCH_TIMEOUT_LIMIT_S + 1,
+                                 True, "abc", [1], {"s": 1}])
 def test_the_server_refuses_a_value_that_is_not_a_budget(tmp_path, bad):
     from fastapi import HTTPException
     with pytest.raises(HTTPException) as refused:

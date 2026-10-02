@@ -1,0 +1,6 @@
+{
+ "markers": [
+  "SFT_EVAL_SAMPLE=-2",
+  "SFT_RESUME_EVERY_MIN=0"
+ ]
+}
