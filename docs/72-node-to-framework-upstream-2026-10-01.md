@@ -1727,3 +1727,60 @@ Ruff и whitespace check прошли.
 original base/files. Exact retry без reexecution, owner/scorer preservation и
 replay/export прошли. Полный suite проекта и paid model judgments этим
 исправлением не проверены.
+
+### 18.23 Проверка полноты фичей и доступ к поздним номинациям (2026-10-02)
+
+Повторная feature review от HEAD `0d1f09518` сверяет принятую спецификацию §17–18,
+а не только имена событий и прежние CLOSED-маркеры. Текущая карта:
+
+| Пункт | Исполняемый путь | Подтверждающая проверка |
+|---|---|---|
+| 72.1, WP1 | `looplab/engine/upstream.py::UpstreamLane.advance`: явный evidence-bound CAS; `looplab/adapters/repo_task.py::RepoTask.effective_seed_base`: следующие seeds и authoring читают новую базу | Real Engine/stdio MCP smoke, multibase и stale-CAS tests |
+| 72.2 | `looplab/engine/workspace.py::WorkspaceSeeder.materialize`: same-read архив и attribution до overlay; primary terminal хранит receipt | Seed/base/archive tests; smoke и original-base confirmation |
+| 72.3, WP1 | `looplab/engine/upstream_state.py::repair_origin`: applied repair и исходный pending env trigger; generalized runner, old-fail/new-pass gate | `tests/test_upstream_repairs.py` выполняет настоящее падение, ремонт и gate |
+| 72.4, WP2 | `looplab/engine/upstream_state.py::upstream_candidates`: hunks/ranges/hash, recipe/capability/promoted advice; shared source eligibility | Source-advice tests; новая crowded-source приёмка ниже |
+| 72.5, WP2 | `looplab/agents/maintainer.py::Maintainer`: авторский контракт и validator; run-owned Git worktree, отдельный recipe/flag/docs/critic | Real-Git, candidate-binding и Assistant approval tests |
+| 72.6 | `looplab/engine/upstream_gate.py::execute_gate`: operator tests, artifact regression, paired full repeats/SEM, repair trigger, scorer/input/environment identity и отдельные costs | Gate/refusal/environment/admission tests; реальный SGD smoke |
+| 72.7, WP3 | Inspector/Overview/Report показывают actual base/origin/conflict; DAG пересекает base и concept filters; действие идёт через Assistant | Base provenance/lineage/upstream panel UI tests; прежняя desktop-приёмка §18.3 |
+
+Функциональный пробел нашёлся в 72.4: global advice останавливалось на 200 ханках,
+а admission повторно искал source в той же первой странице. Поздний реально
+измеренный источник нельзя было номинировать или предложить независимо от его
+качества. Red fixture исполняет два CPU SGD узла: первый имеет 201 независимый
+code hunk, второй — обычную momentum capability. Diagnostic constants первого
+узла не являются заявлением об ML-качестве. Предложение второго получало
+`upstream_nomination_invalid`; pagination/filter API отсутствовал.
+
+Теперь nomination имеет независимые `candidate_offset`/`candidate_limit` (1–200),
+`candidates.next_offset` и `source_node_id` filter в HTTP, typed MCP и Assistant.
+History сохраняет отдельные offset/limit; каждый ответ ограничен, но следующие
+страницы доступны. Прежний лимит первых 128 путей также снят: лимит относится к
+странице, а не к невидимой части manifest. Admission читает именно выбранный
+источник и exact requested hashes, а не глобальную страницу. Measured source,
+protected surface, recipe, real gate и current-evidence CAS проверки сохраняются.
+Чтение ничего не исполняет и не пишет. MCP проверяет echo filter/offset/limit,
+consistency next page и отсутствие чужих source rows; потерянная metadata —
+unavailable, не пустой список возможностей. После изменения evidence страницы
+надо обновить; сохранённый список советов не разрешает advancement.
+
+`tests/test_upstream_candidate_pages.py` проверяет полный proposal → 7 real gate
+executions → explicit advancement второго источника, exact retries без новых
+executions, чтение всех страниц через HTTP/MCP и узкий Assistant read без writes.
+Семь malformed page controls в `tests/test_upstream_candidate_page_receipts.py`
+отказываются. Новые controls — 9 passed; replay first — 193 passed; UI provenance/
+upstream/lineage subset — 11 passed. UI markup этим изменением не менялся.
+
+Финальный upstream/MCP regression — 240 passed; documentation/claim pins/package/
+layering/containment/API/event/diagram surface contracts — 116 passed. Strict
+MkDocs, Ruff и whitespace check прошли. `.tmp/doc72-feature-sgd/acceptance.json`:
+private server + scoped stdio MCP, 2 primary CPU SGD trainings, 7 gate executions,
+3 original-base/files confirmations, exact retries без reexecution, owner/scorer
+preservation и replay/export. Полный Python/UI suite и paid model judgments в
+этом проходе не запускались; UI-проверка ограничена названным subset.
+
+**Вывод о полноте:** 72.1–72.7 и WP1–WP3 реализованы в принятом opt-in scope §18.
+Это не реализация всех первоначальных расширений: automatic advancement, отдельный
+paid Maintainer/critic workflow, Docker/host scorer/setup gate, protected regions
+внутри общего trainer/scorer и arbitrary GPU reproducibility остаются за границей
+§18.4. Их нельзя получить снятием existing refusal или назвать выполненными по
+CPU protocol smoke. Owner repository PR/push не является действием движка.

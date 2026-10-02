@@ -160,15 +160,20 @@ def repair_origin(events, node, name, changed_lines):
     return None, []
 
 
-def upstream_candidates(rd, task, events=None):
-    """Bounded hunk/range/hash advice, including exact pending env repair triggers."""
+def upstream_candidates(rd, task, events=None, *, source_node_id=None, offset=0, limit=200, hunk_hashes=None):
+    """Paged advice; admission inspects the chosen source/hunks beyond any UI page."""
     from looplab.engine.activation import CHANGE_CAPABILITY, is_config_path
     from looplab.engine.seed_archive import verified_seed_archive
     events = events if events is not None else events_for(rd)
-    state, rows = fold(events), []
+    state, rows, skipped = fold(events), [], 0
+    def page(more):
+        return {"rows": rows, "bounded": more, "limit": limit, "offset": offset,
+                "next_offset": offset + limit if more else None, "source_node_id": source_node_id}
     events_by_seq = {e.seq: e for e in events}
     promoted = {h for e in events if e.type == "base_advanced" for h in e.data.get("hunk_hashes", [])}
     for node in sorted(state.nodes.values(), key=lambda n: (n.id != state.best_node_id, n.id)):
+        if source_node_id is not None and node.id != source_node_id:
+            continue
         try:
             receipt = _source_receipt(node, events_by_seq)
         except UpstreamRefusal:
@@ -176,7 +181,7 @@ def upstream_candidates(rd, task, events=None):
         archive = verified_seed_archive(rd, receipt)
         if archive is None:
             continue
-        for name in sorted(set(node.files) | set(node.deleted))[:128]:
+        for name in sorted(set(node.files) | set(node.deleted)):
             raw = read_bounded_regular_file(archive / name, 1024 * 1024 + 1)
             if raw is not None and len(raw) > 1024 * 1024:
                 continue  # bounded advice; the full archive remains authoritative
@@ -192,6 +197,13 @@ def upstream_candidates(rd, task, events=None):
                     continue
                 i, j, k, l = changed[0][1], changed[-1][2], changed[0][3], changed[-1][4]
                 signature = digest({"path": name, "old": a[i:j], "new": b[k:l]})
+                if hunk_hashes is not None and signature not in hunk_hashes:
+                    continue
+                if skipped < offset:
+                    skipped += 1
+                    continue
+                if len(rows) == limit:
+                    return page(True)
                 repair, tokens = repair_origin(events, node, name, after.splitlines()[k:l])
                 triggers = [n.id for n in state.pending_nodes() if n.id != node.id and
                             any(token in list(map(str.strip, n.files.get(name, "").splitlines())) for token in tokens)]
@@ -204,6 +216,4 @@ def upstream_candidates(rd, task, events=None):
                     "repair_reason": ((repair.data.get("reason_summary") or repair.data.get("reason") or repair.data.get("rationale")) if repair else None),
                     "trigger_tokens": {name: tokens} if repair and triggers else {},
                     "pending_trigger_nodes": triggers, "source_signature": node_signature(node)})
-                if len(rows) >= 200:
-                    return {"rows": rows, "bounded": True, "limit": 200}
-    return {"rows": rows, "bounded": False, "limit": 200}
+    return page(False)

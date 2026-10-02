@@ -33,8 +33,13 @@ class UpstreamLane:
         self.rd, self.task, self.settings = Path(run_dir).resolve(), task, settings
         self.task.bind_run_directory(self.rd)
 
-    def read(self, expected_generation, *, offset=0, limit=40):
+    def read(self, expected_generation, *, offset=0, limit=40, source_node_id=None, candidate_offset=0, candidate_limit=200):
         from looplab.agents.maintainer import Maintainer
+        if (type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 100
+                or type(candidate_offset) is not int or candidate_offset < 0
+                or type(candidate_limit) is not int or not 1 <= candidate_limit <= 200
+                or source_node_id is not None and (type(source_node_id) is not int or source_node_id < 0)):
+            raise ValueError("Use nonnegative source/offsets, history limit 1..100 and candidate limit 1..200")
         events = self._current(expected_generation)
         active = active_base(events, self.task.seed_base)
         history = [{"seq": e.seq, "type": e.type, **self._view(e.data)} for e in events
@@ -43,7 +48,10 @@ class UpstreamLane:
             "enabled": self.task.upstream is not None, "active_base": active,
             "source_health": {"events": "complete"}, "history": history[offset:offset + limit],
             "next_offset": offset + limit if len(history) > offset + limit else None,
-            "candidates": upstream_candidates(self.rd, self.task, events) if self.task.upstream else {"rows": [], "bounded": False, "limit": 200},
+            "candidates": upstream_candidates(self.rd, self.task, events, source_node_id=source_node_id,
+                offset=candidate_offset, limit=candidate_limit) if self.task.upstream else
+                {"rows": [], "bounded": False, "limit": candidate_limit, "offset": candidate_offset,
+                 "next_offset": None, "source_node_id": source_node_id},
             "instruction": "Pause and wait for the engine to exit; propose, check, inspect the measured gate, advance explicitly, then resume. No automatic advancement.",
             "maintainer_instruction": Maintainer.instruction,
             "engine_running": engine_alive(self.rd)}
@@ -163,7 +171,8 @@ class UpstreamLane:
             active = active_base(events, self.task.seed_base)
             if body.get("expected_base_revision") != active["revision"] or receipt["digest"] != active["selector"]["digest"]:
                 raise UpstreamRefusal("upstream_base_conflict", "Source node and proposal must refer to the current base revision")
-            advice = upstream_candidates(self.rd, self.task, events)["rows"]
+            advice = upstream_candidates(self.rd, self.task, events, source_node_id=node.id,
+                hunk_hashes=set(body["hunk_hashes"]))["rows"]
             rows = [r for r in advice if r["node_id"] == node.id and r["hunk_hash"] in body.get("hunk_hashes", [])]
             if not rows or len(rows) != len(set(body.get("hunk_hashes", []))) or any(r["classification"] != "capability" for r in rows):
                 raise UpstreamRefusal("upstream_nomination_invalid", "Select current reusable capability hunks; recipes and already promoted hunks cannot advance")

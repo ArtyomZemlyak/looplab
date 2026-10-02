@@ -71,8 +71,17 @@ def page_detail(page):
         return False
     if candidates["bounded"] and len(candidates["rows"]) != candidates["limit"]:
         return False
-    if len(candidates["rows"]) > 200 or not all(isinstance(r, dict) and event(r, r.get("type")) for r in history):
+    if len(candidates["rows"]) > candidates["limit"] or not all(isinstance(r, dict) and event(r, r.get("type")) for r in history):
         return False
+    pagination = {"offset", "next_offset", "source_node_id"}
+    if pagination & set(candidates):
+        if not pagination <= set(candidates) or not integer(candidates["offset"]):
+            return False
+        next_offset, source = candidates["next_offset"], candidates["source_node_id"]
+        if (next_offset is not None and (not integer(next_offset) or next_offset != candidates["offset"] + candidates["limit"])
+                or candidates["bounded"] != (next_offset is not None)
+                or source is not None and (not integer(source) or any(r.get("node_id") != source for r in candidates["rows"] if isinstance(r, dict)))):
+            return False
     if any(a["seq"] >= b["seq"] for a, b in zip(history, history[1:])):
         return False
     # Older pages need not contain the current advancement. Any advancement

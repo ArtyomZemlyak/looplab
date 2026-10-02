@@ -360,11 +360,18 @@ class HarnessAPI:
                     "message": "Completion page is incomplete or inconsistent. Read it again explicitly before interpreting results; no paging, retry or engine work was made."}
         return result
 
-    def upstream_status(self, run_id: str, expected_generation: str, offset: int = 0, limit: int = 40) -> dict:
+    def upstream_status(self, run_id: str, expected_generation: str, offset: int = 0, limit: int = 40,
+                        source_node_id: int | None = None, candidate_offset: int = 0, candidate_limit: int = 200) -> dict:
         self._run_identity(run_id, expected_generation)
-        if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 100:
-            raise ValueError("Use a nonnegative offset and limit 1..100")
-        result = self._checked_generation(self.request("GET", f"/api/runs/{quote(run_id, safe='')}/upstream?expected_generation={expected_generation}&offset={offset}&limit={limit}"), expected_generation)
+        if (type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 100
+                or type(candidate_offset) is not int or candidate_offset < 0
+                or type(candidate_limit) is not int or not 1 <= candidate_limit <= 200
+                or source_node_id is not None and (type(source_node_id) is not int or source_node_id < 0)):
+            raise ValueError("Use nonnegative source/offsets, history limit 1..100 and candidate limit 1..200")
+        query = f"expected_generation={expected_generation}&offset={offset}&limit={limit}&candidate_offset={candidate_offset}&candidate_limit={candidate_limit}"
+        if source_node_id is not None:
+            query += f"&source_node_id={source_node_id}"
+        result = self._checked_generation(self.request("GET", f"/api/runs/{quote(run_id, safe='')}/upstream?{query}"), expected_generation)
         if result.get("status") == 200 and not result.get("code"):
             page = result["body"]
             active, candidates = page.get("active_base"), page.get("candidates")
@@ -377,7 +384,12 @@ class HarnessAPI:
                 and re.fullmatch(r"[0-9a-f]{64}", active["revision"]) is not None
                 and "selector" in active and "advance_seq" in active
                 and isinstance(candidates, dict) and isinstance(candidates.get("rows"), list)
-                and type(candidates.get("bounded")) is bool and candidates.get("limit") == 200)
+                and type(candidates.get("bounded")) is bool and type(candidates.get("limit")) is int
+                and candidates["limit"] == candidate_limit
+                and candidates.get("offset", 0) == candidate_offset
+                and candidates.get("source_node_id") == source_node_id
+                and (candidate_offset == 0 and candidate_limit == 200 and source_node_id is None
+                     or {"offset", "next_offset", "source_node_id"} <= set(candidates)))
             from looplab.harness.upstream_receipts import page_detail
             if not valid or not page_detail(page):
                 return self._read_refusal("invalid_upstream_page")
@@ -619,9 +631,11 @@ def build_server(api: HarnessAPI):
         return phase
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
-    def upstream_status(run_id: str, expected_generation: str, offset: int = 0, limit: int = 40) -> dict:
-        """Read verified base, reusable hunk nominations and paged measured gate history. No work starts."""
-        return api.upstream_status(run_id, expected_generation, offset, limit)
+    def upstream_status(run_id: str, expected_generation: str, offset: int = 0, limit: int = 40,
+                        source_node_id: int | None = None, candidate_offset: int = 0, candidate_limit: int = 200) -> dict:
+        """Read verified base and independently paged nominations/history. Filter source_node_id or follow candidates.next_offset; use small candidate_limit for narrow replies. No work starts."""
+        return api.upstream_status(run_id, expected_generation, offset, limit,
+                                   source_node_id, candidate_offset, candidate_limit)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False))
     def upstream_propose(run_id: str, body: dict) -> dict:

@@ -1368,6 +1368,14 @@ When the operator launches a pinned repo task with `upstream`, search
 `upstream_status(run_id, expected_generation, offset, limit)` for the current base,
 Maintainer instructions, per-hunk nominations and paged gate history. A nomination
 is advice; a completed source must have its current primary score and seed receipt.
+Candidate pages are independent of history pages: use `candidate_limit` (1–200),
+follow `candidates.next_offset` with `candidate_offset`, or filter `source_node_id`.
+History keeps its separate `offset`/`limit`. Assistant exposes the same controls.
+Narrow both limits if a response exceeds the transport/context budget. A full first
+page does not mean later sources have no capabilities. Refresh after state changes;
+nomination is current advice, and proposal admission rechecks the selected source
+and exact hunk hashes independently of the displayed page. MCP rejects a page that
+does not bind the requested filter/offset/limit or has inconsistent pagination.
 Nominations use the same source eligibility as proposal admission: salvaged or
 missing scores, reset lifecycles and invalid seed identities supply no hunks.
 A retargeted extra metric cannot substitute for a missing primary task score.

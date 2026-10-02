@@ -11,8 +11,12 @@ class UpstreamTools:
         self.run_root, self.mode, self.approver = Path(run_root).resolve(), mode, approver
 
     def specs(self):
-        rows = [fn_spec("upstream_status", "Read active base, per-hunk nominations and paged measured gate/capability history plus Maintainer instructions. Starts no work.",
-            {"run_id": {"type": "string"}, "expected_generation": {"type": "string"}, "offset": {"type": "integer"}}, ["run_id", "expected_generation"])]
+        rows = [fn_spec("upstream_status", "Read active base, independently paged nominations/history and Maintainer instructions. Filter source_node_id or follow candidates.next_offset using candidate_offset; narrow candidate_limit and history limit for small replies. Starts no work.",
+            {"run_id": {"type": "string"}, "expected_generation": {"type": "string"},
+             "offset": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+             "source_node_id": {"type": "integer", "minimum": 0},
+             "candidate_offset": {"type": "integer", "minimum": 0},
+             "candidate_limit": {"type": "integer", "minimum": 1, "maximum": 200}}, ["run_id", "expected_generation"])]
         if self.mode != "plan":
             for operation, purpose in (
                 ("propose", "Generalize measured source_node_id and hunk_hashes in a run-owned worktree using Maintainer. Supply files/deleted, separate recipe_files/recipe_deleted, summary, documented flag {name,default,enabled}, documentation_path, named critic {verdict:pass,reason,reviewer}, expected_base_revision."),
@@ -45,7 +49,9 @@ class UpstreamTools:
             task = load_task(rd / "task.snapshot.json", existing_run=True)
             lane = UpstreamLane(rd, task, read_config_snapshot(rd / "config.snapshot.json", refuse_unknown=True))
             if name == "upstream_status":
-                result = lane.read(args["expected_generation"], offset=args.get("offset", 0), limit=10)
+                result = lane.read(args["expected_generation"], offset=args.get("offset", 0), limit=args.get("limit", 10),
+                    source_node_id=args.get("source_node_id"), candidate_offset=args.get("candidate_offset", 0),
+                    candidate_limit=args.get("candidate_limit", 200))
                 from looplab.agents.maintainer import Maintainer
                 result["maintainer_instruction"] = Maintainer.instruction
             elif name in {row["function"]["name"] for row in self.specs()}:

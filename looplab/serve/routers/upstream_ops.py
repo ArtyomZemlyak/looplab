@@ -72,10 +72,13 @@ def build_router(srv):
 
     @router.get("/api/runs/{run_id}/upstream")
     def status(run_id: str, response: Response, expected_generation: str = Query(..., pattern=r"^[0-9a-f]{64}$"),
-               offset: int = Query(0, ge=0), limit: int = Query(40, ge=1, le=100)):
-        """Read current base, per-hunk nominations and paged measured upstream history. Starts no work."""
+               offset: int = Query(0, ge=0), limit: int = Query(40, ge=1, le=100),
+               source_node_id: Optional[int] = Query(None, ge=0),
+               candidate_offset: int = Query(0, ge=0), candidate_limit: int = Query(200, ge=1, le=200)):
+        """Read current base, independently paged nominations/history, optionally for one source. Starts no work."""
         response.headers["Cache-Control"] = "no-store"
-        return call(run_id, "read", expected_generation, offset=offset, limit=limit)
+        return call(run_id, "read", expected_generation, offset=offset, limit=limit,
+                    source_node_id=source_node_id, candidate_offset=candidate_offset, candidate_limit=candidate_limit)
 
     @router.post("/api/runs/{run_id}/upstream/proposals")
     def propose(run_id: str, body: UpstreamProposal, request: Request):
