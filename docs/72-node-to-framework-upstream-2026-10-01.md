@@ -890,6 +890,8 @@ path, ranges, SHA-256 hunks, source lifecycle signature и repair/idea origin.
 Nomination и fresh proposal используют одну проверку primary measured source:
 salvaged/missing score, reset lifecycle и неверный seed receipt не дают hunks.
 Retargeted extra metric не подменяет отсутствующий primary task score.
+Отсутствие новой extra objective у источника с сохранённым primary score не мешает
+upstream: gate повторяет declared primary evaluator, ranking остаётся на новой цели.
 Receipt связывает integer node/generation/seed sequence с полным archived seed
 event; digest, file count и bytes должны совпадать. Seed event должен предшествовать
 текущему primary evaluation terminal. Исторический exact ACK остаётся readable,
@@ -1636,3 +1638,40 @@ Documentation/claim pins/package layout/layering/containment/API/event contracts
 2 primary CPU SGD trainings, 7 gate executions и 3 confirmation seeds на original
 base/files; exact retries без reexecution, owner/scorer preservation и replay/export
 прошли. Полный suite проекта и paid model judgments этим исправлением не проверены.
+
+### 18.21 Primary source без значения новой objective (2026-10-02)
+
+Review от HEAD `9c3b52467` нашёл лишний отказ после `metric_retarget`.
+Сохранявшаяся проверка `Node.metric` требовала значение текущей ranking objective,
+хотя gate повторяет declared primary evaluator и сравнивает `Node.task_metric`.
+Узел с настоящим primary score и полным current seed receipt мог не измерять новую
+extra objective; replay правильно оставлял его unranked, но upstream ошибочно
+терял nomination и отказывал в proposal/check/advancement.
+
+Два red сценария используют настоящий CPU SGD, protected stdout scorer и второй
+узел с operator-declared secondary reader. Owner HTTP command меняет objective:
+лидером становится второй узел, у исходного `metric=None`, primary score сохранён.
+Переключение проверяется до proposal и после measured passing gate. Источник не
+получает дополнительной метрики из чужого результата или подставного значения.
+
+`looplab/engine/upstream_state.py::source_node` и
+`looplab/engine/upstream_state.py::upstream_candidates` теперь требуют измеренный
+primary task score независимо от доступности ranking objective. Статус, feasibility,
+salvage, current lifecycle, seed/archive identity и chronology проверки сохраняются.
+Extra metric по-прежнему не подменяет отсутствующий primary score.
+
+HTTP/MCP integration проходит полный proposal → check → explicit CAS на таком
+источнике. Gate воспроизводит original primary score; exact check/advance retries
+возвращают исходные ACK без новых executions. Лидер новой objective и unranked
+статус исходного узла остаются прежними. Смена ranking objective сама по себе не
+меняет declared evaluator или input identity; изменения task/config/environment
+по-прежнему требуют fresh measured evidence. Ни resume, ни нового ожидания нет.
+
+Replay first — 193 passed; source/retarget controls — 25 passed; весь upstream/MCP
+regression — 218 passed. Documentation/claim pins/package contracts/layering/
+containment/API/event contracts — 108 passed. `.tmp/doc72-unranked-sgd/acceptance.json`:
+private UI server + scoped stdio MCP, 2 primary CPU SGD trainings, 7 gate executions
+и 3 confirmation seeds на original base/files. Exact retry без reexecution,
+owner/scorer preservation и replay/export прошли. Приёмка проверяет primary
+protocol; перенос не утверждает результат на отсутствующей extra objective.
+Полный suite проекта и paid model judgments этим исправлением не проверены.

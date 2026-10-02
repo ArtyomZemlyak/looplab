@@ -1371,6 +1371,9 @@ is advice; a completed source must have its current primary score and seed recei
 Nominations use the same source eligibility as proposal admission: salvaged or
 missing scores, reset lifecycles and invalid seed identities supply no hunks.
 A retargeted extra metric cannot substitute for a missing primary task score.
+Conversely, a measured primary source remains eligible when it is unranked on
+the new objective because that extra metric is absent. The gate repeats the
+declared primary evaluator; ranking and the current leader remain unchanged.
 The receipt must bind integer node/generation/seed sequence identities and agree
 with a complete stored seed event, including archive identity, counts and bytes.
 That seed event must precede the current primary evaluation terminal.

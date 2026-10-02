@@ -113,8 +113,7 @@ def _source_receipt(node, events_by_seq):
     """Share primary-score and seed identity eligibility with nomination reads."""
     from looplab.engine.seed_archive import seed_archive_digest
     if (node is None or node.tombstoned or node.status.value != "evaluated"
-            or node.metric is None or not math.isfinite(node.metric) or not node.feasible
-            or node.violations or (node.metric_provenance or {}).get("salvaged")):
+            or not node.feasible or node.violations or (node.metric_provenance or {}).get("salvaged")):
         raise UpstreamRefusal("upstream_source_not_measured", "Choose a current completed node with a primary measured score")
     receipt = (node.metric_provenance or {}).get("base_revision")
     message = "The source node has no complete archived seed identity"
@@ -132,6 +131,8 @@ def _source_receipt(node, events_by_seq):
             or seed_archive_digest(seed_base) != archive_digest
             or any(seed_base[k] != receipt[k] for k in ("file_count", "bytes"))):
         raise UpstreamRefusal("upstream_source_unavailable", message)
+    # The gate repeats the declared primary evaluator. Retargeting only changes
+    # node.metric for ranking; an unranked node can still have a measured source.
     score = node.task_metric
     if score is None or not math.isfinite(score):
         raise UpstreamRefusal("upstream_source_not_measured", "The source task score is unavailable")
