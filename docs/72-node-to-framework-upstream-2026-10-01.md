@@ -1,6 +1,6 @@
 # 72 — Из ноды во фреймворк: upstream возможностей, найденных в прогоне (2026-10-01)
 
-> **Статус: upstream — предложение; основа 72.2 реализована (раздел 8).** Ни один
+> **Статус: upstream — предложение; 72.2 и archive/export prerequisites реализованы (§8–12).** Ни один
 > дефолт не переключён. Исторические свидетельства ниже:
 > каждое исходное утверждение о коде сверено с `master` @ `65551da0` (2026-10-01) и цитируется как
 > `<модуль>.py::<символ>`; каждый `proof:` из раздела 5 прогнан через
@@ -355,9 +355,9 @@ PR/MR для человека; движок туда не пушит.
 ## 5. Состояние пунктов
 
 Каждый маркер несёт свой фальсификатор (грамматика `core/claimpin.py::PROOF`), который сегодня
-истинен и перестанет быть истинным, когда пункт отгрузят. Смежные, уже объявленные в другом месте и
-здесь не дублируемые: `repo-base-tree-not-archived` (doc 67 67.12 — база не архивирована
-содержимым) и постоянный отказ `f3-node-workspace-worktree` (doc 29 §F3, doc 37).
+истинен и перестанет быть истинным, когда пункт отгрузят. Смежный 67.12 теперь
+реализован в bounded regular-file scope (§10–12); data/environment не архивированы.
+Постоянный отказ `f3-node-workspace-worktree` (doc 29 §F3, doc 37) сохраняется.
 
 - **72.1** OPEN[no-base-advance-event] внутри живого прогона база движется только ручной правкой
   рабочей копии оператора, и это не записано ничем, кроме сменившегося `substrate` на следующем
@@ -637,3 +637,43 @@ SGD evaluation, затем удалены private source и node workdirs, эк�
 operator-owned scorer boundary; затем pinned base selection и evidence-bound
 gate/CAS advancement. Архив regular files не заменяет data/environment и не
 доказывает эквивалентность изменений.
+
+## 13. Ревью operator-owned scorer boundary перед реализацией
+
+Существующий `protect_entrypoint` защищает найденный entrypoint, а не импортируемые
+evaluator dependencies, labels, split/filter rules. `protect` также не утверждает,
+что его список является границей оценивания. Ни одно из этих свойств нельзя
+автоматически трактовать как permission для upstream. Совмещённый trainer/scorer
+можно защитить целиком; менять внутри него «только training region» сейчас нельзя.
+
+Первый контракт — opt-in `cmd.scorer_boundary: {files: [...]}` (`eval` — alias cmd).
+Оператор перечисляет до 128 literal regular-file paths относительно **корня node
+workspace**, с префиксом имени editable. Это не paths относительно eval.cwd.
+Пустой список, glob, aliases, absolute/drive/parent escapes, повторные или опасные
+кроссплатформенные имена отклоняются. Каждый путь должен принадлежать объявленному
+editable и существовать в source при submit. Data/reference mounts и host scorers
+за пределами editable в этот первый контракт не входят. Полнота dependency closure
+остаётся утверждением оператора; framework не выводит её из imports или argv.
+
+Все declared файлы добавляются к protect соответствующего editable, поэтому общий
+write gate, внешнее inject admission, Developer tools и protected seeding используют
+ту же защиту, включая seed_mode=none и protect_entrypoint=false. Declaration живёт
+в task snapshot, не в файле кандидата. Resume не должен становиться невозможным
+из-за исчезнувшего source: сохранённая declaration продолжает защищать имена, а
+отсутствующие/copied unreadable bytes дают unavailable evidence.
+
+`base_revision.scorer_boundary` — versioned receipt только явно объявленной
+границы: canonical paths, hashes полных bytes и executable bits из **того же read**,
+который вычисляет base digest, до mounts/overlay/assets. Не перечитывать source на
+terminal и не добавлять второй полный обход seed. Если base read не complete или
+хотя бы declared file отсутствует, digest границы unknown; partial rows не являются
+подтверждением. Необъявленная граница не добавляет ключ и не меняет legacy task dumps,
+setup identity, seed receipts или execution. Архив/replay/export сохраняют receipt.
+
+Приёмка: declaration validation; multi-editable и nested/cwd semantics; protected
+write/delete/admission и seed_mode=none; изменение helper при прежнем entrypoint;
+source drift после seed; unknown/missing/oversized reads; same-read proof; legacy
+identity compatibility; replay/export preservation; два реальных быстрых protected
+SGD сценария восстановления с декларацией и unchanged scorer. Никакой новой
+оценки, hidden wait, автоматического продвижения или equivalence verdict этот
+шаг не вводит. 72.1/72.6 остаются открытыми; далее pinned selection и gate/CAS.
