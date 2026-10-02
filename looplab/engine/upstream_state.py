@@ -45,6 +45,41 @@ def events_for(rd):
     return events
 
 
+def claimed_gate_executions(events, gate):
+    """Bind measured charges to one preceding, matching, unrevoked gate claim.
+
+    A complete result can arrive after operator abandonment or retain charges
+    whose durable start is unavailable. Neither grants fresh CAS authority.
+    Exact ACK reads remain historical; this fence is for a new base publication.
+    """
+    action, proposal = gate.data.get("action_id"), gate.data.get("proposal_id")
+    message = "Inspect events.jsonl: the gate needs one matching current claim before its executions and one completion, without operator abandonment; check afresh with a new action ID"
+    if not isinstance(action, str) or re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", action) is None:
+        raise UpstreamRefusal("upstream_gate_required", message)
+    related = [e for e in events if (e.type.startswith("upstream_") or e.type == "base_advanced")
+               and e.data.get("action_id") == action]
+    starts = [e for e in related if e.type == "upstream_gate_started"]
+    finishes = [e for e in related if e.type == "upstream_gate_finished"]
+    expected_hash = digest({"expected_generation": run_generation_token(events),
+                            "action_id": action, "proposal_id": proposal})
+    if (len(starts) != 1 or len(finishes) != 1 or finishes[0].seq != gate.seq
+            or gate.data.get("request_hash") != expected_hash
+            or any(e.type not in ("upstream_gate_started", "upstream_execution", "upstream_gate_finished") for e in related)
+            or any(e.type == "upstream_gate_abandoned" and e.data.get("claim_action_id") == action for e in events)):
+        raise UpstreamRefusal("upstream_gate_required", message)
+    start = starts[0]
+    result = gate.data.get("result")
+    if (not isinstance(result, dict) or start.seq >= gate.seq
+            or start.data.get("proposal_id") != proposal or start.data.get("request_hash") != expected_hash
+            or start.data.get("input_identity") != result.get("input_identity")):
+        raise UpstreamRefusal("upstream_gate_required", message)
+    charges = [e for e in related if e.type == "upstream_execution"]
+    if any(not start.seq < e.seq < gate.seq or e.data.get("proposal_id") != proposal
+           or e.data.get("request_hash") != expected_hash for e in charges):
+        raise UpstreamRefusal("upstream_gate_required", message)
+    return [e.data.get("execution") for e in charges]
+
+
 def active_base(events, initial):
     advanced = [e for e in events if e.type == "base_advanced"]
     last = advanced[-1] if advanced else None

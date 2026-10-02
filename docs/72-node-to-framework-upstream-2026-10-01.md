@@ -1381,3 +1381,40 @@ Replay first — 193 passed; strict MkDocs, Ruff и whitespace check прошл�
 primary base/files; exact retries без reexecution, replay/export и неизменные
 owner/scorer bytes подтверждены. Scope остаётся declared CPU protocol acceptance,
 не arbitrary environment closure или проверка paid model judgments.
+
+### 18.15 Claim lineage и поздний результат после abandon (2026-10-02)
+
+После проверки полноты result найден ещё один разрыв: recorded executions
+совпадали с gate, но CAS не требовал действительного preceding claim. Шесть red
+real-SGD проб разрешали advancement при missing/duplicate start, wrong request
+hash или input context, первом execution до start и late completion после
+operator abandon. Последний случай выполнял настоящий gate, обрывал процесс до
+publication, явно abandon-ил claim и затем сохранял задержанный результат.
+Все measured scores и реальные execution charges сохранялись.
+
+`looplab/engine/upstream_state.py::claimed_gate_executions` теперь связывает fresh
+CAS с единственным `upstream_gate_started` и единственным completion. Request
+hash пересчитывается из canonical check body с текущей run generation; start
+обязан совпасть с proposal, request и result input identity. Каждый charge
+принадлежит тому же request/proposal и расположен строго между start/finish.
+Operator abandonment этого claim отзывает authority независимо от того, до или
+после задержанного completion записана отмена. Duplicate/mixed-operation claim
+history также не разрешает CAS. Отказ называет `events.jsonl` и требует inspect
+и explicit fresh check/action ID.
+
+Добавлены ещё три boundary cases: charge после finish, duplicate finish и
+согласованные request hashes чужой generation во всех gate records. Все девять
+сценариев отказывают до event write или base switch и проходят после нового
+явного check. Exact historical ACK path, measured Node.metric и execution costs
+не переписываются. Нет автоматического retry, resume или скрытого ожидания;
+event schema и правила operator-only recovery сохранены.
+
+Targeted claim/admission/recovery/transaction — 25 passed. Полный связанный
+upstream/seed/workspace/confirmation/export/MCP regression — 624 passed,
+14 platform/optional skips; docs/diagram/layering/containment — 108 passed.
+Replay first — 193 passed; strict MkDocs, Ruff и whitespace check прошли.
+`.tmp/doc72-claims-acceptance/acceptance.json`: private server + scoped stdio MCP,
+2 primary SGD trainings, 7 gate executions, 3 confirmation seeds на original
+primary base/files; exact retries без reexecution, replay/export и неизменные
+owner/scorer bytes подтверждены. Scope остаётся declared CPU protocol acceptance,
+без проверки paid model judgments и arbitrary environment closure.

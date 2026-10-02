@@ -21,7 +21,7 @@ from looplab.engine.seed_archive import capture_seed_archive, verified_seed_arch
 from looplab.engine.seed_base import selected_seed_base
 from looplab.engine.upstream_gate import boundary_at, execute_gate, input_identity
 from looplab.engine.upstream_spec import normalize_request
-from looplab.engine.upstream_state import active_base, digest, events_for, node_signature, source_node, upstream_candidates
+from looplab.engine.upstream_state import active_base, claimed_gate_executions, digest, events_for, node_signature, source_node, upstream_candidates
 from looplab.engine.upstream_workspace import checked_overlay, git_at, maintainer_worktree, snapshot_worktree, verify_approved_candidate, write_overlay, owned_path
 from looplab.events.eventstore import EventStore, interprocess_lock
 from looplab.events.replay import fold
@@ -268,14 +268,10 @@ class UpstreamLane:
             if later or digest(result) != gates[-1].data["evidence_token"]:
                 raise UpstreamRefusal("upstream_gate_required", "The latest gate is unresolved/abandoned or its evidence is inconsistent; check afresh")
             gate_event = gates[-1]
-            charged = [e.data for e in events if e.type == "upstream_execution"
-                       and e.data.get("action_id") == gate_event.data["action_id"]]
             score = node.task_metric if node.task_metric is not None else node.metric
             if (not gate_matches_policy(result, self.task.upstream, score,
                     repair_required=bool(proposal["repair_trigger_nodes"]))
-                    or any(r.get("proposal_id") != body["proposal_id"]
-                           or r.get("request_hash") != gate_event.data["request_hash"] for r in charged)
-                    or [r.get("execution") for r in charged] != result["executions"]):
+                    or claimed_gate_executions(events, gate_event) != result["executions"]):
                 raise UpstreamRefusal("upstream_gate_required", "The latest gate is incomplete or differs from its declared probes, tolerances or recorded executions; inspect the evidence and check afresh")
             if input_identity(self.task, self.settings, node, proposal) != result["input_identity"]:
                 raise UpstreamRefusal("upstream_evidence_changed", "Task, config, source, environment, inputs or archive changed; check again")

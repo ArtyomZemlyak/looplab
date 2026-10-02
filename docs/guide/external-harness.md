@@ -1433,6 +1433,10 @@ Passing regressions require actual nonempty artifact receipts on both sides.
 Before a fresh CAS the server also validates every launched probe and repetition,
 the complete declared artifact sets, the operator's tolerance and source-score
 reproduction, and exact agreement with the gate's recorded execution charges.
+Those executions must lie between one matching current-generation gate start
+and one completion. The start must bind the exact check body and result context.
+An operator-abandoned claim cannot regain authority from a delayed completion;
+inspect the named `events.jsonl` source and buy an explicit fresh check/action ID.
 Shared evidence validation applies to direct HTTP and Assistant writes too;
 a stored passing flag and matching hash cannot substitute for these checks.
 An ACK must match the requested proposal and CAS evidence. A matching digest alone
