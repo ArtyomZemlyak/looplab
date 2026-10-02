@@ -42,6 +42,53 @@ def test_interrupted_claim_needs_operator_abandonment_and_new_action(tmp_path, m
     assert len([e for e in store.read_all() if e.type == "upstream_execution"]) == 7
 
 
+@pytest.mark.parametrize("operation", ["propose", "check"])
+@pytest.mark.parametrize("running", [False, True])
+def test_retry_of_abandoned_claim_names_recovery_without_reexecution(tmp_path, monkeypatch, operation, running):
+    lane, store, generation, proposal = fixture(tmp_path)
+    if operation == "check":
+        made = lane.propose(proposal)
+        request = {"expected_generation": generation, "action_id": "lost-check", "proposal_id": made["proposal_id"]}
+        target = "execute_gate"
+    else:
+        request, target = proposal, "maintainer_worktree"
+    def die(*args, **kwargs):
+        raise SystemExit("Private process loss after claim publication")
+    with monkeypatch.context() as patch:
+        patch.setattr(upstream, target, die)
+        with pytest.raises(SystemExit):
+            getattr(lane, operation)(request)
+    recovery = {"expected_generation": generation, "action_id": "owner-recovery",
+        "claim_action_id": request["action_id"], "reason": "The private claim process exited"}
+    recovered = lane.abandon(recovery)
+    before = store.path.read_bytes()
+    probes = []
+    with monkeypatch.context() as patch:
+        patch.setattr(upstream, "engine_alive", lambda rd: (probes.append(rd), running)[1])
+        assert lane.abandon(recovery) == recovered
+        with pytest.raises(UpstreamRefusal) as refusal:
+            getattr(lane, operation)(request)
+        assert refusal.value.code == "upstream_claim_abandoned"
+        assert "new action_id" in str(refusal.value)
+        assert probes == [], "A saved refusal/ACK does not need a new engine ownership probe"
+        changed = ({**request, "summary": request["summary"] + " changed"} if operation == "propose"
+            else {**request, "proposal_id": "up_" + "0" * 24})
+        with pytest.raises(UpstreamRefusal) as conflict:
+            getattr(lane, operation)(changed)
+        assert conflict.value.code == "upstream_action_conflict"
+        assert probes == []
+        if running:
+            with pytest.raises(UpstreamRefusal) as busy:
+                getattr(lane, operation)({**request, "action_id": "fresh-action"})
+            assert busy.value.code == "upstream_engine_running"
+            assert len(probes) == 1
+    assert store.path.read_bytes() == before
+    assert not any(e.type in ("upstream_execution", "base_advanced", "resume") for e in store.read_all())
+    # The explicit fresh action, after recovery and engine exit, remains usable.
+    fresh = getattr(lane, operation)({**request, "action_id": "fresh-action"})
+    assert fresh["status"] == "succeeded", fresh
+
+
 def test_drift_after_pass_refuses_cas_and_damaged_log_refuses_even_exact_ack(tmp_path):
     lane, store, generation, body = fixture(tmp_path)
     made = lane.propose(body)

@@ -96,4 +96,11 @@ def test_late_completion_after_operator_abandonment_cannot_advance(tmp_path, mon
         "evidence_token": digest(retained["result"])}
     # Retaining a delayed result cannot revoke the operator's explicit abandon.
     store.append("upstream_gate_finished", late)
+    before = store.path.read_bytes()
+    # A historical exact ACK remains readable; abandonment only revokes its
+    # authority for fresh CAS, rather than rewriting the real measurements.
+    with monkeypatch.context() as patch:
+        patch.setattr(upstream, "engine_alive", lambda rd: True)
+        assert lane.check(request)["result"] == retained["result"]
+    assert store.path.read_bytes() == before
     assert_refused_then_recheck(lane, store, generation, proposal, made, late)

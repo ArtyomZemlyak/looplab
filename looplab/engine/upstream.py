@@ -71,6 +71,14 @@ class UpstreamLane:
             events = self._current(body.get("expected_generation"))
             previous = self._retry(events, body, set(retry_kinds)) if retry_kinds else None
             acknowledged = previous is not None and previous.type not in ("upstream_proposal_started", "upstream_gate_started")
+            if previous is not None and not acknowledged and any(
+                    e.type == "upstream_gate_abandoned" and e.seq > previous.seq
+                    and e.data.get("claim_action_id") == body["action_id"]
+                    and e.data.get("proposal_id") == previous.data.get("proposal_id") for e in events):
+                # The original start is retained after operator recovery. It
+                # neither needs another abandonment nor starts fresh work.
+                raise UpstreamRefusal("upstream_claim_abandoned",
+                    "This interrupted claim was already abandoned; read its history and use a new action_id for new work. Recovery grants no gate pass or automatic resume")
             if not acknowledged and (engine_alive(self.rd) or fresh_resume_launch_pending(self.rd)):
                 raise UpstreamRefusal("upstream_engine_running", "Pause, wait for engine exit, and retry explicitly")
             yield events

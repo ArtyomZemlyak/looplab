@@ -1551,3 +1551,38 @@ stdio MCP, 2 primary CPU SGD trainings, 7 gate executions и 3 confirmation seed
 на original base/files; exact retry без reexecution, replay/export и owner/scorer
 preservation прошли. Scope остаётся declared protocol acceptance; полный suite
 проекта и paid model judgments этим исправлением не проверены.
+
+### 18.19 Exact retry после operator abandonment (2026-10-02)
+
+Review от HEAD `13fc0beb5` нашёл неверную recovery подсказку. После реального
+durable start и private simulated process loss оператор явно abandon-ил proposal
+или check. Повтор исходного exact body всё ещё видел сохранённый start и требовал
+снова abandon-ить уже отменённый claim; при работающем engine вместо этого
+предлагал ждать его выхода. Четыре red случая покрыли обе операции и оба состояния
+engine. Исполнения не дублировались, но такой ответ заводил агента в ненужный
+цикл recovery вместо понятного выбора нового действия.
+
+`looplab/engine/upstream.py::UpstreamLane._mutation` после exact body validation
+различает retained unfinished start и соответствующее последующее operator
+abandonment. Повтор отменённого запроса возвращает `upstream_claim_abandoned` с
+инструкцией inspect history и new action_id, до нового engine ownership probe.
+Это отказ, без event write, training, resume или base advancement. Изменённый
+body со старым action ID по-прежнему даёт `upstream_action_conflict`; fresh action
+при живом engine всё ещё даёт `upstream_engine_running`.
+
+Исторический recovery ACK остаётся byte-stable и readable при живом engine.
+Если настоящий measured terminal result опубликован после abandonment, его exact
+ACK тоже остаётся историческим read, без восстановления CAS authority. Этот
+positive control сохраняет реальные SGD samples/costs; fresh CAS всё ещё
+отказывается от revoked claim, а новая явная проверка после engine exit работает.
+Отдельный HTTP/MCP/Assistant test проверяет общий transaction и обычную
+`allow_once` approval policy без обхода owner-only recovery boundary.
+
+Replay first — 193 passed; targeted recovery/claims/initialization/authority —
+34 passed; весь upstream/MCP regression — 192 passed, отдельный client integration
+test — 1 passed. `.tmp/doc72-recovery-sgd/acceptance.json`: private UI server +
+scoped stdio MCP, 2 primary CPU SGD trainings, 7 gate executions и 3 confirmation
+seeds на original base/files, exact retry без reexecution и replay/export прошли.
+Documentation/claim pins/layering/containment/API/event contracts — 102 passed;
+strict MkDocs, Ruff и whitespace check прошли. Полный suite проекта и paid model
+judgments этим исправлением не проверены.

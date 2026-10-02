@@ -1427,6 +1427,13 @@ and ref are ready. After process loss, inspect the retained staging directory an
 resolve the claim explicitly; a fresh proposal uses a separate staging directory.
 Recovery never deletes that evidence or adopts an unfinished repository. Existing
 repositories damaged before this publication fix still require operator repair.
+After operator abandonment, an exact retry of an unfinished proposal/check returns
+`upstream_claim_abandoned`: inspect its history and use a new `action_id` for new
+work. It does not ask for another abandonment or engine wait, and starts no work.
+Changed bodies still conflict. Exact recovery ACKs and subsequently retained
+terminal results remain historical reads, including while an engine is running;
+they never restore an abandoned check's advancement authority. New actions still
+require engine exit.
 Typed MCP validates complete page/receipt identities, every passing gate leg,
 paired full samples, their means/SEM/delta and corresponding executions and costs.
 Statistical representation closeness never enlarges the declared scientific
