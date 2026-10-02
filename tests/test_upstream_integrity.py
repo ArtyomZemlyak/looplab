@@ -23,7 +23,7 @@ def test_engine_presence_refuses_new_work_but_exact_saved_ack_is_readable(tmp_pa
     assert store.path.read_bytes() == before
 
 
-@pytest.mark.parametrize("fault", ["origin", "candidate", "source_seed", "probe_overlay"])
+@pytest.mark.parametrize("fault", ["origin", "candidate", "source_seed", "seed_generation", "probe_overlay"])
 def test_incomplete_or_masked_evidence_never_advances(tmp_path, fault):
     lane, store, generation, proposal = fixture(tmp_path)
     if fault == "probe_overlay":
@@ -42,7 +42,11 @@ def test_incomplete_or_masked_evidence_never_advances(tmp_path, fault):
             path = None
             events = store.read_all()
             terminal = next(e for e in events if e.type == "node_evaluated")
-            terminal.data["metric_provenance"]["base_revision"]["seed_event_seq"] = 0
+            if fault == "seed_generation":
+                seed = next(e for e in events if e.seq == terminal.data["metric_provenance"]["base_revision"]["seed_event_seq"])
+                seed.data["generation"] = 1
+            else:
+                terminal.data["metric_provenance"]["base_revision"]["seed_event_seq"] = 0
             store.path.write_text("".join(e.model_dump_json() + "\n" for e in events), encoding="utf8")
         if path is not None: path.write_text("changed bytes", encoding="utf8")
         with pytest.raises((UpstreamRefusal, ConfigRefusal)):

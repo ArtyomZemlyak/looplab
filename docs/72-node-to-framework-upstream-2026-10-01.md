@@ -1061,3 +1061,54 @@ MkDocs прошёл. Engine/stdio MCP повторно выполнил 2 SGD ex
 executions: `.tmp/doc72-candidate-complete/acceptance.json`, следующий lifecycle
 на новой базе, exact retries, replay/export и неизменные owner/scorer bytes.
 Seed digest encoding не изменён: старые архивы и provenance остаются проверяемыми.
+
+### 18.7 Последовательные базы, confirmation и generation fence (2026-10-02)
+
+Ревью продолжено двумя настоящими переносами SGD: сначала MOMENTUM, затем
+LEARNING_RATE, с отдельной исходной оценкой второго source и 14 gate executions.
+Проверены старый default, перенос уже перенесённого overlay, независимая научная
+правка, целая старая база при конфликте, сохранение recipe после reset и exact ACK
+первого предложения/gate/advance после второй смены базы. Эти случаи прошли.
+
+Обнаружены связанные ошибки материализации. Confirmation терминальных узлов
+обеих прежних баз выбирал последний shared runner; два regression cases сначала
+упали (`.tmp/doc72-confirm-red.log`). Gate сертифицирует объявленный source recipe,
+поэтому нельзя считать его разрешением менять реализацию любого прошлого
+эксперимента при повторной оценке. Теперь terminal repetition использует primary
+measured selection и прежний overlay; не публикует миграцию terminal files.
+Отсутствующий/повреждённый исторический архив отказывает **до** очистки рабочего
+каталога. Новый pending lifecycle, включая явный reset, получает текущую базу
+через прежний guarded migration, а не через confirmation.
+
+Полный Engine/MCP прогон обнаружил ошибку attribution: имя
+`node_0_g0_seed_1` записывало `workspace_seeded.node_id=1`, путая seed с узлом.
+Материализация теперь передаёт настоящий Node; событие получает его ID и generation.
+Standalone seeding без Node сохраняет прежний diagnostic fallback. Старые записи
+не переписываются и не приобретают отсутствовавшее поколение.
+
+Поздний seed старого поколения после reset также мог сменить basis научного
+overlay и вернуть специально удалённую настройку runner: отдельный case сначала
+упал (`.tmp/doc72-stale-seed-red.log`). Basis обновляют только seeding/applied rebase
+тогдашнего pending lifecycle. Terminal confirmation, superseded generation и
+неприменённый rebase остаются diagnostics. Source authority дополнительно сверяет
+поколение seed event, когда оно записано; legacy отсутствие не заменяется новым
+утверждением о происхождении.
+
+MCP discovery добавляет `confirmation` с настоящим `command:force_confirm` и
+generation-bound subject. Forced confirm собирает full-profile repeated evidence,
+не вводит node в robust winner election. Приёмка `benchmarks.upstream_smoke --confirm`
+через private UI/scoped stdio MCP выполнила 2 primary SGD, 7 gate executions и
+3 Engine confirmation evaluations на исходной базе/реализации. Exact forced-command
+retry не запускает ещё seeds, primary provenance/files сохраняются; replay/export
+и owner/scorer bytes проверены (`.tmp/doc72-confirm-fenced/acceptance.json`).
+
+Итог: regression suite replay/upstream/seed/confirmation/MCP — 385 passed,
+6 platform skips. Семь multibase/terminal scenarios и source integrity guards
+отдельно прошли на окончательном коде: 17 passed, включая missing/invalid primary
+selection без cleanup или fallback. Event-reference обновлён; docs guards сначала
+нашли превышение summary budget, оно исправлено; финальные contract/diagram/
+layering guards — 89 passed, strict MkDocs прошёл. Два Windows workspace-bytes
+symlink cases в первом широком запуске получили WinError 1314; теперь они явно
+skip **только** при отсутствующей directory-symlink privilege, остальные OSError
+продолжают падать. Production guards не ослаблены. Это CPU protocol acceptance;
+GPU и произвольные undeclared recipes ею не покрыты.

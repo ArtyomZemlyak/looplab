@@ -317,7 +317,7 @@ class WorkspaceSeeder:
         # this discriminator exists to refuse. An opaque marker keeps it refusable.
         return {**base, "dirty": digest[:16] if digest else "unknown"}
 
-    def seed_workspace(self, workdir, *, repo_spec=None, base_rebase=None) -> dict | None:
+    def seed_workspace(self, workdir, *, repo_spec=None, base_rebase=None, node=None) -> dict | None:
         """RepoTask (ADR-7): materialize the editable repo tree(s) into the eval workdir, plus
         any runtime-mounted reference repos and data files. Phase 4: each editable repo is
         mounted at its own subdir (name=".") -> workspace root). The agent's `Node.files` edits
@@ -383,12 +383,19 @@ class WorkspaceSeeder:
                 _h.set_many(materialized=", ".join(seeded))
             # Observability: surface WHAT got materialized into this node's workdir (the "data setup"
             # step) in the activity feed — which editable trees were seeded (tracked vs full copy) and
-            # which data/reference inputs were mounted. node_id parsed from the workdir name.
-            try:
-                nid = int(str(wd.name).split("_")[-1])
-            except (ValueError, IndexError):
-                nid = None
+            # which data/reference inputs were mounted. Materialization knows its
+            # exact lifecycle: confirm/noise paths end in a seed, not a node ID.
+            # Keep the legacy inference only for standalone seeding without a Node.
+            if node is not None:
+                nid = node.id
+            else:
+                try:
+                    nid = int(str(wd.name).split("_")[-1])
+                except (ValueError, IndexError):
+                    nid = None
             payload = {"node_id": nid, "materialized": seeded}
+            if node is not None:
+                payload["generation"] = node.attempt
             if editable_bytes and all(type(b) is int and b >= 0 for b in editable_bytes):
                 payload["workspace_bytes"] = sum(editable_bytes)
             base_revision = next((row["base_revision"] for row in rows if "base_revision" in row), None)
@@ -487,8 +494,8 @@ class WorkspaceSeeder:
                 "files": node.files, "deleted": node.deleted, "selector": upstream_plan[0]["effective_seed_base"]},
                 require_lock=True, require_durable=True)
             authored_node.files, authored_node.deleted = dict(node.files), list(node.deleted)
-        base_revision = (self.seed_workspace(wd, repo_spec=upstream_plan[0], base_rebase=upstream_plan[1])
-                         if upstream_plan else self._e._seed_workspace(wd))
+        base_revision = (self.seed_workspace(wd, repo_spec=upstream_plan[0], base_rebase=upstream_plan[1], node=node)
+                         if upstream_plan else self._e._seed_workspace(wd, node=node))
         self._e._write_node_files(node, wd)         # … agent edits on top …
         self._e._write_assets(wd)                   # … task assets win any name collision
         return base_revision

@@ -15,7 +15,7 @@ from pathlib import Path
 from looplab.core.errors import UpstreamRefusal
 from looplab.core.node_evidence import read_bounded_regular_file
 from looplab.events.eventstore import decode_event_record, event_sequence_continues
-from looplab.events.replay import fold
+from looplab.events.replay import event_generation_binds, fold
 from looplab.events.run_generation import run_generation_token
 
 UPSTREAM_EVENTS = frozenset({"upstream_proposed", "upstream_gate_started", "upstream_gate_finished",
@@ -75,7 +75,7 @@ def source_node(events, node_id):
         raise UpstreamRefusal("upstream_source_not_measured", "Choose a current completed node with a primary measured score")
     receipt = (node.metric_provenance or {}).get("base_revision")
     seed = next((e for e in events if e.seq == (receipt or {}).get("seed_event_seq")), None)
-    if not receipt or receipt.get("complete") is not True or receipt.get("node_id") != node.id or receipt.get("generation") != node.attempt or seed is None or seed.type != "workspace_seeded" or seed.data.get("node_id") != node.id or (seed.data.get("base_revision") or {}).get("digest") != receipt.get("digest"):
+    if not receipt or receipt.get("complete") is not True or receipt.get("node_id") != node.id or receipt.get("generation") != node.attempt or seed is None or seed.type != "workspace_seeded" or seed.data.get("node_id") != node.id or not event_generation_binds(seed.data, node.attempt) or (seed.data.get("base_revision") or {}).get("digest") != receipt.get("digest"):
         raise UpstreamRefusal("upstream_source_unavailable", "The source node has no complete archived seed identity")
     score = node.task_metric if node.task_metric is not None else node.metric
     if not math.isfinite(score):

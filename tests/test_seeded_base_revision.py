@@ -33,6 +33,16 @@ def _node(files=None):
     return SimpleNamespace(id=0, attempt=0, files=files or {}, deleted=[])
 
 
+@pytest.mark.parametrize("directory", ["nodes/node_19", "confirm/node_19_g2_seed_7", "noise/node_19_g2_seed_8"])
+def test_seed_attribution_uses_the_actual_lifecycle_not_the_path_suffix(tmp_path, directory):
+    _, run, engine, seeder = _seeder(tmp_path)
+    node = _node()
+    node.id, node.attempt = 19, 2
+    seeder.materialize(node, run / directory)
+    seed = engine.store.read_all()[-1]
+    assert seed.data["node_id"] == 19 and seed.data["generation"] == 2
+
+
 @pytest.mark.parametrize("git,mode", [(True, "auto"), (True, "tracked"), (False, "auto"), (False, "all")])
 def test_receipt_precedes_overlay_and_survives_source_drift(tmp_path, git, mode):
     src, run, engine, seeder = _seeder(tmp_path, git=git, mode=mode)

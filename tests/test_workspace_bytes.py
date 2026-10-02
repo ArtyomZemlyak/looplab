@@ -32,6 +32,15 @@ def _file(path: Path, size: int) -> None:
     path.write_bytes(b"x" * size)
 
 
+def _directory_symlink(source: Path, destination: Path) -> None:
+    try:
+        os.symlink(source, destination, target_is_directory=True)
+    except OSError as exc:
+        if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows directory symlink privilege is unavailable")
+        raise
+
+
 def _run_tree(root: Path) -> Path:
     """A run directory shaped like the one doc 37 §6 measured: a fat node and a thin one.
 
@@ -119,7 +128,7 @@ def test_a_mounted_dataset_symlink_is_counted_as_a_link_and_never_followed(tmp_p
     _file(dataset / "huge.parquet", 500_000)
     run = _run_tree(tmp_path)
     link = run / "nodes" / "node_1" / "data"
-    os.symlink(dataset, link)
+    _directory_symlink(dataset, link)
 
     node_1 = {row.name: row for row in _report(run).nodes}["node_1"]
     # The link's own size is small and platform-dependent; what is pinned is that the 500,000 bytes
@@ -245,7 +254,7 @@ def test_a_run_with_no_nodes_directory_says_so(tmp_path):
 
 def test_a_symlink_wearing_a_node_name_is_reported_rather_than_silently_skipped(tmp_path):
     run = _run_tree(tmp_path)
-    os.symlink(run / "nodes" / "node_1", run / "nodes" / "node_7")
+    _directory_symlink(run / "nodes" / "node_1", run / "nodes" / "node_7")
     body = "\n".join(render_workspace_bytes(_report(run)))
     assert "nodes/node_7 is a symlink — not followed, not measured" in body
 

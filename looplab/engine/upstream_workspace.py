@@ -13,9 +13,9 @@ import tempfile
 from looplab.core.atomicio import atomic_write_bytes
 from looplab.core.node_evidence import read_bounded_regular_file
 from looplab.core.pathsafe import contained_member, is_reparse
-from looplab.engine.seed_base import pinned_editables, selected_seed_base, seed_pinned_workspace
-from looplab.engine.upstream_state import UpstreamRefusal, active_base
-from looplab.events.replay import fold
+from looplab.engine.seed_base import normalize_seed_base, pinned_editables, selected_seed_base, seed_pinned_workspace
+from looplab.engine.upstream_state import UpstreamRefusal, active_base, node_signature, source_node
+from looplab.events.replay import event_generation_binds, fold
 
 
 def owned_path(rd, relative):
@@ -199,17 +199,48 @@ def rebase_overlay(files, deleted, old_archive, new_archive):
 
 
 def materialization_plan(spec, node, events):
-    """Pin once per fresh lifecycle. Repairs in an existing workdir never call this."""
+    """Migrate pending lifecycles; confirmations retain the measured implementation."""
     current = active_base(events, spec["seed_base"])
+    if node.status.value == "evaluated":
+        # Confirmation/noise probes repeat this terminal experiment, not
+        # new candidates. A passing upstream gate covers its source recipe only;
+        # it cannot certify arbitrary older scientific overlays on the new base.
+        measured, receipt = source_node(events, node.id)
+        if node_signature(measured) != node_signature(node):
+            raise UpstreamRefusal("upstream_source_changed", "Terminal implementation changed; read its current lifecycle before repeating evaluation")
+        selection = receipt.get("selection")
+        if (not isinstance(selection, dict) or any(k not in selection for k in ("run_dir", "event_seq", "digest"))
+                or selection["digest"] != receipt["digest"]):
+            raise UpstreamRefusal("upstream_source_unavailable", "Terminal experiment has no matching recorded base selection; restore its primary evidence before repeating evaluation")
+        try:
+            selector = normalize_seed_base({k: selection[k] for k in ("run_dir", "event_seq", "digest")})
+        except (ValueError, TypeError) as exc:
+            raise UpstreamRefusal("upstream_source_unavailable", "Terminal base selection is invalid; restore its primary evidence before repeating evaluation") from exc
+        effective = {**spec, "effective_seed_base": selector,
+                     "editables": pinned_editables(spec["editables"], selector)}
+        return effective, node.model_copy(), {"status": "unchanged", "from_digest": receipt["digest"],
+            "to_digest": receipt["digest"], "conflicts": [], "absorbed_paths": [], "advance_seq": current["advance_seq"]}
     created = next((e for e in reversed(events) if e.type == "node_created" and e.data.get("node_id") == node.id), None)
     origin = active_base([e for e in events if created is None or e.seq <= created.seq], spec["seed_base"])
-    for e in events:
+    for index, e in enumerate(events):
         if e.data.get("node_id") != node.id or (created is not None and e.seq < created.seq):
+            continue
+        if e.type not in ("workspace_seeded", "node_overlay_rebased"):
+            continue
+        # A late old attempt or a terminal confirmation is diagnostic only. It
+        # cannot redefine the basis of a pending scientific overlay after reset.
+        prior_state = fold(events[:index])
+        prior = prior_state.nodes.get(node.id)
+        if (prior is None or prior.status.value != "pending" or prior.tombstoned
+                or node.id in prior_state.aborted_nodes
+                or not event_generation_binds(e.data, prior.attempt)):
             continue
         if e.type == "workspace_seeded" and (e.data.get("base_revision") or {}).get("selection"):
             origin["selector"] = {k: e.data["base_revision"]["selection"][k] for k in ("run_dir", "event_seq", "digest")}
         elif e.type == "node_overlay_rebased":
-            origin["selector"] = e.data["selector"]
+            applied = fold(events[:index + 1]).nodes[node.id]
+            if applied.files == e.data.get("files") and applied.deleted == e.data.get("deleted"):
+                origin["selector"] = e.data["selector"]
     old, _ = selected_seed_base(origin["selector"])
     new, _ = selected_seed_base(current["selector"])
     overlay, removed = dict(node.files), list(node.deleted)

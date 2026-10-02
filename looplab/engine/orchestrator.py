@@ -4675,8 +4675,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
     def _substrate_fingerprint(self) -> dict:
         return self.workspace.substrate_fingerprint()
 
-    def _seed_workspace(self, workdir) -> dict | None:
-        return self.workspace.seed_workspace(workdir)
+    def _seed_workspace(self, workdir, *, node=None) -> dict | None:
+        return self.workspace.seed_workspace(workdir, node=node)
 
     def _seed_repo_tree(self, src, dst, ignore, mode: str = "auto") -> int:
         return self.workspace.seed_repo_tree(src, dst, ignore, mode)

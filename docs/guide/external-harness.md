@@ -1393,6 +1393,16 @@ is advice; a completed source must have its current primary score and seed recei
    base does not waive enabled research/report/knowledge obligations. Reuse the
    shared runner and express scientific changes as recipes.
 
+For repeated evidence, discover `phases(query="confirmation")` and
+`phase_info("confirmation")`; `command:force_confirm` takes the terminal `node_id`
+and its current `generation`. Confirmation retains that experiment's primary
+measured base and scientific files, even after later advancements. A missing
+historical archive refuses before workspace cleanup. It records full-profile seeds
+without electing a robust winner. A new candidate or reset is a new lifecycle and
+uses current-base migration. Seeding records the actual Node ID/generation; late
+old-generation seeds and terminal repetitions cannot redefine a pending overlay's
+basis. Legacy seed events remain readable without invented generation evidence.
+
 Exact body/action retries recover the original ACK without re-execution or fresh
 evidence, including after resume. A started claim with no verdict is unresolved;
 inspect its logs before asking the operator to abandon it through

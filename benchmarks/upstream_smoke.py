@@ -3,6 +3,8 @@
 python -m benchmarks.upstream_smoke --out .tmp/new-upstream-proof
 Runs only disposable processes/directories. No model calls, owner checkout writes,
 implicit retries or user server changes. Stores complete readable acceptance.json.
+Use --confirm to repeat the original experiment through Engine after advancement,
+checking its original base/implementation and an exact forced-command retry.
 """
 from __future__ import annotations
 
@@ -37,7 +39,9 @@ from looplab.serve.server import make_app
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", required=True, type=Path)
-    root = parser.parse_args().out.resolve()
+    parser.add_argument("--confirm", action="store_true")
+    options = parser.parse_args()
+    root = options.out.resolve()
     root.mkdir(parents=True, exist_ok=False)
     source, origin, runs = (root / name for name in ("source", "origin", "runs"))
     for p in (source, origin, runs): p.mkdir()
@@ -150,6 +154,28 @@ def main():
                 assert detail["files"] == {"recipe.env": "MOMENTUM=0.3\n"}, detail
                 assert node0["metric_provenance"]["base_revision"]["digest"] == base["digest"]
                 assert node1["metric_provenance"]["base_revision"]["digest"] == made["body"]["selector"]["digest"]
+                if options.confirm:
+                    await client.progress()
+                    await client.read("harness-checkpoints")
+                    await client.call("phases", {"query": "confirmation"})
+                    await client.call("phase_info", {"phase_id": "confirmation"})
+                    confirm_body = {"node_id": 0, "generation": 0}
+                    forced = await client.command("force_confirm", confirm_body, "upstream:confirm")
+                    await until(client.state, lambda value: 0 in value["state"].get("confirmed_forced", []))
+                    assert await client.command("force_confirm", confirm_body, "upstream:confirm") == forced
+                    actual = await client.read("nodes/0")
+                    assert actual["files"] == first["files"]
+                    assert actual["metric_provenance"] == node0["metric_provenance"]
+                    confirmation = [e for e in EventStore(rd / "events.jsonl").read_all() if e.type == "confirm_eval" and e.data["node_id"] == 0]
+                    assert len(confirmation) == 3 and all(e.data["metric"] == node0["metric"] for e in confirmation)
+                    seeded = [e for e in EventStore(rd / "events.jsonl").read_all() if e.type == "workspace_seeded" and e.data.get("node_id") == 0]
+                    assert len(seeded) == 4 and all(e.data["base_revision"]["digest"] == base["digest"] for e in seeded)
+                    for seed_id in (1, 2, 3):
+                        confirm_work = rd / "confirm" / f"node_0_g0_seed_{seed_id}"
+                        assert (confirm_work / "train.py").read_bytes() == SOURCE.encode()
+                        assert (confirm_work / "recipe.env").read_bytes() == b"MOMENTUM=0.2\n"
+                    proof.update(engine_confirmation_evaluations=3, confirmation_original_base=True,
+                        confirmation_original_files=True, confirmation_exact_retry_no_reexecution=True)
                 await client.command("run_abort", {"reason": "Completed private upstream acceptance"}, "upstream:finish")
                 await client.commentary("run", "upstream:finish-summary", "Прогон явно завершён. Проверены обобщение runner, прежний default, повторные оценки, смена базы и новый эксперимент. Gate учтён отдельно; исходный результат не переписан. Это проверка протокола, не ML benchmark.")
                 proof.update(source_metric=node0["metric"], next_metric=node1["metric"], proposal=made["body"], gate=checked["body"], advancement=advanced["body"], effective_next_files=detail["files"], exact_retries_no_reexecution=True)
