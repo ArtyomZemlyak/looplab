@@ -1301,3 +1301,40 @@ Replay first (193 passed), Ruff, whitespace check и strict MkDocs прошли.
 2 primary trainings, 7 gate executions, 3 confirmation seeds на original
 base/files; exact retries без reexecution, replay/export и неизменные
 owner/scorer bytes подтверждены.
+
+### 18.13 Восстановление после обрыва первой Git initialization (2026-10-02)
+
+Воспроизведён сбой после смерти процесса при первом upstream proposal:
+`upstream/git` уже существовал, но commit/base ref ещё не были готовы. Даже после
+явного operator abandon новый action ID не мог создать worktree. Red проверки
+обрыва после настоящих `git init`, `add`, `commit` дали 3 failed; обрыв после
+готового base ref был положительным контролем.
+
+Initial repository теперь строится в отдельном run-owned
+`upstream/.git-init-PROPOSAL_ID`. Только после seed, byte-preserving attributes,
+commit и base ref он публикуется через durable no-replace directory rename.
+После обрыва staging остаётся для inspection; unresolved claim по-прежнему
+требует явного operator abandon, а fresh proposal получает отдельный staging.
+Обрыв после публикации готового repository также допускает новый proposal.
+Нет автоматического retry, удаления evidence, approval, advancement или resume.
+Старые повреждённые private repositories требуют отдельного operator repair:
+эта правка предотвращает новую частичную публикацию, не подменяет recovery.
+
+Добавлены шесть real-Git process-loss случаев: после seed, init, add, commit,
+base ref и publication. Каждый после abandon выполняет fresh proposal и
+настоящий семикратный SGD gate без base advancement. Также исправлен test helper
+multi-base: loop variable затирала переданное имя directory и складывала разные
+nodes в `write_assets`. Теперь guards явно проверяют отдельные `node_ID` и
+`node_ID_g0_seed_7` пути; прежние migration/reversion/confirmation сценарии
+проверяются на реальных отдельных workspaces.
+
+Private server + scoped stdio MCP acceptance:
+`.tmp/doc72-initialization-acceptance/acceptance.json` — 2 primary SGD trainings,
+7 gate executions, 3 confirmation seeds; original primary base/files,
+exact retries без reexecution, replay/export и неизменные owner/scorer bytes
+подтверждены. Replay first — 193 passed; initial Git/worktree subset — 13 passed
+до добавления шестого seed-cut случая. Полный связанный upstream/seed/workspace/
+confirmation/export/MCP regression, включая все шесть cut cases и исправленный
+multi-base helper, — 607 passed, 14 platform/optional skips;
+docs/diagram/layering/containment — 108 passed. Strict MkDocs, Ruff и whitespace
+check прошли.

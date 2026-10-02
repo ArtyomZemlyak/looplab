@@ -10,7 +10,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-from looplab.core.atomicio import atomic_write_bytes
+from looplab.core.atomicio import atomic_write_bytes, durable_no_replace_rename
 from looplab.core.node_evidence import read_bounded_regular_file
 from looplab.core.pathsafe import contained_member, is_reparse
 from looplab.engine.seed_base import normalize_seed_base, pinned_editables, selected_seed_base, seed_pinned_workspace
@@ -81,9 +81,9 @@ def git_at(root, *argv):
     return result.stdout.decode("utf8").strip()
 
 
-def raw_git_attributes(rd):
+def raw_git_attributes(rd, relative="upstream/git"):
     """Highest-precedence attributes keep this Git projection byte preserving."""
-    path = owned_path(rd, "upstream/git/.git/info/attributes")
+    path = owned_path(rd, relative + "/.git/info/attributes")
     expected = b"* -text -filter -ident -working-tree-encoding\n"
     if path.exists():
         if read_bounded_regular_file(path, len(expected) + 1) != expected:
@@ -97,19 +97,26 @@ def maintainer_worktree(rd, spec, selector, proposal_id):
     work = owned_path(rd, "upstream/proposals/" + proposal_id + "/worktree")
     base_ref = "refs/looplab/base/" + selector["digest"]
     if not root.exists():
-        root.mkdir(parents=True)
-        seed_pinned_workspace(selector, spec["editables"], root)
-        if any(p.name.casefold() == ".git" for p in root.rglob("*")):
+        # Publish only a complete private repository. Process loss after mkdir,
+        # init, add or commit must not make root.exists() certify readiness and
+        # brick the next explicitly abandoned/new proposal. Keep interrupted
+        # staging directories for inspection; a fresh action owns a fresh one.
+        relative = "upstream/.git-init-" + proposal_id
+        staging = owned_path(rd, relative)
+        staging.mkdir(parents=True)
+        seed_pinned_workspace(selector, spec["editables"], staging)
+        if any(p.name.casefold() == ".git" for p in staging.rglob("*")):
             raise UpstreamRefusal("upstream_git_unavailable", "Recorded seed contains Git metadata; it cannot initialize a private repository")
-        git_at(root, "init", "--template=")
-        raw_git_attributes(rd)
-        git_at(root, "config", "user.name", "LoopLab Maintainer")
-        git_at(root, "config", "user.email", "maintainer@looplab.invalid")
-        hooks = root.parent / "empty-hooks"; hooks.mkdir()
-        git_at(root, "config", "core.hooksPath", str(hooks))
-        git_at(root, "add", "-f", "-A")
-        git_at(root, "commit", "--allow-empty", "-m", "Recorded seed " + selector["digest"])
-        git_at(root, "update-ref", base_ref, "HEAD")
+        git_at(staging, "init", "--template=")
+        raw_git_attributes(rd, relative)
+        git_at(staging, "config", "user.name", "LoopLab Maintainer")
+        git_at(staging, "config", "user.email", "maintainer@looplab.invalid")
+        hooks = root.parent / "empty-hooks"; hooks.mkdir(exist_ok=True)
+        git_at(staging, "config", "core.hooksPath", str(hooks))
+        git_at(staging, "add", "-f", "-A")
+        git_at(staging, "commit", "--allow-empty", "-m", "Recorded seed " + selector["digest"])
+        git_at(staging, "update-ref", base_ref, "HEAD")
+        durable_no_replace_rename(staging, root, label="upstream Git repository")
     raw_git_attributes(rd)
     work.parent.mkdir(parents=True, exist_ok=False)
     git_at(root, "worktree", "add", "-b", "proposal/" + proposal_id, str(work), base_ref)

@@ -32,8 +32,8 @@ def materialize(lane, store, nid, *, directory="nodes", name=None):
     engine = SimpleNamespace(run_dir=lane.rd, tracer=None, _repo_spec=lane.task.repo_spec(),
         _seed_mode="auto", _assets={}, store=store)
     seeder = WorkspaceSeeder(engine)
-    for name in ("seed_workspace", "seed_repo_tree", "link_input", "write_node_files", "write_assets"):
-        setattr(engine, "_" + name, getattr(seeder, name))
+    for method in ("seed_workspace", "seed_repo_tree", "link_input", "write_node_files", "write_assets"):
+        setattr(engine, "_" + method, getattr(seeder, method))
     node = fold(store.read_all()).nodes[nid]
     work = lane.rd / directory / (name or ("node_" + str(nid)))
     receipt = seeder.materialize(node, work)
@@ -108,6 +108,7 @@ def test_two_real_advancements_preserve_all_recipe_bases_and_retries(tmp_path):
     source_scores = {nid: state.nodes[nid].metric for nid in (0, 1)}
     for nid, recipe in ((2, "MOMENTUM=0.3\n"), (6, "MOMENTUM=0.4\nLEARNING_RATE=0.3\n")):
         work, receipt = materialize(lane, store, nid)
+        assert work == lane.rd / "nodes" / f"node_{nid}"
         assert receipt["digest"] == second[0]["selector"]["digest"]
         assert (work / "train.py").read_bytes() == RATE_GENERAL.encode()
         assert (work / "recipe.env").read_bytes() == recipe.encode()
@@ -140,6 +141,7 @@ def test_confirmation_keeps_the_terminal_implementation_and_measured_base(tmp_pa
     original = terminal.model_dump()
     primary = terminal.metric_provenance["base_revision"]
     work, receipt = materialize(lane, store, nid, directory="confirm", name=f"node_{nid}_g0_seed_7")
+    assert work == lane.rd / "confirm" / f"node_{nid}_g0_seed_7"
     seeded = store.read_all()[-1]
     assert seeded.type == "workspace_seeded" and seeded.data["node_id"] == nid and seeded.data["generation"] == 0
     assert receipt["digest"] == primary["digest"], "Confirmation must measure the same implementation, not the latest shared runner"

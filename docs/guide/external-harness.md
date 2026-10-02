@@ -1421,6 +1421,12 @@ evidence, including after resume. A started claim with no verdict is unresolved;
 inspect its logs before asking the operator to abandon it through
 `POST /api/runs/{run_id}/upstream/recover`. Recovery grants no pass or resume. A new
 check requires a new action ID. Damaged event sources refuse even old ACK reads.
+The initial private Git repository is built in a proposal-specific
+`upstream/.git-init-PROPOSAL_ID` directory and published only after its base commit
+and ref are ready. After process loss, inspect the retained staging directory and
+resolve the claim explicitly; a fresh proposal uses a separate staging directory.
+Recovery never deletes that evidence or adopts an unfinished repository. Existing
+repositories damaged before this publication fix still require operator repair.
 Typed MCP validates complete page/receipt identities, every passing gate leg,
 paired full samples, their means/SEM/delta and corresponding executions and costs.
 An ACK must match the requested proposal and CAS evidence. A matching digest alone
