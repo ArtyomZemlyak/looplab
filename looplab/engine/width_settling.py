@@ -51,6 +51,7 @@ from looplab.engine.widths import (EVAL_WIDTH_MAX, LLM_WIDTH_MAX, proposal_deriv
                                    operator_width_axes, settle_width)
 from looplab.events.types import EV_RUN_WIDTH_SETTLED
 from looplab.runtime.command_eval import eval_timeout_override
+from looplab.core.numeric import LAUNCH_TIMEOUT_LIMIT_S
 
 _LOG = logging.getLogger(__name__)
 
@@ -62,24 +63,61 @@ _EVAL_TIMEOUT_CLAMPS_REPORTED: set[tuple[float, float]] = set()
 
 
 def _report_eval_timeout_clamp(requested: float, applied: float) -> None:
-    """Say — once per value — that the operator's `budget_extend{eval_timeout}` is above the launch
-    ceiling THIS engine loaded, so its evaluations run under the ceiling instead.
+    """Say — once per value — that the operator's `budget_extend{eval_timeout}` is above the 7-day
+    absolute launch limit, so its evaluations run under the limit instead.
 
-    The server refuses an `eval_timeout` above the run's RECORDED ceiling
-    (`serve/control_validation.py::_run_launch_ceiling`), so arriving here means the ceiling was raised
-    after this engine started (the per-run config was edited while it ran), or the event reached the
-    log past the server. Either way the fix is a restart, and a clamp nobody reports is exactly the
-    silent cut the ceiling is refused loudly at the server to avoid."""
+    Since 2026-10-02 a value up to the limit is never clamped: `lift_launch_ceiling` raises this
+    engine's ceiling to it first. The server refuses anything above the limit
+    (`serve/control_validation.py::_normalize_budget_extend`), so arriving here means the event reached
+    the log past the server (a hand-edited log, an older build). A clamp nobody reports is exactly the
+    silent cut the server refuses loudly to avoid."""
     key = (float(requested), float(applied))
     if key in _EVAL_TIMEOUT_CLAMPS_REPORTED:
         return
     _EVAL_TIMEOUT_CLAMPS_REPORTED.add(key)
     _LOG.warning(
-        "budget_extend eval_timeout=%.0f s is above this engine's launch ceiling of %.0f s "
-        "(max_launch_timeout_s as loaded when the engine started), so the evaluations it dispatches "
-        "run under %.0f s. The ceiling is read only at engine start: raise max_launch_timeout_s in "
-        "the run's config (at most 604800 s), then stop and resume the run to apply %.0f s.",
-        requested, applied, applied, requested)
+        "budget_extend eval_timeout=%.0f s is above the %.0f s (7 day) absolute launch limit, so the "
+        "evaluations it dispatches run under %.0f s. The server refuses such a value; this one reached "
+        "the run's log another way. Extend again with at most %.0f s to make the bound explicit.",
+        requested, LAUNCH_TIMEOUT_LIMIT_S, applied, LAUNCH_TIMEOUT_LIMIT_S)
+
+
+def lift_launch_ceiling(overrides) -> None:
+    """Raise THIS process's launch ceiling to the operator's live per-eval wall clock (2026-10-02).
+
+    `budget_extend{eval_timeout}` (an eval-spec task's budget) and `budget_extend{timeout}` (the
+    script-path one) are OPERATOR wall clocks, and an operator wall clock is never cut by a ceiling
+    the operator did not choose (incident 2026-10-01, `minionerec-backbones-v11`, a 28 h budget
+    SIGKILLed at the 24 h default ceiling). The engine-start install covers what the task and the
+    settings declare (`sandbox.install_launch_timeout_ceiling`); this covers what the LOG declares —
+    called at re-entry, before setup or any dispatch (`orchestrator.py::_enter_run`, so a resume folds
+    it in before its first launch), and on every turn from `_apply_control_overrides`, BEFORE the
+    override is read through the ceiling (`command_eval.eval_timeout_override`).
+
+    UPWARD ONLY and at most the week (`sandbox.raise_launch_timeout_ceiling`): a later, smaller value
+    leaves the ceiling where it is — the leash rule applies the shorter budget, and lowering the
+    BOUND would cut evaluations already dispatched under the larger one. One WARNING per raise
+    (a second turn with the same value raises nothing, so says nothing); above the week the clamp is
+    reported by `_report_eval_timeout_clamp` instead.
+
+    Process-wide, like the ceiling itself: one engine process drives one run. The UI server never
+    reaches this (it holds no Engine), and it validates against the constant limit, not this value.
+    Agent-originated timeouts never come here: a Researcher's `eval_timeout` stays clamped by
+    `max_eval_timeout` (`engine/shared.py::effective_max_eval_timeout`) and a Strategist's `timeout`
+    by `governed_eval_timeout`; neither is a `budget_extend`."""
+    from looplab.runtime.sandbox import launch_timeout_ceiling, raise_launch_timeout_ceiling
+
+    for key in ("eval_timeout", "timeout"):
+        requested = budget_ceiling(overrides, key, None)
+        if requested is None:
+            continue
+        before = launch_timeout_ceiling()
+        after = raise_launch_timeout_ceiling(requested)
+        if after > before:
+            _LOG.warning(
+                "budget_extend %s=%.0f s raised this engine's launch ceiling from %.0f s to %.0f s: "
+                "an operator's wall clock is never cut by the ceiling (at most %.0f s, 7 days).",
+                key, requested, before, after, LAUNCH_TIMEOUT_LIMIT_S)
 
 
 class CalibrationOverrideRefusal(ConfigRefusal, RuntimeError):
@@ -361,14 +399,19 @@ class WidthSettlingMixin:
                     self.timeout = max(0.1, _timeout)
             except (TypeError, ValueError, OverflowError):
                 pass
+        # The operator's live wall clocks lift this process's launch ceiling FIRST (2026-10-02), so
+        # neither `self.timeout` below nor the `eval_timeout` read after it meets a ceiling lower than
+        # the value the operator gave — see `lift_launch_ceiling`.
+        lift_launch_ceiling(_bo)
         # THE EVAL-SPEC BUDGET (`budget_extend{eval_timeout}`, 2026-09-24). Stored, not applied here:
         # `_eval_spec` stays the task's recorded spec and every reader of its budget/timeouts goes
         # through `shared.py::effective_eval_spec`, so an eval DISPATCHED after this turn runs under the
         # new number while one already running keeps the leash it was dispatched with. Re-read off the
         # fold every turn like the siblings above, which is what makes a resume see the last value.
         self._eval_timeout_override = eval_timeout_override(_bo)
-        # Capped at the launch ceiling this engine installed at start (`max_launch_timeout_s`); a
-        # value the cap actually moved is REPORTED, never just applied (`_report_eval_timeout_clamp`).
+        # Capped at the launch ceiling, which `lift_launch_ceiling` above has already raised to the
+        # request — so the cap moves a value only above the 7-day limit, and such a value is REPORTED,
+        # never just applied (`_report_eval_timeout_clamp`).
         _requested_eval_timeout = eval_timeout_override(_bo, clamp=False)
         if (_requested_eval_timeout is not None and self._eval_timeout_override is not None
                 and _requested_eval_timeout > self._eval_timeout_override):

@@ -178,9 +178,9 @@ looplab run examples/dataset_task.json -s profile=thorough -s confirm_top_k=5   
 | `asha_live_quantile` | `LOOPLAB_ASHA_LIVE_QUANTILE` | `0.5` | The rank bar sits at this quantile along a WORST→BEST ordering of finished siblings' finals: `0.5` = the median; SMALLER lowers the bar toward the WORST peer so it is more conservative (`0.0` = only stop a node worse than the worst finished peer); LARGER is more aggressive |
 | `asha_live_min_siblings` | `LOOPLAB_ASHA_LIVE_MIN_SIBLINGS` | `3` | Minimum finished sibling nodes required before ASHA ranks at all (never acts on too little evidence) |
 | `asha_live_kill_confidence` | `LOOPLAB_ASHA_LIVE_KILL_CONFIDENCE` | `0.8` | Minimum confidence (0–1) required from the ASHA judge's `stop` verdict before a flagged node is actually killed. Once the rank test fires past the grace window, the judge is shown the node's live curve, the same-resource sibling values and computed bar, the objective's direction, the other metrics the run is printing, and the training monitor's latest health verdict, and answers `continue`/`watch`/`stop` (a fold-ignored `asha_verdict` diagnostic + span). Because it is consulted only INSIDE the rank gate it can never stop a node the quantile test would have spared — it can only spare one the quantile test would have killed |
-| `timeout` | `LOOPLAB_TIMEOUT` | `30.0` | Per-evaluation wall-clock limit (seconds) — the budget on the script-solution path only; a task with an active eval spec takes its per-eval budget from `cmd.timeout`/the profile timeouts instead. Whichever of the two applies is announced to the roles that spend it, per proposal — see [Both roles are told the per-eval TIME budget](#both-roles-are-told-the-per-eval-time-budget) |
+| `timeout` | `LOOPLAB_TIMEOUT` | `30.0` | Per-evaluation wall-clock limit (seconds) — the budget on the script-solution path only; a task with an active eval spec takes its per-eval budget from `cmd.timeout`/the profile timeouts instead. Like those, an operator value above `max_launch_timeout_s` lifts the launch ceiling to it (at most 7 days) rather than being cut. Whichever of the two applies is announced to the roles that spend it, per proposal — see [Both roles are told the per-eval TIME budget](#both-roles-are-told-the-per-eval-time-budget) |
 | `max_eval_timeout` | `LOOPLAB_MAX_EVAL_TIMEOUT` | `3600.0` | Hard ceiling for an AGENT-chosen eval timeout: a Researcher-authored per-node `eval_timeout`, applied after the `agent_control.timeout` permission gate, and (since 2026-09-22) a Strategist's run-level `timeout`, clamped when the decision is validated so the recorded `strategy_decision` is the applied value (`core/config.py::governed_eval_timeout`). The run-wide `timeout` remains the fallback when no permitted override is supplied. The one-hour default admits existing heavy-model requests while remaining below the default 24-hour launch ceiling. Its own bound stays `86400` even when `max_launch_timeout_s` is raised: an agent reaches a longer eval only when the operator's live `budget_extend{eval_timeout}` larger than it LIFTS this clamp for the rest of the run (`engine/shared.py::effective_max_eval_timeout`); see [Raising a LIVE run's eval budget](#raising-a-live-runs-eval-budget-budget_extendeval_timeout). |
-| `max_launch_timeout_s` | `LOOPLAB_MAX_LAUNCH_TIMEOUT_S` | `86400.0` | The HARD wall clock every subprocess launch is clamped to — each eval stage, the protected `score` stage, a setup, a scorer — whatever a task declares or a `budget_extend` asks for (`runtime/sandbox.py::finite_timeout`). `86400` (24 h) is the historical ceiling and the floor; raise it up to `604800` (7 days) for evaluations that train longer than a day. A live `budget_extend{eval_timeout}` above the run's value is REFUSED (400), never accepted and then silently cut. Read once, when the engine starts (`cli/__init__.py::_engine` installs it process-wide), so on a running run: set it in the run's config, stop and resume the run, then extend — see [Allowing more than 24 hours](#allowing-more-than-24-hours-max_launch_timeout_s). A task's own timeouts above it are cut at the launch, as they always were at 24 h. |
+| `max_launch_timeout_s` | `LOOPLAB_MAX_LAUNCH_TIMEOUT_S` | `86400.0` | Where the per-launch wall-clock ceiling STARTS (`runtime/sandbox.py::finite_timeout` clamps every subprocess deadline to the ceiling in force). Since 2026-10-02 it bounds what an AGENT can make a launch run for — a Developer-authored `looplab_stages.json` stage timeout — and **never** an operator's own wall clock: at engine start the ceiling is `min(604800, max(this, the largest operator-declared timeout))` (the task's `eval.timeout`, profile, `cmd.stages`, canary, host/holdout scorer and setup timeouts, and the run's `timeout`), and a live `budget_extend{eval_timeout}` raises it again. `86400` (24 h) is the historical value and the floor; up to `604800` (7 days), the absolute limit nothing may exceed (a task declaring more is refused at submit). Read once, when the engine starts (`cli/__init__.py::_engine`); see [Allowing more than 24 hours](#allowing-more-than-24-hours-max_launch_timeout_s). |
 | `sweep_timeout_mult` | `LOOPLAB_SWEEP_TIMEOUT_MULT` | `8.0` | A sweep node (a grid in one process) gets this × `timeout` |
 | `eval_stall_timeout_s` | `LOOPLAB_EVAL_STALL_TIMEOUT_S` | `1800.0` | STALL watchdog cap (seconds): a stage that is completely SILENT on stdout/stderr for this long — while still alive and below its wall-clock deadline — is tree-killed early with a STALLED marker (a hung dataloader/deadlock dies in minutes instead of burning a multi-hour timeout). The per-stage window is `min(this, the stage's own timeout)`. Set to `0` to DISABLE the watchdog (only the hard deadline applies) — for a legitimately quiet non-Python stage (block-buffered stdout, a script logging only to its own file). Threaded into the eval and surfaced to the Developer so its code emits periodic progress to stay alive. **Where it meets `eval_deadline_grace_s`**: a stage silent for a whole window is stall-killed BEFORE its deadline, so no grace is asked for (the judge's only input is a live log tail, and there is none) — but once a grace IS granted the order reverses and the silence kill is deferred for exactly the window bought, so the extension is real. A stage still silent when the grace runs out is then killed as STALLED, not as a timeout |
 | `eval_deadline_grace_s` | `LOOPLAB_EVAL_DEADLINE_GRACE_S` | `-1.0` (AUTO) | The most extra wall clock a live-log judge may buy for a stage that has reached its deadline, ONCE per command. `-1.0` — **the default since 2026-08-23** — is AUTO: at most 10% of the stage's OWN time limit, and never more than 1800 s. A fraction rather than a constant because 1800 s is 50% of a 3600 s score stage, 30x a 60 s smoke stage and 6% of a 28000 s train wall, so one number cannot mean the same thing twice. `0.0` keeps the unconditional tree-kill this always was, byte for byte, and is now the OFF switch rather than the default; a positive number is your own absolute ceiling. It exists because a deadline is a number that cannot see a progress bar: all NINE `stage_finished.status == "timeout"` rows in the shipped corpus land within seconds of their own declared wall and together discarded 57.6 GPU-hours, and the whole captured record of `rubertlite-dense-retrieval` node 72 ends `100%|##########| 664/664 [00:17<00:00, 38.13it/s]`. At the wall, a stage two seconds from writing its checkpoint and one that will never finish present the identical fact; only something reading the log separates them. The judge answers ONE WORD, never a number, and fails CLOSED — the opposite direction from the stage checker, because there an unreadable answer saves work and here it spends it. The operator's number is the ceiling: the runtime clamps to it, so a judge cannot name its own extension. It was opt-in until 2026-08-23 because turning it on lets a model reading the candidate's own live log spend GPU time; the operator flipped it on the ground that the opt-in put the whole of that 57.6-hour loss behind a switch nobody had turned, while the spend it authorises stays bounded, one-shot and fail-closed. A resumed pre-2026-08-23 run keeps `0.0` via `LEGACY_CONFIG_SNAPSHOT_DEFAULTS`, so no already-recorded run changes behaviour mid-log. The seconds it buys are seconds the process actually receives: the STALL watchdog's silence kill is deferred for the granted window (a stage that went quiet writing its checkpoint is the case this exists for), and the stage row's `seconds` and `deadline_grace_s` therefore agree. |
@@ -380,13 +380,13 @@ POST /api/runs/<run>/commands   (Idempotency-Key: <key>)
 {"type": "budget_extend", "data": {"eval_timeout": 43200}, "expected_generation": "<64-hex>"}
 ```
 
-* **Validation**: a finite number of seconds in `(0, C]`, where `C` is the RUN's launch ceiling —
-  `max_launch_timeout_s`: `86400` (24 h) unless raised, at most `604800` (7 days) — read from the
-  run's `config.snapshot.json` the way `looplab resume` reads it
-  (`serve/control_validation.py::_run_launch_ceiling`). A larger value is refused, naming that
-  setting, rather than announced and then silently cut at the launch; see
-  [Allowing more than 24 hours](#allowing-more-than-24-hours-max_launch_timeout_s). Anything else is
-  a rejected `invalid_command` record too.
+* **Validation**: a finite number of seconds in `(0, 604800]` — the 7-day absolute launch limit
+  (`core/numeric.py::LAUNCH_TIMEOUT_LIMIT_S`), whatever the run's `max_launch_timeout_s`. Since
+  2026-10-02 the run's engine RAISES its launch ceiling to the value it is given (upward only,
+  `engine/width_settling.py::lift_launch_ceiling`, logged once), so any value up to the week is run as
+  given — no restart, no config edit. Above the week it is refused rather than announced and then cut.
+  Anything else is a rejected `invalid_command` record too. (`budget_extend{timeout}`, the script-path
+  lever, has the same 7-day bound and lifts the ceiling the same way.)
 * **Durability**: absolute and last-write-wins in `RunState.budget_overrides["eval_timeout"]`,
   re-applied by `_apply_control_overrides` on every turn, so replay reproduces it and a resume sees
   the last value (invariant #6 is not in play: the task snapshot is untouched, the override is its
@@ -413,52 +413,57 @@ POST /api/runs/<run>/commands   (Idempotency-Key: <key>)
 
 #### Allowing more than 24 hours: `max_launch_timeout_s`
 
-**Added 2026-09-27.** Every launch — each eval stage, the protected `score` stage, a setup, a scorer
-— is clamped to one hard wall clock (`runtime/sandbox.py::finite_timeout`), and until this date that
-was the literal 24 h. It is now the run's `max_launch_timeout_s`: `86400` by default, so nothing
-changes for a run that does not set it, and at most `604800` (7 days). Two places read it, and both
-read the RUN's value, so they cannot disagree:
+**Added 2026-09-27; reworked 2026-10-02.** Every launch — each eval stage, the protected `score`
+stage, a setup, a scorer — is clamped to one wall clock (`runtime/sandbox.py::finite_timeout`), and
+until 2026-09-27 that was the literal 24 h.
 
-* the **engine**: `cli/__init__.py::_engine` installs it for the whole process when the engine
-  starts (`looplab run`, `resume`, `finalize`, and every engine the UI spawns), before any role is
-  built. It is **not** re-read while the engine runs.
-* the **server**: `budget_extend{eval_timeout}` above it is refused with a 400 that names the setting.
+**Your own timeouts are never cut by it** (since 2026-10-02). On `minionerec-backbones-v11` the task
+declared `eval.timeout: 100800` (28 h), the ceiling was the 24 h default, nothing refused or warned at
+submit or start, and a 24-hour training was SIGKILLed at 24 h during its final eval. For a number you
+already declared, the ceiling was only a second copy of your budget that silently won. Now:
 
-The ceiling bounds, it does not grant. Raised, a task's own timeouts above a day (`eval.timeout`, a
-profile, a declared stage, the canary) are honoured up to it instead of being cut at 24 h, but the
-per-eval budget is still the task's until `budget_extend{eval_timeout}` moves it. `max_eval_timeout`
-(what an AGENT may ask for) keeps its 24-hour bound on purpose; the operator's `eval_timeout` lifts it.
+* **at engine start** (`cli/__init__.py::_engine`, every `run`/`resume`/`finalize` and every engine
+  the UI spawns, before any role is built) the ceiling installed is
+  `min(604800, max(max_launch_timeout_s, the largest wall clock you declared))`. "Declared" is every
+  timeout in the task's eval spec — `eval.timeout`/`cmd.timeout`, each profile's, each `cmd.stages`
+  timeout, the canary's, the host and holdout scorers', `setup_timeout`, `run_setup_timeout`
+  (`runtime/command_eval.py::operator_declared_timeouts`) — plus the run's `timeout` setting. When that
+  lifts the ceiling above the setting, the engine logs one WARNING line naming the value and the field.
+* **live**: a `budget_extend{eval_timeout}` (or `{timeout}`) above the ceiling raises it, upward only,
+  in the running engine and again on every resume (the value is folded from the log), with one line in
+  the log. See [Raising a LIVE run's eval budget](#raising-a-live-runs-eval-budget-budget_extendeval_timeout).
+* **the week is absolute**: a task declaring any wall clock above `604800` (7 days) is refused at
+  submit, naming every offending field (`EvalSpec._wall_clocks_within_launch_limit`); the server
+  refuses such a `budget_extend`. A run recorded before that refusal existed is NOT made unresumable:
+  its over-limit launches are clamped to the week, with a WARNING at every engine start naming them.
+
+**What the setting still does**: it bounds what an AGENT can make a launch run for. A Developer's
+`looplab_stages.json` stage timeout is recorded against the budget rather than enforced (see
+[Both roles are told the per-eval TIME budget](#both-roles-are-told-the-per-eval-time-budget)), and the
+ceiling is where it is cut — at the setting, or at your largest declared timeout if that is larger.
+Raise the setting (up to `604800`) only to give agent-authored stages a longer wall than any timeout
+you declared yourself. A Researcher's `eval_timeout` is unchanged: `max_eval_timeout` clamps it.
 
 **A new run**: `looplab run task.json -s max_launch_timeout_s=604800` — or
 `LOOPLAB_MAX_LAUNCH_TIMEOUT_S=604800` in the environment, `max_launch_timeout_s: 604800` in a config
 file, or "Max launch timeout (s)" on the UI's Settings page (the defaults every new UI run starts
 from). It is recorded in `config.snapshot.json`, so every resume keeps it.
 
-**A run that already exists** — its engine loaded its ceiling when it started:
+**A run that already exists** — its engine read the setting when it started: set the run's value (its
+Config panel, `PUT /api/runs/<run>/config` with
+`{"settings": {"max_launch_timeout_s": 604800}, "expected_generation": "<64-hex>"}`, or its
+`config.snapshot.json`; a snapshot that predates the field takes `LOOPLAB_MAX_LAUNCH_TIMEOUT_S` from the
+environment — for a UI-driven run, the SERVER's), then restart the engine (`looplab stop <run> --wait`,
+then `looplab resume <run>`). A stop never kills a running evaluation — it keeps the leash it was
+dispatched with. None of this is needed to give an EVALUATION more time: `budget_extend{eval_timeout}`
+up to a week is enough on its own.
 
-1. Run this build's UI server. A server started before it still refuses anything above 86400: its
-   validation is code it has already loaded.
-2. Set the run's value: the run's Config panel (Budgets & confirmation → Max launch timeout),
-   `PUT /api/runs/<run>/config` with
-   `{"settings": {"max_launch_timeout_s": 604800}, "expected_generation": "<64-hex>"}`, or
-   `"max_launch_timeout_s": 604800` in its `config.snapshot.json`. A snapshot that predates the field
-   (a run started before 2026-09-27) instead takes `LOOPLAB_MAX_LAUNCH_TIMEOUT_S` from the
-   environment: for a UI-driven run that is the SERVER's environment, which it both validates with and
-   hands to every engine it spawns. A snapshot that records the field is not overridden by it.
-3. Restart the engine: `looplab stop <run> --wait`, then `looplab resume <run>` (or the Dock's stop
-   and resume buttons). A stop never kills a running evaluation — the engine waits for it, and that
-   evaluation keeps the leash it was dispatched with.
-4. `budget_extend{eval_timeout: N}`, `N` up to the new ceiling. Evaluations dispatched after it run
-   under `N`.
-
-An engine that loaded a LOWER ceiling than an `eval_timeout` the server accepted (the config was
-raised while it ran, i.e. step 3 was skipped) runs its evaluations under its own ceiling and logs a
-WARNING naming the restart — it does not cut silently. A week-long evaluation also needs the run's
-other clocks to allow it: with `max_eval_seconds` set, an admission reserves the whole per-eval budget
-first, and `max_seconds` bounds the whole run — raise them with `budget_extend` too. And the live
-training monitor's per-node backstop of 200 judge calls (`engine/monitor_gates.py`) was sized for a
-day: on a week-long evaluation whose log never reads healthy it can run out, after which the monitor
-keeps observing but stops judging — and so stops killing.
+A week-long evaluation also needs the run's other clocks to allow it: with `max_eval_seconds` set, an
+admission reserves the whole per-eval budget first, and `max_seconds` bounds the whole run — raise them
+with `budget_extend` too. And the live training monitor's per-node backstop of 200 judge calls
+(`engine/monitor_gates.py`) was sized for a day: on a week-long evaluation whose log never reads
+healthy it can run out, after which the monitor keeps observing but stops judging — and so stops
+killing.
 
 #### The DEVICE COUNT has the same shape, and only the Researcher knew it
 

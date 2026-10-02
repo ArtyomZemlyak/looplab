@@ -456,8 +456,9 @@ class Settings(BaseSettings):
     is larger: every `*timeout*` / `*_budget_s` field has its own row in docs/guide/configuration.md):
       - `timeout`:             per-eval wall-clock budget for ONE experiment's evaluation (engine/eval).
       - `max_eval_timeout`:    hard ceiling for a governed per-node Researcher timeout override.
-      - `max_launch_timeout_s`: the HARD ceiling every subprocess launch is clamped to (runtime/
-                               sandbox), 24 h unless raised, at most 7 days.
+      - `max_launch_timeout_s`: the floor of the ceiling every subprocess launch is clamped to
+                               (runtime/sandbox), 24 h unless raised; operator-declared timeouts lift
+                               the ceiling past it, never past 7 days.
       - `llm_timeout`:         LLM request idle timeout — inter-token stall limit in stream mode
                                (core.llm OpenAICompatibleClient).
       - `llm_header_timeout`:  LLM first-byte (response-headers) window for stream attempts (core.llm).
@@ -742,29 +743,44 @@ class Settings(BaseSettings):
     # (2026-09-27), deliberately: this clamps what a MODEL may ask for, and a model that reads
     # candidate-authored evidence asking for a multi-day eval is a spend nobody consented to. The
     # operator's own live `budget_extend{eval_timeout}` already LIFTS this clamp for the run it names
-    # (`engine/shared.py::effective_max_eval_timeout`), up to the raised launch ceiling — so a week is
-    # reachable for an agent exactly when the operator has said so, while a static bound that followed
-    # the per-run ceiling would be a cross-field rule every old snapshot then has to pass.
+    # (`engine/shared.py::effective_max_eval_timeout`), and (since 2026-10-02) lifts the launch
+    # ceiling to the same value — so a week is reachable for an agent exactly when the operator has
+    # said so, while a static bound that followed the per-run ceiling would be a cross-field rule every
+    # old snapshot then has to pass. Unchanged by the 2026-10-02 rework: an operator-DECLARED task
+    # timeout raises the launch ceiling, never this clamp.
     max_eval_timeout: float = Field(default=3600.0, gt=0, le=LAUNCH_TIMEOUT_DEFAULT_S)
-    # THE HARD PER-LAUNCH WALL-CLOCK CEILING (2026-09-27): every subprocess deadline — an eval stage,
-    # the protected score stage, a setup, a scorer — is clamped to this at the launch
-    # (`runtime/sandbox.py::finite_timeout`), and a `budget_extend{eval_timeout}` above it is REFUSED
-    # by the server (a 400 / a rejected command), never accepted and then cut. It was the literal
-    # `sandbox.MAX_TIMEOUT_S` (24 h) until long SFT evaluations needed one stage to train past a day.
-    # The default IS that literal, so a run that does not set this is unchanged; the range (24 h ..
-    # 7 days, `core/numeric.py`) can only LENGTHEN a launch.
+    # THE PER-LAUNCH WALL-CLOCK CEILING's FLOOR (2026-09-27; meaning narrowed 2026-10-02). Every
+    # subprocess deadline — an eval stage, the protected score stage, a setup, a scorer — is clamped
+    # at the launch to the ceiling IN FORCE (`runtime/sandbox.py::finite_timeout`), and this setting is
+    # where that ceiling STARTS. It was the literal `sandbox.MAX_TIMEOUT_S` (24 h) until long SFT
+    # evaluations needed one stage to train past a day; the default IS that literal and the range
+    # (24 h .. 7 days, `core/numeric.py`) can only LENGTHEN a launch.
     #
-    # READ AT ENGINE START, never live: `cli/__init__.py::_engine` installs it process-wide
-    # (`runtime/sandbox.py::set_launch_timeout_ceiling`) from the Settings the run or resume loaded,
-    # and the server validates against the RUN's recorded value, resolved from `config.snapshot.json`
-    # the way the resume child resolves it (`serve/control_validation.py::_run_launch_ceiling`). So
-    # raising it on a live run is: edit the run's config (per-run Config panel, PUT
-    # /api/runs/<id>/config, or the snapshot), restart the engine (stop, then resume), then extend.
+    # WHAT IT BOUNDS NOW: what an AGENT can make a launch run for — chiefly a Developer-authored
+    # `looplab_stages.json` stage timeout, recorded-not-enforced against the budget and cut only here.
+    # It no longer bounds the OPERATOR. Incident 2026-10-01 (`minionerec-backbones-v11`): the task
+    # declared `eval.timeout = 100800` (28 h), this was the 24 h default, nothing refused or warned at
+    # submit or start, and a 24-hour training was SIGKILLed at 24 h in its final eval. For a number the
+    # operator already declared, this setting was a duplicate of that budget that silently won. So:
+    #   * at engine start the ceiling installed is `min(7 days, max(this, the largest operator-
+    #     declared wall clock))` — the task's eval/profile/stage/canary/scorer/setup timeouts and the
+    #     run's own `timeout` (`cli/__init__.py::_engine` -> `sandbox.install_launch_timeout_ceiling`,
+    #     which logs one line when it raises past this value);
+    #   * a live `budget_extend{eval_timeout|timeout}` raises it again, upward only, at most a week
+    #     (`engine/width_settling.py::lift_launch_ceiling`), and the server validates those against the
+    #     7-day `LAUNCH_TIMEOUT_LIMIT_S`, not against this setting;
+    #   * the week stays absolute: a task declaring more is refused at submit
+    #     (`EvalSpec._wall_clocks_within_launch_limit`), a recorded run holding more is clamped loudly.
+    # Kept (and still honoured) so an operator can deliberately give AGENT-authored stages a longer
+    # wall than any timeout they declared themselves, and so existing snapshots load unchanged.
+    #
+    # READ AT ENGINE START: `cli/__init__.py::_engine` installs it process-wide. Raising it on a live
+    # run is: edit the run's config (per-run Config panel, PUT /api/runs/<id>/config, or the snapshot),
+    # then restart the engine (stop, then resume). An operator who only wants a longer EVALUATION needs
+    # neither: `budget_extend{eval_timeout}` is enough.
     # NO `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row, deliberately: the default is the historical behaviour,
     # so a pre-field snapshot resumes unchanged without one — and without one the
-    # `LOOPLAB_MAX_LAUNCH_TIMEOUT_S` env var reaches exactly those snapshots, the no-edit way to lift a
-    # run started before this field existed (the UI server hands its env to every engine it spawns and
-    # reads the same env when it resolves the snapshot).
+    # `LOOPLAB_MAX_LAUNCH_TIMEOUT_S` env var reaches exactly those snapshots.
     max_launch_timeout_s: float = Field(default=LAUNCH_TIMEOUT_DEFAULT_S, ge=LAUNCH_TIMEOUT_DEFAULT_S,
                                         le=LAUNCH_TIMEOUT_LIMIT_S)
     # Intra-node sweep: a sweep node runs a whole grid in one process, so it gets this multiple of

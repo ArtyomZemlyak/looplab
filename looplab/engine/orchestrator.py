@@ -49,7 +49,7 @@ from looplab.engine.metric_salvage import settle_mode as settle_metric_salvage_m
 from looplab.engine.widths import LLM_WIDTH_MAX
 # The live width settle (the proposals' re-pin, the operator's `budget_extend`, the broker ceiling
 # that follows them) is a mixin of its own since review 2026-09-22, ENG1-04 step 1.
-from looplab.engine.width_settling import WidthSettlingMixin
+from looplab.engine.width_settling import WidthSettlingMixin, lift_launch_ceiling
 # The run-start pins and the re-entry checks that read them back (invariant #6) are a mixin of their
 # own since ENG1-04 step 2. The `RunStartPinError` family moved WITH the checks that raise it and is
 # imported back here: the SAME class objects, under the spelling `cli/run_cmds.py` and the tests use
@@ -1764,6 +1764,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # decision in this invocation runs at the width the run's own log was written under.
         self._repin_settled_widths(state)
         self._repin_declared_env(state)
+        # The operator's live wall clock (`budget_extend{eval_timeout|timeout}`) lifts this process's
+        # launch ceiling from the FOLD, before setup, recovery or any dispatch — so a resumed run's
+        # first launch already runs under it rather than waiting for the loop head's re-application
+        # (`width_settling.py::lift_launch_ceiling`). Moves no state and appends nothing.
+        lift_launch_ceiling(state.budget_overrides)
         self._require_pinned_speculation_receipt(state)
         if self._speculation_gate_calibration and events:
             # The hidden bootstrap is launch-only.  Even an exact prior calibration envelope cannot be

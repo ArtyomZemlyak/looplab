@@ -1741,6 +1741,43 @@ class EvalSpec(BaseModel):
             raise ValueError("\n".join(errs))
         return self
 
+    @model_validator(mode="after")
+    def _wall_clocks_within_launch_limit(self, info: ValidationInfo):
+        """Refuse, at SUBMIT, any operator-declared wall clock above the 7-day absolute launch limit.
+
+        Every timeout this spec declares is now honoured AS DECLARED: the engine lifts its launch
+        ceiling to the largest of them at start (`sandbox.install_launch_timeout_ceiling`, incident
+        2026-10-01 — a declared 28 h `eval.timeout` was SIGKILLed at the 24 h default ceiling with no
+        word at submit or start). The one bound left is `LAUNCH_TIMEOUT_LIMIT_S`, which exists so a
+        fat-fingered value cannot wedge a launch forever — and a value above it can only be cut, so
+        it is refused here, where the operator is still at the keyboard, rather than discovered at
+        the kill. ALL offending fields at once, like `_readers_usable`. `+inf` is above the limit and
+        refused with them (no other gate bounded `eval.timeout` above).
+
+        The walk is `command_eval.operator_declared_timeouts`, the SAME enumeration the engine-start
+        install reads, so the field set refused here is exactly the field set that lifts the ceiling.
+        A model validator rather than per-field ones for that reason, and because the nested
+        canary/scorer models would otherwise each grow their own copy of the bound.
+
+        `_grandfathered` (a `resume`/`finalize` re-validating the run's own `task.snapshot.json`): NOT
+        refused. A recorded run must stay resumable; its over-limit launches are clamped to the week
+        with a WARNING naming each field at engine start instead."""
+        if _grandfathered(info):
+            return self
+        from looplab.core.numeric import LAUNCH_TIMEOUT_LIMIT_S
+        from looplab.runtime.command_eval import operator_declared_timeouts
+        over = [(label, seconds) for label, seconds in operator_declared_timeouts(self.model_dump())
+                if seconds > LAUNCH_TIMEOUT_LIMIT_S]
+        if over:
+            raise ValueError(
+                "operator-declared wall clock above the 7-day absolute launch limit "
+                f"({LAUNCH_TIMEOUT_LIMIT_S:.0f} s): "
+                + ", ".join(f"{label} = {seconds:.0f} s" for label, seconds in over)
+                + ". Every timeout up to the limit is honoured as declared (the engine raises its "
+                  "launch ceiling to it); above it a launch could only be cut, so lower it to at "
+                  f"most {LAUNCH_TIMEOUT_LIMIT_S:.0f}.")
+        return self
+
     @field_validator("stages")
     @classmethod
     def _stages_valid(cls, v):
@@ -2488,9 +2525,11 @@ class RepoTask(BaseModel):
             return ""
 
         # The ceiling IN FORCE, not the `MAX_TIMEOUT_S` default: a run that raised
-        # `max_launch_timeout_s` has it installed before its roles are built
-        # (`cli/__init__.py::_engine`), so the cap quoted here is the one `finite_timeout` applies
-        # below. Unraised, it is the same 86400 as ever, so the prompt's bytes do not move.
+        # `max_launch_timeout_s`, or whose operator declared a longer timeout (which lifts the
+        # ceiling to it, `sandbox.install_launch_timeout_ceiling`), has it installed before its roles
+        # are built (`cli/__init__.py::_engine`), so the cap quoted here is the one `finite_timeout`
+        # applies below — and no profile timeout is reported cut. Unraised, it is the same 86400 as
+        # ever, so the prompt's bytes do not move.
         from looplab.runtime.sandbox import finite_timeout, launch_timeout_ceiling
 
         rows: list[str] = []

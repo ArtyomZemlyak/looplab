@@ -122,6 +122,19 @@ def _fresh_thread_spend_counters():
 
 
 @pytest.fixture(autouse=True)
+def _restore_the_launch_ceiling(_isolation_patch):
+    """The launch ceiling is PROCESS-WIDE (`runtime/sandbox.py::_launch_timeout_ceiling_s`) and, since
+    2026-10-02, moved by more than `cli._engine`: an Engine LIFTS it from a `budget_extend{eval_timeout}`
+    in its own log (`engine/width_settling.py::lift_launch_ceiling`), and the engine-start install
+    lifts it to the task's declared timeouts. Upward only, so a test that drives either leaves the
+    next one with a week where it expects the 24 h default — a false green there, or a red that names
+    the wrong test. Restored after every test, the way `_fresh_thread_spend_counters` resets its
+    counters."""
+    from looplab.runtime import sandbox
+    _isolation_patch.setattr(sandbox, "_launch_timeout_ceiling_s", sandbox._launch_timeout_ceiling_s)
+
+
+@pytest.fixture(autouse=True)
 def _no_repo_dotenv_in_tests(_isolation_patch):
     """`Settings.model_config["env_file"]` stopped being the only dotenv reader.
 

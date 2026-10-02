@@ -882,7 +882,7 @@
           "label": "Max launch timeout (s)",
           "type": "float",
           "default": 86400.0,
-          "help": "The hard wall clock EVERY launch is clamped to — an eval stage, the protected score stage, a setup, a scorer — whatever the task or a budget_extend asks for. 86400 (24 h, the historical ceiling) up to 604800 (7 days); it can only lengthen a launch. A live budget_extend eval_timeout above it is refused, never silently cut. Read when the engine starts: on a running run, save it here, then stop and resume the run before extending the eval budget."
+          "help": "The wall clock an AGENT-authored launch (a Developer-declared stage) is clamped to. 86400 (24 h, the historical ceiling) up to 604800 (7 days); it can only lengthen a launch. Your own timeouts are never cut by it: a task timeout (eval, profile, stage, canary, scorer) or a live budget_extend eval_timeout above it raises the ceiling to that value, up to the 7-day absolute limit, which is refused above. Read when the engine starts: on a running run, save it here, then stop and resume the run."
         },
         {
           "key": "eval_deadline_grace_s",

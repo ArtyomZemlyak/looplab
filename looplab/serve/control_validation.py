@@ -41,6 +41,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from looplab.core.hardware import detect_gpus, gpu_free_mib_uncached
+from looplab.core.numeric import LAUNCH_TIMEOUT_LIMIT_S
 from looplab.core.models import (
     CARD_STATEMENT_MAX_CHARS,
     Idea, IdeaEmission, durable_idea_payload, effective_card_footprint, idea_field_carried,
@@ -572,16 +573,27 @@ def _normalize_budget_extend(ctx: _ControlIntake) -> dict:
             raise HTTPException(400, f"{name} must be a finite positive number")
         if not math.isfinite(value) or value <= 0:
             raise HTTPException(400, f"{name} must be a finite positive number")
+        if name == "timeout" and value > LAUNCH_TIMEOUT_LIMIT_S:
+            # `timeout` is a per-eval WALL CLOCK (the script path's), and since 2026-10-02 the run's
+            # engine honours one up to the absolute launch limit by raising its ceiling
+            # (`engine/width_settling.py::lift_launch_ceiling`). Above the limit it would be accepted
+            # and then cut at the launch — so it is refused, by the same bound as `eval_timeout`.
+            raise HTTPException(400, (
+                f"timeout must be a finite number of seconds in (0, {LAUNCH_TIMEOUT_LIMIT_S:.0f}] — "
+                "the absolute launch limit, 7 days"))
         data[name] = value
     if data.get("eval_timeout") is not None:
         # THE EVAL-SPEC BUDGET (2026-09-24): the per-evaluation wall clock of a repo/command task,
         # which `timeout` above does not reach (`engine/shared.py::effective_eval_time_budget`).
-        # Bounded ABOVE as well as below, by the ceiling every launch of THIS run is clamped to
-        # anyway (`_run_launch_ceiling`, the run's `max_launch_timeout_s`: 24 h unless raised, at
-        # most 7 days): a larger number would be accepted, announced to the roles as their budget,
-        # and then silently cut at the launch — a false success.
-        ceiling = _run_launch_ceiling(ctx.rd)
-        bounds = f"eval_timeout must be a finite number of seconds in (0, {ceiling:.0f}]"
+        # Bounded ABOVE by the absolute launch limit, `LAUNCH_TIMEOUT_LIMIT_S` (7 days), and by
+        # nothing smaller. Until 2026-10-02 the bound was the RUN's `max_launch_timeout_s`, read from
+        # its config snapshot, because the engine clamped every launch to that and a larger value would
+        # have been accepted and then cut. The engine now LIFTS its ceiling to the operator's value
+        # (`engine/width_settling.py::lift_launch_ceiling`; incident 2026-10-01: an operator's 28 h
+        # budget SIGKILLed at a 24 h ceiling), so any value up to the week is one it will honour —
+        # and this check needs neither the run's snapshot nor any process-wide ceiling. The server
+        # installs none (`runtime/sandbox.py`); a check that read one would be reading the default.
+        bounds = f"eval_timeout must be a finite number of seconds in (0, {LAUNCH_TIMEOUT_LIMIT_S:.0f}]"
         value = data["eval_timeout"]
         try:
             if isinstance(value, bool):
@@ -591,54 +603,11 @@ def _normalize_budget_extend(ctx: _ControlIntake) -> dict:
             raise HTTPException(400, bounds)
         if not math.isfinite(value) or value <= 0:
             raise HTTPException(400, bounds)
-        if value > ceiling:
-            from looplab.core.numeric import LAUNCH_TIMEOUT_LIMIT_S
-            # The message names the lever, because the number alone reads like a product limit:
-            # the ceiling is this run's own setting, and above the week it is not a setting at all.
-            raise HTTPException(400, bounds + (
-                f" — {ceiling:.0f} s is this run's launch ceiling (max_launch_timeout_s). Raise it "
-                f"in the run's config (at most {LAUNCH_TIMEOUT_LIMIT_S:.0f} s = 7 days), restart "
-                "the run's engine (stop, then resume), then extend again"
-                if ceiling < LAUNCH_TIMEOUT_LIMIT_S else
-                " — the most any run's launch ceiling (max_launch_timeout_s) may be: 7 days"))
+        if value > LAUNCH_TIMEOUT_LIMIT_S:
+            raise HTTPException(400, bounds + " — the absolute launch limit, 7 days: no launch "
+                                              "may run longer, whatever the run's configuration")
         data["eval_timeout"] = value
     return data
-
-
-def _run_launch_ceiling(rd: Path) -> float:
-    """The hard per-launch ceiling THIS run's engine clamps every evaluation to — the bound a
-    `budget_extend{eval_timeout}` is refused above.
-
-    The run's own `Settings.max_launch_timeout_s`, resolved the way the resume child resolves it:
-    through `core/config.py::read_config_snapshot` (the read `engine_proc.spawn_snapshot_refusal`
-    already shares with that child), and ambient `Settings()` for a run with no snapshot — the
-    fallback `GET /api/runs/{id}/config` shows. So the ceiling accepted here is the one the run's
-    engine installs at start (`cli/__init__.py::_engine`). Not the SERVER's process ceiling: the
-    server installs none, and two runs under one server may be configured differently. A LIVE engine
-    started before the ceiling was raised keeps its own until it restarts, and says so in its log
-    (`engine/width_settling.py::_apply_control_overrides`).
-
-    FAILS CLOSED to the default: a snapshot this build cannot read, or an ambient environment that
-    does not validate, yields `LAUNCH_TIMEOUT_DEFAULT_S` — the floor every configured ceiling sits
-    at or above (`core/numeric.py`), so nothing accepted under it can be cut by any engine. The run
-    that really is configured higher is then refused LOUDLY and its operator can fix the file, which
-    is the right way round: the opposite error is a budget accepted and then silently not run.
-
-    Read per command, never cached: the per-run config editor rewrites the snapshot while the server
-    runs, and a cached ceiling would go on refusing the budget the operator just unlocked."""
-    from looplab.core.config import Settings, read_config_snapshot
-    from looplab.core.numeric import LAUNCH_TIMEOUT_DEFAULT_S
-    snap = Path(rd) / "config.snapshot.json"
-    try:
-        settings = read_config_snapshot(snap) if snap.is_file() else Settings()
-        value = float(settings.max_launch_timeout_s)
-    # `ValueError` covers the whole refusal family: `ConfigSnapshotUnreadableError` and the version
-    # refusals are `ConfigRefusal`s (ValueErrors), and so is pydantic's `ValidationError` from an
-    # invalid ambient value. `OSError`: `is_file` itself can fail on a dying mount.
-    except (OSError, ValueError, TypeError, AttributeError):
-        return LAUNCH_TIMEOUT_DEFAULT_S
-    return value if math.isfinite(value) and value >= LAUNCH_TIMEOUT_DEFAULT_S \
-        else LAUNCH_TIMEOUT_DEFAULT_S
 
 
 def _normalize_hint(ctx: _ControlIntake) -> dict:
