@@ -789,6 +789,30 @@ this run. The
 actual write must still pass its own guarded API.
 Finalization rejects missing reviews or reviews from an earlier node count.
 
+#### Recover a decision or review acknowledgement
+
+Keep the exact body, `action_id` and target generation for `/harness-decisions`
+and `/harness-reviews`. An identical retry returns the **original** saved receipt,
+including its original `at_node` and `evidence_revision`, even after a new terminal
+result, reset or tombstone. The two server-assigned context fields are not new
+request content; normalized authored content, run identity and action identity
+still must match. Conflicting content or a different generation is refused.
+Existing journals use the same rule without a migration or a new digest field.
+
+`replayed=true` acknowledges prior publication; it does **not** refresh its review
+window or grant admission/finalization. Read current `harness-progress` and the
+history item's `validity`. If it is `superseded`, inspect the new evidence and
+publish a fresh justified decision/review with a new action ID. A fresh review
+still validates its current evidence and recorded domain action. Result commentary
+never discharges these obligations or the report requirement.
+
+For durable commands, HTTP 200 alone also does not mean an applied action. Inspect
+the returned command receipt's `status` and `error`: a finish blocked by reports or
+reviews can return `status=rejected` with `external_report_required` or
+`external_reviews_required`. Read the original receipt and current progress before
+choosing a new justified action. Do not keep retrying an already rejected request
+as if missing obligations had been completed.
+
 For cross-run task facets, read `GET /api/cross-run/task-facets` for the current
 portfolio identity and ledger revision, then send `POST` to the same path with
 `task_id`, a non-empty `facets` object, `expected_portfolio_id`,
@@ -1115,6 +1139,15 @@ An exact retry of the admitted failed candidate must not execute its scorer agai
 The final result contains one failure without a score and one measured SGD result,
 with separate interpretations and preserved lineage. Both agent-loss and engine-loss
 cases are supported; the fault changes only editable configuration.
+Add `--obligations` to enable research, authored concepts, novelty decisions,
+reports and lesson/skill reviews in this recovery probe. After the corrected child
+settles, it repeats the old journal requests and verifies that original receipts
+are returned without new rows while progress still marks them superseded.
+Commentary alone must not permit finish; a fresh report alone must not discharge
+fresh lesson/skill reviews. The agent supplies justified no-action reviews for
+this deterministic fixture, then explicitly finishes. Expansion-only research and
+concept-base gates remain separate from finalization. These are scripted protocol
+decisions, not model judgment parity tests.
 `--case agent_loss --drop-command-response --read-fault stale_result_generation`
 instead replaces a successful result page's generation at the owned proxy. The
 typed tool must return unavailable context without those receipts; the next explicit

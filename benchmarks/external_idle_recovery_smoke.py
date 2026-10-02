@@ -29,6 +29,7 @@ from benchmarks.claude_harness_smoke import wait_for
 from benchmarks.external_asha_smoke import SCORER
 from benchmarks.external_session_smoke import Client, until
 from benchmarks._external_response_loss import ResponseLossProxy
+from benchmarks._external_obligation_cycle import settle_obligations
 from looplab.events.eventstore import EventStore
 from looplab.harness.mcp_server import HarnessAPI
 from looplab.serve.server import make_app
@@ -37,7 +38,7 @@ from looplab.serve.server import make_app
 CASES = ("agent_loss", "engine_loss")
 
 
-def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, response_fault="disconnect", read_fault="disconnect", discovery_fault="none", mcp_python=None, result_backlog=False, failed_first=False):
+def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, response_fault="disconnect", read_fault="disconnect", discovery_fault="none", mcp_python=None, result_backlog=False, failed_first=False, obligations=False):
     root.mkdir(parents=True, exist_ok=False)
     runs = root / "runs"; runs.mkdir()
     source = root / "source"; source.mkdir()
@@ -65,6 +66,7 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
     owned_engines = []
     proof = {"case": name, "model_judgment_tested": False, "agent_connection": "not_measured",
              "metrics": [], "read_steps": []}
+    saved_receipts = []
     if mcp_python:
         probe = subprocess.run([mcp_python, "-c", "import importlib.util,json;v={n:bool(importlib.util.find_spec(n)) for n in ('fastapi','uvicorn')};assert not v['fastapi'];print(json.dumps(v))"],
                                capture_output=True, text=True, timeout=20)
@@ -105,6 +107,8 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
             data.update(parent_id=0, parent_generations={"0": 0})
             data["idea"]["operator"] = "improve"
             data["idea"]["rationale"] = "Correct the invalid learning-rate type observed in the failed parent's stage log."
+        if obligations:
+            data["idea"]["concepts"] = ["model/linear"]
         return data
 
     async def candidate(client, nid, steps):
@@ -112,6 +116,16 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
         await client.call("phases", {"query": "implementation"})
         await client.call("phase_info", {"phase_id": "implementation"})
         data = candidate_data(nid, steps)
+        if obligations:
+            settled = await settle_obligations(client, expanding=True, saved_receipts=saved_receipts)
+            proof.setdefault("settled_before_candidates", []).append(settled)
+            await client.call("phases", {"query": "novelty"})
+            await client.call("phase_info", {"phase_id": "novelty"})
+            body = {"expected_generation": client.generation, "phase_id": "novelty",
+                "action_id": f"idle:novelty:{nid}", "idea": data["idea"], "decision": "submit",
+                "reason": "Explicit fixture decision: test the invalid configuration or its authored correction; not an independent novelty model judgment."}
+            reply = await client.request("POST", "harness-decisions", body)
+            saved_receipts.append(("decisions", body, reply["decision"]))
         key = f"idle:candidate:{nid}"
         if proxy is not None and nid == 0:
             lost = await client.call("api_request", {"method": "POST", "path": "/api/runs/demo/commands",
@@ -299,6 +313,40 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
             assert after == before, after[len(before):].decode("utf8")
             proof.update(backlog_node_order=seen, backlog_commentary_changed_no_work=True,
                          typed_result_notices=True)
+        if obligations:
+            before = (rd / "events.jsonl").read_bytes()
+            journals = {kind: (rd / f"harness_{kind}.jsonl").read_bytes() for kind in ("reviews", "decisions")}
+            for kind, body, saved in saved_receipts:
+                reply = await client.request("POST", "harness-" + kind, body)
+                assert reply["replayed"] and reply["review" if kind == "reviews" else "decision"] == saved
+            assert (rd / "events.jsonl").read_bytes() == before
+            assert all((rd / f"harness_{kind}.jsonl").read_bytes() == raw for kind, raw in journals.items())
+            current = await client.progress()
+            assert current["finish_reviews_due"] == ["lessons", "skill_candidates"] and current["finish_report_due"]
+            full = await client.read("harness-progress")
+            for kind in ("reviews", "decisions"):
+                assert all(row["validity"] == "superseded" for row in full["history"][kind]["items"])
+            denied = await client.request("POST", "commands", {"expected_generation": generation,
+                "type": "run_abort", "data": {"reason": "Commentary cannot discharge reports/reviews."}},
+                "idle:premature-finish")
+            assert denied["status"] == "rejected" and denied["error"]["code"] == "external_report_required"
+            assert (rd / "events.jsonl").read_bytes() == before
+            await client.call("phases", {"query": "report"})
+            await client.call("phase_info", {"phase_id": "report"})
+            await client.command("report_generated", {"content": {"headline": "Recovery outcomes",
+                "verdict": "Protocol acceptance, not independent ML robustness.",
+                "summary": json.dumps({"terminal_metrics": proof["metrics"], "failed_parent_retained": failed_first})}},
+                "idle:current-report")
+            after_report = (rd / "events.jsonl").read_bytes()
+            denied = await client.request("POST", "commands", {"expected_generation": generation,
+                "type": "run_abort", "data": {"reason": "Old reviews cannot discharge the new evidence window."}},
+                "idle:premature-review-finish")
+            assert denied["status"] == "rejected" and denied["error"]["code"] == "external_reviews_required"
+            assert (rd / "events.jsonl").read_bytes() == after_report
+            proof.update(old_receipts_replayed=len(saved_receipts), receipt_replay_changed_no_work=True,
+                         old_receipts_stayed_superseded=True, commentary_did_not_discharge_finish=True,
+                         fresh_report_still_required_fresh_reviews=True)
+            proof["finish_obligations"] = await settle_obligations(client, expanding=False)
         await client.call("phases", {"query": "recovery"})
         await client.call("phase_info", {"phase_id": "recovery"})
         await client.command("run_abort", {"reason": "Completed disposable idle recovery acceptance."}, "idle:finish")
@@ -376,6 +424,9 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
             "lessons_every": 0, "comparative_lessons": False, "concurrent_research": False,
             "train_monitor": False, "asha_live": False, "stage_check_tools": False,
             "eval_deadline_grace_s": 0, "memory_dir": str(root / "memory")}
+        if obligations:
+            flags.update(deep_research_every=1, report_every=1, novelty_mode="llm", concept_run_base=True,
+                         reflection_priors=True, lessons_every=1, comparative_lessons=True)
         command = [sys.executable, "-m", "looplab.cli", "run", str(task_path), "--out", str(runs / "demo"),
                    "--backend", "toy", "--max-nodes", "3"]
         for key, value in flags.items():
@@ -497,6 +548,8 @@ def main():
                         help="Defer node commentary across reconnect, then drain result pages and publish/retry each summary.")
     parser.add_argument("--failed-first", action="store_true",
                         help="Fail the first scorer on invalid learning rate; inspect fenced logs and submit a corrected child. Requires --result-backlog.")
+    parser.add_argument("--obligations", action="store_true",
+                        help="Enable research/concepts/report/novelty and lesson/skill reviews; restore old journal receipts after new results. Requires --result-backlog.")
     args = parser.parse_args()
     if not 0 <= args.quiet_hold_seconds <= 14400:
         parser.error("quiet hold must be between zero and four hours")
@@ -512,11 +565,13 @@ def main():
         parser.error("result backlog uses deferred summaries; run response-loss probes separately")
     if args.failed_first and not args.result_backlog:
         parser.error("failed-first requires --result-backlog")
+    if args.obligations and not args.result_backlog:
+        parser.error("obligations requires --result-backlog")
     root = args.out.resolve(); root.mkdir(parents=True, exist_ok=False)
     mcp_python = str(args.mcp_python.resolve()) if args.mcp_python else None
     if mcp_python and not Path(mcp_python).is_file():
         parser.error("MCP interpreter does not exist")
-    proof = [run_case(root / name, name, args.quiet_hold_seconds, args.drop_command_response, args.response_fault, args.read_fault, args.discovery_fault, mcp_python, args.result_backlog, args.failed_first)
+    proof = [run_case(root / name, name, args.quiet_hold_seconds, args.drop_command_response, args.response_fault, args.read_fault, args.discovery_fault, mcp_python, args.result_backlog, args.failed_first, args.obligations)
              for name in CASES if args.case in ("all", name)]
     (root / "acceptance.json").write_text(json.dumps(proof, ensure_ascii=False, indent=2), encoding="utf8")
 

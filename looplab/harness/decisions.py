@@ -12,6 +12,7 @@ from looplab.core.models import Idea, IdeaEmission, durable_idea_payload
 from looplab.events.eventstore import EventStore, EventStoreLockError, interprocess_lock, read_jsonl_lenient
 from looplab.events.replay import fold
 from looplab.harness.obligations import evidence_revision
+from looplab.harness.journals import same_receipt_request
 from looplab.events.run_generation import run_generation_token
 
 
@@ -157,7 +158,7 @@ def publish_decision(srv, rd: Path, body) -> dict:
                     raise HTTPException(503, "external decision ledger exceeds its review bound")
                 for old in read_jsonl_lenient(path):
                     if old.get("run_uid") == state.run_uid and old.get("action_id") == body.action_id:
-                        if orjson.dumps(old, option=orjson.OPT_SORT_KEYS) != payload:
+                        if not same_receipt_request(old, row):
                             raise HTTPException(409, "decision action_id was reused with different content")
                         return {"ok": True, "replayed": True, "decision": old}
                 append_jsonl_bytes_locked(path, payload)

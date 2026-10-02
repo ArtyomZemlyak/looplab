@@ -39,6 +39,7 @@ MCP_INSTRUCTIONS = (
     "Typed progress/result/command reads verify the returned generation and command receipt ID; response_context_mismatch is unavailable evidence even at HTTP 200. Refresh state/original receipts before acting. "
     "Live operations/operation_schema discovery can also be unavailable. Check code/outcome before choosing routes; a failed catalog read is not an empty capability list. "
     "Follow enabled admission/finish obligations. A trainer exit is not terminal evaluation. "
+    "Exact decision/review retries restore original receipts, not current evidence approval. Refresh progress validity; superseded receipts require a new justified decision/review. HTTP 200 commands can be rejected: inspect receipt status/error. "
     "inject_node succeeded means admission, not training success. Inspect terminal status/results; read current-attempt logs before repairing a failure with a new child and command key. A failed parent has no measured score delta. "
     "After each terminal node and finalized run, call result_notices with the current generation and POST "
     "a brief interpretation in the user's language with receipt_id, evidence_token and a stable "

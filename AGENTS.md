@@ -66,6 +66,9 @@ lesson reviews are also due there when `comparative_lessons` is enabled. Both
 reviews are due at finish, including a reason when no conclusion is supported.
 Use `harness-decisions` and `harness-reviews` to record idea-bound reviews and
 justified no-action outcomes where a change is not supported by evidence.
+Keep decision/review bodies and action IDs for lost replies. An exact retry returns
+the original evidence-stamped receipt, without refreshing its window. Check current
+progress validity and publish a new justified review when the old one is superseded.
 While evaluating, poll `/api/runs/{run_id}/harness-checkpoints` with the run
 generation and answer any pending stage or live monitor question. A checked
 stage cannot advance without a verdict; an opened live question holds the

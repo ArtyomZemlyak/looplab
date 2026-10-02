@@ -10,6 +10,7 @@ from looplab.core.atomicio import append_jsonl_bytes_locked
 from looplab.events.eventstore import EventStore, EventStoreLockError, interprocess_lock, read_jsonl_lenient
 from looplab.events.replay import fold
 from looplab.harness.obligations import evidence_revision
+from looplab.harness.journals import same_receipt_request
 from looplab.events.run_generation import run_generation_token
 
 
@@ -110,17 +111,6 @@ def publish_review(srv, rd: Path, body) -> dict:
             state = fold(events)
             if not state.run_uid:
                 raise HTTPException(409, "run has no durable identity")
-            if body.decision == "completed" and not body.action_ref:
-                raise HTTPException(400, "completed review requires the recorded action's reference")
-            if body.decision == "completed" and not body.evidence:
-                raise HTTPException(400, "completed review requires current run node evidence")
-            if body.decision == "completed" and not _action_recorded(
-                    str(settings.memory_dir), body.phase_id, body.action_ref, state.run_uid):
-                raise HTTPException(409, "completed review does not cite a recorded domain action")
-            for nid in body.evidence:
-                node = state.nodes.get(nid)
-                if node is None or node.tombstoned or nid in (state.aborted_nodes or []):
-                    raise HTTPException(409, "review evidence node is missing or superseded")
             row = {"run_uid": state.run_uid, "generation": generation,
                    "at_node": len(state.nodes), "phase_id": body.phase_id,
                    "evidence_revision": evidence_revision(state),
@@ -134,9 +124,23 @@ def publish_review(srv, rd: Path, body) -> dict:
                     raise HTTPException(503, "external review ledger exceeds its bound")
                 for old in read_jsonl_lenient(path):
                     if old.get("run_uid") == state.run_uid and old.get("action_id") == body.action_id:
-                        if orjson.dumps(old, option=orjson.OPT_SORT_KEYS) != payload:
+                        if not same_receipt_request(old, row):
                             raise HTTPException(409, "review action_id was reused with different content")
                         return {"ok": True, "replayed": True, "review": old}
+                # Existing requests acknowledge their ORIGINAL receipt above,
+                # even if its evidence/action no longer supports a new write.
+                # Every fresh publication still validates current domain evidence.
+                if body.decision == "completed" and not body.action_ref:
+                    raise HTTPException(400, "completed review requires the recorded action's reference")
+                if body.decision == "completed" and not body.evidence:
+                    raise HTTPException(400, "completed review requires current run node evidence")
+                if body.decision == "completed" and not _action_recorded(
+                        str(settings.memory_dir), body.phase_id, body.action_ref, state.run_uid):
+                    raise HTTPException(409, "completed review does not cite a recorded domain action")
+                for nid in body.evidence:
+                    node = state.nodes.get(nid)
+                    if node is None or node.tombstoned or nid in (state.aborted_nodes or []):
+                        raise HTTPException(409, "review evidence node is missing or superseded")
                 append_jsonl_bytes_locked(path, payload)
             return {"ok": True, "replayed": False, "review": row}
     except HTTPException:
