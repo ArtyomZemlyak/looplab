@@ -45,6 +45,6 @@ test('approval empty state only prefills Assistant and never auto-submits', asyn
   assert.match(runView, /Approval target is missing\.[\s\S]*?no command has been guessed/)
   assert.match(assistant, /window\.addEventListener\('ll:focus-assistant', onFocusAssistant\)/)
   assert.match(assistant, /if \(text && \(!draft \|\| draft === text\)\) setInput\(text\)/)
-  assert.match(assistant, /Draft preserved — clear it before inserting/)
+  assert.match(assistant, /Draft preserved — send or clear it first/)
   assert.doesNotMatch(assistant, /onFocusAssistant[\s\S]{0,400}\bsend\(\)/)
 })

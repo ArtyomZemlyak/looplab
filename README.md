@@ -21,10 +21,14 @@ looplab ui                       # open http://127.0.0.1:8765
 
 Source checkouts need Node/npm to build the UI on first launch; see
 [Installation](docs/guide/installation.md) for the exact versions and Windows commands.
-In the UI, open **Settings → LLM** to configure your model, then use **Start a new run**
+In the UI, open **Settings → Essential → Model** to configure your model, then use **Start a new run**
 in Assistant. Describe the goal, where the code or data live, and any time or compute limit.
 Review the proposed task, evaluation, and effective settings; **Validate** and then **Start run**.
 The Assistant can discuss a plan without starting an experiment.
+
+Want later experiments to reuse a useful code fix? Ask Assistant to prepare a reuse plan,
+or open **Code for future experiments** in Overview or Report for a run with a recorded code base. See the
+[short walkthrough](docs/guide/quickstart.md#reuse-a-useful-code-change).
 
 For a no-model demonstration, follow the [offline CLI recipe](docs/guide/cli-walkthrough.md).
 To keep working in Codex or Claude Code while LoopLab evaluates your candidates, follow the

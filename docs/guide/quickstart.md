@@ -49,6 +49,30 @@ and LoopLab's internal research roles. For setup from a fresh checkout, use
    from repeat checks and explains whether parent evaluation conditions match.
    An unconfirmed score remains exploratory; a confirmation mean alone does not prove reliability.
 
+## Reuse a useful code change
+
+A fix discovered in one experiment can become shared starting code for later experiments.
+Start in Assistant with **Permissions · Plan**:
+
+> Help reuse useful code changes in future experiments. Explain what can be shared,
+> which checks are needed and their cost. Prepare a plan for review before changing the base.
+
+For a run with a recorded code base, **Overview** or **Report → Code for future experiments → Choose a change
+with Assistant** prepares this discussion. With **Language / Язык → Русский**, the panel
+and its prepared question use Russian. The button fills the composer; **Send** contacts
+the model and may incur provider charges. An existing draft is kept.
+
+If reuse is disabled for that run, **Prepare with Assistant** asks for a **new** launch
+proposal. This feature needs a recorded code archive, protected evaluation, and declared
+tests and regression checks. Assistant can explain missing prerequisites; enabling it
+requires reviewing the new task before launch. See
+[task setup](tasks.md#promote-reusable-code-into-a-verified-base) for those requirements.
+
+Reusing code does not copy a score or rewrite previous results. Checks measure the
+proposed change and the original behavior; a base update needs explicit approval while
+the engine is stopped. Resuming is a separate action. For Codex or Claude Code, the
+[external-agent guide](external-harness.md) describes the same guarded workflow.
+
 ## Offline CLI walkthrough
 
 For an offline proof with no model or network, follow the [CLI walkthrough](cli-walkthrough.md).

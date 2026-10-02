@@ -121,7 +121,11 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // (+607 B) distinguishes unfinished/revoked/bounded gate evidence and unknown costs.
     // The claim model stays in the lazy panel; CSS and all route/reachability limits
     // remain unchanged. 600 KiB leaves 813 B headroom above this measured total.
-    js: { gzip: 600 * KIB },
+    // 2026-10-02 code reuse onboarding: HEAD 613,587 B, now 615,416 B (+1,829 B).
+    // Plain first steps, setup/review drafts and RU/EN caveats use the existing lazy panel and
+    // Assistant handoff. Drafts and preservation notices were shortened; 601.5 KiB leaves 520 B.
+    // Initial shell, route and forbidden reachability ceilings remain unchanged.
+    js: { gzip: 601.5 * KIB },
     css: { gzip: 58 * KIB },
   },
   individual: {

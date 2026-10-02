@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import React from 'react'
 import { click, fetchStub, mountLive, settle, unanswered, until } from './_mount.js'
 import { parseRunRouteState } from '../src/runRouteState.js'
 import { node, payload } from './_resultNoticesFixtures.js'
@@ -97,6 +98,18 @@ test('Assistant drafts the result question, preserves an existing draft, and sen
     assert.equal(ask.disabled, true, 'the next click cannot overwrite a nonempty draft')
     await until(() => mounted.container.querySelector('.asst-result-notice button'), 'node result question')
     assert.equal(mounted.container.querySelector('.asst-result-notice button').disabled, true)
+    const preserved = input.value
+    await React.act(async () => window.dispatchEvent(new CustomEvent('ll:focus-assistant', {
+      detail: { text: 'Review useful code changes' },
+    })))
+    assert.equal(input.value, preserved)
+    assert.match(mounted.container.textContent, /Draft preserved — send or clear it first/)
+    await React.act(async () => window.dispatchEvent(new CustomEvent('looplab:language', { detail: 'ru' })))
+    await React.act(async () => window.dispatchEvent(new CustomEvent('ll:focus-assistant', {
+      detail: { text: 'Помоги выбрать изменение' },
+    })))
+    assert.equal(input.value, preserved)
+    assert.match(mounted.container.textContent, /Черновик сохранён\. Сначала отправьте или очистите его/)
     assert.equal(backend.calls.some(call => call.method !== 'GET'), false,
       'preparing the question cannot send a message or run command')
   } finally {

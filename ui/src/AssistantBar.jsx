@@ -1454,13 +1454,13 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       const text = String(event?.detail?.text || '').trim()
       const draft = input.trim()
       if (text && (!draft || draft === text)) setInput(text)
-      else if (text) flash(`Draft preserved — clear it before inserting ${text}`)
+      else if (text) flash(ru ? 'Черновик сохранён. Сначала отправьте или очистите его.' : 'Draft preserved — send or clear it first.')
       setAssistantView(value => value === 'bar' && hasChat ? 'side' : value)
       requestAnimationFrame(() => inputRef.current?.focus())
     }
     window.addEventListener('ll:focus-assistant', onFocusAssistant)
     return () => window.removeEventListener('ll:focus-assistant', onFocusAssistant)
-  }, [hasChat, input])
+  }, [hasChat, input, ru])
   const newChat = ({ preserveAttentionHandoff = false } = {}) => {
     if (directConfirmRef.current) {
       flash('Cancel or confirm the current run command before starting another chat')
