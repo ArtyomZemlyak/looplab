@@ -1092,9 +1092,18 @@ python -m benchmarks.external_live_monitor_smoke --out .tmp/live-monitor-proof
 python -m benchmarks.external_asha_smoke --out .tmp/asha-proof
 # Recover between experiments: MCP loss with a live engine or an explicitly resumed engine.
 python -m benchmarks.external_idle_recovery_smoke --out .tmp/idle-proof
+# Record copied-base provenance while the operator source changes during training.
+python -m benchmarks.external_idle_recovery_smoke --out .tmp/seed-base-proof --case all --seed-base-recovery
 # Observe actual request silence after MCP death, without owner polling refreshing it.
 python -m benchmarks.external_idle_recovery_smoke --out .tmp/activity-proof --case agent_loss --quiet-hold-seconds 121
 ```
+
+`--seed-base-recovery` covers agent loss and explicit engine recovery on a private
+git fixture. It changes the source after the first seed and before its terminal,
+checks the old/new copied-base receipts through public MCP, joins each to its
+seed event and generation, and requires exactly two protected training executions.
+It verifies seed provenance (doc 72.2), with no claim of upstream advancement or
+archived-base replay.
 
 The offline scenario runs three real CPU training configurations with a protected
 scorer. It kills its own MCP process, restarts its private UI server, withholds two

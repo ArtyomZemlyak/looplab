@@ -38,12 +38,17 @@ from looplab.serve.server import make_app
 CASES = ("agent_loss", "engine_loss")
 
 
-def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, response_fault="disconnect", read_fault="disconnect", discovery_fault="none", mcp_python=None, result_backlog=False, failed_first=False, obligations=False, damaged_journals=False, value_recovery=False, damaged_events=False, knowledge_recovery=False):
+def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, response_fault="disconnect", read_fault="disconnect", discovery_fault="none", mcp_python=None, result_backlog=False, failed_first=False, obligations=False, damaged_journals=False, value_recovery=False, damaged_events=False, knowledge_recovery=False, seed_base_recovery=False):
     root.mkdir(parents=True, exist_ok=False)
     runs = root / "runs"; runs.mkdir()
     source = root / "source"; source.mkdir()
     (source / "score.py").write_text(SCORER, encoding="utf8")
     (source / "config.json").write_text('{}', encoding="utf8")
+    if seed_base_recovery:
+        (source / "experiment.env").write_text("BASE=old\n", encoding="utf8")
+        for args in (["init", "-q"], ["add", "."],
+                     ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "base"]):
+            subprocess.run(["git", "-C", str(source), *args], check=True, capture_output=True)
     digest = hashlib.sha256((source / "score.py").read_bytes()).hexdigest()
     task = {"id": "external-idle-recovery", "goal": "Measure real SGD before and after explicit idle recovery.",
         "direction": "min", "repo": str(source), "edit_surface": ["config.json"], "protect": ["score.py"],
@@ -103,7 +108,8 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
         data = {"idea": {"operator": "draft", "footprint": {"gpus": 0},
             "rationale": "Measure the declared training steps with the protected SGD scorer."},
             "files": {"config.json": json.dumps({"steps": steps,
-                "lr": "invalid" if failed_first and nid == 0 else .1, "delay": 0., "delay_from": 1})}}
+                "lr": "invalid" if failed_first and nid == 0 else .1,
+                "delay": .08 if seed_base_recovery and nid == 0 else 0., "delay_from": 1})}}
         if failed_first and nid == 1:
             data.update(parent_id=0, parent_generations={"0": 0})
             data["idea"]["operator"] = "improve"
@@ -143,7 +149,30 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
             proof.update(lost_write=lost, exact_retry_receipt=receipt["command"]["id"])
         else:
             await client.command("inject_node", data, key)
+        if seed_base_recovery and nid == 0:
+            async def seeded():
+                rows = EventStore(runs / "demo" / "events.jsonl").read_all()
+                return next((row for row in rows if row.type == "workspace_seeded"
+                             and row.data.get("node_id") == 0), None)
+            seed = await until(seeded, bool)
+            assert seed.data["base_revision"]["complete"]
+            assert not any(row.type == "node_evaluated" for row in EventStore(runs / "demo" / "events.jsonl").read_all())
+            (source / "experiment.env").write_text("BASE=new\n", encoding="utf8")
+            proof["source_changed_before_terminal"] = True
         node = await client.terminal(nid, "failed" if failed_first and nid == 0 else "evaluated")
+        if seed_base_recovery:
+            revision = node["metric_provenance"]["base_revision"]
+            rows = EventStore(runs / "demo" / "events.jsonl").read_all()
+            seed = next(row for row in rows if row.seq == revision["seed_event_seq"])
+            assert seed.type == "workspace_seeded" and seed.data["node_id"] == nid
+            assert revision["digest"] == seed.data["base_revision"]["digest"]
+            assert revision["file_count"] == seed.data["base_revision"]["file_count"] == 3
+            assert revision["node_id"] == nid and revision["generation"] == 0 and revision["complete"]
+            expected = "BASE=old\n" if nid == 0 else "BASE=new\n"
+            assert (runs / "demo" / "nodes" / f"node_{nid}" / "experiment.env").read_text(encoding="utf8") == expected
+            proof.setdefault("base_revisions", []).append(revision)
+            if nid == 1:
+                assert proof["base_revisions"][0]["digest"] != revision["digest"]
         if failed_first and nid == 0:
             assert node["metric"] is None
         if failed_first and nid == 1:
@@ -771,6 +800,8 @@ def main():
                         help="Damage the private event log; refuse domain reads/receipt writes, then restore fixture backup. Requires --obligations.")
     parser.add_argument("--knowledge-recovery", action="store_true",
                         help="Publish a protocol lesson/skill with lost ACKs and damaged source recovery. Requires backlog/obligations, excludes failed-first/response-loss.")
+    parser.add_argument("--seed-base-recovery", action="store_true",
+                        help="Record a tracked seed; change the owned source before terminal and verify a later seed after recovery.")
     args = parser.parse_args()
     if not 0 <= args.quiet_hold_seconds <= 14400:
         parser.error("quiet hold must be between zero and four hours")
@@ -796,11 +827,13 @@ def main():
         parser.error("damaged-events requires --obligations")
     if args.knowledge_recovery and (not args.result_backlog or not args.obligations or args.failed_first or args.drop_command_response):
         parser.error("knowledge-recovery requires --result-backlog --obligations and two successful nodes, without --drop-command-response")
+    if args.seed_base_recovery and (args.failed_first or args.drop_command_response):
+        parser.error("seed-base-recovery requires two successful nodes, without failed-first/response-loss")
     root = args.out.resolve(); root.mkdir(parents=True, exist_ok=False)
     mcp_python = str(args.mcp_python.resolve()) if args.mcp_python else None
     if mcp_python and not Path(mcp_python).is_file():
         parser.error("MCP interpreter does not exist")
-    proof = [run_case(root / name, name, args.quiet_hold_seconds, args.drop_command_response, args.response_fault, args.read_fault, args.discovery_fault, mcp_python, args.result_backlog, args.failed_first, args.obligations, args.damaged_journals, args.value_recovery, args.damaged_events, args.knowledge_recovery)
+    proof = [run_case(root / name, name, args.quiet_hold_seconds, args.drop_command_response, args.response_fault, args.read_fault, args.discovery_fault, mcp_python, args.result_backlog, args.failed_first, args.obligations, args.damaged_journals, args.value_recovery, args.damaged_events, args.knowledge_recovery, args.seed_base_recovery)
              for name in CASES if args.case in ("all", name)]
     (root / "acceptance.json").write_text(json.dumps(proof, ensure_ascii=False, indent=2), encoding="utf8")
 

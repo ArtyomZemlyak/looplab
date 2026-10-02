@@ -317,12 +317,12 @@ class WorkspaceSeeder:
         # this discriminator exists to refuse. An opaque marker keeps it refusable.
         return {**base, "dirty": digest[:16] if digest else "unknown"}
 
-    def seed_workspace(self, workdir) -> None:
+    def seed_workspace(self, workdir) -> dict | None:
         """RepoTask (ADR-7): materialize the editable repo tree(s) into the eval workdir, plus
         any runtime-mounted reference repos and data files. Phase 4: each editable repo is
         mounted at its own subdir (name=".") -> workspace root). The agent's `Node.files` edits
         are applied on top by `_write_node_files`; task assets win last. No-op for non-repo
-        tasks."""
+        tasks. Returns the copied base receipt plus its seed event sequence when measured."""
         if not self._e._repo_spec:
             return
         from looplab.engine.workspace_seed import SeedOps, seed_candidate_workspace
@@ -339,6 +339,7 @@ class WorkspaceSeeder:
             # `copy_input` remain the patch points they have always been.
             rows = seed_candidate_workspace(
                 self._e._repo_spec, wd, seed_mode=(self._e._seed_mode or "auto"),
+                capture_base_revision=True,
                 ops=SeedOps(seed_repo_tree=self._e._seed_repo_tree,
                             seed_protected_files=self.seed_protected_files,
                             link_input=self._e._link_input,
@@ -384,7 +385,12 @@ class WorkspaceSeeder:
             payload = {"node_id": nid, "materialized": seeded}
             if editable_bytes and all(type(b) is int and b >= 0 for b in editable_bytes):
                 payload["workspace_bytes"] = sum(editable_bytes)
-            self._e.store.append(EV_WORKSPACE_SEEDED, payload)
+            base_revision = next((row["base_revision"] for row in rows if "base_revision" in row), None)
+            if base_revision is not None:
+                payload["base_revision"] = base_revision
+            event = self._e.store.append(EV_WORKSPACE_SEEDED, payload)
+            if base_revision is not None and type(getattr(event, "seq", None)) is int:
+                return {**base_revision, "seed_event_seq": event.seq}
 
     def seed_repo_tree(self, src, dst, ignore, mode: str = "auto") -> int:
         """Delegate to the shared evaluation/Developer candidate seeding rule."""
@@ -432,12 +438,13 @@ class WorkspaceSeeder:
             return str((base / rel).resolve())
         return str(ap)
 
-    def materialize(self, node, workdir) -> None:
+    def materialize(self, node, workdir) -> dict | None:
         """The full workdir build for one eval of `node` — the seed → node-files → assets triple
         `_evaluate` and both confirm paths (`_confirm_phase` / `_confirm_node`) each ran verbatim
         before the extraction. Order is load-bearing (see `_write_node_files`): node edits go on
         top of the seeded tree, and task assets win any name collision, last. Routed through the
-        Engine's delegators so an instance-level monkeypatch of any step still intercepts it."""
+        Engine's delegators so an instance-level monkeypatch of any step still intercepts it.
+        Returns that seed's optional receipt for the evaluation attempt to retain."""
         from looplab.core.atomicio import rmtree_readonly_aware
         from looplab.core.pathsafe import resolve_settled
 
@@ -457,6 +464,7 @@ class WorkspaceSeeder:
             # Read-only-aware: a workdir seeded from a git clone holds read-only pack files, which
             # Windows refuses to unlink — a second materialization of the same node failed there.
             rmtree_readonly_aware(wd)
-        self._e._seed_workspace(wd)                # RepoTask: editable repo tree (ADR-7) …
+        base_revision = self._e._seed_workspace(wd) # RepoTask: editable repo tree (ADR-7) …
         self._e._write_node_files(node, wd)         # … agent edits on top …
         self._e._write_assets(wd)                   # … task assets win any name collision
+        return base_revision

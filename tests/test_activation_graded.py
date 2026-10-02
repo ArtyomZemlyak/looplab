@@ -263,14 +263,14 @@ def test_the_grade_says_how_strong_the_proof_was():
 def test_log_spans_re_read_only_the_failed_attempt_s_bytes(tmp_path):
     from looplab.engine.eval_log_plan import snapshot_training_logs
     log = tmp_path / "eval.log"
-    log.write_text("attempt 0: NEW_PATH_ON\n")
+    log.write_text("attempt 0: NEW_PATH_ON\n", newline="")
     snap = snapshot_training_logs(tmp_path)
-    with open(log, "a") as fh:
+    with open(log, "a", newline="") as fh:
         fh.write("attempt 1: fallback\n")
     texts, spans = act.attempt_log_texts(tmp_path, time.time() - 60, snap,
                                          frozenset({"eval.log"}))
     assert texts == ["attempt 1: fallback\n"]
-    with open(log, "a") as fh:
+    with open(log, "a", newline="") as fh:
         fh.write("attempt 2: NEW_PATH_ON\n")                       # a later append vouches for nothing
     assert act.read_log_spans(spans) == ["attempt 1: fallback\n"]
     log.write_text("x")                                            # truncated: no re-check at all

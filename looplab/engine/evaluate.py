@@ -1555,6 +1555,7 @@ class EvalAttempt:
     eval_env: Any = None
     # --- bound by PREPARE_WORKDIR
     workdir: Any = None
+    base_revision: Any = None                 # copied seed receipt, bound by PREPARE_WORKDIR
     _superseded_marker: Any = None
     _manifest_stamp: Any = None
     # --- seeded by SEED_LEDGERS from the durable rows; carried across attempts
@@ -4115,7 +4116,11 @@ class EvaluateMixin:
         # recovery, which asks only whether the files are this manifest's.
         _reuse = False
         if not _reuse:
-            self._materialize(a.node, a.workdir)    # seed tree -> node edits -> task assets
+            seed = self._materialize(a.node, a.workdir) # seed tree -> node edits -> task assets
+            # Attempt-local, never a shared seeder cache or a terminal-time source
+            # read. Legacy/patched materializers returning None mean unobserved.
+            a.base_revision = ({**seed, "node_id": a.node_id, "generation": a.generation}
+                               if isinstance(seed, dict) else None)
             a.stamp_workdir(a.node)                # the workdir now IS this manifest
         # THE BUILD DELTA, here rather than on the eval-start receipt: the question is about
         # BYTES ON DISK, and until the line above there are none. Fold-ignored and diagnostic,
@@ -6228,6 +6233,8 @@ class EvaluateMixin:
                 _eval_payload["violations"] = _terminal.violations
                 if _terminal.metric_provenance is not None:
                     _eval_payload["metric_provenance"] = _terminal.metric_provenance
+                if a.base_revision is not None:
+                    _eval_payload.setdefault("metric_provenance", {})["base_revision"] = a.base_revision
                 # THE GRADED ACTIVATION RECORD (`_apply_activation_verdict`): its grade, and on a WARN
                 # what could not be verified and the gate decision made for it. NOT a `violations`
                 # row -- `feasible = not violations` would exclude a node whose metric stands

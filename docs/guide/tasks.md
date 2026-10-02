@@ -771,7 +771,7 @@ content decides), or a **facet** the operator writes into `comparison_contract` 
 the record says `declared`). Anything else is `unknown`, on purpose, and `unknown` is visible.
 
 **The substrate: a fourth field that is not a fourth authority.** Since 2026-08-24 the record also
-carries `substrate` — a digest of the editable source tree the number was produced on, HEAD *and* the
+carries `substrate` — a digest of the live editable source observed at terminal, HEAD *and* the
 uncommitted work (`engine/workspace.py::substrate_fingerprint`). It is a **discriminator**, and the
 distinction is the whole of its design:
 
@@ -789,6 +789,23 @@ the working tree) leaves invisible to a HEAD-only digest. `ui/src/runIndex.js::c
 mirrors the same rule, and both halves are driven from one shared truth table
 (`tests/fixtures/comparability_status_cases.json`) so the browser and the engine cannot disagree about
 whether two numbers may be ordered.
+
+**The copied base receipt (doc 72.2).** New repo evaluations also retain
+`metric_provenance.base_revision` from `workspace_seeded.base_revision`: the actual
+destination after editable/protected copies, before data/reference mounts, node
+overlay and task assets. It includes every suffix, relative file paths and
+executable bits in the digest, with full regular-file content hashes. No file
+contents are published. `seed_event_seq`, `node_id` and node `generation` bind the
+primary terminal to that seed. Repair keeps it; a fresh materialization records
+a new receipt. Source edits after seeding do not change the saved base.
+
+The read is bounded to 20,000 entries and 64 MiB. Unreadable, unstable,
+unsupported or oversized trees return `complete:false`, `digest:null` and a
+reason; missing historical/recovery receipts remain unknown. The receipt is a
+diagnostic, with no new evaluation wait or refusal. It neither archives the tree
+nor certifies equivalence or comparability; the existing live `substrate` rule
+above remains separate. Confirmation seed diagnostics do not gain a separate
+score-bound receipt in this step. See [the upstream plan](../72-node-to-framework-upstream-2026-10-01.md).
 
 **The protocol: the ruler, per facet.** Since 2026-09-26 the record also carries `protocol` — a map of
 refuse-only facets, each a digest, describing the conditions the number was measured under

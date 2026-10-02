@@ -1211,7 +1211,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
     def _write_node_files(self, node, workdir) -> None:
         return self.workspace.write_node_files(node, workdir)
 
-    def _materialize(self, node, workdir) -> None:
+    def _materialize(self, node, workdir) -> dict | None:
         return self.workspace.materialize(node, workdir)
 
     # ------------------------------------------------------------ loop control
@@ -4671,7 +4671,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
     def _substrate_fingerprint(self) -> dict:
         return self.workspace.substrate_fingerprint()
 
-    def _seed_workspace(self, workdir) -> None:
+    def _seed_workspace(self, workdir) -> dict | None:
         return self.workspace.seed_workspace(workdir)
 
     def _seed_repo_tree(self, src, dst, ignore, mode: str = "auto") -> int:

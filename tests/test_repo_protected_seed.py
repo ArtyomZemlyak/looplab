@@ -24,6 +24,7 @@ import sys
 from pathlib import Path
 
 import anyio
+import pytest
 
 from looplab.adapters.repo_task import EvalSpec, RepoTask
 from looplab.engine.orchestrator import Engine
@@ -145,7 +146,12 @@ def test_out_of_repo_and_absent_protect_entries_are_skipped(tmp_path):
     outside.mkdir()
     (outside / "secret.py").write_text("print('secret')\n", encoding="utf-8")
     repo = _git_repo(tmp_path / "repo", {"train.py": "print('t')\n"})
-    (repo / "escape.py").symlink_to(outside / "secret.py")
+    try:
+        (repo / "escape.py").symlink_to(outside / "secret.py")
+    except OSError as exc:
+        if getattr(exc, "winerror", None) != 1314:
+            raise
+        pytest.skip("Windows symlink privilege unavailable")
 
     seeder = _engine(tmp_path, RepoTask(
         id="p", direction="max", editable_path=str(repo),

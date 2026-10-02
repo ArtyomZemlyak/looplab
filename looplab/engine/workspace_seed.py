@@ -39,6 +39,70 @@ LS_FILES_TIMEOUT_S = 120
 # `workspace_seeded` row spell it (`.[auto]:copytree:git_timeout`).
 GIT_TIMEOUT_FALLBACK = "git_timeout"
 
+# A diagnostic over the COPIED editable bytes, never a sampled/archive claim.
+MAX_BASE_REVISION_ENTRIES = 20_000
+MAX_BASE_REVISION_BYTES = 64 * 1024 * 1024
+
+
+def seeded_base_revision(root) -> dict:
+    """Doc 72.2: effective seed before mounts/overlay/assets, not live source HEAD.
+
+    Full regular-file content and executable bits; no suffix filter (env is code
+    provenance too), no symlink traversal or partial digest. This bounded read
+    cannot reject evaluation or certify an atomic source snapshot/reproducibility.
+    """
+    import hashlib
+    import json
+    from looplab.core.atomicio import file_identity
+    from looplab.core.node_evidence import read_bounded_regular_file
+    from looplab.core.pathsafe import is_reparse
+
+    receipt = {"version": 1, "scope": "seeded_editables_before_mounts_and_overlay",
+               "complete": False, "digest": None, "reason": "unreadable_seed",
+               "file_count": 0, "bytes": 0, "max_entries": MAX_BASE_REVISION_ENTRIES,
+               "max_bytes": MAX_BASE_REVISION_BYTES}
+    base, rows, entries = Path(root), [], 1
+    def fail(reason):
+        return {**receipt, "reason": reason}
+    try:
+        if is_reparse(os.lstat(base)) or not base.is_dir():
+            return fail("unsupported_seed_entry")
+        pending = [base]
+        while pending:
+            # Stream entries: os.walk lists a whole directory before a caller can
+            # enforce the cap, so one huge flat seed would defeat the read bound.
+            with os.scandir(pending.pop()) as scan:
+                for entry in scan:
+                    entries += 1
+                    if entries > MAX_BASE_REVISION_ENTRIES:
+                        return fail("too_many_entries")
+                    path = Path(entry.path)
+                    before = os.lstat(path)
+                    if is_reparse(before):
+                        return fail("unsupported_seed_entry")
+                    if _stat.S_ISDIR(before.st_mode):
+                        pending.append(path)
+                        continue
+                    if not _stat.S_ISREG(before.st_mode):
+                        return fail("unsupported_seed_entry")
+                    if receipt["bytes"] + before.st_size > MAX_BASE_REVISION_BYTES:
+                        return fail("too_many_bytes")
+                    data = read_bounded_regular_file(path, before.st_size + 1)
+                    if data is None:
+                        return fail("unreadable_seed")
+                    if (len(data) != before.st_size or
+                            file_identity(before) != file_identity(os.lstat(path))):
+                        return fail("unstable_seed")
+                    rows.append([path.relative_to(base).as_posix(), before.st_mode & 0o111,
+                                 hashlib.sha256(data).hexdigest()])
+                    receipt["file_count"] += 1
+                    receipt["bytes"] += len(data)
+    except OSError:
+        return fail("unreadable_seed")
+    preimage = json.dumps([receipt["version"], receipt["scope"], sorted(rows)], ensure_ascii=True)
+    return {**receipt, "complete": True, "digest": hashlib.sha256(preimage.encode("ascii")).hexdigest(),
+            "reason": None}
+
 
 class SeedCount(int):
     """What `seed_repo_tree` returns: the count it always returned, plus two facts the walk learned.
@@ -417,7 +481,7 @@ class SeedOps:
 
 
 def seed_candidate_workspace(repo_spec, workdir, *, seed_mode: str = "auto", ignore=None,
-                             ops: "SeedOps | None" = None) -> list[dict]:
+                             ops: "SeedOps | None" = None, capture_base_revision=False) -> list[dict]:
     """Materialize `repo_spec` into `workdir` in the ONE order (module docstring), and RECEIPT it.
 
     Returns one row per thing materialized, in the order it happened — the ingredients each caller
@@ -434,6 +498,9 @@ def seed_candidate_workspace(repo_spec, workdir, *, seed_mode: str = "auto", ign
     `symlink` is observed AFTER the input is materialized, because `link_input` falls back to a COPY
     (geesefs flattens symlinks) and a Docker bind list built from the DECLARATION rather than from
     the result would bind a path the candidate is not actually reading through.
+
+    Engine-only `capture_base_revision` adds the copied editable/protected digest to the first
+    editable row, before mounts. Other consumers keep the existing receipts and read cost.
 
     Raises `MountCollision`; see that class for what it prevents. Everything the two callers do NOT
     share — the tracing span, the domain event, the overlay of the Developer's staged edits — stays
@@ -511,6 +578,12 @@ def seed_candidate_workspace(repo_spec, workdir, *, seed_mode: str = "auto", ign
         if protected:
             rows.append({"kind": "protected", "name": editable.get("name"),
                          "files": list(protected)})
+
+    # Engine-only diagnostic. The first editable row carries the aggregate seed,
+    # before mounted inputs can be mistaken for base bytes. Developer/tools keep
+    # their existing receipt/cost. This does not inspect the operator tree again.
+    if capture_base_revision and editables:
+        rows[0]["base_revision"] = seeded_base_revision(work)
 
     for ref in references:
         if not ref.get("mount"):                 # context-only reference: nothing is materialized

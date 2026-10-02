@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-164 event types — 113 folded into `RunState`, 51 diagnostic; 1075 declared payload keys; 22 types whose whole payload is stored by the fold.
+164 event types — 113 folded into `RunState`, 51 diagnostic; 1076 declared payload keys; 22 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -190,6 +190,6 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `trust_scan` | diagnostic | Which trust detectors ran over one node's code, how many findings they made, over what digest. | — | `code_digest`, `detectors`, `evidence_version`, `findings`, `generation`, `node_id` |
 | `verifier_group_scored` | folded | One verifier round over a GROUP of nodes, keyed on the contract and evidence digests. | `contract`, `members`, `requested_samples`, `v` | `action_id`, `request_sha256` |
 | `workspace_changed` | folded | A re-entry read a workspace source unlike the last recorded reading of its kind, or a way it was never read before. | `now`, `was` | — |
-| `workspace_seeded` | diagnostic | One node's workspace was seeded: what was materialized, and the bytes the seed copied from the editable tree(s). | `materialized`, `node_id` | `workspace_bytes` |
+| `workspace_seeded` | diagnostic | One node's workspace was seeded: what was materialized, and the bytes the seed copied from the editable tree(s). | `materialized`, `node_id` | `base_revision`, `workspace_bytes` |
 
 <!-- /generated -->
