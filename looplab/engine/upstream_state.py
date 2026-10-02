@@ -106,16 +106,36 @@ def node_signature(node):
 
 def source_node(events, node_id):
     node = fold(events).nodes.get(node_id)
-    if node is None or node.tombstoned or node.status.value != "evaluated" or node.metric is None or not math.isfinite(node.metric) or not node.feasible or node.violations or (node.metric_provenance or {}).get("salvaged"):
+    return node, _source_receipt(node, {e.seq: e for e in events})
+
+
+def _source_receipt(node, events_by_seq):
+    """Share primary-score and seed identity eligibility with nomination reads."""
+    from looplab.engine.seed_archive import seed_archive_digest
+    if (node is None or node.tombstoned or node.status.value != "evaluated"
+            or node.metric is None or not math.isfinite(node.metric) or not node.feasible
+            or node.violations or (node.metric_provenance or {}).get("salvaged")):
         raise UpstreamRefusal("upstream_source_not_measured", "Choose a current completed node with a primary measured score")
     receipt = (node.metric_provenance or {}).get("base_revision")
-    seed = next((e for e in events if e.seq == (receipt or {}).get("seed_event_seq")), None)
-    if not receipt or receipt.get("complete") is not True or receipt.get("node_id") != node.id or receipt.get("generation") != node.attempt or seed is None or seed.type != "workspace_seeded" or seed.data.get("node_id") != node.id or not event_generation_binds(seed.data, node.attempt) or (seed.data.get("base_revision") or {}).get("digest") != receipt.get("digest"):
-        raise UpstreamRefusal("upstream_source_unavailable", "The source node has no complete archived seed identity")
-    score = node.task_metric if node.task_metric is not None else node.metric
-    if not math.isfinite(score):
+    message = "The source node has no complete archived seed identity"
+    if not isinstance(receipt, dict) or any(type(receipt.get(k)) is not int or receipt[k] < 0
+            for k in ("node_id", "generation", "seed_event_seq")):
+        raise UpstreamRefusal("upstream_source_unavailable", message)
+    seed = events_by_seq.get(receipt["seed_event_seq"])
+    seed_base = seed.data.get("base_revision") if seed is not None else None
+    archive_digest = seed_archive_digest(receipt)
+    if (receipt["node_id"] != node.id or receipt["generation"] != node.attempt
+            or seed is None or seed.type != "workspace_seeded"
+            or type(node.terminal_event_seq) is not int or seed.seq >= node.terminal_event_seq
+            or type(seed.data.get("node_id")) is not int or seed.data["node_id"] != node.id
+            or not event_generation_binds(seed.data, node.attempt) or archive_digest is None
+            or seed_archive_digest(seed_base) != archive_digest
+            or any(seed_base[k] != receipt[k] for k in ("file_count", "bytes"))):
+        raise UpstreamRefusal("upstream_source_unavailable", message)
+    score = node.task_metric
+    if score is None or not math.isfinite(score):
         raise UpstreamRefusal("upstream_source_not_measured", "The source task score is unavailable")
-    return node, receipt
+    return receipt
 
 
 def repair_origin(events, node, name, changed_lines):
@@ -145,11 +165,15 @@ def upstream_candidates(rd, task, events=None):
     from looplab.engine.seed_archive import verified_seed_archive
     events = events if events is not None else events_for(rd)
     state, rows = fold(events), []
+    events_by_seq = {e.seq: e for e in events}
     promoted = {h for e in events if e.type == "base_advanced" for h in e.data.get("hunk_hashes", [])}
     for node in sorted(state.nodes.values(), key=lambda n: (n.id != state.best_node_id, n.id)):
-        receipt = (node.metric_provenance or {}).get("base_revision")
+        try:
+            receipt = _source_receipt(node, events_by_seq)
+        except UpstreamRefusal:
+            continue  # an ineligible source grants no nomination; reads stay diagnostic
         archive = verified_seed_archive(rd, receipt)
-        if archive is None or node.tombstoned or node.status.value != "evaluated" or not node.feasible or node.violations:
+        if archive is None:
             continue
         for name in sorted(set(node.files) | set(node.deleted))[:128]:
             raw = read_bounded_regular_file(archive / name, 1024 * 1024 + 1)

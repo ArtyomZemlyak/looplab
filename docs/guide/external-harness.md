@@ -1368,6 +1368,14 @@ When the operator launches a pinned repo task with `upstream`, search
 `upstream_status(run_id, expected_generation, offset, limit)` for the current base,
 Maintainer instructions, per-hunk nominations and paged gate history. A nomination
 is advice; a completed source must have its current primary score and seed receipt.
+Nominations use the same source eligibility as proposal admission: salvaged or
+missing scores, reset lifecycles and invalid seed identities supply no hunks.
+A retargeted extra metric cannot substitute for a missing primary task score.
+The receipt must bind integer node/generation/seed sequence identities and agree
+with a complete stored seed event, including archive identity, counts and bytes.
+That seed event must precede the current primary evaluation terminal.
+Malformed source receipts remain diagnostic reads with no nomination; fresh
+writes refuse them before work starts. Saved exact ACKs remain historical reads.
 
 1. Pause through the ordinary durable command, then wait for engine exit. Every
    fresh upstream write requires a stopped engine; readings start no work.

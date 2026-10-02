@@ -887,6 +887,13 @@ three-way nonoverlap/conflict и reset, archive/export/replay, external MCP и U
 
 `upstream_candidates` сравнивает source overlay с его реально архивированным seed:
 path, ranges, SHA-256 hunks, source lifecycle signature и repair/idea origin.
+Nomination и fresh proposal используют одну проверку primary measured source:
+salvaged/missing score, reset lifecycle и неверный seed receipt не дают hunks.
+Retargeted extra metric не подменяет отсутствующий primary task score.
+Receipt связывает integer node/generation/seed sequence с полным archived seed
+event; digest, file count и bytes должны совпадать. Seed event должен предшествовать
+текущему primary evaluation terminal. Исторический exact ACK остаётся readable,
+но не заменяет current source eligibility для нового действия.
 Repair применяется только до terminal текущего lifecycle. Для env-fix pending
 триггер ищется по **старому падающему** присваиванию, не по исправленному значению.
 Unchanged и post-terminal repair не превращают научную ручку в capability.
@@ -1586,3 +1593,46 @@ seeds на original base/files, exact retry без reexecution и replay/export 
 Documentation/claim pins/layering/containment/API/event contracts — 102 passed;
 strict MkDocs, Ruff и whitespace check прошли. Полный suite проекта и paid model
 judgments этим исправлением не проверены.
+
+### 18.20 Nomination и admission: единый measured source (2026-10-02)
+
+Review от HEAD `36fe7da49` обнаружил расхождение read и write. Семь red случаев
+на настоящем завершённом CPU SGD показали: candidate advice предлагал hunks от
+salvaged/missing score или неверного source seed/node/generation, хотя fresh
+proposal отказывался от такого источника. Это давало агенту неисполнимый следующий
+шаг. Дополнительная проверка receipt выявила принятие `false` как node/generation
+0, исключение при неверной форме receipt и слабую проверку соответствия seed event:
+его incomplete archive или изменённые counts могли пройти при прежнем digest.
+Финальный red case также принимал receipt, привязанный к seed event после terminal;
+такой источник не подтверждает базу, использованную до primary measurement.
+Ещё один red case показал подмену отсутствующего primary score конечным значением
+retargeted extra metric; primary task score теперь требуется явно. Positive control
+сохраняет допустимость retargeted узла, когда primary measurement присутствует.
+Тесты меняют provenance либо убирают score; новых measured values они не создают.
+
+`looplab/engine/upstream_state.py::source_node` и
+`looplab/engine/upstream_state.py::upstream_candidates` теперь используют одну
+проверку source eligibility. Node/generation/seed sequence должны быть настоящими
+неотрицательными integers. Receipt и связанный current-lifecycle seed event должны
+содержать полный stored archive identity по
+`looplab/engine/seed_archive.py::seed_archive_digest`, одинаковые digest/counts/bytes.
+Seed sequence должен предшествовать текущему primary terminal sequence.
+Content verification архива остаётся обязательной. Advice fold выполняется один
+раз, события seed ищутся по sequence index; отдельного replay для каждого узла нет.
+
+Непригодный источник не получает nomination; fresh proposal даёт структурированный
+refusal до claim/worktree. HTTP/MCP/Assistant читают такую страницу без исключения
+и новых событий. Сохранённый exact proposal ACK остаётся byte-stable historical
+read. Positive control проходит настоящий reset, новый seed и повторное training:
+пока измерения нет, hunks отсутствуют; после completed generation-1 результата
+они возвращаются с новым lifecycle. Новых engine ожиданий или model jobs нет.
+
+Replay first — 193 passed; весь upstream/MCP regression — 216 passed. Финальные
+source/control tests, включая fresh-generation и retarget cases — 23 passed.
+Seed archive/base/workspace regression — 78 passed, 6 platform skips.
+Documentation/claim pins/package layout/layering/containment/API/event contracts —
+914 passed; strict MkDocs, Ruff и whitespace check прошли.
+`.tmp/doc72-source-primary-sgd/acceptance.json`: private UI server + scoped stdio MCP,
+2 primary CPU SGD trainings, 7 gate executions и 3 confirmation seeds на original
+base/files; exact retries без reexecution, owner/scorer preservation и replay/export
+прошли. Полный suite проекта и paid model judgments этим исправлением не проверены.
