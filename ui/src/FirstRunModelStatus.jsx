@@ -6,7 +6,8 @@ import './assistant-model-check.css'
 
 const AssistantModelCheck = React.lazy(() => import('./AssistantModelCheck.jsx'))
 
-export default function FirstRunModelStatus({ onSettings }) {
+export default function FirstRunModelStatus({ onSettings, language = 'auto' }) {
+  const ru = language === 'ru'
   const [snapshot, setSnapshot] = useState(null)
   const [check, setCheck] = useState(readModelCheck)
   const [routeEpoch, setRouteEpoch] = useState(0)
@@ -29,13 +30,13 @@ export default function FirstRunModelStatus({ onSettings }) {
     }).catch(() => { if (alive()) setSnapshot({ error: true }) })
     return request
   }, 30_000, [routeEpoch], { pauseHidden: true })
-  const status = modelConnectionView(snapshot, check)
+  const status = modelConnectionView(snapshot, check, language)
   return <div className="asst-new-run-hint asst-model-status">
     <span role="status" className={status.tone ? `model-connection-${status.tone}` : ''}>{status.text}</span>
-    {!showCheck && <button type="button" className="btn sm" onClick={onSettings}>Model settings</button>}
+    {!showCheck && <button type="button" className="btn sm" onClick={onSettings}>{ru ? 'Настроить модель' : 'Model settings'}</button>}
     {!showCheck && <button type="button" className="btn sm ghost" onClick={() => setShowCheck(true)}>
-      Check connection…</button>}
-    {showCheck && <React.Suspense fallback={<span role="status">Opening connection check…</span>}>
+      {ru ? 'Проверить связь…' : 'Check connection…'}</button>}
+    {showCheck && <React.Suspense fallback={<span role="status">{ru ? 'Открываем проверку связи…' : 'Opening connection check…'}</span>}>
       <AssistantModelCheck onSettings={onSettings} />
     </React.Suspense>}
   </div>

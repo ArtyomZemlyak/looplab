@@ -84,6 +84,7 @@ import { startTurnFallbackPolls } from './assistantTurnPolls.js'
 import { followClientRoute } from './accessibility.jsx'
 
 const FirstRunModelStatus = React.lazy(() => import('./FirstRunModelStatus.jsx'))
+const NewRunStarter = React.lazy(() => import('./NewRunStarter.jsx'))
 const AssistantRunResult = React.lazy(() => import('./AssistantRunResult.jsx'))
 const AssistantResults = React.lazy(() => import('./AssistantResults.jsx'))
 
@@ -3129,16 +3130,16 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const runContextBanner = (runId || proposalContext) && <div className={`asst-run-context${!proposalContext && selectedRunStatus === 'stalled' ? ' stalled' : ''}`}>
     <span className="asst-run-context-label">{proposalContext ? text('Drafting', 'Подготовка')
       : historical ? text('Viewing run', 'Просмотр запуска') : text('Next message to run', 'Следующее сообщение о запуске')}</span>
-    <strong title={proposalContext ? 'New run proposal' : selectedRun?.goal || runId}>
-      {proposalContext ? 'New run proposal' : selectedRun?.label || selectedRun?.run_id || runId}
+    <strong title={proposalContext ? text('New run proposal', 'План нового запуска') : selectedRun?.goal || runId}>
+      {proposalContext ? text('New run proposal', 'План нового запуска') : selectedRun?.label || selectedRun?.run_id || runId}
     </strong>
     {!proposalContext && <span className="asst-run-context-state">{selectedRunStatus || 'Loading'}</span>}
     {!proposalContext && selectedRunStatus === 'stalled' && <span className="asst-run-context-help">Engine stopped · use Resume run in Lineage.</span>}
   </div>
 
   const slashMatch = /^\/(\w*)$/.exec(input)
-  const nextMessageTarget = draftingNewRun ? 'New run proposal'
-    : runId ? (selectedRun?.label || selectedRun?.run_id || runId) : 'No run attached'
+  const nextMessageTarget = draftingNewRun ? text('New run proposal', 'План нового запуска')
+    : runId ? (selectedRun?.label || selectedRun?.run_id || runId) : text('No run attached', 'Запуск не выбран')
   const nextMessageRefs = !draftingNewRun && runId ? refNodes(input) : []
   const directModeDecision = assistantDirectDecision(mode)
   const directModeHint = directModeDecision === 'deny'
@@ -3498,7 +3499,16 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
             ? 'Describe a goal to get a launch proposal. The run starts only after you review and approve it.'
             : 'Describe a goal, ask about runs, or plan an experiment.'}</p>
       {firstRun && <React.Suspense fallback={null}>
-        <FirstRunModelStatus onSettings={openAssistantModelSettings} />
+        <FirstRunModelStatus language={responseLanguage} onSettings={openAssistantModelSettings} />
+      </React.Suspense>}
+      {newRunDraft && <React.Suspense fallback={null}>
+        <NewRunStarter language={responseLanguage}
+          disabled={!!input.trim() || historical || composerEditingPaused || busy || commandBusy}
+          onDraft={draft => {
+            if (openSessionPendingRef.current || input.trim() || historical || composerEditingPaused || busy || commandBusy) return
+            setInput(current => current.trim() ? current : draft)
+            requestAnimationFrame(() => inputRef.current?.focus())
+          }} />
       </React.Suspense>}
       {!showRunResult && !input.trim() && welcomeHints.length > 0 && <div className="asst-hints">
         {welcomeHints.map(h => <button key={h} className="asst-hint"
@@ -3797,9 +3807,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     </div>
     {draftingNewRun && <div id="assistant-new-run-hint" className="asst-new-run-hint" role="note">
       <span>{newRunDraft
-        ? 'Discuss the goal, validate the launch card, then choose Start run.'
-        : 'Describe the goal after /new. Nothing starts until you review the launch card and press Start run.'}</span>
-      {newRunDraft && <button type="button" className="btn sm ghost" onClick={() => setNewRunDraft(false)}>Back to chat</button>}
+        ? text('Discuss the goal, validate the launch card, then choose Start run.', 'Обсудите цель, проверьте карточку через Validate и выберите Start run.')
+        : text('Describe the goal after /new. Nothing starts until you review the launch card and press Start run.', 'После /new опишите цель. Запуск начнётся после проверки карточки и нажатия Start run.')}</span>
+      {newRunDraft && <button type="button" className="btn sm ghost" onClick={() => setNewRunDraft(false)}>{text('Back to chat', 'Вернуться в чат')}</button>}
     </div>}
     {modeRow}
   </div>

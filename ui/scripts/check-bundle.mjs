@@ -125,7 +125,11 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // Plain first steps, setup/review drafts and RU/EN caveats use the existing lazy panel and
     // Assistant handoff. Drafts and preservation notices were shortened; 601.5 KiB leaves 520 B.
     // Initial shell, route and forbidden reachability ceilings remain unchanged.
-    js: { gzip: 601.5 * KIB },
+    // 2026-10-02 first-run examples: 615,416 -> 617,596 B JS (+2,180 B), CSS 59,392 B.
+    // Code/data drafts and translated model status load only with their Assistant surfaces.
+    // Common proposal labels add ~200 B to owner closures; structural exclusions are unchanged.
+    // 604 KiB leaves 900 B above this measured total.
+    js: { gzip: 604 * KIB },
     css: { gzip: 58 * KIB },
   },
   individual: {
@@ -161,7 +165,8 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-09-30 permission disclosure: measured 220,270 B JS (+314 B); collapsed choices
       // preserve the current draft mode and return focus after an explicit selection.
       // 2026-10-01 Assistant language: 223,790 B; owner chrome contains its translated controls.
-      limits: { js: { gzip: 219 * KIB }, css: { gzip: 40 * KIB } },
+      // 2026-10-02 first-run labels/handoff: 224,200 -> 224,404 B; 364 B headroom.
+      limits: { js: { gzip: 219.5 * KIB }, css: { gzip: 40 * KIB } },
     },
     {
       name: 'Run compare increment',
@@ -210,7 +215,8 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-10-01 Assistant language: 405,152 B; the same owner chrome increment.
       // 2026-10-02 doc 72: 405,898 B JS, recorded base details + comparable-score
       // arrows; full UpstreamPanel remains behind the panel hub. CSS stays bounded.
-      limits: { js: { gzip: 397 * KIB }, css: { gzip: 46 * KIB } },
+      // 2026-10-02 same Assistant labels: measured 406,596 B; 444 B headroom.
+      limits: { js: { gzip: 397.5 * KIB }, css: { gzip: 46 * KIB } },
     },
     {
       name: 'valid review DAG route',
@@ -248,7 +254,8 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-10-01 final integrated build: measured 265,214 B JS; existing ceiling holds.
       // 2026-10-01: 265,223 B (+9 B): RunView passes the live sequence to the lazy agent panel.
       // 2026-10-01 Assistant language: 268,292 B; the same owner chrome increment.
-      limits: { js: { gzip: 263 * KIB }, css: { gzip: 43 * KIB } },
+      // 2026-10-02 same Assistant labels: measured 269,500 B; 324 B headroom.
+      limits: { js: { gzip: 263.5 * KIB }, css: { gzip: 43 * KIB } },
     },
     {
       name: 'panel-hub increment',
@@ -309,6 +316,12 @@ export const DEFAULT_BUDGETS = Object.freeze({
     },
   ],
   forbidden: [
+    {
+      name: 'owner chrome defers new-run examples',
+      roots: [entry, ownerChrome],
+      targets: [source('src/NewRunStarter.jsx')],
+      requireTargets: true,
+    },
     {
       name: 'List defers graph and panel code',
       roots: [entry, named('RunList'), ownerChrome],

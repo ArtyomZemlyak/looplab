@@ -23,6 +23,14 @@ and LoopLab's internal research roles. For setup from a fresh checkout, use
    use estimates and require provider prices; Assistant chat is outside those run budgets.
 3. Select **Start a new run** in Assistant. For example:
 
+   Choose **I have code** or **I have data** to fill an editable example in the
+   composer. With **Language / Язык → Русский**, these are **Есть код** and
+   **Есть данные**. Replace the text in `[brackets]` with your goal and paths,
+   then **Send**. Choosing an example makes no model request and starts no run.
+   Examples stay disabled while the composer contains a draft; clear it to choose
+   another. If you do not know the evaluation command or metric yet, ask Assistant
+   to help choose them before launching.
+
    > Improve accuracy on my dataset. The code is at `/path/on/the/LoopLab/server/repo`
    > and the data is at `/path/on/the/LoopLab/server/data`. Start with at most three
    > experiments. Show me the evaluation command and editable files before launch.

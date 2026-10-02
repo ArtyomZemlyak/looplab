@@ -23,6 +23,8 @@ Source checkouts need Node/npm to build the UI on first launch; see
 [Installation](docs/guide/installation.md) for the exact versions and Windows commands.
 In the UI, open **Settings → Essential → Model** to configure your model, then use **Start a new run**
 in Assistant. Describe the goal, where the code or data live, and any time or compute limit.
+**I have code** and **I have data** prepare editable examples; Assistant can help choose
+the evaluation command and metric if you do not have them yet.
 Review the proposed task, evaluation, and effective settings; **Validate** and then **Start run**.
 The Assistant can discuss a plan without starting an experiment.
 

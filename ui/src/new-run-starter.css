@@ -1,0 +1,6 @@
+.asst-run-starter { margin: 18px 0; padding: 16px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--bg-2); text-align: left; }
+.asst-run-starter h3 { margin: 0 0 12px; font-size: 16px; }
+.asst-run-starter ol { margin: 0; padding-left: 22px; font-size: 14px; line-height: 1.6; }
+.asst-run-starter li + li { margin-top: 8px; }
+.asst-run-starter-examples { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+.asst-empty .asst-run-starter p { margin: 12px 0 0; font-size: 13px; line-height: 1.5; }

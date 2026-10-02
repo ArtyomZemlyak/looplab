@@ -32,6 +32,16 @@ test('only a check for both current revisions can change the first-run status', 
     /outcome unknown/)
 })
 
+test('Russian model guidance preserves the same revision fence and explicit outcomes', () => {
+  const current = { settingsRevision: 'settings-1', secretRevision: 'secret-1', outcome: 'passed' }
+  assert.equal(modelConnectionView(snapshot(), current, 'ru').tone, 'ok')
+  assert.match(modelConnectionView(snapshot(), current, 'ru').text, /проверка связи пройдена/)
+  assert.match(modelConnectionView(snapshot(), { ...current, secretRevision: 'old' }, 'ru').text, /ещё не проверена/)
+  assert.match(modelConnectionView(snapshot(), { ...current, outcome: 'unknown' }, 'ru').text, /Результат проверки неизвестен/)
+  assert.match(modelConnectionView({ error: true }, current, 'ru').text, /Не удалось прочитать/)
+  assert.match(modelConnectionView({ settings: {} }, current, 'ru').text, /укажите модель/)
+})
+
 test('check signal contains only revision identity and a bounded outcome', () => {
   const originalWindow = globalThis.window
   const originalEvent = globalThis.CustomEvent
