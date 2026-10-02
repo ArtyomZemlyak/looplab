@@ -38,7 +38,7 @@ from looplab.serve.server import make_app
 CASES = ("agent_loss", "engine_loss")
 
 
-def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, response_fault="disconnect", read_fault="disconnect", discovery_fault="none", mcp_python=None, result_backlog=False, failed_first=False, obligations=False, damaged_journals=False, value_recovery=False, damaged_events=False):
+def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, response_fault="disconnect", read_fault="disconnect", discovery_fault="none", mcp_python=None, result_backlog=False, failed_first=False, obligations=False, damaged_journals=False, value_recovery=False, damaged_events=False, knowledge_recovery=False):
     root.mkdir(parents=True, exist_ok=False)
     runs = root / "runs"; runs.mkdir()
     source = root / "source"; source.mkdir()
@@ -63,6 +63,7 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
     url = f"http://127.0.0.1:{port}"
     server = thread = engine = None
     proxy = None
+    knowledge_proxy = None
     owned_engines = []
     proof = {"case": name, "model_judgment_tested": False, "agent_connection": "not_measured",
              "metrics": [], "read_steps": []}
@@ -313,6 +314,80 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
             assert after == before, after[len(before):].decode("utf8")
             proof.update(backlog_node_order=seen, backlog_commentary_changed_no_work=True,
                          typed_result_notices=True)
+        if knowledge_recovery:
+            memory = root / "memory"
+            lesson = {"expected_generation": generation, "action_id": "idle:lesson",
+                "statement": "Use isolated configuration edits and protected evaluation to compare bounded training budgets",
+                "outcome": "supported", "evidence": [0, 1]}
+            skill = {"expected_generation": generation, "action_id": "idle:skill",
+                "lesson_action_id": "idle:lesson",
+                "body": "Edit only the declared configuration surface. Keep the scoring source protected. Compare terminal measured outcomes and preserve receipt identities across reconnect. This protocol fixture does not establish general ML robustness."}
+            for phase in ("lessons", "skill_candidates"):
+                await client.call("phases", {"query": phase})
+                await client.call("phase_info", {"phase_id": phase})
+            def sources():
+                # Attribute authoritative event/knowledge bytes, not server caches
+                # or diagnostic files which ordinary reads may update.
+                paths = [rd / "events.jsonl"] + [p for p in memory.rglob("*")
+                    if p.is_file() and p.suffix in (".jsonl", ".md")]
+                return {str(p): p.read_bytes() for p in paths}
+            for route, body in (("lessons", lesson), ("skill-candidates", skill)):
+                before = (rd / "events.jsonl").read_bytes()
+                knowledge_proxy.drop_next_write = "/api/runs/demo/" + route
+                lost = await client.call("api_request", {"method": "POST",
+                    "path": "/api/runs/demo/" + route, "body": body})
+                assert lost["outcome"] == "unknown" and lost["status"] is None
+                accepted = sources()
+                recovered = await client.request("POST", route, body)
+                assert recovered["replayed"] and sources() == accepted
+                assert (rd / "events.jsonl").read_bytes() == before
+                if route == "lessons":
+                    assert "role" not in recovered["lesson"]
+                    await client.request("POST", route, {**body, "role": "developer"}, status=409)
+                else:
+                    assert recovered["skill"]["status"] == "candidate"
+                    await client.request("POST", route, {**body, "body": "changed procedure"}, status=409)
+            refusals = 0
+            for path in (rd / "events.jsonl", memory / "lessons.jsonl", memory / "skill_candidate_actions.jsonl"):
+                original = path.read_bytes()
+                path.write_bytes(original + b'broken private knowledge recovery record\n')
+                before = sources()
+                try:
+                    actions = [("lessons", lesson), ("skill-candidates", skill)] if path.name == "events.jsonl" else (
+                        [("lessons", lesson)] if path.name == "lessons.jsonl" else [("skill-candidates", skill)])
+                    for route, body in actions:
+                        for payload in (body, {**body, "action_id": body["action_id"] + ":fresh"}):
+                            denied = await client.request("POST", route, payload, status=503)
+                            assert denied["detail"]["source"] == path.name
+                            refusals += 1
+                    if path.name == "lessons.jsonl":
+                        denied = await client.request("POST", "skill-candidates", {**skill,
+                            "action_id": "idle:skill:fresh"}, status=503)
+                        assert denied["detail"]["source"] == path.name
+                        refusals += 1
+                    if path.name != "events.jsonl":
+                        phase = "lessons" if path.name == "lessons.jsonl" else "skill_candidates"
+                        denied = await client.request("POST", "harness-reviews", {
+                            "expected_generation": generation, "action_id": "idle:damaged:" + phase,
+                            "phase_id": phase, "decision": "completed", "evidence": [0, 1],
+                            "action_ref": "idle:lesson" if phase == "lessons" else "idle:skill",
+                            "reason": "A completed review cannot approve an incomplete knowledge source."}, status=503)
+                        assert denied["detail"]["source"] == path.name
+                        refusals += 1
+                    after = sources()
+                    assert after == before, [p for p in set(after) | set(before) if after.get(p) != before.get(p)]
+                finally:
+                    # Explicit fixture operator recovery of its own known-good bytes.
+                    path.write_bytes(original)
+                for route, body in (("lessons", lesson), ("skill-candidates", skill)):
+                    assert (await client.request("POST", route, body))["replayed"]
+            assert len((memory / "lessons.jsonl").read_text().splitlines()) == 1
+            assert len((memory / "skill_candidate_actions.jsonl").read_text().splitlines()) == 1
+            assert knowledge_proxy.dropped == [{"method": "POST", "route": name, "upstream_status": 200}
+                for name in ("lessons", "skill-candidates")]
+            proof.update(knowledge_lost_acks_recovered=True, knowledge_source_refusals=refusals,
+                         knowledge_rows=1, skill_receipts=1, skill_status="candidate",
+                         knowledge_recovery_changed_no_engine_work=True)
         if value_recovery:
             await client.call("phases", {"query": "strategy"})
             await client.call("phase_info", {"phase_id": "strategy"})
@@ -453,7 +528,8 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
             proof.update(old_receipts_replayed=len(saved_receipts), receipt_replay_changed_no_work=True,
                          old_receipts_stayed_superseded=True, commentary_did_not_discharge_finish=True,
                          fresh_report_still_required_fresh_reviews=True)
-            proof["finish_obligations"] = await settle_obligations(client, expanding=False)
+            proof["finish_obligations"] = await settle_obligations(client, expanding=False,
+                completed_actions={"lessons": "idle:lesson", "skill_candidates": "idle:skill"} if knowledge_recovery else None)
         await client.call("phases", {"query": "recovery"})
         await client.call("phase_info", {"phase_id": "recovery"})
         await client.command("run_abort", {"reason": "Completed disposable idle recovery acceptance."}, "idle:finish")
@@ -487,7 +563,7 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
                        "    return original(name, *args, **kwargs)\n"
                        "builtins.__import__ = without_ui\n") + wrapper
         params = StdioServerParameters(command=mcp_python or sys.executable, args=["-c", wrapper],
-            env={**child_env, "LOOPLAB_HARNESS_URL": proxy.url if proxy else url, "LOOPLAB_HARNESS_TOKEN": token})
+            env={**child_env, "LOOPLAB_HARNESS_URL": proxy.url if proxy else knowledge_proxy.url if knowledge_proxy else url, "LOOPLAB_HARNESS_TOKEN": token})
         async with stdio_client(params) as (reader, writer), ClientSession(reader, writer) as mcp:
             await mcp.initialize()
             client = Client(mcp, generation)
@@ -524,6 +600,9 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
         if drop_command_response:
             proxy = ResponseLossProxy(url, response_fault,
                 "stale_generation" if read_fault == "stale_result_generation" else read_fault)
+        if knowledge_recovery:
+            knowledge_proxy = ResponseLossProxy(url)
+            knowledge_proxy.drop_next_write = None
         server, thread = start_ui()
         flags = {"external_harness": True, "deep_research_every": -1, "report_every": 0, "novelty_mode": "off",
             "foresight": False, "track_hypotheses": False, "concept_pivot": False, "concept_run_base": False,
@@ -626,6 +705,8 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
     finally:
         if proxy is not None:
             proxy.close()
+        if knowledge_proxy is not None:
+            knowledge_proxy.close()
         for child in owned_engines:
             if child.poll() is None:
                 child.terminate(); child.wait(timeout=10)
@@ -665,6 +746,8 @@ def main():
                         help="Switch greedy/MCTS and recover a complete value batch on two measured nodes. Requires --result-backlog, excludes --failed-first.")
     parser.add_argument("--damaged-events", action="store_true",
                         help="Damage the private event log; refuse domain reads/receipt writes, then restore fixture backup. Requires --obligations.")
+    parser.add_argument("--knowledge-recovery", action="store_true",
+                        help="Publish a protocol lesson/skill with lost ACKs and damaged source recovery. Requires backlog/obligations, excludes failed-first/response-loss.")
     args = parser.parse_args()
     if not 0 <= args.quiet_hold_seconds <= 14400:
         parser.error("quiet hold must be between zero and four hours")
@@ -688,11 +771,13 @@ def main():
         parser.error("value-recovery requires --result-backlog and two successful nodes (no --failed-first)")
     if args.damaged_events and not args.obligations:
         parser.error("damaged-events requires --obligations")
+    if args.knowledge_recovery and (not args.result_backlog or not args.obligations or args.failed_first or args.drop_command_response):
+        parser.error("knowledge-recovery requires --result-backlog --obligations and two successful nodes, without --drop-command-response")
     root = args.out.resolve(); root.mkdir(parents=True, exist_ok=False)
     mcp_python = str(args.mcp_python.resolve()) if args.mcp_python else None
     if mcp_python and not Path(mcp_python).is_file():
         parser.error("MCP interpreter does not exist")
-    proof = [run_case(root / name, name, args.quiet_hold_seconds, args.drop_command_response, args.response_fault, args.read_fault, args.discovery_fault, mcp_python, args.result_backlog, args.failed_first, args.obligations, args.damaged_journals, args.value_recovery, args.damaged_events)
+    proof = [run_case(root / name, name, args.quiet_hold_seconds, args.drop_command_response, args.response_fault, args.read_fault, args.discovery_fault, mcp_python, args.result_backlog, args.failed_first, args.obligations, args.damaged_journals, args.value_recovery, args.damaged_events, args.knowledge_recovery)
              for name in CASES if args.case in ("all", name)]
     (root / "acceptance.json").write_text(json.dumps(proof, ensure_ascii=False, indent=2), encoding="utf8")
 

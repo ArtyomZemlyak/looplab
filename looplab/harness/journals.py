@@ -82,10 +82,24 @@ def same_receipt_request(saved: dict, proposed: dict) -> bool:
     return authored(saved) == authored(proposed)
 
 
-def read_source(path: Path) -> tuple[list[dict], dict]:
+def read_knowledge_source(path: Path) -> list[dict]:
+    """A skipped shared-store row cannot prove absence of an original action.
+
+    Retain compatible legacy object rows; only the complete JSONL source is
+    required here, not a replacement claim/skill schema. Use the existing 64 MiB
+    bound and the caller's shared-store lock. Never rewrite or quarantine bytes.
+    """
+    rows, health = read_source(path, max_bytes=64 * 1024 * 1024)
+    if not health["read_complete"]:
+        raise HTTPException(503, {"code": "harness_history_incomplete", "source": path.name,
+                                  "source_health": health})
+    return rows
+
+
+def read_source(path: Path, *, max_bytes=MAX_JOURNAL_BYTES) -> tuple[list[dict], dict]:
     try:
         exists = path.exists()
-        if exists and path.stat().st_size > MAX_JOURNAL_BYTES:
+        if exists and path.stat().st_size > max_bytes:
             raise HTTPException(503, {"code": "harness_history_too_large", "source": path.name})
         rows, health = read_jsonl_lenient_with_health(path)
         return rows, {**health, "file_present": exists}

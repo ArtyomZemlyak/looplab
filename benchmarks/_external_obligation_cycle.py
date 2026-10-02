@@ -2,7 +2,7 @@
 import json
 
 
-async def settle_obligations(client, *, expanding, saved_receipts=None):
+async def settle_obligations(client, *, expanding, saved_receipts=None, completed_actions=None):
     progress = await client.progress()
     assert progress["complete"] and not progress["finish_pending_node_count"]
     phases = {row["phase_id"] for row in progress["candidate_blockers_if_expanding"]} if expanding else set()
@@ -40,6 +40,9 @@ async def settle_obligations(client, *, expanding, saved_receipts=None):
             body = {"expected_generation": client.generation, "phase_id": phase_id,
                 "action_id": key, "decision": "no_applicable_action", "evidence": evidence,
                 "reason": "One deterministic recovery fixture has no independent seeds or distinct tasks supporting a reusable lesson or skill."}
+            if phase_id in (completed_actions or {}):
+                body.update(decision="completed", action_ref=completed_actions[phase_id],
+                    reason="Reviewed the recorded protected-evaluation protocol technique; this does not establish cross-task ML quality or independent seed robustness.")
             reply = await client.request("POST", "harness-reviews", body)
             if saved_receipts is not None:
                 saved_receipts.append(("reviews", body, reply["review"]))

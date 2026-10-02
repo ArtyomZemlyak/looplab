@@ -15,7 +15,8 @@ from looplab.engine.knowledge_views import claim_source_rows
 from looplab.engine.lesson_hygiene import distilled_claim_stance, lesson_id
 from looplab.engine.lessons_reconcile import LessonReconcileMixin
 from looplab.engine.memory import task_fingerprint, unreliable_metric_ids
-from looplab.events.eventstore import EventStore, EventStoreLockError, interprocess_lock, read_jsonl_lenient
+from looplab.events.eventstore import EventStoreLockError, interprocess_lock
+from looplab.harness.journals import read_event_source, read_knowledge_source
 from looplab.events.replay import fold
 from looplab.events.run_generation import run_generation_token
 
@@ -26,6 +27,8 @@ def publish_lesson(srv, rd: Path, body) -> dict:
     Run sequencing fences reset/delete and serializes the state observation; the shared
     lessons lock makes duplicate detection and append one transaction across UI workers.
     The external agent supplies the conclusion, never the evidence or scope metadata.
+    Exact retry acknowledges the stored action before fresh eligibility checks;
+    it never refreshes evidence signatures or restores a reconciled retired claim.
     """
     try:
         with srv.commands.sequence(rd):
@@ -35,7 +38,7 @@ def publish_lesson(srv, rd: Path, body) -> dict:
             memory_dir = settings.get("memory_dir")
             if not isinstance(memory_dir, str) or not memory_dir:
                 raise HTTPException(400, "this run has no cross-run memory_dir")
-            events = EventStore(rd / "events.jsonl").read_all()
+            events = read_event_source(rd)
             generation = run_generation_token(events)
             if not generation or generation != body.expected_generation.lower():
                 raise HTTPException(409, {"code": "run_generation_changed",
@@ -44,51 +47,12 @@ def publish_lesson(srv, rd: Path, body) -> dict:
             if not state.run_id:
                 raise HTTPException(409, "run has not started")
             evidence = sorted(set(body.evidence))
-            if not evidence:
-                raise HTTPException(400, "a lesson requires measured or failed node evidence")
-            for nid in evidence:
-                node = state.nodes.get(nid)
-                if (node is None or node.status not in (NodeStatus.evaluated, NodeStatus.failed)
-                        or node.tombstoned
-                        or nid in (state.aborted_nodes or [])):
-                    raise HTTPException(409, {"code": "lesson_evidence_not_terminal", "node_id": nid})
-            if body.outcome == "supported" and any(
-                    nid in unreliable_metric_ids(state) for nid in evidence):
-                raise HTTPException(409, "supported lessons cannot cite an unreliable metric")
-
-            task = load_task(rd / "task.snapshot.json", existing_run=True)
-            best = state.best()
-            fp = task_fingerprint(
-                str(getattr(task, "kind", "") or ""), state.direction, state.goal,
-                metric=str(getattr(task, "metric", "") or ""),
-                param_names=list((best.idea.params or {}).keys()) if best and best.idea else [],
-                universal=bool(settings.get("fingerprint_universal", False)))
             statement = body.statement.strip()
             payload = {"statement": statement, "outcome": body.outcome,
                        "role": body.role, "evidence": evidence,
                        "confidence": body.confidence,
                        "expected_generation": generation}
             digest = hashlib.sha256(orjson.dumps(payload, option=orjson.OPT_SORT_KEYS)).hexdigest()
-            row = {"task_id": state.task_id, "fingerprint": fp,
-                   "kind": str(getattr(task, "kind", "") or ""), "statement": statement,
-                   "outcome": body.outcome,
-                   "claim_stance": distilled_claim_stance(body.outcome),
-                   "confidence": body.confidence, "direction": state.direction,
-                   "run_id": state.run_id, "evidence": evidence,
-                   "evidence_sig": {str(nid): LessonReconcileMixin._node_sig(
-                       state.nodes[nid]) for nid in evidence},
-                   "operators": sorted({str(state.nodes[nid].operator) for nid in evidence})[:8],
-                   "harness_action_id": body.action_id,
-                   "harness_payload_sha256": digest}
-            if state.run_uid:
-                row["run_uid"] = state.run_uid
-            if body.role == "shared":
-                row.pop("role")
-            # the public read-model view of the same source contract (doc 25 XP-01): the one row
-            # survives it exactly when `_valid_claim_source_row` admits it
-            if len(claim_source_rows([row], research=False)) != 1:
-                raise HTTPException(400, "lesson does not meet the cross-run source contract")
-
             path = Path(memory_dir) / "lessons.jsonl"
             path.parent.mkdir(parents=True, exist_ok=True)
             with interprocess_lock(Path(str(path) + ".lock"), required=True):
@@ -96,13 +60,53 @@ def publish_lesson(srv, rd: Path, body) -> dict:
                 # unbounded scan instead of searching a tail and risking duplicate writes.
                 if path.exists() and path.stat().st_size > 64 * 1024 * 1024:
                     raise HTTPException(503, {"code": "lesson_store_too_large"})
-                for old in read_jsonl_lenient(path):
+                for old in read_knowledge_source(path):
                     if (old.get("harness_action_id") == body.action_id
                             and old.get("run_uid", old.get("run_id")) == (state.run_uid or state.run_id)):
                         if old.get("harness_payload_sha256") != digest:
                             raise HTTPException(409, "lesson action_id was reused with different content")
                         return {"ok": True, "replayed": True, "lesson_id": lesson_id(old),
                                 "lesson": old}
+                if not evidence:
+                    raise HTTPException(400, "a lesson requires measured or failed node evidence")
+                for nid in evidence:
+                    node = state.nodes.get(nid)
+                    if (node is None or node.status not in (NodeStatus.evaluated, NodeStatus.failed)
+                            or node.tombstoned
+                            or nid in (state.aborted_nodes or [])):
+                        raise HTTPException(409, {"code": "lesson_evidence_not_terminal", "node_id": nid})
+                if body.outcome == "supported" and any(
+                        nid in unreliable_metric_ids(state) for nid in evidence):
+                    raise HTTPException(409, "supported lessons cannot cite an unreliable metric")
+
+                task = load_task(rd / "task.snapshot.json", existing_run=True)
+                best = state.best()
+                fp = task_fingerprint(
+                    str(getattr(task, "kind", "") or ""), state.direction, state.goal,
+                    metric=str(getattr(task, "metric", "") or ""),
+                    param_names=list((best.idea.params or {}).keys()) if best and best.idea else [],
+                    universal=bool(settings.get("fingerprint_universal", False)))
+                row = {"task_id": state.task_id, "fingerprint": fp,
+                       "kind": str(getattr(task, "kind", "") or ""), "statement": statement,
+                       "role": body.role,
+                       "outcome": body.outcome,
+                       "claim_stance": distilled_claim_stance(body.outcome),
+                       "confidence": body.confidence, "direction": state.direction,
+                       "run_id": state.run_id, "evidence": evidence,
+                       "evidence_sig": {str(nid): LessonReconcileMixin._node_sig(
+                           state.nodes[nid]) for nid in evidence},
+                       "operators": sorted({str(state.nodes[nid].operator) for nid in evidence})[:8],
+                       "harness_action_id": body.action_id,
+                       "harness_payload_sha256": digest}
+                if state.run_uid:
+                    row["run_uid"] = state.run_uid
+                if body.role == "shared":
+                    row.pop("role")
+                # the public read-model view of the same source contract (doc 25 XP-01): the one row
+                # survives it exactly when `_valid_claim_source_row` admits it
+                if len(claim_source_rows([row], research=False)) != 1:
+                    raise HTTPException(400, "lesson does not meet the cross-run source contract")
+
                 append_jsonl_bytes_locked(path, orjson.dumps(row))
             return {"ok": True, "replayed": False, "lesson_id": lesson_id(row), "lesson": row}
     except HTTPException:

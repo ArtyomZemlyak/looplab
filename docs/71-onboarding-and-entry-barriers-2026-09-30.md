@@ -594,9 +594,9 @@ External run здесь намеренно не получал кандидат�
 | OB-07 | Частично | Composer показывает активные права и понятное пояснение; четыре варианта раскрываются по запросу, выбор возвращает фокус на видимый переключатель. | Проверить понимание режимов с новым пользователем. |
 | OB-08 | Частично | Essential открывается с модели, показывает 13 полей ресурсов и лимитов с короткими пояснениями; технические детали и runtime permissions раскрываются отдельно. | Проверить подключение модели и понимание лимитов с новым пользователем. |
 | OB-09 | Частично | Run workspace и Agent cycle показывают next step; списки различают внешний режим и engine, attention открывает текущие вопросы (§34–36). Гибель MCP и pause/resume проверены (§37–38). §47 показывает последнее успешное scoped progress чтение. | Активность запросов не доказывает живость агента; многочасовой сценарий OB-10 ещё открыт. |
-| OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–61 проверяют MCP/UI recovery, pause/resume, engine loss, obligations, monitor, deadline и ASHA. §47–61 — request activity, auth, потерянные/неполные ответы, identity/discovery recovery, отдельный `[harness]` клиент и восстановление пропущенных интерпретаций результатов. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
-| OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. §39/41 исправляют ссылки checkpoint/concept base на реальные MCP-фазы; §52 различает unavailable discovery и пустой catalog; §53 убирает FastAPI dependency из `phase_info`; §54–55 дают cursor и typed MCP read для результатов; §56 — проверенный repair recipe; §57 — original ACK для superseded review/decision. §58 — source completeness для ACK, admission и finish. §59 — MCTS value ACK с исходной evidence revision и реальные policy switches; §60 — event source integrity for semantic reads, publications and replay ACK; §61 — typed completion page validation. | Проверены контракт, subprocess-кандидаты, desktop и discovery из серверной подсказки; подключение нового клиента относится к OB-10. |
-| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–61: source health, lifecycle verdict, engine recovery, obligations, monitor, retarget, idle recovery, activity, unknown acknowledgement, identity квитанции, minimal client и пагинация результатов без дублей интерпретаций. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. §49–53 повреждают реальные replies, включая discovery. §54 восстанавливает сообщения после reconnect. Наблюдение запросов не измеряет живость агента. |
+| OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–62 проверяют MCP/UI recovery, pause/resume, engine loss, obligations, monitor, deadline и ASHA. §47–62 — request activity, auth, потерянные/неполные ответы, identity/discovery recovery, отдельный `[harness]` клиент и восстановление пропущенных интерпретаций результатов. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
+| OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. §39/41 исправляют ссылки checkpoint/concept base на реальные MCP-фазы; §52 различает unavailable discovery и пустой catalog; §53 убирает FastAPI dependency из `phase_info`; §54–55 дают cursor и typed MCP read для результатов; §56 — проверенный repair recipe; §57 — original ACK для superseded review/decision. §58 — source completeness для ACK, admission и finish. §59 — MCTS value ACK с исходной evidence revision и реальные policy switches; §60 — event source integrity for semantic reads, publications and replay ACK; §61 — typed completion page validation; §62 — lesson roles and knowledge ACK/source recovery. | Проверены контракт, subprocess-кандидаты, desktop и discovery из серверной подсказки; подключение нового клиента относится к OB-10. |
+| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–62: source health, lifecycle verdict, engine recovery, obligations, monitor, retarget, idle recovery, activity, unknown acknowledgement, identity квитанции, minimal client и пагинация результатов без дублей интерпретаций. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. §49–53 повреждают реальные replies, включая discovery. §54 восстанавливает сообщения после reconnect. Наблюдение запросов не измеряет живость агента. |
 | OB-14 | Частично | Начало сайта показывает два основных входа. | Большая архитектурная схема всё ещё нуждается в упрощении для первого знакомства. |
 
 Остальные пункты §3 и соответствующие сценарии §11 остаются открытыми. Изменения первого
@@ -3037,5 +3037,78 @@ requested limit, дубли, terminal statuses, compatible extra fields и nonfi
 manifest и full B/E diagram обновлены. Финальный backend/MCP/progress набор —
 **419 passed**, ещё **31 docs/diagram** check и `mkdocs build --strict` прошли.
 API reference регенерирован без изменения endpoint/settings/event schema.
+Модельные решения, interactive client approvals, многочасовые сеансы и physical
+remote transfer остаются открытыми.
+
+## 62. OB-10/11/12: lesson roles и безопасное восстановление knowledge publications
+
+**2026-10-02.** Проверка настоящего knowledge write, вместо только no-action review,
+обнаружила ошибку в обычном запросе lesson: writer не добавлял `role` в row, затем
+для default `shared` удалял отсутствующий ключ и возвращал **503**. Явные
+`researcher`/`developer` принимались, но теряли роль. Теперь новые rows сохраняют
+явный канал, а shared использует прежний формат без поля. Уже сохранённые rows
+не переписываются; request hash и API default не менялись.
+
+Lesson replay lookup теперь выполняется под существующим shared-store lock
+**до fresh eligibility checks**. После reset/tombstone/abort exact body/action
+подтверждает записанную публикацию, не меняя evidence signatures. Изменённый payload
+по-прежнему получает **409**. Новая публикация требует текущих terminal outcomes;
+текущий retired lesson возвращается retired, retry не восстанавливает поддержку.
+Generation/run identity остаются обязательными. Skill original ACK уже имел такой
+порядок: ему нужен собственный receipt, а не повторная пригодность текущего lesson.
+Новый skill по-прежнему требует supported/reliable measured source.
+
+Обе публикации используют healthy event source из §60. Общий knowledge reader
+проверяет JSONL source health под существующими locks, сохраняя предел **64 MiB**
+и совместимость legacy object rows. Malformed JSON, non-object и invalid UTF-8
+дают **503** с named source/health: повреждённый action нельзя пропустить и
+объявить отсутствующим. Lesson lookup/write проверяет `lessons.jsonl`; skill ACK —
+`skill_candidate_actions.jsonl`, fresh skill также читает полный lesson source.
+Свежий `completed` lesson/skill review проверяет referenced store тем же reader.
+Run-local progress не выдаёт эти shared memory sources за свои четыре health
+receipts; диагностика shared источника приходит в самом refusal.
+Новых gates, engine waits, repair/resume, model calls, promotion rule или event
+fields нет. Эти проверки не заменяют claim/skill schema и agent judgment.
+
+### Два реальных knowledge/MCP recovery cases
+
+`external_idle_recovery_smoke --case all --result-backlog --obligations
+--knowledge-recovery --mcp-python PATH_TO_HARNESS_ONLY_PYTHON` выполнил
+agent-loss/UI restart и engine-loss/явный resume. После двух measured SGD nodes
+агент публикует узкую технику protected-evaluation protocol с terminal evidence
+и процедурный skill draft. Owned proxy теряет **два принятых HTTP 200** ответа.
+Exact retries восстанавливают **один lesson и один skill receipt**; role по
+умолчанию shared работает, skill остаётся **candidate**, не promoted.
+Менять роль или body под прежним action ID нельзя.
+
+Fixture по очереди повреждает собственные events, lessons и skill receipts.
+В каждом case **11** отказов закрывают original/fresh publications, свежую
+skill dependency и два fresh completed reviews. Event/knowledge/skill bytes
+не меняются; только operator fixture восстанавливает собственные backups.
+После recovery старые ACK доступны, прежние no-action reviews остаются superseded.
+Свежий finish report и **completed** reviews с настоящими action references
+выполняются отдельно; run заканчивается явно.
+
+В каждом run **два** scorer invocations, MSE
+**0.13721179500378475 / 0.01337676906957059**, два terminal events и **три** русских
+commentary rows. Agent-loss сохраняет один engine, engine-loss использует исходный
+и один replacement. Scorer bytes неизменны; `inspect`/`replay` проходят. Minimal
+MCP client не имеет FastAPI, блокирует FastAPI/Uvicorn imports и читает **32**
+phases до/после reconnect. Scripted protocol technique не устанавливает ML
+robustness или model parity. Proof: `.tmp/external-knowledge-recovery-proof-4/acceptance.json`.
+
+Первый unit fixture уточнён до полного существующего task snapshot. **19** checks
+затем остановились на обнаруженном default-role defect; это не 19 независимых
+recovery defects. После runtime fixes оставшийся synthetic tombstone test получил
+настоящий `node_ids` payload. Первый live byte assertion захватывал также server
+caches/diagnostics; fixture теперь сравнивает authoritative event/knowledge/skill
+bytes, а отсутствие нового обучения проверяет отдельно по scorer/terminal count.
+Два cases с новым completed-review fence пройдены заново.
+
+Новый набор — **28** checks; финальный targeted backend/knowledge/MCP набор —
+**326 passed**. Перед изменением прошли **193 replay** проверки. Guide, AGENTS,
+MCP instructions, manifest и full B/E diagram обновлены. **31 docs/diagram** checks
+и ещё **56** MCP metadata/phase checks прошли вместе; `mkdocs build --strict`
+прошёл. API reference регенерирован без изменения routes/settings/event schema.
 Модельные решения, interactive client approvals, многочасовые сеансы и physical
 remote transfer остаются открытыми.

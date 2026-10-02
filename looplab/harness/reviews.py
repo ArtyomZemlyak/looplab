@@ -10,7 +10,8 @@ from looplab.core.atomicio import append_jsonl_bytes_locked
 from looplab.events.eventstore import EventStoreLockError, interprocess_lock, read_jsonl_lenient
 from looplab.events.replay import fold
 from looplab.harness.obligations import evidence_revision
-from looplab.harness.journals import read_event_source, read_receipts, same_receipt_request
+from looplab.harness.journals import (read_event_source, read_knowledge_source,
+                                     read_receipts, same_receipt_request)
 from looplab.events.run_generation import run_generation_token
 
 
@@ -49,9 +50,13 @@ _ACTION_STORES = {
 def _action_recorded(memory_dir: str, phase_id: str, action_ref: str, run_uid: str) -> bool:
     for name in _ACTION_STORES[phase_id]:
         path = Path(memory_dir) / name
-        if not path.exists() or path.stat().st_size > 64 * 1024 * 1024:
+        if phase_id in ("lessons", "skill_candidates"):
+            rows = read_knowledge_source(path)
+        elif not path.exists() or path.stat().st_size > 64 * 1024 * 1024:
             continue
-        for row in read_jsonl_lenient(path):
+        else:
+            rows = read_jsonl_lenient(path)
+        for row in rows:
             ref = row.get("harness_action_id" if phase_id == "lessons" else "action_id")
             if ref != action_ref:
                 continue

@@ -771,6 +771,26 @@ lesson; reusing it for different content fails. An agent can publish before or
 after finalizing the run. In external mode, finalization does not ask LoopLab's
 internal reflector to create additional lessons or auto-promote skills.
 
+The default lesson role is `shared`; explicit `researcher`/`developer` roles are
+stored so the corresponding cross-run channel can use them. Exact retries compare
+the original authored payload before checking eligibility for a fresh publication.
+After reset, tombstone or abort they acknowledge the stored action without updating
+its outcome signatures. A reconciled/retired lesson is returned as it is currently
+stored; retry does not restore support. Changed content under the same action ID
+is a conflict. Healthy generation and run identity are still required.
+
+Lesson and skill publications require a healthy event prefix. Original lesson
+lookups and new writes also require complete JSONL in `lessons.jsonl`; skill ACK
+lookups require `skill_candidate_actions.jsonl`, and fresh skill drafts additionally
+check the current lesson source. Malformed JSON, non-object records and invalid
+UTF-8 refuse with 503, a named source and available health diagnostics, rather than
+skipping a possible original/conflicting action. Existing 64 MiB store bounds remain.
+Compatible legacy object rows are retained; this does not replace the claim schema.
+Fresh `completed` lesson/skill reviews also require a complete referenced store.
+The shared sources are named in the refusal; progress's four run-local source
+receipts do not include these memory stores. Ask the operator to recover known
+bytes, then explicitly resolve the same request. No API repairs or resumes work.
+
 Concept authoring and deduplication use the existing durable controls. If
 `concept_pivot`, `concept_run_base`, or `cross_run_concepts` is enabled, an
 external `inject_node` must carry nonempty effective concepts. The admission
@@ -794,6 +814,8 @@ unique action ID, published `lesson_action_id` and a procedural Markdown body.
 The server checks that the lesson still cites measured, reliable node outcomes,
 then applies the existing portability prefilter and cross-task fingerprint
 promotion rule. The agent cannot set `status: promoted` itself.
+An existing skill action may replay after its source lesson has retired or vanished:
+that ACK proves its earlier publication, not current eligibility or promotion.
 
 Enabled `cross_run_curation`, `task_facets_finalize`, `concept_tidy` and
 `reflection_priors` require a final review of the applicable concept, claim,
@@ -1231,6 +1253,14 @@ removes `items` from a real successful result reply while preserving generation.
 The typed read must return `invalid_result_page`, without body or automatic retry.
 The next explicit read recovers the measured receipt without changing event bytes.
 Run this response-loss probe separately from backlog/engine-loss probes.
+Add `--knowledge-recovery` with `--result-backlog --obligations` to publish a
+protected-evaluation protocol lesson and candidate skill after two measured nodes.
+An owned proxy drops both accepted responses; exact retries must recover one lesson
+and one skill receipt. The fixture damages its own event/knowledge sources, proves
+refusal for writes and fresh completed reviews without changing domain bytes, and
+restores only its own backups. Run it separately from `--failed-first` and
+`--drop-command-response`. The authored technique checks recovery protocol; it is
+not evidence of general ML quality. Finish report and completed reviews stay explicit.
 `--case agent_loss --drop-command-response --read-fault stale_result_generation`
 instead replaces a successful result page's generation at the owned proxy. The
 typed tool must return unavailable context without those receipts; the next explicit

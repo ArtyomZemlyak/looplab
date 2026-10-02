@@ -99,6 +99,12 @@ scope-report generation. Author the corresponding run decisions and reports
 through the durable commands and guarded knowledge APIs.
 When the evidence supports a reusable conclusion, publish it through `/lessons`
 with terminal node IDs; never include a claimed score in place of evaluation.
+Keep lesson/skill bodies and action IDs for lost replies. Exact retries acknowledge
+prior publication without refreshing evidence or restoring a retired claim. Fresh
+writes validate current outcomes. Lesson roles default to shared; researcher and
+developer roles are retained. Damaged event/knowledge sources refuse publication;
+fresh completed knowledge reviews also require a complete referenced store. Inspect
+the refusal's named source and health; operator recovery does not approve evidence.
 
 After each terminal node and finalized run, read generation-fenced `/result-notices`.
 MCP `result_notices(run_id, expected_generation, limit, cursor)` performs this read

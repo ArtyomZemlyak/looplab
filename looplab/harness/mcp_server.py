@@ -49,6 +49,7 @@ MCP_INSTRUCTIONS = (
     "action_id; retry a lost response with the exact body. Scores come from LoopLab, not prose. "
     "Typed result pages also validate the version-1 envelope, paging and terminal receipt identities/numeric fields; invalid_result_page with HTTP 200 is unavailable, not empty results. Read again explicitly; no automatic repair/retry. On reconnect, follow result-notices.next_cursor for older receipts, preserving expected_generation; only publish missing current commentary. A changed cursor requires refreshing the latest page. "
     "Commentary executes no actions and never replaces checkpoints or report obligations. "
+    "Keep original lesson/skill bodies and action IDs. Exact retries acknowledge stored actions without refreshing signatures, restoring retired support or granting promotion; fresh writes check current evidence. Shared/researcher/developer lesson roles are retained. Damaged event/knowledge sources and fresh completed knowledge reviews refuse with a named source. Inspect refusal health and request operator recovery; no automatic repair/resume. "
     "Use only the scoped harness credential; owner-only workflows require the operator."
 )
 

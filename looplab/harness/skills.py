@@ -12,7 +12,8 @@ from looplab.core.atomicio import append_jsonl_bytes_locked
 from looplab.core.models import NodeStatus
 from looplab.engine.lessons_reconcile import LessonReconcileMixin
 from looplab.engine.memory import assess_skill_statement, unreliable_metric_ids, write_auto_skill
-from looplab.events.eventstore import EventStore, EventStoreLockError, interprocess_lock, read_jsonl_lenient
+from looplab.events.eventstore import EventStoreLockError, interprocess_lock
+from looplab.harness.journals import read_event_source, read_knowledge_source
 from looplab.events.replay import fold
 from looplab.events.run_generation import run_generation_token
 from looplab.tools.skills import parse_skill_frontmatter
@@ -32,7 +33,7 @@ def publish_skill_candidate(srv, rd: Path, body) -> dict:
             memory_dir = settings.get("memory_dir")
             if not isinstance(memory_dir, str) or not memory_dir:
                 raise HTTPException(400, "this run has no cross-run memory_dir")
-            events = EventStore(rd / "events.jsonl").read_all()
+            events = read_event_source(rd)
             generation = run_generation_token(events)
             if not generation or generation != body.expected_generation.lower():
                 raise HTTPException(409, {"code": "run_generation_changed",
@@ -50,7 +51,7 @@ def publish_skill_candidate(srv, rd: Path, body) -> dict:
             with interprocess_lock(Path(str(receipts) + ".lock"), required=True):
                 if receipts.exists() and receipts.stat().st_size > 64 * 1024 * 1024:
                     raise HTTPException(503, {"code": "skill_receipts_unavailable"})
-                for row in read_jsonl_lenient(receipts):
+                for row in read_knowledge_source(receipts):
                     if row.get("run_uid") == state.run_uid and row.get("action_id") == body.action_id:
                         if row.get("payload_sha256") != digest:
                             raise HTTPException(409, "skill action_id was reused with different content")
@@ -63,7 +64,7 @@ def publish_skill_candidate(srv, rd: Path, body) -> dict:
                 # store under its writer's lock, then keep it held through the skill
                 # write so retirement cannot overtake this evidence check.
                 with interprocess_lock(Path(str(lessons) + ".lock"), required=True):
-                    source = next((row for row in read_jsonl_lenient(lessons)
+                    source = next((row for row in read_knowledge_source(lessons)
                                    if row.get("run_uid") == state.run_uid
                                    and row.get("harness_action_id") == body.lesson_action_id), None)
                     if source is None or source.get("outcome") != "supported":
