@@ -50,6 +50,10 @@ def damage(receipt, case):
         result["executions"][-1]["stages"][0]["status"] = "timeout"
     elif case == "valid_timeout":
         result["executions"][0]["timed_out"] = True
+    elif case == "artifacts":
+        for row in result["executions"]:
+            if row["label"] in ("old-old_recipe", "new-old_recipe"):
+                row["artifacts"] = {}
     elif case == "proposal":
         receipt["proposal_id"] = "up_" + "0" * 24
     elif case == "version":
@@ -59,7 +63,7 @@ def damage(receipt, case):
 
 
 @pytest.mark.parametrize("case", ["equivalence", "test", "regression", "samples", "statistics", "mean",
-    "source", "profile", "execution", "stages", "stage_fields", "stage_failed", "stage_timeout", "valid_timeout", "proposal", "version"])
+    "source", "profile", "execution", "stages", "stage_fields", "stage_failed", "stage_timeout", "valid_timeout", "artifacts", "proposal", "version"])
 def test_incomplete_passing_ack_is_unknown_and_never_retried(measured, case):
     lane, store, request, original = measured
     receipt = deepcopy(original)
@@ -77,11 +81,12 @@ def test_incomplete_passing_ack_is_unknown_and_never_retried(measured, case):
     assert lane.check(request) == original
 
 
-def test_incomplete_gate_history_is_unavailable(measured):
+@pytest.mark.parametrize("missing", ["statistics", "artifacts"])
+def test_incomplete_gate_history_is_unavailable(measured, missing):
     lane, store, request, receipt = measured
     page = deepcopy(lane.read(request["expected_generation"]))
     gate = next(r for r in page["history"] if r["type"] == "upstream_gate_finished")
-    damage(gate, "statistics")
+    damage(gate, missing)
     api = HarnessAPI("http://localhost", transport=httpx.MockTransport(lambda r: httpx.Response(200, json=page)))
     try:
         result = api.upstream_status("run", request["expected_generation"])
@@ -126,3 +131,25 @@ def test_operator_tests_are_required_before_proposal_work(tmp_path):
         lane.propose(proposal)
     assert refusal.value.code == "upstream_tests_required"
     assert store.path.read_bytes() == before and not (lane.rd / "upstream").exists()
+
+
+def test_actual_failed_artifact_gate_remains_readable_through_mcp(tmp_path):
+    lane, store, generation, proposal = fixture(tmp_path, upstream_policy={"repeats": 2,
+        "tests": [{"name": "syntax", "command": [sys.executable, "-m", "py_compile", "train.py"]}],
+        "regressions": [{"name": "old_recipe", "command": [sys.executable, "train.py"],
+            "artifacts": ["predictions.json", "missing.json"]}]})
+    made = lane.propose(proposal)
+    request = {"expected_generation": generation, "action_id": "missing-artifact-check",
+        "proposal_id": made["proposal_id"]}
+    original = lane.check(request)
+    assert original["status"] == "failed"
+    assert len(original["result"]["executions"]) == 7
+    assert original["result"]["checks"][-1]["passed"]  # actual full source SGD still reproduced
+    before = store.path.read_bytes()
+    api = HarnessAPI("http://localhost", transport=httpx.MockTransport(lambda r: httpx.Response(200, json=original)))
+    try:
+        result = api.upstream_write("run", "check", request)
+        assert result["body"] == original and result["body"]["status"] == "failed", result
+    finally:
+        api.client.close()
+    assert store.path.read_bytes() == before

@@ -1429,6 +1429,12 @@ Recovery never deletes that evidence or adopts an unfinished repository. Existin
 repositories damaged before this publication fix still require operator repair.
 Typed MCP validates complete page/receipt identities, every passing gate leg,
 paired full samples, their means/SEM/delta and corresponding executions and costs.
+Passing regressions require actual nonempty artifact receipts on both sides.
+Before a fresh CAS the server also validates every launched probe and repetition,
+the complete declared artifact sets, the operator's tolerance and source-score
+reproduction, and exact agreement with the gate's recorded execution charges.
+Shared evidence validation applies to direct HTTP and Assistant writes too;
+a stored passing flag and matching hash cannot substitute for these checks.
 An ACK must match the requested proposal and CAS evidence. A matching digest alone
 does not certify complete evidence. Incomplete HTTP 200 is unavailable/unknown,
 without a verdict body; read explicitly before recovery. A complete failed gate,

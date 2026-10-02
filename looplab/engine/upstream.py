@@ -15,6 +15,7 @@ from looplab.core.atomicio import strict_atomic_write_bytes
 from looplab.core.errors import UpstreamRefusal
 from looplab.core.node_evidence import read_bounded_regular_file
 from looplab.core.scorer_boundary import BoundaryCapture
+from looplab.core.upstream_evidence import gate_matches_policy
 from looplab.engine.run_lifecycle import engine_alive, fresh_resume_launch_pending, run_lifecycle_lock
 from looplab.engine.seed_archive import capture_seed_archive, verified_seed_archive
 from looplab.engine.seed_base import selected_seed_base
@@ -266,6 +267,16 @@ class UpstreamLane:
             later = [e for e in events if e.seq > gates[-1].seq and e.type in ("upstream_gate_started", "upstream_gate_abandoned") and e.data.get("proposal_id") == body["proposal_id"]]
             if later or digest(result) != gates[-1].data["evidence_token"]:
                 raise UpstreamRefusal("upstream_gate_required", "The latest gate is unresolved/abandoned or its evidence is inconsistent; check afresh")
+            gate_event = gates[-1]
+            charged = [e.data for e in events if e.type == "upstream_execution"
+                       and e.data.get("action_id") == gate_event.data["action_id"]]
+            score = node.task_metric if node.task_metric is not None else node.metric
+            if (not gate_matches_policy(result, self.task.upstream, score,
+                    repair_required=bool(proposal["repair_trigger_nodes"]))
+                    or any(r.get("proposal_id") != body["proposal_id"]
+                           or r.get("request_hash") != gate_event.data["request_hash"] for r in charged)
+                    or [r.get("execution") for r in charged] != result["executions"]):
+                raise UpstreamRefusal("upstream_gate_required", "The latest gate is incomplete or differs from its declared probes, tolerances or recorded executions; inspect the evidence and check afresh")
             if input_identity(self.task, self.settings, node, proposal) != result["input_identity"]:
                 raise UpstreamRefusal("upstream_evidence_changed", "Task, config, source, environment, inputs or archive changed; check again")
             state = fold(events)

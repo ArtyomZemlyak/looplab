@@ -1338,3 +1338,46 @@ confirmation/export/MCP regression, включая все шесть cut cases �
 multi-base helper, — 607 passed, 14 platform/optional skips;
 docs/diagram/layering/containment — 108 passed. Strict MkDocs, Ruff и whitespace
 check прошли.
+
+### 18.14 Полнота gate проверяется и перед server CAS (2026-10-02)
+
+Воспроизведено, что свежий CAS доверял сохранённым `passed=true`,
+`evidence_token` и `input_identity`, даже если в result отсутствовали checks или
+regression artifact receipts, изменились execution costs либо tolerance.
+Четыре real-SGD guards дали red: соответствующие неполные результаты с
+пересчитанным matching hash разрешали `base_advanced`. Отдельный MCP guard также
+принимал passing regression с двумя пустыми artifact maps.
+
+Pure numeric/execution/gate validator перенесён из typed MCP reader в
+`looplab/core/upstream_evidence.py` и используется обеими сторонами. Passing
+regression теперь требует nonempty equal artifact receipts. Server перед новым
+CAS дополнительно связывает checks с полным списком launched tests/regressions/
+required repair probes, repeats и declared artifact sets. Means/SEM и tolerance
+пересчитываются по samples; source reproduction сверяется с primary score.
+Result executions обязаны точно совпасть с `upstream_execution` events того же
+action/proposal/request hash, включая реальные costs.
+
+При review первой правки ещё один red guard показал, что approximate tolerance
+comparison превращал явно заданный ноль в allowance до `1e-12`. CAS теперь
+требует точного computed tolerance и проверяет actual delta по полным samples.
+Scientific tolerance определяется operator declaration, не numeric rounding
+validator. Offline MCP сохраняет проверку согласованности statistical fields;
+fresh authority требует ещё и launched policy.
+
+Пять saved-evidence вариантов отказывают до event write и base switch. Exact
+historical ACK сохраняется, не обновляет evidence и не заменяет новый CAS. Каждый
+вариант проходит после explicit fresh check/action ID. Missing artifact evidence
+в passing HTTP 200 даёт unknown/unavailable в MCP write/history; настоящие failed
+partial gates остаются читаемыми диагностическими результатами. Event schema,
+scoring files и измеренные Node.metric не меняются.
+
+Первичный targeted transaction/repair/typed receipt прогон после правки —
+38 passed. Итоговый upstream/seed/workspace/confirmation/export/MCP regression,
+включая настоящий failed artifact gate через MCP, — 615 passed,
+14 platform/optional skips; docs/diagram/layering/containment — 108 passed.
+Replay first — 193 passed; strict MkDocs, Ruff и whitespace check прошли.
+`.tmp/doc72-gate-cas-acceptance/acceptance.json`: private server + scoped stdio MCP,
+2 primary SGD trainings, 7 gate executions, 3 confirmation seeds на original
+primary base/files; exact retries без reexecution, replay/export и неизменные
+owner/scorer bytes подтверждены. Scope остаётся declared CPU protocol acceptance,
+не arbitrary environment closure или проверка paid model judgments.
