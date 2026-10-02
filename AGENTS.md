@@ -72,6 +72,9 @@ justified no-action outcomes where a change is not supported by evidence.
 If `source_health` is incomplete, inspect its source before writing or retrying.
 Damaged decision/review journals refuse acknowledgements, new writes and dependent
 obligations; operator recovery never itself approves or resumes the run.
+Semantic hypothesis/selection reads and decision/review/hypothesis/verifier/value
+publications also refuse a damaged event source, naming `events.jsonl`. Use progress
+for health diagnostics; after operator recovery resolve original requests explicitly.
 Keep decision/review bodies and action IDs for lost replies. An exact retry returns
 the original evidence-stamped receipt, without refreshing its window. Check current
 progress validity and publish a new justified review when the old one is superseded.

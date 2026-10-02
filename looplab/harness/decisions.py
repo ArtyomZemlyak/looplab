@@ -9,10 +9,10 @@ from fastapi import HTTPException
 
 from looplab.core.atomicio import append_jsonl_bytes_locked
 from looplab.core.models import Idea, IdeaEmission, durable_idea_payload
-from looplab.events.eventstore import EventStore, EventStoreLockError, interprocess_lock
+from looplab.events.eventstore import EventStoreLockError, interprocess_lock
 from looplab.events.replay import fold
 from looplab.harness.obligations import evidence_revision
-from looplab.harness.journals import read_receipts, same_receipt_request
+from looplab.harness.journals import read_event_source, read_receipts, same_receipt_request
 from looplab.events.run_generation import run_generation_token
 
 
@@ -105,7 +105,7 @@ def publish_decision(srv, rd: Path, body) -> dict:
             settings = read_config_snapshot(rd / "config.snapshot.json")
             if not settings.external_harness:
                 raise HTTPException(409, "decision receipts require external harness mode")
-            events = EventStore(rd / "events.jsonl").read_all()
+            events = read_event_source(rd)
             generation = run_generation_token(events)
             if not generation or generation != body.expected_generation.lower():
                 raise HTTPException(409, {"code": "run_generation_changed",

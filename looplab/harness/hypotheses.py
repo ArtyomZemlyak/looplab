@@ -18,6 +18,7 @@ from looplab.events.eventstore import (EventStore, EventStoreConcurrencyError,
 from looplab.events.replay import fold
 from looplab.events.types import EV_HYPOTHESIS_MERGED, EV_HYPOTHESIS_MERGE_REVIEWED
 from looplab.harness.obligations import evidence_revision
+from looplab.harness.journals import read_event_source
 from looplab.events.run_generation import run_generation_token
 
 
@@ -39,7 +40,7 @@ def merge_due(settings, state, events) -> bool:
 
 
 def board_status(rd: Path, expected_generation: str) -> dict:
-    events = EventStore(rd / "events.jsonl").read_all()
+    events = read_event_source(rd)
     if run_generation_token(events) != expected_generation.lower():
         raise HTTPException(409, "run generation changed")
     settings = read_config_snapshot(rd / "config.snapshot.json")
@@ -57,7 +58,7 @@ def review_board(srv, rd: Path, body) -> dict:
             if not (settings.external_harness and settings.track_hypotheses):
                 raise HTTPException(409, "external hypothesis review is not enabled")
             store = EventStore(rd / "events.jsonl")
-            events = store.read_all()
+            events = read_event_source(rd, store=store)
             generation = run_generation_token(events)
             if not generation or generation != body.expected_generation.lower():
                 raise HTTPException(409, "run generation changed")

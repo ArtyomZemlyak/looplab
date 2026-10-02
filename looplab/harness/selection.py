@@ -15,6 +15,7 @@ from looplab.events.replay import fold, verifier_tie_groups
 from looplab.events.types import EV_NODE_VALUE_ESTIMATED, EV_VERIFIER_GROUP_SCORED
 from looplab.engine.value_estimate import VALUE_ESTIMATE_CADENCE_CAP, VALUE_ESTIMATE_RATIONALE_CAP
 from looplab.harness.obligations import evidence_revision
+from looplab.harness.journals import read_event_source
 from looplab.events.run_generation import run_generation_token
 
 
@@ -51,7 +52,7 @@ def value_due(settings, state) -> bool:
 
 
 def status(rd: Path, expected_generation: str) -> dict:
-    events = EventStore(rd / "events.jsonl").read_all()
+    events = read_event_source(rd)
     if run_generation_token(events) != expected_generation.lower():
         raise HTTPException(409, "run generation changed")
     settings = read_config_snapshot(rd / "config.snapshot.json")
@@ -79,7 +80,7 @@ def verify_group(srv, rd: Path, body) -> dict:
         with srv.commands.sequence(rd):
             settings = read_config_snapshot(rd / "config.snapshot.json")
             store = EventStore(rd / "events.jsonl")
-            events = store.read_all()
+            events = read_event_source(rd, store=store)
             if run_generation_token(events) != body.expected_generation.lower():
                 raise HTTPException(409, "run generation changed")
             state = fold(events)
@@ -136,7 +137,7 @@ def estimate_values(srv, rd: Path, body) -> dict:
         with srv.commands.sequence(rd):
             settings = read_config_snapshot(rd / "config.snapshot.json")
             store = EventStore(rd / "events.jsonl")
-            events = store.read_all()
+            events = read_event_source(rd, store=store)
             if run_generation_token(events) != body.expected_generation.lower():
                 raise HTTPException(409, "run generation changed")
             state = fold(events)

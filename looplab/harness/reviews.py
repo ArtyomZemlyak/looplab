@@ -7,10 +7,10 @@ import orjson
 from fastapi import HTTPException
 
 from looplab.core.atomicio import append_jsonl_bytes_locked
-from looplab.events.eventstore import EventStore, EventStoreLockError, interprocess_lock, read_jsonl_lenient
+from looplab.events.eventstore import EventStoreLockError, interprocess_lock, read_jsonl_lenient
 from looplab.events.replay import fold
 from looplab.harness.obligations import evidence_revision
-from looplab.harness.journals import read_receipts, same_receipt_request
+from looplab.harness.journals import read_event_source, read_receipts, same_receipt_request
 from looplab.events.run_generation import run_generation_token
 
 
@@ -103,7 +103,7 @@ def publish_review(srv, rd: Path, body) -> dict:
             settings = read_config_snapshot(rd / "config.snapshot.json")
             if body.phase_id not in required_reviews(settings):
                 raise HTTPException(409, "this review is not enabled by the run settings")
-            events = EventStore(rd / "events.jsonl").read_all()
+            events = read_event_source(rd)
             generation = run_generation_token(events)
             if not generation or generation != body.expected_generation.lower():
                 raise HTTPException(409, {"code": "run_generation_changed",

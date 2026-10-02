@@ -826,6 +826,23 @@ existing budget finish gate pauses with `due.source_error`, preserving a resumab
 run instead of routing source damage through fatal-error finalization. Recovery
 does not itself resume evaluation or satisfy current report/review obligations.
 
+These semantic harness operations also require a healthy authoritative event
+prefix: GET hypothesis board/selection and POST decisions, reviews, hypothesis
+reviews, verifier samples or MCTS values. A complete corrupted event record returns
+503 with `harness_history_incomplete`, `source=events.jsonl` and `source_health`,
+before a successful ACK or a fresh publication can be claimed. Unreadable sources
+use `harness_history_unavailable` with health diagnostics; absent/empty sources
+cannot prove identity and use the same unavailable code. Generation mismatches on
+a healthy source still return 409.
+
+The source check runs before and after reading, catching damage introduced during
+the read. Normal valid concurrent appends remain allowed; event publications keep
+their existing CAS fence. Progress remains the diagnostic read for an incomplete
+prefix. EventStore's normal torn-tail rule is unchanged: an unterminated crash tail
+is separate from a complete corrupted record. The harness neither rewrites bytes
+nor supplies missing events. After operator recovery, refresh progress and resolve
+the original body/action; an old ACK still does not approve current evidence.
+
 `replayed=true` acknowledges prior publication; it does **not** refresh its review
 window or grant admission/finalization. Read current `harness-progress` and the
 history item's `validity`. If it is `superseded`, inspect the new evidence and
@@ -1193,6 +1210,14 @@ applied strategy decisions are recorded, without extra scoring. This option excl
 `--failed-first`: MCTS branch review needs two eligible measured branches.
 Combine it with `--obligations` and `--mcp-python` for report/review and minimal
 remote-client coverage; use a fresh output directory for each probe.
+Add `--damaged-events` with `--obligations` to damage a complete record in the
+private event log after terminal results. Progress must expose incomplete event
+health; hypothesis/selection reads and exact/fresh decision/review requests must
+return source refusals without modifying event or sidecar bytes. With
+`--value-recovery`, the accepted value batch is checked too. Only the fixture
+operator restores its known-good backup, then recovers the old ACKs and explicitly
+satisfies current finish obligations. This probe preserves normal EventStore
+torn-tail handling and makes no production repair request.
 `--case agent_loss --drop-command-response --read-fault stale_result_generation`
 instead replaces a successful result page's generation at the owned proxy. The
 typed tool must return unavailable context without those receipts; the next explicit

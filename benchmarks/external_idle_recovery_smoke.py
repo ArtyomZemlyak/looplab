@@ -38,7 +38,7 @@ from looplab.serve.server import make_app
 CASES = ("agent_loss", "engine_loss")
 
 
-def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, response_fault="disconnect", read_fault="disconnect", discovery_fault="none", mcp_python=None, result_backlog=False, failed_first=False, obligations=False, damaged_journals=False, value_recovery=False):
+def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, response_fault="disconnect", read_fault="disconnect", discovery_fault="none", mcp_python=None, result_backlog=False, failed_first=False, obligations=False, damaged_journals=False, value_recovery=False, damaged_events=False):
     root.mkdir(parents=True, exist_ok=False)
     runs = root / "runs"; runs.mkdir()
     source = root / "source"; source.mkdir()
@@ -354,6 +354,41 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
             proof.update(value_batch_count=2, value_retry_changed_no_work=True,
                          value_conflicting_revision_refused=True, value_replay_after_greedy=True,
                          explicit_policy_switches=["mcts", "greedy"])
+            value_body = body
+        if damaged_events:
+            path = rd / "events.jsonl"
+            original = path.read_bytes()
+            journals = {p.name: p.read_bytes() for p in rd.glob("harness_*.jsonl")}
+            path.write_bytes(original + b'broken event recovery fixture\n')
+            damaged = path.read_bytes()
+            try:
+                current = await client.progress()
+                assert not current["complete"] and current["next_step"]["code"] == "inspect_sources"
+                assert not current["source_health"]["events"]["read_complete"]
+                for route in ("harness-hypotheses", "harness-selection"):
+                    denied = await client.request("GET", route + "?expected_generation=" + generation, status=503)
+                    assert denied["detail"]["code"] == "harness_history_incomplete"
+                    assert denied["detail"]["source"] == "events.jsonl"
+                actions = [("harness-" + kind, body) for kind, body, _ in saved_receipts]
+                if value_recovery:
+                    actions.append(("harness-selection/values", value_body))
+                for route, body in actions:
+                    for payload in (body, {**body, "action_id": body["action_id"] + ":new"}):
+                        denied = await client.request("POST", route, payload, status=503)
+                        assert denied["detail"]["code"] == "harness_history_incomplete"
+                        assert denied["detail"]["source"] == "events.jsonl"
+                assert path.read_bytes() == damaged
+                assert journals == {p.name: p.read_bytes() for p in rd.glob("harness_*.jsonl")}
+            finally:
+                # Only the operator fixture restores this private known-good backup.
+                path.write_bytes(original)
+            assert (await client.progress())["complete"]
+            if value_recovery:
+                assert (await client.request("POST", "harness-selection/values", value_body))["replayed"]
+            assert path.read_bytes() == original
+            proof.update(damaged_event_read_routes=["harness-hypotheses", "harness-selection"],
+                         damaged_event_write_requests=len(actions) * 2,
+                         damaged_event_refusals_changed_no_work=True, event_backup_restored_by_fixture=True)
         if obligations:
             before = (rd / "events.jsonl").read_bytes()
             journals = {kind: (rd / f"harness_{kind}.jsonl").read_bytes() for kind in ("reviews", "decisions")}
@@ -628,6 +663,8 @@ def main():
                         help="Damage private decision/review sources; prove refusal without writes, then restore fixture backups. Requires --obligations.")
     parser.add_argument("--value-recovery", action="store_true",
                         help="Switch greedy/MCTS and recover a complete value batch on two measured nodes. Requires --result-backlog, excludes --failed-first.")
+    parser.add_argument("--damaged-events", action="store_true",
+                        help="Damage the private event log; refuse domain reads/receipt writes, then restore fixture backup. Requires --obligations.")
     args = parser.parse_args()
     if not 0 <= args.quiet_hold_seconds <= 14400:
         parser.error("quiet hold must be between zero and four hours")
@@ -649,11 +686,13 @@ def main():
         parser.error("damaged-journals requires --obligations")
     if args.value_recovery and (not args.result_backlog or args.failed_first):
         parser.error("value-recovery requires --result-backlog and two successful nodes (no --failed-first)")
+    if args.damaged_events and not args.obligations:
+        parser.error("damaged-events requires --obligations")
     root = args.out.resolve(); root.mkdir(parents=True, exist_ok=False)
     mcp_python = str(args.mcp_python.resolve()) if args.mcp_python else None
     if mcp_python and not Path(mcp_python).is_file():
         parser.error("MCP interpreter does not exist")
-    proof = [run_case(root / name, name, args.quiet_hold_seconds, args.drop_command_response, args.response_fault, args.read_fault, args.discovery_fault, mcp_python, args.result_backlog, args.failed_first, args.obligations, args.damaged_journals, args.value_recovery)
+    proof = [run_case(root / name, name, args.quiet_hold_seconds, args.drop_command_response, args.response_fault, args.read_fault, args.discovery_fault, mcp_python, args.result_backlog, args.failed_first, args.obligations, args.damaged_journals, args.value_recovery, args.damaged_events)
              for name in CASES if args.case in ("all", name)]
     (root / "acceptance.json").write_text(json.dumps(proof, ensure_ascii=False, indent=2), encoding="utf8")
 

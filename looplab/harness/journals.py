@@ -5,8 +5,33 @@ import orjson
 from fastapi import HTTPException
 
 from looplab.core.jsonlio import read_jsonl_lenient_with_health
+from looplab.events.eventstore import EventStore, log_integrity
 
 MAX_JOURNAL_BYTES = 16 * 1024 * 1024
+
+
+def read_event_source(rd: Path, *, store=None) -> list:
+    """A semantic harness decision needs a healthy authoritative event prefix.
+
+    Display progress deliberately keeps incomplete-prefix diagnostics. Domain
+    reads, sidecar publications and event-bound ACKs cannot claim current evidence
+    or absence of an action from a damaged source. Check before and after reading,
+    as checkpoints already do; normal valid concurrent appends remain allowed and
+    event writers retain their CAS fence. No repair or engine work happens here.
+    """
+    path = rd / "events.jsonl"
+    def require_complete():
+        health = log_integrity(path)
+        if not health["complete"]:
+            code = "harness_history_unavailable" if health.get("unreadable") else "harness_history_incomplete"
+            raise HTTPException(503, {"code": code, "source": path.name,
+                                      "source_health": health})
+    require_complete()
+    events = (store if store is not None else EventStore(path)).read_all()
+    require_complete()
+    if not events:
+        raise HTTPException(503, {"code": "harness_history_unavailable", "source": path.name})
+    return events
 
 _RECEIPT_FIELDS = {"generation": str, "run_uid": str, "phase_id": str,
                    "at_node": int, "evidence_revision": str, "decision": str,

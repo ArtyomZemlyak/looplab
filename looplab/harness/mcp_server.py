@@ -42,6 +42,7 @@ MCP_INSTRUCTIONS = (
     "For MCTS value reviews, retain the original expected_evidence_revision with estimates/action_id. Exact replay acknowledges the old batch; changing its revision is a conflict. Read the current complete batch and author a new action after reset. "
     "Exact decision/review retries restore original receipts, not current evidence approval. Refresh progress validity; superseded receipts require a new justified decision/review. HTTP 200 commands can be rejected: inspect receipt status/error. "
     "Incomplete decision/review sources refuse replay, writes and dependent obligations. Inspect progress source_health and ask the operator to recover the journal before retrying; the harness never repairs it or resumes work automatically. "
+    "Hypothesis/selection reads and decision/review/hypothesis/verifier/value publications also require a healthy event prefix; incomplete/unavailable refusals name events.jsonl with available health diagnostics. Read progress for diagnostics, then resolve original requests explicitly after operator recovery. "
     "inject_node succeeded means admission, not training success. Inspect terminal status/results; read current-attempt logs before repairing a failure with a new child and command key. A failed parent has no measured score delta. "
     "After each terminal node and finalized run, call result_notices with the current generation and POST "
     "a brief interpretation in the user's language with receipt_id, evidence_token and a stable "
