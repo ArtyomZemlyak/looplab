@@ -723,3 +723,47 @@ POSIX executable semantics или Windows symlinks без нужной прив�
 с CAS. Этот receipt фиксирует байты declared set до исполнения; сам по себе он
 не доказывает неизменность во время исполнения, эквивалентность или permission
 для продвижения. Host scorers, mounts и environment требуют отдельной идентичности.
+
+## 15. Ревью initial pinned base selection перед реализацией
+
+Нельзя вводить live `set_base` до equivalence/regression gate: выбор другого
+архива внутри запущенного рана фактически является непроверенным advancement.
+Первый публичный шаг — immutable operator-owned выбор **начальной** базы новой
+repo-задачи: `seed_base: {run_dir, event_seq, digest}`. Это ссылка на конкретный
+`workspace_seeded.base_revision` существующего run или экспортированного bundle,
+а не supplied receipt, terminal score, workdir или произвольный repo path.
+Digest ожидается полностью, sequence типизирован; отсутствующий, damaged или
+изменившийся event source и unverified archive отказываются без fallback.
+
+Одна aggregate копия selected archive должна попадать в candidate workspace,
+включая multi-editable namespaces, без git discovery, suffix/ignore filters или
+повторного live protected seeding. Source paths для Developer/scout/probe и engine
+должны указывать на тот же archive; исходные пути сохраняются отдельно для
+absolute cwd remap и предупреждений о source-tree argv. Read/copy drift проверяется
+по фактически прочитанным bytes до scoring. Existing nonempty destination не
+используется как overlay на pin; ни repair внутри lifecycle, ни reuse не меняют pin.
+Task assets и operator-declared stages остаются последующими владельцами своих
+поверхностей; pin не объявляет их частью base identity.
+
+Поскольку выбран уже реализованный snapshot, `seed_mode` не фильтрует его второй
+раз: все regular files выбранной базы копируются. Native executable bits
+сохраняются. Copy/storage failure отказывает именно этот pinned seed, вместо
+unknown/live подстановки. Declared scorer boundary проверяется из selected bytes.
+Необъявленная зависимость evaluator остаётся неизвестной. Initial pin не является
+новой оценкой или подтверждением, что метрики старого и нового рана сравнимы.
+
+`base_revision.selection` сохраняет origin run, origin event sequence и expected
+digest; `seed_event_seq` по-прежнему относится к текущему run. Current run сохраняет
+свой архив полученных bytes и переносит его через export. Выбранный origin log и
+archive остаются явными required inputs для дальнейшего засева/resume: их утрата
+не должна тихо переключать provider на другую историю или owner source. Portable
+bundle можно явно выбрать как origin новой задачи. Автоматическое восстановление
+origin по текущему run — отдельный следующий контракт, не implicit fallback.
+
+Приёмка: неизменный seed после live source drift/removal; single/multi namespaces;
+exact protected bytes; Developer probe и engine используют одну базу; no ignore
+filter; missing/corrupt/wrong-sequence/digest/log и copy drift; no outside write;
+existing destination refusal; source cwd mapping; legacy serialization/seeding;
+replay/export metadata и реальные быстрые CPU SGD восстановления. Декларация
+не может поступить через candidate injection. Live advancement, CAS и gate
+verdict ещё не реализованы; 72.1/72.6 остаются открытыми.
