@@ -227,10 +227,20 @@ def materialization_plan(spec, node, events):
                      "editables": pinned_editables(spec["editables"], selector)}
         return effective, node.model_copy(), {"status": "unchanged", "from_digest": receipt["digest"],
             "to_digest": receipt["digest"], "conflicts": [], "absorbed_paths": [], "advance_seq": current["advance_seq"]}
-    created = next((e for e in reversed(events) if e.type == "node_created" and e.data.get("node_id") == node.id), None)
-    origin = active_base([e for e in events if created is None or e.seq <= created.seq], spec["seed_base"])
+    state = fold(events)
+    current_node = state.nodes.get(node.id)
+    if (current_node is None or current_node.attempt != node.attempt
+            or current_node.status.value != "pending" or current_node.tombstoned
+            or node.id in state.aborted_nodes or current_node.files != node.files
+            or current_node.deleted != node.deleted or current_node.code != node.code
+            or (node.creation_event_seq is not None and node.creation_event_seq != current_node.creation_event_seq)):
+        raise UpstreamRefusal("upstream_source_changed", "Read the current pending lifecycle before materializing its overlay")
+    created = next((e for e in events if e.seq == current_node.creation_event_seq and e.type == "node_created"), None)
+    if created is None:
+        raise UpstreamRefusal("upstream_source_unavailable", "Pending overlay has no replay-applied authoring event")
+    origin = active_base([e for e in events if e.seq <= created.seq], spec["seed_base"])
     for index, e in enumerate(events):
-        if e.data.get("node_id") != node.id or (created is not None and e.seq < created.seq):
+        if e.data.get("node_id") != node.id or e.seq < created.seq:
             continue
         if e.type not in ("workspace_seeded", "node_overlay_rebased"):
             continue

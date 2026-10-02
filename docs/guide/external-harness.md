@@ -1421,6 +1421,13 @@ without electing a robust winner. A new candidate or reset is a new lifecycle an
 uses current-base migration. Seeding records the actual Node ID/generation; late
 old-generation seeds and terminal repetitions cannot redefine a pending overlay's
 basis. Legacy seed events remain readable without invented generation evidence.
+The authoring basis comes from the creation event actually accepted by replay.
+Ignored late or malformed creation responses cannot move it; reset and repair
+retain it, while an accepted in-place recreation establishes a new basis.
+Materialization checks the current pending lifecycle, manifest and available
+authoring identity before workspace cleanup. A superseded, settled, aborted or
+tombstoned snapshot refuses without replacing that workspace; reread the current
+node before another attempt. Terminal confirmations still use measured provenance.
 Capability absorption applies only to advancements after the overlay's recorded
 base. An explicit reversal authored on an already advanced base remains an
 experiment; an older promotion cannot erase it or inject its source recipe.

@@ -1697,6 +1697,10 @@ class Node(BaseModel):
     # Fold-internal causal anchor for projections that must identify the FIRST accepted terminal of
     # this lifecycle. Excluded from every public model dump: the durable source remains the event log.
     terminal_event_seq: Optional[int] = Field(default=None, exclude=True)
+    # Last replay-applied node_created: the authoring basis for this overlay.
+    # Reset/repair retain it until an accepted in-place recreation replaces it.
+    # Like the terminal anchor, it is derived only from events and stays internal.
+    creation_event_seq: Optional[int] = Field(default=None, exclude=True)
     error: str = ""
     # Failure taxonomy (set by node_failed): an experiment's own failure is a member of the closed
     # `FAILURE_REASONS` above; a node the engine ended carries its own word (`BENIGN_TERMINAL_REASONS`,

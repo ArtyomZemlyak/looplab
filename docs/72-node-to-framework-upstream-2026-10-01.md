@@ -1675,3 +1675,55 @@ private UI server + scoped stdio MCP, 2 primary CPU SGD trainings, 7 gate execut
 owner/scorer preservation и replay/export прошли. Приёмка проверяет primary
 protocol; перенос не утверждает результат на отсутствующей extra objective.
 Полный suite проекта и paid model judgments этим исправлением не проверены.
+
+### 18.22 Replay-принятое основание overlay и устаревшие снимки (2026-10-02)
+
+Review от HEAD `b172f75ce` воспроизвёл расхождение replay и материализации.
+Выбор authoring basis читал последнее сырое `node_created`, даже когда fold
+отвергал его. Четыре red сценария — неверное поколение, устаревшее поколение
+родителя, повреждённая idea и повтор creation завершённого узла перед reset —
+не меняли replay-узел, но меняли его основание. После двух настоящих capability
+promotions это теряло ранее перенесённую `LEARNING_RATE` при миграции независимой
+научной правки числа эпох.
+
+`looplab/events/replay.py::_on_node_created` теперь сохраняет sequence только
+принятого creation в `looplab/core/models.py::Node`. Внутренний
+`creation_event_seq` исключён из public JSON, как terminal anchor; источник
+остаётся журналом событий. Reset и repair сохраняют authoring basis, принятое
+in-place recreation заменяет его. Positive controls проверяют современный
+generation-stamped и legacy unstamped rebuild после reset: новое явно написанное
+сравнение старой реализации на текущей базе не поглощается прошлым promotion.
+
+`looplab/engine/upstream_workspace.py::materialization_plan` берёт основание по
+этому replay anchor. Исправленные четыре сценария сохраняют обе capabilities и
+научное число эпох; фактически материализованные байты проходят настоящее
+train → protected score с измеренной метрикой. Игнорированный ответ не становится
+исполняемой программой. Эти дополнительные executions сами по себе не записывают
+новый terminal узла.
+
+Отдельные red сценарии показали, что старый worker snapshot мог очистить каталог
+уже завершённого либо изменённого эксперимента. Перед
+`looplab/engine/workspace.py::WorkspaceSeeder.materialize` cleanup план проверяет
+current pending lifecycle, files/deleted/code и доступный authoring anchor, а
+также abort/tombstone. Семь controls — reset, настоящий terminal, repair,
+recreation с другими файлами, recreation с тем же manifest, tombstone и abort —
+получают `upstream_source_changed` с сохранением всех файлов и байтов журнала.
+Для снимка с внутренним anchor recreation даже одинаковых файлов является
+другим authoring request. После отказа надо перечитать текущий узел.
+
+Terminal confirmation остаётся отдельным путём: оно проверяет измеренное
+происхождение и сохраняет original base/files. Public event payloads, настройки,
+cadences и схема процесса не изменены; нового ожидания, resume или model job нет.
+Проверка снимка выполняется по прочитанному event history, не заменяет engine
+single-writer ownership и не обещает filesystem lock против постороннего writer.
+
+Replay и seed/archive/workspace regression — 271 passed, 6 platform skips;
+отдельная targeted проверка migration/snapshot — 18 passed.
+Весь upstream/MCP regression — 231 passed. Documentation/claim pins/package
+contracts/layering/containment/API/event contracts — 108 passed; strict MkDocs,
+Ruff и whitespace check прошли.
+`.tmp/doc72-basis-sgd/acceptance.json`: private UI server + scoped stdio MCP,
+2 primary CPU SGD trainings, 7 gate executions и 3 confirmation evaluations на
+original base/files. Exact retry без reexecution, owner/scorer preservation и
+replay/export прошли. Полный suite проекта и paid model judgments этим
+исправлением не проверены.

@@ -471,6 +471,7 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             files=d.get("files", {}) or {},
             deleted=d.get("deleted", []) or [],
             attempt=generation,
+            creation_event_seq=e.seq,
             origin=d.get("origin"),   # cross-run provenance (None for ordinary nodes)
             # IN-run fork provenance: the operator branched from a node (usually while reading a
             # historical snapshot) and edited its idea. Additive with a reader-side default, so old
