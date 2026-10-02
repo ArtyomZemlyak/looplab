@@ -68,7 +68,7 @@ def promote(lane, generation, body, key):
     return made, check, checked, advance, advanced
 
 
-def twice(tmp_path):
+def twice(tmp_path, *, before_second=None):
     lane, store, generation, first_body = fixture(tmp_path)
     create(store, 2, {"train.py": SOURCE, "recipe.env": "MOMENTUM=0.3\n"})
     create(store, 3, {"train.py": SOURCE.replace("range(30)", "range(20)")})
@@ -88,6 +88,8 @@ def twice(tmp_path):
         "flag": {"name": "LEARNING_RATE", "default": "0.2", "enabled": "0.3"},
         "summary": "Shared learning rate flag with the existing momentum capability and original rate default"}
     create(store, 6, {"train.py": RATE_SOURCE, "recipe.env": "MOMENTUM=0.4\nLEARNING_RATE=0.3\n"})
+    if before_second is not None:
+        before_second(lane, store)
     second = promote(lane, generation, second_body, "second")
     return lane, store, generation, first_body, first, second
 

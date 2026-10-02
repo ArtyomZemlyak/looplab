@@ -1216,3 +1216,34 @@ Strict MkDocs, Ruff и whitespace check прошли.
 confirmation base/files, exact retries без reexecution, replay/export и
 неизменные owner/scorer bytes подтверждены. Это короткая CPU protocol acceptance;
 ограничения selected interpreter и declared observables выше сохраняются.
+
+### 18.10 Scientific reversions после advancement (2026-10-02)
+
+Actual SGD cases воспроизвели silent experiment substitution: absorption заново
+обрабатывала все historical promotions, включая уже входящие в basis overlay.
+Если новая node или repair после migration явно возвращали прежний source code,
+его байтовое совпадение со старым source ошибочно удаляло правку и добавляло
+source recipe. Три случая сначала упали: node после первой promotion, repair
+после migration и node после двух promotions.
+
+Теперь absorption проходит только transitions после фактического basis selector
+overlay. Basis остаётся generation-fenced и берётся из creation или применённых
+seed/rebase events. Новые scientific reversions сохраняются; старые overlays по-
+прежнему мигрируют, а конфликты удерживают whole old base. При следующем advancement
+действует обычный three-way merge. Текстовый merge не обещает semantic compatibility:
+дополнительный случай с удалённым settings reader сохраняет reversal и честно
+падает в actual training вместо подмены успешным generalized runner.
+
+Live smoke раньше отправлял прежний `SOURCE` как ready-made implementation,
+ожидая его удаления. Этот прогон выявил зависимость fixture от исправленной
+подмены. Для reuse advanced runner smoke теперь передаёт только recipe; explicit
+source bytes не считаются inherited автоматически.
+
+Приёмка: replay first — 193 passed; targeted migration/SGD cases — 17 passed;
+связанные upstream/seed/workspace/confirmation/export/MCP guards — 591 passed,
+14 platform/optional skips. Docs/diagram/layering/containment — 108 passed.
+Ruff, whitespace check и strict MkDocs прошли.
+`.tmp/doc72-overlay-final-acceptance/acceptance.json`: private server + scoped
+MCP, 2 primary trainings, 7 gate executions, 3 confirmation seeds на original
+base/files; exact retries без extra execution, replay/export и неизменные
+owner/scorer bytes. Никакой merge не заменяет measured result и необходимый repair.

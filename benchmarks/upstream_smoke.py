@@ -146,10 +146,12 @@ def main():
                 await client.command("resume", {}, "upstream:resume")
                 await client.progress()
                 second = {"idea": {"operator": "improve", "rationale": "Tune shared momentum", "footprint": {"gpus": 0}}, "parent_ids": [0],
-                    "parent_generations": {"0": 0}, "files": {"train.py": SOURCE, "recipe.env": "MOMENTUM=0.3\n"}}
+                    # Reuse the advanced runner. Supplying SOURCE here is an
+                    # explicit reversal, not inherited code for the engine to erase.
+                    "parent_generations": {"0": 0}, "files": {"recipe.env": "MOMENTUM=0.3\n"}}
                 await client.command("inject_node", second, "upstream:next")
                 node1 = await client.terminal(1)
-                await client.commentary("node", "upstream:next-summary", "Следующий SGD использовал новую записанную базу и отдельный рецепт momentum=0.3. Унаследованный runner поглощён без дублирования. Метрика измерена заново; вывод ограничен этой CPU-задачей.", 1)
+                await client.commentary("node", "upstream:next-summary", "Следующий SGD использовал новую записанную базу и отдельный рецепт momentum=0.3. Общий runner переиспользован; изменён только рецепт. Метрика измерена заново; вывод ограничен этой CPU-задачей.", 1)
                 detail = await client.read("nodes/1")
                 assert detail["files"] == {"recipe.env": "MOMENTUM=0.3\n"}, detail
                 assert node0["metric_provenance"]["base_revision"]["digest"] == base["digest"]

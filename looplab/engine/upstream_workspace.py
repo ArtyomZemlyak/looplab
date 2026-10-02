@@ -245,7 +245,13 @@ def materialization_plan(spec, node, events):
     new, _ = selected_seed_base(current["selector"])
     overlay, removed = dict(node.files), list(node.deleted)
     absorbed = []
-    for advancement in (e for e in events if e.type == "base_advanced"):
+    advancements = [e for e in events if e.type == "base_advanced"]
+    # Absorption belongs to transitions AFTER this overlay's actual basis. A new
+    # node or a post-migration repair can deliberately restore an older source;
+    # replaying an already-applied promotion would silently erase that experiment.
+    basis_seq = next((e.seq for e in reversed(advancements)
+                      if e.data["selector"] == origin["selector"]), -1)
+    for advancement in (e for e in advancements if e.seq > basis_seq):
         proposal = next((e for e in events if e.type == "upstream_proposed" and e.data.get("proposal_id") == advancement.data.get("proposal_id")), None)
         if proposal is None:
             raise UpstreamRefusal("upstream_source_unavailable", "Advanced base has no recorded source proposal")

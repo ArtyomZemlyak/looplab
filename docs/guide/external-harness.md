@@ -1402,6 +1402,11 @@ without electing a robust winner. A new candidate or reset is a new lifecycle an
 uses current-base migration. Seeding records the actual Node ID/generation; late
 old-generation seeds and terminal repetitions cannot redefine a pending overlay's
 basis. Legacy seed events remain readable without invented generation evidence.
+Capability absorption applies only to advancements after the overlay's recorded
+base. An explicit reversal authored on an already advanced base remains an
+experiment; an older promotion cannot erase it or inject its source recipe.
+Three-way merging checks text compatibility, not scientific validity: inspect
+the resulting evaluation, including failures requiring repair.
 
 Exact body/action retries recover the original ACK without re-execution or fresh
 evidence, including after resume. A started claim with no verdict is unresolved;
