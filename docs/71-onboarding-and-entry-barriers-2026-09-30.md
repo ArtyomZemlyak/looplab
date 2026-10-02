@@ -594,9 +594,9 @@ External run здесь намеренно не получал кандидат�
 | OB-07 | Частично | Composer показывает активные права и понятное пояснение; четыре варианта раскрываются по запросу, выбор возвращает фокус на видимый переключатель. | Проверить понимание режимов с новым пользователем. |
 | OB-08 | Частично | Essential открывается с модели, показывает 13 полей ресурсов и лимитов с короткими пояснениями; технические детали и runtime permissions раскрываются отдельно. | Проверить подключение модели и понимание лимитов с новым пользователем. |
 | OB-09 | Частично | Run workspace и Agent cycle показывают next step; списки различают внешний режим и engine, attention открывает текущие вопросы (§34–36). Гибель MCP и pause/resume проверены (§37–38). §47 показывает последнее успешное scoped progress чтение. | Активность запросов не доказывает живость агента; многочасовой сценарий OB-10 ещё открыт. |
-| OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–58 проверяют MCP/UI recovery, pause/resume, engine loss, obligations, monitor, deadline и ASHA. §47–58 — request activity, auth, потерянные/неполные ответы, identity/discovery recovery, отдельный `[harness]` клиент и восстановление пропущенных интерпретаций результатов. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
-| OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. §39/41 исправляют ссылки checkpoint/concept base на реальные MCP-фазы; §52 различает unavailable discovery и пустой catalog; §53 убирает FastAPI dependency из `phase_info`; §54–55 дают cursor и typed MCP read для результатов; §56 — проверенный repair recipe; §57 — original ACK для superseded review/decision. §58 — source completeness для ACK, admission и finish. | Проверены контракт, subprocess-кандидаты, desktop и discovery из серверной подсказки; подключение нового клиента относится к OB-10. |
-| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–58: source health, lifecycle verdict, engine recovery, obligations, monitor, retarget, idle recovery, activity, unknown acknowledgement, identity квитанции, minimal client и пагинация результатов без дублей интерпретаций. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. §49–53 повреждают реальные replies, включая discovery. §54 восстанавливает сообщения после reconnect. Наблюдение запросов не измеряет живость агента. |
+| OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–59 проверяют MCP/UI recovery, pause/resume, engine loss, obligations, monitor, deadline и ASHA. §47–59 — request activity, auth, потерянные/неполные ответы, identity/discovery recovery, отдельный `[harness]` клиент и восстановление пропущенных интерпретаций результатов. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
+| OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. §39/41 исправляют ссылки checkpoint/concept base на реальные MCP-фазы; §52 различает unavailable discovery и пустой catalog; §53 убирает FastAPI dependency из `phase_info`; §54–55 дают cursor и typed MCP read для результатов; §56 — проверенный repair recipe; §57 — original ACK для superseded review/decision. §58 — source completeness для ACK, admission и finish. §59 — MCTS value ACK с исходной evidence revision и реальные policy switches. | Проверены контракт, subprocess-кандидаты, desktop и discovery из серверной подсказки; подключение нового клиента относится к OB-10. |
+| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–59: source health, lifecycle verdict, engine recovery, obligations, monitor, retarget, idle recovery, activity, unknown acknowledgement, identity квитанции, minimal client и пагинация результатов без дублей интерпретаций. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. §49–53 повреждают реальные replies, включая discovery. §54 восстанавливает сообщения после reconnect. Наблюдение запросов не измеряет живость агента. |
 | OB-14 | Частично | Начало сайта показывает два основных входа. | Большая архитектурная схема всё ещё нуждается в упрощении для первого знакомства. |
 
 Остальные пункты §3 и соответствующие сценарии §11 остаются открытыми. Изменения первого
@@ -2851,5 +2851,73 @@ ACK перед сравнением bytes; production timing не менялся
 manifest и full B/E diagram обновлены; API reference регенерирован.
 Финальный backend/MCP/progress набор — **340 passed**; ещё **31 docs/diagram**
 check и `mkdocs build --strict` прошли. Маршруты и settings не менялись.
+Модельные решения, interactive client approvals, многочасовые сеансы и physical
+remote transfer остаются открытыми.
+
+## 59. OB-10/11/12: MCTS value ACK привязан к исходной authored evidence revision
+
+**2026-10-02.** Следующий recovery probe проверяет `/harness-selection/values`
+и реальные переключения greedy → MCTS → greedy. Runtime defect: сохранённый
+`request_sha256` привязывал estimates, но replay не сравнивал присланный
+`expected_evidence_revision`. Другой revision с прежними estimates/action ID
+получал **200**, `replayed=true`, как будто это exact retry. До исправления
+**шесть** проверок подтвердили отказ контракта: unchanged state, новый узел,
+reset, tombstone, retarget и смена policy.
+
+`estimate_values` теперь находит **первый** event исходного action batch и
+восстанавливает `evidence_revision` из fold prefix **перед** ним. Исходная CAS
+publication уже доказала, что именно этот prefix был рассмотрен; atomic batch
+не позволяет восстанавливать его из промежуточного member. Replay проверяет
+и исходный request hash, и исходную authored revision. Изменённая revision
+получает **409**, даже при прежних estimates; exact body сохраняет прежний ACK
+после изменения состояния и не дописывает event. Run generation fence сохранён.
+
+Новых event fields, request hashes, endpoint или migration нет. Уже сохранённые
+value events проходят ту же проверку. Дополнительный fold нужен только при
+lookup существующего action; fresh writes по-прежнему проверяют текущую revision,
+полную candidate batch и generation каждого узла. Старый ACK не закрывает
+review вновь измеренного после reset узла. Отдельная проверка двух последовательных
+batches после reset подтверждает собственный prefix каждого action и свежую
+review obligation, которая закрывается только новым justified action.
+
+### Два реальных MCP recovery cases
+
+`external_idle_recovery_smoke --case all --result-backlog --obligations
+--value-recovery --mcp-python PATH_TO_HARNESS_ONLY_PYTHON` проверил agent-loss/UI
+restart и engine-loss/явный resume. Оператор fixture задаёт
+`mcts_value_weight=0.4` при launch; основной policy остаётся greedy до решения
+агента. После двух successful protected SGD nodes агент через MCP читает strategy
+и value phases, явно переключает policy в MCTS и читает две текущие ветви.
+Записывает полный batch с явно обозначенными scripted headroom beliefs,
+получает original ACK, отказывается от изменённой revision под прежним action,
+затем явно возвращается в greedy и повторяет обе проверки.
+
+Записаны ровно **два** `node_value_estimated` events и **две** применённые
+`strategy_decision` — MCTS и greedy. Exact value replay/refusal не меняет event
+bytes, не запускает candidate и не меняет policy. Value obligation закрывается
+принятым полным batch; в greedy value weight не действует. Свежие finish report
+и lesson/skill reviews остаются обязательными; run завершается явно.
+Эти beliefs — проверка протокола, не измеренные metrics и не model parity.
+
+В каждом case ровно **два** scorer invocations с MSE
+**0.13721179500378475 / 0.01337676906957059**, два terminal events и **три** русских
+commentary rows. Agent-loss использует **один** engine; engine-loss — исходный и
+**один** replacement. Protected scorer bytes неизменны; `inspect`/`replay` проходят.
+Minimal remote MCP client не имеет FastAPI, запрещает FastAPI/Uvicorn imports,
+читает все **32** phases до/после reconnect. Proof:
+`.tmp/external-value-retry-proof-2/acceptance.json`.
+
+Первый live fixture пытался передать `value_weight` в `set_strategy.policy_params`
+и был правильно отклонён API: weight — фиксированная operator obligation; агент
+может менять policy и разрешённые параметры. Fixture исправлен через launch flag,
+API не ослаблен. Synthetic retarget fixture уточнён до настоящего `metric_retarget`
+с существующим extra metric и сохранённым direction, вместо неизвестного event.
+Начальный targeted набор после runtime fix — **36 passed**; окончательные
+**семь** новых retry checks вместе с external selection — **11 passed**.
+Перед изменением прошли **193 replay** проверки. Guide, AGENTS, MCP instructions,
+manifest и full B/E diagram обновлены.
+Финальный backend/MCP/progress набор — **347 passed**; ещё **31 docs/diagram**
+check и `mkdocs build --strict` прошли. API reference регенерирован без изменения
+маршрутов; defaults и event schema не менялись.
 Модельные решения, interactive client approvals, многочасовые сеансы и physical
 remote transfer остаются открытыми.

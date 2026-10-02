@@ -61,6 +61,9 @@ reason and is invalidated when the board or measured outcomes change.
 If `select_verifier` exposes a tie, score its complete evidence-bound group via
 `harness-selection/verify`. With active MCTS `value_weight`, estimate all current
 branches via `harness-selection/values`; both block the next candidate when due.
+Preserve a value request's original `expected_evidence_revision` with its body/action ID.
+An exact retry only acknowledges the original batch; changing that revision is a conflict.
+After reset, read the current batch and author fresh estimates under a new action ID.
 With `lessons_every`, record skill reviews at each configured node window;
 lesson reviews are also due there when `comparative_lessons` is enabled. Both
 reviews are due at finish, including a reason when no conclusion is supported.

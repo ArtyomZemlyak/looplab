@@ -38,7 +38,7 @@ from looplab.serve.server import make_app
 CASES = ("agent_loss", "engine_loss")
 
 
-def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, response_fault="disconnect", read_fault="disconnect", discovery_fault="none", mcp_python=None, result_backlog=False, failed_first=False, obligations=False, damaged_journals=False):
+def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, response_fault="disconnect", read_fault="disconnect", discovery_fault="none", mcp_python=None, result_backlog=False, failed_first=False, obligations=False, damaged_journals=False, value_recovery=False):
     root.mkdir(parents=True, exist_ok=False)
     runs = root / "runs"; runs.mkdir()
     source = root / "source"; source.mkdir()
@@ -313,6 +313,47 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
             assert after == before, after[len(before):].decode("utf8")
             proof.update(backlog_node_order=seen, backlog_commentary_changed_no_work=True,
                          typed_result_notices=True)
+        if value_recovery:
+            await client.call("phases", {"query": "strategy"})
+            await client.call("phase_info", {"phase_id": "strategy"})
+            await client.command("set_strategy", {"strategy": {"policy": "mcts"}}, "idle:mcts")
+            await until(client.progress, lambda row: row["policy_preview"]["policy"] == "mcts")
+            await client.call("phases", {"query": "value_estimate"})
+            phase = await client.call("phase_info", {"phase_id": "value_estimate"})
+            assert phase["write_access"]["POST /api/runs/{run_id}/harness-selection/values"] == "external_agent"
+            observed = await client.read("harness-selection")
+            assert len(observed["value_candidates"]) == 2 and observed["value_weight"] == .4
+            body = {"expected_generation": generation, "action_id": "idle:values",
+                "expected_evidence_revision": observed["evidence_revision"],
+                "estimates": [{"node_id": n["node_id"], "generation": n["generation"],
+                    "value": .5, "rationale": "Scripted recovery belief, not measured quality or a model judgment."}
+                    for n in observed["value_candidates"]]}
+            first = await client.request("POST", "harness-selection/values", body)
+            assert not first["replayed"] and first["count"] == 2
+            before = (rd / "events.jsonl").read_bytes()
+            assert (await client.request("POST", "harness-selection/values", body))["replayed"]
+            await client.request("POST", "harness-selection/values", {**body,
+                "expected_evidence_revision": "f" * 64}, status=409)
+            assert (rd / "events.jsonl").read_bytes() == before
+            assert not (await client.read("harness-selection"))["value_candidates"]
+            assert not any(row["phase_id"] == "value_estimate" for row in
+                           (await client.progress())["candidate_blockers_if_expanding"])
+            greedy = await client.command("set_strategy", {"strategy": {"policy": "greedy"}}, "idle:greedy")
+            await until(client.progress, lambda row: row["policy_preview"]["policy"] == "greedy")
+            await until(settled_trust, lambda rows: any(row.type == "command_ack" and
+                row.data.get("command_id") == greedy["command"]["id"] for row in rows))
+            before = (rd / "events.jsonl").read_bytes()
+            assert (await client.request("POST", "harness-selection/values", body))["replayed"]
+            await client.request("POST", "harness-selection/values", {**body,
+                "expected_evidence_revision": "f" * 64}, status=409)
+            assert (rd / "events.jsonl").read_bytes() == before
+            assert (await client.read("harness-selection"))["value_weight"] == 0
+            rows = EventStore(rd / "events.jsonl").read_all()
+            assert len([row for row in rows if row.type == "node_value_estimated"]) == 2
+            assert [row.data["strategy"]["policy"] for row in rows if row.type == "strategy_decision"] == ["mcts", "greedy"]
+            proof.update(value_batch_count=2, value_retry_changed_no_work=True,
+                         value_conflicting_revision_refused=True, value_replay_after_greedy=True,
+                         explicit_policy_switches=["mcts", "greedy"])
         if obligations:
             before = (rd / "events.jsonl").read_bytes()
             journals = {kind: (rd / f"harness_{kind}.jsonl").read_bytes() for kind in ("reviews", "decisions")}
@@ -458,6 +499,8 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
         if obligations:
             flags.update(deep_research_every=1, report_every=1, novelty_mode="llm", concept_run_base=True,
                          reflection_priors=True, lessons_every=1, comparative_lessons=True)
+        if value_recovery:
+            flags.update(mcts_value_weight=.4)
         command = [sys.executable, "-m", "looplab.cli", "run", str(task_path), "--out", str(runs / "demo"),
                    "--backend", "toy", "--max-nodes", "3"]
         for key, value in flags.items():
@@ -583,6 +626,8 @@ def main():
                         help="Enable research/concepts/report/novelty and lesson/skill reviews; restore old journal receipts after new results. Requires --result-backlog.")
     parser.add_argument("--damaged-journals", action="store_true",
                         help="Damage private decision/review sources; prove refusal without writes, then restore fixture backups. Requires --obligations.")
+    parser.add_argument("--value-recovery", action="store_true",
+                        help="Switch greedy/MCTS and recover a complete value batch on two measured nodes. Requires --result-backlog, excludes --failed-first.")
     args = parser.parse_args()
     if not 0 <= args.quiet_hold_seconds <= 14400:
         parser.error("quiet hold must be between zero and four hours")
@@ -602,11 +647,13 @@ def main():
         parser.error("obligations requires --result-backlog")
     if args.damaged_journals and not args.obligations:
         parser.error("damaged-journals requires --obligations")
+    if args.value_recovery and (not args.result_backlog or args.failed_first):
+        parser.error("value-recovery requires --result-backlog and two successful nodes (no --failed-first)")
     root = args.out.resolve(); root.mkdir(parents=True, exist_ok=False)
     mcp_python = str(args.mcp_python.resolve()) if args.mcp_python else None
     if mcp_python and not Path(mcp_python).is_file():
         parser.error("MCP interpreter does not exist")
-    proof = [run_case(root / name, name, args.quiet_hold_seconds, args.drop_command_response, args.response_fault, args.read_fault, args.discovery_fault, mcp_python, args.result_backlog, args.failed_first, args.obligations, args.damaged_journals)
+    proof = [run_case(root / name, name, args.quiet_hold_seconds, args.drop_command_response, args.response_fault, args.read_fault, args.discovery_fault, mcp_python, args.result_backlog, args.failed_first, args.obligations, args.damaged_journals, args.value_recovery)
              for name in CASES if args.case in ("all", name)]
     (root / "acceptance.json").write_text(json.dumps(proof, ensure_ascii=False, indent=2), encoding="utf8")
 

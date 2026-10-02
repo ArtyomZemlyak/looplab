@@ -142,10 +142,18 @@ def estimate_values(srv, rd: Path, body) -> dict:
             state = fold(events)
             request = [row.model_dump() for row in body.estimates]
             digest = _request_hash(request)
-            older = next((e for e in events if e.type == EV_NODE_VALUE_ESTIMATED
-                          and e.data.get("action_id") == body.action_id), None)
-            if older is not None:
-                if older.data.get("request_sha256") != digest:
+            older_index = next((i for i, e in enumerate(events) if e.type == EV_NODE_VALUE_ESTIMATED
+                                and e.data.get("action_id") == body.action_id), None)
+            if older_index is not None:
+                older = events[older_index]
+                # The revision is authored request content too. Recover its
+                # original value from the prefix before the batch's FIRST event:
+                # CAS publication proved that prefix was the reviewed state.
+                # This fences old receipts as well, without changing their schema
+                # or refreshing an old estimate against today's measured outcomes.
+                original_revision = evidence_revision(fold(events[:older_index]))
+                if (older.data.get("request_sha256") != digest
+                        or body.expected_evidence_revision != original_revision):
                     raise HTTPException(409, "value action_id reused differently")
                 return {"ok": True, "replayed": True}
             if body.expected_evidence_revision != evidence_revision(state):

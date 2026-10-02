@@ -592,6 +592,15 @@ The normal control cycle is:
    with a positive value weight. A reset or new
    measurement requires a fresh judgment. These are the external agent's
    assessments, not independent model verification.
+   Preserve the entire value request, including `expected_evidence_revision`,
+   estimates and `action_id`. An exact retry acknowledges the original batch,
+   even after a policy switch, reset, new outcome or tombstone; it never writes
+   fresh estimates. Changing the evidence revision under that action ID is a
+   conflicting request and returns 409, even with identical estimates. LoopLab
+   reconstructs the original reviewed evidence from the event prefix before the
+   batch's first `node_value_estimated` event, so existing events need no migration.
+   After reset, read the current complete candidate batch and publish a justified
+   new review with a new action ID. Old ACKs do not close the new value obligation.
    With `reflection_priors` and `lessons_every` enabled, review skill candidates
    at each configured node interval; review lessons there when
    `comparative_lessons` is also enabled. Both reviews are due at finalization.
@@ -1174,6 +1183,16 @@ operator restores its own known-good backup; the server performs no repair.
 After restoration the old receipts replay, stay superseded, and require current
 finish evidence as above. The byte attribution check waits for the specific
 existing report command's engine acknowledgement, which may follow its intake receipt.
+Add `--value-recovery` with `--result-backlog` to exercise explicit greedy → MCTS →
+greedy switches on two successful measured SGD nodes. The fixture operator sets
+`mcts_value_weight=0.4` at launch; the scoped agent switches only the policy.
+It submits the complete batch with clearly labelled scripted headroom beliefs,
+replays its original request, refuses changed evidence revision under that action,
+then replays again after returning to greedy. Exactly two value events and two
+applied strategy decisions are recorded, without extra scoring. This option excludes
+`--failed-first`: MCTS branch review needs two eligible measured branches.
+Combine it with `--obligations` and `--mcp-python` for report/review and minimal
+remote-client coverage; use a fresh output directory for each probe.
 `--case agent_loss --drop-command-response --read-fault stale_result_generation`
 instead replaces a successful result page's generation at the owned proxy. The
 typed tool must return unavailable context without those receipts; the next explicit
