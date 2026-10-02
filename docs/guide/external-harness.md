@@ -1433,6 +1433,11 @@ Statistical representation closeness never enlarges the declared scientific
 tolerance: both passing and failed equivalence verdicts must agree with the
 actual paired samples, including a zero tolerance. A contradictory rounded
 verdict is unavailable evidence even when its receipt hash matches.
+Nonfinite decoded numbers and overflowed total execution costs also supply no
+verdict. A malformed check ACK returns unknown without its body; malformed history
+is unavailable. Read the original receipt explicitly before recovery; validation
+does not automatically retry the check. Finite extra result fields remain readable
+and covered by the receipt hash.
 Passing regressions require actual nonempty artifact receipts on both sides.
 Before a fresh CAS the server also validates every launched probe and repetition,
 the complete declared artifact sets, the operator's tolerance and source-score

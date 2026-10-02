@@ -113,7 +113,10 @@ def gate(row):
                 and r.get("kind") in ("test", "regression", "repair", "equivalence")
                 and (r["kind"] != "equivalence" or equivalence(r)) for r in row["checks"])
         and number(row.get("eval_seconds")) and row["eval_seconds"] >= 0
-        and math.isclose(row["eval_seconds"], sum(r["seconds"] for r in row["executions"]), rel_tol=1e-9, abs_tol=1e-9)
+        # Individually finite JSON numbers can overflow when combined. Reject
+        # their aggregate before converting it inside math.isclose.
+        and number(total_seconds := sum(r["seconds"] for r in row["executions"]))
+        and math.isclose(row["eval_seconds"], total_seconds, rel_tol=1e-9, abs_tol=1e-9)
         and (not row["passed"] or passing_checks(row)))
 
 

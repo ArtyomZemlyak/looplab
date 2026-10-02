@@ -1,5 +1,6 @@
 """Corrupt real measured gate replies; a digest alone is not complete evidence."""
 from copy import deepcopy
+import json
 import math
 import statistics
 import sys
@@ -95,6 +96,62 @@ def test_incomplete_gate_history_is_unavailable(measured, missing):
         assert result["outcome"] == "unavailable" and "body" not in result, result
     finally:
         api.client.close()
+
+
+@pytest.mark.parametrize("case", ["cost_sum_overflow", "metric_overflow", "extra_nonfinite"])
+def test_extreme_wire_numbers_refuse_without_tool_crash_or_retry(measured, case):
+    lane, store, request, original = measured
+    receipt = deepcopy(original)
+    result = receipt["result"]
+    if case == "cost_sum_overflow":
+        for row in result["executions"]:
+            row["seconds"] = 10 ** 308
+        result["eval_seconds"] = 10 ** 308
+        receipt["evidence_token"] = digest(result)
+    else:
+        # 1e309 is valid JSON syntax, but decoding it yields a nonfinite float.
+        # Unknown extensions remain readable only if canonicalization is safe.
+        target = result["executions"][0] if case == "metric_overflow" else result
+        target["metric" if case == "metric_overflow" else "extra"] = "WIRE_OVERFLOW"
+    wire = json.dumps(receipt).replace('"WIRE_OVERFLOW"', '1e309')
+    before, calls = store.path.read_bytes(), []
+    api = HarnessAPI("http://localhost", transport=httpx.MockTransport(
+        lambda r: (calls.append(r), httpx.Response(200, content=wire))[1]))
+    try:
+        reply = api.upstream_write("run", "check", request)
+        assert reply.get("outcome") == "unknown" and "body" not in reply, reply
+        page = deepcopy(lane.read(request["expected_generation"]))
+        saved = next(row for row in page["history"] if row["type"] == "upstream_gate_finished")
+        saved.update({k: receipt[k] for k in ("result", "evidence_token")})
+        api.client.close()
+        wire = json.dumps(page).replace('"WIRE_OVERFLOW"', '1e309')
+        api = HarnessAPI("http://localhost", transport=httpx.MockTransport(
+            lambda r: httpx.Response(200, content=wire)))
+        reply = api.upstream_status("run", request["expected_generation"])
+        assert reply.get("outcome") == "unavailable" and "body" not in reply, reply
+    finally:
+        api.client.close()
+    assert len(calls) == 1 and store.path.read_bytes() == before
+    assert lane.check(request) == original
+
+
+def test_finite_result_extensions_remain_readable_and_hash_bound(measured):
+    lane, store, request, original = measured
+    receipt = deepcopy(original)
+    receipt["result"]["extra"] = {"future_observation": 1.5}
+    receipt["evidence_token"] = digest(receipt["result"])
+    before = store.path.read_bytes()
+    api = HarnessAPI("http://localhost", transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json=receipt)))
+    try:
+        reply = api.upstream_write("run", "check", request)
+        assert not reply.get("code") and reply["body"] == receipt, reply
+        receipt["evidence_token"] = original["evidence_token"]
+        reply = api.upstream_write("run", "check", request)
+        assert reply.get("outcome") == "unknown" and "body" not in reply, reply
+    finally:
+        api.client.close()
+    assert store.path.read_bytes() == before and lane.check(request) == original
 
 
 @pytest.mark.parametrize("case", ["zero", "boundary", "negative", "false_failure"])

@@ -1486,3 +1486,33 @@ experiment на новой базе, replay/export и неизменные owner
 Это protocol acceptance; paid critic/model judgments, Docker/host scorer,
 environment installation, произвольные dependency closures и полный suite
 всего проекта этим ревью не проверены. Ограничения раздела 18.4 сохраняются.
+
+### 18.17 Числовой overflow не обрывает MCP recovery (2026-10-02)
+
+Повторный review от HEAD `847f82bf0` обнаружил ещё один разрыв typed ACK:
+`upstream_write` вычислял canonical hash результата до безопасной semantic
+validation. JSON literal `1e309` декодируется в nonfinite float; в metric и даже
+unknown extra field это приводило к `ValueError` вместо unknown receipt. Третий
+red case содержал по отдельности конечные integer execution costs, сумма которых
+превышала float range: `math.isclose` выбрасывал `OverflowError`. Все три ошибки
+воспроизведены на транспортной копии настоящего SGD receipt, без изменения
+primary score, реальных charge events или saved result.
+
+`looplab/core/upstream_evidence.py::gate` проверяет конечность суммы до числового
+сравнения. `looplab/harness/mcp_server.py::HarnessAPI.upstream_write` передаёт
+валидацию результата и его hash существующему guarded
+`looplab/harness/upstream_receipts.py::event`, до небезопасной canonicalization.
+Malformed HTTP 200 теперь возвращает unknown write или unavailable history без
+body, не вызывает tool exception, повторную training, engine wait или resume.
+Exact retry сохраняет оригинальный measured receipt. Finite future fields по-прежнему
+читаются; изменение extension без обновления hash отвергается.
+
+Replay first — 193 passed; первичный receipt/admission/claim/HTTP regression —
+49 passed; весь upstream/MCP regression — 175 passed. Documentation/claim pins/
+layering/containment/API/event contracts — 98 passed. Strict MkDocs, Ruff и
+whitespace check прошли. UI и scientific operator tolerances не изменены.
+`.tmp/doc72-overflow-sgd/acceptance.json`: отдельный UI server + scoped stdio MCP,
+2 primary CPU SGD trainings, 7 gate executions и 3 confirmation seeds на original
+base/files, exact retry без reexecution, replay/export и owner/scorer preservation
+прошли. Scope остаётся declared CPU protocol acceptance; paid model judgments
+и полный suite проекта этим исправлением не проверены.

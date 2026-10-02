@@ -402,8 +402,9 @@ class HarnessAPI:
                 measured = receipt.get("result")
                 valid = (isinstance(measured, dict) and type(measured.get("passed")) is bool
                     and receipt["status"] == ("succeeded" if measured["passed"] else "failed")
-                    and isinstance(measured.get("checks"), list) and isinstance(measured.get("executions"), list)
-                    and receipt.get("evidence_token") == digest(measured))
+                    and isinstance(measured.get("checks"), list) and isinstance(measured.get("executions"), list))
+            # event validates numeric evidence and safely checks its canonical
+            # hash. Never hash an untrusted result first: JSON 1e309 decodes to inf.
             from looplab.harness.upstream_receipts import event
             if valid:
                 valid = event(receipt, receipt["event_type"]) and receipt["status"] == (
