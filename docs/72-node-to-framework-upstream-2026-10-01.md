@@ -831,3 +831,60 @@ scorer проверены. Origin fixture сохраняется как required
 gate и advancement с CAS; далее Maintainer lane и UI. Initial pin не продвигает
 возможности из Node.files в базу, не сравнивает шкалы разных задач и не заменяет
 идентичность data/environment/host scorer или полноту объявленных dependencies.
+
+## 17. Финальное ревью оставшихся WP1–WP3 перед реализацией
+
+Цель — законченный путь nomination → Maintainer → измеренный gate → explicit
+CAS advancement → новые seeds → provenance в UI/отчёте. Одни названия событий
+не закрывают пункты. Defaults остаются прежними; оператор включает `upstream`
+в новой pinned repo-задаче с явной scorer boundary и regression probes. Никакой
+записи в owner checkout, push или автоматического изменения scoring contract.
+
+Поправки к исходному предложению:
+
+1. Run-owned reachable git repository/worktree служит Maintainer, не узлам.
+   Authoritative база — verified archive полученных bytes. Git refs/commit нужны
+   для review и reachability, а не вместо проверки archive. Все edits проходят
+   существующую surface/protect проверку; совмещённый защищённый trainer/scorer
+   требует operator split и здесь не обходит защиту.
+2. Hunk nomination содержит path/ranges/hash и происхождение current lifecycle.
+   Config hunk сам по себе — recipe; repair-origin и exact pending env trigger
+   номинируют capability. Это совет, не доказательство причины/полезности.
+   Promoted hunk signatures и база доступны Researcher/внешнему агенту для дедупа.
+3. Maintainer авторствует обобщённый patch и отдельный recipe источника на новой
+   базе. Recipe вне затронутых capability paths сохраняет source bytes; flag,
+   прежний default, документация, tests и critic фиксируются для review. Critic —
+   явно agent-authored суждение, которое не заменяет execution evidence.
+4. Gate выполняет объявленные tests, полную source evaluation на старой/новой
+   базе (повторы и шум), operator-declared old-recipe artifact regression probes.
+   Repair capability дополнительно требует объявленный trigger probe: old fails,
+   new passes. Canary не заменяет его. Operator stages выигрывают, opaque score
+   не дублируется дополнительной training стадией. Gate execution/logs/cost и
+   source node score — разные записи; проверка не публикует новый Node.metric.
+5. Gate bind включает candidate/source/recipe/task/config и declared evaluator
+   bytes, bounded mounted-input fingerprints и environment. Unsupported или
+   неполное evidence отказывает; noise не отменяет scorer/input drift. Это scope
+   объявленных observable probes, не доказательство произвольных dependencies.
+6. Claim пишется до исполнения. Lost reply восстанавливается exact action/body;
+   crashed started gate не перезапускается молча. Operator recovery явно abandons
+   старую попытку, новая проверка имеет новую identity. CAS advance перепроверяет
+   текущие inputs/source/base и measured verdict, публикует событие атомарно.
+7. Для первой законченной реализации advancement требует остановленного engine:
+   UI/assistant явно сообщает «pause, дождаться выхода, advance, resume». Так все
+   роли при resume получают один provider; background builds не переключаются
+   посреди model call. Это явное требование, не hidden command wait. Начатые
+   evaluations не переписываются; очередные lifecycle получают новую базу.
+8. Pending overlays выполняют three-way merge старой базы, новой базы и overlay;
+   exact duplicate исчезает, nonoverlap переносится, conflict оставляет целый
+   node на verified старой базе с причиной. Ни конфликт, ни новая база не стирают
+   measured history и не объявляют все прежние результаты сравнимыми.
+9. UI показывает digest/origin/source capability и conflict, фильтр по measured
+   базе и историю gate/advance. Основные действия доступны через Assistant tools
+   и scoped harness MCP; owner task declarations/recovery остаются operator-only.
+
+Приёмка закрытия: реальные короткие training source + generalization + paired
+gate + advance + следующий узел без дублирующего runner; failed gate/scorer drift/
+data drift/stale source/base/CAS, lost ACK/crashed claim/recovery, protected writes,
+three-way nonoverlap/conflict и reset, archive/export/replay, external MCP и UI.
+Документ отмечает поддержку по этому scope и точные оставшиеся ограничения;
+маркер снимается по исполняемому пути, а не по появлению символа.
