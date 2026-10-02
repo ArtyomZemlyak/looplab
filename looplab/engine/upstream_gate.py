@@ -64,17 +64,6 @@ def input_identity(task, settings, source, proposal):
             if body is None or len(body) > 64 * 1024 * 1024:
                 raise UpstreamRefusal("upstream_input_unavailable", f"Input {name} is missing or unsupported")
             inputs.append([name, hashlib.sha256(body).hexdigest()])
-    python = spec.get("task_python") or sys.executable
-    try:
-        # Uncached: installing/changing a distribution invalidates the gate at CAS.
-        probe = subprocess.run([python, "-c", "import sys,json,platform,importlib.metadata as m;print(json.dumps([sys.executable,sys.version,platform.platform(),sorted((d.metadata['Name'],d.version) for d in m.distributions())]))"],
-            cwd=str(Path(rd) if (rd := proposal["selector"]["run_dir"]) else Path.cwd()),
-            capture_output=True, timeout=30)
-        env = json.loads(probe.stdout) if probe.returncode == 0 and len(probe.stdout) <= 256 * 1024 else None
-    except (OSError, ValueError, subprocess.SubprocessError):
-        env = None
-    if env is None:
-        raise UpstreamRefusal("upstream_environment_unavailable", "Cannot read the evaluator interpreter's environment")
     for selector in (proposal["old_selector"], proposal["selector"]):
         selected_seed_base(selector)
     snapshots = {}
@@ -84,11 +73,51 @@ def input_identity(task, settings, source, proposal):
             raise UpstreamRefusal("upstream_snapshot_unavailable", "Task/config snapshot is missing or unreadable")
         snapshots[name] = hashlib.sha256(raw).hexdigest()
     context = evaluation_context(task, settings, events_for(Path(proposal["selector"]["run_dir"])))
+    env = environment_identity(spec, settings, context, proposal["selector"]["run_dir"])
     from looplab.engine.shared import effective_eval_spec
     return digest({"task": task.model_dump(), "settings": settings.model_dump(), "snapshots": snapshots,
                    "effective_eval_spec": effective_eval_spec(context),
                    "source": node_signature(source), "proposal": proposal,
                    "inputs": inputs, "environment": env, "process_env": dict(os.environ)})
+
+
+def evaluation_env(settings, spec):
+    """The same declared run/task environment for probing and gate execution."""
+    from looplab.core.envsafe import merge_env
+    return merge_env(settings.eval_env, spec.get("eval_env", {}), {"PYTHONDONTWRITEBYTECODE": "1"})
+
+
+def environment_identity(spec, settings, context, rd):
+    """Uncached selected-interpreter distributions under actual declared env layers.
+
+    Stage environments are operator-only; use the pipeline's validated stages.
+    Identical envs share a probe within this read, never across gate/CAS reads.
+    The whole observation retains the previous 30-second bound.
+    """
+    from looplab.core.envsafe import is_secret_env, merge_env
+    python = spec.get("task_python") or sys.executable
+    base = evaluation_env(settings, spec)
+    contexts = [("evaluation", base)] + [(s["name"], merge_env(base, s.get("env")))
+        for s in context._operator_stages(context._eval_spec) or []]
+    process = {k: v for k, v in os.environ.items() if not is_secret_env(k, v)}
+    deadline, cache, observed = time.monotonic() + 30, {}, []
+    for label, declared in contexts:
+        identity = digest(declared)
+        if identity not in cache:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise UpstreamRefusal("upstream_environment_unavailable", "Evaluator environment observation exceeded its time bound")
+            try:
+                probe = subprocess.run([python, "-c", "import sys,json,platform,importlib.metadata as m;print(json.dumps([sys.executable,sys.version,platform.platform(),sorted((d.metadata['Name'],d.version) for d in m.distributions())]))"],
+                    cwd=str(rd), env=merge_env(process, declared), capture_output=True, timeout=remaining)
+                value = json.loads(probe.stdout) if probe.returncode == 0 and len(probe.stdout) <= 256 * 1024 else None
+            except (OSError, ValueError, subprocess.SubprocessError):
+                value = None
+            if value is None:
+                raise UpstreamRefusal("upstream_environment_unavailable", "Cannot read the evaluator interpreter's declared environment")
+            cache[identity] = value
+        observed.append([label, identity, cache[identity]])
+    return observed
 
 
 def evaluation_context(task, settings, events):
@@ -104,7 +133,6 @@ def evaluation_context(task, settings, events):
 
 
 def execute_gate(rd, task, settings, source, proposal, manifest, action_id, charge):
-    from looplab.core.envsafe import merge_env
     from looplab.engine.shared import effective_eval_spec, effective_max_eval_timeout
     spec, declaration = task.repo_spec(), task.upstream
     before = input_identity(task, settings, source, proposal)
@@ -124,7 +152,7 @@ def execute_gate(rd, task, settings, source, proposal, manifest, action_id, char
         write_overlay(work, files, deleted)
         if boundary_at(work, spec["scorer_boundary"]) != baseline_boundary:
             raise UpstreamRefusal("upstream_scorer_changed", "Gate workspace changed declared scorer bytes")
-        env = merge_env(settings.eval_env, spec.get("eval_env", {}), {"PYTHONDONTWRITEBYTECODE": "1"})
+        env = evaluation_env(settings, spec)
         events = events_for(Path(rd))
         context = evaluation_context(task, settings, events)
         es = effective_eval_spec(context)

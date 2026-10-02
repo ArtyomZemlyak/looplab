@@ -1421,6 +1421,16 @@ timeout after a gate requires a fresh check/action ID before CAS; exact retries
 still recover the original evidence. Probe-specific timeouts remain operator
 declared. These bounded gate executions do not open node monitor questions.
 
+The selected interpreter's distribution identity is read under the same
+run/task env merge and each validated operator-stage env override. A changed
+distribution exposed through declared `PYTHONPATH` invalidates advancement even
+when the server's own environment is unchanged. Identical environments share an
+observation within one read; gate and CAS always read again, with a shared
+30-second observation bound. Wrappers and undeclared dependency closures retain
+the scope limits in doc 72. A `valid` execution cannot contain a timed-out or
+failed stage; contradictory MCP evidence supplies no verdict. Genuine failed
+executions remain readable diagnostics.
+
 The scoped token may write this lane on external runs; internal runs require the
 owner credential. Task declarations and interrupted-claim recovery are owner-only.
 The UI Assistant uses the same lane with its ordinary approval policy. No hidden

@@ -43,6 +43,13 @@ def damage(receipt, case):
         result["executions"][-1]["stages"] = "not a stage receipt"
     elif case == "stage_fields":
         del result["executions"][-1]["stages"][0]["exit_code"]
+    elif case == "stage_failed":
+        result["executions"][-1]["stages"][0]["status"] = "fail"
+        result["executions"][-1]["stages"][0]["exit_code"] = 1
+    elif case == "stage_timeout":
+        result["executions"][-1]["stages"][0]["status"] = "timeout"
+    elif case == "valid_timeout":
+        result["executions"][0]["timed_out"] = True
     elif case == "proposal":
         receipt["proposal_id"] = "up_" + "0" * 24
     elif case == "version":
@@ -52,7 +59,7 @@ def damage(receipt, case):
 
 
 @pytest.mark.parametrize("case", ["equivalence", "test", "regression", "samples", "statistics", "mean",
-    "source", "profile", "execution", "stages", "stage_fields", "proposal", "version"])
+    "source", "profile", "execution", "stages", "stage_fields", "stage_failed", "stage_timeout", "valid_timeout", "proposal", "version"])
 def test_incomplete_passing_ack_is_unknown_and_never_retried(measured, case):
     lane, store, request, original = measured
     receipt = deepcopy(original)

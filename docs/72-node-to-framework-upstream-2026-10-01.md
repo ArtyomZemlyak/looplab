@@ -1181,3 +1181,38 @@ scoped stdio MCP, 2 primary SGD trainings, 7 gate executions, 3 confirmation see
 Ранее записанные ACK не переписываются: новый input binding может потребовать
 fresh gate перед новым CAS; exact retry подтверждает прежний ACK, не новую
 сертификацию. Изменений launch defaults или автоматического resume нет.
+
+### 18.9 Declared environment и согласованность runtime evidence (2026-10-02)
+
+Следующий проход воспроизвёл ещё два дефекта:
+
+1. Interpreter distributions читались только в environment сервера. Оценка же
+   использует `Settings.eval_env` → `eval.env` → `stages[].env`. Во всех трёх
+   случаях actual SGD pipeline импортировал dependency через declared PYTHONPATH;
+   изменение её distribution version после passing gate не запрещало CAS.
+   Теперь fingerprint читает selected interpreter под теми же env слоями.
+   Stage declarations берутся из общего validated operator-stage reader; env
+   execution и observation используют одну композицию. Secret host variables
+   не передаются probe. Одинаковые env делят один subprocess внутри read, но не
+   между gate и CAS. Общий предел observation остаётся 30 секунд, не 30 на stage.
+   Exact ACK не покупает training и не освежает evidence; новая версия требует
+   fresh gate/action ID. Scope selected interpreter/declared observables сохраняется:
+   это не полный hash произвольных библиотечных bytes или wrapper environment.
+2. Shape-complete MCP result мог сообщать `valid=true`, полный passing gate и
+   одновременно `stage.status=fail|timeout`. Matching evidence token этого не
+   выявлял. Проверка execution теперь требует, чтобы valid row не была timed out,
+   а её stages имели успешный status и exit code 0. Настоящие failed/timeout
+   diagnostics с `valid=false` остаются читаемыми и не разрешают advancement.
+
+Actual dependency-import cases сначала упали для task/run/stage env; два
+contradictory-stage ACK cases тоже упали до правки. Первые targeted environment,
+receipt, budget, repair и HTTP/MCP guards после исправления: 38 passed.
+
+Финальная проверка этого прохода: 916 Python tests passed, 31 platform/optional
+skips; docs/API/event/layout/layering/containment/diagram guards — 968 passed.
+Strict MkDocs, Ruff и whitespace check прошли.
+`.tmp/doc72-fix-acceptance/acceptance.json`: private server и scoped stdio MCP,
+2 primary SGD trainings, 7 gate executions и 3 confirmation seeds. Original
+confirmation base/files, exact retries без reexecution, replay/export и
+неизменные owner/scorer bytes подтверждены. Это короткая CPU protocol acceptance;
+ограничения selected interpreter и declared observables выше сохраняются.

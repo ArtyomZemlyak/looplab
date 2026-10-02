@@ -43,7 +43,9 @@ def execution(row):
         and isinstance(row.get("workdir"), str) and isinstance(row.get("artifacts"), dict)
         and all(isinstance(k, str) and sha(v) for k, v in row["artifacts"].items())
         and "stages" in row and (row["stages"] is None or isinstance(row["stages"], list)
-            and all(stage(s) for s in row["stages"])))
+            and all(stage(s) for s in row["stages"]))
+        and (not row["valid"] or not row["timed_out"] and all(
+            s["status"] in ("ok", "reused") and s["exit_code"] == 0 for s in row["stages"] or [])))
 
 
 def equivalence(row):

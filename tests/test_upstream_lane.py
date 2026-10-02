@@ -28,7 +28,7 @@ from looplab.runtime.command_eval import run_command_eval
 
 
 
-def fixture(tmp_path, *, base_train=TRAIN, source_files=None, upstream_policy=None, repair_from=None, base_files=None):
+def fixture(tmp_path, *, base_train=TRAIN, source_files=None, upstream_policy=None, repair_from=None, base_files=None, eval_env=None):
     src, origin, rd = (tmp_path / name for name in ("owner", "origin", "run"))
     for p in (src, origin, rd):
         p.mkdir()
@@ -42,6 +42,7 @@ def fixture(tmp_path, *, base_train=TRAIN, source_files=None, upstream_policy=No
     task = RepoTask(goal="SGD", direction="min", editable_path=str(src), seed_base=selector,
         edit_surface=["train.py", "recipe.env", "README.md"],
         eval=EvalSpec(command=[sys.executable, "score.py"], timeout=10,
+            env=eval_env or {},
             stages=[{"name": "train", "command": [sys.executable, "train.py"], "timeout": 10},
                     {"name": "score", "command": [sys.executable, "score.py"], "timeout": 10}],
             metric={"kind": "stdout_json", "key": "metric"}, scorer_boundary={"files": ["score.py"]}),
@@ -62,13 +63,13 @@ def fixture(tmp_path, *, base_train=TRAIN, source_files=None, upstream_policy=No
     receipt["node_id"], receipt["generation"] = 0, 0
     if repair_from is not None:
         write_overlay(work, repair_from)
-        failed = run_command_eval([sys.executable, "score.py"], str(work), 10, task.eval_spec()["metric"], stages=task.eval_spec()["stages"])
+        failed = run_command_eval([sys.executable, "score.py"], str(work), 10, task.eval_spec()["metric"], stages=task.eval_spec()["stages"], env=eval_env)
         assert failed.exit_code != 0 and failed.metric is None
         store.append("node_repaired", {"node_id": 0, "generation": 0, "attempt": 1,
             "files": files, "deleted": [], "changed": True, "error_in": "train", "triage_action": "repair",
             "stages_passed": [], "rationale": "Negative momentum unsupported by the original runner", "eval_seconds": 0.1})
     write_overlay(work, files)
-    result = run_command_eval([sys.executable, "score.py"], str(work), 10, task.eval_spec()["metric"], stages=task.eval_spec()["stages"])
+    result = run_command_eval([sys.executable, "score.py"], str(work), 10, task.eval_spec()["metric"], stages=task.eval_spec()["stages"], env=eval_env)
     assert result.exit_code == 0 and result.metric is not None
     store.append("node_evaluated", {"node_id": 0, "metric": result.metric, "task_metric": result.metric,
         "eval_seconds": 0.1, "violations": [], "metric_provenance": {"base_revision": receipt}})
