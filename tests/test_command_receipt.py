@@ -116,3 +116,22 @@ def test_oversized_receipt_is_unavailable_without_a_partial_success(tmp_path, mo
     response = client.get("/api/runs/demo/command-receipt", params={
         "expected_generation": gen, "command_id": row["id"]}, headers={"X-LoopLab-Token": "agent-secret"})
     assert response.status_code == 503 and path.read_bytes() == before
+
+
+@pytest.mark.parametrize("changes", [{"event_seq": True}, {"event_seq": -1}, {"event_seq": "3"},
+    {"error": []}, {"error": "failed"}, {"error": {"code": None}},
+    {"error": {"code": ["failed"]}}, {"error": {"retryable": 1}}, {"error": {"retryable": "false"}}])
+def test_receipt_does_not_launder_damaged_error_or_sequence(tmp_path, monkeypatch, changes):
+    rd, store, client, service = _client(tmp_path, monkeypatch)
+    generation = run_generation_token(store.read_all())
+    path, row = _record(rd, generation, "rejected", **changes)
+    def forbidden(*args, **kwargs):
+        pytest.fail("receipt repair reached a mutation path")
+    for name in ("sequence", "_start_worker", "_save", "_read_existing"):
+        monkeypatch.setattr(service, name, forbidden)
+    before = path.read_bytes()
+    result = client.get("/api/runs/demo/command-receipt", params={
+        "expected_generation": generation, "command_id": row["id"]},
+        headers={"X-LoopLab-Token": "agent-secret"})
+    assert result.status_code == 503, result.text
+    assert path.read_bytes() == before

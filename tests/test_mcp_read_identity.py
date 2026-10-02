@@ -10,8 +10,9 @@ from tests.test_harness_connection import GEN, response
 
 
 def _receipt(generation=GEN, command_id=None):
-    return {"generation": generation, "terminal": True,
-            "command": {"id": command_id or command_identity("original-key")[0], "status": "succeeded"}}
+    return {"version": 1, "generation": generation, "terminal": True,
+            "command": {"id": command_id or command_identity("original-key")[0], "status": "succeeded",
+                        "event_type": "inject_node", "event_seq": 3, "error_code": "", "retryable": False}}
 
 
 @pytest.mark.parametrize("tool", ["run_progress", "command_receipt"])
@@ -85,7 +86,8 @@ def without_ui(name, *args, **kwargs):
     return original(name, *args, **kwargs)
 builtins.__import__ = without_ui
 from looplab.harness.mcp_server import HarnessAPI
-payload = {'generation': 'a' * 64, 'terminal': True, 'command': {'id': sys.argv[1], 'status': 'succeeded'}}
+payload = {'version': 1, 'generation': 'a' * 64, 'terminal': True, 'command': {'id': sys.argv[1],
+    'status': 'succeeded', 'event_type': 'inject_node', 'event_seq': 3, 'error_code': '', 'retryable': False}}
 api = HarnessAPI('http://localhost', transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload)))
 assert api.command_receipt('demo', 'a' * 64, idempotency_key='original-key')['body'] == payload
 '''

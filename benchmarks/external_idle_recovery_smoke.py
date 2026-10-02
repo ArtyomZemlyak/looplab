@@ -198,20 +198,31 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
             proof["discovery_reads_changed_no_work"] = True
         await candidate(client, 0, 16)
         proof["original_receipt"] = (await client.receipt("idle:candidate:0"))["command"]["id"]
+        if read_fault == "incomplete_receipt":
+            before = (runs / "demo" / "events.jsonl").read_bytes()
+            rejected = await client.request("POST", "commands", {"expected_generation": generation,
+                "type": "hint", "data": {"invalid": True}}, "idle:rejected-command")
+            assert rejected["status"] == "rejected"
+            assert (runs / "demo" / "events.jsonl").read_bytes() == before
         if proxy is not None:
             before = (runs / "demo" / "events.jsonl").read_bytes()
             proxy.drop_next_read = True
             args = {"run_id": "demo", "expected_generation": generation}
-            if read_fault == "wrong_receipt":
-                args["idempotency_key"] = "idle:candidate:0"
-            tool = {"wrong_receipt": "command_receipt", "stale_result_generation": "result_notices", "incomplete_result_page": "result_notices"}.get(read_fault, "run_progress")
+            if read_fault in ("wrong_receipt", "incomplete_receipt"):
+                args["idempotency_key"] = "idle:rejected-command" if read_fault == "incomplete_receipt" else "idle:candidate:0"
+            tool = {"wrong_receipt": "command_receipt", "incomplete_receipt": "command_receipt", "stale_result_generation": "result_notices", "incomplete_result_page": "result_notices"}.get(read_fault, "run_progress")
             lost = await client.call(tool, args)
             assert lost["status"] == (None if read_fault == "disconnect" else 200)
-            assert lost["code"] == ("api_unreachable" if read_fault == "disconnect" else "response_incomplete" if read_fault == "incomplete_result_page" else "response_context_mismatch")
+            assert lost["code"] == ("api_unreachable" if read_fault == "disconnect" else "response_incomplete" if read_fault in ("incomplete_result_page", "incomplete_receipt") else "response_context_mismatch")
             assert lost["outcome"] == "unavailable"
             if read_fault != "disconnect":
                 assert "body" not in lost
-                assert lost["reason"] == ("command_mismatch" if read_fault == "wrong_receipt" else "invalid_result_page" if read_fault == "incomplete_result_page" else "generation_mismatch")
+                assert lost["reason"] == ("command_mismatch" if read_fault == "wrong_receipt" else "invalid_result_page" if read_fault == "incomplete_result_page" else "invalid_command_receipt" if read_fault == "incomplete_receipt" else "generation_mismatch")
+            if read_fault == "incomplete_receipt":
+                observed = await client.receipt("idle:rejected-command")
+                assert observed["terminal"] and observed["command"]["status"] == "rejected"
+                assert observed["command"]["error_code"] and observed["command"]["event_seq"] is None
+                proof["rejected_receipt_recovered_explicitly"] = observed["command"]
             if tool == "result_notices":
                 recovered_page = await client.notices()
                 assert recovered_page["generation"] == generation
@@ -694,7 +705,7 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
                              if discovery_fault != "none" else [])
             assert proxy.dropped == catalog_reads + [{"method": "POST", "route": "commands", "upstream_status": 200},
                                      {"method": "POST", "route": "result-notices", "upstream_status": 200},
-                                     {"method": "GET", "route": {"wrong_receipt": "command-receipt", "stale_result_generation": "result-notices", "incomplete_result_page": "result-notices"}.get(read_fault, "harness-progress"), "upstream_status": 200}]
+                                     {"method": "GET", "route": {"wrong_receipt": "command-receipt", "incomplete_receipt": "command-receipt", "stale_result_generation": "result-notices", "incomplete_result_page": "result-notices"}.get(read_fault, "harness-progress"), "upstream_status": 200}]
             assert proof["exact_retry_receipt"] == proof["original_receipt"]
             assert len((rd / "result_commentary.jsonl").read_text(encoding="utf8").splitlines()) == 3
             proof["commentary_count"] = 3
@@ -728,7 +739,7 @@ def main():
                         help="Lose accepted command/commentary replies and one read reply through an owned TCP proxy.")
     parser.add_argument("--response-fault", choices=["disconnect", "invalid_json", "oversized", "server_error"],
                         default="disconnect", help="Replace accepted write replies instead of disconnecting; requires --drop-command-response.")
-    parser.add_argument("--read-fault", choices=["disconnect", "stale_generation", "wrong_receipt", "stale_result_generation", "incomplete_result_page"],
+    parser.add_argument("--read-fault", choices=["disconnect", "stale_generation", "wrong_receipt", "stale_result_generation", "incomplete_result_page", "incomplete_receipt"],
                         default="disconnect", help="Lose one successful read or replace its identity/page structure; requires --drop-command-response.")
     parser.add_argument("--discovery-fault", choices=["none", "disconnect", "invalid_json", "invalid_catalog"],
                         default="none", help="Fault both live discovery tools before the first candidate; requires --drop-command-response.")

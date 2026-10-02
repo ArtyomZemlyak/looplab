@@ -102,8 +102,9 @@ def test_cli_reports_missing_credential_before_opening_stdio(monkeypatch):
 def test_command_receipt_is_one_get_with_original_key_in_header_only(status, by_key):
     seen = []
     from looplab.serve.command_identity import command_identity
-    payload = ({"generation": "b" * 64, "command": {"id": command_identity("original-key")[0]
-        if by_key else "cmd_" + "a" * 32, "status": "succeeded"}, "terminal": True}
+    payload = ({"version": 1, "generation": "b" * 64, "command": {"id": command_identity("original-key")[0]
+        if by_key else "cmd_" + "a" * 32, "status": "succeeded", "event_type": "inject_node",
+        "event_seq": 3, "error_code": "", "retryable": False}, "terminal": True}
         if status == 200 else {"unchanged": True})
     def handler(request):
         seen.append(request)

@@ -17,6 +17,7 @@ from looplab.core.node_evidence import read_bounded_regular_file
 from looplab.core.redact import redact_persisted_text
 from looplab.serve.command_identity import command_identity
 from looplab.serve.http import refusal
+from looplab.serve.protocol import COMMAND_RECEIPT_ERROR_CAP
 from looplab.serve.run_commands import CONTROL_SPECS, TERMINAL_STATUSES, _normalize_expected_generation
 
 _MAX_RECORD_BYTES = 2 * 1024 * 1024
@@ -50,6 +51,15 @@ def snapshot(service, rd, expected_generation, *, command_id="", idempotency_key
             or not isinstance(record.get("event_type"), str)
             or record["event_type"] not in CONTROL_SPECS):
         raise HTTPException(503, "command receipt invalid")
+    seq = record.get("event_seq")
+    error = record.get("error")
+    # Preserve legitimate old records with absent optional fields; never turn
+    # damaged acknowledgement/error types into null sequence or empty diagnostics.
+    if ((seq is not None and (type(seq) is not int or seq < 0))
+            or (error is not None and (not isinstance(error, dict)
+                or ("code" in error and not isinstance(error["code"], str))
+                or ("retryable" in error and type(error["retryable"]) is not bool)))):
+        raise HTTPException(503, "command receipt invalid")
     if digest is not None:
         stored = record.get("idempotency_key_digest")
         if (not isinstance(stored, str) or re.fullmatch(r"[0-9a-f]{64}", stored) is None
@@ -60,12 +70,11 @@ def snapshot(service, rd, expected_generation, *, command_id="", idempotency_key
     # Fence across the read; a reset cannot turn an old receipt into current evidence.
     if service.generation_fence(rd)[1] != generation:
         raise HTTPException(409, "run generation changed during receipt read")
-    seq = record.get("event_seq")
-    error = record.get("error") if isinstance(record.get("error"), dict) else {}
+    error = error or {}
     return {"version": 1, "generation": generation, "terminal": record["status"] in TERMINAL_STATUSES,
             "command": {"id": command_id, "event_type": record["event_type"], "status": record["status"],
-                        "event_seq": seq if type(seq) is int and seq >= 0 else None,
-                        "error_code": redact_persisted_text(error.get("code", ""), max_chars=256,
+                        "event_seq": seq,
+                        "error_code": redact_persisted_text(error.get("code", ""), max_chars=COMMAND_RECEIPT_ERROR_CAP,
                                                              entropy=False, single_line=True),
                         "retryable": error.get("retryable") is True},
             "meaning": "Saved receipt only; no reconciliation or worker restart. It may lag events. Check current state, node results and checkpoints before choosing recovery."}

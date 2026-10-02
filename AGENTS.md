@@ -17,6 +17,9 @@ An `inject_node` command receipt marked `succeeded` proves admission, not succes
 training. For a failed node, read current generation/attempt-bound logs before
 submitting a corrected child with a new key and parent generation. An exact retry
 only recovers the original command; a failed parent without a score supports no delta.
+Typed MCP command receipts also validate version, status/terminal consistency,
+control event, sequence and error/retryable fields. An incomplete HTTP 200 is
+unavailable, not a saved command verdict; read again explicitly before recovery.
 
 For an externally driven run, start with `looplab harness` and connect
 `looplab harness-mcp` to the running UI. Launch with `--backend toy -s

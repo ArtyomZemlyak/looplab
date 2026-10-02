@@ -268,6 +268,24 @@ or terminal evaluation. Generic text GETs and empty
 204/205 mutation responses remain supported; validation 4xx responses keep their
 original status/body. Never infer whether a server error occurred before or after
 acceptance without reading durable evidence.
+
+Typed `command_receipt` additionally checks its version-1 receipt fields: known
+status/control event, strict boolean `terminal` consistent with that status,
+nonnegative integer/null `event_seq`, string `error_code` (up to 256 characters)
+and strict boolean `retryable`. A missing or inconsistent field returns HTTP 200
+with `response_incomplete`, `outcome=unavailable`, `reason=invalid_command_receipt`,
+without body. Extra fields are retained. The status/control sets and error-code
+cap come from the same UI-free protocol constants as the server; a remote client
+still needs no FastAPI/Uvicorn imports. Repeat the observation explicitly after
+checking the source, rather than treating an incomplete reply as a command verdict.
+
+The server also refuses malformed saved `event_seq`/`error` field types with 503,
+instead of replacing a bad sequence with null or a bad error with empty diagnostics.
+Older records with absent optional fields remain readable and are normalized into
+the same public receipt. Observation never repairs a record, reconciles a command,
+starts a worker or takes the exclusive write sequencer. `terminal=true` includes
+rejected/failed/timed-out commands; inspect status/error before deciding. Even a
+valid `succeeded` inject receipt proves admission, not completed training.
 Connection-check errors omit raw HTTP bodies, exception details and URLs. On success it returns server
 paths, last-read engine status, source health, `evidence_complete` and the next step.
 `ok: true` means these reads succeeded; incomplete journals remain explicit, and
@@ -1253,6 +1271,11 @@ removes `items` from a real successful result reply while preserving generation.
 The typed read must return `invalid_result_page`, without body or automatic retry.
 The next explicit read recovers the measured receipt without changing event bytes.
 Run this response-loss probe separately from backlog/engine-loss probes.
+`--read-fault incomplete_receipt` in the same agent-loss response-loss probe
+submits an invalid hint, observes its real `rejected` record, and removes `terminal`
+from one successful receipt reply while preserving generation/ID. The typed read
+must refuse it; the next explicit read recovers `rejected`/`invalid_command` with
+no new event, automatic retry or worker restart. The protected SGD evaluations remain unchanged.
 Add `--knowledge-recovery` with `--result-backlog --obligations` to publish a
 protected-evaluation protocol lesson and candidate skill after two measured nodes.
 An owned proxy drops both accepted responses; exact retries must recover one lesson

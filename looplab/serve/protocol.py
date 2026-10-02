@@ -95,6 +95,7 @@ COMMAND_SUCCEEDED_STATUSES = frozenset({"succeeded", "noop"})
 COMMAND_FAILED_STATUSES = frozenset({"failed", "rejected", "timed_out"})
 COMMAND_TERMINAL_STATUSES = COMMAND_SUCCEEDED_STATUSES | COMMAND_FAILED_STATUSES
 COMMAND_STATUSES = COMMAND_ACTIVE_STATUSES | COMMAND_TERMINAL_STATUSES
+COMMAND_RECEIPT_ERROR_CAP = 256  # sanitized command-receipt diagnostics, shared server/MCP boundary
 
 
 class EnginePolicy(str, Enum):

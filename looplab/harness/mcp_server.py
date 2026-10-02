@@ -50,6 +50,7 @@ MCP_INSTRUCTIONS = (
     "Typed result pages also validate the version-1 envelope, paging and terminal receipt identities/numeric fields; invalid_result_page with HTTP 200 is unavailable, not empty results. Read again explicitly; no automatic repair/retry. On reconnect, follow result-notices.next_cursor for older receipts, preserving expected_generation; only publish missing current commentary. A changed cursor requires refreshing the latest page. "
     "Commentary executes no actions and never replaces checkpoints or report obligations. "
     "Keep original lesson/skill bodies and action IDs. Exact retries acknowledge stored actions without refreshing signatures, restoring retired support or granting promotion; fresh writes check current evidence. Shared/researcher/developer lesson roles are retained. Damaged event/knowledge sources and fresh completed knowledge reviews refuse with a named source. Inspect refusal health and request operator recovery; no automatic repair/resume. "
+    "Typed command_receipt also verifies v1 status/terminal consistency, control event, sequence, error_code and retryable fields. Incomplete HTTP 200 means unavailable without body, not a command verdict. Read again explicitly; a terminal rejected/failed receipt or succeeded inject still does not prove completed training. "
     "Use only the scoped harness credential; owner-only workflows require the operator."
 )
 
@@ -410,6 +411,25 @@ class HarnessAPI:
             command_id = command_identity(idempotency_key)[0]
         if command["id"] != command_id:
             return self._read_refusal("command_mismatch", mismatch=True)
+        # Share the UI-free wire constants with the server, not a client status
+        # table or an import of its optional FastAPI command implementation.
+        from looplab.serve.protocol import (COMMAND_STATUSES, COMMAND_TERMINAL_STATUSES,
+                                           COMMAND_RECEIPT_ERROR_CAP, CONTROL_EVENTS)
+
+        page = result["body"]
+        status, event = command.get("status"), command.get("event_type")
+        seq, error = command.get("event_seq"), command.get("error_code")
+        if not (type(page.get("version")) is int and page["version"] == 1
+                and type(page.get("terminal")) is bool
+                and isinstance(status, str) and status in COMMAND_STATUSES
+                and page["terminal"] == (status in COMMAND_TERMINAL_STATUSES)
+                and isinstance(event, str) and event in CONTROL_EVENTS
+                and "event_seq" in command and (seq is None or (type(seq) is int and seq >= 0))
+                and isinstance(error, str) and len(error) <= COMMAND_RECEIPT_ERROR_CAP
+                and type(command.get("retryable")) is bool):
+            return {"status": 200, "code": "response_incomplete", "outcome": "unavailable",
+                    "reason": "invalid_command_receipt",
+                    "message": "Command receipt is incomplete or inconsistent. Read the original receipt and current state explicitly before choosing recovery; no worker restart or retry was made."}
         return result
 
 
@@ -585,6 +605,10 @@ def build_server(api: HarnessAPI):
         unavailable evidence, never proof that a receipt is absent.
         The returned generation and command ID must match the request, including
         the original key's durable ID; response_context_mismatch omits that body.
+        Version-1 status/terminal, control event, sequence and error fields must
+        be complete and consistent; invalid_command_receipt omits the body.
+        Terminal includes rejected/failed, and succeeded inject proves admission,
+        not completed training. Extra fields remain compatible.
         """
         return api.command_receipt(run_id, expected_generation, command_id, idempotency_key)
 
