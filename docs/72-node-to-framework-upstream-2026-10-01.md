@@ -1516,3 +1516,38 @@ whitespace check прошли. UI и scientific operator tolerances не изм�
 base/files, exact retry без reexecution, replay/export и owner/scorer preservation
 прошли. Scope остаётся declared CPU protocol acceptance; paid model judgments
 и полный suite проекта этим исправлением не проверены.
+
+### 18.18 Текущая база и pagination в typed upstream read (2026-10-02)
+
+Review от HEAD `4ec483f02` выявил слабую проверку согласованности страниц:
+правильная форма SHA не связывала active revision с generation/selector/advance
+sequence; visible advancement мог противоречить active base, а short/empty page
+с `next_offset` и short candidate list с `bounded=true` принимались как readable.
+Десять первоначальных red случаев воспроизведены на транспортных копиях страницы
+после настоящего SGD gate и explicit advancement. Добавлен case свежей generation
+с прежней CAS revision. Server CAS не обходился; дефект давал агенту недостоверный
+read context до следующего решения.
+
+`looplab/harness/upstream_receipts.py::page_detail` пересчитывает active revision
+по той же canonical формуле, что `looplab/engine/upstream_state.py::active_base`.
+Advancement должен следовать за своим seed event. Видимый latest advancement
+обязан совпасть с active selector, а более ранние advancements остаются readable;
+страница не обязана содержать current advancement. `bounded` candidate advice
+должен достигать заявленного limit. `HarnessAPI.upstream_status` также требует
+полную history page перед continuation.
+
+Malformed HTTP 200 возвращает `invalid_upstream_page`, unavailable без body,
+ровно после одного GET. Нет автоматического paging/retry, новой engine obligation,
+resume или base advancement. Успешные exact ACK и measured score не меняются.
+Positive controls проходят всю историю по две строки, читают valid empty terminal
+page и старую страницу первого advancement после двух реальных SGD base switches.
+Во всех read-only случаях event bytes остаются неизменными.
+
+Replay first — 193 passed; targeted typed receipts/HTTP — 49 passed.
+Весь upstream/MCP regression — 188 passed; documentation/claim pins/layering/
+containment/API/event contracts — 98 passed. Strict MkDocs, Ruff и whitespace
+check прошли. `.tmp/doc72-pages-sgd/acceptance.json`: отдельный UI server + scoped
+stdio MCP, 2 primary CPU SGD trainings, 7 gate executions и 3 confirmation seeds
+на original base/files; exact retry без reexecution, replay/export и owner/scorer
+preservation прошли. Scope остаётся declared protocol acceptance; полный suite
+проекта и paid model judgments этим исправлением не проверены.

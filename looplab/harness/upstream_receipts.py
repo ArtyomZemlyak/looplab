@@ -55,14 +55,30 @@ def event(row, kind):
 
 
 def page_detail(page):
+    from looplab.engine.upstream_state import digest
     active, candidates, history = page["active_base"], page["candidates"], page["history"]
     if (active["selector"] is not None and not selector(active["selector"])) or (page["enabled"] and active["selector"] is None):
         return False
     if active["advance_seq"] is not None and not integer(active["advance_seq"]):
         return False
+    advance = active["advance_seq"]
+    if advance is not None and (active["selector"] is None or advance <= active["selector"]["event_seq"]):
+        return False
+    # The engine's CAS revision binds this generation, selector and advancement.
+    # A well-formed hash alone cannot make an inconsistent snapshot readable.
+    if active["revision"] != digest({"generation": page["generation"].lower(),
+            "selector": active["selector"], "advance_seq": advance}):
+        return False
+    if candidates["bounded"] and len(candidates["rows"]) != candidates["limit"]:
+        return False
     if len(candidates["rows"]) > 200 or not all(isinstance(r, dict) and event(r, r.get("type")) for r in history):
         return False
     if any(a["seq"] >= b["seq"] for a, b in zip(history, history[1:])):
+        return False
+    # Older pages need not contain the current advancement. Any advancement
+    # they do contain must agree with, or precede, the current base snapshot.
+    if any(r["type"] == "base_advanced" and (advance is None or r["seq"] > advance
+            or r["seq"] == advance and r["selector"] != active["selector"]) for r in history):
         return False
     return all(isinstance(r, dict) and integer(r.get("node_id")) and integer(r.get("generation"))
         and sha(r.get("hunk_hash")) and sha(r.get("source_signature")) and isinstance(r.get("path"), str)

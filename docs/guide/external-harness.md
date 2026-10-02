@@ -1438,6 +1438,13 @@ verdict. A malformed check ACK returns unknown without its body; malformed histo
 is unavailable. Read the original receipt explicitly before recovery; validation
 does not automatically retry the check. Finite extra result fields remain readable
 and covered by the receipt hash.
+Typed upstream pages also recompute the active CAS revision from the returned
+generation, selector and advancement sequence. Visible advancements must agree
+with that current base or precede it; older pages need not contain its current
+advancement. A continuation requires a full history page, and a bounded candidate
+list must reach its declared limit. Contradictory HTTP 200 is unavailable without
+body; a valid empty terminal page remains readable. Reads perform no automatic
+paging, retry or advancement.
 Passing regressions require actual nonempty artifact receipts on both sides.
 Before a fresh CAS the server also validates every launched probe and repetition,
 the complete declared artifact sets, the operator's tolerance and source-score

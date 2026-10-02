@@ -371,7 +371,8 @@ class HarnessAPI:
             valid = (type(page.get("version")) is int and page["version"] == 1 and type(page.get("enabled")) is bool and type(page.get("engine_running")) is bool
                 and page.get("source_health") == {"events": "complete"} and isinstance(page.get("history"), list)
                 and len(page["history"]) <= limit and "next_offset" in page
-                and (page["next_offset"] is None or type(page["next_offset"]) is int and page["next_offset"] == offset + limit)
+                and (page["next_offset"] is None or type(page["next_offset"]) is int
+                    and page["next_offset"] == offset + limit and len(page["history"]) == limit)
                 and isinstance(active, dict) and isinstance(active.get("revision"), str)
                 and re.fullmatch(r"[0-9a-f]{64}", active["revision"]) is not None
                 and "selector" in active and "advance_seq" in active

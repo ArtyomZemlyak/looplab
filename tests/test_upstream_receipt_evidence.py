@@ -224,6 +224,98 @@ def test_advance_ack_must_match_requested_cas_evidence(advanced, field):
         api.client.close()
 
 
+@pytest.mark.parametrize("case", ["revision", "selector", "advance_seq", "early_advance", "generation",
+    "visible_advance", "missing_advance", "stale_advance", "short_page", "empty_page", "candidate_bound"])
+def test_upstream_page_cannot_supply_inconsistent_base_or_paging(measured, advanced, case):
+    lane, store, request, _ = measured
+    page = deepcopy(lane.read(request["expected_generation"]))
+    generation = request["expected_generation"]
+    active = page["active_base"]
+    if case == "revision":
+        active["revision"] = "0" * 64
+    elif case == "selector":
+        active["selector"]["digest"] = "0" * 64
+    elif case == "advance_seq":
+        active["advance_seq"] += 1
+    elif case == "generation":
+        # A refreshed envelope must not re-label the previous generation's CAS.
+        generation = ("0" if generation[0] != "0" else "1") + generation[1:]
+        page["generation"] = generation
+    elif case in ("early_advance", "missing_advance", "stale_advance"):
+        active["advance_seq"] = (None if case == "missing_advance" else
+            active["selector"]["event_seq"] if case == "early_advance" else active["advance_seq"] - 1)
+        active["revision"] = digest({"generation": page["generation"],
+            "selector": active["selector"], "advance_seq": active["advance_seq"]})
+    elif case == "visible_advance":
+        saved = next(row for row in page["history"] if row["type"] == "base_advanced")
+        saved["selector"]["digest"] = "0" * 64
+    elif case in ("short_page", "empty_page"):
+        page["history"] = page["history"][:1] if case == "short_page" else []
+        page["next_offset"] = 40
+    else:
+        assert len(page["candidates"]["rows"]) < 200
+        page["candidates"]["bounded"] = True
+    before, calls = store.path.read_bytes(), []
+    api = HarnessAPI("http://localhost", transport=httpx.MockTransport(
+        lambda r: (calls.append(r), httpx.Response(200, json=page))[1]))
+    try:
+        reply = api.upstream_status("run", generation)
+        assert reply.get("outcome") == "unavailable" and "body" not in reply, reply
+        assert reply["reason"] == "invalid_upstream_page"
+    finally:
+        api.client.close()
+    assert len(calls) == 1 and store.path.read_bytes() == before
+
+
+def test_real_upstream_paging_retains_current_base_on_older_and_empty_pages(measured, advanced):
+    lane, store, request, _ = measured
+    calls, before = [], store.path.read_bytes()
+    def reply(r):
+        calls.append(r)
+        return httpx.Response(200, json=lane.read(request["expected_generation"],
+            offset=int(r.url.params["offset"]), limit=int(r.url.params["limit"])))
+    api = HarnessAPI("http://localhost", transport=httpx.MockTransport(reply))
+    try:
+        offset, rows = 0, []
+        current = lane.read(request["expected_generation"])
+        while True:
+            result = api.upstream_status("run", request["expected_generation"], offset=offset, limit=2)
+            assert not result.get("code"), result
+            assert result["body"]["active_base"] == current["active_base"]
+            rows.extend(result["body"]["history"])
+            offset = result["body"]["next_offset"]
+            if offset is None:
+                break
+            assert offset <= len(current["history"])
+        assert rows == current["history"]
+        assert len(calls) == math.ceil(len(rows) / 2)
+        empty = api.upstream_status("run", request["expected_generation"], offset=len(rows), limit=2)
+        assert not empty.get("code") and empty["body"]["history"] == []
+        assert empty["body"]["next_offset"] is None
+    finally:
+        api.client.close()
+    assert store.path.read_bytes() == before
+
+
+def test_old_advance_pages_remain_readable_after_two_real_base_switches(tmp_path):
+    from tests.test_upstream_multibase import twice
+    lane, store, generation, _, first, second = twice(tmp_path)
+    before = store.path.read_bytes()
+    history = lane.read(generation)["history"]
+    offset = next(i for i, r in enumerate(history) if r["type"] == "base_advanced")
+    page = lane.read(generation, offset=offset, limit=1)
+    assert page["history"][0]["selector"] == first[4]["selector"]
+    assert page["active_base"]["selector"] == second[4]["selector"]
+    api = HarnessAPI("http://localhost", transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json=page)))
+    try:
+        result = api.upstream_status("run", generation, offset=offset, limit=1)
+        assert not result.get("code") and result["body"] == page, result
+    finally:
+        api.client.close()
+    assert store.path.read_bytes() == before
+
+
 def test_operator_tests_are_required_before_proposal_work(tmp_path):
     lane, store, generation, proposal = fixture(tmp_path, upstream_policy={"repeats": 2, "tests": [],
         "regressions": [{"name": "old_recipe", "command": [sys.executable, "train.py"],
