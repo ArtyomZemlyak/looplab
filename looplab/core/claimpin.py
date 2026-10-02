@@ -139,6 +139,9 @@ TEST_PATH_CITATION = re.compile(
 
 _SKIP_DIRS = {".git", ".claude", "runs", "node_modules", "dist", "site", "__pycache__",
               ".pytest_cache", ".mypy_cache", ".venv", "venv", "build",
+              # Private review artifacts include rendered HTML copies of docs;
+              # their duplicated/markup-split pins are not source declarations.
+              ".tmp",
               # JupyterLab keeps a `<name>-checkpoint.md` copy of every file edited in it, markers
               # included — a second declaration of every slug the original carries, so the index
               # went red on the box that edits docs in the hub (review 2026-09-22, TST-08;

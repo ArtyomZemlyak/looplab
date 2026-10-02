@@ -1,5 +1,7 @@
 """Corrupt real measured gate replies; a digest alone is not complete evidence."""
 from copy import deepcopy
+import math
+import statistics
 import sys
 
 import httpx
@@ -93,6 +95,49 @@ def test_incomplete_gate_history_is_unavailable(measured, missing):
         assert result["outcome"] == "unavailable" and "body" not in result, result
     finally:
         api.client.close()
+
+
+@pytest.mark.parametrize("case", ["zero", "boundary", "negative", "false_failure"])
+def test_rounding_cannot_change_the_sample_bound_verdict(measured, case):
+    lane, store, request, original = measured
+    receipt = deepcopy(original)
+    result = receipt["result"]
+    eq = result["checks"][-1]
+    old = eq["values"][0]
+    # Corrupt only the transport reply. Keep matching executions and exact hash:
+    # a numeric-consistency epsilon must not become a scientific allowance.
+    shift = 0.0 if case == "false_failure" else -5e-13 if case == "negative" else 5e-13
+    eq["values"][1] = [v + shift for v in old]
+    eq["means"] = [statistics.mean(v) for v in eq["values"]]
+    eq["sem"] = [statistics.stdev(v) / math.sqrt(len(v)) for v in eq["values"]]
+    actual_delta = eq["means"][1] - eq["means"][0]
+    eq["tolerance"] = abs(actual_delta) - 1e-13 if case == "boundary" else 0.0
+    eq["delta"] = 5e-13 if case == "false_failure" else eq["tolerance"]
+    eq["source_reproduced"] = True
+    eq["passed"] = result["passed"] = case != "false_failure"
+    receipt["status"] = "succeeded" if result["passed"] else "failed"
+    for row in result["executions"]:
+        if row["label"].startswith("new-source"):
+            row["metric"] = eq["values"][1][int(row["label"].removeprefix("new-source"))]
+    receipt["evidence_token"] = digest(result)
+    before, calls = store.path.read_bytes(), []
+    api = HarnessAPI("http://localhost", transport=httpx.MockTransport(
+        lambda r: (calls.append(r), httpx.Response(200, json=receipt))[1]))
+    try:
+        reply = api.upstream_write("run", "check", request)
+        assert reply.get("outcome") == "unknown" and "body" not in reply, reply
+        page = deepcopy(lane.read(request["expected_generation"]))
+        saved = next(row for row in page["history"] if row["type"] == "upstream_gate_finished")
+        saved.update({k: receipt[k] for k in ("result", "evidence_token")})
+        api.client.close()
+        api = HarnessAPI("http://localhost", transport=httpx.MockTransport(
+            lambda r: httpx.Response(200, json=page)))
+        reply = api.upstream_status("run", request["expected_generation"])
+        assert reply.get("outcome") == "unavailable" and "body" not in reply, reply
+    finally:
+        api.client.close()
+    assert len(calls) == 1 and store.path.read_bytes() == before
+    assert lane.check(request) == original
 
 
 @pytest.fixture(scope="module")

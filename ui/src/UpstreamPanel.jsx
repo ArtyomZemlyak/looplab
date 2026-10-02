@@ -1,12 +1,13 @@
 import React from 'react'
 import './baseRevision.css'
 import { baseChoices } from './baseRevision.js'
+import { upstreamCheckSummary } from './upstreamCheckModel.js'
 
 export default function UpstreamPanel({ state, onClose }) {
   const bases = baseChoices(state.nodes)
-  const history = state.upstream_history || []
-  const advances = history.filter(row => row.type === 'base_advanced')
-  const latestGate = history.filter(row => row.type === 'upstream_gate_finished').at(-1)
+  const history = Array.isArray(state.upstream_history) ? state.upstream_history : []
+  const advances = history.filter(row => row?.type === 'base_advanced')
+  const check = upstreamCheckSummary(history)
   if (!bases.some(row => row.digest !== 'unknown') && !history.length) return null
   const discuss = () => {
     onClose?.()
@@ -18,7 +19,11 @@ export default function UpstreamPanel({ state, onClose }) {
     {state.upstream_base && <p>Promoted base <code title={state.upstream_base.selector?.digest}>{state.upstream_base.selector?.digest?.slice(0, 12)}</code> · from experiment #{state.upstream_base.source_node_id}</p>}
     <p className="muted">Experiments retain the base they actually evaluated. Promotion changes future work; scores across bases need comparable evidence.</p>
     <div className="upstream-bases">{bases.map(row => <span className="pill" key={row.digest} title={row.digest}>{row.digest === 'unknown' ? 'Base unknown' : row.digest.slice(0, 12)} · {row.count} experiments</span>)}</div>
-    {latestGate && <p>Latest measured check: <strong>{latestGate.result?.passed === true ? 'passed' : 'failed'}</strong> · {latestGate.result?.executions?.length || 0} explicit executions · {(latestGate.result?.eval_seconds || 0).toFixed(1)} s</p>}
+    {check && <p>{check.status === 'unfinished' ? 'Unfinished check — read progress; recover interrupted checks explicitly.'
+      : check.status === 'abandoned' ? 'Abandoned check — late results cannot authorize advancement.'
+      : check.status === 'unknown' ? 'Check evidence unavailable — read complete upstream history.'
+      : <>Recorded completed check: <strong>{check.status}</strong> · {check.executions === null ? 'execution count unavailable' : `${check.executions} explicit executions`} · {check.seconds === null ? 'cost unavailable' : `${check.seconds.toFixed(1)} s`}</>}</p>}
+    {check && <p className="muted">Read current upstream evidence before advancement; recorded results do not approve it.</p>}
     {advances.length > 0 && <details><summary>Capability origins</summary><ol>{advances.map(row => <li key={row.seq}>Experiment #{row.source_node_id} → <code>{row.selector?.digest?.slice(0, 12)}</code> · {row.summary} · flag {row.flag?.name}, old default {row.flag?.default}</li>)}</ol></details>}
     <p className="muted">{state.upstream_enabled
       ? 'Pause → wait for engine exit → Maintainer proposal → measured checks → explicit base advance → resume. Interrupted checks require operator recovery.'

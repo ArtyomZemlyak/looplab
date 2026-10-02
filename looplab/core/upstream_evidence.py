@@ -57,7 +57,11 @@ def equivalence(row):
         sem = [statistics.stdev(v) / math.sqrt(len(v)) for v in values]
         return (all(math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-12)
                     for a, b in zip(row["means"] + row["sem"] + [row["delta"]], means + sem + [means[1] - means[0]]))
-            and row["passed"] == (row["source_reproduced"] and abs(row["delta"]) <= row["tolerance"]))
+            and row["passed"] == (row["source_reproduced"] and abs(row["delta"]) <= row["tolerance"])
+            # Representation closeness is not a scientific allowance. Both
+            # sides of the declared tolerance use the actual paired samples,
+            # including zero tolerance and a readable failed comparison.
+            and row["passed"] == (row["source_reproduced"] and abs(means[1] - means[0]) <= row["tolerance"]))
     except (OverflowError, ValueError):
         return False
 

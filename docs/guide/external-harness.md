@@ -1429,6 +1429,10 @@ Recovery never deletes that evidence or adopts an unfinished repository. Existin
 repositories damaged before this publication fix still require operator repair.
 Typed MCP validates complete page/receipt identities, every passing gate leg,
 paired full samples, their means/SEM/delta and corresponding executions and costs.
+Statistical representation closeness never enlarges the declared scientific
+tolerance: both passing and failed equivalence verdicts must agree with the
+actual paired samples, including a zero tolerance. A contradictory rounded
+verdict is unavailable evidence even when its receipt hash matches.
 Passing regressions require actual nonempty artifact receipts on both sides.
 Before a fresh CAS the server also validates every launched probe and repetition,
 the complete declared artifact sets, the operator's tolerance and source-score
@@ -1465,6 +1469,11 @@ owner credential. Task declarations and interrupted-claim recovery are owner-onl
 The UI Assistant uses the same lane with its ordinary approval policy. No hidden
 Maintainer model job is launched. Support and bounds are documented in
 [doc 72 §18](../72-node-to-framework-upstream-2026-10-01.md#18-upstream-lane).
+The code-base panel distinguishes a recorded completed check, an unfinished
+claim, operator abandonment and unavailable claim evidence. A late completion
+cannot restore an abandoned check, and an older pass does not replace a newer
+unfinished claim. Missing costs remain unavailable. Read current upstream
+evidence before advancement; the panel's recorded result is not CAS approval.
 
 The MCP adapter forwards JSON API requests and limits a response to 256 KiB and
 a request body to 1 MiB. Query narrow routes for larger outputs; binary uploads

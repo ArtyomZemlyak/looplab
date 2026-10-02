@@ -296,6 +296,22 @@ def test_the_index_is_not_empty():
 # Negative controls. A guard nobody has driven is a claim about a guard.
 
 
+def test_generated_review_sites_do_not_duplicate_source_claims(tmp_path):
+    marker = "CLAIM" + "[review-boundary]"
+    source = tmp_path / "source.md"
+    source.write_text(f"{marker} decided:present:REAL@implementation.py\n", encoding="utf-8")
+    (tmp_path / "implementation.py").write_text("REAL = True\n", encoding="utf-8")
+    site = tmp_path / ".tmp" / "review-site"
+    site.mkdir(parents=True)
+    (site / "index.html").write_text(f"<p>{marker}</p>\n", encoding="utf-8")
+    assert tracked_text_files(tmp_path) == [tmp_path / "implementation.py", source]
+    assert check_tree(tmp_path) == []
+    # A false source claim must still fail; excluding generated copies is not
+    # an exemption for the actual documentation or its deciding implementation.
+    (tmp_path / "implementation.py").write_text("OTHER = True\n", encoding="utf-8")
+    assert check_tree(tmp_path)
+
+
 def test_a_pin_cannot_satisfy_itself(tmp_path):
     """The failure `test_open_item_index` was fixed for on 2026-08-19, held here in one place.
 

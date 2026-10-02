@@ -1418,3 +1418,71 @@ Replay first — 193 passed; strict MkDocs, Ruff и whitespace check прошл�
 primary base/files; exact retries без reexecution, replay/export и неизменные
 owner/scorer bytes подтверждены. Scope остаётся declared CPU protocol acceptance,
 без проверки paid model judgments и arbitrary environment closure.
+
+### 18.16 Повторное комплексное ревью: measured verdict и текущая проверка в UI (2026-10-02)
+
+Ревью выполнено в worktree `codex/external-agent-harness-verified`, исходный
+HEAD `650a3f7a9`. Проверены требования документа и цепочка source nomination →
+approved candidate bytes → real gate → claim lineage → explicit CAS → новый
+lifecycle → confirmation/replay/export, а также Assistant/MCP и UI.
+
+| Область | Результат ревью |
+|---|---|
+| Nomination и Maintainer | Номинация остаётся советом; current terminal source, patch/recipe/probe separation, protected scorer и привязка полного архива к approved patch проверяются до нового исполнения. |
+| Git и immutable archive | Рабочее дерево принадлежит run, archive остаётся авторитетным; reachable refs, case aliases, interrupted initialization и повторные proposals покрыты regression. Owner checkout не записывается. |
+| Научный gate | Реальные old/new repetitions, воспроизведение primary source, default artifact regression и original repair trigger сохранены. Найден и исправлен разрыв между приближённой проверкой чисел MCP и фактическим вердиктом. |
+| CAS и восстановление | Текущие generation/base/input context и одна неотозванная claim обязательны; lost ACK не покупает повторную training, abandonment не разрешает advance/resume. Отдельный server CAS уже отказывал ложной equivalence. |
+| Overlay и confirmation | Конфликт сохраняет весь node на старой базе; новые lifecycle используют migration, научные reversions сохраняются. Confirmation повторяет оригинальные primary base/files. |
+| Assistant и внешний агент | Shared transaction, scoped/owner boundaries и approval binding сохранены. Реальный private UI + stdio MCP прошёл полный цикл с отдельными измерениями, result commentary и exact retry. |
+| UI и понятность результата | Найден и исправлен показ прежнего passing gate при новом незавершённом или abandoned claim. Recorded result отделён от текущего разрешения CAS; отсутствующие costs не превращаются в ноль. |
+| Replay, экспорт и бюджеты | Связанный regression и реальный smoke сохраняют primary scores, scorer/owner bytes и execution accounting; экспорт не запускает новую оценку. |
+| Структура и проверяемость документации | `upstream_evidence` добавлен в обязательную package map. Generated `.tmp` HTML больше не создаёт ложные duplicate claims; отрицательный контроль сохраняет отказ ложному source claim. |
+
+**Подтверждённые дефекты.** Четыре red transport cases сохраняли matching digest,
+согласованные execution metrics и statistics, но сдвигали `delta` в пределах
+representation epsilon. При actual delta ±5e-13 и tolerance 0 MCP принимал
+ложный pass; такой же разрыв был у ненулевой границы и ложного failed verdict.
+`looplab/core/upstream_evidence.py::equivalence` теперь требует совпадения
+verdict с actual paired means и declared tolerance, дополнительно к прежней
+проверке reported fields. Числовой epsilon не становится научным допуском.
+Corrupt HTTP 200 даёт unknown/unavailable без verdict body; настоящие failed
+partial gates остаются читаемыми. Node.metric и формат событий не меняются.
+
+Пять первоначальных red UI cases показали старый pass во время нового claim,
+возврат pass после abandon/late completion, принятие bounded history без start,
+ложный ноль при missing cost и отсутствие ясной границы recorded/current evidence.
+`ui/src/upstreamCheckModel.js::upstreamCheckSummary` связывает текущий check со
+start/action/proposal/request/context, замечает abandonment и незавершённую
+проверку. Missing/duplicate/mixed claim evidence показывается как unavailable;
+старый late completion не вытесняет новую попытку. Все изменения UI проверяются
+реальным render компонента, а не поиском строки в исходнике.
+
+Два дополнительных дефекта проверок воспроизведены на текущем worktree:
+`looplab/__init__.py::_LAYOUT` не содержал уже существующий core module
+`upstream_evidence`; legacy/canonical module identity теперь проверяется общим
+layout suite. `looplab/core/claimpin.py::tracked_text_files` читал старые rendered
+HTML из `.tmp` как source declarations, поэтому local review sites создавали
+duplicate и markup-split claims. Generated directory исключён; новый red/green
+контроль сохраняет проверку настоящей документации и отказ ложному source claim.
+Проверки claim pins и open-item index выполнены вместе.
+
+Первичная проверка до изменений: replay — 193 passed; upstream — 116 passed.
+После исправления числовой границы и receipt guards — 42 passed. Связанный
+upstream/seed/workspace/repo/confirmation/export/MCP regression — 568 passed,
+16 platform/optional skips. UI — 1821 passed; docs/claim pins/open-item index/
+layout/layering/containment/API/event contracts — 985 passed. Production build,
+strict MkDocs, Ruff и whitespace check прошли. UI build сохранён в private staging
+directory, без замены обслуживаемого `ui/dist`.
+
+Сборка отдельного архива исходного HEAD: 612,980 B JS gzip; после исправления UI:
+613,587 B (+607 B), CSS неизменен — 59,141 B. Общий ceiling поднят с 599 до 600 KiB
+по этой паре измерений, с 813 B headroom. Новый claim model остаётся в lazy panel;
+route, static-cycle и forbidden-reachability ceilings не изменены и проходят.
+
+`.tmp/doc72-megareview-sgd-final/acceptance.json`: private UI server + scoped
+stdio MCP, 2 primary CPU SGD trainings, 7 gate executions и 3 confirmation seeds
+на original primary base/files. Exact retries без reexecution, следующий
+experiment на новой базе, replay/export и неизменные owner/scorer bytes прошли.
+Это protocol acceptance; paid critic/model judgments, Docker/host scorer,
+environment installation, произвольные dependency closures и полный suite
+всего проекта этим ревью не проверены. Ограничения раздела 18.4 сохраняются.

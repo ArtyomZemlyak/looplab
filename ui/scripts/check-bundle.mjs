@@ -117,7 +117,11 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // buys recorded seed identity, capability origins, explicit gate workflow and
     // evidence-bound lineage deltas. Provenance panels stay lazy; graph-only CSS
     // excludes their full styles. Static cycles and forbidden reachability still fail.
-    js: { gzip: 599 * KIB },
+    // 2026-10-02 doc 72 re-review: archived HEAD measured 612,980 B JS; now 613,587 B
+    // (+607 B) distinguishes unfinished/revoked/bounded gate evidence and unknown costs.
+    // The claim model stays in the lazy panel; CSS and all route/reachability limits
+    // remain unchanged. 600 KiB leaves 813 B headroom above this measured total.
+    js: { gzip: 600 * KIB },
     css: { gzip: 58 * KIB },
   },
   individual: {

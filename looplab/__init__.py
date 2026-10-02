@@ -38,6 +38,7 @@ _LAYOUT = {
     "upstream_spec": "engine",
     "upstream_workspace": "engine",
     "upstream_gate": "engine",
+    "upstream_evidence": "core",
     "upstream_tools": "tools",
     "_base": "tools",
     "_log_index": "serve",   # scaffolding shared by the two incremental log indexes (doc 25 SC-04)
