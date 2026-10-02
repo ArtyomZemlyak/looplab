@@ -20,15 +20,15 @@ test('editable launch card gates Start on the exact validated fingerprint', asyn
   assert.match(card, /onSubmit=\{event => \{ event\.preventDefault\(\); validate\(\) \}\}/)
   assert.doesNotMatch(card, /onSubmit=\{[^\n]*start\(\)/,
     'Enter/form submit must never turn a current validation into a paid launch')
-  assert.match(card, />Reset proposal<\/button>/)
+  assert.match(card, />\{t\('Reset proposal'\)\}<\/button>/)
   assert.ok(card.indexOf('saveLaunchTransport(transportIdentity') < card.indexOf('await startRun('),
     'the recovery key must be durable before paid Start leaves the browser')
   assert.match(card, /loadLaunchTransport\(transportIdentity\)/)
   assert.match(card, /Durable tab storage is unavailable; paid Start was not sent\./)
   assert.match(card, /Recovered unfinished startup “\$\{saved\.runId\}”/)
-  assert.match(card, /<strong>Startup being observed<\/strong><code>\{unknownStart\.runId\}<\/code>/,
+  assert.match(card, /<strong>\{t\('Startup being observed'\)\}<\/strong><code>\{unknownStart\.runId\}<\/code>/,
     'reload recovery must show the saved run identity even when the proposal originally had another name')
-  assert.match(card, /<strong>Validate is free:<\/strong>/)
+  assert.match(card, /<strong>\{t\('Validate is free:'\)\}<\/strong>/)
   assert.match(card, /Start may incur provider cost\. No monetary cap is configured\./,
     'an unvalidated draft must warn that Start can cost money and that nothing caps it')
   assert.doesNotMatch(card, /did not reach Popen/)
@@ -39,12 +39,12 @@ test('launch card is a labelled busy form with actionable errors and status', as
   assert.match(card, /<form className="asst-launch" aria-labelledby=\{titleId\} aria-busy=/)
   assert.match(card, /aria-busy=\{operationBusy \? 'true' : 'false'\}/,
     'idle startup recovery is a user decision state, not an indefinitely busy form')
-  assert.match(card, /<label htmlFor=\{`launch-\$\{reactId\}-run_id`\}>Run name<\/label>/)
+  assert.match(card, /<label htmlFor=\{`launch-\$\{reactId\}-run_id`\}>\{t\('Run name'\)\}<\/label>/)
   assert.match(card, /<fieldset className="asst-launch-source"/)
-  assert.match(card, /<legend>Task source<\/legend>/)
+  assert.match(card, /<legend>\{t\('Task source'\)\}<\/legend>/)
   assert.match(card, /<div ref=\{errorRef\} id=\{errorId\} className="asst-launch-errors" tabIndex=\{-1\}>/,
     'the error summary must be programmatically focusable for the field-path fallback below')
-  assert.match(card, /<div role="alert" aria-label="Cannot start yet">/,
+  assert.match(card, /<div role=\"alert\" aria-label=\{t\('Cannot start yet'\)\}>/,
     'errors that map to no control must still be ANNOUNCED, not only rendered')
   assert.match(card, /role="status" aria-live="polite" aria-atomic="true"/)
   assert.match(card, /runIdRef\.current\?\.focus\(\); runIdRef\.current\?\.select\(\)/)

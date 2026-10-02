@@ -3,12 +3,13 @@ import Markdown from './markdown.jsx'
 import { fmt } from './util.js'
 import { assistantErrorInfo } from './assistantErrors.js'
 import { permissionPresentation } from './assistantPermission.js'
-import LaunchCard from './LaunchCard.jsx'
 import { launchDraftKey } from './launchDraftStore.js'
 import { OpIcon } from './icons.jsx'
 import { toolActivityProjection } from './assistantToolActivity.js'
 import { turnPropsEqual } from './assistantTranscriptModel.js'
 import './assistant-tool-activity.css'
+
+const LaunchCard = React.lazy(() => import('./LaunchCard.jsx'))
 
 const RUN_MENTION_MAX = 32
 const runMentions = value => {
@@ -183,13 +184,16 @@ function Turn({
       {!readOnly && Array.isArray(m.proposals) && m.proposals.map((sp, i) => {
         const draftKey = launchDraftKey({ sessionId: launchSessionId, messageId: launchMessageId,
           messageIndex: launchMessageIndex, proposalId: sp.proposal_id, proposalIndex: i })
-        return <LaunchCard key={draftKey} spec={sp} chat={launchChat} launchIdentity={draftKey}
+        return <React.Suspense key={draftKey} fallback={<div className="asst-launch" role="status">
+          {language === 'ru' ? 'Загружаем карточку запуска…' : 'Loading launch card…'}</div>}>
+          <LaunchCard key={draftKey} spec={sp} chat={launchChat} launchIdentity={draftKey}
           retainedDraft={launchDrafts?.[draftKey]}
           retainedConfigOpen={launchDisclosures?.[draftKey] === true}
           onOpenSettings={onOpenSettings} language={language}
           onDraftChange={draft => onLaunchDraft?.(draftKey, draft)}
           onConfigOpenChange={open => onLaunchDisclosure?.(draftKey, open)}
           onStarted={() => onLaunchStarted?.(draftKey)} />
+        </React.Suspense>
       })}
     </div>
   </div>

@@ -111,6 +111,7 @@ test('the default policy is satisfiable by a fully split route and interaction g
     'RunList.jsx', 'RunCompare.jsx', 'OwnerChrome.jsx', 'RunView.jsx', 'Dag.jsx',
     'Dock.jsx', 'Inspector.jsx', 'ConceptChipBar.jsx', 'ConceptView.jsx', 'panels.jsx',
     'SharedAssistant.jsx', 'Report.jsx', 'ClaimsCuration.jsx', 'NewRunStarter.jsx', 'AssistantModelCheck.jsx', 'LaunchGuidance.jsx',
+    'LaunchCard.jsx', 'launchCardRussian.js',
   ]
   const graph = {
     'index.html': {
@@ -144,7 +145,7 @@ test('the default policy is satisfiable by a fully split route and interaction g
 
   const result = evaluateBundle({ manifest: graph, assetStats: measured })
   assert.deepEqual(result.violations, [])
-  assert.equal(result.reachability.length, 10)
+  assert.equal(result.reachability.length, 11)
   assert.ok(result.reachability.every(item => item.paths.length === 0))
 
   for (const [root, target] of [
@@ -163,6 +164,8 @@ test('the default policy is satisfiable by a fully split route and interaction g
     ['src/OwnerChrome.jsx', 'src/NewRunStarter.jsx', 'owner chrome defers new-run examples'],
     ['src/RunView.jsx', 'src/AssistantModelCheck.jsx', 'run routes defer Assistant model setup'],
     ['src/RunView.jsx', 'src/LaunchGuidance.jsx', 'run routes defer launch guidance'],
+    ['src/OwnerChrome.jsx', 'src/LaunchCard.jsx', 'run routes defer launch cards and Russian copy'],
+    ['src/OwnerChrome.jsx', 'src/launchCardRussian.js', 'run routes defer launch cards and Russian copy'],
   ]) {
     const poisoned = structuredClone(graph)
     poisoned[root].imports = [target]

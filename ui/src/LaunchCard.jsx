@@ -127,11 +127,11 @@ const validLaunchPreview = (preview, runId, expectedSource) => isObject(preview)
   && validReviewedSettings(preview.settings)
   && Array.isArray(preview.referenced_paths)
 
-function EnumOptions({ field, value }) {
+function EnumOptions({ field, value, t }) {
   const options = field.options || []
   const extra = value && !options.includes(String(value)) ? [String(value)] : []
   return <>
-    <option value="">Use inherited value</option>
+    <option value="">{t('Use inherited value')}</option>
     {[...extra, ...options].map(option => <option key={option} value={option}>{option}</option>)}
   </>
 }
@@ -156,6 +156,18 @@ export default function LaunchCard({
   spec, chat = [], onStarted, retainedDraft = null, onDraftChange, launchIdentity = '',
   retainedConfigOpen = false, onConfigOpenChange, onOpenSettings, language = 'auto',
 }) {
+  // Presentation only: never feed language or translated text into the draft or startup identity.
+  const [russianCopy, setRussianCopy] = useState(null)
+  useEffect(() => {
+    if (language !== 'ru' || russianCopy) return
+    let active = true
+    import('./launchCardRussian.js').then(module => {
+      if (active) setRussianCopy(() => module.default)
+    }).catch(() => { /* A missing translation chunk keeps the usable English card. */ })
+    return () => { active = false }
+  }, [language, russianCopy])
+  const cardLanguage = language === 'ru' && russianCopy ? 'ru' : 'en'
+  const t = cardLanguage === 'ru' ? russianCopy : text => text
   const original = useMemo(() => createLaunchDraft(spec), [spec])
   const transportIdentity = useMemo(() => String(
     launchIdentity || spec?.proposal_id || `legacy:${spec?.run_id || 'proposal'}`),
@@ -279,7 +291,7 @@ export default function LaunchCard({
   const transportPending = hydratedTransportIdentity !== transportIdentity
   const operationBusy = transportPending || validating || starting || checking
   const locked = operationBusy || !!unknownStart || !!damagedRecovery || !!startedRunId
-  const taskRows = summarizeLaunchTask(draft)
+  const taskRows = summarizeLaunchTask(draft, t)
   const launchErrorTarget = path => {
     const target = errorTarget(path)
     return target === 'task' && draft.source === 'task_file' ? 'task_file' : target
@@ -665,7 +677,7 @@ export default function LaunchCard({
   const errorsForTarget = target => fieldErrorEntries.filter(([path]) => launchErrorTarget(path) === target)
   const targetHasErrors = target => errorsForTarget(target).length > 0
   const errorItem = ([path, error]) => <li key={path}>
-    {path !== 'form' && <><strong>{errorLabel(path)}</strong>{': '}</>}{error}
+    {path !== 'form' && <><strong>{t(errorLabel(path))}</strong>{': '}</>}{error}
   </li>
   const inlineErrorId = target => `launch-${reactId}-${target}-error`
   const describedBy = (...ids) => ids.filter(Boolean).join(' ') || undefined
@@ -684,58 +696,58 @@ export default function LaunchCard({
   const draftSettings = settingsParsed.ok ? settingsParsed.value : null
   const reviewSettings = validatedCurrent ? preview?.settings : draftSettings
   const visibleTaskRows = validatedCurrent
-    ? summarizeLaunchTask({ source: 'task', task_json: JSON.stringify(preview.task) }) : taskRows
+    ? summarizeLaunchTask({ source: 'task', task_json: JSON.stringify(preview.task) }, t) : taskRows
   const decisionRows = validatedCurrent
-    ? summarizeLaunchDecision({ source: 'task', task_json: JSON.stringify(preview.task) })
-    : summarizeLaunchDecision(draft)
-  const inheritedReview = 'inherit (validate)'
-  const reviewSetting = (key, { resolvedNull = 'not set', format = String } = {}) => {
-    if (!settingsParsed.ok) return 'invalid JSON'
+    ? summarizeLaunchDecision({ source: 'task', task_json: JSON.stringify(preview.task) }, t)
+    : summarizeLaunchDecision(draft, t)
+  const inheritedReview = t('inherit (validate)')
+  const reviewSetting = (key, { resolvedNull = t('not set'), format = String } = {}) => {
+    if (!settingsParsed.ok) return t('invalid JSON')
     const hasValue = reviewSettings && Object.hasOwn(reviewSettings, key)
     const value = hasValue ? reviewSettings[key] : null
     if (validatedCurrent) return value == null ? resolvedNull : format(value)
     return !hasValue || value == null || value === '' ? inheritedReview : format(value)
   }
   const evalParallelReview = () => {
-    if (!settingsParsed.ok) return 'invalid JSON'
+    if (!settingsParsed.ok) return t('invalid JSON')
     const value = reviewSettings?.eval_parallel
     if (!validatedCurrent && (value == null || value === '')) return inheritedReview
     const resolved = value == null ? reviewSettings?.max_parallel : value
-    if (Number(resolved) === 0) return 'Auto (GPU count)'
-    return value == null ? `default ${resolved ?? 'unknown'}` : String(resolved)
+    if (Number(resolved) === 0) return t('Auto (GPU count)')
+    return value == null ? `${t('default')} ${resolved ?? t('unknown')}` : String(resolved)
   }
   const llmParallelReview = () => {
-    if (!settingsParsed.ok) return 'invalid JSON'
+    if (!settingsParsed.ok) return t('invalid JSON')
     const value = reviewSettings?.llm_parallel
     if (!validatedCurrent && (value == null || value === '')) return inheritedReview
-    if (value == null) return `${reviewSettings?.parallel_build ?? 'default'} build · no shared provider cap`
-    if (Number(value) === 0) return 'Auto build · no shared provider cap'
-    return `${value} build/shared cap`
+    if (value == null) return `${reviewSettings?.parallel_build ?? t('default')} ${t('build · no shared provider cap')}`
+    if (Number(value) === 0) return t('Auto build · no shared provider cap')
+    return `${value} ${t('build/shared cap')}`
   }
   const timeReview = key => reviewSetting(key, {
-    resolvedNull: 'no limit', format: value => `${value}s`,
+    resolvedNull: t('no limit'), format: value => `${value}${t('s')}`,
   })
   const reviewSettingsInvalid = !settingsParsed.ok || settingsInvalid
   const reviewedBackend = reviewSetting('backend')
   const reviewedModel = reviewSettings?.backend === 'toy'
-    ? 'Not used (toy backend)'
-    : validatedCurrent && !reviewSettings?.llm_model ? 'Not configured' : reviewSetting('llm_model')
+    ? t('Not used (toy backend)')
+    : validatedCurrent && !reviewSettings?.llm_model ? t('Not configured') : reviewSetting('llm_model')
   const reviewRows = [
-    { label: 'Run', value: String((validatedCurrent ? preview.run_id : draft.run_id) || 'Missing run name'),
+    { label: 'Run', value: String((validatedCurrent ? preview.run_id : draft.run_id) || t('Missing run name')),
       invalid: !!errors.run_id },
     { label: 'Task source', value: validatedCurrent
-      ? preview.source === 'task_file' ? preview.source_task_file : 'Inline task JSON'
-      : draft.source === 'task_file' ? String(draft.task_file || 'Missing task file') : 'Inline task JSON',
+      ? preview.source === 'task_file' ? preview.source_task_file : t('Inline task JSON')
+      : draft.source === 'task_file' ? String(draft.task_file || t('Missing task file')) : t('Inline task JSON'),
       invalid: targetHasErrors('source') || targetHasErrors('task_file') || taskInvalid },
     { label: 'Backend', value: reviewedBackend,
       invalid: reviewSettingsInvalid || !!errors['settings.backend'] },
     { label: 'Model', value: reviewedModel,
       invalid: reviewSettingsInvalid || !!errors['settings.llm_model'] },
-    { label: 'Search', value: `nodes ${reviewSetting('max_nodes')} · seeds ${reviewSetting('n_seeds')}`,
+    { label: 'Search', value: `${t('nodes')} ${reviewSetting('max_nodes')} · ${t('seeds')} ${reviewSetting('n_seeds')}`,
       invalid: reviewSettingsInvalid || !!errors['settings.max_nodes'] || !!errors['settings.n_seeds'] },
-    { label: 'Parallel', value: `eval ${evalParallelReview()} · LLM ${llmParallelReview()}`,
+    { label: 'Parallel', value: `${t('eval')} ${evalParallelReview()} · LLM ${llmParallelReview()}`,
       invalid: reviewSettingsInvalid || !!errors['settings.eval_parallel'] || !!errors['settings.llm_parallel'] },
-    { label: 'Time limits', value: `run ${timeReview('max_seconds')} · eval ${timeReview('max_eval_seconds')}`,
+    { label: 'Time limits', value: `${t('run')} ${timeReview('max_seconds')} · ${t('eval')} ${timeReview('max_eval_seconds')}`,
       invalid: reviewSettingsInvalid || !!errors['settings.max_seconds'] || !!errors['settings.max_eval_seconds'] },
   ]
   const normalLaunchActions = !startedRunId && !damagedRecovery && !unknownStart
@@ -750,10 +762,10 @@ export default function LaunchCard({
   const guidanceNotice = ((!settingsLaunchBlocked && !settingsUnblockSettling)
     || unknownStart || startedRunId || damagedRecovery) ? notice : ''
   const costDisclosure = validatedCurrent && reviewedBackend === 'toy'
-    ? 'The validated toy backend makes no model/provider call.'
+    ? t('The validated toy backend makes no model/provider call.')
     : validatedCurrent
-      ? 'The validated LLM backend may incur provider cost. No monetary cap is configured.'
-      : 'If validation resolves to an LLM backend, Start may incur provider cost. No monetary cap is configured.'
+      ? t('The validated LLM backend may incur provider cost. No monetary cap is configured.')
+      : t('If validation resolves to an LLM backend, Start may incur provider cost. No monetary cap is configured.')
   // Reveal the editable config on explicit request OR whenever there is a field error to fix (so a
   // collapsed field is never the reason an error can't be seen/focused).
   const showConfig = configOpen || hasFieldErrors
@@ -787,17 +799,17 @@ export default function LaunchCard({
   return <form className="asst-launch" aria-labelledby={titleId} aria-busy={operationBusy ? 'true' : 'false'}
     onSubmit={event => { event.preventDefault(); validate() }}>
     <div className="asst-launch-h" id={titleId}>
-      <span className="asst-perm-badge">new run</span>
-      <b>Review launch proposal</b>
+      <span className="asst-perm-badge">{t('new run')}</span>
+      <b>{t('Review launch proposal')}</b>
       <span className={'asst-launch-state' + (validatedCurrent ? ' ready' : '')}>
-        {validatedCurrent ? '✓ validated' : 'not validated'}</span>
+        {validatedCurrent ? t('✓ validated') : t('not validated')}</span>
     </div>
 
     {draft.rationale && <p className="asst-launch-rationale">{draft.rationale}</p>}
 
     {hasErrors && <div ref={errorRef} id={errorId} className="asst-launch-errors" tabIndex={-1}>
-      <strong>Cannot start yet</strong>
-      {hasUnmappedErrors && <div role="alert" aria-label="Cannot start yet">
+      <strong>{t('Cannot start yet')}</strong>
+      {hasUnmappedErrors && <div role="alert" aria-label={t('Cannot start yet')}>
         <ul>{unmappedErrorEntries.map(errorItem)}</ul>
       </div>}
       {hasFieldErrors && <ul>{fieldErrorEntries.map(errorItem)}</ul>}
@@ -805,19 +817,19 @@ export default function LaunchCard({
 
     {/* Compact, always-visible run summary + a toggle. Collapsed by default so the common path is just
         "Start"; the editable settings below open on demand (or automatically when there's an error). */}
-    {!showConfig && <section className="asst-launch-section asst-launch-decision" aria-label="What this run will do">
-      <h4>What this run will do</h4>
+    {!showConfig && <section className="asst-launch-section asst-launch-decision" aria-label={t('What this run will do')}>
+      <h4>{t('What this run will do')}</h4>
       <dl className="asst-launch-summary">
         {decisionRows.map((row, index) => <div key={`${row.label}-${index}`} className={row.invalid ? 'invalid' : ''}>
-          <dt>{row.label}</dt><dd>{row.value}</dd>
+          <dt>{t(row.label)}</dt><dd>{row.value}</dd>
         </div>)}
-        <div><dt>Limits</dt><dd>{validatedCurrent
-          ? `${reviewSettings.max_nodes} experiments · run time ${timeReview('max_seconds')}`
-          : 'Validate to see effective limits.'}</dd></div>
+        <div><dt>{t('Limits')}</dt><dd>{validatedCurrent
+          ? `${t('Experiments:')} ${reviewSettings.max_nodes} · ${t('Run time')} ${timeReview('max_seconds')}`
+          : t('Validate to see effective limits.')}</dd></div>
       </dl>
     </section>}
     {hasFieldErrors
-      ? <p className="asst-launch-openreason">Proposal details are open so you can fix the highlighted fields.</p>
+      ? <p className="asst-launch-openreason">{t('Proposal details are open so you can fix the highlighted fields.')}</p>
       : <button type="button" className="btn xs ghost asst-launch-configtoggle" aria-expanded={showConfig}
           aria-controls={configId}
           disabled={locked} onClick={() => {
@@ -825,12 +837,12 @@ export default function LaunchCard({
             setConfigOpen(next)
             onConfigOpenChange?.(next)
           }}>
-          {showConfig ? 'Hide proposal details' : 'Edit proposal details'}</button>}
+          {showConfig ? t('Hide proposal details') : t('Edit proposal details')}</button>}
 
     {showConfig && <div id={configId} className="asst-launch-config">
     <section className="asst-launch-section" aria-labelledby={`${titleId}-identity`}>
-      <h4 id={`${titleId}-identity`}>Run identity</h4>
-      <label htmlFor={`launch-${reactId}-run_id`}>Run name</label>
+      <h4 id={`${titleId}-identity`}>{t('Run identity')}</h4>
+      <label htmlFor={`launch-${reactId}-run_id`}>{t('Run name')}</label>
       <input ref={runIdRef} id={`launch-${reactId}-run_id`} className="text" value={draft.run_id}
         disabled={locked} aria-invalid={errors.run_id ? 'true' : undefined}
         aria-describedby={targetHasErrors('run_id') ? inlineErrorId('run_id') : undefined}
@@ -839,44 +851,44 @@ export default function LaunchCard({
     </section>
 
     <section className="asst-launch-section" aria-labelledby={`${titleId}-task`}>
-      <h4 id={`${titleId}-task`}>Task and evaluation contract</h4>
+      <h4 id={`${titleId}-task`}>{t('Task and evaluation contract')}</h4>
       <fieldset className="asst-launch-source" disabled={locked}
         aria-invalid={targetHasErrors('source') ? 'true' : undefined}
         aria-describedby={targetHasErrors('source') ? inlineErrorId('source') : undefined}>
-        <legend>Task source</legend>
+        <legend>{t('Task source')}</legend>
         <label><input id={`launch-${reactId}-source`} type="radio" name={`launch-${reactId}-source`} value="task"
-          checked={draft.source === 'task'} onChange={() => update({ source: 'task' })} /> Inline task JSON</label>
+          checked={draft.source === 'task'} onChange={() => update({ source: 'task' })} /> {t('Inline task JSON')}</label>
         <label><input type="radio" name={`launch-${reactId}-source`} value="task_file"
-          checked={draft.source === 'task_file'} onChange={() => update({ source: 'task_file' })} /> Task file</label>
+          checked={draft.source === 'task_file'} onChange={() => update({ source: 'task_file' })} /> {t('Task file')}</label>
       </fieldset>
       {inlineError('source')}
       {draft.source === 'task_file' ? <>
-        <label htmlFor={`launch-${reactId}-task_file`}>Task file path</label>
+        <label htmlFor={`launch-${reactId}-task_file`}>{t('Task file path')}</label>
         <input id={`launch-${reactId}-task_file`} className="text" value={draft.task_file} disabled={locked}
           aria-invalid={targetHasErrors('task_file') ? 'true' : undefined}
           aria-describedby={targetHasErrors('task_file') ? inlineErrorId('task_file') : undefined}
           onChange={event => update({ task_file: event.target.value })} />
         {inlineError('task_file')}
       </> : <>
-        <label htmlFor={`launch-${reactId}-task`}>Inline task JSON</label>
+        <label htmlFor={`launch-${reactId}-task`}>{t('Inline task JSON')}</label>
         <textarea id={`launch-${reactId}-task`} className="text asst-launch-json" value={draft.task_json}
           disabled={locked} spellCheck="false" aria-invalid={taskInvalid ? 'true' : undefined}
           aria-describedby={describedBy(`${titleId}-task-help`, taskInvalid && inlineErrorId('task'))}
           onChange={event => update({ task_json: event.target.value })} />
         <span className="asst-launch-help" id={`${titleId}-task-help`}>
-          Lossless task contract: goal, direction, repo/data, command, metric reader, and edit boundaries.
+          {t('Lossless task contract: goal, direction, repo/data, command, metric reader, and edit boundaries.')}
         </span>
         {inlineError('task')}
       </>}
-      <dl className="asst-launch-summary" aria-label="Task summary">
+      <dl className="asst-launch-summary" aria-label={t('Task summary')}>
         {visibleTaskRows.map((row, index) => <div key={`${row.label}-${index}`} className={row.invalid ? 'invalid' : ''}>
-          <dt>{row.label}</dt><dd>{row.value}</dd>
+          <dt>{t(row.label)}</dt><dd>{row.value}</dd>
         </div>)}
       </dl>
     </section>
 
     <section className="asst-launch-section" aria-labelledby={`${titleId}-runtime`}>
-      <h4 id={`${titleId}-runtime`}>Runtime and budget</h4>
+      <h4 id={`${titleId}-runtime`}>{t('Runtime and budget')}</h4>
       <div className="asst-launch-runtime">
         {LAUNCH_RUNTIME_FIELDS.map(field => {
           const id = `launch-${reactId}-settings-${field.key}`
@@ -893,12 +905,12 @@ export default function LaunchCard({
               ? preview.settings[field.key] : null
           const booleanInvalid = field.type === 'bool' && value === BOOL_CHOICE.invalid
           return <div className="asst-launch-field" key={field.key}>
-            <label htmlFor={id}>{field.label}</label>
+            <label htmlFor={id}>{t(field.label)}</label>
             {field.type === 'enum'
               ? <select id={id} className="text" value={value} disabled={locked || !settingsParsed.ok}
                   aria-invalid={fieldError ? 'true' : undefined} aria-describedby={fieldDescribedBy}
                   onChange={event => changeRuntime(field, event.target.value)}>
-                  <EnumOptions field={field} value={value} />
+                  <EnumOptions field={field} value={value} t={t} />
                 </select>
               : field.type === 'bool'
                 ? <select id={id} className="text" value={value} disabled={locked || !settingsParsed.ok}
@@ -908,38 +920,37 @@ export default function LaunchCard({
                       event.target.value === BOOL_CHOICE.enabled ? true
                         : event.target.value === BOOL_CHOICE.disabled ? false : '')}>
                     {booleanInvalid &&
-                      <option value={BOOL_CHOICE.invalid} disabled>Invalid value — edit Advanced JSON</option>}
-                    <option value={BOOL_CHOICE.inherit}>Use inherited value</option>
-                    <option value={BOOL_CHOICE.enabled}>Override: Enabled</option>
-                    <option value={BOOL_CHOICE.disabled}>Override: Disabled</option>
+                      <option value={BOOL_CHOICE.invalid} disabled>{t('Invalid value — edit Advanced JSON')}</option>}
+                    <option value={BOOL_CHOICE.inherit}>{t('Use inherited value')}</option>
+                    <option value={BOOL_CHOICE.enabled}>{t('Override: Enabled')}</option>
+                    <option value={BOOL_CHOICE.disabled}>{t('Override: Disabled')}</option>
                   </select>
               : <input id={id} className="text" value={value} disabled={locked || !settingsParsed.ok}
                   type={field.type === 'text' ? 'text' : 'number'} min={field.min}
                   step={field.type === 'int' ? 1 : field.type === 'float' ? 'any' : undefined}
-                  placeholder={field.placeholder || 'inherit'} aria-invalid={fieldError ? 'true' : undefined}
+                  placeholder={t(field.placeholder || 'inherit')} aria-invalid={fieldError ? 'true' : undefined}
                   aria-describedby={fieldDescribedBy}
                   onChange={event => changeRuntime(field, event.target.value)} />}
             {hasHelp && <span className="asst-launch-help" id={helpId}>
-              {field.help}{field.help && field.type === 'bool' ? ' ' : ''}
-              {field.type === 'bool' && <>Inherit resolves from task-file, saved, environment, profile,
-                or default settings. Validate for free to see the effective value.
+              {t(field.help)}{field.help && field.type === 'bool' ? ' ' : ''}
+              {field.type === 'bool' && <>{t('Inherit resolves from task-file, saved, environment, profile, or default settings. Validate for free to see the effective value.')}
                 {resolvedBoolean != null &&
-                  <> <strong>Validated inherited value: {resolvedBoolean ? 'Enabled' : 'Disabled'}.</strong></>}</>}
+                  <> <strong>{t('Validated inherited value:')} {resolvedBoolean ? t('Enabled') : t('Disabled')}.</strong></>}</>}
             </span>}
             {inlineError(target)}
           </div>
         })}
       </div>
       <details ref={advancedRef} className="asst-launch-advanced">
-        <summary>Advanced settings JSON</summary>
-        <label htmlFor={`launch-${reactId}-advanced-settings`}>Lossless settings overrides</label>
+        <summary>{t('Advanced settings JSON')}</summary>
+        <label htmlFor={`launch-${reactId}-advanced-settings`}>{t('Lossless settings overrides')}</label>
         <textarea id={`launch-${reactId}-advanced-settings`} className="text asst-launch-json" value={draft.settings_json}
           disabled={locked} spellCheck="false" aria-invalid={settingsInvalid ? 'true' : undefined}
           aria-describedby={describedBy(`${titleId}-settings-help`,
             settingsInvalid && inlineErrorId('advanced-settings'))}
           onChange={event => update({ settings_json: event.target.value })} />
         <span className="asst-launch-help" id={`${titleId}-settings-help`}>
-          The shortcuts above edit this same object; unlisted proposal settings are preserved.
+          {t('The shortcuts above edit this same object; unlisted proposal settings are preserved.')}
         </span>
         {inlineError('advanced-settings')}
       </details>
@@ -947,79 +958,78 @@ export default function LaunchCard({
 
     {draft.setup_steps.length > 0 && <section className="asst-launch-section asst-launch-notes"
       aria-labelledby={`${titleId}-notes`}>
-      <h4 id={`${titleId}-notes`}>Readiness notes</h4>
-      <p>Operator checklist only — these notes are not commands and are not executed automatically.</p>
-      <ol aria-label="Setup notes">{draft.setup_steps.map((step, index) => <li key={index}>{step}</li>)}</ol>
+      <h4 id={`${titleId}-notes`}>{t('Readiness notes')}</h4>
+      <p>{t('Operator checklist only — these notes are not commands and are not executed automatically.')}</p>
+      <ol aria-label={t('Setup notes')}>{draft.setup_steps.map((step, index) => <li key={index}>{step}</li>)}</ol>
     </section>}
     </div>}
     {validatedCurrent && warnings.length > 0 && <div className="asst-launch-warnings" role="status">
-      <strong>Warnings</strong><ul>{warnings.map((warning, index) => <li key={index}>
+      <strong>{t('Warnings')}</strong><ul>{warnings.map((warning, index) => <li key={index}>
         {warning}</li>)}</ul>
     </div>}
-    {validatedCurrent && preview && <details className="asst-launch-preview"><summary>Validated preview</summary>
+    {validatedCurrent && preview && <details className="asst-launch-preview"><summary>{t('Validated preview')}</summary>
       <pre>{typeof preview === 'string' ? preview : JSON.stringify(preview, null, 2)}</pre></details>}
     {unknownStart && <div className="asst-launch-recovery" role="status">
-      <strong>Startup being observed</strong><code>{unknownStart.runId}</code>
-      <span>The recovery key stays hidden and no new launch will be sent.</span>
+      <strong>{t('Startup being observed')}</strong><code>{unknownStart.runId}</code>
+      <span>{t('The recovery key stays hidden and no new launch will be sent.')}</span>
     </div>}
     {damagedRecovery && <div className="asst-launch-recovery" role="alert">
-      <strong>Damaged startup recovery</strong>
-      <span>Its outcome cannot be trusted. Inspect the run list and provider activity before releasing this exact local fence.</span>
+      <strong>{t('Damaged startup recovery')}</strong>
+      <span>{t('Its outcome cannot be trusted. Inspect the run list and provider activity before releasing this exact local fence.')}</span>
     </div>}
     {settingsLaunchBlocked && <div className="asst-launch-recovery">
       <div className="asst-launch-recovery-message" role="status" aria-live="polite" aria-atomic="true">
-        <strong>Settings need attention</strong>
+        <strong>{t('Settings need attention')}</strong>
         <span>{settingsLaunchReason}</span>
       </div>
       {onOpenSettings && <button type="button" className="btn sm"
-        onClick={onOpenSettings}>Go to Settings</button>}
+        onClick={onOpenSettings}>{t('Go to Settings')}</button>}
     </div>}
     <section className="asst-launch-section asst-launch-review" aria-labelledby={`${titleId}-review`}>
-      <h4 id={`${titleId}-review`}>Launch review</h4>
+      <h4 id={`${titleId}-review`}>{t('Launch review')}</h4>
       <dl className="asst-launch-summary"
-        aria-label={validatedCurrent ? 'Effective launch settings' : 'Launch settings to validate'}>
+        aria-label={validatedCurrent ? t('Effective launch settings') : t('Launch settings to validate')}>
         {reviewRows.map(row => <div key={row.label} className={row.invalid ? 'invalid' : ''}>
-          <dt>{row.label}</dt><dd>{row.value}</dd>
+          <dt>{t(row.label)}</dt><dd>{row.value}</dd>
         </div>)}
       </dl>
     </section>
     <div className="asst-launch-progress"
       role="status" aria-live="polite" aria-atomic="true">
       <React.Suspense fallback={guidanceNotice}><LaunchGuidance phase={guidancePhase}
-        language={language} notice={guidanceNotice} /></React.Suspense>
+        language={cardLanguage} notice={guidanceNotice} /></React.Suspense>
     </div>
     {normalLaunchActions && <>
-      <p className="asst-launch-cost"><strong>Validate is free:</strong> it makes no model/provider call and
-        resolves inherited values in the review above.</p>
-      <p id={costId} className="asst-launch-cost"><strong>Provider cost:</strong> {costDisclosure}
-        {' '}Review the model, workload, parallelism, and time limits above.</p>
+      <p className="asst-launch-cost"><strong>{t('Validate is free:')}</strong> {t('it makes no model/provider call and resolves inherited values in the review above.')}</p>
+      <p id={costId} className="asst-launch-cost"><strong>{t('Provider cost:')}</strong> {costDisclosure}
+        {' '}{t('Review the model, workload, parallelism, and time limits above.')}</p>
     </>}
 
     <div className="asst-perm-actions asst-launch-actions">
-      <button type="button" className="btn xs ghost" disabled={locked} onClick={reset}>Reset proposal</button>
+      <button type="button" className="btn xs ghost" disabled={locked} onClick={reset}>{t('Reset proposal')}</button>
       {startedRunId
         ? <button ref={startedActionRef} type="button" className="btn xs primary"
           onClick={() => { location.hash = `#/run/${encodeURIComponent(startedRunId)}` }}>
-          Open started run</button>
+          {t('Open started run')}</button>
         : damagedRecovery
         ? <button type="button" className="btn xs ghost" disabled={operationBusy || !damagedRecovery.storageKey}
-          onClick={releaseDamagedRecovery}>Release after inspection</button>
+          onClick={releaseDamagedRecovery}>{t('Release after inspection')}</button>
         : unknownStart
         ? <>
           <button ref={recoveryActionRef} type="button" className="btn xs primary" disabled={operationBusy}
             onClick={checkStartup}>
-            {checking ? 'Checking…' : starting ? 'Waiting for Start…' : 'Check startup'}</button>
+            {checking ? t('Checking…') : starting ? t('Waiting for Start…') : t('Check startup')}</button>
           {(missingStart || unknownStart.paidEffectUnknown) && <button type="button" className="btn xs ghost"
-            disabled={operationBusy} onClick={releaseStartupRecovery}>Release after inspection</button>}
+            disabled={operationBusy} onClick={releaseStartupRecovery}>{t('Release after inspection')}</button>}
         </>
         : <>
           <button ref={validateActionRef} type="button" className="btn xs"
             disabled={locked || settingsLaunchBlocked} onClick={validate}>
-            {validating ? 'Validating…' : validatedCurrent ? 'Validate again — free' : 'Validate — free'}</button>
+            {validating ? t('Validating…') : validatedCurrent ? t('Validate again — free') : t('Validate — free')}</button>
           <button type="button" className="btn xs primary"
             disabled={locked || storageBlocked || settingsLaunchBlocked || !validatedCurrent}
             aria-describedby={costId} onClick={start}>
-            {starting ? 'Starting…' : 'Start run'}</button>
+            {starting ? t('Starting…') : t('Start run')}</button>
         </>}
     </div>
   </form>

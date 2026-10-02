@@ -173,13 +173,13 @@ const short = (value, max = 120) => {
   return text.length > max ? text.slice(0, max - 1) + '…' : text
 }
 
-export function summarizeLaunchTask(draft) {
+export function summarizeLaunchTask(draft, t = text => text) {
   if (draft?.source === 'task_file') {
     const path = String(draft.task_file || '')
-    return [{ label: 'Source', value: path ? path.split(/[\\/]/).pop() : 'No task file selected' }]
+    return [{ label: 'Source', value: path ? path.split(/[\\/]/).pop() : t('No task file selected') }]
   }
   const parsed = parseObjectJson(draft?.task_json, 'Task')
-  if (!parsed.ok) return [{ label: 'Task', value: 'Fix the JSON to preview this task', invalid: true }]
+  if (!parsed.ok) return [{ label: 'Task', value: t('Fix the JSON to preview this task'), invalid: true }]
   const task = parsed.value
   const kind = task.kind || (task.repo || task.editable_path || task.editables ? 'repo'
     : task.kaggle || task.competition ? 'Kaggle'
@@ -200,20 +200,20 @@ export function summarizeLaunchTask(draft) {
   return rows
 }
 
-export function summarizeLaunchDecision(draft) {
+export function summarizeLaunchDecision(draft, t = text => text) {
   if (draft?.source === 'task_file') return [
-    { label: 'Task file', value: String(draft.task_file || '').split(/[\\/]/).pop() || 'Not selected' },
-    { label: 'Before launch', value: 'Validate to inspect the goal, score, and edit rules in this file.' },
+    { label: 'Task file', value: String(draft.task_file || '').split(/[\\/]/).pop() || t('Not selected') },
+    { label: 'Before launch', value: t('Validate to inspect the goal, score, and edit rules in this file.') },
   ]
   const parsed = parseObjectJson(draft?.task_json, 'Task')
-  if (!parsed.ok) return [{ label: 'Task', value: 'Fix the task JSON before review.', invalid: true }]
+  if (!parsed.ok) return [{ label: 'Task', value: t('Fix the task JSON before review.'), invalid: true }]
   const task = parsed.value
   const metric = task.eval?.metric || task.cmd?.metric
   const metricName = typeof metric === 'string' ? metric
     : metric && typeof metric === 'object' ? metric.key || metric.path || '' : ''
-  const direction = task.direction === 'max' ? 'higher is better'
-    : task.direction === 'min' ? 'lower is better'
-      : task.direction === 'auto' ? 'direction resolved by evaluator' : 'direction not stated'
+  const direction = task.direction === 'max' ? t('higher is better')
+    : task.direction === 'min' ? t('lower is better')
+      : task.direction === 'auto' ? t('direction resolved by evaluator') : t('direction not stated')
   const paths = [task.repo || task.editable_path, task.dataset || task.data_path,
     task.competition || task.kaggle,
     ...(Array.isArray(task.editables) ? task.editables.map(item => item?.path) : []),
@@ -221,19 +221,19 @@ export function summarizeLaunchDecision(draft) {
       ? Object.values(task.data).map(item => typeof item === 'string' ? item : item?.path) : []),
   ].filter(value => typeof value === 'string' && value.trim())
   const rows = [
-    { label: 'Goal', value: task.goal ? short(task.goal, 180) : 'Not stated in the task.' },
-    { label: 'Score', value: `${metricName ? short(metricName, 80) : 'Metric not explicitly stated'} · ${direction}` },
+    { label: 'Goal', value: task.goal ? short(task.goal, 180) : t('Not stated in the task.') },
+    { label: 'Score', value: `${metricName ? short(metricName, 80) : t('Metric not explicitly stated')} · ${direction}` },
     { label: 'Code or data', value: paths.length
-      ? [...new Set(paths)].join(', ') : 'No external path stated in the task.' },
+      ? [...new Set(paths)].join(', ') : t('No external path stated in the task.') },
   ]
   if (task.editable_path || task.repo || (Array.isArray(task.editables) && task.editables.length)) {
     const surfaces = [
       ...(task.editable_path || task.repo
         ? [`root: ${Array.isArray(task.edit_surface) && task.edit_surface.length
-          ? task.edit_surface.join(', ') : 'not stated'}`] : []),
+          ? task.edit_surface.join(', ') : t('not stated')}`] : []),
       ...(Array.isArray(task.editables) ? task.editables.map(item =>
         `${item?.name || 'repo'}: ${Array.isArray(item?.surface) && item.surface.length
-          ? item.surface.join(', ') : 'not stated'}`) : []),
+          ? item.surface.join(', ') : t('not stated')}`) : []),
     ]
     rows.push({ label: 'May edit', value: surfaces.join('; ') })
     const protectedPaths = [
@@ -241,13 +241,13 @@ export function summarizeLaunchDecision(draft) {
       ...(Array.isArray(task.editables) ? task.editables.flatMap(item => item?.protect || []) : []),
     ]
     rows.push({ label: 'Protected', value: protectedPaths.length
-      ? protectedPaths.join(', ') : 'No protected paths listed in the task.' })
+      ? protectedPaths.join(', ') : t('No protected paths listed in the task.') })
     if (task.data && typeof task.data === 'object' && !Array.isArray(task.data)) {
       const writable = Object.entries(task.data).filter(([, spec]) => spec?.edit === true)
         .map(([name]) => name)
       rows.push({ label: 'Original data', value: writable.length
-        ? `${short(writable.join(', '), 140)} editable; others read-only.`
-        : 'No editable originals declared.' })
+        ? `${short(writable.join(', '), 140)} ${t('editable; others read-only.')}`
+        : t('No editable originals declared.') })
     }
   }
   return rows

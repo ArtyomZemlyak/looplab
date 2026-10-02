@@ -6,6 +6,10 @@ Install and launch the UI using the [source-install steps](installation.md#sourc
 Open **Runs**; Assistant is already visible on a desktop screen. Select **Start a new run**,
 describe your goal and where the code or data live, then review its launch card.
 **Validate** shows the effective task and settings; **Start run** begins the experiment.
+With **Русский**, the launch card uses **Проверить — бесплатно**, **Начать запуск**,
+**Изменить параметры плана** and **Проверить запуск**. Its labels, limit explanations
+and cost warning follow the selected language. Authored task JSON, paths, metric names
+and exact server diagnostics retain their original text.
 
 The launch card shows a **Next:** instruction in the Assistant language (**Дальше:**
 in Russian). Before validation, review the goal, metric direction and code/data

@@ -137,7 +137,11 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // Guidance prose/CSS load only for a launch card; a required forbidden target proves deferral.
     // Language and phase wiring adds ~300 B to owner routes. Initial shell remains 83,031 B JS.
     // The new measured total leaves 983 B JS and 72 B CSS headroom.
-    js: { gzip: 609 * KIB },
+    // 2026-10-02 launch card localization: 622,633 -> 628,010 B JS (+5,377 B), CSS unchanged.
+    // Russian copy and the whole LaunchCard now load only for a proposal; owner List falls to
+    // 211,023 B and DAG to 394,776 B. Keep every route ceiling and add required deferral targets.
+    // 614 KiB leaves 726 B above the measured sum; initial shell remains 83,032 B JS.
+    js: { gzip: 614 * KIB },
     css: { gzip: 58.25 * KIB },
   },
   individual: {
@@ -326,6 +330,12 @@ export const DEFAULT_BUDGETS = Object.freeze({
     },
   ],
   forbidden: [
+    {
+      name: 'run routes defer launch cards and Russian copy',
+      roots: [entry, ownerChrome, source('src/RunView.jsx'), source('src/ConceptView.jsx')],
+      targets: [source('src/LaunchCard.jsx'), source('src/launchCardRussian.js')],
+      requireTargets: true,
+    },
     {
       name: 'run routes defer launch guidance',
       roots: [entry, ownerChrome, source('src/RunView.jsx'), source('src/ConceptView.jsx')],

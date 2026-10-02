@@ -48,9 +48,12 @@ and LoopLab's internal research roles. For setup from a fresh checkout, use
    edit rules where applicable, and limits. Missing facts are marked explicitly.
    Choose **Validate**, inspect the effective preview and technical settings, then
    **Start run**. Changing the proposal invalidates its validation, so validate again.
+   With **Русский**, these actions are **Проверить — бесплатно** and **Начать запуск**;
+   **Изменить параметры плана** opens the fields. The labels and cost warning also
+   follow the language; task JSON, paths and server diagnostics keep their original text.
    The card's **Next:** guidance (Russian: **Дальше:**) explains the current step in
    the Assistant language. **Detailed status / Подробный статус** retains the precise
-   technical message. If the startup reply is lost, follow **Check startup** to read
+   technical message. If the startup reply is lost, follow **Check startup / Проверить запуск** to read
    the already-submitted launch; an unknown reply does not prove that it failed.
    Chatting about a plan does not start a run. A live model or evaluator may incur cost;
    check the effective limits in the preview. Experiment and time limits alone do not cap

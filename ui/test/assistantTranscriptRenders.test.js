@@ -187,6 +187,7 @@ async function sendFromComposer(container, text) {
 test('Assistant language reaches an existing launch card without remounting it or sending a command', async () => {
   const chat = await mountRestoredChat({ transcript: GENESIS })
   try {
+    await until(() => chat.container.querySelector('form.asst-launch'), 'lazy launch card')
     const card = chat.container.querySelector('form.asst-launch')
     assert.ok(card)
     await until(() => card.textContent.includes('Next: check the proposal'), 'English launch guidance')
@@ -194,6 +195,8 @@ test('Assistant language reaches an existing launch card without remounting it o
       window.dispatchEvent(new CustomEvent('looplab:language', { detail: 'ru' }))
     })
     await until(() => card.textContent.includes('Дальше: проверить план'), 'Russian launch guidance')
+    assert.ok([...card.querySelectorAll('button')].some(button => button.textContent === 'Проверить — бесплатно'))
+    assert.match(card.textContent, /Условия запуска/)
     assert.equal(chat.container.querySelector('form.asst-launch'), card)
     await React.act(async () => {
       window.dispatchEvent(new CustomEvent('looplab:language', { detail: 'en' }))
