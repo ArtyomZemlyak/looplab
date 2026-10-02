@@ -474,3 +474,32 @@ replay/comparability наборе; после ужесточения directory b
 и scorer boundary до любого продвижения. Сам digest не хранит bytes, data или
 environment, не доказывает equivalence и не меняет сравнимость. Классификация
 ханков, Maintainer, gate/CAS advancement и UI остаются шестью открытыми пунктами.
+
+## 9. Ревью следующего шага: архив полученной базы
+
+Первый prerequisite 72.1/67.12 — сохранить байты того же destination seed,
+который уже назван digest. Повторная копия source или HEAD archive после seed
+может дать другую базу. Поэтому запись архива должна получать **те же прочитанные
+байты**, из которых 72.2 считает digest, до mounts/overlay/assets.
+
+Решение: отдельный run-owned `base_snapshots/<digest>/`, приватная временная
+директория и публикация целиком через durable no-replace rename. Одинаковая база
+переиспользуется только после bounded проверки содержимого и executable bits.
+Повреждённый существующий архив не заменяется молча. Partial/unknown seed не
+публикуется. Receipt отдельно различает известную идентичность и доступность
+архива: ошибка записи/публикации не отменяет измеренную оценку и не даёт новых
+разрешений. Обрыв до публикации может оставить orphan staging; он не считается
+архивом. Ограничения 72.2 остаются; пустые директории и полные POSIX permissions
+не входят в идентичность regular-file contents.
+
+Перед использованием архив нужно проверить относительно receipt, а не доверять
+имени каталога. Приёмка: база после удаления source и node workdir; dirty/env/
+untracked protect; исключение overlay/mount; одинаковая база без дубликатов;
+конкурентная публикация; недоступный/повреждённый архив и unknown seed без
+ложного успеха; отсутствие нового evaluation wait. Живой SGD/MCP probe должен
+проверить прежнюю и новую архивированные базы после drift/reconnect.
+
+Этот шаг пока не закрывает 72.1: scorer dependency boundary, перенос архивов
+в export bundle, выбор pinned base и gate/CAS advancement требуют следующих
+изменений. Event replay уже существует; повторное исполнение требует ещё
+data/reference/environment identities и защищённого evaluation boundary.
