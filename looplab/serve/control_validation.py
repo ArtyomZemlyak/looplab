@@ -442,6 +442,8 @@ def _normalize_run_abort(ctx: _ControlIntake) -> dict:
         # prefix; a live evaluation can append between two independent folds.
         from looplab.events.replay import fold
         due = external_finish_due(ctx.rd, settings, fold(events) if events else ctx.state(), events)
+        if "source_error" in due:
+            raise HTTPException(503, due["source_error"])
         if due["pending_nodes"]:
             raise HTTPException(409, {
                 "code": "external_pending_evaluations",

@@ -9,10 +9,10 @@ from fastapi import HTTPException
 
 from looplab.core.atomicio import append_jsonl_bytes_locked
 from looplab.core.models import Idea, IdeaEmission, durable_idea_payload
-from looplab.events.eventstore import EventStore, EventStoreLockError, interprocess_lock, read_jsonl_lenient
+from looplab.events.eventstore import EventStore, EventStoreLockError, interprocess_lock
 from looplab.events.replay import fold
 from looplab.harness.obligations import evidence_revision
-from looplab.harness.journals import same_receipt_request
+from looplab.harness.journals import read_receipts, same_receipt_request
 from looplab.events.run_generation import run_generation_token
 
 
@@ -63,9 +63,7 @@ def missing_decisions(rd: Path, settings, state, idea: Idea, generation: str,
     if not required:
         return []
     path = decision_file(rd)
-    if path.exists() and path.stat().st_size > 16 * 1024 * 1024:
-        raise HTTPException(503, "external decision ledger exceeds its review bound")
-    rows = read_jsonl_lenient(path)
+    rows = read_receipts(path, decisions=True)
     digest = idea_digest(idea)
     candidate_digest = (implementation_digest(idea, code, files or {}, deleted or [])
                         if "candidate_ranking" in required else None)
@@ -154,9 +152,7 @@ def publish_decision(srv, rd: Path, body) -> dict:
             payload = orjson.dumps(row, option=orjson.OPT_SORT_KEYS)
             path = decision_file(rd)
             with interprocess_lock(Path(str(path) + ".lock"), required=True):
-                if path.exists() and path.stat().st_size > 16 * 1024 * 1024:
-                    raise HTTPException(503, "external decision ledger exceeds its review bound")
-                for old in read_jsonl_lenient(path):
+                for old in read_receipts(path, decisions=True):
                     if old.get("run_uid") == state.run_uid and old.get("action_id") == body.action_id:
                         if not same_receipt_request(old, row):
                             raise HTTPException(409, "decision action_id was reused with different content")

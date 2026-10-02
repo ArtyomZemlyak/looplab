@@ -10,7 +10,7 @@ from looplab.core.atomicio import append_jsonl_bytes_locked
 from looplab.events.eventstore import EventStore, EventStoreLockError, interprocess_lock, read_jsonl_lenient
 from looplab.events.replay import fold
 from looplab.harness.obligations import evidence_revision
-from looplab.harness.journals import same_receipt_request
+from looplab.harness.journals import read_receipts, same_receipt_request
 from looplab.events.run_generation import run_generation_token
 
 
@@ -61,14 +61,14 @@ def _action_recorded(memory_dir: str, phase_id: str, action_ref: str, run_uid: s
     return False
 
 
-def missing_reviews(rd: Path, settings, state, generation: str) -> list[str]:
+def missing_reviews(rd: Path, settings, state, generation: str, *, rows=None) -> list[str]:
     required = required_reviews(settings)
     if not required or not state.nodes:
         return []
-    path = review_file(rd)
-    if path.exists() and path.stat().st_size > 16 * 1024 * 1024:
-        raise HTTPException(503, "external review ledger exceeds its bound")
-    rows = read_jsonl_lenient(path)
+    # Progress supplies its already validated display rows and exposes health.
+    # Admission/finish readers require completeness rather than claiming absence.
+    if rows is None:
+        rows = read_receipts(review_file(rd), decisions=False)
     revision = evidence_revision(state)
     return [phase for phase in required if not any(
         row.get("run_uid") == state.run_uid and row.get("generation") == generation
@@ -77,7 +77,7 @@ def missing_reviews(rd: Path, settings, state, generation: str) -> list[str]:
         for row in rows)]
 
 
-def cadence_reviews_due(rd: Path, settings, state, generation: str) -> list[str]:
+def cadence_reviews_due(rd: Path, settings, state, generation: str, *, rows=None) -> list[str]:
     """A configured mid-run lesson/skill window must be decided before expansion.
 
     The receipt may say no action applies, but it must bind the measured evidence
@@ -88,7 +88,7 @@ def cadence_reviews_due(rd: Path, settings, state, generation: str) -> list[str]
             or not settings.memory_dir or settings.lessons_every <= 0
             or n == 0 or n % settings.lessons_every):
         return []
-    due = set(missing_reviews(rd, settings, state, generation))
+    due = set(missing_reviews(rd, settings, state, generation, rows=rows))
     phases = {"skill_candidates"}
     if settings.comparative_lessons:
         phases.add("lessons")
@@ -120,9 +120,7 @@ def publish_review(srv, rd: Path, body) -> dict:
             payload = orjson.dumps(row, option=orjson.OPT_SORT_KEYS)
             path = review_file(rd)
             with interprocess_lock(Path(str(path) + ".lock"), required=True):
-                if path.exists() and path.stat().st_size > 16 * 1024 * 1024:
-                    raise HTTPException(503, "external review ledger exceeds its bound")
-                for old in read_jsonl_lenient(path):
+                for old in read_receipts(path, decisions=False):
                     if old.get("run_uid") == state.run_uid and old.get("action_id") == body.action_id:
                         if not same_receipt_request(old, row):
                             raise HTTPException(409, "review action_id was reused with different content")

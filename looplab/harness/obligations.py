@@ -141,7 +141,7 @@ def report_cadence_due(settings, state, events=None) -> bool:
     return final_report_due(settings, state, events)
 
 
-def external_finish_due(rd, settings, state, events) -> dict:
+def external_finish_due(rd, settings, state, events, *, review_rows=None) -> dict:
     """One live preflight for every external finish writer, after evaluation drains.
 
     This must also guard the CLI and engine budget paths, which do not pass
@@ -150,13 +150,27 @@ def external_finish_due(rd, settings, state, events) -> dict:
     """
     if not settings.external_harness:
         return {"report": False, "reviews": [], "pending_nodes": []}
-    from looplab.harness.reviews import missing_reviews
+    from looplab.harness.reviews import missing_reviews, required_reviews
     from looplab.events.run_generation import run_generation_token
+    from fastapi import HTTPException
+
+    source_error = None
+    try:
+        reviews = (missing_reviews(rd, settings, state, run_generation_token(events), rows=review_rows)
+                   if state.run_uid else [])
+    except HTTPException as exc:
+        if exc.status_code != 503:
+            raise
+        # An engine budget stop must PAUSE under its existing obligation gate,
+        # not escape to the CLI's fatal-error finalizer. These reviews are unknown,
+        # not proven missing; source_error tells the operator which source to recover.
+        reviews = sorted(required_reviews(settings))
+        source_error = exc.detail
 
     return {
         "report": final_report_due(settings, state, events),
-        "reviews": missing_reviews(rd, settings, state, run_generation_token(events))
-        if state.run_uid else [],
+        "reviews": reviews,
+        **({"source_error": source_error} if source_error is not None else {}),
         "pending_nodes": sorted(node.id for node in state.nodes.values()
                                 if node.status == "pending" and not node.tombstoned
                                 and node.id not in (state.aborted_nodes or [])),

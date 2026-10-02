@@ -21,7 +21,7 @@ from looplab.events.run_generation import run_generation_token
 from looplab.harness.checkpoint_history import project_checkpoints
 from looplab.harness.decisions import decision_file, required_decisions
 from looplab.harness.hypotheses import merge_due
-from looplab.harness.journals import read_source as _source
+from looplab.harness.journals import read_source as _source, receipt_records
 from looplab.harness.obligations import (concept_tags_required, evidence_revision,
                                          external_finish_due, report_cadence_due,
                                          research_due, run_base_due)
@@ -69,14 +69,6 @@ def _page(rows: list[dict], offset: int, limit: int) -> dict:
             "has_more": offset + limit < len(rows)}
 
 
-def _validate_rows(rows: list[dict], health: dict, fields: dict[str, type]) -> list[dict]:
-    valid = [row for row in rows if all(type(row.get(key)) is value
-                                       for key, value in fields.items())]
-    health["invalid_record_rows"] = len(rows) - len(valid)
-    health["read_complete"] &= len(valid) == len(rows)
-    return valid
-
-
 def snapshot(rd: Path, expected_generation: str, *, activity_reader,
              offset: int = 0, limit: int = 20) -> dict:
     store = EventStore(rd / "events.jsonl")
@@ -95,14 +87,8 @@ def snapshot(rd: Path, expected_generation: str, *, activity_reader,
     decisions, decision_health = _source(decision_file(rd))
     reviews, review_health = _source(review_file(rd))
     checkpoints, checkpoint_health = _source(rd / "harness_checkpoints.jsonl")
-    decisions = _validate_rows(decisions, decision_health, {
-        "generation": str, "run_uid": str, "phase_id": str,
-        "at_node": int, "evidence_revision": str, "idea_sha256": str,
-        "decision": str, "reason": str, "action_id": str})
-    reviews = _validate_rows(reviews, review_health, {
-        "generation": str, "run_uid": str, "phase_id": str,
-        "at_node": int, "evidence_revision": str, "decision": str, "reason": str,
-        "action_id": str})
+    decisions = receipt_records(decisions, decision_health, decisions=True)
+    reviews = receipt_records(reviews, review_health, decisions=False)
     decisions = [{**row, "validity": (
         "current_evidence_for_idea" if row.get("at_node") == n
         and row.get("evidence_revision") == revision else "superseded")}
@@ -130,7 +116,7 @@ def snapshot(rd: Path, expected_generation: str, *, activity_reader,
         "GET/POST /api/runs/{run_id}/harness-selection/verify")
     due("value_estimate", value_due(settings, state),
         "GET/POST /api/runs/{run_id}/harness-selection/values")
-    for phase in cadence_reviews_due(rd, settings, state, generation):
+    for phase in cadence_reviews_due(rd, settings, state, generation, rows=reviews):
         due(phase, True, "POST /api/runs/{run_id}/harness-reviews")
 
     event_health = log_integrity(rd / "events.jsonl")
@@ -138,7 +124,7 @@ def snapshot(rd: Path, expected_generation: str, *, activity_reader,
               "decisions": decision_health, "reviews": review_health,
               "checkpoints": checkpoint_health}
     pending = [row for row in checkpoint_rows if row["status"] == "pending"]
-    finish_due = external_finish_due(rd, settings, state, events)
+    finish_due = external_finish_due(rd, settings, state, events, review_rows=reviews)
     # Reuse the server's public node projection on THIS event prefix, including
     # pause-withheld evaluations. Keep the dependency downward: the route supplies
     # its reader rather than importing serve into the harness.

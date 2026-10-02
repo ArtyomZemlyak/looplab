@@ -71,11 +71,14 @@ def test_phase_receipts_expire_when_measured_outcome_changes_at_same_node_count(
     decision_file(tmp_path).write_text(json.dumps({
         "run_uid": state.run_uid, "generation": generation, "at_node": 1,
         "phase_id": "novelty", "idea_sha256": idea_digest(idea),
-        "evidence_revision": revision, "decision": "submit", "options_considered": 1}) + "\n")
+        "evidence_revision": revision, "decision": "submit", "options_considered": 1,
+        "option_sha256": [idea_digest(idea)], "reason": "Fixture reviewed this idea",
+        "action_id": "decision-1"}) + "\n")
     review_file(tmp_path).write_text(json.dumps({
         "run_uid": state.run_uid, "generation": generation, "at_node": 1,
         "phase_id": "concept_merge", "evidence_revision": revision,
-        "decision": "no_applicable_action"}) + "\n")
+        "decision": "no_applicable_action", "evidence": [0], "action_ref": "",
+        "reason": "Fixture has no alias to merge", "action_id": "review-1"}) + "\n")
     assert "novelty" not in missing_decisions(tmp_path, settings, state, idea, generation)
     assert "concept_merge" not in missing_reviews(tmp_path, settings, state, generation)
     state.nodes[0].metric = 2.0

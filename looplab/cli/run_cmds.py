@@ -2017,6 +2017,8 @@ def finalize(
         if settings is not None and settings.external_harness:
             from looplab.harness.obligations import external_finish_due
             due = external_finish_due(run_dir, settings, before, events)
+            if "source_error" in due:
+                raise typer.BadParameter(f"external finish source unavailable: {due['source_error']}")
             if due["report"] or due["reviews"] or due["pending_nodes"]:
                 raise typer.BadParameter(
                     "external finish obligations remain: "

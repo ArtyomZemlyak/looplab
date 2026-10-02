@@ -799,6 +799,24 @@ request content; normalized authored content, run identity and action identity
 still must match. Conflicting content or a different generation is refused.
 Existing journals use the same rule without a migration or a new digest field.
 
+A decision/review source must be complete before either an acknowledgement or a
+fresh write can be trusted. Malformed JSON, invalid UTF-8, non-object records or
+invalid receipt fields return HTTP 503 with `harness_history_incomplete` and the
+source filename. Candidate admission cannot use decisions from that damaged
+source; finish and configured review windows cannot use reviews from it.
+`harness-progress` remains readable with the accepted history, `complete=false`,
+`source_health` and `next_step.code=inspect_sources`. Its displayed due lists are
+diagnostics on accepted rows, not permission to continue while a source is incomplete.
+
+The harness never deletes damaged lines or manufactures a replacement receipt.
+Ask the operator to recover the journal from known evidence, then refresh progress
+and resolve the saved request using its exact body/action ID. Missing journals are
+ordinary empty sources; unavailable/over-bound sources refuse reads and writes.
+Explicit HTTP/CLI finish refuses damaged reviews. A live engine reaching its
+existing budget finish gate pauses with `due.source_error`, preserving a resumable
+run instead of routing source damage through fatal-error finalization. Recovery
+does not itself resume evaluation or satisfy current report/review obligations.
+
 `replayed=true` acknowledges prior publication; it does **not** refresh its review
 window or grant admission/finalization. Read current `harness-progress` and the
 history item's `validity`. If it is `superseded`, inspect the new evidence and
@@ -1148,6 +1166,14 @@ fresh lesson/skill reviews. The agent supplies justified no-action reviews for
 this deterministic fixture, then explicitly finishes. Expansion-only research and
 concept-base gates remain separate from finalization. These are scripted protocol
 decisions, not model judgment parity tests.
+Add `--damaged-journals` with `--obligations` to damage each private decision/review
+journal after the two terminal outcomes. Progress must expose incomplete sources;
+both exact retries and new action IDs must refuse without changing journal/event
+bytes. A damaged review source also refuses explicit finish. Only the fixture
+operator restores its own known-good backup; the server performs no repair.
+After restoration the old receipts replay, stay superseded, and require current
+finish evidence as above. The byte attribution check waits for the specific
+existing report command's engine acknowledgement, which may follow its intake receipt.
 `--case agent_loss --drop-command-response --read-fault stale_result_generation`
 instead replaces a successful result page's generation at the owned proxy. The
 typed tool must return unavailable context without those receipts; the next explicit

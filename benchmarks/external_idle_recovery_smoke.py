@@ -38,7 +38,7 @@ from looplab.serve.server import make_app
 CASES = ("agent_loss", "engine_loss")
 
 
-def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, response_fault="disconnect", read_fault="disconnect", discovery_fault="none", mcp_python=None, result_backlog=False, failed_first=False, obligations=False):
+def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, response_fault="disconnect", read_fault="disconnect", discovery_fault="none", mcp_python=None, result_backlog=False, failed_first=False, obligations=False, damaged_journals=False):
     root.mkdir(parents=True, exist_ok=False)
     runs = root / "runs"; runs.mkdir()
     source = root / "source"; source.mkdir()
@@ -316,6 +316,33 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
         if obligations:
             before = (rd / "events.jsonl").read_bytes()
             journals = {kind: (rd / f"harness_{kind}.jsonl").read_bytes() for kind in ("reviews", "decisions")}
+            if damaged_journals:
+                proof["damaged_journal_cases"] = []
+                for kind, original in journals.items():
+                    path = rd / f"harness_{kind}.jsonl"
+                    body = next(body for saved_kind, body, _ in saved_receipts if saved_kind == kind)
+                    path.write_bytes(original + b'broken recovery fixture row\n')
+                    damaged = path.read_bytes()
+                    try:
+                        current = await client.progress()
+                        assert not current["complete"] and current["next_step"]["code"] == "inspect_sources"
+                        assert current["source_health"][kind]["invalid_lines"] == 1
+                        for payload in (body, {**body, "action_id": body["action_id"] + ":fresh"}):
+                            denied = await client.request("POST", "harness-" + kind, payload, status=503)
+                            assert denied["detail"]["code"] == "harness_history_incomplete"
+                            assert denied["detail"]["source"] == path.name
+                        if kind == "reviews":
+                            denied = await client.request("POST", "commands", {"expected_generation": generation,
+                                "type": "run_abort", "data": {"reason": "Incomplete reviews cannot prove finish."}},
+                                "idle:damaged-journal-finish")
+                            assert denied["status"] == "rejected" and denied["error"]["code"] == "harness_history_incomplete"
+                        assert (rd / "events.jsonl").read_bytes() == before and path.read_bytes() == damaged
+                    finally:
+                        # Fixture operator restores only its own known-good backup.
+                        # The harness has neither repaired nor removed a source row.
+                        path.write_bytes(original)
+                    assert (await client.progress())["complete"]
+                    proof["damaged_journal_cases"].append(kind)
             for kind, body, saved in saved_receipts:
                 reply = await client.request("POST", "harness-" + kind, body)
                 assert reply["replayed"] and reply["review" if kind == "reviews" else "decision"] == saved
@@ -333,10 +360,14 @@ def run_case(root, name, quiet_hold_seconds=0, drop_command_response=False, resp
             assert (rd / "events.jsonl").read_bytes() == before
             await client.call("phases", {"query": "report"})
             await client.call("phase_info", {"phase_id": "report"})
-            await client.command("report_generated", {"content": {"headline": "Recovery outcomes",
+            report_receipt = await client.command("report_generated", {"content": {"headline": "Recovery outcomes",
                 "verdict": "Protocol acceptance, not independent ML robustness.",
                 "summary": json.dumps({"terminal_metrics": proof["metrics"], "failed_parent_retained": failed_first})}},
                 "idle:current-report")
+            # The durable intake receipt can precede the engine's command_ack.
+            # Attribute bytes only after that specific existing acknowledgement.
+            await until(settled_trust, lambda rows: any(row.type == "command_ack" and
+                row.data.get("command_id") == report_receipt["command"]["id"] for row in rows))
             after_report = (rd / "events.jsonl").read_bytes()
             denied = await client.request("POST", "commands", {"expected_generation": generation,
                 "type": "run_abort", "data": {"reason": "Old reviews cannot discharge the new evidence window."}},
@@ -550,6 +581,8 @@ def main():
                         help="Fail the first scorer on invalid learning rate; inspect fenced logs and submit a corrected child. Requires --result-backlog.")
     parser.add_argument("--obligations", action="store_true",
                         help="Enable research/concepts/report/novelty and lesson/skill reviews; restore old journal receipts after new results. Requires --result-backlog.")
+    parser.add_argument("--damaged-journals", action="store_true",
+                        help="Damage private decision/review sources; prove refusal without writes, then restore fixture backups. Requires --obligations.")
     args = parser.parse_args()
     if not 0 <= args.quiet_hold_seconds <= 14400:
         parser.error("quiet hold must be between zero and four hours")
@@ -567,11 +600,13 @@ def main():
         parser.error("failed-first requires --result-backlog")
     if args.obligations and not args.result_backlog:
         parser.error("obligations requires --result-backlog")
+    if args.damaged_journals and not args.obligations:
+        parser.error("damaged-journals requires --obligations")
     root = args.out.resolve(); root.mkdir(parents=True, exist_ok=False)
     mcp_python = str(args.mcp_python.resolve()) if args.mcp_python else None
     if mcp_python and not Path(mcp_python).is_file():
         parser.error("MCP interpreter does not exist")
-    proof = [run_case(root / name, name, args.quiet_hold_seconds, args.drop_command_response, args.response_fault, args.read_fault, args.discovery_fault, mcp_python, args.result_backlog, args.failed_first, args.obligations)
+    proof = [run_case(root / name, name, args.quiet_hold_seconds, args.drop_command_response, args.response_fault, args.read_fault, args.discovery_fault, mcp_python, args.result_backlog, args.failed_first, args.obligations, args.damaged_journals)
              for name in CASES if args.case in ("all", name)]
     (root / "acceptance.json").write_text(json.dumps(proof, ensure_ascii=False, indent=2), encoding="utf8")
 
